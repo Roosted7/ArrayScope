@@ -2,9 +2,11 @@ import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets, QtGui
+from PyQt5.QtCore import QThread
 import math
 from enum import Enum
 from .imageview2d import ImageView2D
+from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 import multiprocessing as mp
 
 def symlog(data, C = 0):
@@ -240,6 +242,8 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             w = self.widgets['spins']['slice_indices'][i]
             self.dim_containers[i].layout().addWidget(w)
             w.valueChanged.connect(self.update)
+        
+        self._setup_export_context_menus()
         
         # Create a single compact control panel with all radio buttons
         controls_widget = QtWidgets.QWidget()
@@ -1207,6 +1211,114 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                     event.accept()
                     return True 
         return super().eventFilter(obj, event)
+    
+    def _setup_export_context_menus(self):
+        for i in range(self.data.ndim):
+            prim_btn = self.widgets['buttons']['primary'][i]
+            sec_btn = self.widgets['buttons']['secondary'][i]
+            
+            prim_btn.setContextMenuPolicy(Qt.QtCore.Qt.CustomContextMenu)
+            sec_btn.setContextMenuPolicy(Qt.QtCore.Qt.CustomContextMenu)
+            
+            prim_btn.customContextMenuRequested.connect(lambda pos, btn=prim_btn, dim=i: self._show_export_context_menu(pos, btn, dim))
+            sec_btn.customContextMenuRequested.connect( lambda pos, btn=sec_btn,  dim=i: self._show_export_context_menu(pos, btn, dim))
+    
+    def _show_export_context_menu(self, pos, btn, dim):
+        menu = QtWidgets.QMenu()
+        
+        export_action = menu.addAction("Export along this dimension...")
+        export_action.triggered.connect(lambda: self._start_export(dim))
+        
+        # Show menu at cursor position
+        menu.exec_(btn.mapToGlobal(pos))
+    
+    def _start_export(self, export_dim):
+        """Initiate video export workflow"""
+        if self.singleton[export_dim]:
+            QtWidgets.QMessageBox.warning(self, "Cannot Export", 
+                f"Dimension {export_dim} has size 1 and cannot be exported.")
+            return
+        
+        # Get export settings from dialog
+        settings_dialog = VideoExportSettingsDialog(parent=self, export_dim=export_dim, data_shape=self.data.shape)
+        if settings_dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        
+        settings = settings_dialog.get_settings()
+        
+        # Get file save path
+        file_filter = f"{settings['format'].upper()} files (*.{settings['format']})"
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, f"Export Video as {settings['format'].upper()}", 
+            f"export.{settings['format']}", file_filter
+        )
+        
+        if not file_path:
+            return
+        
+        # Determine transpose flag to match on-screen orientation (same condition as update_image_view)
+        transpose = True if len(self.selected_indices) >= 2 and self.selected_indices[0] > self.selected_indices[1] else False
+        
+        # Capture display mode and widget aspect ratio
+        display_mode = getattr(self.img_view, 'displayMode', 'square_pixels')
+        view = self.img_view.getView()
+        widget_ratio = view.size().width() / view.size().height() if view.size().height() != 0 else 1.0
+        
+        # Prepare transformation functions
+        channel_func = None
+        if self.widgets['buttons']['channel']['abs'].isChecked():
+            channel_func = np.abs
+        elif self.widgets['buttons']['channel']['angle'].isChecked():
+            channel_func = np.angle
+        elif self.widgets['buttons']['channel']['real'].isChecked():
+            channel_func = np.real
+        elif self.widgets['buttons']['channel']['imag'].isChecked():
+            channel_func = np.imag
+        
+        processing_func = None
+        if self.widgets['buttons']['processing']['symlog'].isChecked():
+            processing_func = symlog
+        
+        # Capture current display levels for consistent frame scaling
+        levels = None
+        if hasattr(self.img_view, 'imageItem') and self.img_view.imageItem.levels is not None:
+            levels = tuple(self.img_view.imageItem.levels)
+
+        # Capture current color map LUT (256x3) to apply in export
+        lut = None
+        try:
+            if hasattr(self.img_view, 'histogram') and hasattr(self.img_view.histogram, 'gradient'):
+                cm = self.img_view.histogram.gradient.colorMap()
+                if cm is not None:
+                    lut = cm.getLookupTable(0.0, 1.0, 256, alpha=False)
+        except Exception:
+            lut = None
+        
+        # Create worker thread
+        worker = VideoExportWorker(
+            data=self.data,
+            export_dim=export_dim,
+            output_path=file_path,
+            fps=settings['fps'],
+            format_type=settings['format'],
+            channel_func=channel_func,
+            processing_func=processing_func,
+            slice_indices=self.slice,
+            selected_indices=self.selected_indices,
+            singleton=self.singleton,
+            levels=levels,
+            transpose=transpose,
+            pixel_ratio_mode=settings.get('pixel_ratio', 'square_pixels'),
+            display_mode=display_mode,
+            widget_ratio=widget_ratio,
+            axis_flipped=self.axis_flipped,
+            lut=lut
+        )
+        
+        # Show progress dialog
+        progress_dialog = VideoExportDialog(self)
+        progress_dialog.start_export(worker, self.data.shape[export_dim])
+
         
 def _run_window(data, title, complex_dim=None):
     """Opens a window in a separate process which is blocked on exec()"""
