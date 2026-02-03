@@ -44,6 +44,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         self.selected_indices = []
         self.channel = None
         self.scale = None
+        self._force_autolevel = False
         
         self.axis_flipped = [False] * data.ndim  # Track flip state so that one can toggle dims and come back to the same flip state
         
@@ -277,6 +278,8 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         for btn in proc_buttons:
             btn.setStyleSheet(self.RADIO_BUTTON_STYLE)
             processing_layout.addWidget(btn)
+            # When a processing button is pressed while already active, force auto-level
+            btn.pressed.connect(lambda b=btn: self._processing_pressed(b))
             btn.clicked.connect(self.update)
         
         processing_group.setLayout(processing_layout)
@@ -777,7 +780,10 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
         changed_channel = old_channel != self.channel
         changed_scale = oldscale != self.scale
-        al = changed_scale or changed_channel
+        al = changed_scale or changed_channel or getattr(self, '_force_autolevel', False)
+        # reset the one-shot flag after using it
+        if getattr(self, '_force_autolevel', False):
+            self._force_autolevel = False
         
         prev_levels = None
         if not al:
@@ -819,6 +825,17 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             self.img_view.setDisplayMode('square_fov')
         elif self.widgets['buttons']['display']['fit'].isChecked():
             self.img_view.setDisplayMode('fit')
+
+    def _processing_pressed(self, btn):
+        """Called on processing button press; if the button is already checked
+        the user is re-clicking it and we should force an auto-level on next update."""
+        try:
+            if btn.isChecked():
+                self._force_autolevel = True
+            else:
+                self._force_autolevel = False
+        except Exception:
+            self._force_autolevel = False
 
         # Update the display group title
         self._update_display_group_title()
