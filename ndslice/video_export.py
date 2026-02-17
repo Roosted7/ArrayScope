@@ -27,7 +27,7 @@ class VideoExportWorker(QtCore.QThread):
                  channel_func, processing_func, slice_indices, selected_indices, 
                  singleton, levels=None, transpose=False, pixel_ratio_mode='square_pixels',
                  display_mode='square_pixels', widget_ratio=1.0, axis_flipped=None,
-                 lut=None):
+                 lut=None, window_level_mode='displayed'):
         super().__init__()
         self.transpose = transpose
         self.pixel_ratio_mode = pixel_ratio_mode
@@ -46,6 +46,7 @@ class VideoExportWorker(QtCore.QThread):
         self.selected_indices = selected_indices
         self.singleton = singleton
         self.levels = levels
+        self.window_level_mode = (window_level_mode or 'displayed')
         self._is_running = True
         
     def run(self):
@@ -79,10 +80,11 @@ class VideoExportWorker(QtCore.QThread):
                 # Squeeze and convert to uint8
                 frame_data = np.squeeze(frame_data)
                 
-                # Normalize to 0-255 using captured levels
-                if self.levels is not None:
+                # Determine window/level mode: use displayed levels if requested
+                if (str(self.window_level_mode).lower() == 'displayed') and (self.levels is not None):
                     vmin, vmax = self.levels
                 else:
+                    # 'rescale' or no displayed levels -> compute per-frame
                     vmin = np.nanmin(frame_data)
                     vmax = np.nanmax(frame_data)
                 
@@ -493,6 +495,16 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
         self.ratio_combo.addItems(["Square pixels", "Square FOV", "Displayed"])
         ratio_layout.addWidget(self.ratio_combo)
         layout.addLayout(ratio_layout)
+
+        # Window/Level behavior
+        wl_layout = QtWidgets.QHBoxLayout()
+        wl_layout.addWidget(QtWidgets.QLabel("Window/Level:"))
+        self.wl_combo = QtWidgets.QComboBox()
+        # Displayed: use the currently displayed levels (default); Rescale: auto-adjust per frame
+        self.wl_combo.addItem("Displayed", "displayed")
+        self.wl_combo.addItem("Rescale", "rescale")
+        wl_layout.addWidget(self.wl_combo)
+        layout.addLayout(wl_layout)
         
         # Info
         info_text = f"Exporting dimension {self.export_dim} ({self.data_shape[self.export_dim]} frames)"
@@ -520,7 +532,8 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
         return {
             'format': (self.format_combo.currentData() or 'gif'),
             'fps': self.fps_spinbox.value(),
-            'pixel_ratio': self.ratio_combo.currentText().lower().replace(' ', '_')
+            'pixel_ratio': self.ratio_combo.currentText().lower().replace(' ', '_'),
+            'window_level': (self.wl_combo.currentData() or 'displayed')
         }
 
     def _on_format_changed(self, *_args):

@@ -1327,6 +1327,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             output_path=file_path,
             fps=settings['fps'],
             format_type=settings['format'],
+            window_level_mode=settings.get('window_level', 'displayed'),
             channel_func=channel_func,
             processing_func=processing_func,
             slice_indices=self.slice,
