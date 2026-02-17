@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 
 # Compatibility for PyQt5/PySide6 signal naming
@@ -137,6 +138,8 @@ class VideoExportWorker(QtCore.QThread):
             self.progress_updated.emit(total_frames, "Encoding video...")
             if self.format_type == 'gif':
                 self._save_gif(frames)
+            elif self.format_type == 'png':
+                self._save_png_frames(frames)
             elif self.format_type in ('mp4', 'webm'):
                 if not HAS_IMAGEIO:
                     raise RuntimeError(f"imageio not installed. Cannot save {self.format_type.upper()} files. "
@@ -243,6 +246,37 @@ class VideoExportWorker(QtCore.QThread):
                 writer.close()
             except Exception as e:
                 raise RuntimeError(f"Failed to write video: {e}")
+
+
+    def _save_png_frames(self, frames):
+        """Save each frame as an individual PNG file into the output directory."""
+        try:
+            from PIL import Image
+        except ImportError:
+            raise RuntimeError("PIL not available. PNG export requires Pillow. "
+                               "Install with: pip install Pillow")
+
+        out_dir = getattr(self, 'output_path', None)
+        if not out_dir:
+            raise RuntimeError("No output directory specified for PNG frames.")
+
+        # Create output directory if it doesn't exist
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to create output directory: {e}")
+
+        total = len(frames)
+        digits = max(4, len(str(total)))
+
+        for idx, frame in enumerate(frames, start=1):
+            try:
+                img = Image.fromarray(np.ascontiguousarray(frame.astype(np.uint8)))
+                fname = f"frame_{idx:0{digits}d}.png"
+                out_path = os.path.join(out_dir, fname)
+                img.save(out_path)
+            except Exception as e:
+                raise RuntimeError(f"Failed to save PNG frame {idx}: {e}")
 
     
     def stop(self):
@@ -411,14 +445,17 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
         format_layout.addWidget(QtWidgets.QLabel("Format:"))
         self.format_combo = QtWidgets.QComboBox()
         
+        # Offer PNG frames export (saves each frame as a separate PNG)
         if (HAS_IMAGEIO):
             format_options = [
+                ("PNG frames", "png", True),
                 ("GIF", "gif", True),
                 ("MP4 (requires imageio-ffmpeg)", "mp4", True),
                 ("WebM (requires imageio-ffmpeg)", "webm", True),
             ]
         else:
             format_options = [
+                ("PNG frames", "png", True),
                 ("GIF", "gif", True),
                 ("MP4", "mp4", False),
                 ("WebM", "webm", False),
@@ -434,6 +471,10 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
                     item.setEnabled(False)
 
         format_layout.addWidget(self.format_combo)
+        # Disable/enable other options depending on chosen format
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        # Initialize UI state based on default selection
+        self._on_format_changed()
         layout.addLayout(format_layout)
 
         # FPS setting
@@ -481,3 +522,14 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
             'fps': self.fps_spinbox.value(),
             'pixel_ratio': self.ratio_combo.currentText().lower().replace(' ', '_')
         }
+
+    def _on_format_changed(self, *_args):
+        """Adjust UI when format changes (disable FPS for PNG frames)."""
+        try:
+            fmt = self.format_combo.currentData()
+            if fmt == 'png':
+                self.fps_spinbox.setEnabled(False)
+            else:
+                self.fps_spinbox.setEnabled(True)
+        except Exception:
+            pass

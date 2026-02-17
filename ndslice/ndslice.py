@@ -3,6 +3,7 @@ import pyqtgraph as pg
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets, QtGui
 from PyQt5.QtCore import QThread
+import os
 import math
 from enum import Enum
 from .imageview2d import ImageView2D
@@ -1263,15 +1264,23 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
         settings = settings_dialog.get_settings()
         
-        # Get file save path
-        file_filter = f"{settings['format'].upper()} files (*.{settings['format']})"
-        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, f"Export Video as {settings['format'].upper()}", 
-            f"export.{settings['format']}", file_filter
-        )
-        
-        if not file_path:
-            return
+        # Get file save path (for PNG frames we ask for a directory)
+        file_path = None
+        if settings['format'] == 'png':
+            dir_path = QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Export frames to directory", os.path.expanduser("~")
+            )
+            if not dir_path:
+                return
+            file_path = dir_path
+        else:
+            file_filter = f"{settings['format'].upper()} files (*.{settings['format']})"
+            file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, f"Export Video as {settings['format'].upper()}", 
+                f"export.{settings['format']}", file_filter
+            )
+            if not file_path:
+                return
         
         # Determine transpose flag to match on-screen orientation (same condition as update_image_view)
         transpose = True if len(self.selected_indices) >= 2 and self.selected_indices[0] > self.selected_indices[1] else False
