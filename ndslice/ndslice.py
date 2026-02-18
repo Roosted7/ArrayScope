@@ -2,7 +2,6 @@ import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets, QtGui
-from PyQt5.QtCore import QThread
 import os
 import math
 from enum import Enum
@@ -28,13 +27,13 @@ class Domain(Enum):
     FOURIER=1
 
 class NDSliceWindow(QtWidgets.QMainWindow):
-    # Styling constants
-    DIMENSION_LABEL_STYLE = "QLabel { font-size: 12px; padding: 1px; margin: 2px; }"
-    FLIP_ICON_STYLE = "QLabel { font-size: 20px; padding: 0px; margin: 0px; }"
-    BUTTON_STYLE = "QPushButton { font-size: 12px; padding: 2px; margin: 2px; }"
-    SPINBOX_STYLE = "QSpinBox { font-size: 12px; }"
-    RADIO_BUTTON_STYLE = "QRadioButton { font-size: 11px; }"
-    GROUPBOX_BASE_STYLE = "QGroupBox { font-size: 11px; font-weight: bold; padding-top: 8px; margin-top: 3px; } QGroupBox::title { subcontrol-origin: margin; left: 5px; }"
+    # Styling constants — use pt (point) units so font sizes are DPI-independent
+    DIMENSION_LABEL_STYLE = "QLabel { font-size: 9pt; padding: 1px; margin: 2px; }"
+    FLIP_ICON_STYLE = "QLabel { font-size: 15pt; padding: 0px; margin: 0px; }"
+    BUTTON_STYLE = "QPushButton { font-size: 9pt; padding: 2px; margin: 2px; }"
+    SPINBOX_STYLE = "QSpinBox { font-size: 9pt; }"
+    RADIO_BUTTON_STYLE = "QRadioButton { font-size: 9pt; }"
+    GROUPBOX_BASE_STYLE = "QGroupBox { font-size: 9pt; font-weight: bold; border: 1px solid palette(mid); border-radius: 3px; margin-top: 1.4ex; padding-top: 3pt; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }"
 
     def __init__(self, data, complex_dim=None):
         super(NDSliceWindow, self).__init__()
@@ -101,9 +100,9 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 }
             },
             'labels': {
-                'dims': [QtWidgets.QLabel('[' + str(data.shape[i]) + ']', alignment=Qt.QtCore.Qt.AlignCenter) for i in range(data.ndim)],
-                'flip': [QtWidgets.QLabel('', alignment=Qt.QtCore.Qt.AlignCenter) for i in range(data.ndim)],
-                'complex': [QtWidgets.QLabel('', alignment=Qt.QtCore.Qt.AlignCenter) for i in range(data.ndim)],
+                'dims': [QtWidgets.QLabel('[' + str(data.shape[i]) + ']', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
+                'flip': [QtWidgets.QLabel('', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
+                'complex': [QtWidgets.QLabel('', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
                 'primary': QtWidgets.QLabel('Y'),
                 'secondary': QtWidgets.QLabel('X'),
                 'slice': QtWidgets.QLabel('Slice'),
@@ -160,7 +159,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
         for i, label in enumerate(self.widgets['labels']['dims']):
             label.mousePressEvent = lambda event, i=i, l=label: self.dimClicked(event, l, i)
-            label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.PointingHandCursor))
+            label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
             label.setToolTip(f"Apply centered FFT along dim {i}")
 
         
@@ -168,18 +167,18 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         for i, flip_label in enumerate(self.widgets['labels']['flip']):
             flip_label.mousePressEvent = lambda event, i=i: self.flipAxisClicked(event, i)
             flip_label.setStyleSheet(self.FLIP_ICON_STYLE)
-            flip_label.setAlignment(Qt.QtCore.Qt.AlignLeft | Qt.QtCore.Qt.AlignVCenter)
+            flip_label.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignLeft | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
         
         # Set up complex indicator labels with click handlers
         for i, complex_label in enumerate(self.widgets['labels']['complex']):
             complex_label.mousePressEvent = lambda event, i=i: self.complexOrRealClicked(event, i)
             complex_label.setStyleSheet(self.FLIP_ICON_STYLE)
-            complex_label.setAlignment(Qt.QtCore.Qt.AlignRight | Qt.QtCore.Qt.AlignVCenter)
+            complex_label.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignRight | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
         
         # Apply compact styling to dimension control widgets
         for label in self.widgets['labels']['dims']:
             label.setStyleSheet(self.DIMENSION_LABEL_STYLE)
-            label.setFixedHeight(24)
+            label.setMinimumHeight(24)
             label.setMinimumWidth(30)
         
         for btn in self.widgets['buttons']['primary'] + self.widgets['buttons']['secondary']:
@@ -216,7 +215,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             # Add flip icon (left-aligned)
             label_layout.addWidget(self.widgets['labels']['flip'][i])
             # Add dimension label (centered, takes remaining space)
-            self.widgets['labels']['dims'][i].setAlignment(Qt.QtCore.Qt.AlignCenter)
+            self.widgets['labels']['dims'][i].setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignCenter)
             label_layout.addWidget(self.widgets['labels']['dims'][i], 1)
             # Add complex indicator (ℝ/ℂ)
             label_layout.addWidget(self.widgets['labels']['complex'][i])
@@ -461,8 +460,8 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         right_container.setLayout(self.layouts['botRight'])
         
         # Set both containers to expand vertically the same way
-        left_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        right_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        left_container.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        right_container.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         
         self.layouts['top'].addLayout(self.layouts['topUp'],1)
         self.layouts['top'].addLayout(self.layouts['topDown'],20)  # Give viewport much more space
@@ -513,25 +512,25 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         if self.domain[dim] == Domain.FOURIER:
             # From FFT domain, go back to native (undo)
             self.domain[dim] = Domain.NATIVE
-            p.setColor(QtGui.QPalette.WindowText, QtGui.QColor('black'))
+            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor('black'))
             label.setStyleSheet("font-weight: normal;")
             self._apply_ifft(dim)  # Undo the FFT by applying IFFT
         elif self.domain[dim] == Domain.INV_FOURIER:
             # From IFFT domain, go back to native (undo)
             self.domain[dim] = Domain.NATIVE
-            p.setColor(QtGui.QPalette.WindowText, QtGui.QColor('black'))
+            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor('black'))
             label.setStyleSheet("font-weight: normal;")
             self._apply_fft(dim)  # Undo the IFFT by applying FFT
-        elif event.button() == Qt.QtCore.Qt.RightButton:
+        elif event.button() == Qt.QtCore.Qt.MouseButton.RightButton:
             # Right click from native: apply IFFT
             self.domain[dim] = Domain.INV_FOURIER
-            p.setColor(QtGui.QPalette.WindowText, QtGui.QColor('green'))
+            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor('green'))
             label.setStyleSheet("font-weight: bold; color: green;")
             self._apply_ifft(dim)
         else:
             # Left click from native: apply FFT
             self.domain[dim] = Domain.FOURIER
-            p.setColor(QtGui.QPalette.WindowText, QtGui.QColor('blue'))
+            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor('blue'))
             label.setStyleSheet("font-weight: bold; color: blue;")
             self._apply_fft(dim)
 
@@ -565,7 +564,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 # In line plot mode, only show horizontal flip icon for the plot dimension
                 if self.is_line_plot_mode():
                     if i == self.line_plot_dimension:
-                        flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.SizeHorCursor))
+                        flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeHorCursor))
                         flip_label.setToolTip("Flip X axis")
                         if self.axis_flipped[i]:
                             flip_label.setText('⬅️')    
@@ -576,14 +575,14 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                         flip_label.setToolTip('')
                 # In image view mode, show vertical flip for primary, horizontal for secondary
                 elif i == self.selected_indices[0]:
-                    flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.SizeVerCursor))
+                    flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeVerCursor))
                     flip_label.setToolTip("Flip Y")
                     if self.axis_flipped[i]:
                         flip_label.setText('⬇️')
                     else:
                         flip_label.setText('⬆️')
                 elif len(self.selected_indices) > 1 and i == self.selected_indices[1]:
-                    flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.SizeHorCursor))
+                    flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeHorCursor))
                     flip_label.setToolTip("Flip X")
                     if self.axis_flipped[i]:
                         flip_label.setText('⬅️')
@@ -624,18 +623,18 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             if self.combined_as_complex[i]:
                 indicator.setText('ℂ')
                 indicator.setStyleSheet(self.FLIP_ICON_STYLE + " QLabel {font-weight: bold; }")
-                indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.PointingHandCursor))
+                indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
                 indicator.setToolTip(f'Split to real')
             elif self.can_combine_as_complex[i]:
                 indicator.setText('ℝ')
                 indicator.setStyleSheet(self.FLIP_ICON_STYLE + " QLabel {font-weight: bold; }")
-                indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.PointingHandCursor))
+                indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
                 indicator.setToolTip(f'Combine as complex')
             else:
                 # No indicator, already-complex data or non-size-2 dimensions
                 indicator.setText('')
                 indicator.setToolTip('')
-                indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.ArrowCursor))
+                indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
     
     def complexOrRealClicked(self, event, dim):
         if self.can_combine_as_complex[dim] and not self.combined_as_complex[dim]:
@@ -1412,8 +1411,8 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             prim_btn = self.widgets['buttons']['primary'][i]
             sec_btn = self.widgets['buttons']['secondary'][i]
             
-            prim_btn.setContextMenuPolicy(Qt.QtCore.Qt.CustomContextMenu)
-            sec_btn.setContextMenuPolicy(Qt.QtCore.Qt.CustomContextMenu)
+            prim_btn.setContextMenuPolicy(Qt.QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+            sec_btn.setContextMenuPolicy(Qt.QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
             
             prim_btn.customContextMenuRequested.connect(lambda pos, btn=prim_btn, dim=i: self._show_export_context_menu(pos, btn, dim))
             sec_btn.customContextMenuRequested.connect( lambda pos, btn=sec_btn,  dim=i: self._show_export_context_menu(pos, btn, dim))
@@ -1425,7 +1424,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         export_action.triggered.connect(lambda: self._start_export(dim))
         
         # Show menu at cursor position
-        menu.exec_(btn.mapToGlobal(pos))
+        menu.exec(btn.mapToGlobal(pos))
     
     def _start_export(self, export_dim):
         """Initiate video export workflow"""
@@ -1436,7 +1435,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
         # Get export settings from dialog
         settings_dialog = VideoExportSettingsDialog(parent=self, export_dim=export_dim, data_shape=self.data.shape)
-        if settings_dialog.exec_() != QtWidgets.QDialog.Accepted:
+        if settings_dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         
         settings = settings_dialog.get_settings()
@@ -1526,9 +1525,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
 def _run_window(data, title, complex_dim=None):
     """Opens a window in a separate process which is blocked on exec()"""
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        app = QtWidgets.QApplication([])
+    app = pg.mkQApp()  # sets QT_ENABLE_HIGHDPI_SCALING + PassThrough rounding before creating QApp
     win = NDSliceWindow(data, complex_dim=complex_dim)
     win.setWindowTitle(title)
     win.show()

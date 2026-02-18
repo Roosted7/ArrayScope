@@ -24,9 +24,8 @@ def _show_selector(filepath, selector_class_name, interpret_as_complex):
         return
     
     # Create QApplication
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        app = QtWidgets.QApplication(sys.argv)
+    import pyqtgraph as pg
+    app = pg.mkQApp()
     
     # Create selector
     selector = selector_class(filepath)
@@ -79,7 +78,7 @@ class DatasetSelector:
         dialog = self._create_dialog()
         result = dialog.exec()
         
-        if result == self.QtWidgets.QDialog.Accepted and self.selected_dataset:
+        if result == self.QtWidgets.QDialog.DialogCode.Accepted and self.selected_dataset:
             return self.selected_dataset
         return None
     
@@ -106,10 +105,8 @@ class DatasetSelector:
         # Multiple datasets
         # Ensure QApplication exists
         if block:
-            import sys
-            app = self.QtWidgets.QApplication.instance()
-            if app is None:
-                app = self.QtWidgets.QApplication(sys.argv)
+            import pyqtgraph as pg
+            app = pg.mkQApp()
             
             if selected_path := self.show():
                 data = self.load_data(selected_path)
@@ -151,20 +148,20 @@ class DatasetSelector:
     
     def _on_item_double_clicked(self, item, column, dialog):
         """Handle double-click on tree item."""
-        compatible = item.data(0, self.QtCore.Qt.UserRole + 1)
+        compatible = item.data(0, self.QtCore.Qt.ItemDataRole.UserRole + 1)
         if compatible:
-            dataset_name = item.data(0, self.QtCore.Qt.UserRole)
+            dataset_name = item.data(0, self.QtCore.Qt.ItemDataRole.UserRole)
             self.selected_dataset = dataset_name
             dialog.accept()
     
     def _add_group(self, parent, name, path=None, item_type="Group"):
         """Add a group/struct item to the tree (non-selectable, greyed out, expanded)."""
         item = self.QtWidgets.QTreeWidgetItem([name, "", item_type])
-        item.setData(0, self.QtCore.Qt.UserRole, path)
-        item.setData(0, self.QtCore.Qt.UserRole + 1, False)  # Not compatible
+        item.setData(0, self.QtCore.Qt.ItemDataRole.UserRole, path)
+        item.setData(0, self.QtCore.Qt.ItemDataRole.UserRole + 1, False)  # Not compatible
         
         # Customize group appearance
-        item.setFlags(item.flags() & ~self.QtCore.Qt.ItemIsSelectable)
+        item.setFlags(item.flags() & ~self.QtCore.Qt.ItemFlag.ItemIsSelectable)
         font = item.font(0)
         font.setBold(True)
         item.setFont(0, font)
@@ -215,11 +212,11 @@ class DatasetSelector:
         item = self.QtWidgets.QTreeWidgetItem([f"{prefix}{name}"])
         item.setText(1, display_text)
         item.setText(2, str(dtype))
-        item.setData(0, self.QtCore.Qt.UserRole, path)
-        item.setData(0, self.QtCore.Qt.UserRole + 1, compatible)
+        item.setData(0, self.QtCore.Qt.ItemDataRole.UserRole, path)
+        item.setData(0, self.QtCore.Qt.ItemDataRole.UserRole + 1, compatible)
 
         if not compatible: # Mark incompatible items
-            item.setFlags(item.flags() & ~self.QtCore.Qt.ItemIsEnabled)
+            item.setFlags(item.flags() & ~self.QtCore.Qt.ItemFlag.ItemIsEnabled)
             item.setForeground(0, self.QtGui.QBrush(self.QtGui.QColor(*self.COLOR_INCOMPATIBLE)))
             item.setForeground(1, self.QtGui.QBrush(self.QtGui.QColor(*self.COLOR_INCOMPATIBLE)))
             item.setForeground(2, self.QtGui.QBrush(self.QtGui.QColor(*self.COLOR_INCOMPATIBLE)))
