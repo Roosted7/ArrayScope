@@ -445,11 +445,22 @@ class MatDatasetSelector(DatasetSelector):
         except ImportError:
             raise ImportError("scipy is required to read .mat files. Install it with: pip install scipy")
         
-        mat_data = scipy.io.loadmat(filepath)
-        self.mat_dict = {k: v for k, v in mat_data.items() if not k.startswith('__')}
-        
-        compatible_datasets = self._find_compatible_datasets()
-        super().__init__(filepath, compatible_datasets)
+        try:
+            mat_data = scipy.io.loadmat(filepath)
+            self.mat_dict = {k: v for k, v in mat_data.items() if not k.startswith('__')}
+            
+            compatible_datasets = self._find_compatible_datasets()
+            super().__init__(filepath, compatible_datasets)
+        except NotImplementedError:
+            # MATLAB v7.3 files are HDF5-based, fall back to H5DatasetSelector
+            try:
+                self.__class__ = H5DatasetSelector
+                H5DatasetSelector.__init__(self, filepath)
+            except Exception as e:
+                raise NotImplementedError(
+                    f"Failed to load {filepath}. MATLAB v7.3 files are HDF5-based and require h5py. "
+                    f"Details: {e}"
+                ) from e
     
     def _is_struct(self, val):
         return isinstance(val, np.ndarray) and hasattr(val.dtype, 'names') and val.dtype.names is not None
