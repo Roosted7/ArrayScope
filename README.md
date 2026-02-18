@@ -40,6 +40,16 @@ Data slicing and dimension selection should be intuitive: click the two dimensio
 
 ![Line plot](docs/images/lineplot.png)
 
+**Video export**
+Right-clicking a dimension button to export a video or PNG frames along that dimension.
+The video export functionality is optional, and can be installed with
+
+```bash
+pip install ndslice[video_export]
+```
+![Export](docs/images/video_export.gif)
+
+
 **Scaling**
 
 Log scaling is often good for k-space visualization.
@@ -48,10 +58,14 @@ Symmetric log scaling is an extension of the log scale which supports negative v
 
 **Colormap**
 Change colormap:
-- `Ctrl+1` Grayscale
-- `Ctrl+2` Viridis
-- `Ctrl+3` Plasma
-- `Ctrl+4` Rainbow
+  - Ctrl+1: Gray
+  - Ctrl+2: [Viridis](https://bids.github.io/colormap/)
+  - Ctrl+3: [Plasma](https://bids.github.io/colormap/)
+  - Ctrl+4: Cyclic rainbow, hides phase wraps
+  - Ctrl+5: [Cividis](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0199239)
+  - Ctrl+6: [Cubehelix](http://www.mrao.cam.ac.uk/~dag/CUBEHELIX/)
+  - Ctrl+7: [Cool](https://d3js.org/d3-scale-chromatic/sequential)
+  - Ctrl+8: [Warm](https://d3js.org/d3-scale-chromatic/sequential)
 
 
 **Axis flipping**
@@ -105,8 +119,9 @@ Double click to open.
 ### From PyPI
 
 ```bash
-pip install ndslice
-pip install h5py # Optional for HDF5 CLI support
+pip install ndslice 
+pip install ndslice[video_export] # Include video export dependencies (imageio, Pillow, imageio-ffmpeg)
+pip install ndslice[all] # includes all optional dependencies (video export and file formats)
 ```
 
 ### From source
