@@ -47,26 +47,29 @@ hdf5 = [
 matlab = [
     "scipy>=1.7.0",
 ]
-all = [
-    "h5py>=3.0.0",
-    "scipy>=1.7.0",
-]
 dicom = [
     "pydicom>=2.4.0",
 ]
 nifti = [
-    "nibabel>=4.0.0"
+    "nibabel>=4.0.0",
 ]
 video_export = [
     "imageio>=2.9.0",
     "imageio-ffmpeg>=0.4.2",
     "Pillow>=8.0.0",
 ]
-
+all = [
+    "h5py>=3.0.0",
+    "scipy>=1.7.0",
+    "pydicom>=2.4.0",
+    "nibabel>=4.0.0",
+    "imageio>=2.9.0",
+    "imageio-ffmpeg>=0.4.2",
+    "Pillow>=8.0.0",
+]
 [project.urls]
 Homepage = "https://github.com/henricryden/ndslice"
 Documentation = "https://github.com/henricryden/ndslice#readme"
-Repository = "https://github.com/henricryden/ndslice"
 "Bug Tracker" = "https://github.com/henricryden/ndslice/issues"
 
 [tool.setuptools]
