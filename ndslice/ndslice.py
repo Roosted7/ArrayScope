@@ -1185,6 +1185,22 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 self.setColormap('PAL-relaxed')
                 event.accept()
                 return
+            elif key == Qt.QtCore.Qt.Key.Key_5:
+                self.setColormap('d3-cividis')
+                event.accept()
+                return
+            elif key == Qt.QtCore.Qt.Key.Key_6:
+                self.setColormap('d3-cubehelix')
+                event.accept()
+                return
+            elif key == Qt.QtCore.Qt.Key.Key_7:
+                self.setColormap('d3-cool')
+                event.accept()
+                return
+            elif key == Qt.QtCore.Qt.Key.Key_8:
+                self.setColormap('d3-warm')
+                event.accept()
+                return
             
         
         # Pass event to parent if not handled
@@ -1201,6 +1217,14 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 colormap = pg.colormap.get('PAL-relaxed')
             elif colormap_name == 'plasma':
                 colormap = pg.colormap.get('plasma')
+            elif colormap_name == 'd3-warm':
+                colormap = self._create_d3_warm_colormap()
+            elif colormap_name == 'd3-cool':
+                colormap = self._create_d3_cool_colormap()
+            elif colormap_name == 'd3-cubehelix':
+                colormap = self._create_d3_cubehelix_colormap()
+            elif colormap_name == 'd3-cividis':
+                colormap = self._create_d3_cividis_colormap()
             else:
                 print(f"Unknown colormap: {colormap_name}")
                 return
@@ -1211,6 +1235,159 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             
         except Exception as e:
             print(f"Failed to set colormap {colormap_name}: {e}")
+    
+    def _create_d3_warm_colormap(self):
+        """Create D3.js interpolateWarm colormap (Niccoli's perceptual rainbow, 180° rotation)"""
+        # D3 uses cubehelix interpolation: cubehelix(-100, 0.75, 0.35) to cubehelix(80, 1.50, 0.8)
+        # Uses "long" interpolation (linear, not shortest path)
+        colors = []
+        positions = []
+        n_samples = 256
+        
+        # D3 cubehelix constants from d3-color
+        A = -0.14861
+        B = +1.78277
+        C = -0.29227
+        D = -0.90649
+        E = +1.97294
+        
+        for i in range(n_samples):
+            t = i / (n_samples - 1)
+            # Linear interpolation of cubehelix parameters (not shortest path)
+            h = -100 + t * (80 - (-100))  # hue: -100 to 80
+            s = 0.75 + t * (1.50 - 0.75)  # saturation: 0.75 to 1.50
+            l = 0.35 + t * (0.8 - 0.35)   # lightness: 0.35 to 0.8
+            
+            # Convert cubehelix to RGB using D3 formula
+            h_rad = (h + 120) * np.pi / 180
+            a = s * l * (1 - l)
+            cosh = np.cos(h_rad)
+            sinh = np.sin(h_rad)
+            
+            r = l + a * (A * cosh + B * sinh)
+            g = l + a * (C * cosh + D * sinh)
+            b = l + a * (E * cosh)
+            
+            # Convert to 0-255 range (D3 multiplies by 255)
+            r = np.clip(r * 255, 0, 255)
+            g = np.clip(g * 255, 0, 255)
+            b = np.clip(b * 255, 0, 255)
+            
+            colors.append((int(r), int(g), int(b)))
+            positions.append(t)
+        
+        return pg.ColorMap(pos=np.array(positions), color=np.array(colors))
+    
+    def _create_d3_cool_colormap(self):
+        """Create D3.js interpolateCool colormap (Niccoli's perceptual rainbow)"""
+        # D3 uses cubehelix interpolation: cubehelix(260, 0.75, 0.35) to cubehelix(80, 1.50, 0.8)
+        # Uses "long" interpolation (linear, not shortest path)
+        colors = []
+        positions = []
+        n_samples = 256
+        
+        # D3 cubehelix constants from d3-color
+        A = -0.14861
+        B = +1.78277
+        C = -0.29227
+        D = -0.90649
+        E = +1.97294
+        
+        for i in range(n_samples):
+            t = i / (n_samples - 1)
+            # Linear interpolation of cubehelix parameters (not shortest path)
+            h = 260 + t * (80 - 260)      # hue: 260 to 80
+            s = 0.75 + t * (1.50 - 0.75)  # saturation: 0.75 to 1.50
+            l = 0.35 + t * (0.8 - 0.35)   # lightness: 0.35 to 0.8
+            
+            # Convert cubehelix to RGB using D3 formula
+            h_rad = (h + 120) * np.pi / 180
+            a = s * l * (1 - l)
+            cosh = np.cos(h_rad)
+            sinh = np.sin(h_rad)
+            
+            r = l + a * (A * cosh + B * sinh)
+            g = l + a * (C * cosh + D * sinh)
+            b = l + a * (E * cosh)
+            
+            # Convert to 0-255 range (D3 multiplies by 255)
+            r = np.clip(r * 255, 0, 255)
+            g = np.clip(g * 255, 0, 255)
+            b = np.clip(b * 255, 0, 255)
+            
+            colors.append((int(r), int(g), int(b)))
+            positions.append(t)
+        
+        return pg.ColorMap(pos=np.array(positions), color=np.array(colors))
+    
+    def _create_d3_cubehelix_colormap(self):
+        """Create D3.js interpolateCubehelixDefault colormap (Green's default Cubehelix)"""
+        # D3 uses cubehelix interpolation: cubehelix(300, 0.5, 0.0) to cubehelix(-240, 0.5, 1.0)
+        # Uses "long" interpolation (linear, not shortest path)
+        colors = []
+        positions = []
+        n_samples = 256
+        
+        # D3 cubehelix constants from d3-color
+        A = -0.14861
+        B = +1.78277
+        C = -0.29227
+        D = -0.90649
+        E = +1.97294
+        
+        for i in range(n_samples):
+            t = i / (n_samples - 1)
+            # Linear interpolation of cubehelix parameters (not shortest path)
+            h = 300 + t * (-240 - 300)   # hue: 300 to -240 (wraps around the long way)
+            s = 0.5                      # saturation: constant at 0.5
+            l = 0.0 + t * (1.0 - 0.0)    # lightness: 0.0 to 1.0
+            
+            # Convert cubehelix to RGB using D3 formula
+            h_rad = (h + 120) * np.pi / 180
+            a = s * l * (1 - l)
+            cosh = np.cos(h_rad)
+            sinh = np.sin(h_rad)
+            
+            r = l + a * (A * cosh + B * sinh)
+            g = l + a * (C * cosh + D * sinh)
+            b = l + a * (E * cosh)
+            
+            # Convert to 0-255 range (D3 multiplies by 255)
+            r = np.clip(r * 255, 0, 255)
+            g = np.clip(g * 255, 0, 255)
+            b = np.clip(b * 255, 0, 255)
+            
+            colors.append((int(r), int(g), int(b)))
+            positions.append(t)
+        
+        return pg.ColorMap(pos=np.array(positions), color=np.array(colors))
+    
+    def _create_d3_cividis_colormap(self):
+        """Create D3.js Cividis colormap (color vision deficiency-optimized)"""
+        # D3 implementation uses polynomial functions for each RGB channel
+        # Source: https://github.com/d3/d3-scale-chromatic/blob/main/src/sequential-multi/cividis.js
+        colors = []
+        positions = []
+        n_samples = 256
+        
+        for i in range(n_samples):
+            t = i / (n_samples - 1)
+            t = np.clip(t, 0, 1)
+            
+            # D3's polynomial formulas for RGB channels
+            r = -4.54 - t * (35.34 - t * (2381.73 - t * (6402.7 - t * (7024.72 - t * 2710.57))))
+            g = 32.49 + t * (170.73 + t * (52.82 - t * (131.46 - t * (176.58 - t * 67.37))))
+            b = 81.24 + t * (442.36 - t * (2482.43 - t * (6167.24 - t * (6614.94 - t * 2475.67))))
+            
+            # Clamp to [0, 255]
+            r = np.clip(np.round(r), 0, 255)
+            g = np.clip(np.round(g), 0, 255)
+            b = np.clip(np.round(b), 0, 255)
+            
+            colors.append((int(r), int(g), int(b)))
+            positions.append(t)
+        
+        return pg.ColorMap(pos=np.array(positions), color=np.array(colors))
     
     def eventFilter(self, obj, event):
         if obj == self.tab_widget.tabBar():
