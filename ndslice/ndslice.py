@@ -1209,7 +1209,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         """Set the colormap for the image view"""
         try:
             if colormap_name == 'gray':
-                colormap = pg.colormap.get('gray', source='matplotlib')
+                colormap = pg.colormap.get('gray')
             elif colormap_name == 'viridis':
                 colormap = pg.colormap.get('viridis')
             elif colormap_name == 'PAL-relaxed':
