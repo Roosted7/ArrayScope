@@ -1209,7 +1209,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         """Set the colormap for the image view"""
         try:
             if colormap_name == 'gray':
-                colormap = pg.colormap.get('gray')
+                colormap = self._create_gray_colormap()
             elif colormap_name == 'viridis':
                 colormap = pg.colormap.get('viridis')
             elif colormap_name == 'PAL-relaxed':
@@ -1220,12 +1220,16 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 colormap = self._create_d3_warm_colormap()
             elif colormap_name == 'd3-cool':
                 colormap = self._create_d3_cool_colormap()
-            elif colormap_name == 'd3-cubehelix':
-                colormap = self._create_d3_cubehelix_colormap()
-            elif colormap_name == 'd3-cividis':
-                colormap = self._create_d3_cividis_colormap()
+            elif colormap_name == 'CET-CBL1':
+                colormap = pg.colormap.get('CET-CBL1')
+            elif colormap_name == 'cividis':
+                colormap = pg.colormap.get('cividis')
             else:
                 print(f"Unknown colormap: {colormap_name}")
+                return
+            
+            if colormap is None:
+                print(f"Failed to load colormap '{colormap_name}': returned None")
                 return
             
             # Apply colormap to the image view
@@ -1234,6 +1238,11 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             
         except Exception as e:
             print(f"Failed to set colormap {colormap_name}: {e}")
+    
+    
+    def _create_gray_colormap(self):
+        """Create a grayscale colormap matching pyqtgraph's built-in default (black to white)"""
+        return pg.ColorMap(pos=[0.0, 1.0], color=[[0, 0, 0, 255], [255, 255, 255, 255]])
     
     def _create_d3_warm_colormap(self):
         """Create D3.js interpolateWarm colormap (Niccoli's perceptual rainbow, 180° rotation)"""
@@ -1313,75 +1322,6 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             r = np.clip(r * 255, 0, 255)
             g = np.clip(g * 255, 0, 255)
             b = np.clip(b * 255, 0, 255)
-            
-            colors.append((int(r), int(g), int(b)))
-            positions.append(t)
-        
-        return pg.ColorMap(pos=np.array(positions), color=np.array(colors))
-    
-    def _create_d3_cubehelix_colormap(self):
-        """Create D3.js interpolateCubehelixDefault colormap (Green's default Cubehelix)"""
-        # D3 uses cubehelix interpolation: cubehelix(300, 0.5, 0.0) to cubehelix(-240, 0.5, 1.0)
-        # Uses "long" interpolation (linear, not shortest path)
-        colors = []
-        positions = []
-        n_samples = 256
-        
-        # D3 cubehelix constants from d3-color
-        A = -0.14861
-        B = +1.78277
-        C = -0.29227
-        D = -0.90649
-        E = +1.97294
-        
-        for i in range(n_samples):
-            t = i / (n_samples - 1)
-            # Linear interpolation of cubehelix parameters (not shortest path)
-            h = 300 + t * (-240 - 300)   # hue: 300 to -240 (wraps around the long way)
-            s = 0.5                      # saturation: constant at 0.5
-            l = 0.0 + t * (1.0 - 0.0)    # lightness: 0.0 to 1.0
-            
-            # Convert cubehelix to RGB using D3 formula
-            h_rad = (h + 120) * np.pi / 180
-            a = s * l * (1 - l)
-            cosh = np.cos(h_rad)
-            sinh = np.sin(h_rad)
-            
-            r = l + a * (A * cosh + B * sinh)
-            g = l + a * (C * cosh + D * sinh)
-            b = l + a * (E * cosh)
-            
-            # Convert to 0-255 range (D3 multiplies by 255)
-            r = np.clip(r * 255, 0, 255)
-            g = np.clip(g * 255, 0, 255)
-            b = np.clip(b * 255, 0, 255)
-            
-            colors.append((int(r), int(g), int(b)))
-            positions.append(t)
-        
-        return pg.ColorMap(pos=np.array(positions), color=np.array(colors))
-    
-    def _create_d3_cividis_colormap(self):
-        """Create D3.js Cividis colormap (color vision deficiency-optimized)"""
-        # D3 implementation uses polynomial functions for each RGB channel
-        # Source: https://github.com/d3/d3-scale-chromatic/blob/main/src/sequential-multi/cividis.js
-        colors = []
-        positions = []
-        n_samples = 256
-        
-        for i in range(n_samples):
-            t = i / (n_samples - 1)
-            t = np.clip(t, 0, 1)
-            
-            # D3's polynomial formulas for RGB channels
-            r = -4.54 - t * (35.34 - t * (2381.73 - t * (6402.7 - t * (7024.72 - t * 2710.57))))
-            g = 32.49 + t * (170.73 + t * (52.82 - t * (131.46 - t * (176.58 - t * 67.37))))
-            b = 81.24 + t * (442.36 - t * (2482.43 - t * (6167.24 - t * (6614.94 - t * 2475.67))))
-            
-            # Clamp to [0, 255]
-            r = np.clip(np.round(r), 0, 255)
-            g = np.clip(np.round(g), 0, 255)
-            b = np.clip(np.round(b), 0, 255)
             
             colors.append((int(r), int(g), int(b)))
             positions.append(t)
