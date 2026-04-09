@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.1] - 2026-04-09
+
+### Fixed
+- **Colormap switching** — Fixed error when switching back to gray colormap on PyQt5 systems without matplotlib.
+
 ## [0.5.0] - 2026-02-18
 
 ### Added
