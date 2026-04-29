@@ -1185,11 +1185,11 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 event.accept()
                 return
             elif key == Qt.QtCore.Qt.Key.Key_5:
-                self.setColormap('d3-cividis')
+                self.setColormap('cividis')
                 event.accept()
                 return
             elif key == Qt.QtCore.Qt.Key.Key_6:
-                self.setColormap('d3-cubehelix')
+                self.setColormap('CET-CBL1')
                 event.accept()
                 return
             elif key == Qt.QtCore.Qt.Key.Key_7:
@@ -1200,8 +1200,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 self.setColormap('d3-warm')
                 event.accept()
                 return
-            
-        
+                
         # Pass event to parent if not handled
         super().keyPressEvent(event)
     
