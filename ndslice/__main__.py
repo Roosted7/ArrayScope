@@ -45,7 +45,7 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
             # Single-dataset formats is handled by file_interpreters.load_file
             if suffix in ['.npy', '.rec', '.cfl', '.dcm', '.nii', '.nii.gz', '.txt']:
                 data = load_file(filepath)
-                ndslice(data=data, title=filepath.name, block=False)
+                ndslice(data=data, title=filepath.name, block=False, filepath=filepath)
                 continue
             
             # Multi-dataset formats - use selectors

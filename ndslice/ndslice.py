@@ -35,7 +35,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
     RADIO_BUTTON_STYLE = "QRadioButton { font-size: 9pt; }"
     GROUPBOX_BASE_STYLE = "QGroupBox { font-size: 9pt; font-weight: bold; border: 1px solid palette(mid); border-radius: 3px; margin-top: 1.4ex; padding-top: 3pt; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }"
 
-    def __init__(self, data, complex_dim=None):
+    def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
         super(NDSliceWindow, self).__init__()
         self.resize(800,800)
 
@@ -45,6 +45,9 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         self.channel = None
         self.scale = None
         self._force_autolevel = False
+        self._filepath = filepath
+        self._dataset_path = dataset_path
+        self._selector_class_name = selector_class_name
         
         self.axis_flipped = [False] * data.ndim  # Track flip state so that one can toggle dims and come back to the same flip state
         
@@ -121,14 +124,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         self.channel_button_group.addButton(self.widgets['buttons']['channel']['imag'])
         self.channel_button_group.addButton(self.widgets['buttons']['channel']['abs'])
         self.channel_button_group.addButton(self.widgets['buttons']['channel']['angle'])
-        
-        # Set default checked radio button
-        if self.widgets['buttons']['channel']['abs'].isEnabled():
-            self.widgets['buttons']['channel']['abs'].setChecked(True)
-            #self.channel = 'abs'
-        else:
-            self.widgets['buttons']['channel']['real'].setChecked(True)
-            #self.channel = 'real'
+        self._update_channel_controls()
             
         self.scale_button_group = QtWidgets.QButtonGroup()
         #self.scale_button_group.addButton(self.widgets['buttons']['processing']['log'])
@@ -445,7 +441,16 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
         # Add tab widget to the main layout
         self.layouts['topDown'].addWidget(self.tab_widget)
-        
+
+        # Reload / file-changed button (⟳ by default, ⚠️ when file changes on disk)
+        self._reload_btn = QtWidgets.QPushButton("⟳")
+        self._reload_btn.setStyleSheet("QPushButton { font-size: 18pt; padding: 1px 2px; margin: 0px; border: none; background: transparent; }")
+        self._reload_btn.setToolTip("Reload file")
+        self._reload_btn.setFlat(True)
+        self._reload_btn.setFixedSize(28, 20)
+        self._reload_btn.clicked.connect(self._reload_file)
+        self._reload_btn.setVisible(filepath is not None)
+        self.layouts['topUp'].addWidget(self._reload_btn)
         self.layouts['topUp'].addWidget(self.widgets['labels']['pixelValue'])
         self.layouts['topUp'].addWidget(self.widgets['labels']['arrayInfo'])
 
@@ -498,6 +503,13 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         self.update()
         self.show()
 
+        # Set up file watcher if a filepath was provided (QFileSystemWatcher uses
+        # OS-native events: inotify on Linux, FSEvents on macOS, ReadDirectoryChanges on Windows)
+        self._file_watcher = None
+        if filepath is not None:
+            self._file_watcher = Qt.QtCore.QFileSystemWatcher([str(filepath)])
+            self._file_watcher.fileChanged.connect(self._on_file_changed)
+
 
 
 
@@ -541,10 +553,12 @@ class NDSliceWindow(QtWidgets.QMainWindow):
     def _apply_fft(self, dim):
         """Apply forward FFT along specified dimension"""
         self.data = np.fft.ifftshift(np.fft.ifft(np.fft.fftshift(self.data), axis=dim, norm='ortho'))
+        self._update_channel_controls()
         
     def _apply_ifft(self, dim):
         """Apply inverse FFT along specified dimension"""
         self.data = np.fft.ifftshift(np.fft.fft(np.fft.fftshift(self.data), axis=dim, norm='ortho'))
+        self._update_channel_controls()
     
     def flipAxisClicked(self, event, dim):
         """Handle click on flip axis icon"""
@@ -635,6 +649,30 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 indicator.setText('')
                 indicator.setToolTip('')
                 indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
+
+    def _update_channel_controls(self):
+        """Keep channel options in sync with the current array dtype."""
+        is_complex = np.iscomplexobj(self.data)
+        channel_buttons = self.widgets['buttons']['channel']
+        enabled_channels = {
+            'real': True,
+            'abs': True,
+            'imag': is_complex,
+            'angle': is_complex,
+        }
+
+        checked_channel = next(
+            (name for name, button in channel_buttons.items() if button.isChecked()),
+            None,
+        )
+
+        for name, button in channel_buttons.items():
+            button.setEnabled(enabled_channels[name])
+
+        if checked_channel not in enabled_channels or not enabled_channels[checked_channel]:
+            checked_channel = 'abs' if enabled_channels['abs'] else 'real'
+
+        channel_buttons[checked_channel].setChecked(True)
     
     def complexOrRealClicked(self, event, dim):
         if self.can_combine_as_complex[dim] and not self.combined_as_complex[dim]:
@@ -683,12 +721,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                     self.line_plot_dimension = new_dim
                     break
         
-        # Enable complex channel buttons now that data is complex
-        for button in self.widgets['buttons']['channel'].values():
-            button.setEnabled(True)
-        
-        if not self.widgets['buttons']['channel']['abs'].isChecked():
-            self.widgets['buttons']['channel']['abs'].setChecked(True)
+        self._update_channel_controls()
         
         # Update UI
         self.update_complex_indicators()
@@ -717,12 +750,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         # Update max value for the spinbox for this dimension
         self.widgets['spins']['slice_indices'][dim].setMaximum(self.data.shape[dim] - 1)
         
-        # Disable complex channel buttons (data is now real)
-        for button in self.widgets['buttons']['channel'].values():
-            button.setEnabled(False)
-        
-        # Switch to 'real' channel
-        self.widgets['buttons']['channel']['real'].setChecked(True)
+        self._update_channel_controls()
         
         # Update UI
         self.update_complex_indicators()
@@ -1461,23 +1489,158 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         progress_dialog = VideoExportDialog(self)
         progress_dialog.start_export(worker, self.data.shape[export_dim])
 
-        
-def _run_window(data, title, complex_dim=None):
+    def _on_file_changed(self, path):
+        """Called by QFileSystemWatcher when the source file changes on disk."""
+        self._reload_btn.setText("⚠️")
+        self._reload_btn.setToolTip("File changed — click to reload")
+        # Re-add the path: handles atomic replacement where the original inode disappears
+        if self._file_watcher:
+            self._file_watcher.addPath(path)
+
+    def _reload_file(self):
+        """Reload data from the source file, preserving slice positions where possible."""
+        if self._filepath is None:
+            return
+        try:
+            new_data = None
+            new_dataset_path = self._dataset_path
+
+            if self._selector_class_name is None:
+                from .file_interpreters import load_file
+                new_data = load_file(self._filepath)
+            else:
+                from .selectors import H5DatasetSelector, NpzDatasetSelector, MatDatasetSelector
+                selector_map = {
+                    'H5DatasetSelector': H5DatasetSelector,
+                    'NpzDatasetSelector': NpzDatasetSelector,
+                    'MatDatasetSelector': MatDatasetSelector,
+                }
+                selector_cls = selector_map.get(self._selector_class_name)
+                if selector_cls is None:
+                    return
+                selector = selector_cls(self._filepath)
+                compatible_keys = {d[0] for d in selector.compatible_datasets}
+                if self._dataset_path is not None and self._dataset_path in compatible_keys:
+                    new_data = selector.load_data(self._dataset_path)
+                    selector.close()
+                elif selector.requires_gui():
+                    selected = selector.show()
+                    if selected is None:
+                        selector.close()
+                        return  # User cancelled — keep ⚠️ visible
+                    new_data = selector.load_data(selected)
+                    new_dataset_path = selected
+                    selector.close()
+                else:
+                    result = selector.get_single_data()
+                    selector.close()
+                    if result is None:
+                        return
+                    new_dataset_path, new_data = result
+
+            if new_data is None:
+                return
+
+            self._dataset_path = new_dataset_path
+            self._reset_data(new_data)
+            self._reload_btn.setText("⟳")
+            self._reload_btn.setToolTip("Reload file")
+            if self._file_watcher and self._filepath:
+                self._file_watcher.addPath(str(self._filepath))
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Reload Error", f"Failed to reload:\n{e}")
+
+    def _reset_data(self, new_data):
+        """Replace the displayed data, clamping slice positions to the new shape."""
+        old_ndim = self.data.ndim
+        new_ndim = new_data.ndim
+
+        if new_ndim != old_ndim:
+            # Per-dimension widgets were built for old_ndim and cannot be rebuilt in-place.
+            # Open a fresh window with the new data and close this one.
+            win = NDSliceWindow(new_data,
+                                filepath=self._filepath,
+                                dataset_path=self._dataset_path,
+                                selector_class_name=self._selector_class_name)
+            win.setWindowTitle(self.windowTitle())
+            win.show()
+            self.close()
+            return
+
+        self.data = new_data
+        self.singleton = [e == 1 for e in new_data.shape]
+
+        if np.iscomplexobj(new_data):
+            self.can_combine_as_complex = [False] * new_ndim
+        else:
+            self.can_combine_as_complex = [new_data.shape[i] == 2 for i in range(new_ndim)]
+        self.combined_as_complex = [False] * new_ndim
+
+        # Reset FFT domain state and dim label styling
+        self.domain = [Domain.NATIVE for _ in range(new_ndim)]
+        for i, label in enumerate(self.widgets['labels']['dims']):
+            label.setStyleSheet(self.DIMENSION_LABEL_STYLE)
+            label.setText(f'[{new_data.shape[i]}]')
+
+        # Update spinbox maximums (auto-clamps current value)
+        for i in range(new_ndim):
+            self.widgets['spins']['slice_indices'][i].setMaximum(new_data.shape[i] - 1)
+
+        # Clamp selected_indices: keep existing choices where still valid, fill from valid dims
+        valid_dims = [i for i in range(new_ndim) if not self.singleton[i]]
+        clamped = [i for i in self.selected_indices if i < new_ndim and not self.singleton[i]]
+        for d in valid_dims:
+            if len(clamped) >= 2:
+                break
+            if d not in clamped:
+                clamped.append(d)
+        if not clamped and valid_dims:
+            clamped = [valid_dims[0]]
+        self.selected_indices = clamped[:2]
+
+        # Clamp line_plot_dimension
+        if self.line_plot_dimension >= new_ndim or self.singleton[self.line_plot_dimension]:
+            for d in range(new_ndim):
+                if not self.singleton[d]:
+                    self.line_plot_dimension = d
+                    break
+
+        self.axis_flipped = [False] * new_ndim
+
+        self._update_channel_controls()
+        self.update_complex_indicators()
+        if len(self.selected_indices) >= 1:
+            self.changedIndex(True, 0, self.selected_indices[0], update=False)
+        if len(self.selected_indices) >= 2:
+            self.changedIndex(True, 1, self.selected_indices[1], update=False)
+        self.update_dimension_controls()
+        self._force_autolevel = True
+        self.update()
+
+
+def _run_window(data, title, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
     """Opens a window in a separate process which is blocked on exec()"""
     app = pg.mkQApp()  # sets QT_ENABLE_HIGHDPI_SCALING + PassThrough rounding before creating QApp
-    win = NDSliceWindow(data, complex_dim=complex_dim)
+    win = NDSliceWindow(data, complex_dim=complex_dim, filepath=filepath,
+                        dataset_path=dataset_path, selector_class_name=selector_class_name)
     win.setWindowTitle(title)
     win.show()
     app.exec()
 
-def ndslice(data, title='', block=False, complex_dim=None):
+def ndslice(data, title='', block=False, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
     if not isinstance(data, np.ndarray):
         raise TypeError("data must be a numpy array")
     if data.ndim < 1:
         raise ValueError("data must have at least 1 dimension")
     
     if block:
-        _run_window(data, title, complex_dim)
+        _run_window(data, title, complex_dim, filepath=filepath,
+                    dataset_path=dataset_path, selector_class_name=selector_class_name)
     else:
-        process = mp.Process(target=_run_window, args=(data, title, complex_dim)).start()
+        import multiprocessing.process as _mp_process
+        p = mp.Process(target=_run_window, args=(data, title, complex_dim),
+                       kwargs={'filepath': filepath, 'dataset_path': dataset_path,
+                               'selector_class_name': selector_class_name})
+        p.start()
+        _mp_process._children.discard(p)
     

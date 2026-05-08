@@ -134,8 +134,11 @@ class DatasetSelector:
             return False
         else:
             import multiprocessing as mp
-            mp.Process(target=_show_selector,
-                      args=(self.filepath, self.__class__.__name__, self.interpret_as_complex)).start()
+            import multiprocessing.process as _mp_process
+            p = mp.Process(target=_show_selector,
+                           args=(self.filepath, self.__class__.__name__, self.interpret_as_complex))
+            p.start()
+            _mp_process._children.discard(p)
             self.close()
             return True
     
