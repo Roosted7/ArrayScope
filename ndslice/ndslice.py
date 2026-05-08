@@ -29,9 +29,9 @@ class Domain(Enum):
 class NDSliceWindow(QtWidgets.QMainWindow):
     # Styling constants — use pt (point) units so font sizes are DPI-independent
     DIMENSION_LABEL_STYLE = "QLabel { font-size: 9pt; padding: 1px; margin: 2px; }"
-    FLIP_ICON_STYLE = "QLabel { font-size: 15pt; padding: 0px; margin: 0px; }"
-    BUTTON_STYLE = "QPushButton { font-size: 9pt; padding: 2px; margin: 2px; }"
-    SPINBOX_STYLE = "QSpinBox { font-size: 9pt; }"
+    FLIP_ICON_STYLE = "QLabel { font-size: 15pt; padding: 0px; margin: 0px; color: palette(text); }"
+    BUTTON_STYLE = "QPushButton { font-size: 9pt; padding: 2px; margin: 2px; } QPushButton:disabled { color: palette(mid); }"
+    SPINBOX_STYLE = "QSpinBox { font-size: 9pt; } QSpinBox:disabled { color: palette(mid); }"
     RADIO_BUTTON_STYLE = "QRadioButton { font-size: 9pt; }"
     GROUPBOX_BASE_STYLE = "QGroupBox { font-size: 9pt; font-weight: bold; border: 1px solid palette(mid); border-radius: 3px; margin-top: 1.4ex; padding-top: 3pt; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }"
 
@@ -1621,6 +1621,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
 def _run_window(data, title, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
     """Opens a window in a separate process which is blocked on exec()"""
     app = pg.mkQApp()  # sets QT_ENABLE_HIGHDPI_SCALING + PassThrough rounding before creating QApp
+    app.setStyle('Fusion')
     win = NDSliceWindow(data, complex_dim=complex_dim, filepath=filepath,
                         dataset_path=dataset_path, selector_class_name=selector_class_name)
     win.setWindowTitle(title)

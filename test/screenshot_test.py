@@ -34,14 +34,23 @@ def take_screenshot(win, path: Path):
 
 
 def main():
+    import argparse
     import pyqtgraph as pg
     from ndslice.ndslice import NDSliceWindow
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--style', default='Fusion',
+                        help='Qt style name, e.g. Fusion, Windows, macOS (default: Fusion)')
+    parser.add_argument('--out', default=None,
+                        help='Output directory for screenshot (default: test/screenshots/)')
+    args = parser.parse_args()
 
     data = make_data()
 
     app = pg.mkQApp()
+    app.setStyle(args.style)
     win = NDSliceWindow(data)
-    win.setWindowTitle(f"CI test — {sys.platform}")
+    win.setWindowTitle(f"CI test — {sys.platform} — style: {args.style}")
     win.resize(800, 800)
     win.show()
 
@@ -49,7 +58,8 @@ def main():
     for _ in range(5):
         app.processEvents()
 
-    out = Path(__file__).parent / "screenshots" / f"screenshot_{sys.platform}.png"
+    out_dir = Path(args.out) if args.out else Path(__file__).parent / "screenshots"
+    out = out_dir / f"screenshot_{sys.platform}.png"
     take_screenshot(win, out)
 
     win.close()
