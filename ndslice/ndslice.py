@@ -4,6 +4,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets, QtGui
 import os
 import math
+import platform
 from enum import Enum
 from .imageview2d import ImageView2D
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
@@ -34,6 +35,13 @@ class NDSliceWindow(QtWidgets.QMainWindow):
     SPINBOX_STYLE = "QSpinBox { font-size: 9pt; } QSpinBox:disabled { color: palette(mid); }"
     RADIO_BUTTON_STYLE = "QRadioButton { font-size: 9pt; }"
     GROUPBOX_BASE_STYLE = "QGroupBox { font-size: 9pt; font-weight: bold; border: 1px solid palette(mid); border-radius: 3px; margin-top: 1.4ex; padding-top: 3pt; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }"
+    
+    @staticmethod
+    def _set_emoji_font(widget):
+        if platform.system() == 'Darwin':
+            font = widget.font()
+            font.setFamily('Apple Color Emoji')
+            widget.setFont(font)
 
     def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
         super(NDSliceWindow, self).__init__()
@@ -164,12 +172,14 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             flip_label.mousePressEvent = lambda event, i=i: self.flipAxisClicked(event, i)
             flip_label.setStyleSheet(self.FLIP_ICON_STYLE)
             flip_label.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignLeft | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
+            self._set_emoji_font(flip_label)
         
         # Set up complex indicator labels with click handlers
         for i, complex_label in enumerate(self.widgets['labels']['complex']):
             complex_label.mousePressEvent = lambda event, i=i: self.complexOrRealClicked(event, i)
             complex_label.setStyleSheet(self.FLIP_ICON_STYLE)
             complex_label.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignRight | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
+            self._set_emoji_font(complex_label)
         
         # Apply compact styling to dimension control widgets
         for label in self.widgets['labels']['dims']:
@@ -450,6 +460,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         self._reload_btn.setFixedSize(28, 20)
         self._reload_btn.clicked.connect(self._reload_file)
         self._reload_btn.setVisible(filepath is not None)
+        self._set_emoji_font(self._reload_btn)
         self.layouts['topUp'].addWidget(self._reload_btn)
         self.layouts['topUp'].addWidget(self.widgets['labels']['pixelValue'])
         self.layouts['topUp'].addWidget(self.widgets['labels']['arrayInfo'])
