@@ -1,0 +1,47 @@
+name: Cross-platform screenshot test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  screenshot:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libgl1 libegl1
+
+      - name: Install ndslice
+        run: pip install -e .
+
+      - name: Run screenshot test (Linux)
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python test/screenshot_test.py
+
+      - name: Run screenshot test (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: python test/screenshot_test.py
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ matrix.os }}
+          path: test/screenshots/
+          if-no-files-found: error
