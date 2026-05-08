@@ -34,10 +34,14 @@ def _show_selector(filepath, selector_class_name, interpret_as_complex):
     # Show dialog
     if selected_path := selector.show():
         data = selector.load_data(selected_path)
+        selector.close()
         ndslice(data=data,
                 title=f"{filepath.name} - {selected_path}",
                 block=True,
-                complex_dim=interpret_as_complex)
+                complex_dim=interpret_as_complex,
+                filepath=filepath,
+                dataset_path=selected_path,
+                selector_class_name=selector_class_name)
 
 
 class DatasetSelector:
@@ -68,7 +72,11 @@ class DatasetSelector:
     def load_data(self, path):
         """Load data for a given dataset path/name. Returns numpy array."""
         raise NotImplementedError("Subclasses must implement load_data()")
-    
+
+    def close(self):
+        """Close any open file handles. Subclasses override if needed."""
+        pass
+
     def _build_tree(self):
         """Build the tree widget. Must be implemented by subclasses."""
         raise NotImplementedError("Subclasses must implement _build_tree()")
@@ -94,10 +102,14 @@ class DatasetSelector:
             result = self.get_single_data()
             if result:
                 name, data = result
+                self.close()
                 ndslice(data=data,
                         title=f"{self.filepath.name} - {name}",
                         block=block,
-                        complex_dim=self.interpret_as_complex)
+                        complex_dim=self.interpret_as_complex,
+                        filepath=self.filepath,
+                        dataset_path=name,
+                        selector_class_name=self.__class__.__name__)
                 return True
             else:
                 return False
@@ -110,16 +122,21 @@ class DatasetSelector:
             
             if selected_path := self.show():
                 data = self.load_data(selected_path)
+                self.close()
                 ndslice(data=data,
                         title=f"{self.filepath.name} - {selected_path}",
                         block=True,
-                        complex_dim=self.interpret_as_complex)
+                        complex_dim=self.interpret_as_complex,
+                        filepath=self.filepath,
+                        dataset_path=selected_path,
+                        selector_class_name=self.__class__.__name__)
                 return True
             return False
         else:
             import multiprocessing as mp
             mp.Process(target=_show_selector,
                       args=(self.filepath, self.__class__.__name__, self.interpret_as_complex)).start()
+            self.close()
             return True
     
     def _create_dialog(self):
@@ -246,6 +263,10 @@ class H5DatasetSelector(DatasetSelector):
         self._detect_complex_interpretation()
     
     def __del__(self):
+        if hasattr(self, 'h5_file') and self.h5_file:
+            self.h5_file.close()
+
+    def close(self):
         if hasattr(self, 'h5_file') and self.h5_file:
             self.h5_file.close()
 
@@ -406,7 +427,11 @@ class NpzDatasetSelector(DatasetSelector):
         """Close the NPZ file when selector is destroyed."""
         if hasattr(self, 'npz_file'):
             self.npz_file.close()
-    
+
+    def close(self):
+        if hasattr(self, 'npz_file'):
+            self.npz_file.close()
+
     def _find_compatible_datasets(self):
         """Find all compatible datasets in the NPZ file."""
         compatible = []
