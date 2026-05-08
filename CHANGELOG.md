@@ -2,6 +2,14 @@
 
 
 
+## [0.6.1]
+
+### Changed
+- **Default channel selection** — Real-valued data now defaults to 'real' channel. Complex data defaults to 'abs' channel
+
+### Fixed
+- **macOS emoji rendering** — Fixed emoji glyphs on macOS
+
 ## [0.6.0]
 
 ### Added
