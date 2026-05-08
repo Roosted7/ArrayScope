@@ -670,7 +670,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             button.setEnabled(enabled_channels[name])
 
         if checked_channel not in enabled_channels or not enabled_channels[checked_channel]:
-            checked_channel = 'abs' if enabled_channels['abs'] else 'real'
+            checked_channel = 'abs' if is_complex else 'real'
 
         channel_buttons[checked_channel].setChecked(True)
     
