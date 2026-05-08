@@ -1,5 +1,19 @@
 # Changelog
 
+
+
+## [0.6.0]
+
+### Added
+- **File monitoring & live reload** — Watch for file changes; click warning icon (⚠️) to reload
+- **Cross-platform CI** — Automated testing on Ubuntu, macOS, Windows with Python 3.12–3.14
+
+### Changed
+- **Fusion Qt style**
+
+### Fixed
+- **File locking** — Close HDF5/NPZ files immediately after data load to prevent locks blocking other processes
+
 ## [0.5.1] - 2026-04-09
 
 ### Fixed

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ndslice"
-version = "0.5.2"
+version = "0.6.0"
 description = "Interactive N-dimensional numpy array viewer with FFT support"
 readme = "README.md"
 authors = [
@@ -22,6 +22,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 keywords = ["visualization", "numpy", "fft", "image-viewer", "data-visualization"]
