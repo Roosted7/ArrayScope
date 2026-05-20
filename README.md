@@ -125,10 +125,9 @@ Double click to open.
 ### From PyPI
 
 ```bash
-pip install ndslice 
-pip install ndslice[video_export] # Include video export dependencies (imageio, Pillow, imageio-ffmpeg)
-pip install ndslice[all] # includes all optional dependencies (video export and file formats)
-pip install ndslice[dicom_dir] # pydicom + nibabel for DICOM file/dir support
+pip install ndslice
+# Or, if you want just the package without pulling in dependencies:
+pip install --no-deps ndslice
 ```
 
 For DICOM directories you also need the external `dcm2niix` binary available on `PATH`. A practical install route is:
@@ -158,7 +157,13 @@ pip install -e .
 - NumPy >= 1.20.0
 - PyQtGraph >= 0.12.0
 - PyQt5 >= 5.15.0
-- h5py >= 3.0.0 (for HDF5 file support in CLI)
+- h5py >= 3.0.0
+- scipy >= 1.7.0
+- pydicom >= 2.4.0
+- nibabel >= 4.0.0
+- imageio >= 2.9.0
+- imageio-ffmpeg >= 0.4.2
+- Pillow >= 8.0.0
 
 ## License
 

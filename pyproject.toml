@@ -31,6 +31,13 @@ dependencies = [
     "numpy>=1.20.0",
     "pyqtgraph>=0.14.0",
     "PyQt5>=5.15.0",
+    "h5py>=3.0.0",
+    "scipy>=1.7.0",
+    "pydicom>=2.4.0",
+    "nibabel>=4.0.0",
+    "imageio>=2.9.0",
+    "imageio-ffmpeg>=0.4.2",
+    "Pillow>=8.0.0",
 ]
 
 [project.scripts]
@@ -41,36 +48,6 @@ pyqt6 = ["PyQt6>=6.4.0"]
 dev = [
     "build>=0.10.0",
     "twine>=4.0.0",
-]
-hdf5 = [
-    "h5py>=3.0.0",
-]
-matlab = [
-    "scipy>=1.7.0",
-]
-dicom = [
-    "pydicom>=2.4.0",
-]
-nifti = [
-    "nibabel>=4.0.0",
-]
-dicom_dir = [
-    "pydicom>=2.4.0",
-    "nibabel>=4.0.0",
-]
-video_export = [
-    "imageio>=2.9.0",
-    "imageio-ffmpeg>=0.4.2",
-    "Pillow>=8.0.0",
-]
-all = [
-    "h5py>=3.0.0",
-    "scipy>=1.7.0",
-    "pydicom>=2.4.0",
-    "nibabel>=4.0.0",
-    "imageio>=2.9.0",
-    "imageio-ffmpeg>=0.4.2",
-    "Pillow>=8.0.0",
 ]
 [project.urls]
 Homepage = "https://github.com/henricryden/ndslice"
