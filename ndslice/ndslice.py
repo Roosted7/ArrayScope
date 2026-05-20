@@ -6,6 +6,7 @@ import os
 import math
 import platform
 from enum import Enum
+from pathlib import Path
 from .imageview2d import ImageView2D
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 import multiprocessing as mp
@@ -251,6 +252,8 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             w.valueChanged.connect(self.update)
         
         self._setup_export_context_menus()
+        self._save_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Save, self)
+        self._save_shortcut.activated.connect(self._save_current_numpy_file)
         
         # Create a single compact control panel with all radio buttons
         controls_widget = QtWidgets.QWidget()
@@ -1499,6 +1502,35 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         # Show progress dialog
         progress_dialog = VideoExportDialog(self)
         progress_dialog.start_export(worker, self.data.shape[export_dim])
+
+    def _save_current_numpy_file(self):
+        """Save the currently displayed array state to a NumPy .npy file."""
+        default_name = 'ndslice.npy'
+        if self._filepath is not None:
+            source_path = Path(self._filepath)
+            source_name = source_path.name
+            if source_name.lower().endswith('.nii.gz'):
+                default_name = source_name[:-7] + '.npy'
+            else:
+                default_name = f"{source_path.stem}.npy"
+
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save current array as NumPy file",
+            default_name,
+            "NumPy files (*.npy)"
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith('.npy'):
+            file_path += '.npy'
+
+        try:
+            np.save(file_path, self.data)
+            print(f"Saved current array to {file_path}")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Save Error", f"Failed to save NumPy file:\n{e}")
 
     def _on_file_changed(self, path):
         """Called by QFileSystemWatcher when the source file changes on disk."""
