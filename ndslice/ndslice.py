@@ -28,6 +28,292 @@ class Domain(Enum):
     NATIVE=0
     FOURIER=1
 
+
+QT_SIGNAL = getattr(Qt.QtCore, 'Signal', getattr(Qt.QtCore, 'pyqtSignal'))
+
+
+class RangeSlider(QtWidgets.QWidget):
+    """A minimal horizontal two-handle slider for inclusive integer ranges."""
+
+    valuesChanged = QT_SIGNAL(int, int)
+
+    def __init__(self, parent=None, minimum=0, maximum=0):
+        super().__init__(parent)
+        self._minimum = int(minimum)
+        self._maximum = max(int(minimum), int(maximum))
+        self._lower_value = self._minimum
+        self._upper_value = self._maximum
+        self._active_handle = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(30)
+
+    def sizeHint(self):
+        return Qt.QtCore.QSize(240, 30)
+
+    def values(self):
+        return self._lower_value, self._upper_value
+
+    def setValues(self, lower_value, upper_value):
+        lower_value = max(self._minimum, min(int(lower_value), self._maximum))
+        upper_value = max(self._minimum, min(int(upper_value), self._maximum))
+        if lower_value > upper_value:
+            lower_value, upper_value = upper_value, lower_value
+
+        if (lower_value, upper_value) == (self._lower_value, self._upper_value):
+            return
+
+        self._lower_value = lower_value
+        self._upper_value = upper_value
+        self.valuesChanged.emit(self._lower_value, self._upper_value)
+        self.update()
+
+    def paintEvent(self, event):
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        palette = self.palette()
+        groove_rect = self._groove_rect()
+        lower_center = self._handle_center(self._lower_value)
+        upper_center = self._handle_center(self._upper_value)
+
+        painter.setPen(Qt.QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(palette.midlight())
+        painter.drawRoundedRect(groove_rect, 3, 3)
+
+        selected_rect = Qt.QtCore.QRectF(
+            lower_center.x(),
+            groove_rect.top(),
+            max(upper_center.x() - lower_center.x(), 1),
+            groove_rect.height(),
+        )
+        painter.setBrush(palette.highlight())
+        painter.drawRoundedRect(selected_rect, 3, 3)
+
+        self._paint_handle(painter, lower_center, self._active_handle == 'lower')
+        self._paint_handle(painter, upper_center, self._active_handle == 'upper')
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.QtCore.Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
+
+        point = self._event_point(event)
+        self._active_handle = self._closest_handle(point)
+        self._move_active_handle(point.x())
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        point = self._event_point(event)
+        if self._active_handle is not None:
+            self._move_active_handle(point.x())
+            event.accept()
+            return
+
+        self.setCursor(
+            QtGui.QCursor(
+                Qt.QtCore.Qt.CursorShape.SizeHorCursor if self._is_over_handle(point) else Qt.QtCore.Qt.CursorShape.ArrowCursor
+            )
+        )
+        event.ignore()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.QtCore.Qt.MouseButton.LeftButton:
+            self._active_handle = None
+            self.update()
+        event.accept()
+
+    def leaveEvent(self, event):
+        self.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
+        super().leaveEvent(event)
+
+    def _event_point(self, event):
+        if hasattr(event, 'position'):
+            return event.position()
+        if hasattr(event, 'localPos'):
+            return event.localPos()
+        return Qt.QtCore.QPointF(event.pos())
+
+    def _handle_radius(self):
+        return 8.0
+
+    def _groove_rect(self):
+        margin = self._handle_radius() + 4.0
+        return Qt.QtCore.QRectF(
+            margin,
+            self.height() / 2.0 - 3.0,
+            max(self.width() - 2.0 * margin, 1.0),
+            6.0,
+        )
+
+    def _handle_center(self, value):
+        groove_rect = self._groove_rect()
+        span = max(self._maximum - self._minimum, 1)
+        ratio = (value - self._minimum) / span
+        return Qt.QtCore.QPointF(groove_rect.left() + groove_rect.width() * ratio, groove_rect.center().y())
+
+    def _handle_rect(self, value):
+        center = self._handle_center(value)
+        radius = self._handle_radius()
+        return Qt.QtCore.QRectF(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0)
+
+    def _paint_handle(self, painter, center, active):
+        radius = self._handle_radius()
+        palette = self.palette()
+        rect = Qt.QtCore.QRectF(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0)
+        painter.setPen(QtGui.QPen(palette.shadow().color(), 1.0))
+        painter.setBrush(palette.highlight() if active else palette.button())
+        painter.drawEllipse(rect)
+
+        inner_rect = rect.adjusted(3.0, 3.0, -3.0, -3.0)
+        painter.setPen(Qt.QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(palette.base())
+        painter.drawEllipse(inner_rect)
+
+    def _closest_handle(self, point):
+        lower_distance = abs(point.x() - self._handle_center(self._lower_value).x())
+        upper_distance = abs(point.x() - self._handle_center(self._upper_value).x())
+        return 'lower' if lower_distance <= upper_distance else 'upper'
+
+    def _is_over_handle(self, point):
+        expanded_lower = self._handle_rect(self._lower_value).adjusted(-4, -4, 4, 4)
+        expanded_upper = self._handle_rect(self._upper_value).adjusted(-4, -4, 4, 4)
+        return expanded_lower.contains(point) or expanded_upper.contains(point)
+
+    def _value_from_position(self, position_x):
+        groove_rect = self._groove_rect()
+        clamped_x = min(max(position_x, groove_rect.left()), groove_rect.right())
+        ratio = (clamped_x - groove_rect.left()) / max(groove_rect.width(), 1.0)
+        return int(round(self._minimum + ratio * (self._maximum - self._minimum)))
+
+    def _move_active_handle(self, position_x):
+        value = self._value_from_position(position_x)
+        if self._active_handle == 'lower':
+            self.setValues(min(value, self._upper_value), self._upper_value)
+        elif self._active_handle == 'upper':
+            self.setValues(self._lower_value, max(value, self._lower_value))
+
+
+class SaveRangeDialog(QtWidgets.QDialog):
+    """Dialog for selecting an inclusive index range along each dimension."""
+
+    def __init__(self, parent, data_shape):
+        super().__init__(parent)
+        self.setWindowTitle('Save as NumPy')
+        self._controls = []
+        self._data_shape = tuple(data_shape)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QtWidgets.QWidget()
+        content_layout = QtWidgets.QVBoxLayout(content)
+        content_layout.setContentsMargins(4, 4, 4, 4)
+        content_layout.setSpacing(10)
+
+        for dim, size in enumerate(data_shape):
+            max_index = max(0, size - 1)
+            row_widget = QtWidgets.QWidget()
+            row_layout = QtWidgets.QGridLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setHorizontalSpacing(8)
+            row_layout.setVerticalSpacing(4)
+
+            dimension_label = QtWidgets.QLabel(f'Dim {dim}')
+            dimension_label.setStyleSheet('QLabel { font-size: 9pt; font-weight: bold; }')
+            slider = RangeSlider(row_widget, 0, max_index)
+
+            start_spinbox = QtWidgets.QSpinBox()
+            end_spinbox = QtWidgets.QSpinBox()
+            for spinbox in (start_spinbox, end_spinbox):
+                spinbox.setRange(0, max_index)
+                spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+                spinbox.setStyleSheet(NDSliceWindow.SPINBOX_STYLE)
+                spinbox.setFixedWidth(70)
+
+            end_spinbox.setValue(max_index)
+            start_spinbox.valueChanged.connect(lambda value, end_box=end_spinbox: end_box.setMinimum(value))
+            end_spinbox.valueChanged.connect(lambda value, start_box=start_spinbox: start_box.setMaximum(value))
+            start_spinbox.valueChanged.connect(lambda value, slider_widget=slider, end_box=end_spinbox: slider_widget.setValues(value, end_box.value()))
+            end_spinbox.valueChanged.connect(lambda value, slider_widget=slider, start_box=start_spinbox: slider_widget.setValues(start_box.value(), value))
+            start_spinbox.valueChanged.connect(lambda _value: self._update_output_shape_label())
+            end_spinbox.valueChanged.connect(lambda _value: self._update_output_shape_label())
+            slider.valuesChanged.connect(lambda lower, upper, start_box=start_spinbox, end_box=end_spinbox: self._sync_spinboxes(start_box, end_box, lower, upper))
+
+            slider.setValues(0, max_index)
+
+            row_layout.addWidget(dimension_label, 0, 0)
+            row_layout.addWidget(slider, 0, 1, 1, 4)
+            row_layout.addWidget(QtWidgets.QLabel('start'), 1, 0)
+            row_layout.addWidget(start_spinbox, 1, 1)
+            row_layout.addItem(QtWidgets.QSpacerItem(24, 1, QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Minimum), 1, 2)
+            row_layout.addWidget(QtWidgets.QLabel('end'), 1, 3)
+            row_layout.addWidget(end_spinbox, 1, 4)
+            row_layout.setColumnStretch(1, 0)
+            row_layout.setColumnStretch(2, 1)
+            row_layout.setColumnStretch(4, 0)
+            content_layout.addWidget(row_widget)
+            self._controls.append((slider, start_spinbox, end_spinbox))
+
+        content_layout.addStretch(1)
+
+        scroll_area.setWidget(content)
+        scroll_area.setMaximumHeight(min(440, 84 * max(len(data_shape), 1)))
+        layout.addWidget(scroll_area)
+
+        footer_layout = QtWidgets.QHBoxLayout()
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(12)
+        self._squeeze_checkbox = QtWidgets.QCheckBox('Squeeze singleton dimensions')
+        self._squeeze_checkbox.setChecked(True)
+        self._squeeze_checkbox.toggled.connect(self._update_output_shape_label)
+        self._output_shape_label = QtWidgets.QLabel()
+        self._output_shape_label.setStyleSheet('QLabel { font-size: 9pt; color: palette(windowText); }')
+        footer_layout.addWidget(self._squeeze_checkbox)
+        footer_layout.addStretch(1)
+        footer_layout.addWidget(self._output_shape_label)
+        layout.addLayout(footer_layout)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._update_output_shape_label()
+        self.resize(640, min(560, 150 + 84 * len(data_shape)))
+
+    def _sync_spinboxes(self, start_spinbox, end_spinbox, lower_value, upper_value):
+        start_spinbox.blockSignals(True)
+        end_spinbox.blockSignals(True)
+        start_spinbox.setValue(lower_value)
+        end_spinbox.setValue(upper_value)
+        start_spinbox.blockSignals(False)
+        end_spinbox.blockSignals(False)
+        self._update_output_shape_label()
+
+    def _selected_shape(self):
+        selected_shape = [max(end.value() - start.value() + 1, 0) for _, start, end in self._controls]
+        if self.should_squeeze():
+            squeezed_shape = [size for size in selected_shape if size != 1]
+            return squeezed_shape or [1]
+        return selected_shape
+
+    def _update_output_shape_label(self):
+        self._output_shape_label.setText(f'Output shape: {self._selected_shape()}')
+
+    def get_ranges(self):
+        """Return Python slice bounds as (start, stop) tuples."""
+        return [(start.value(), end.value() + 1) for _, start, end in self._controls]
+
+    def should_squeeze(self):
+        return self._squeeze_checkbox.isChecked()
+
 class NDSliceWindow(QtWidgets.QMainWindow):
     # Styling constants — use pt (point) units so font sizes are DPI-independent
     DIMENSION_LABEL_STYLE = "QLabel { font-size: 9pt; padding: 1px; margin: 2px; }"
@@ -1505,6 +1791,14 @@ class NDSliceWindow(QtWidgets.QMainWindow):
 
     def _save_current_numpy_file(self):
         """Save the currently displayed array state to a NumPy .npy file."""
+        range_dialog = SaveRangeDialog(self, self.data.shape)
+        if range_dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+
+        ranges = range_dialog.get_ranges()
+        sliced_data = self.data[tuple(slice(start, stop) for start, stop in ranges)]
+        output_data = np.squeeze(sliced_data) if range_dialog.should_squeeze() else sliced_data
+
         default_name = 'ndslice.npy'
         if self._filepath is not None:
             source_path = Path(self._filepath)
@@ -1527,8 +1821,8 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             file_path += '.npy'
 
         try:
-            np.save(file_path, self.data)
-            print(f"Saved current array to {file_path}")
+            np.save(file_path, output_data)
+            print(f"Saved array {list(output_data.shape)} to {file_path}")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Save Error", f"Failed to save NumPy file:\n{e}")
 
