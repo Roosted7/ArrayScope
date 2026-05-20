@@ -452,15 +452,15 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
             format_options = [
                 ("PNG frames", "png", True),
                 ("GIF", "gif", True),
-                ("MP4 (requires imageio-ffmpeg)", "mp4", True),
-                ("WebM (requires imageio-ffmpeg)", "webm", True),
+                ("MP4", "mp4", True),
+                ("WebM", "webm", True),
             ]
         else:
             format_options = [
                 ("PNG frames", "png", True),
                 ("GIF", "gif", True),
-                ("MP4", "mp4", False),
-                ("WebM", "webm", False),
+                ("MP4 (requires imageio-ffmpeg)", "mp4", False),
+                ("WebM (requires imageio-ffmpeg)", "webm", False),
             ]
 
 
