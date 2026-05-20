@@ -2,6 +2,11 @@
 
 
 
+## [0.7.0]
+
+### Added
+- **DICOM directory loading** — `ndslice some_dicom_dir/` now converts a directory of `.dcm` files via `dcm2niix` and loads the produced NIfTI volume. Single `.dcm` files still load through `pydicom`.
+
 ## [0.6.1]
 
 ### Changed

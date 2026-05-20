@@ -91,6 +91,9 @@ ndslice(data2)  # Shown after first closes
 ### Command Line
 ```bash
 ndslice data.npy # Numpy file
+ndslice image.nii.gz
+ndslice image.dcm
+ndslice some_dicom_dir/ # Automatically attemps to form an nd-array from DICOM the files
 ndslice --help   # Show all options
 ```
 
@@ -104,9 +107,12 @@ ndslice has CLI support and can conveniently display:
 | [BART](https://mrirecon.github.io/bart/) | `.cfl` + `.hdr` | — |
 | Philips REC | `.REC` + `.xml` | — |
 | [NIfTI](https://nifti.nimh.nih.gov/) | `.nii`, `.nii.gz` | nibabel |
-| DICOM (pixel array) | `.dcm` | pydicom |
+| DICOM file | `.dcm` | pydicom |
+| DICOM directory | directory containing `.dcm` files | pydicom, nibabel, `dcm2niix` on `PATH` |
 
 HDF5 files can be compound complex dtype, or real/imag fields.
+
+For DICOM directories, ndslice does not infer series dimensions itself. It runs `dcm2niix`, then loads the produced NIfTI volume.
 
 If there are multiple datasets in the file, a selection GUI appears which highlights arrays supported by ndslice (essentially numeric).
 Double click to open.
@@ -122,7 +128,16 @@ Double click to open.
 pip install ndslice 
 pip install ndslice[video_export] # Include video export dependencies (imageio, Pillow, imageio-ffmpeg)
 pip install ndslice[all] # includes all optional dependencies (video export and file formats)
+pip install ndslice[dicom_dir] # pydicom + nibabel for DICOM file/dir support
 ```
+
+For DICOM directories you also need the external `dcm2niix` binary available on `PATH`. A practical install route is:
+
+```bash
+conda install -c conda-forge dcm2niix
+```
+
+If `dcm2niix` is missing or conversion fails, ndslice reports a clear error instead of trying to infer the series layout itself.
 
 ### From source
 

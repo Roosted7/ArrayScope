@@ -1,7 +1,17 @@
 import xml.etree.ElementTree as ET
 import numpy as np
 import struct
+import subprocess
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+import shutil
+
+
+@dataclass
+class LoadedPath:
+    data: np.ndarray
+    metadata: dict
 
 
 def remove_trailing_singletons(data):
@@ -233,6 +243,10 @@ class BartLoader:
 class DicomLoader:
     def __init__(self, dcm_path):
         self.dcm_path = Path(dcm_path)
+        self.metadata = {
+            'source_path': str(self.dcm_path),
+            'detected_format': 'dicom_file',
+        }
         
         if not self.dcm_path.exists():
             raise FileNotFoundError(f"DICOM file not found: {self.dcm_path}")
@@ -247,12 +261,195 @@ class DicomLoader:
             )
         
         dcm = pydicom.dcmread(self.dcm_path)
-        return remove_trailing_singletons(dcm.pixel_array)
+        if not hasattr(dcm, 'pixel_array'):
+            raise ValueError(
+                f"DICOM file does not contain pixel data: {self.dcm_path}"
+            )
+
+        if getattr(dcm, 'SamplesPerPixel', 1) != 1:
+            raise ValueError(
+                "Single-file DICOM loading currently supports grayscale pixel data only. "
+                f"Unsupported SamplesPerPixel={dcm.SamplesPerPixel} for {self.dcm_path}"
+            )
+
+        data = remove_trailing_singletons(np.asarray(dcm.pixel_array))
+        self.metadata.update({
+            'shape': tuple(data.shape),
+            'dtype': str(data.dtype),
+            'dicom_metadata': {
+                'patient_name': str(getattr(dcm, 'PatientName', '')),
+                'series_description': str(getattr(dcm, 'SeriesDescription', '')),
+                'modality': str(getattr(dcm, 'Modality', '')),
+                'pixel_spacing': list(getattr(dcm, 'PixelSpacing', [])) if hasattr(dcm, 'PixelSpacing') else None,
+                'image_position_patient': list(getattr(dcm, 'ImagePositionPatient', [])) if hasattr(dcm, 'ImagePositionPatient') else None,
+            },
+        })
+        return data
+
+
+def _find_dicom_files(directory_path):
+    directory_path = Path(directory_path)
+    return sorted(
+        path for path in directory_path.rglob('*')
+        if path.is_file() and path.suffix.lower() == '.dcm'
+    )
+
+
+def _json_sidecar_for_nifti(nifti_path):
+    nifti_path = Path(nifti_path)
+    json_path = nifti_path.with_suffix('.json')
+    if nifti_path.suffix == '.gz':
+        json_path = nifti_path.with_suffix('').with_suffix('.json')
+    return json_path if json_path.exists() else None
+
+
+def _pick_converted_niftis(output_dir):
+    output_dir = Path(output_dir)
+    nifti_paths = sorted(output_dir.glob('*.nii')) + sorted(output_dir.glob('*.nii.gz'))
+
+    if not nifti_paths:
+        raise ValueError("dcm2niix did not produce a NIfTI file")
+
+    return [(nifti_path, _json_sidecar_for_nifti(nifti_path)) for nifti_path in nifti_paths]
+
+
+def _read_json_sidecar(json_path):
+    if json_path is None:
+        return {}
+
+    import json
+
+    with open(json_path, 'r') as json_file:
+        return json.load(json_file)
+
+
+def _describe_stacking_axis(sidecar_metadata):
+    axis_candidates = [
+        ('EchoNumber', 'echoes'),
+        ('FlipAngle', 'flip angles'),
+        ('DiffusionBValue', 'b-values'),
+        ('SeriesNumber', 'series'),
+        ('AcquisitionNumber', 'acquisitions'),
+    ]
+
+    for key, label in axis_candidates:
+        values = [metadata.get(key) for metadata in sidecar_metadata]
+        if any(value is not None for value in values) and len(set(values)) > 1:
+            return label, key, values
+
+    names = [metadata.get('ProtocolName') or metadata.get('SeriesDescription') for metadata in sidecar_metadata]
+    if any(name for name in names) and len(set(names)) > 1:
+        return 'series', 'SeriesDescription', names
+
+    return 'series', None, None
+
+
+def _run_dcm2niix(directory_path, output_dir):
+    dcm2niix_path = shutil.which('dcm2niix')
+    if dcm2niix_path is None:
+        raise RuntimeError(
+            "dcm2niix is required to load DICOM directories. Install it, for example, with "
+            "'conda install -c conda-forge dcm2niix', and ensure it is on PATH."
+        )
+
+    command = [
+        dcm2niix_path,
+        '-b', 'y',
+        '-z', 'n',
+        '-f', 'ndslice_%s',
+        '-o', str(output_dir),
+        str(directory_path),
+    ]
+    completed = subprocess.run(command, capture_output=True)
+    if completed.returncode != 0:
+        stdout = completed.stdout.decode('utf-8', errors='replace').strip()
+        stderr = completed.stderr.decode('utf-8', errors='replace').strip()
+        error_output = '\n'.join(part for part in [stdout, stderr] if part)
+        raise RuntimeError(
+            "dcm2niix failed to convert the DICOM directory. "
+            f"Input: {directory_path}\n{error_output}"
+        )
+
+    return _pick_converted_niftis(output_dir)
+
+
+class DicomDirectoryLoader:
+    def __init__(self, directory_path):
+        self.directory_path = Path(directory_path)
+        self.metadata = {
+            'source_path': str(self.directory_path),
+            'detected_format': 'dicom_directory',
+        }
+
+        if not self.directory_path.exists():
+            raise FileNotFoundError(f"DICOM directory not found: {self.directory_path}")
+        if not self.directory_path.is_dir():
+            raise NotADirectoryError(f"Expected a directory, got: {self.directory_path}")
+
+    def load(self):
+        dicom_files = _find_dicom_files(self.directory_path)
+        if not dicom_files:
+            raise ValueError(
+                f"No DICOM files with suffix .dcm were found under directory: {self.directory_path}"
+            )
+
+        with tempfile.TemporaryDirectory(prefix='ndslice_dicom_') as temp_dir:
+            nifti_outputs = _run_dcm2niix(self.directory_path, temp_dir)
+            arrays = []
+            nifti_paths = []
+            json_paths = []
+            sidecar_metadata = []
+
+            for nifti_path, json_path in nifti_outputs:
+                nifti_loader = NiftiLoader(nifti_path)
+                arrays.append(nifti_loader.load())
+                nifti_paths.append(str(nifti_path))
+                json_paths.append(str(json_path) if json_path else None)
+                sidecar_metadata.append(_read_json_sidecar(json_path))
+
+            if len(arrays) == 1:
+                data = arrays[0]
+                stacking_label = None
+                stacking_key = None
+                stacking_values = None
+            else:
+                shapes = [tuple(array.shape) for array in arrays]
+                if len(set(shapes)) != 1:
+                    paths = ', '.join(Path(path).name for path in nifti_paths)
+                    raise ValueError(
+                        "dcm2niix produced multiple NIfTI files with different shapes, so ndslice "
+                        f"cannot stack them automatically. Outputs: {paths}"
+                    )
+
+                stacking_label, stacking_key, stacking_values = _describe_stacking_axis(sidecar_metadata)
+                print(f"Dataset stacked automatically along new dimension: {stacking_label}")
+                if stacking_key is not None and stacking_values is not None:
+                    print(f"  {stacking_key}: {stacking_values}")
+                if stacking_key == 'SeriesNumber':
+                    series_descriptions = [metadata.get('SeriesDescription') for metadata in sidecar_metadata]
+                    if any(description is not None for description in series_descriptions):
+                        print(f"  SeriesDescription: {series_descriptions}")
+                data = np.stack(arrays, axis=-1)
+
+            self.metadata.update({
+                'shape': tuple(data.shape),
+                'dtype': str(data.dtype),
+                'nifti_output_path': nifti_paths[0] if len(nifti_paths) == 1 else nifti_paths,
+                'sidecar_json_path': json_paths[0] if len(json_paths) == 1 else json_paths,
+                'stacked_dimension': stacking_label,
+                'stacked_dimension_key': stacking_key,
+                'stacked_dimension_values': stacking_values,
+            })
+            return data
 
 
 class NiftiLoader:
     def __init__(self, file_path):
         self.file_path = Path(file_path)
+        self.metadata = {
+            'source_path': str(self.file_path),
+            'detected_format': 'nifti',
+        }
         
         if not self.file_path.exists():
             raise FileNotFoundError(f"NIfTI file not found: {self.file_path}")
@@ -267,12 +464,21 @@ class NiftiLoader:
             )
         
         data = nib.load(self.file_path).get_fdata()
-        return remove_trailing_singletons(data)
+        data = remove_trailing_singletons(data)
+        self.metadata.update({
+            'shape': tuple(data.shape),
+            'dtype': str(data.dtype),
+        })
+        return data
 
 
 class TextLoader:
     def __init__(self, file_path):
         self.file_path = Path(file_path)
+        self.metadata = {
+            'source_path': str(self.file_path),
+            'detected_format': 'text',
+        }
         
         if not self.file_path.exists():
             raise FileNotFoundError(f"Text file not found: {self.file_path}")
@@ -318,7 +524,58 @@ class TextLoader:
             # Different row lengths - flatten to 1D
             data = np.array([val for row in numeric_lines for val in row], dtype=np.float32)
         
-        return remove_trailing_singletons(data)
+        data = remove_trailing_singletons(data)
+        self.metadata.update({
+            'shape': tuple(data.shape),
+            'dtype': str(data.dtype),
+        })
+        return data
+
+
+def load_path(filepath):
+    filepath = Path(filepath)
+
+    if filepath.is_dir():
+        loader = DicomDirectoryLoader(filepath)
+        data = loader.load()
+        return LoadedPath(data=data, metadata=loader.metadata)
+
+    suffix = ''.join(filepath.suffixes).lower()
+
+    if suffix == '.npy':
+        data = np.load(filepath)
+        return LoadedPath(
+            data=data,
+            metadata={
+                'source_path': str(filepath),
+                'detected_format': 'numpy',
+                'shape': tuple(data.shape),
+                'dtype': str(data.dtype),
+            },
+        )
+
+    if suffix == '.rec':
+        loader = PhilipsRECLoader(filepath)
+    elif suffix == '.cfl':
+        loader = BartLoader(filepath)
+    elif suffix == '.dcm':
+        loader = DicomLoader(filepath)
+    elif suffix in ['.nii', '.nii.gz']:
+        loader = NiftiLoader(filepath)
+    elif suffix == '.txt':
+        loader = TextLoader(filepath)
+    else:
+        raise ValueError(f"Unsupported file format: {suffix}")
+
+    data = loader.load()
+    metadata = {
+        'source_path': str(filepath),
+        'detected_format': suffix.lstrip('.'),
+        'shape': tuple(data.shape),
+        'dtype': str(data.dtype),
+    }
+    metadata.update(getattr(loader, 'metadata', {}))
+    return LoadedPath(data=data, metadata=metadata)
 
 
 
@@ -326,9 +583,10 @@ class TextLoader:
 
 def load_file(filepath):
     """
-    Generic file loader - automatically detects format and returns NumPy array.
+    Generic path loader - automatically detects format and returns a NumPy array.
     
     Supported formats:
+    - directory: DICOM directory via dcm2niix
     - .npy: NumPy binary format
     - .REC: Philips XLM+REC (requires xml file)
     - .cfl: BART format (requires hdr file)
@@ -337,36 +595,10 @@ def load_file(filepath):
     - .txt: Simple text files with numeric data
     
     Args:
-        filepath: Path to data file
+        filepath: Path to data file or DICOM directory
         
     Returns:
         NumPy array
         
     """
-    filepath = Path(filepath)
-    suffix = ''.join(Path(filepath).suffixes).lower()
-    
-    if suffix == '.npy':
-        return np.load(filepath)
-    
-    elif suffix == '.rec':
-        loader = PhilipsRECLoader(filepath)
-        return loader.load()
-    
-    elif suffix == '.cfl':
-        loader = BartLoader(filepath)
-        return loader.load()
-    
-    elif suffix == '.dcm':
-        loader = DicomLoader(filepath)
-        return loader.load()
-    elif suffix in ['.nii', '.nii.gz']:
-        loader = NiftiLoader(filepath)
-        return loader.load()
-    
-    elif suffix == '.txt':
-        loader = TextLoader(filepath)
-        return loader.load()
-    
-    else:
-        raise ValueError(f"Unsupported file format: {suffix}")
+    return load_path(filepath).data
