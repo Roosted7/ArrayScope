@@ -28,9 +28,11 @@ class Domain(Enum):
     NATIVE=0
     FOURIER=1
 
-
-QT_SIGNAL = getattr(Qt.QtCore, 'Signal', getattr(Qt.QtCore, 'pyqtSignal'))
-
+QT_SIGNAL = getattr(Qt.QtCore, "Signal", None)
+if QT_SIGNAL is None:
+    QT_SIGNAL = getattr(Qt.QtCore, "pyqtSignal", None)
+if QT_SIGNAL is None:
+    raise AttributeError("Could not find Qt signal class: expected Signal or pyqtSignal")
 
 class RangeSlider(QtWidgets.QWidget):
     """A minimal horizontal two-handle slider for inclusive integer ranges."""
