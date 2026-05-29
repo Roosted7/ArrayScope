@@ -12,6 +12,12 @@ from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSetti
 import multiprocessing as mp
 import warnings
 
+try:
+    from IPython import get_ipython
+except ImportError:
+    def get_ipython():
+        return None
+
 def symlog(data, C = 0):
     return np.sign(data) * np.log10( 1 + np.abs(data) / 10**C)
 
@@ -1974,50 +1980,126 @@ def _qt_application_exists():
         return QtWidgets.QApplication.instance() is not None
     except Exception:
         return False
+    
+def _enable_ipython_qt_event_loop():
+    """Try to enable IPython's Qt input hook for responsive inline windows.
 
+    Returns True if we are in IPython and Qt GUI integration is active or was
+    successfully enabled. Returns False otherwise.
+    """
+    ip = get_ipython()
 
-def _run_window(data, title, complex_dim=None, filepath=None,
+    if ip is None:
+        return False
+
+    # If already active, good.
+    active_eventloop = getattr(ip, "active_eventloop", None)
+    if active_eventloop in {"qt", "qt5", "qt6"}:
+        return True
+
+    try:
+        ip.enable_gui("qt")
+    except Exception:
+        return False
+
+    active_eventloop = getattr(ip, "active_eventloop", None)
+    return active_eventloop in {"qt", "qt5", "qt6"}
+
+def _retain_window_reference(app, win):
+    """Keep inline windows alive for as long as they are open.
+
+    Without a strong Python reference, some Qt bindings may garbage-collect the
+    wrapper even while the native window is visible.
+    """
+    live_windows = app.property("_ndslice_live_windows")
+    if not isinstance(live_windows, list):
+        live_windows = []
+
+    live_windows.append(win)
+    app.setProperty("_ndslice_live_windows", live_windows)
+
+    def _release_reference(_=None, w=win, qapp=app):
+        refs = qapp.property("_ndslice_live_windows")
+        if not isinstance(refs, list):
+            return
+        try:
+            refs.remove(w)
+        except ValueError:
+            pass
+        qapp.setProperty("_ndslice_live_windows", refs)
+
+    win.destroyed.connect(_release_reference)
+
+def _create_window(data, title='', complex_dim=None, filepath=None,
+                   dataset_path=None, selector_class_name=None):
+    _prepare_qt_environment()
+
+    app = pg.mkQApp()
+    app.setStyle('Fusion')
+
+    win = NDSliceWindow(data, complex_dim=complex_dim, filepath=filepath,
+                        dataset_path=dataset_path,
+                        selector_class_name=selector_class_name)
+    win.setWindowTitle(title)
+    win.show()
+
+    return app, win
+
+def _run_window(data, title='', complex_dim=None, filepath=None,
                 dataset_path=None, selector_class_name=None):
     """Open a viewer window in this process and block on the Qt event loop."""
     try:
-        _prepare_qt_environment()
-        app = pg.mkQApp()
-        app.setStyle('Fusion')
-        win = NDSliceWindow(data, complex_dim=complex_dim, filepath=filepath,
-                            dataset_path=dataset_path,
-                            selector_class_name=selector_class_name)
-        win.setWindowTitle(title)
-        win.show()
+        app, win = _create_window(
+            data, title=title, complex_dim=complex_dim,
+            filepath=filepath, dataset_path=dataset_path,
+            selector_class_name=selector_class_name,
+        )
         return app.exec()
     except BaseException:
         import traceback
         traceback.print_exc()
         raise
 
-def ndslice(data, title='', block=False, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
+def _show_window_inline(data, title='', complex_dim=None, filepath=None,
+                        dataset_path=None, selector_class_name=None):
+    """Open a viewer window in this process without starting app.exec()."""
+    app, win = _create_window(
+        data, title=title, complex_dim=complex_dim,
+        filepath=filepath, dataset_path=dataset_path,
+        selector_class_name=selector_class_name,
+    )
+
+    _retain_window_reference(app, win)
+
+    return win
+
+def ndslice(data, title='', block=False, complex_dim=None, filepath=None,
+            dataset_path=None, selector_class_name=None):
     if not isinstance(data, np.ndarray):
         raise TypeError("data must be a numpy array")
     if data.ndim < 1:
         raise ValueError("data must have at least 1 dimension")
 
-    kwargs = {'filepath': filepath, 'dataset_path': dataset_path,
-              'selector_class_name': selector_class_name}
+    kwargs = {
+        "filepath": filepath,
+        "dataset_path": dataset_path,
+        "selector_class_name": selector_class_name,
+    }
 
     if block:
         return _run_window(data, title, complex_dim, **kwargs)
 
     if _qt_application_exists():
+        if _enable_ipython_qt_event_loop():
+            return _show_window_inline(data, title, complex_dim, **kwargs)
+
         warnings.warn(
-            "ndslice(block=False) normally opens the viewer in a forked child "
-            "process so large arrays can be viewed without copying memory. "
-            "However, Qt has already been initialized in this Python process "
-            "for example by `%gui qt` or an earlier ndslice(..., block=True) "
-            "call. Forking after Qt/X11 initialization can make the child GUI "
-            "silently fail or crash the X11 connection, so ndslice is falling "
-            "back to blocking mode in the current process. To avoid this warning, "
-            "either call ndslice(..., block=True) explicitly, or restart Python "
-            "and call ndslice(...) before enabling `%gui qt` or opening another "
-            "Qt window.",
+            "Qt is already initialized, so ndslice cannot safely fork a child "
+            "process for non-blocking display. No active IPython Qt event-loop "
+            "integration was detected, so an inline non-blocking window may freeze. "
+            "Falling back to blocking mode in the current process. To avoid this, "
+            "use ndslice(..., block=True) explicitly, or in IPython run `%gui qt` "
+            "before calling ndslice(...).",
             RuntimeWarning,
             stacklevel=2,
         )
