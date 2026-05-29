@@ -1976,17 +1976,23 @@ def _qt_application_exists():
         return False
 
 
-def _run_window(data, title, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
+def _run_window(data, title, complex_dim=None, filepath=None,
+                dataset_path=None, selector_class_name=None):
     """Open a viewer window in this process and block on the Qt event loop."""
-    _prepare_qt_environment()
-    app = pg.mkQApp()  # sets QT_ENABLE_HIGHDPI_SCALING + PassThrough rounding before creating QApp
-    app.setStyle('Fusion')
-    win = NDSliceWindow(data, complex_dim=complex_dim, filepath=filepath,
-                        dataset_path=dataset_path, selector_class_name=selector_class_name)
-    win.setWindowTitle(title)
-    win.show()
-    return app.exec()
-
+    try:
+        _prepare_qt_environment()
+        app = pg.mkQApp()
+        app.setStyle('Fusion')
+        win = NDSliceWindow(data, complex_dim=complex_dim, filepath=filepath,
+                            dataset_path=dataset_path,
+                            selector_class_name=selector_class_name)
+        win.setWindowTitle(title)
+        win.show()
+        return app.exec()
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        raise
 
 def ndslice(data, title='', block=False, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
     if not isinstance(data, np.ndarray):
