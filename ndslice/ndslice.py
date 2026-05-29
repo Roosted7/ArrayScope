@@ -10,6 +10,7 @@ from pathlib import Path
 from .imageview2d import ImageView2D
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 import multiprocessing as mp
+import warnings
 
 def symlog(data, C = 0):
     return np.sign(data) * np.log10( 1 + np.abs(data) / 10**C)
@@ -1957,30 +1958,66 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         self.update()
 
 
+def _prepare_qt_environment():
+    """Apply conservative Qt workarounds before QApplication creation."""
+    # On XWayland/XCB, Qt's MIT-SHM path can fail with:
+    #   qt.qpa.xcb: xcb_shm_create_segment() failed
+    #   The X11 connection broke
+    # This must be set before QApplication / the QPA plugin is initialized.
+    if os.environ.get("QT_QPA_PLATFORM") == "xcb":
+        os.environ.setdefault("QT_X11_NO_MITSHM", "1")
+
+
+def _qt_application_exists():
+    """Return True if Qt has already created a QApplication in this process."""
+    try:
+        return QtWidgets.QApplication.instance() is not None
+    except Exception:
+        return False
+
+
 def _run_window(data, title, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
-    """Opens a window in a separate process which is blocked on exec()"""
+    """Open a viewer window in this process and block on the Qt event loop."""
+    _prepare_qt_environment()
     app = pg.mkQApp()  # sets QT_ENABLE_HIGHDPI_SCALING + PassThrough rounding before creating QApp
     app.setStyle('Fusion')
     win = NDSliceWindow(data, complex_dim=complex_dim, filepath=filepath,
                         dataset_path=dataset_path, selector_class_name=selector_class_name)
     win.setWindowTitle(title)
     win.show()
-    app.exec()
+    return app.exec()
+
 
 def ndslice(data, title='', block=False, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
     if not isinstance(data, np.ndarray):
         raise TypeError("data must be a numpy array")
     if data.ndim < 1:
         raise ValueError("data must have at least 1 dimension")
-    
+
+    kwargs = {'filepath': filepath, 'dataset_path': dataset_path,
+              'selector_class_name': selector_class_name}
+
     if block:
-        _run_window(data, title, complex_dim, filepath=filepath,
-                    dataset_path=dataset_path, selector_class_name=selector_class_name)
-    else:
-        import multiprocessing.process as _mp_process
-        p = mp.Process(target=_run_window, args=(data, title, complex_dim),
-                       kwargs={'filepath': filepath, 'dataset_path': dataset_path,
-                               'selector_class_name': selector_class_name})
-        p.start()
-        _mp_process._children.discard(p)
-    
+        return _run_window(data, title, complex_dim, **kwargs)
+
+    if _qt_application_exists():
+        warnings.warn(
+            "ndslice(block=False) normally opens the viewer in a forked child "
+            "process so large arrays can be viewed without copying memory. "
+            "However, Qt has already been initialized in this Python process "
+            "for example by `%gui qt` or an earlier ndslice(..., block=True) "
+            "call. Forking after Qt/X11 initialization can make the child GUI "
+            "silently fail or crash the X11 connection, so ndslice is falling "
+            "back to blocking mode in the current process. To avoid this warning, "
+            "either call ndslice(..., block=True) explicitly, or restart Python "
+            "and call ndslice(...) before enabling `%gui qt` or opening another "
+            "Qt window.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return _run_window(data, title, complex_dim, **kwargs)
+
+    p = mp.Process(target=_run_window, args=(data, title, complex_dim),
+                   kwargs=kwargs)
+    p.start()
+    return p
