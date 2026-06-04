@@ -262,6 +262,12 @@ class ImageView2D(QtWidgets.QWidget):
     def getLevels(self):
         """Get the current histogram levels"""
         return self.histogram.getLevels()
+
+    def getHistogramDataBounds(self):
+        """Get the current histogram source data bounds."""
+        if self.levelMin is None or self.levelMax is None:
+            return None
+        return (float(self.levelMin), float(self.levelMax))
         
     def setHistogramRange(self, min_val, max_val):
         """Set the range of the histogram"""

@@ -21,6 +21,7 @@ from .operation_recipes import load_recipe, save_recipe
 from .operation_registry import create_operation, operation_entries
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 from .view_state import ChannelMode, ScaleMode, ViewState
+from .window_levels import choose_window_levels
 
 def getNumberOfDecimalPlaces(number):
     if isinstance(number, (int, np.integer)):
@@ -123,7 +124,9 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                 'display': {
                     'square_pixels': QtWidgets.QRadioButton('Square pixels', checkable=True, checked=True),
                     'square_fov': QtWidgets.QRadioButton('Square FOV', checkable=True),
-                    'fit': QtWidgets.QRadioButton('Fit', checkable=True)
+                    'fit': QtWidgets.QRadioButton('Fit', checkable=True),
+                    'window_relative': QtWidgets.QRadioButton('Relative', checkable=True, checked=True),
+                    'window_absolute': QtWidgets.QRadioButton('Absolute', checkable=True),
                 }
             },
             'labels': {
@@ -163,6 +166,10 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.display_button_group.addButton(self.widgets['buttons']['display']['square_pixels'])
         self.display_button_group.addButton(self.widgets['buttons']['display']['square_fov'])
         self.display_button_group.addButton(self.widgets['buttons']['display']['fit'])
+
+        self.window_button_group = QtWidgets.QButtonGroup()
+        self.window_button_group.addButton(self.widgets['buttons']['display']['window_relative'])
+        self.window_button_group.addButton(self.widgets['buttons']['display']['window_absolute'])
         
         self.layouts = {
             'main': QtWidgets.QVBoxLayout(),
@@ -323,11 +330,23 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         display_layout.setSpacing(5)
         display_layout.setContentsMargins(3, 3, 3, 3)
         
-        disp_buttons = list(self.widgets['buttons']['display'].values())
+        disp_buttons = [
+            self.widgets['buttons']['display']['square_pixels'],
+            self.widgets['buttons']['display']['square_fov'],
+            self.widgets['buttons']['display']['fit'],
+        ]
         for btn in disp_buttons:
             btn.setStyleSheet(self.RADIO_BUTTON_STYLE)
             display_layout.addWidget(btn)
             btn.clicked.connect(self.update_display_mode)
+        window_relative = self.widgets['buttons']['display']['window_relative']
+        window_absolute = self.widgets['buttons']['display']['window_absolute']
+        window_relative.setStyleSheet(self.RADIO_BUTTON_STYLE)
+        window_absolute.setStyleSheet(self.RADIO_BUTTON_STYLE)
+        window_relative.setToolTip("Preserve the selected relative range within each new histogram")
+        window_absolute.setToolTip("Keep numeric histogram/window limits fixed while changing views")
+        display_layout.addWidget(window_relative)
+        display_layout.addWidget(window_absolute)
         
         # Optional: tooltip hints
         self.widgets['buttons']['display']['square_pixels'].setToolTip('Lock to 1:1 pixel aspect')
@@ -956,7 +975,6 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         if self.data.ndim == 1: # No image view for 1D data
             return
             
-        prev_levels = None
         al = True
         old_channel = self.channel
         oldscale = self.scale
@@ -981,14 +999,21 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         changed_scale = oldscale != self.scale
         if changed_channel:
             self._apply_channel_colormap()
-        al = changed_scale or changed_channel or getattr(self, '_force_autolevel', False)
+        force_auto = changed_scale or changed_channel or getattr(self, '_force_autolevel', False)
+        window_mode = self._current_window_mode()
         # reset the one-shot flag after using it
         if getattr(self, '_force_autolevel', False):
             self._force_autolevel = False
         
-        prev_levels = None
-        if not al:
-            prev_levels = self.img_view.imageItem.levels
+        previous_levels = None
+        previous_bounds = None
+        if not force_auto and getattr(self.img_view, "image", None) is not None:
+            try:
+                previous_levels = self.img_view.getLevels()
+                previous_bounds = self.img_view.getHistogramDataBounds()
+            except Exception:
+                previous_levels = None
+                previous_bounds = None
 
         
         try:
@@ -997,23 +1022,50 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             if self.view_state.channel == ChannelMode.COMPLEX:
                 colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
             display_image = self.operation_evaluator.image(self.view_state, colormap_lut=colormap_lut)
-            if display_image.default_levels is not None and al:
-                prev_levels = display_image.default_levels
+            current_bounds = self._display_histogram_bounds(display_image)
+            level_decision = choose_window_levels(
+                mode=window_mode,
+                previous_levels=previous_levels,
+                previous_bounds=previous_bounds,
+                current_bounds=current_bounds,
+                default_levels=display_image.default_levels,
+                force_auto=force_auto,
+            )
+            al = level_decision.auto_levels
+            levels = level_decision.levels
 
             if display_image.histogram_data is not None:
                 self.img_view.setImage(
                     display_image.data,
                     autoLevels=al,
+                    levels=levels,
                     histogramData=display_image.histogram_data,
                 )
             else:
-                self.img_view.setImage(display_image.data, autoLevels=al, levels=prev_levels)
+                self.img_view.setImage(display_image.data, autoLevels=al, levels=levels)
             
             # Apply axis flips after setting the image
             self.apply_axis_flips()
             
         except Exception as e:
             print(f'Image update failed: {e}')
+
+    def _current_window_mode(self):
+        if self.widgets['buttons']['display']['window_absolute'].isChecked():
+            return "absolute"
+        return "relative"
+
+    def _display_histogram_bounds(self, display_image):
+        data = display_image.histogram_data
+        if data is None:
+            data = display_image.data
+        try:
+            finite_data = data[np.isfinite(data)]
+            if len(finite_data) > 0:
+                return (float(np.min(finite_data)), float(np.max(finite_data)))
+        except Exception:
+            return None
+        return None
     
     def update_display_mode(self):
         """Update the display mode for the image view"""
@@ -1370,8 +1422,10 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         
         # Capture current display levels for consistent frame scaling
         levels = None
-        if hasattr(self.img_view, 'imageItem') and self.img_view.imageItem.levels is not None:
-            levels = tuple(self.img_view.imageItem.levels)
+        try:
+            levels = tuple(self.img_view.getLevels())
+        except Exception:
+            levels = None
 
         # Capture current color map LUT (256x3) to apply in export
         lut = None
