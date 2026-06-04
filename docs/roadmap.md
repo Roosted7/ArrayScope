@@ -3,9 +3,9 @@
 ## Must
 - [x] Extract ViewState.
 - [x] Extract slice/display engine.
-- [ ] Extract dimension operations.
-- [ ] Keep existing ndslice behavior working.
-- [ ] Add complex display tests.
+- [x] Extract dimension operations.
+- [x] Keep existing ndslice behavior working.
+- [x] Add complex display tests.
 
 ## Should
 - [ ] Dimension context menu from operation registry.

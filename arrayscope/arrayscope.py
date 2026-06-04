@@ -11,6 +11,14 @@ import math
 import platform
 from enum import Enum
 from pathlib import Path
+from .dim_ops import (
+    apply_fftshift,
+    centered_fft,
+    centered_ifft,
+    combine_real_imag_axis,
+    split_complex_axis,
+    undo_fftshift,
+)
 from .imageview2d import ImageView2D
 from .slice_engine import make_image, make_line, symlog
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
@@ -936,12 +944,12 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         
     def _apply_fft(self, dim):
         """Apply forward FFT along specified dimension"""
-        self.data = np.fft.ifftshift(np.fft.ifft(np.fft.fftshift(self.data), axis=dim, norm='ortho'))
+        self.data = centered_fft(self.data, dim)
         self._update_channel_controls()
         
     def _apply_ifft(self, dim):
         """Apply inverse FFT along specified dimension"""
-        self.data = np.fft.ifftshift(np.fft.fft(np.fft.fftshift(self.data), axis=dim, norm='ortho'))
+        self.data = centered_ifft(self.data, dim)
         self._update_channel_controls()
 
     def fftshiftClicked(self, event, dim):
@@ -950,10 +958,10 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             return
 
         if self.fftshifted[dim]:
-            self.data = np.fft.ifftshift(self.data, axes=dim)
+            self.data = undo_fftshift(self.data, dim)
             self.fftshifted[dim] = False
         else:
-            self.data = np.fft.fftshift(self.data, axes=dim)
+            self.data = apply_fftshift(self.data, dim)
             self.fftshifted[dim] = True
 
         self.update_shift_indicators()
@@ -1107,16 +1115,10 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             return
 
         if self.fftshifted[dim]:
-            self.data = np.fft.ifftshift(self.data, axes=dim)
+            self.data = undo_fftshift(self.data, dim)
             self.fftshifted[dim] = False
         
-        # Build slices to extract real and imaginary parts
-        real_slice = [slice(None)] * self.data.ndim
-        imag_slice = [slice(None)] * self.data.ndim
-        real_slice[dim] = 0
-        imag_slice[dim] = 1
-        
-        self.data = np.expand_dims(self.data[tuple(real_slice)] + 1j * self.data[tuple(imag_slice)], axis=dim)
+        self.data = combine_real_imag_axis(self.data, dim)
 
         # Update state
         self.combined_as_complex[dim] = True
@@ -1156,9 +1158,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         if not self.combined_as_complex[dim]:
             return
         
-        # Restore data to real with size-2 dimension
-        self.data = np.stack([np.real(self.data).squeeze(dim), 
-                              np.imag(self.data).squeeze(dim)], axis=dim)
+        self.data = split_complex_axis(self.data, dim)
         
         # Update state
         self.combined_as_complex[dim] = False
