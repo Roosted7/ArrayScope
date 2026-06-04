@@ -47,3 +47,6 @@ bin/
 # Distribution
 dist/
 build/
+
+# MATLAB ArrayShow (reference)
+docs/references/arrShow
