@@ -40,6 +40,10 @@ class ImageView2D(QtWidgets.QWidget):
         self.displayMode = 'square_pixels'  # Default to square pixels
         self.histogramSource = None
         self._rgbBaseImage = None
+        self._profile_vline = None
+        self._profile_hline = None
+        self._profile_marker_callback = None
+        self._profile_marker_updating = False
         
         # Create the UI layout
         self.setupUI()
@@ -69,6 +73,15 @@ class ImageView2D(QtWidgets.QWidget):
         # Initialize levels
         self.levelMin = 0.0
         self.levelMax = 1.0
+
+        self._profile_vline = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen((230, 60, 30, 180), width=1))
+        self._profile_hline = pg.InfiniteLine(angle=0, movable=True, pen=pg.mkPen((230, 60, 30, 180), width=1))
+        self._profile_vline.setVisible(False)
+        self._profile_hline.setVisible(False)
+        self._profile_vline.sigPositionChanged.connect(self._on_profile_marker_changed)
+        self._profile_hline.sigPositionChanged.connect(self._on_profile_marker_changed)
+        self.view.addItem(self._profile_vline)
+        self.view.addItem(self._profile_hline)
         
     def setupUI(self):
         """Create the user interface"""
@@ -288,12 +301,54 @@ class ImageView2D(QtWidgets.QWidget):
     def getHistogramWidget(self):
         """Get the histogram widget"""
         return self.histogram
+
+    def setProfileMarker(self, x, y, visible=True):
+        """Set or hide the image-space profile marker."""
+        if self._profile_vline is None or self._profile_hline is None:
+            return
+        self._profile_marker_updating = True
+        try:
+            self._profile_vline.setValue(float(x))
+            self._profile_hline.setValue(float(y))
+            self._profile_vline.setVisible(bool(visible))
+            self._profile_hline.setVisible(bool(visible))
+        finally:
+            self._profile_marker_updating = False
+
+    def hideProfileMarker(self):
+        """Hide the image-space profile marker."""
+        if self._profile_vline is not None:
+            self._profile_vline.setVisible(False)
+        if self._profile_hline is not None:
+            self._profile_hline.setVisible(False)
+
+    def profileMarkerPosition(self):
+        """Return the current profile marker position in image coordinates."""
+        if self._profile_vline is None or self._profile_hline is None:
+            return None
+        if not self._profile_vline.isVisible() or not self._profile_hline.isVisible():
+            return None
+        return (float(self._profile_vline.value()), float(self._profile_hline.value()))
+
+    def setProfileMarkerCallback(self, callback):
+        """Set a callback called with image-space x/y when the marker moves."""
+        self._profile_marker_callback = callback
+
+    def _on_profile_marker_changed(self, *_args):
+        if self._profile_marker_updating:
+            return
+        if self._profile_marker_callback is None:
+            return
+        position = self.profileMarkerPosition()
+        if position is not None:
+            self._profile_marker_callback(*position)
         
     def clear(self):
         """Clear the displayed image"""
         self.image = None
         self.imageDisp = None
         self.imageItem.clear()
+        self.hideProfileMarker()
         
     def setColorMap(self, colormap):
         """Set the color map for the histogram"""
