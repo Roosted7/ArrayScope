@@ -32,8 +32,10 @@ ViewState = view_state.ViewState
 apply_channel = slice_engine.apply_channel
 complex_to_rgb = slice_engine.complex_to_rgb
 make_image = slice_engine.make_image
+make_export_frame = slice_engine.make_export_frame
 make_line = slice_engine.make_line
 symlog = slice_engine.symlog
+with_slice_index = slice_engine.with_slice_index
 
 
 def state_for(shape, image_axes=None, line_axis=None, slices=None, channel=ChannelMode.REAL, scale=ScaleMode.LINEAR):
@@ -104,6 +106,27 @@ def test_make_image_ndslice_reversed_axes_preserves_existing_orientation():
     expected = np.squeeze(data[1:2, :, 2:3, :])
     assert image.data.shape == (3, 5)
     np.testing.assert_array_equal(image.data, expected)
+
+
+def test_with_slice_index_returns_updated_valid_state():
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=0, slices=(0, 0, 0))
+
+    updated = with_slice_index(state, axis=2, index=3)
+
+    assert updated is not state
+    assert state.slice_indices == (0, 0, 0)
+    assert updated.slice_indices == (0, 0, 3)
+
+
+def test_make_export_frame_reuses_make_image_with_temporary_slice():
+    data = np.arange(2 * 3 * 4).reshape(2, 3, 4).astype(float)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, slices=(0, 0, 0))
+
+    export_frame = make_export_frame(data, state, frame_axis=2, frame_index=3)
+    expected = make_image(data, state.with_slice(2, 3))
+
+    np.testing.assert_array_equal(export_frame.data, expected.data)
+    assert export_frame.default_levels == expected.default_levels
 
 
 def test_make_image_angle_sets_default_levels_and_values():

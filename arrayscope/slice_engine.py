@@ -89,6 +89,16 @@ def make_image(data, state, colormap_lut=None):
     return DisplayImage(data=image_data, default_levels=default_levels)
 
 
+def with_slice_index(state, axis, index):
+    return state.with_slice(axis, index)
+
+
+def make_export_frame(data, state, frame_axis, frame_index, colormap_lut=None):
+    """Create one export frame using the same image path as the on-screen view."""
+    export_state = with_slice_index(state, frame_axis, frame_index)
+    return make_image(data, export_state, colormap_lut=colormap_lut)
+
+
 def make_line(data, state):
     state = _validated_state_for_data(data, state)
     if state.line_axis is None:
