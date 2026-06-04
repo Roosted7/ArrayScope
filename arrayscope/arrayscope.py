@@ -8,6 +8,7 @@ import platform
 from enum import Enum
 from pathlib import Path
 from .imageview2d import ImageView2D
+from .slice_engine import make_image, make_line, symlog
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 from .view_state import ChannelMode, ScaleMode, ViewState
 import multiprocessing as mp
@@ -18,9 +19,6 @@ try:
 except ImportError:
     def get_ipython():
         return None
-
-def symlog(data, C = 0):
-    return np.sign(data) * np.log10( 1 + np.abs(data) / 10**C)
 
 def asinh(data, linear_width = 1):
     return np.arcsinh( data / linear_width ) * linear_width
@@ -1210,49 +1208,27 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         else:
             self.img_view.setColorMap(self._create_gray_colormap())
 
-    def _complex_to_rgb(self, data):
-        phase = np.angle(data)
-        magnitude = np.abs(data)
-        phase_index = (phase + np.pi) / (2.0 * np.pi)
-        phase_index = np.nan_to_num(phase_index, nan=0.0, posinf=0.0, neginf=0.0)
-        lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False).astype(float)
-        colors = lut[np.clip((phase_index * 255).astype(int), 0, 255)]
-        return colors.astype(np.uint8), magnitude.astype(float)
-    
     def update_image_view(self):
         if self.data.ndim == 1: # No image view for 1D data
             return
             
         prev_levels = None
         al = True
-        def_levels = None
         old_channel = self.channel
         oldscale = self.scale
         
-        # Determine channel transformation
-        channel_func = None
-        complex_color = False
         if self.widgets['buttons']['channel']['complex'].isChecked():
             self.channel = 'complex'
-            complex_color = True
         elif self.widgets['buttons']['channel']['abs'].isChecked():
             self.channel = 'abs'
-            channel_func = np.abs
         elif self.widgets['buttons']['channel']['angle'].isChecked():
             self.channel = 'angle'
-            def_levels = [-np.pi, np.pi]
-            channel_func = np.angle
         elif self.widgets['buttons']['channel']['real'].isChecked():
             self.channel = 'real'
-            channel_func = np.real
         elif self.widgets['buttons']['channel']['imag'].isChecked():
             self.channel = 'imag'
-            channel_func = np.imag
         
-        # Determine processing transformation
-        processing_func = None
         if self.widgets['buttons']['processing']['symlog'].isChecked():
-            processing_func = symlog
             self.scale = 'symlog'
         else:
             self.scale = None
@@ -1269,38 +1245,28 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         prev_levels = None
         if not al:
             prev_levels = self.img_view.imageItem.levels
-        elif def_levels is not None:
-            prev_levels = def_levels
 
         
         try:
-            # Get the sliced data
-            image_data = self.data[tuple(self.slice)]
+            self._sync_view_state_from_window()
+            colormap_lut = None
+            if self.view_state.channel == ChannelMode.COMPLEX:
+                colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
+            display_image = make_image(self.data, self.view_state, colormap_lut=colormap_lut)
+            if display_image.default_levels is not None and al:
+                prev_levels = display_image.default_levels
 
-            # Handle transpose if needed
-            if self.selected_indices[0] < self.selected_indices[1]:
-                image_data = np.transpose(image_data)
-
-            image_data = np.squeeze(image_data)
-
-            if complex_color:
-                image_data, magnitude_data = self._complex_to_rgb(image_data)
-                self.img_view.setImage(image_data, autoLevels=al, histogramData=magnitude_data)
+            if display_image.histogram_data is not None:
+                self.img_view.setImage(
+                    display_image.data,
+                    autoLevels=al,
+                    histogramData=display_image.histogram_data,
+                )
             else:
-                # Apply transformations in sequence
-                if channel_func is not None:
-                    image_data = channel_func(image_data)
-
-                if processing_func is not None:
-                    image_data = processing_func(image_data)
-
-                # Final processing and display
-                image_data = np.nan_to_num(image_data)
-                self.img_view.setImage(image_data, autoLevels=al, levels=prev_levels)
+                self.img_view.setImage(display_image.data, autoLevels=al, levels=prev_levels)
             
             # Apply axis flips after setting the image
             self.apply_axis_flips()
-            self._sync_view_state_from_window()
             
         except Exception as e:
             print(f'Image update failed: {e}')
@@ -1377,24 +1343,6 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
     
     def update_line_plot(self):
         """Update the line plot with 1D data slices"""
-        # Determine channel transformation
-        channel_func = None
-        if self.widgets['buttons']['channel']['complex'].isChecked():
-            channel_func = np.abs
-        elif self.widgets['buttons']['channel']['abs'].isChecked():
-            channel_func = np.abs
-        elif self.widgets['buttons']['channel']['angle'].isChecked():
-            channel_func = np.angle
-        elif self.widgets['buttons']['channel']['real'].isChecked():
-            channel_func = np.real
-        elif self.widgets['buttons']['channel']['imag'].isChecked():
-            channel_func = np.imag
-        
-        # Determine processing transformation
-        processing_func = None
-        if self.widgets['buttons']['processing']['symlog'].isChecked():
-            processing_func = symlog
-        
         # Clear previous plots but preserve crosshair reference (we will re-add after clear)
         self.plot_widget.clear()
         # Re-add crosshair item if it exists
@@ -1403,31 +1351,8 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             self.plot_crosshair.setVisible(False)
         
         try:
-            # Create slice for line plot mode
-            line_slice = [slice(None)] * self.data.ndim
-            
-            # For all dimensions except the one we're plotting along, use the spinbox values
-            for dim in range(self.data.ndim):
-                if dim == self.line_plot_dimension:
-                    # Plot along this dimension - use full range
-                    line_slice[dim] = slice(None)
-                else:
-                    # Use the slice specified by the spinbox
-                    val = self.widgets['spins']['slice_indices'][dim].value()
-                    line_slice[dim] = slice(val, val+1)
-            
-            # Extract and transform the 1D data
-            line_data = self.data[tuple(line_slice)]
-            
-            # Apply transformations in sequence
-            if channel_func is not None:
-                line_data = channel_func(line_data)
-                
-            if processing_func is not None:
-                line_data = processing_func(line_data)
-            
-            # Squeeze out singleton dimensions
-            line_data = np.squeeze(line_data)
+            self._sync_view_state_from_window()
+            line_data = make_line(self.data, self.view_state).data
             
             # Make sure we have 1D data
             if line_data.ndim == 1:
