@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 from .imageview2d import ImageView2D
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
+from .view_state import ChannelMode, ScaleMode, ViewState
 import multiprocessing as mp
 import warnings
 
@@ -384,6 +385,8 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             if not self.singleton[dim]:
                 self.line_plot_dimension = dim
                 break
+
+        self.view_state = self._make_view_state(slice_indices=[0] * data.ndim)
                 
         self.domain = [Domain.NATIVE for _ in range(data.ndim)]
         self.widgets = {
@@ -836,6 +839,62 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
 
 
 
+    def _make_view_state(self, slice_indices=None):
+        if slice_indices is None:
+            slice_indices = self._current_slice_indices()
+        else:
+            slice_indices = tuple(
+                max(0, min(int(index), self.data.shape[axis] - 1))
+                for axis, index in enumerate(slice_indices)
+            )
+
+        image_axes = None
+        if self.data.ndim >= 2 and len(self.selected_indices) >= 2:
+            image_axes = (self.selected_indices[0], self.selected_indices[1])
+
+        return ViewState(
+            ndim=self.data.ndim,
+            shape=tuple(self.data.shape),
+            image_axes=image_axes,
+            line_axis=self.line_plot_dimension if self.data.ndim >= 1 else None,
+            slice_indices=slice_indices,
+            channel=self._current_channel_mode(),
+            scale=self._current_scale_mode(),
+            axis_flipped=tuple(self.axis_flipped),
+            axis_fftshifted=tuple(self.fftshifted),
+        )
+
+    def _sync_view_state_from_window(self):
+        self.view_state = self._make_view_state()
+        return self.view_state
+
+    def _current_slice_indices(self):
+        if not hasattr(self, 'widgets'):
+            return (0,) * self.data.ndim
+
+        indices = []
+        for axis, spinbox in enumerate(self.widgets['spins']['slice_indices']):
+            indices.append(max(0, min(spinbox.value(), self.data.shape[axis] - 1)))
+        return tuple(indices)
+
+    def _current_channel_mode(self):
+        if hasattr(self, 'widgets'):
+            channel_buttons = self.widgets['buttons']['channel']
+            for name, button in channel_buttons.items():
+                if button.isChecked():
+                    return ChannelMode(name)
+
+        if self.channel is not None:
+            return ChannelMode(self.channel)
+        return ChannelMode.REAL
+
+    def _current_scale_mode(self):
+        if hasattr(self, 'widgets') and self.widgets['buttons']['processing']['symlog'].isChecked():
+            return ScaleMode.SYMLOG
+        if self.scale is not None:
+            return ScaleMode(self.scale)
+        return ScaleMode.LINEAR
+
     
     def dimClicked(self, event, label, dim):
         if self.singleton[dim]:
@@ -926,6 +985,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.axis_flipped[dim] = not self.axis_flipped[dim]
         
         self.update_flip_icons()
+        self._sync_view_state_from_window()
         self.apply_axis_flips()
         
     def update_flip_icons(self):
@@ -1240,6 +1300,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             
             # Apply axis flips after setting the image
             self.apply_axis_flips()
+            self._sync_view_state_from_window()
             
         except Exception as e:
             print(f'Image update failed: {e}')
@@ -1495,6 +1556,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.update_slice()
         self.update_image_view()
         self.update_line_plot()
+        self._sync_view_state_from_window()
 
     def update_slice(self):
         """Update slice for image view mode"""
@@ -1518,6 +1580,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                 self.selected_indices[which_one] = idx
         
         self.update_dimension_controls()
+        self._sync_view_state_from_window()
         if update is True:
             self.update()
     
