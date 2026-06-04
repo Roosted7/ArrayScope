@@ -89,6 +89,23 @@ def test_make_image_3d_slices_non_display_axis_and_applies_channel_and_scale():
     np.testing.assert_allclose(image.data, expected)
 
 
+def test_make_image_ndslice_reversed_axes_preserves_existing_orientation():
+    data = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+    state = state_for(
+        data.shape,
+        image_axes=(3, 1),
+        line_axis=3,
+        slices=(1, 0, 2, 0),
+        channel=ChannelMode.REAL,
+    )
+
+    image = make_image(data, state)
+
+    expected = np.squeeze(data[1:2, :, 2:3, :])
+    assert image.data.shape == (3, 5)
+    np.testing.assert_array_equal(image.data, expected)
+
+
 def test_make_image_angle_sets_default_levels_and_values():
     data = np.array([[1 + 0j, 0 + 1j], [-1 + 0j, 0 - 1j]])
     state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.ANGLE)
@@ -97,6 +114,18 @@ def test_make_image_angle_sets_default_levels_and_values():
 
     assert image.default_levels == (-np.pi, np.pi)
     np.testing.assert_allclose(image.data, np.angle(data.T))
+
+
+def test_make_image_complex_real_imag_and_abs_channels():
+    data = np.array([[1 + 2j, -3 + 4j], [5 - 6j, -7 - 8j]])
+
+    real_state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.REAL)
+    imag_state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.IMAG)
+    abs_state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.ABS)
+
+    np.testing.assert_array_equal(make_image(data, real_state).data, np.real(data.T))
+    np.testing.assert_array_equal(make_image(data, imag_state).data, np.imag(data.T))
+    np.testing.assert_allclose(make_image(data, abs_state).data, np.abs(data.T))
 
 
 def test_make_image_complex_returns_rgb_and_magnitude_histogram():
@@ -112,6 +141,23 @@ def test_make_image_complex_returns_rgb_and_magnitude_histogram():
     np.testing.assert_array_equal(image.histogram_data, np.ones((2, 2)))
     np.testing.assert_array_equal(image.data[0, 0], lut[127])
     np.testing.assert_array_equal(image.data[1, 0], lut[255])
+
+
+def test_make_image_complex_rgb_uses_phase_for_color_and_magnitude_for_histogram():
+    data = np.array([[1 + 0j, 2j], [-3 + 0j, -4j]])
+    lut = np.zeros((4, 3), dtype=np.uint8)
+    lut[0] = [10, 0, 0]
+    lut[1] = [20, 0, 0]
+    lut[2] = [30, 0, 0]
+    lut[3] = [40, 0, 0]
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX)
+
+    image = make_image(data, state, colormap_lut=lut)
+
+    assert image.data.shape == (2, 2, 3)
+    np.testing.assert_array_equal(image.histogram_data, np.abs(data.T))
+    np.testing.assert_array_equal(image.data[0, 0], lut[1])
+    np.testing.assert_array_equal(image.data[1, 0], lut[2])
 
 
 def test_complex_to_rgb_rejects_bad_lut_shape():
