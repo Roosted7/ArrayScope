@@ -391,6 +391,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 'primary': [QtWidgets.QPushButton(str(i), checkable=True) for i in range(data.ndim)],
                 'secondary': [QtWidgets.QPushButton(str(i), checkable=True) for i in range(data.ndim)],
                 'channel': {
+                    'complex': QtWidgets.QRadioButton('complex', enabled=np.iscomplexobj(self.data)),
                     'real': QtWidgets.QRadioButton('real', enabled=np.iscomplexobj(self.data)),
                     'imag': QtWidgets.QRadioButton('imag', enabled=np.iscomplexobj(self.data)),
                     'abs': QtWidgets.QRadioButton('abs', enabled=np.iscomplexobj(self.data)),
@@ -428,6 +429,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
         # Create a button group for the channel radio buttons
         self.channel_button_group = QtWidgets.QButtonGroup()
+        self.channel_button_group.addButton(self.widgets['buttons']['channel']['complex'])
         self.channel_button_group.addButton(self.widgets['buttons']['channel']['real'])
         self.channel_button_group.addButton(self.widgets['buttons']['channel']['imag'])
         self.channel_button_group.addButton(self.widgets['buttons']['channel']['abs'])
@@ -1009,6 +1011,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         is_complex = np.iscomplexobj(self.data)
         channel_buttons = self.widgets['buttons']['channel']
         enabled_channels = {
+            'complex': is_complex,
             'real': True,
             'abs': True,
             'imag': is_complex,
@@ -1024,7 +1027,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             button.setEnabled(enabled_channels[name])
 
         if checked_channel not in enabled_channels or not enabled_channels[checked_channel]:
-            checked_channel = 'abs' if is_complex else 'real'
+            checked_channel = 'complex' if is_complex else 'real'
 
         channel_buttons[checked_channel].setChecked(True)
     
@@ -1123,12 +1126,38 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             x_i = math.floor(mousePoint.x()) 
             y_i = math.floor(mousePoint.y()) 
             if x_i >= 0 and x_i < img.shape [ 0 ] and y_i >= 0 and y_i < img.shape[1]:
+                if img.ndim == 3 and img.shape[-1] in (3, 4):
+                    self.widgets['labels']['pixelValue'].setText(f"({x_i}, {y_i}) RGB = {img[x_i, y_i, :3].tolist()}")
+                    return
                 decimal_places = getNumberOfDecimalPlaces(abs(img[x_i ,y_i]))
                 if decimal_places > 5:
                     self.widgets['labels']['pixelValue'].setText("({}, {}) = {:.3e}".format (x_i, y_i, img[x_i ,y_i]))
                 else:
                     self.widgets['labels']['pixelValue'].setText("({}, {}) = {:.{}f}".format (x_i, y_i, img[x_i ,y_i], decimal_places))
 
+    def _phase_colormap(self):
+        try:
+            colormap = pg.colormap.get('PAL-relaxed')
+            if colormap is not None:
+                return colormap
+        except Exception:
+            pass
+        return self._create_phase_colormap()
+
+    def _apply_channel_colormap(self):
+        if self.channel in ('complex', 'angle'):
+            self.img_view.setColorMap(self._phase_colormap())
+        else:
+            self.img_view.setColorMap(self._create_gray_colormap())
+
+    def _complex_to_rgb(self, data):
+        phase = np.angle(data)
+        magnitude = np.abs(data)
+        phase_index = (phase + np.pi) / (2.0 * np.pi)
+        phase_index = np.nan_to_num(phase_index, nan=0.0, posinf=0.0, neginf=0.0)
+        lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False).astype(float)
+        colors = lut[np.clip((phase_index * 255).astype(int), 0, 255)]
+        return colors.astype(np.uint8), magnitude.astype(float)
     
     def update_image_view(self):
         if self.data.ndim == 1: # No image view for 1D data
@@ -1142,7 +1171,11 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
         # Determine channel transformation
         channel_func = None
-        if self.widgets['buttons']['channel']['abs'].isChecked():
+        complex_color = False
+        if self.widgets['buttons']['channel']['complex'].isChecked():
+            self.channel = 'complex'
+            complex_color = True
+        elif self.widgets['buttons']['channel']['abs'].isChecked():
             self.channel = 'abs'
             channel_func = np.abs
         elif self.widgets['buttons']['channel']['angle'].isChecked():
@@ -1166,6 +1199,8 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
         changed_channel = old_channel != self.channel
         changed_scale = oldscale != self.scale
+        if changed_channel:
+            self._apply_channel_colormap()
         al = changed_scale or changed_channel or getattr(self, '_force_autolevel', False)
         # reset the one-shot flag after using it
         if getattr(self, '_force_autolevel', False):
@@ -1181,21 +1216,27 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         try:
             # Get the sliced data
             image_data = self.data[tuple(self.slice)]
-            
-            # Apply transformations in sequence
-            if channel_func is not None:
-                image_data = channel_func(image_data)
-                
-            if processing_func is not None:
-                image_data = processing_func(image_data)
-            
+
             # Handle transpose if needed
             if self.selected_indices[0] < self.selected_indices[1]:
                 image_data = np.transpose(image_data)
-            
-            # Final processing and display
-            image_data = np.nan_to_num(np.squeeze(image_data))
-            self.img_view.setImage(image_data, autoLevels=al, levels=prev_levels)
+
+            image_data = np.squeeze(image_data)
+
+            if complex_color:
+                image_data, magnitude_data = self._complex_to_rgb(image_data)
+                self.img_view.setImage(image_data, autoLevels=al, histogramData=magnitude_data)
+            else:
+                # Apply transformations in sequence
+                if channel_func is not None:
+                    image_data = channel_func(image_data)
+
+                if processing_func is not None:
+                    image_data = processing_func(image_data)
+
+                # Final processing and display
+                image_data = np.nan_to_num(image_data)
+                self.img_view.setImage(image_data, autoLevels=al, levels=prev_levels)
             
             # Apply axis flips after setting the image
             self.apply_axis_flips()
@@ -1244,7 +1285,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 if hasattr(self.img_view, 'image') and self.img_view.image is not None:
                     view = self.img_view.getView()
                     
-                    img_height, img_width = self.img_view.image.shape
+                    img_height, img_width = self.img_view.image.shape[:2]
                     widget_ratio = view.size().width() / view.size().height()
                     img_ratio = img_width / img_height
                     ratio = img_ratio * widget_ratio
@@ -1260,8 +1301,8 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             # For square FOV, use the image aspect ratio
             if hasattr(self.img_view, 'image') and self.img_view.image is not None:
                 shape = self.img_view.image.shape
-                if len(shape) == 2:
-                    height, width = shape
+                if len(shape) >= 2:
+                    height, width = shape[:2]
                     ratio = width / height
                     if abs(ratio - 1.0) < 1e-2:
                         aspect_str = '(1:1)'
@@ -1277,7 +1318,9 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         """Update the line plot with 1D data slices"""
         # Determine channel transformation
         channel_func = None
-        if self.widgets['buttons']['channel']['abs'].isChecked():
+        if self.widgets['buttons']['channel']['complex'].isChecked():
+            channel_func = np.abs
+        elif self.widgets['buttons']['channel']['abs'].isChecked():
             channel_func = np.abs
         elif self.widgets['buttons']['channel']['angle'].isChecked():
             channel_func = np.angle
@@ -1629,6 +1672,16 @@ class NDSliceWindow(QtWidgets.QMainWindow):
     def _create_gray_colormap(self):
         """Create a grayscale colormap matching pyqtgraph's built-in default (black to white)"""
         return pg.ColorMap(pos=[0.0, 1.0], color=[[0, 0, 0, 255], [255, 255, 255, 255]])
+
+    def _create_phase_colormap(self):
+        """Create a cyclic HSV phase colormap."""
+        positions = np.linspace(0.0, 1.0, 257)
+        colors = []
+        for pos in positions:
+            qcolor = QtGui.QColor()
+            qcolor.setHsvF(pos % 1.0, 1.0, 1.0, 1.0)
+            colors.append([qcolor.red(), qcolor.green(), qcolor.blue(), 255])
+        return pg.ColorMap(pos=positions, color=np.array(colors))
     
     def _create_d3_warm_colormap(self):
         """Create D3.js interpolateWarm colormap (Niccoli's perceptual rainbow, 180° rotation)"""

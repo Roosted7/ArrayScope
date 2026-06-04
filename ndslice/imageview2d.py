@@ -34,6 +34,8 @@ class ImageView2D(QtWidgets.QWidget):
         self.levelMin = None
         self.levelMax = None
         self.displayMode = 'square_pixels'  # Default to square pixels
+        self.histogramSource = None
+        self._rgbBaseImage = None
         
         # Create the UI layout
         self.setupUI()
@@ -55,8 +57,10 @@ class ImageView2D(QtWidgets.QWidget):
         self.view.addItem(self.imageItem)
         
         # Setup histogram
-        self.histogram.setImageItem(self.imageItem)
+        self.histogramImageItem = ImageItem()
+        self.histogram.setImageItem(self.histogramImageItem)
         self.histogram.setLevelMode('mono')  # Force mono mode for scalar values
+        self.histogram.item.sigLevelsChanged.connect(self._on_histogram_levels_changed)
         
         # Initialize levels
         self.levelMin = 0.0
@@ -78,7 +82,8 @@ class ImageView2D(QtWidgets.QWidget):
         self.layout.addWidget(self.histogram)
         
     def setImage(self, img, autoRange=True, autoLevels=True, levels=None, 
-                 pos=None, scale=None, transform=None, autoHistogramRange=True):
+                 pos=None, scale=None, transform=None, autoHistogramRange=True,
+                 histogramData=None):
         """
         Set the image to be displayed.
         
@@ -104,16 +109,19 @@ class ImageView2D(QtWidgets.QWidget):
         if not isinstance(img, np.ndarray):
             raise TypeError("Image must be a numpy array")
             
-        if img.ndim != 2:
-            raise ValueError("ImageView2D only supports 2D images")
+        is_rgb = self._is_rgb_image(img)
+        if img.ndim != 2 and not is_rgb:
+            raise ValueError("ImageView2D only supports 2D scalar or RGB images")
             
         self.image = img
         self.imageDisp = None
+        self.histogramSource = histogramData
         
         # Update the image display
         self.updateImage(autoHistogramRange=autoHistogramRange)
         
         # Set levels
+        self.histogram.setVisible(True)
         if levels is None and autoLevels:
             self.autoLevels()
         elif levels is not None:
@@ -151,11 +159,26 @@ class ImageView2D(QtWidgets.QWidget):
         # For 2D images, we can display directly
         self.imageDisp = self.image
         
+        is_rgb = self._is_rgb_image(self.imageDisp)
+        self._rgbBaseImage = None
+        histogram_data = self.histogramSource
+        if histogram_data is None:
+            histogram_data = self._histogram_data(self.imageDisp)
+
         # Calculate min/max levels from the image data for histogram
-        self._updateImageLevels()
+        self._updateImageLevels(histogram_data)
+        histogram_levels = (self.levelMin, self.levelMax)
         
         # Set the image data
-        self.imageItem.setImage(self.imageDisp, autoLevels=False)
+        if is_rgb:
+            self.histogram.setImageItem(self.histogramImageItem)
+            self._rgbBaseImage = self.imageDisp[..., :3].astype(float)
+            self.imageDisp = self._rgb_display_for_levels(histogram_levels)
+            self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=(0, 255))
+            self.histogramImageItem.setImage(histogram_data, autoLevels=False, levels=histogram_levels)
+        else:
+            self.histogram.setImageItem(self.imageItem)
+            self.imageItem.setImage(self.imageDisp, autoLevels=False)
         
         # Update histogram range if requested
         if autoHistogramRange:
@@ -166,27 +189,71 @@ class ImageView2D(QtWidgets.QWidget):
         if self.imageDisp is not None:
             self.view.autoRange()
             
-    def _updateImageLevels(self):
+    def _updateImageLevels(self, image=None):
         """Update the min/max levels from the current image data"""
-        if self.imageDisp is not None:
+        if image is None:
+            image = self.imageDisp
+        if image is not None:
             # Use the same approach as the original ImageView
-            finite_data = self.imageDisp[np.isfinite(self.imageDisp)]
+            finite_data = image[np.isfinite(image)]
             if len(finite_data) > 0:
                 self.levelMin = float(np.min(finite_data))
                 self.levelMax = float(np.max(finite_data))
             else:
                 self.levelMin = 0.0
                 self.levelMax = 1.0
+
+    def _is_rgb_image(self, img):
+        return isinstance(img, np.ndarray) and img.ndim == 3 and img.shape[-1] in (3, 4)
+
+    def _histogram_data(self, img):
+        if self._is_rgb_image(img):
+            rgb = img[..., :3].astype(float)
+            return 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
+        return img
+
+    def _rgb_display_for_levels(self, levels=None):
+        if self._rgbBaseImage is None:
+            return self.imageDisp
+
+        histogram_data = self.histogramSource
+        if histogram_data is None:
+            histogram_data = self._histogram_data(self._rgbBaseImage)
+
+        if levels is None:
+            try:
+                levels = self.histogram.getLevels()
+            except Exception:
+                levels = (self.levelMin, self.levelMax)
+
+        low, high = levels
+        span = max(float(high) - float(low), 1e-12)
+        intensity = np.clip((histogram_data.astype(float) - float(low)) / span, 0.0, 1.0)
+        return np.clip(self._rgbBaseImage * intensity[..., np.newaxis], 0, 255).astype(np.uint8)
+
+    def _on_histogram_levels_changed(self, *args):
+        if self._rgbBaseImage is None or self.histogramSource is None:
+            return
+
+        self.imageDisp = self._rgb_display_for_levels()
+        self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=(0, 255))
                 
     def autoLevels(self):
         """Automatically set the histogram levels based on image data"""
         if self.imageDisp is not None:
-            self._updateImageLevels()
+            if self._rgbBaseImage is not None:
+                image = self.histogramSource
+                if image is None:
+                    image = self._histogram_data(self.imageDisp)
+                self._updateImageLevels(image)
+            else:
+                self._updateImageLevels()
             self.setLevels(self.levelMin, self.levelMax)
                 
     def setLevels(self, min_level, max_level):
         """Set the histogram levels"""
         self.histogram.setLevels(min_level, max_level)
+        self._on_histogram_levels_changed()
         
     def getLevels(self):
         """Get the current histogram levels"""
@@ -245,7 +312,7 @@ class ImageView2D(QtWidgets.QWidget):
             self.view.setAspectLocked(True, ratio=1.0)
         elif self.displayMode == 'square_fov':
             # Square FOV: adjust aspect ratio based on image dimensions
-            height, width = self.image.shape
+            height, width = self.image.shape[:2]
             aspect_ratio = width / height
             self.view.setAspectLocked(True, ratio=aspect_ratio)
         elif self.displayMode == 'fit':
