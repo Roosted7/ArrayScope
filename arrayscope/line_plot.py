@@ -102,7 +102,7 @@ class LinePlotController:
     def update(self, data, view_state):
         self.update_line_result(make_line(data, view_state), view_state)
 
-    def update_line_result(self, line_result, view_state):
+    def update_line_result(self, line_result, view_state, y_range=None):
         self.widget.clear()
         self.widget.addItem(self.crosshair)
         self.crosshair.setVisible(False)
@@ -119,16 +119,18 @@ class LinePlotController:
                     pen = pg.mkPen(50, 100, 200)
                     self.curve = pg.BarGraphItem(x=x, height=line_data, width=0.8, brush=brush, pen=pen)
                     self.widget.addItem(self.curve)
-                    self.owner.tab_widget.setTabText(1, "Bar Plot")
                 else:
                     pen = pg.mkPen(color=(50, 100, 200), width=2)
                     self.curve = self.widget.plot(line_data, pen=pen, name="")
-                    self.owner.tab_widget.setTabText(1, "Line Plot")
 
                 if self.base_range is None:
                     x_min = 0
                     x_max = len(line_data) - 1
                     self.base_range = max(1.0, (x_max - x_min))
+                if y_range is not None:
+                    self.widget.getViewBox().setYRange(float(y_range[0]), float(y_range[1]), padding=0)
+                else:
+                    self.widget.enableAutoRange(axis="y")
             else:
                 print(f"Warning: Expected 1D data but got {line_data.ndim}D data with shape {line_data.shape}")
 
@@ -167,8 +169,6 @@ class LinePlotController:
             print(f"Thickness update failed: {e}")
 
     def on_hover(self, pos):
-        if not self.owner.is_line_plot_mode():
-            return
         if self.current_line_data is None:
             return
 

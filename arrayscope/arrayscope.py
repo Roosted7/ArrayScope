@@ -13,12 +13,13 @@ from pathlib import Path
 from .colormaps import gray_colormap, named_colormap, phase_colormap
 from .dialogs import SaveRangeDialog
 from .imageview2d import ImageView2D
-from .line_plot import LinePlotController
 from .operation_dock import OperationStackDock
 from .operation_evaluator import OperationEvaluator
 from .operation_pipeline import ArrayDocument
 from .operation_recipes import load_recipe, save_recipe
 from .operation_registry import create_operation, operation_entries
+from .profile import profile_state_from_image_hover, profile_y_range
+from .profile_dock import ProfileDock
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 from .view_state import ChannelMode, ScaleMode, ViewState
 from .window_levels import choose_window_levels
@@ -127,6 +128,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                     'fit': QtWidgets.QRadioButton('Fit', checkable=True),
                     'window_relative': QtWidgets.QRadioButton('Relative', checkable=True, checked=True),
                     'window_absolute': QtWidgets.QRadioButton('Absolute', checkable=True),
+                    'live_profile': QtWidgets.QCheckBox('Live profile'),
                 }
             },
             'labels': {
@@ -170,6 +172,12 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.window_button_group = QtWidgets.QButtonGroup()
         self.window_button_group.addButton(self.widgets['buttons']['display']['window_relative'])
         self.window_button_group.addButton(self.widgets['buttons']['display']['window_absolute'])
+        self._pending_profile_pos = None
+        self._pending_profile_point = None
+        self._profile_timer = Qt.QtCore.QTimer(self)
+        self._profile_timer.setSingleShot(True)
+        self._profile_timer.setInterval(40)
+        self._profile_timer.timeout.connect(self._update_live_profile_from_pending_pos)
         
         self.layouts = {
             'main': QtWidgets.QVBoxLayout(),
@@ -347,6 +355,11 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         window_absolute.setToolTip("Keep numeric histogram/window limits fixed while changing views")
         display_layout.addWidget(window_relative)
         display_layout.addWidget(window_absolute)
+        live_profile = self.widgets['buttons']['display']['live_profile']
+        live_profile.setStyleSheet(self.RADIO_BUTTON_STYLE)
+        live_profile.setToolTip("Update the line plot from the mouse position in the image view")
+        live_profile.toggled.connect(self._on_live_profile_toggled)
+        display_layout.addWidget(live_profile)
         
         # Optional: tooltip hints
         self.widgets['buttons']['display']['square_pixels'].setToolTip('Lock to 1:1 pixel aspect')
@@ -372,27 +385,14 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.img_view = ImageView2D()
         self.image_tab_layout.addWidget(self.img_view)
         self.image_tab.setLayout(self.image_tab_layout)
-        self.img_view.getView().scene().sigMouseMoved.connect(lambda pos: self.getPixel(pos))
+        self.img_view.getView().scene().sigMouseMoved.connect(lambda pos: self._on_image_mouse_moved(pos))
+        self.img_view.setProfileMarkerCallback(self._on_profile_marker_moved)
         
         # Connect to view range changes to update aspect ratio in fit mode
         self.img_view.getView().sigRangeChanged.connect(self._on_view_range_changed)
         
-        # Create line plot tab
-        self.plot_tab = QtWidgets.QWidget()
-        self.plot_tab_layout = QtWidgets.QVBoxLayout()
-        
-        self.line_plot = LinePlotController(self)
-        self.plot_widget = self.line_plot.widget
-        self.plot_tab_layout.addWidget(self.plot_widget)
-        self.plot_tab.setLayout(self.plot_tab_layout)
-
         # Add tabs to tab widget
         self.tab_widget.addTab(self.image_tab, "Image View")
-        self.tab_widget.addTab(self.plot_tab, "Line Plot")
-
-        if data.ndim == 1:
-            self.tab_widget.setTabEnabled(0, False)  # Disable Image View tab
-            self.tab_widget.setCurrentIndex(1)  # Set line plot as default
         
         # Connect tab change handler
         self.tab_widget.currentChanged.connect(self.on_tab_changed)
@@ -441,6 +441,13 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         tmp = QtWidgets.QWidget()
         tmp.setLayout(self.layouts['main'])
         self.setCentralWidget(tmp)
+        self.profile_dock = ProfileDock(self, on_axis_changed=self.set_profile_axis)
+        self.line_plot = self.profile_dock.line_plot
+        self.plot_widget = self.profile_dock.widget
+        self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
+        self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
+        self.profile_dock.visibilityChanged.connect(self._on_profile_dock_visibility_changed)
+        self.profile_dock.hide()
         self.operation_dock = OperationStackDock(
             self,
             on_undo=self.undo_last_operation,
@@ -567,11 +574,12 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                     min(self.widgets['spins']['slice_indices'][i].value(), self.data.shape[i] - 1)
                 )
 
-        if ndim == 1:
-            self.tab_widget.setTabEnabled(0, False)
-            self.tab_widget.setCurrentIndex(1)
-        elif ndim >= 2:
-            self.tab_widget.setTabEnabled(0, True)
+        self.tab_widget.setTabEnabled(0, ndim >= 2)
+        if hasattr(self, "profile_dock"):
+            self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
+            if ndim == 1:
+                self.profile_dock.show()
+                self.profile_dock.raise_()
 
         self.update_complex_indicators()
         self.update_shift_indicators()
@@ -962,6 +970,110 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                 else:
                     self.widgets['labels']['pixelValue'].setText("({}, {}) = {:.{}f}".format (x_i, y_i, img[x_i ,y_i], decimal_places))
 
+    def _on_image_mouse_moved(self, pos):
+        self.getPixel(pos)
+    
+    def _on_profile_marker_moved(self, image_x, image_y):
+        if not self.widgets['buttons']['display']['live_profile'].isChecked():
+            return
+        if not self.profile_dock.isVisible():
+            return
+        self._pending_profile_point = (float(image_x), float(image_y))
+        if not self._profile_timer.isActive():
+            self._profile_timer.start()
+
+    def _update_live_profile_from_pending_pos(self):
+        point = self._pending_profile_point
+        pos = self._pending_profile_pos
+        self._pending_profile_point = None
+        self._pending_profile_pos = None
+        if point is None and pos is None:
+            return
+        if not self.widgets['buttons']['display']['live_profile'].isChecked():
+            return
+        if not self.profile_dock.isVisible():
+            return
+        if self.is_line_plot_mode():
+            return
+
+        if point is None:
+            view = self.img_view.getView()
+            if not view.sceneBoundingRect().contains(pos):
+                self._clear_live_profile_marker()
+                return
+            mouse_point = view.mapSceneToView(pos)
+            point = (mouse_point.x(), mouse_point.y())
+
+        try:
+            self._sync_view_state_from_window()
+            profile_state = profile_state_from_image_hover(
+                self.view_state,
+                point[0],
+                point[1],
+                line_axis=self.line_plot_dimension,
+            )
+            if profile_state is None:
+                self._clear_live_profile_marker()
+                return
+
+            line_result = self.operation_evaluator.line(profile_state)
+            self.profile_dock.update_line_result(line_result, profile_state, y_range=self._current_profile_y_range())
+            self.profile_dock.show()
+            self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
+        except Exception as e:
+            print(f"Live profile update failed: {e}")
+            self._clear_live_profile_marker()
+
+    def _clear_live_profile_marker(self):
+        if hasattr(self, "img_view"):
+            self.img_view.hideProfileMarker()
+
+    def _on_live_profile_toggled(self, enabled):
+        if enabled and hasattr(self, "profile_dock"):
+            if not self.profile_dock.isVisible():
+                self.profile_dock.setFloating(True)
+                self.profile_dock.resize(560, 260)
+            self.profile_dock.show()
+            self.profile_dock.raise_()
+            self._ensure_profile_marker()
+        if not enabled:
+            self._pending_profile_pos = None
+            self._pending_profile_point = None
+            self._profile_timer.stop()
+            self._clear_live_profile_marker()
+            self.update_line_plot()
+
+    def _on_profile_dock_visibility_changed(self, visible):
+        if not visible and self.widgets['buttons']['display']['live_profile'].isChecked():
+            self.widgets['buttons']['display']['live_profile'].setChecked(False)
+
+    def _ensure_profile_marker(self):
+        position = self.img_view.profileMarkerPosition()
+        if position is None:
+            x, y = self._default_profile_marker_position()
+            self.img_view.setProfileMarker(x, y, visible=True)
+            self._on_profile_marker_moved(x, y)
+        else:
+            self._on_profile_marker_moved(*position)
+
+    def _default_profile_marker_position(self):
+        self._sync_view_state_from_window()
+        if self.view_state.image_axes is None:
+            return (0, 0)
+        primary_axis, secondary_axis = self.view_state.image_axes
+        x = (self.view_state.shape[secondary_axis] - 1) / 2.0
+        y = (self.view_state.shape[primary_axis] - 1) / 2.0
+        return (round(x), round(y))
+
+    def _current_profile_y_range(self):
+        if not hasattr(self, "profile_dock"):
+            return None
+        try:
+            image_levels = self.img_view.getLevels()
+        except Exception:
+            image_levels = None
+        return profile_y_range(self.profile_dock.y_range_mode(), image_levels)
+
     def _phase_colormap(self):
         return phase_colormap()
 
@@ -1138,24 +1250,35 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             self.display_group.setTitle('Display')
     
     def update_line_plot(self):
+        if not hasattr(self, "profile_dock") or not self.profile_dock.isVisible():
+            return
+        if self.widgets['buttons']['display']['live_profile'].isChecked():
+            position = self.img_view.profileMarkerPosition()
+            if position is not None:
+                self._on_profile_marker_moved(*position)
+                return
         self._sync_view_state_from_window()
         line_result = self.operation_evaluator.line(self.view_state)
-        self.line_plot.update_line_result(line_result, self.view_state)
+        self.profile_dock.update_line_result(line_result, self.view_state, y_range=self._current_profile_y_range())
 
     def _on_view_range_changed(self):
         """Update display group title when view range changes (for fit mode)."""
         self._update_display_group_title()
 
     def on_tab_changed(self, index):
-        """Handle tab change between Image View and Line Plot"""
+        """Handle central image tab changes."""
         self.update_dimension_controls()
         self.update()
-        if not self.is_line_plot_mode():
-            self.line_plot.hide_crosshair()
+        self.line_plot.hide_crosshair()
     
     def is_line_plot_mode(self):
-        """Check if currently in line plot mode"""
-        return self.tab_widget.currentIndex() == 1
+        """The historical line-plot tab is no longer the primary plot surface."""
+        return False
+
+    def set_profile_axis(self, axis):
+        self.line_plot_dimension = int(axis)
+        self._sync_view_state_from_window()
+        self.update_line_plot()
 
     def transposeView(self, event):
         old_primary = self.selected_indices[0]
@@ -1344,15 +1467,9 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
     def eventFilter(self, obj, event):
         if obj == self.tab_widget.tabBar():
             if event.type() == Qt.QtCore.QEvent.Type.MouseButtonDblClick:
-                # which tab was double-clicked
-                tab_bar = self.tab_widget.tabBar()
-                clicked_index = tab_bar.tabAt(event.pos())
-                
-                # Check if line/bar tab (index 1)
-                if clicked_index == 1:
-                    self.line_plot.toggle_style()
-                    event.accept()
-                    return True 
+                self.profile_dock.toggle_style()
+                event.accept()
+                return True
         return super().eventFilter(obj, event)
     
     def _setup_export_context_menus(self):
