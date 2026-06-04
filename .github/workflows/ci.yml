@@ -28,16 +28,25 @@ jobs:
           sudo apt-get install -y libgl1 libegl1
 
       - name: Install arrayscope
-        run: pip install -e .
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYQTGRAPH_QT_LIB: PySide6
+        run: pytest -q
 
       - name: Run screenshot test (Linux)
         if: runner.os == 'Linux'
         env:
           QT_QPA_PLATFORM: offscreen
+          PYQTGRAPH_QT_LIB: PySide6
         run: python test/screenshot_test.py --style Fusion
 
       - name: Run screenshot test (macOS / Windows)
         if: runner.os != 'Linux'
+        env:
+          PYQTGRAPH_QT_LIB: PySide6
         run: python test/screenshot_test.py --style Fusion
 
       - name: Upload screenshots

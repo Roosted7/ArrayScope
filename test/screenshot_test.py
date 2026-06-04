@@ -6,8 +6,14 @@ headlessly, and saves a PNG. Run via:
   python test/screenshot_test.py               # macOS / Windows
 """
 import sys
+import os
 import numpy as np
 from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 
 def make_data():

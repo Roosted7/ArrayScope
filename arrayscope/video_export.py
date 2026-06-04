@@ -1,5 +1,9 @@
 import numpy as np
 import os
+from .qt_binding import prefer_pyside6
+
+prefer_pyside6()
+
 from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 
 # Compatibility for PyQt5/PySide6 signal naming

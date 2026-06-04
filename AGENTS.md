@@ -12,6 +12,26 @@ Read only the files relevant to the task:
 * For ArrayShow comparisons, read `docs/references/ArrayShow.md`.
 * For non-blocking future ideas, check `docs/ideas.md` only when the task asks for planning, feature design, or follow-up suggestions.
 
+## Environment
+
+Use the project conda environment through direnv for local commands:
+
+```bash
+direnv exec . <command>
+```
+
+The `.envrc` activates the conda environment named `arrayscope`. If a non-interactive agent shell cannot find `conda`, add the local conda binary to `PATH` before running `direnv exec`, for example:
+
+```bash
+PATH=~/miniconda3/bin:$PATH direnv exec . <command>
+```
+
+When dependencies change, update `environment.yml` and apply it to the conda environment:
+
+```bash
+PATH=~/miniconda3/bin:$PATH direnv exec . conda env update -f environment.yml --prune
+```
+
 ## While changing code
 
 * Update docs when changing architecture, public behavior, roadmap status, or ArrayShow-derived design decisions.

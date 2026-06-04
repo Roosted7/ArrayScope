@@ -1,4 +1,8 @@
 import numpy as np
+from .qt_binding import prefer_pyside6
+
+prefer_pyside6()
+
 import pyqtgraph as pg
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets, QtGui

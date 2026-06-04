@@ -2,6 +2,10 @@
 arrayscope - Interactive N-dimensional array viewer with FFT support
 """
 
+from .qt_binding import prefer_pyside6
+
+prefer_pyside6()
+
 from .arrayscope import arrayscope, ArrayScopeWindow, Domain
 from .imageview2d import ImageView2D
 
