@@ -5,6 +5,7 @@ from .qt_binding import prefer_pyside6
 prefer_pyside6()
 
 from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
+from .slice_engine import make_export_frame
 
 # Compatibility for PyQt5/PySide6 signal naming
 try:
@@ -27,26 +28,22 @@ class VideoExportWorker(QtCore.QThread):
     progress_updated = Signal(int, str)  # (current_frame, status_text)
     export_finished = Signal(bool, str)  # (success, message)
     
-    def __init__(self, data, export_dim, output_path, fps, format_type, 
-                 channel_func, processing_func, slice_indices, selected_indices, 
-                 singleton, levels=None, transpose=False, pixel_ratio_mode='square_pixels',
+    def __init__(self, data, view_state, export_dim, output_path, fps, format_type,
+                 selected_indices, singleton, levels=None, pixel_ratio_mode='square_pixels',
                  display_mode='square_pixels', widget_ratio=1.0, axis_flipped=None,
-                 lut=None, window_level_mode='displayed'):
+                 colormap_lut=None, window_level_mode='displayed'):
         super().__init__()
-        self.transpose = transpose
         self.pixel_ratio_mode = pixel_ratio_mode
         self.display_mode = display_mode
         self.widget_ratio = widget_ratio
         self.axis_flipped = axis_flipped or []
-        self.lut = lut
+        self.colormap_lut = colormap_lut
         self.data = data
+        self.view_state = view_state
         self.export_dim = export_dim
         self.output_path = output_path
         self.fps = fps
         self.format_type = format_type
-        self.channel_func = channel_func
-        self.processing_func = processing_func
-        self.slice_indices = slice_indices
         self.selected_indices = selected_indices
         self.singleton = singleton
         self.levels = levels
@@ -65,71 +62,15 @@ class VideoExportWorker(QtCore.QThread):
                     self.export_finished.emit(False, "Export cancelled")
                     return
                 
-                # Create slice for this frame
-                frame_slice = list(self.slice_indices)
-                frame_slice[self.export_dim] = slice(frame_idx, frame_idx + 1)
-
-                
-                # Extract frame data
-                frame_data = self.data[tuple(frame_slice)]
-                
-                # Apply channel transformation
-                if self.channel_func is not None:
-                    frame_data = self.channel_func(frame_data)
-                
-                # Apply processing transformation
-                if self.processing_func is not None:
-                    frame_data = self.processing_func(frame_data)
-                
-                # Squeeze and convert to uint8
-                frame_data = np.squeeze(frame_data)
-                
-                # Determine window/level mode: use displayed levels if requested
-                if (str(self.window_level_mode).lower() == 'displayed') and (self.levels is not None):
-                    vmin, vmax = self.levels
-                else:
-                    # 'rescale' or no displayed levels -> compute per-frame
-                    vmin = np.nanmin(frame_data)
-                    vmax = np.nanmax(frame_data)
-                
-                if vmax > vmin:
-                    normalized = (frame_data - vmin) / (vmax - vmin)
-                else:
-                    normalized = np.zeros_like(frame_data)
-                
-                frame_uint8 = np.clip(normalized * 255, 0, 255).astype(np.uint8)
-                
-                # Convert grayscale to RGB for video formats
-                lut = getattr(self, 'lut', None)
-                if frame_uint8.ndim == 2 and lut is not None:
-                    try:
-                        lut_arr = np.asarray(lut)
-                        if lut_arr.shape[1] >= 3:
-                            lut_rgb = np.asarray(lut_arr[:, :3], dtype=np.uint8)
-                            frame_rgb = lut_rgb[frame_uint8]
-                        else:
-                            frame_rgb = np.stack([frame_uint8] * 3, axis=2)
-                    except Exception:
-                        frame_rgb = np.stack([frame_uint8] * 3, axis=2)
-                else:
-                    if frame_uint8.ndim == 2:
-                        frame_rgb = np.stack([frame_uint8] * 3, axis=2)
-                    else:
-                        frame_rgb = frame_uint8
-
-                if self.transpose:
-                    frame_rgb = np.transpose(frame_rgb, (1, 0, 2))
-
-                # Flips
-                try:
-                    primary = self.selected_indices[0]
-                    if not self.axis_flipped[primary]: # numpy uses matrix orientation by default
-                        frame_rgb = np.flipud(frame_rgb)
-                    secondary = self.selected_indices[1]
-                    if self.axis_flipped[secondary]:
-                        frame_rgb = np.fliplr(frame_rgb)
-                except Exception:
-                    pass
+                display_frame = make_export_frame(
+                    self.data,
+                    self.view_state,
+                    self.export_dim,
+                    frame_idx,
+                    colormap_lut=self.colormap_lut,
+                )
+                frame_rgb = self._display_image_to_rgb(display_frame)
+                frame_rgb = self._apply_view_flips(frame_rgb)
 
                 # Apply pixel ratio scaling
                 frame_rgb = self._apply_pixel_ratio(frame_rgb)
@@ -156,6 +97,53 @@ class VideoExportWorker(QtCore.QThread):
             
         except Exception as e:
             self.export_finished.emit(False, f"Export failed: {str(e)}")
+
+    def _display_image_to_rgb(self, display_image):
+        frame_data = np.asarray(display_image.data)
+
+        if frame_data.ndim == 3 and frame_data.shape[-1] in (3, 4):
+            return np.ascontiguousarray(frame_data[..., :3].astype(np.uint8))
+
+        if (str(self.window_level_mode).lower() == 'displayed') and (self.levels is not None):
+            vmin, vmax = self.levels
+        elif display_image.default_levels is not None:
+            vmin, vmax = display_image.default_levels
+        else:
+            vmin = np.nanmin(frame_data)
+            vmax = np.nanmax(frame_data)
+
+        if vmax > vmin:
+            normalized = (frame_data - vmin) / (vmax - vmin)
+        else:
+            normalized = np.zeros_like(frame_data)
+
+        frame_uint8 = np.clip(normalized * 255, 0, 255).astype(np.uint8)
+
+        lut = self.colormap_lut
+        if frame_uint8.ndim == 2 and lut is not None:
+            try:
+                lut_arr = np.asarray(lut)
+                if lut_arr.ndim == 2 and lut_arr.shape[1] >= 3:
+                    lut_rgb = np.asarray(lut_arr[:, :3], dtype=np.uint8)
+                    return lut_rgb[frame_uint8]
+            except Exception:
+                pass
+
+        if frame_uint8.ndim == 2:
+            return np.stack([frame_uint8] * 3, axis=2)
+        return frame_uint8
+
+    def _apply_view_flips(self, frame_rgb):
+        try:
+            primary = self.selected_indices[0]
+            if not self.axis_flipped[primary]:  # numpy uses matrix orientation by default
+                frame_rgb = np.flipud(frame_rgb)
+            secondary = self.selected_indices[1]
+            if self.axis_flipped[secondary]:
+                frame_rgb = np.fliplr(frame_rgb)
+        except Exception:
+            pass
+        return frame_rgb
     
     def _save_gif(self, frames):
         """Save frames as GIF using PIL"""

@@ -11,7 +11,7 @@ def _show_selector(filepath, selector_class_name, interpret_as_complex):
     prefer_pyside6()
 
     from pyqtgraph.Qt import QtWidgets
-    from .arrayscope import arrayscope
+    from .launch import arrayscope
     import sys
 
     # Import appropriate selector class (not checking filename twice with this approach)
@@ -101,7 +101,7 @@ class DatasetSelector:
         Select dataset (with GUI if needed) and open in arrayscope.
         Returns True if successful, False otherwise.
         """
-        from .arrayscope import arrayscope
+        from .launch import arrayscope
         
         # Auto-load if single compatible dataset
         if not self.requires_gui():
