@@ -1,0 +1,13 @@
+# Ideas
+
+## Candidate features
+- ...
+
+## Technical debt
+- ...
+
+## UX ideas
+- ...
+
+## Maybe never
+- ...
