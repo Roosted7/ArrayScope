@@ -327,6 +327,8 @@ class NDSliceWindow(QtWidgets.QMainWindow):
     # Styling constants — use pt (point) units so font sizes are DPI-independent
     DIMENSION_LABEL_STYLE = "QLabel { font-size: 9pt; padding: 1px; margin: 2px; }"
     FLIP_ICON_STYLE = "QLabel { font-size: 15pt; padding: 0px; margin: 0px; color: palette(text); }"
+    SHIFT_LABEL_STYLE = "QLabel { font-size: 8pt; padding: 1px 2px; margin: 0px; color: palette(mid); }"
+    SHIFT_LABEL_ACTIVE_STYLE = "QLabel { font-size: 8pt; padding: 1px 2px; margin: 0px; font-weight: bold; color: darkMagenta; }"
     BUTTON_STYLE = "QPushButton { font-size: 9pt; padding: 2px; margin: 2px; } QPushButton:disabled { color: palette(mid); }"
     SPINBOX_STYLE = "QSpinBox { font-size: 9pt; } QSpinBox:disabled { color: palette(mid); }"
     RADIO_BUTTON_STYLE = "QRadioButton { font-size: 9pt; }"
@@ -354,6 +356,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         self._selector_class_name = selector_class_name
         
         self.axis_flipped = [False] * data.ndim  # Track flip state so that one can toggle dims and come back to the same flip state
+        self.fftshifted = [False] * data.ndim
         
         # If data is real-valued and has size-2 dimensions, ndslice can combine them as complex (ISMRMD uses this for real/imag parts)
         if np.iscomplexobj(data):
@@ -409,6 +412,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             'labels': {
                 'dims': [QtWidgets.QLabel('[' + str(data.shape[i]) + ']', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
                 'flip': [QtWidgets.QLabel('', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
+                'shift': [QtWidgets.QLabel('sh', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
                 'complex': [QtWidgets.QLabel('', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
                 'primary': QtWidgets.QLabel('Y'),
                 'secondary': QtWidgets.QLabel('X'),
@@ -469,6 +473,12 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             flip_label.setStyleSheet(self.FLIP_ICON_STYLE)
             flip_label.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignLeft | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
             self._set_emoji_font(flip_label)
+
+        for i, shift_label in enumerate(self.widgets['labels']['shift']):
+            shift_label.mousePressEvent = lambda event, i=i: self.fftshiftClicked(event, i)
+            shift_label.setStyleSheet(self.SHIFT_LABEL_STYLE)
+            shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
+            shift_label.setToolTip(f"Toggle fftshift along dim {i}")
         
         # Set up complex indicator labels with click handlers
         for i, complex_label in enumerate(self.widgets['labels']['complex']):
@@ -519,6 +529,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             # Add dimension label (centered, takes remaining space)
             self.widgets['labels']['dims'][i].setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignCenter)
             label_layout.addWidget(self.widgets['labels']['dims'][i], 1)
+            label_layout.addWidget(self.widgets['labels']['shift'][i])
             # Add complex indicator (ℝ/ℂ)
             label_layout.addWidget(self.widgets['labels']['complex'][i])
             
@@ -792,6 +803,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         
         # Initialize complex indicators for size-2 real dimensions
         self.update_complex_indicators()
+        self.update_shift_indicators()
         
         if complex_dim is not None: # user requested combining as complex
             if complex_dim < 0 or complex_dim >= data.ndim:
@@ -868,6 +880,39 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         """Apply inverse FFT along specified dimension"""
         self.data = np.fft.ifftshift(np.fft.fft(np.fft.fftshift(self.data), axis=dim, norm='ortho'))
         self._update_channel_controls()
+
+    def fftshiftClicked(self, event, dim):
+        """Toggle fftshift along one array dimension without applying an FFT."""
+        if self.singleton[dim]:
+            return
+
+        if self.fftshifted[dim]:
+            self.data = np.fft.ifftshift(self.data, axes=dim)
+            self.fftshifted[dim] = False
+        else:
+            self.data = np.fft.fftshift(self.data, axes=dim)
+            self.fftshifted[dim] = True
+
+        self.update_shift_indicators()
+        self.update()
+
+    def update_shift_indicators(self):
+        for i, shift_label in enumerate(self.widgets['labels']['shift']):
+            if self.singleton[i]:
+                shift_label.setText('')
+                shift_label.setToolTip('')
+                shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
+                continue
+
+            shift_label.setText('sh')
+            shift_label.setToolTip(
+                f"{'Undo fftshift' if self.fftshifted[i] else 'Apply fftshift'} along dim {i}"
+            )
+            shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
+            if self.fftshifted[i]:
+                shift_label.setStyleSheet(self.SHIFT_LABEL_ACTIVE_STYLE)
+            else:
+                shift_label.setStyleSheet(self.SHIFT_LABEL_STYLE)
     
     def flipAxisClicked(self, event, dim):
         """Handle click on flip axis icon"""
@@ -995,6 +1040,10 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         """Combine a size-2 real dimension into complex (real+imag), keeping singleton dimension (makes indexing easier)"""
         if not self.can_combine_as_complex[dim] or self.combined_as_complex[dim]:
             return
+
+        if self.fftshifted[dim]:
+            self.data = np.fft.ifftshift(self.data, axes=dim)
+            self.fftshifted[dim] = False
         
         # Build slices to extract real and imaginary parts
         real_slice = [slice(None)] * self.data.ndim
@@ -1490,6 +1539,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                 self.widgets['buttons']['secondary'][self.selected_indices[1]].setChecked(True)
         
         self.update_flip_icons()
+        self.update_shift_indicators()
     
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts"""
@@ -1952,9 +2002,11 @@ class NDSliceWindow(QtWidgets.QMainWindow):
                     break
 
         self.axis_flipped = [False] * new_ndim
+        self.fftshifted = [False] * new_ndim
 
         self._update_channel_controls()
         self.update_complex_indicators()
+        self.update_shift_indicators()
         if len(self.selected_indices) >= 1:
             self.changedIndex(True, 0, self.selected_indices[0], update=False)
         if len(self.selected_indices) >= 2:
