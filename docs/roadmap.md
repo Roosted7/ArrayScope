@@ -8,7 +8,7 @@
 - [x] Add complex display tests.
 
 ## Should
-- [ ] Dimension context menu from operation registry.
+- [x] Dimension context menu from operation registry.
 - [ ] Interactive line profile over selected dimension.
 - [ ] Linked window state sync.
 

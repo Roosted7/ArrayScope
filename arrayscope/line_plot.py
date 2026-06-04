@@ -100,12 +100,15 @@ class LinePlotController:
         self.widget.getViewBox().sigRangeChanged.connect(self.on_range_changed)
 
     def update(self, data, view_state):
+        self.update_line_result(make_line(data, view_state), view_state)
+
+    def update_line_result(self, line_result, view_state):
         self.widget.clear()
         self.widget.addItem(self.crosshair)
         self.crosshair.setVisible(False)
 
         try:
-            line_data = make_line(data, view_state).data
+            line_data = line_result.data
 
             if line_data.ndim == 1:
                 self.current_line_data = line_data
@@ -129,7 +132,7 @@ class LinePlotController:
             else:
                 print(f"Warning: Expected 1D data but got {line_data.ndim}D data with shape {line_data.shape}")
 
-            self.widget.setLabel("bottom", f"Index along dim {self.owner.line_plot_dimension}")
+            self.widget.setLabel("bottom", f"Index along dim {view_state.line_axis}")
 
         except Exception as e:
             print(f"Line plot update failed: {e}")
@@ -137,7 +140,7 @@ class LinePlotController:
 
     def toggle_style(self):
         self.plot_style = "bar" if self.plot_style == "line" else "line"
-        self.update(self.owner.data, self.owner.view_state)
+        self.owner.update_line_plot()
 
     def hide_crosshair(self):
         if self.crosshair is not None and self.crosshair.isVisible():

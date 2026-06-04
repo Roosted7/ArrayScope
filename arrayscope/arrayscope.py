@@ -12,17 +12,13 @@ from enum import Enum
 from pathlib import Path
 from .colormaps import gray_colormap, named_colormap, phase_colormap
 from .dialogs import SaveRangeDialog
-from .dim_ops import (
-    apply_fftshift,
-    centered_fft,
-    centered_ifft,
-    combine_real_imag_axis,
-    split_complex_axis,
-    undo_fftshift,
-)
 from .imageview2d import ImageView2D
 from .line_plot import LinePlotController
-from .slice_engine import make_image
+from .operation_dock import OperationStackDock
+from .operation_evaluator import OperationEvaluator
+from .operation_pipeline import ArrayDocument
+from .operation_recipes import load_recipe, save_recipe
+from .operation_registry import create_operation, operation_entries
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 from .view_state import ChannelMode, ScaleMode, ViewState
 
@@ -60,7 +56,10 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         super(ArrayScopeWindow, self).__init__()
         self.resize(800,800)
 
-        self.data = data
+        self.base_data = data
+        self.document = ArrayDocument(self.base_data)
+        self.operation_evaluator = OperationEvaluator(self.document)
+        self.data = self.operation_evaluator.current_data()
         self.singleton = [e == 1 for e in list(data.shape)]
         self.selected_indices = []
         self.channel = None
@@ -78,7 +77,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             self.can_combine_as_complex = [False] * data.ndim
         else:
             self.can_combine_as_complex = [data.shape[i] == 2 for i in range(data.ndim)]
-        self.combined_as_complex = [False] * data.ndim
+        self.combined_as_complex = [np.iscomplexobj(data) and data.shape[i] == 1 for i in range(data.ndim)]
         
         # Store complex_dim for later use (after widgets are created)
         self._initial_complex_dim = complex_dim
@@ -130,7 +129,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             'labels': {
                 'dims': [QtWidgets.QLabel('[' + str(data.shape[i]) + ']', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
                 'flip': [QtWidgets.QLabel('', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
-                'shift': [QtWidgets.QLabel('sh', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
+                'shift': [QtWidgets.QLabel('', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
                 'complex': [QtWidgets.QLabel('', alignment=Qt.QtCore.Qt.AlignmentFlag.AlignCenter) for i in range(data.ndim)],
                 'primary': QtWidgets.QLabel('Y'),
                 'secondary': QtWidgets.QLabel('X'),
@@ -183,7 +182,9 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         for i, label in enumerate(self.widgets['labels']['dims']):
             label.mousePressEvent = lambda event, i=i, l=label: self.dimClicked(event, l, i)
             label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
-            label.setToolTip(f"Apply centered FFT along dim {i}")
+            label.setContextMenuPolicy(Qt.QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+            label.customContextMenuRequested.connect(lambda pos, label=label, dim=i: self._show_operation_context_menu(pos, label, dim))
+            label.setToolTip(f"Left click: centered FFT along dim {i}. Right click: operations.")
 
         
         # Set up flip labels with click handlers
@@ -193,11 +194,8 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             flip_label.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignLeft | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
             self._set_emoji_font(flip_label)
 
-        for i, shift_label in enumerate(self.widgets['labels']['shift']):
-            shift_label.mousePressEvent = lambda event, i=i: self.fftshiftClicked(event, i)
-            shift_label.setStyleSheet(self.SHIFT_LABEL_STYLE)
-            shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
-            shift_label.setToolTip(f"Toggle fftshift along dim {i}")
+        for shift_label in self.widgets['labels']['shift']:
+            shift_label.setVisible(False)
         
         # Set up complex indicator labels with click handlers
         for i, complex_label in enumerate(self.widgets['labels']['complex']):
@@ -248,7 +246,6 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             # Add dimension label (centered, takes remaining space)
             self.widgets['labels']['dims'][i].setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignCenter)
             label_layout.addWidget(self.widgets['labels']['dims'][i], 1)
-            label_layout.addWidget(self.widgets['labels']['shift'][i])
             # Add complex indicator (ℝ/ℂ)
             label_layout.addWidget(self.widgets['labels']['complex'][i])
             
@@ -425,6 +422,16 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         tmp = QtWidgets.QWidget()
         tmp.setLayout(self.layouts['main'])
         self.setCentralWidget(tmp)
+        self.operation_dock = OperationStackDock(
+            self,
+            on_undo=self.undo_last_operation,
+            on_clear=self.clear_operations,
+            on_save_recipe=self.save_operation_recipe,
+            on_load_recipe=self.load_operation_recipe,
+            on_materialize=self.materialize_current_array,
+        )
+        self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
+        self._update_operation_dock()
         
         # Initialize complex indicators for size-2 real dimensions
         self.update_complex_indicators()
@@ -484,6 +491,86 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             axis_fftshifted=tuple(self.fftshifted),
         )
 
+    def _set_document(self, document):
+        evaluator = OperationEvaluator(document)
+        data = evaluator.current_data()
+        self.document = document
+        self.operation_evaluator = evaluator
+        self.data = data
+        self._sync_controls_to_current_data()
+        self._force_autolevel = True
+        self._update_channel_controls()
+        self._update_operation_dock()
+
+    def _sync_controls_to_current_data(self):
+        ndim = self.data.ndim
+        self.singleton = [size == 1 for size in self.data.shape]
+        if len(self.axis_flipped) != ndim:
+            self.axis_flipped = [False] * ndim
+        if len(self.fftshifted) != ndim:
+            self.fftshifted = [False] * ndim
+        self.domain = [Domain.NATIVE for _ in range(ndim)]
+
+        if np.iscomplexobj(self.data):
+            self.can_combine_as_complex = [False] * ndim
+        else:
+            self.can_combine_as_complex = [self.data.shape[i] == 2 for i in range(ndim)]
+        self.combined_as_complex = [np.iscomplexobj(self.data) and self.data.shape[i] == 1 for i in range(ndim)]
+
+        valid_dims = [i for i in range(ndim) if not self.singleton[i]]
+        if ndim == 1:
+            self.selected_indices = [0]
+        elif ndim >= 2:
+            selected = [i for i in self.selected_indices if i < ndim and not self.singleton[i]]
+            for dim in valid_dims + list(range(ndim)):
+                if len(selected) >= 2:
+                    break
+                if dim not in selected:
+                    selected.append(dim)
+            self.selected_indices = selected[:2]
+        else:
+            self.selected_indices = []
+
+        if ndim >= 1:
+            if self.line_plot_dimension >= ndim or self.singleton[self.line_plot_dimension]:
+                self.line_plot_dimension = valid_dims[0] if valid_dims else 0
+
+        for i, container in enumerate(getattr(self, "dim_containers", [])):
+            visible = i < ndim
+            container.setVisible(visible)
+            self.widgets['buttons']['primary'][i].setVisible(visible)
+            self.widgets['buttons']['secondary'][i].setVisible(visible)
+            self.widgets['spins']['slice_indices'][i].setVisible(visible)
+            if visible:
+                self.widgets['labels']['dims'][i].setText(f'[{self.data.shape[i]}]')
+                self.widgets['spins']['slice_indices'][i].setMaximum(self.data.shape[i] - 1)
+                self.widgets['spins']['slice_indices'][i].setValue(
+                    min(self.widgets['spins']['slice_indices'][i].value(), self.data.shape[i] - 1)
+                )
+
+        if ndim == 1:
+            self.tab_widget.setTabEnabled(0, False)
+            self.tab_widget.setCurrentIndex(1)
+        elif ndim >= 2:
+            self.tab_widget.setTabEnabled(0, True)
+
+        self.update_complex_indicators()
+        self.update_shift_indicators()
+        self.update_dimension_controls()
+
+    def _update_operation_dock(self):
+        if hasattr(self, "operation_dock"):
+            self.operation_dock.set_operations(self.document.operations)
+
+    def _replace_base_data(self, data):
+        self.base_data = data
+        self.document = ArrayDocument(self.base_data)
+        self.operation_evaluator = OperationEvaluator(self.document)
+        self.data = self.operation_evaluator.current_data()
+        self._sync_controls_to_current_data()
+        self._update_channel_controls()
+        self._update_operation_dock()
+
     def _sync_view_state_from_window(self):
         self.view_state = self._make_view_state()
         return self.view_state
@@ -493,7 +580,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             return (0,) * self.data.ndim
 
         indices = []
-        for axis, spinbox in enumerate(self.widgets['spins']['slice_indices']):
+        for axis, spinbox in enumerate(self.widgets['spins']['slice_indices'][: self.data.ndim]):
             indices.append(max(0, min(spinbox.value(), self.data.shape[axis] - 1)))
         return tuple(indices)
 
@@ -517,7 +604,9 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
 
     
     def dimClicked(self, event, label, dim):
-        if self.singleton[dim]:
+        if dim >= self.data.ndim or self.singleton[dim]:
+            return
+        if event.button() == Qt.QtCore.Qt.MouseButton.RightButton:
             return
     
         p = QtGui.QPalette()
@@ -553,47 +642,153 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.update_line_plot()
         
     def _apply_fft(self, dim):
-        """Apply forward FFT along specified dimension"""
-        self.data = centered_fft(self.data, dim)
-        self._update_channel_controls()
+        """Apply forward FFT along specified dimension."""
+        self._append_operation("centered_fft", dim)
         
     def _apply_ifft(self, dim):
-        """Apply inverse FFT along specified dimension"""
-        self.data = centered_ifft(self.data, dim)
-        self._update_channel_controls()
+        """Apply inverse FFT along specified dimension."""
+        self._append_operation("centered_ifft", dim)
 
-    def fftshiftClicked(self, event, dim):
-        """Toggle fftshift along one array dimension without applying an FFT."""
-        if self.singleton[dim]:
+    def _show_operation_context_menu(self, pos, widget, dim):
+        if dim >= self.data.ndim:
             return
 
-        if self.fftshifted[dim]:
-            self.data = undo_fftshift(self.data, dim)
-            self.fftshifted[dim] = False
-        else:
-            self.data = apply_fftshift(self.data, dim)
-            self.fftshifted[dim] = True
+        menu = QtWidgets.QMenu(self)
+        for entry in operation_entries():
+            action = menu.addAction(entry.label)
+            action.setData(entry.id)
+            action.setEnabled(self._operation_entry_enabled(entry, dim))
+            action.triggered.connect(lambda checked=False, operation_id=entry.id: self._append_operation(operation_id, dim))
 
-        self.update_shift_indicators()
+        menu.exec(widget.mapToGlobal(pos))
+
+    def _operation_entry_enabled(self, entry, dim):
+        if dim >= self.data.ndim:
+            return False
+        if entry.id in {"mean", "rss", "sum", "max", "min"} and self.data.ndim <= 1:
+            return False
+        if entry.id == "combine_real_imag":
+            return (not np.iscomplexobj(self.data)) and self.data.shape[dim] == 2
+        if entry.id == "split_complex":
+            return np.iscomplexobj(self.data) and self.data.shape[dim] == 1
+        return True
+
+    def _append_operation(self, operation_id, dim=None):
+        try:
+            parameters = self._collect_operation_parameters(operation_id, dim)
+            if parameters is None:
+                return
+            operation = create_operation(operation_id, axis=dim, parameters=parameters)
+            new_document = self.document.with_operation(operation)
+            if len(new_document.current_shape) < 1:
+                raise ValueError("operation would produce a scalar, which this viewer cannot display yet")
+            self._set_document(new_document)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Operation Error", f"Failed to apply operation:\n{e}")
+            return
+
+        self.update()
+
+    def _collect_operation_parameters(self, operation_id, dim):
+        if operation_id != "crop":
+            return {}
+
+        axis_size = self.data.shape[dim]
+        start, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            "Crop Axis",
+            f"Start index for dim {dim}",
+            0,
+            0,
+            axis_size,
+            1,
+        )
+        if not ok:
+            return None
+
+        stop, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            "Crop Axis",
+            f"Stop index for dim {dim} (exclusive)",
+            axis_size,
+            start,
+            axis_size,
+            1,
+        )
+        if not ok:
+            return None
+
+        return {"start": start, "stop": stop}
+
+    def undo_last_operation(self):
+        self._set_document(self.document.without_last_operation())
+        self.update()
+
+    def clear_operations(self):
+        self._set_document(ArrayDocument(self.base_data))
+        self.update()
+
+    def save_operation_recipe(self):
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save operation recipe",
+            "arrayscope-recipe.json",
+            "JSON files (*.json)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".json"):
+            file_path += ".json"
+        try:
+            save_recipe(file_path, self.document.operations)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Recipe Save Error", f"Failed to save recipe:\n{e}")
+
+    def load_operation_recipe(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load operation recipe",
+            "",
+            "JSON files (*.json);;All files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            operations = load_recipe(file_path, self.base_data.shape)
+            document = ArrayDocument(self.base_data, operations=operations)
+            if len(document.current_shape) < 1:
+                raise ValueError("recipe produces a scalar, which this viewer cannot display yet")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Recipe Load Error", f"Failed to load recipe:\n{e}")
+            return
+        try:
+            self._set_document(document)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Recipe Load Error", f"Failed to load recipe:\n{e}")
+            return
+        self.update()
+
+    def materialize_current_array(self):
+        self.base_data = np.array(self.operation_evaluator.current_data(), copy=True)
+        self._set_document(ArrayDocument(self.base_data))
         self.update()
 
     def update_shift_indicators(self):
         for i, shift_label in enumerate(self.widgets['labels']['shift']):
+            if i >= self.data.ndim:
+                shift_label.setText('')
+                shift_label.setToolTip('')
+                shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
+                continue
             if self.singleton[i]:
                 shift_label.setText('')
                 shift_label.setToolTip('')
                 shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
                 continue
 
-            shift_label.setText('sh')
-            shift_label.setToolTip(
-                f"{'Undo fftshift' if self.fftshifted[i] else 'Apply fftshift'} along dim {i}"
-            )
-            shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
-            if self.fftshifted[i]:
-                shift_label.setStyleSheet(self.SHIFT_LABEL_ACTIVE_STYLE)
-            else:
-                shift_label.setStyleSheet(self.SHIFT_LABEL_STYLE)
+            shift_label.setText('')
+            shift_label.setToolTip('')
+            shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
     
     def flipAxisClicked(self, event, dim):
         """Handle click on flip axis icon"""
@@ -713,82 +908,23 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
     
     def complexOrRealClicked(self, event, dim):
         if self.can_combine_as_complex[dim] and not self.combined_as_complex[dim]:
-            # ℝ clicked - combine to complex
-            self.combineAsComplex(dim)
+            self._append_operation("combine_real_imag", dim)
         elif self.combined_as_complex[dim]:
-            # ℂ clicked - split back to real
-            self.splitToReal(dim)
+            self._append_operation("split_complex", dim)
     
     def combineAsComplex(self, dim):
-        """Combine a size-2 real dimension into complex (real+imag), keeping singleton dimension (makes indexing easier)"""
+        """Combine a size-2 real dimension into complex as an operation."""
         if not self.can_combine_as_complex[dim] or self.combined_as_complex[dim]:
             return
 
-        if self.fftshifted[dim]:
-            self.data = undo_fftshift(self.data, dim)
-            self.fftshifted[dim] = False
-        
-        self.data = combine_real_imag_axis(self.data, dim)
-
-        # Update state
-        self.combined_as_complex[dim] = True
-        self.can_combine_as_complex[dim] = False
-        self.singleton[dim] = True  # Now it's a singleton dimension
-        
-        # Once data is complex, no other dimension can be combined (all other size-2 dims become invalid)
-        for i in range(self.data.ndim):
-            if i != dim:
-                self.can_combine_as_complex[i] = False
-        
-        # If the converted dimension was in selected_indices or line_plot_dimension, we need to find a new valid selection
-        if dim in self.selected_indices:
-            # Find a new non-singleton dimension to replace it
-            for new_dim in range(self.data.ndim):
-                if not self.singleton[new_dim] and new_dim not in self.selected_indices:
-                    idx = self.selected_indices.index(dim)
-                    self.selected_indices[idx] = new_dim
-                    break
-        
-        # Same problem can happen with line plot.
-        if self.line_plot_dimension == dim:
-            for new_dim in range(self.data.ndim):
-                if not self.singleton[new_dim]:
-                    self.line_plot_dimension = new_dim
-                    break
-        
-        self._update_channel_controls()
-        
-        # Update UI
-        self.update_complex_indicators()
-        self.update_dimension_controls()
-        self.update()
+        self._append_operation("combine_real_imag", dim)
     
     def splitToReal(self, dim):
-        """Split a complex dimension back to real (real+imag as separate slices)"""
+        """Split a singleton complex dimension back to real/imag as an operation."""
         if not self.combined_as_complex[dim]:
             return
-        
-        self.data = split_complex_axis(self.data, dim)
-        
-        # Update state
-        self.combined_as_complex[dim] = False
-        self.can_combine_as_complex[dim] = True
-        self.singleton[dim] = False
-        
-        # Data is now real - re-enable combining for all size-2 dimensions
-        for i in range(self.data.ndim):
-            if self.data.shape[i] == 2:
-                self.can_combine_as_complex[i] = True
-        
-        # Update max value for the spinbox for this dimension
-        self.widgets['spins']['slice_indices'][dim].setMaximum(self.data.shape[dim] - 1)
-        
-        self._update_channel_controls()
-        
-        # Update UI
-        self.update_complex_indicators()
-        self.update_dimension_controls()
-        self.update()
+
+        self._append_operation("split_complex", dim)
     
     def getPixel(self, pos):
         img = self.img_view.image
@@ -860,7 +996,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             colormap_lut = None
             if self.view_state.channel == ChannelMode.COMPLEX:
                 colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
-            display_image = make_image(self.data, self.view_state, colormap_lut=colormap_lut)
+            display_image = self.operation_evaluator.image(self.view_state, colormap_lut=colormap_lut)
             if display_image.default_levels is not None and al:
                 prev_levels = display_image.default_levels
 
@@ -951,7 +1087,8 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
     
     def update_line_plot(self):
         self._sync_view_state_from_window()
-        self.line_plot.update(self.data, self.view_state)
+        line_result = self.operation_evaluator.line(self.view_state)
+        self.line_plot.update_line_result(line_result, self.view_state)
 
     def _on_view_range_changed(self):
         """Update display group title when view range changes (for fit mode)."""
@@ -1017,6 +1154,13 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             for i, w in enumerate(self.widgets['spins']['slice_indices']):
                 bPrim = self.widgets['buttons']['primary'][i]
                 bSecondary = self.widgets['buttons']['secondary'][i]
+                if i >= self.data.ndim:
+                    w.setEnabled(False)
+                    bPrim.setEnabled(False)
+                    bSecondary.setEnabled(False)
+                    bPrim.setChecked(False)
+                    bSecondary.setChecked(False)
+                    continue
                 
                 if self.singleton[i]:
                     w.setEnabled(False)
@@ -1043,6 +1187,13 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             for i, w in enumerate(self.widgets['spins']['slice_indices']):
                 bPrim = self.widgets['buttons']['primary'][i]
                 bSecondary = self.widgets['buttons']['secondary'][i]
+                if i >= self.data.ndim:
+                    w.setEnabled(False)
+                    bPrim.setEnabled(False)
+                    bSecondary.setEnabled(False)
+                    bPrim.setChecked(False)
+                    bSecondary.setChecked(False)
+                    continue
                 if self.singleton[i] == True:
                     w.setEnabled(False)
                     bPrim.setEnabled(False)
@@ -1164,7 +1315,15 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             sec_btn.customContextMenuRequested.connect( lambda pos, btn=sec_btn,  dim=i: self._show_export_context_menu(pos, btn, dim))
     
     def _show_export_context_menu(self, pos, btn, dim):
-        menu = QtWidgets.QMenu()
+        menu = QtWidgets.QMenu(self)
+
+        operations_menu = menu.addMenu("Operations")
+        for entry in operation_entries():
+            action = operations_menu.addAction(entry.label)
+            action.setEnabled(self._operation_entry_enabled(entry, dim))
+            action.triggered.connect(lambda checked=False, operation_id=entry.id: self._append_operation(operation_id, dim))
+
+        menu.addSeparator()
         
         export_action = menu.addAction("Export along this dimension...")
         export_action.triggered.connect(lambda: self._start_export(dim))
@@ -1363,7 +1522,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             self.close()
             return
 
-        self.data = new_data
+        self._replace_base_data(new_data)
         self.singleton = [e == 1 for e in new_data.shape]
 
         if np.iscomplexobj(new_data):
