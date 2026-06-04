@@ -1,18 +1,18 @@
-[![Python versions](https://img.shields.io/pypi/pyversions/ndslice.svg)](https://pypi.org/project/ndslice/)
-[![PyPI version](https://img.shields.io/pypi/v/ndslice.svg)](https://pypi.org/project/ndslice/)
-[![License](https://img.shields.io/github/license/henricryden/ndslice.svg)](https://github.com/henricryden/ndslice/blob/main/LICENSE)
-[![Downloads](https://static.pepy.tech/personalized-badge/ndslice?period=total&units=international_system&left_color=black&right_color=green&left_text=downloads)](https://pepy.tech/projects/ndslice)
-# ndslice
+[![Python versions](https://img.shields.io/pypi/pyversions/arrayscope.svg)](https://pypi.org/project/arrayscope/)
+[![PyPI version](https://img.shields.io/pypi/v/arrayscope.svg)](https://pypi.org/project/arrayscope/)
+[![License](https://img.shields.io/github/license/henricryden/arrayscope.svg)](https://github.com/henricryden/arrayscope/blob/main/LICENSE)
+[![Downloads](https://static.pepy.tech/personalized-badge/arrayscope?period=total&units=international_system&left_color=black&right_color=green&left_text=downloads)](https://pepy.tech/projects/arrayscope)
+# arrayscope
 
 **Quick interactive visualization for N-dimensional NumPy arrays**
 
 A python package for browsing slices, applying FFTs, and inspecting data.
 
-Quickly checking multi-dimensional data usually means writing the same matplotlib boilerplate over and over. This tool lets you just call `ndslice(data)` and interactively explore what you've got.
+Quickly checking multi-dimensional data usually means writing the same matplotlib boilerplate over and over. This tool lets you just call `arrayscope(data)` and interactively explore what you've got.
 
 ## Usage
 ```python
-from ndslice import ndslice
+from arrayscope import arrayscope
 import numpy as np
 
 # Create some data
@@ -24,7 +24,7 @@ mag = np.exp(-(X**2 + Y**2 + Z**2) / 10)
 pha = np.pi/4 * (X + Y + Z)
 complex_data = mag * np.exp(1j * pha)
 
-ndslice(complex_data, title='3D Complex Gaussian')
+arrayscope(complex_data, title='3D Complex Gaussian')
 ```
 
 ![Showcase](docs/images/showcase.gif)
@@ -45,7 +45,7 @@ Right-clicking a dimension button to export a video or PNG frames along that dim
 The video export functionality is optional, and can be installed with
 
 ```bash
-pip install ndslice[video_export]
+pip install arrayscope[video_export]
 ```
 ![Export](docs/images/video_export.gif)
 
@@ -77,34 +77,34 @@ Flip the primary axis for matrix-style (origin upper-left).
 
 By default, windows open in separate processes, allowing multiple simultaneous views:
 ```python
-ndslice(data1)
-ndslice(data2) # Both windows appear
+arrayscope(data1)
+arrayscope(data2) # Both windows appear
 ```
 
 Use `block=True` to wait for the window to close before continuing:
 ```python
-ndslice(data1, block=True)  # Script pauses here
-ndslice(data2)  # Shown after first closes
+arrayscope(data1, block=True)  # Script pauses here
+arrayscope(data2)  # Shown after first closes
 ```
 
-If Qt is already initialized in the current process, `ndslice(..., block=False)`
+If Qt is already initialized in the current process, `arrayscope(..., block=False)`
 cannot safely fork a child process. In that case:
 
-- In IPython/Jupyter with `%gui qt`, ndslice opens inline in the current process (still non-blocking).
-- Without an active Qt event loop, ndslice falls back to blocking mode and emits a warning.
+- In IPython/Jupyter with `%gui qt`, arrayscope opens inline in the current process (still non-blocking).
+- Without an active Qt event loop, arrayscope falls back to blocking mode and emits a warning.
 
 ### Command Line
 
 ```bash
-ndslice data.npy # Numpy file
-ndslice image.nii.gz
-ndslice image.dcm
-ndslice some_dicom_dir/ # Automatically attemps to form an nd-array from DICOM the files
-ndslice --help   # Show all options
+arrayscope data.npy # Numpy file
+arrayscope image.nii.gz
+arrayscope image.dcm
+arrayscope some_dicom_dir/ # Automatically attemps to form an nd-array from DICOM the files
+arrayscope --help   # Show all options
 ```
 
 **File support**
-ndslice has CLI support and can conveniently display:
+arrayscope has CLI support and can conveniently display:
 | Format | File suffix | Requirement |
 |---|---:|---|
 | NumPy | `.npy`, `.npz` | NumPy |
@@ -118,9 +118,9 @@ ndslice has CLI support and can conveniently display:
 
 HDF5 files can be compound complex dtype, or real/imag fields.
 
-For DICOM directories, ndslice does not infer series dimensions itself. It runs `dcm2niix`, then loads the produced NIfTI volume.
+For DICOM directories, arrayscope does not infer series dimensions itself. It runs `dcm2niix`, then loads the produced NIfTI volume.
 
-If there are multiple datasets in the file, a selection GUI appears which highlights arrays supported by ndslice (essentially numeric).
+If there are multiple datasets in the file, a selection GUI appears which highlights arrays supported by arrayscope (essentially numeric).
 Double click to open.
 
 ![Selector](docs/images/selector.png)
@@ -131,9 +131,9 @@ Double click to open.
 ### From PyPI
 
 ```bash
-pip install ndslice
+pip install arrayscope
 # Or, if you want just the package without pulling in dependencies:
-pip install --no-deps ndslice
+pip install --no-deps arrayscope
 ```
 
 For DICOM directories you also need the external `dcm2niix` binary available on `PATH`. A practical install route is:
@@ -142,16 +142,16 @@ For DICOM directories you also need the external `dcm2niix` binary available on 
 conda install -c conda-forge dcm2niix
 ```
 
-If `dcm2niix` is missing or conversion fails, ndslice reports a clear error instead of trying to infer the series layout itself.
+If `dcm2niix` is missing or conversion fails, arrayscope reports a clear error instead of trying to infer the series layout itself.
 
 ### From source
 
 ```bash
-git clone https://github.com/henricryden/ndslice.git
-cd ndslice
+git clone https://github.com/henricryden/arrayscope.git
+cd arrayscope
 
 # Use directly without installing
-python -m ndslice data.npy
+python -m arrayscope data.npy
 
 pip install -e .
 ```

@@ -356,7 +356,7 @@ def _run_dcm2niix(directory_path, output_dir):
         dcm2niix_path,
         '-b', 'y',
         '-z', 'n',
-        '-f', 'ndslice_%s',
+        '-f', 'arrayscope_%s',
         '-o', str(output_dir),
         str(directory_path),
     ]
@@ -393,7 +393,7 @@ class DicomDirectoryLoader:
                 f"No DICOM files with suffix .dcm were found under directory: {self.directory_path}"
             )
 
-        with tempfile.TemporaryDirectory(prefix='ndslice_dicom_') as temp_dir:
+        with tempfile.TemporaryDirectory(prefix='arrayscope_dicom_') as temp_dir:
             nifti_outputs = _run_dcm2niix(self.directory_path, temp_dir)
             arrays = []
             nifti_paths = []
@@ -417,7 +417,7 @@ class DicomDirectoryLoader:
                 if len(set(shapes)) != 1:
                     paths = ', '.join(Path(path).name for path in nifti_paths)
                     raise ValueError(
-                        "dcm2niix produced multiple NIfTI files with different shapes, so ndslice "
+                        "dcm2niix produced multiple NIfTI files with different shapes, so arrayscope "
                         f"cannot stack them automatically. Outputs: {paths}"
                     )
 

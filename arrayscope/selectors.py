@@ -1,5 +1,5 @@
 """
-ndslice GUI for choosing datasets from multi-dataset files.
+arrayscope GUI for choosing datasets from multi-dataset files.
 Handles mat, h5, and npz files.
 """
 import numpy as np
@@ -7,7 +7,7 @@ import numpy as np
 
 def _show_selector(filepath, selector_class_name, interpret_as_complex):
     from pyqtgraph.Qt import QtWidgets
-    from .ndslice import ndslice
+    from .arrayscope import arrayscope
     import sys
 
     # Import appropriate selector class (not checking filename twice with this approach)
@@ -35,7 +35,7 @@ def _show_selector(filepath, selector_class_name, interpret_as_complex):
     if selected_path := selector.show():
         data = selector.load_data(selected_path)
         selector.close()
-        ndslice(data=data,
+        arrayscope(data=data,
                 title=f"{filepath.name} - {selected_path}",
                 block=True,
                 complex_dim=interpret_as_complex,
@@ -92,10 +92,10 @@ class DatasetSelector:
     
     def view(self, block=False):
         """
-        Select dataset (with GUI if needed) and open in ndslice.
+        Select dataset (with GUI if needed) and open in arrayscope.
         Returns True if successful, False otherwise.
         """
-        from .ndslice import ndslice
+        from .arrayscope import arrayscope
         
         # Auto-load if single compatible dataset
         if not self.requires_gui():
@@ -103,7 +103,7 @@ class DatasetSelector:
             if result:
                 name, data = result
                 self.close()
-                ndslice(data=data,
+                arrayscope(data=data,
                         title=f"{self.filepath.name} - {name}",
                         block=block,
                         complex_dim=self.interpret_as_complex,
@@ -123,7 +123,7 @@ class DatasetSelector:
             if selected_path := self.show():
                 data = self.load_data(selected_path)
                 self.close()
-                ndslice(data=data,
+                arrayscope(data=data,
                         title=f"{self.filepath.name} - {selected_path}",
                         block=True,
                         complex_dim=self.interpret_as_complex,
