@@ -5,7 +5,7 @@
 ## [0.7.0]
 
 ### Added
-- **DICOM directory loading** — `ndslice some_dicom_dir/` now converts a directory of `.dcm` files via `dcm2niix` and loads the produced NIfTI volume. Single `.dcm` files still load through `pydicom`.
+- **DICOM directory loading** — `arrayscope some_dicom_dir/` now converts a directory of `.dcm` files via `dcm2niix` and loads the produced NIfTI volume. Single `.dcm` files still load through `pydicom`.
 - **Save current array as NumPy** — Ctrl+S now saves the current array state to `.npy`, with a range-selection dialog and optional singleton-dimension squeezing.
 
 ## [0.6.1]
@@ -36,7 +36,7 @@
 ## [0.5.0] - 2026-02-18
 
 ### Added
-- **PyQt6 support** — works with both PyQt5 (default) and PyQt6 via optional dependency: `pip install ndslice[pyqt6]`
+- **PyQt6 support** — works with both PyQt5 (default) and PyQt6 via optional dependency: `pip install arrayscope[pyqt6]`
 - **HiDPI display support**
 - **Colormaps** — Added colormaps with keyboard shortcuts:
   - Ctrl+1: Gray

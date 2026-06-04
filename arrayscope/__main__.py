@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-Command-line interface for ndslice.
+Command-line interface for arrayscope.
 """
 import argparse
 import numpy as np
 from pathlib import Path
-from .ndslice import ndslice
+from .arrayscope import arrayscope
 from .selectors import H5DatasetSelector, NpzDatasetSelector, MatDatasetSelector
 from .file_interpreters import load_path
 
 
 def main():
     parser = argparse.ArgumentParser(
-        prog='ndslice',
+        prog='arrayscope',
         description='Interactive N-dimensional array viewer',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  ndslice data.npy                      # View single file
-  ndslice data.h5 data2.npy data3.npz   # View multiple files
-  ndslice scan.REC                      # View Philips REC/XML pair
-  ndslice ref.cfl                       # View BART CFL/HDR pair
-    ndslice dicomdir/                     # Convert DICOM directory via dcm2niix, then view
-  ndslice scan.dcm                      # View DICOM file
-  ndslice scan.nii                      # View NIfTI file
-  ndslice data.txt                      # View text file with numeric data
+  arrayscope data.npy                      # View single file
+  arrayscope data.h5 data2.npy data3.npz   # View multiple files
+  arrayscope scan.REC                      # View Philips REC/XML pair
+  arrayscope ref.cfl                       # View BART CFL/HDR pair
+    arrayscope dicomdir/                     # Convert DICOM directory via dcm2niix, then view
+  arrayscope scan.dcm                      # View DICOM file
+  arrayscope scan.nii                      # View NIfTI file
+  arrayscope data.txt                      # View text file with numeric data
   
 For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatically appear.
         """
@@ -50,7 +50,7 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
                 detected_format = loaded.metadata.get('detected_format')
                 if detected_format:
                     title = f"{title} [{detected_format}]"
-                ndslice(data=loaded.data, title=title, block=False, filepath=filepath)
+                arrayscope(data=loaded.data, title=title, block=False, filepath=filepath)
                 continue
             
             # Multi-dataset formats - use selectors

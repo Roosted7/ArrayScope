@@ -1,4 +1,4 @@
-name: Publish ndslice to PyPI
+name: Publish arrayscope to PyPI
 
 on:
   release:

@@ -1,6 +1,6 @@
-"""Screenshot smoke-test for ndslice.
+"""Screenshot smoke-test for arrayscope.
 
-Directly instantiates NDSliceWindow (bypassing multiprocessing), renders it
+Directly instantiates ArrayScopeWindow (bypassing multiprocessing), renders it
 headlessly, and saves a PNG. Run via:
   xvfb-run -a python test/screenshot_test.py   # Linux
   python test/screenshot_test.py               # macOS / Windows
@@ -36,7 +36,7 @@ def take_screenshot(win, path: Path):
 def main():
     import argparse
     import pyqtgraph as pg
-    from ndslice.ndslice import NDSliceWindow
+    from arrayscope.arrayscope import ArrayScopeWindow
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--style', default='Fusion',
@@ -49,7 +49,7 @@ def main():
 
     app = pg.mkQApp()
     app.setStyle(args.style)
-    win = NDSliceWindow(data)
+    win = ArrayScopeWindow(data)
     win.setWindowTitle(f"CI test — {sys.platform} — style: {args.style}")
     win.resize(800, 800)
     win.show()

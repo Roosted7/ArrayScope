@@ -241,7 +241,7 @@ class SaveRangeDialog(QtWidgets.QDialog):
             for spinbox in (start_spinbox, end_spinbox):
                 spinbox.setRange(0, max_index)
                 spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-                spinbox.setStyleSheet(NDSliceWindow.SPINBOX_STYLE)
+                spinbox.setStyleSheet(ArrayScopeWindow.SPINBOX_STYLE)
                 spinbox.setFixedWidth(70)
 
             end_spinbox.setValue(max_index)
@@ -323,7 +323,7 @@ class SaveRangeDialog(QtWidgets.QDialog):
     def should_squeeze(self):
         return self._squeeze_checkbox.isChecked()
 
-class NDSliceWindow(QtWidgets.QMainWindow):
+class ArrayScopeWindow(QtWidgets.QMainWindow):
     # Styling constants — use pt (point) units so font sizes are DPI-independent
     DIMENSION_LABEL_STYLE = "QLabel { font-size: 9pt; padding: 1px; margin: 2px; }"
     FLIP_ICON_STYLE = "QLabel { font-size: 15pt; padding: 0px; margin: 0px; color: palette(text); }"
@@ -342,7 +342,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
             widget.setFont(font)
 
     def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
-        super(NDSliceWindow, self).__init__()
+        super(ArrayScopeWindow, self).__init__()
         self.resize(800,800)
 
         self.data = data
@@ -358,7 +358,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         self.axis_flipped = [False] * data.ndim  # Track flip state so that one can toggle dims and come back to the same flip state
         self.fftshifted = [False] * data.ndim
         
-        # If data is real-valued and has size-2 dimensions, ndslice can combine them as complex (ISMRMD uses this for real/imag parts)
+        # If data is real-valued and has size-2 dimensions, arrayscope can combine them as complex (ISMRMD uses this for real/imag parts)
         if np.iscomplexobj(data):
             self.can_combine_as_complex = [False] * data.ndim
         else:
@@ -1911,7 +1911,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         sliced_data = self.data[tuple(slice(start, stop) for start, stop in ranges)]
         output_data = np.squeeze(sliced_data) if range_dialog.should_squeeze() else sliced_data
 
-        default_name = 'ndslice.npy'
+        default_name = 'arrayscope.npy'
         if self._filepath is not None:
             source_path = Path(self._filepath)
             source_name = source_path.name
@@ -2007,7 +2007,7 @@ class NDSliceWindow(QtWidgets.QMainWindow):
         if new_ndim != old_ndim:
             # Per-dimension widgets were built for old_ndim and cannot be rebuilt in-place.
             # Open a fresh window with the new data and close this one.
-            win = NDSliceWindow(new_data,
+            win = ArrayScopeWindow(new_data,
                                 filepath=self._filepath,
                                 dataset_path=self._dataset_path,
                                 selector_class_name=self._selector_class_name)
@@ -2116,22 +2116,22 @@ def _retain_window_reference(app, win):
     Without a strong Python reference, some Qt bindings may garbage-collect the
     wrapper even while the native window is visible.
     """
-    live_windows = app.property("_ndslice_live_windows")
+    live_windows = app.property("_arrayscope_live_windows")
     if not isinstance(live_windows, list):
         live_windows = []
 
     live_windows.append(win)
-    app.setProperty("_ndslice_live_windows", live_windows)
+    app.setProperty("_arrayscope_live_windows", live_windows)
 
     def _release_reference(_=None, w=win, qapp=app):
-        refs = qapp.property("_ndslice_live_windows")
+        refs = qapp.property("_arrayscope_live_windows")
         if not isinstance(refs, list):
             return
         try:
             refs.remove(w)
         except ValueError:
             pass
-        qapp.setProperty("_ndslice_live_windows", refs)
+        qapp.setProperty("_arrayscope_live_windows", refs)
 
     win.destroyed.connect(_release_reference)
 
@@ -2142,7 +2142,7 @@ def _create_window(data, title='', complex_dim=None, filepath=None,
     app = pg.mkQApp()
     app.setStyle('Fusion')
 
-    win = NDSliceWindow(data, complex_dim=complex_dim, filepath=filepath,
+    win = ArrayScopeWindow(data, complex_dim=complex_dim, filepath=filepath,
                         dataset_path=dataset_path,
                         selector_class_name=selector_class_name)
     win.setWindowTitle(title)
@@ -2178,7 +2178,7 @@ def _show_window_inline(data, title='', complex_dim=None, filepath=None,
 
     return win
 
-def ndslice(data, title='', block=False, complex_dim=None, filepath=None,
+def arrayscope(data, title='', block=False, complex_dim=None, filepath=None,
             dataset_path=None, selector_class_name=None):
     if not isinstance(data, np.ndarray):
         raise TypeError("data must be a numpy array")
@@ -2199,12 +2199,12 @@ def ndslice(data, title='', block=False, complex_dim=None, filepath=None,
             return _show_window_inline(data, title, complex_dim, **kwargs)
 
         warnings.warn(
-            "Qt is already initialized, so ndslice cannot safely fork a child "
+            "Qt is already initialized, so arrayscope cannot safely fork a child "
             "process for non-blocking display. No active IPython Qt event-loop "
             "integration was detected, so an inline non-blocking window may freeze. "
             "Falling back to blocking mode in the current process. To avoid this, "
-            "use ndslice(..., block=True) explicitly, or in IPython run `%gui qt` "
-            "before calling ndslice(...).",
+            "use arrayscope(..., block=True) explicitly, or in IPython run `%gui qt` "
+            "before calling arrayscope(...).",
             RuntimeWarning,
             stacklevel=2,
         )
