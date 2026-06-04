@@ -1,6 +1,9 @@
 # Changelog
 
+## Unreleased
 
+### Changed
+- **Qt binding default** — ArrayScope now depends on and tests PySide6 by default through PyQtGraph's Qt abstraction. The hard PyQt5 dependency has been removed.
 
 ## [0.7.0]
 
@@ -56,4 +59,3 @@
 ### Fixed
 - Window/Level reset on re-clicking `linear` / `symlog`
 - MATLAB v7.3 file loading — falls back to HDF5 loader when scipy.io.loadmat fails
-

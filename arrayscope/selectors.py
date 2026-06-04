@@ -4,8 +4,12 @@ Handles mat, h5, and npz files.
 """
 import numpy as np
 
+from .qt_binding import prefer_pyside6
+
 
 def _show_selector(filepath, selector_class_name, interpret_as_complex):
+    prefer_pyside6()
+
     from pyqtgraph.Qt import QtWidgets
     from .arrayscope import arrayscope
     import sys
@@ -50,6 +54,8 @@ class DatasetSelector:
     COLOR_INCOMPATIBLE = (180, 180, 180) # Light grey for incompatible items
     
     def __init__(self, filepath, compatible_datasets=None):
+        prefer_pyside6()
+
         from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
         
         self.QtWidgets = QtWidgets

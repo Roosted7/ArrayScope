@@ -136,6 +136,8 @@ pip install arrayscope
 pip install --no-deps arrayscope
 ```
 
+ArrayScope uses PySide6 by default through PyQtGraph's Qt abstraction.
+
 For DICOM directories you also need the external `dcm2niix` binary available on `PATH`. A practical install route is:
 
 ```bash
@@ -161,8 +163,8 @@ pip install -e .
 
 - Python >= 3.8
 - NumPy >= 1.20.0
-- PyQtGraph >= 0.12.0
-- PyQt5 >= 5.15.0
+- PyQtGraph >= 0.14.0
+- PySide6 >= 6.4.0
 - h5py >= 3.0.0
 - scipy >= 1.7.0
 - pydicom >= 2.4.0
