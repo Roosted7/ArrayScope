@@ -73,6 +73,20 @@ def test_profile_state_returns_none_outside_image_bounds(image_x, image_y):
     assert profile.profile_state_from_image_hover(state, image_x=image_x, image_y=image_y) is None
 
 
+def test_marker_position_is_clamped_to_image_axes():
+    assert profile.clamp_marker_position((2, 3, 4), (0, 1), image_x=10, image_y=-2) == (2, 0)
+
+
+def test_profile_states_from_marker_supports_multiple_profile_axes():
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=2)
+
+    states = profile.profile_states_from_marker(state, image_x=2, image_y=1, profile_axes=(1, 2))
+
+    assert tuple(profile_state.line_axis for profile_state in states) == (1, 2)
+    assert states[0].slice_indices == (1, 0, 0)
+    assert states[1].slice_indices == (1, 2, 0)
+
+
 def test_profile_y_range_matches_image_window_only_when_requested():
     assert profile.profile_y_range("match_image", (1, 5)) == (1.0, 5.0)
     assert profile.profile_y_range("auto", (1, 5)) is None

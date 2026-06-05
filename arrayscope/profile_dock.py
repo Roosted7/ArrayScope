@@ -23,6 +23,15 @@ class ProfileDock(QtWidgets.QDockWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.addWidget(QtWidgets.QLabel("Profile"))
+        title_row.addStretch()
+        self.float_button = QtWidgets.QPushButton("Float")
+        self.close_button = QtWidgets.QPushButton("Close")
+        title_row.addWidget(self.float_button)
+        title_row.addWidget(self.close_button)
+        layout.addLayout(title_row)
+
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(QtWidgets.QLabel("Axis:"))
         self.axis_combo = QtWidgets.QComboBox()
@@ -55,6 +64,9 @@ class ProfileDock(QtWidgets.QDockWidget):
         self.resize(560, 260)
 
         self.axis_combo.currentIndexChanged.connect(self._axis_index_changed)
+        self.float_button.clicked.connect(self._toggle_floating)
+        self.close_button.clicked.connect(self.hide)
+        self.topLevelChanged.connect(self._top_level_changed)
 
     @property
     def widget(self):
@@ -83,6 +95,18 @@ class ProfileDock(QtWidgets.QDockWidget):
 
     def toggle_style(self):
         self.line_plot.toggle_style()
+
+    def _toggle_floating(self):
+        self.setFloating(not self.isFloating())
+
+    def _top_level_changed(self, floating):
+        self.float_button.setText("Dock" if floating else "Float")
+        if floating:
+            flags = self.windowFlags()
+            flags |= Qt.QtCore.Qt.WindowType.Window
+            flags &= ~Qt.QtCore.Qt.WindowType.FramelessWindowHint
+            self.setWindowFlags(flags)
+            self.show()
 
     def _axis_index_changed(self, index):
         if self._updating_axis or index < 0:
