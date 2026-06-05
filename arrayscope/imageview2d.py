@@ -3,7 +3,7 @@ from .qt_binding import prefer_pyside6
 
 prefer_pyside6()
 
-from pyqtgraph.Qt import QtGui, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 from pyqtgraph.graphicsItems.ViewBox import ViewBox
@@ -42,6 +42,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._rgbBaseImage = None
         self._profile_vline = None
         self._profile_hline = None
+        self._profile_handle = None
         self._profile_marker_callback = None
         self._profile_marker_updating = False
         
@@ -76,12 +77,26 @@ class ImageView2D(QtWidgets.QWidget):
 
         self._profile_vline = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen((230, 60, 30, 180), width=1))
         self._profile_hline = pg.InfiniteLine(angle=0, movable=True, pen=pg.mkPen((230, 60, 30, 180), width=1))
+        self._profile_handle = pg.TargetItem(
+            pos=(0, 0),
+            size=14,
+            symbol="o",
+            pen=pg.mkPen((230, 60, 30, 220), width=2),
+            brush=pg.mkBrush(230, 60, 30, 80),
+            movable=True,
+        )
         self._profile_vline.setVisible(False)
         self._profile_hline.setVisible(False)
+        self._profile_handle.setVisible(False)
+        self._profile_vline.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+        self._profile_hline.setCursor(QtCore.Qt.CursorShape.SizeVerCursor)
+        self._profile_handle.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         self._profile_vline.sigPositionChanged.connect(self._on_profile_marker_changed)
         self._profile_hline.sigPositionChanged.connect(self._on_profile_marker_changed)
+        self._profile_handle.sigPositionChanged.connect(self._on_profile_handle_changed)
         self.view.addItem(self._profile_vline)
         self.view.addItem(self._profile_hline)
+        self.view.addItem(self._profile_handle)
         
     def setupUI(self):
         """Create the user interface"""
@@ -310,8 +325,10 @@ class ImageView2D(QtWidgets.QWidget):
         try:
             self._profile_vline.setValue(float(x))
             self._profile_hline.setValue(float(y))
+            self._profile_handle.setPos(float(x), float(y))
             self._profile_vline.setVisible(bool(visible))
             self._profile_hline.setVisible(bool(visible))
+            self._profile_handle.setVisible(bool(visible))
         finally:
             self._profile_marker_updating = False
 
@@ -321,6 +338,8 @@ class ImageView2D(QtWidgets.QWidget):
             self._profile_vline.setVisible(False)
         if self._profile_hline is not None:
             self._profile_hline.setVisible(False)
+        if self._profile_handle is not None:
+            self._profile_handle.setVisible(False)
 
     def profileMarkerPosition(self):
         """Return the current profile marker position in image coordinates."""
@@ -337,11 +356,32 @@ class ImageView2D(QtWidgets.QWidget):
     def _on_profile_marker_changed(self, *_args):
         if self._profile_marker_updating:
             return
+        self._profile_marker_updating = True
+        try:
+            if self._profile_handle is not None:
+                self._profile_handle.setPos(float(self._profile_vline.value()), float(self._profile_hline.value()))
+        finally:
+            self._profile_marker_updating = False
         if self._profile_marker_callback is None:
             return
         position = self.profileMarkerPosition()
         if position is not None:
             self._profile_marker_callback(*position)
+
+    def _on_profile_handle_changed(self, *_args):
+        if self._profile_marker_updating:
+            return
+        if self._profile_handle is None:
+            return
+        pos = self._profile_handle.pos()
+        self._profile_marker_updating = True
+        try:
+            self._profile_vline.setValue(float(pos.x()))
+            self._profile_hline.setValue(float(pos.y()))
+        finally:
+            self._profile_marker_updating = False
+        if self._profile_marker_callback is not None:
+            self._profile_marker_callback(float(pos.x()), float(pos.y()))
         
     def clear(self):
         """Clear the displayed image"""

@@ -1,9 +1,9 @@
 # 0008 — Live image profiles
 
 ArrayScope supports opt-in live profiles from the image view. When `Live profile`
-is enabled, a draggable image crosshair is converted into a temporary
-`ViewState` for `slice_engine.make_line(...)` through the existing
-`OperationEvaluator`.
+is enabled, a draggable image marker with vertical/horizontal crosshair lines
+and a center handle is converted into a temporary `ViewState` for
+`slice_engine.make_line(...)` through the existing `OperationEvaluator`.
 
 Mouse `x` maps to the secondary image axis and mouse `y` maps to the primary
 image axis, matching the existing image display orientation. If the selected

@@ -9,8 +9,8 @@ line queries.
 The dock owns the existing line plot controller and adds lightweight profile
 controls:
 
-- profile axis selection, currently backed by the existing single
-  `line_plot_dimension`;
+- profile axis selection, backed by visible per-dimension `P` role buttons and
+  the existing single `line_plot_dimension`;
 - profile Y range mode: `Match image window` or `Auto`.
 
 `Match image window` is the default because live profiles should usually compare
@@ -27,3 +27,12 @@ as a floating dock window. It remains a normal `QDockWidget` with close, move,
 and float features, so users can drag the dock title bar, close it, or dock it
 back into the main window. Closing the Profile dock disables live profile mode to
 avoid hidden background processing.
+
+Dimension roles are presented as compact per-dimension `Y`, `X`, and `P`
+buttons. The model keeps profile axes as a tuple so multiple profile axes can be
+added later, but this first version plots one active profile axis at a time.
+
+The live image marker has draggable vertical and horizontal lines plus a
+draggable center handle. Dragging a line changes one coordinate; dragging the
+center handle changes both. Marker movement is clamped to valid image
+coordinates before profile extraction.

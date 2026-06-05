@@ -7,6 +7,24 @@ from typing import Optional, Tuple
 from .view_state import ViewState
 
 
+def clamp_marker_position(shape, image_axes, image_x, image_y):
+    primary_axis, secondary_axis = tuple(int(axis) for axis in image_axes)
+    x = int(round(float(image_x)))
+    y = int(round(float(image_y)))
+    x = max(0, min(x, int(shape[secondary_axis]) - 1))
+    y = max(0, min(y, int(shape[primary_axis]) - 1))
+    return x, y
+
+
+def profile_states_from_marker(state: ViewState, image_x, image_y, profile_axes) -> Tuple[ViewState, ...]:
+    states = []
+    for axis in profile_axes:
+        profile_state = profile_state_from_image_hover(state, image_x, image_y, line_axis=axis)
+        if profile_state is not None:
+            states.append(profile_state)
+    return tuple(states)
+
+
 def image_hover_indices(state: ViewState, image_x, image_y) -> Optional[Tuple[int, int]]:
     """Map image item coordinates to array indices for the current image axes."""
     if state.image_axes is None:

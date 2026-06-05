@@ -12,13 +12,14 @@ from enum import Enum
 from pathlib import Path
 from .colormaps import gray_colormap, named_colormap, phase_colormap
 from .dialogs import SaveRangeDialog
+from .dimension_roles import DimensionRoles
 from .imageview2d import ImageView2D
 from .operation_dock import OperationStackDock
 from .operation_evaluator import OperationEvaluator
 from .operation_pipeline import ArrayDocument
 from .operation_recipes import load_recipe, save_recipe
 from .operation_registry import create_operation, operation_entries
-from .profile import profile_state_from_image_hover, profile_y_range
+from .profile import clamp_marker_position, profile_state_from_image_hover, profile_y_range
 from .profile_dock import ProfileDock
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 from .view_state import ChannelMode, ScaleMode, ViewState
@@ -100,14 +101,16 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             if not self.singleton[dim]:
                 self.line_plot_dimension = dim
                 break
+        self.profile_axes = (self.line_plot_dimension,)
 
         self.view_state = self._make_view_state(slice_indices=[0] * data.ndim)
                 
         self.domain = [Domain.NATIVE for _ in range(data.ndim)]
         self.widgets = {
             'buttons': {
-                'primary': [QtWidgets.QPushButton(str(i), checkable=True) for i in range(data.ndim)],
-                'secondary': [QtWidgets.QPushButton(str(i), checkable=True) for i in range(data.ndim)],
+                'primary': [QtWidgets.QPushButton('Y', checkable=True) for i in range(data.ndim)],
+                'secondary': [QtWidgets.QPushButton('X', checkable=True) for i in range(data.ndim)],
+                'profile': [QtWidgets.QPushButton('P', checkable=True) for i in range(data.ndim)],
                 'channel': {
                     'complex': QtWidgets.QRadioButton('complex', enabled=np.iscomplexobj(self.data)),
                     'real': QtWidgets.QRadioButton('real', enabled=np.iscomplexobj(self.data)),
@@ -225,8 +228,9 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             label.setMinimumHeight(24)
             label.setMinimumWidth(30)
         
-        for btn in self.widgets['buttons']['primary'] + self.widgets['buttons']['secondary']:
+        for btn in self.widgets['buttons']['primary'] + self.widgets['buttons']['secondary'] + self.widgets['buttons']['profile']:
             btn.setStyleSheet(self.BUTTON_STYLE)
+            btn.setFixedWidth(28)
             
         for spin in self.widgets['spins']['slice_indices']:
             spin.setStyleSheet(self.SPINBOX_STYLE)
@@ -278,11 +282,18 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         for i in range(data.ndim):
             w = self.widgets['buttons']['primary'][i]
             self.dim_containers[i].layout().addWidget(w)
-            w.clicked.connect(lambda checked, i=i : self.changedIndex(checked, 0, i))
+            w.setToolTip(f"Use dim {i} as image Y axis")
+            w.clicked.connect(lambda checked, i=i : self.set_dimension_role("y", i))
             
             w = self.widgets['buttons']['secondary'][i]
             self.dim_containers[i].layout().addWidget(w)
-            w.clicked.connect(lambda checked, i=i: self.changedIndex(checked, 1, i))
+            w.setToolTip(f"Use dim {i} as image X axis")
+            w.clicked.connect(lambda checked, i=i: self.set_dimension_role("x", i))
+
+            w = self.widgets['buttons']['profile'][i]
+            self.dim_containers[i].layout().addWidget(w)
+            w.setToolTip(f"Use dim {i} as profile axis")
+            w.clicked.connect(lambda checked, i=i: self.set_dimension_role("p", i))
             
             w = self.widgets['spins']['slice_indices'][i]
             self.dim_containers[i].layout().addWidget(w)
@@ -560,12 +571,18 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         if ndim >= 1:
             if self.line_plot_dimension >= ndim or self.singleton[self.line_plot_dimension]:
                 self.line_plot_dimension = valid_dims[0] if valid_dims else 0
+        self.profile_axes = tuple(axis for axis in getattr(self, "profile_axes", ()) if axis < ndim)
+        if not self.profile_axes and ndim >= 1:
+            self.profile_axes = (self.line_plot_dimension,)
+        if self.profile_axes:
+            self.line_plot_dimension = self.profile_axes[0]
 
         for i, container in enumerate(getattr(self, "dim_containers", [])):
             visible = i < ndim
             container.setVisible(visible)
             self.widgets['buttons']['primary'][i].setVisible(visible)
             self.widgets['buttons']['secondary'][i].setVisible(visible)
+            self.widgets['buttons']['profile'][i].setVisible(visible)
             self.widgets['spins']['slice_indices'][i].setVisible(visible)
             if visible:
                 self.widgets['labels']['dims'][i].setText(f'[{self.data.shape[i]}]')
@@ -978,7 +995,13 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             return
         if not self.profile_dock.isVisible():
             return
-        self._pending_profile_point = (float(image_x), float(image_y))
+        self._sync_view_state_from_window()
+        if self.view_state.image_axes is None:
+            return
+        clamped = clamp_marker_position(self.view_state.shape, self.view_state.image_axes, image_x, image_y)
+        if (float(clamped[0]), float(clamped[1])) != (float(image_x), float(image_y)):
+            self.img_view.setProfileMarker(clamped[0], clamped[1], visible=True)
+        self._pending_profile_point = (float(clamped[0]), float(clamped[1]))
         if not self._profile_timer.isActive():
             self._profile_timer.start()
 
@@ -1035,17 +1058,30 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                 self.profile_dock.resize(560, 260)
             self.profile_dock.show()
             self.profile_dock.raise_()
+            self.img_view.getView().setCursor(Qt.QtCore.Qt.CursorShape.CrossCursor)
             self._ensure_profile_marker()
         if not enabled:
             self._pending_profile_pos = None
             self._pending_profile_point = None
             self._profile_timer.stop()
             self._clear_live_profile_marker()
+            self.img_view.getView().unsetCursor()
             self.update_line_plot()
 
     def _on_profile_dock_visibility_changed(self, visible):
         if not visible and self.widgets['buttons']['display']['live_profile'].isChecked():
             self.widgets['buttons']['display']['live_profile'].setChecked(False)
+        elif visible and not self.profile_dock.isFloating():
+            Qt.QtCore.QTimer.singleShot(0, self._resize_profile_dock_default)
+
+    def _resize_profile_dock_default(self):
+        if not hasattr(self, "profile_dock") or not self.profile_dock.isVisible() or self.profile_dock.isFloating():
+            return
+        target_height = max(140, int(self.height() * 0.23))
+        try:
+            self.resizeDocks([self.profile_dock], [target_height], Qt.QtCore.Qt.Orientation.Vertical)
+        except Exception:
+            pass
 
     def _ensure_profile_marker(self):
         position = self.img_view.profileMarkerPosition()
@@ -1277,8 +1313,28 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
 
     def set_profile_axis(self, axis):
         self.line_plot_dimension = int(axis)
+        self.profile_axes = (self.line_plot_dimension,)
         self._sync_view_state_from_window()
+        self.update_dimension_controls()
         self.update_line_plot()
+
+    def set_dimension_role(self, role, axis):
+        if axis >= self.data.ndim:
+            return
+        if role == "p":
+            self.profile_axes = (int(axis),)
+            self.line_plot_dimension = self.profile_axes[0]
+            if hasattr(self, "profile_dock"):
+                self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
+        elif role in ("y", "x"):
+            if len(self.selected_indices) < 2:
+                return
+            roles = DimensionRoles.from_axes(tuple(self.selected_indices[:2]), self.profile_axes)
+            roles = roles.with_image_axis(role, axis)
+            self.selected_indices = list(roles.image_axes)
+        self.update_dimension_controls()
+        self._sync_view_state_from_window()
+        self.update()
 
     def transposeView(self, event):
         old_primary = self.selected_indices[0]
@@ -1329,50 +1385,64 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             for i, w in enumerate(self.widgets['spins']['slice_indices']):
                 bPrim = self.widgets['buttons']['primary'][i]
                 bSecondary = self.widgets['buttons']['secondary'][i]
+                bProfile = self.widgets['buttons']['profile'][i]
                 if i >= self.data.ndim:
                     w.setEnabled(False)
                     bPrim.setEnabled(False)
                     bSecondary.setEnabled(False)
+                    bProfile.setEnabled(False)
                     bPrim.setChecked(False)
                     bSecondary.setChecked(False)
+                    bProfile.setChecked(False)
                     continue
                 
                 if self.singleton[i]:
                     w.setEnabled(False)
                     bPrim.setEnabled(False)
                     bSecondary.setEnabled(False)
+                    bProfile.setEnabled(False)
                     bPrim.setChecked(False)
                     bSecondary.setChecked(False)
+                    bProfile.setChecked(False)
                 elif i == self.line_plot_dimension:
                     # This is the dimension we're plotting along
                     w.setEnabled(False)
                     bPrim.setEnabled(True)
                     bSecondary.setEnabled(False)
+                    bProfile.setEnabled(True)
                     bPrim.setChecked(True)
                     bSecondary.setChecked(False)
+                    bProfile.setChecked(i in self.profile_axes)
                 else:
                     # All other dimensions: enable spinbox to select slice
                     w.setEnabled(True)
                     bPrim.setEnabled(True)
                     bSecondary.setEnabled(False)
+                    bProfile.setEnabled(True)
                     bPrim.setChecked(False)
                     bSecondary.setChecked(False)
+                    bProfile.setChecked(i in self.profile_axes)
         else:
             # Image view mode: original two-dimension selection behavior
             for i, w in enumerate(self.widgets['spins']['slice_indices']):
                 bPrim = self.widgets['buttons']['primary'][i]
                 bSecondary = self.widgets['buttons']['secondary'][i]
+                bProfile = self.widgets['buttons']['profile'][i]
                 if i >= self.data.ndim:
                     w.setEnabled(False)
                     bPrim.setEnabled(False)
                     bSecondary.setEnabled(False)
+                    bProfile.setEnabled(False)
                     bPrim.setChecked(False)
                     bSecondary.setChecked(False)
+                    bProfile.setChecked(False)
                     continue
                 if self.singleton[i] == True:
                     w.setEnabled(False)
                     bPrim.setEnabled(False)
                     bSecondary.setEnabled(False)
+                    bProfile.setEnabled(False)
+                    bProfile.setChecked(False)
                 elif i in self.selected_indices:
                     w.setEnabled(False)
                     if i == self.selected_indices[0]:
@@ -1383,12 +1453,16 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                         bSecondary.setChecked(True)
                     bPrim.setEnabled(False)
                     bSecondary.setEnabled(False)
+                    bProfile.setEnabled(True)
+                    bProfile.setChecked(i in self.profile_axes)
                 else:
                     w.setEnabled(True)
                     bPrim.setEnabled(True)
                     bSecondary.setEnabled(True)
+                    bProfile.setEnabled(True)
                     bPrim.setChecked(False)
                     bSecondary.setChecked(False)
+                    bProfile.setChecked(i in self.profile_axes)
                     
             # Only set buttons if we have at least 2 selected indices
             if len(self.selected_indices) >= 1:
