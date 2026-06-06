@@ -41,6 +41,12 @@ class ViewState:
     scale: ScaleMode = ScaleMode.LINEAR
     axis_flipped: Tuple[bool, ...] = ()
     axis_fftshifted: Tuple[bool, ...] = ()
+    montage_axis: Optional[int] = None
+    montage_columns: Optional[int] = None
+    montage_indices: Optional[Tuple[int, ...]] = None
+    montage_text: Optional[str] = None
+    axis_range_indices: Tuple[Optional[Tuple[int, ...]], ...] = ()
+    axis_range_text: Tuple[Optional[str], ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "ndim", int(self.ndim))
@@ -48,6 +54,18 @@ class ViewState:
         object.__setattr__(self, "slice_indices", tuple(int(index) for index in self.slice_indices))
         object.__setattr__(self, "axis_flipped", tuple(bool(value) for value in self.axis_flipped))
         object.__setattr__(self, "axis_fftshifted", tuple(bool(value) for value in self.axis_fftshifted))
+        if not self.axis_range_indices:
+            object.__setattr__(self, "axis_range_indices", (None,) * self.ndim)
+        else:
+            object.__setattr__(
+                self,
+                "axis_range_indices",
+                tuple(None if value is None else tuple(int(index) for index in value) for value in self.axis_range_indices),
+            )
+        if not self.axis_range_text:
+            object.__setattr__(self, "axis_range_text", (None,) * self.ndim)
+        else:
+            object.__setattr__(self, "axis_range_text", tuple(None if value is None else str(value) for value in self.axis_range_text))
         object.__setattr__(self, "channel", _coerce_enum(ChannelMode, self.channel))
         object.__setattr__(self, "scale", _coerce_enum(ScaleMode, self.scale))
 
@@ -55,6 +73,14 @@ class ViewState:
             object.__setattr__(self, "image_axes", tuple(int(axis) for axis in self.image_axes))
         if self.line_axis is not None:
             object.__setattr__(self, "line_axis", int(self.line_axis))
+        if self.montage_axis is not None:
+            object.__setattr__(self, "montage_axis", int(self.montage_axis))
+        if self.montage_columns is not None:
+            object.__setattr__(self, "montage_columns", max(1, int(self.montage_columns)))
+        if self.montage_indices is not None:
+            object.__setattr__(self, "montage_indices", tuple(int(index) for index in self.montage_indices))
+        if self.montage_text is not None:
+            object.__setattr__(self, "montage_text", str(self.montage_text))
 
         self.validate()
 
@@ -131,6 +157,32 @@ class ViewState:
             return replace(self, line_axis=None)
         return replace(self, line_axis=self._validate_axis(axis))
 
+    def with_montage_axis(self, axis, columns=None, indices=None, text=None):
+        if axis is None:
+            return replace(
+                self,
+                montage_axis=None,
+                montage_columns=None if columns is None else max(1, int(columns)),
+                montage_indices=None,
+                montage_text=None,
+            )
+        axis = self._validate_axis(axis)
+        return replace(
+            self,
+            montage_axis=axis,
+            montage_columns=None if columns is None else max(1, int(columns)),
+            montage_indices=None if indices is None else tuple(int(index) for index in indices),
+            montage_text=text,
+        )
+
+    def with_axis_range(self, axis, indices=None, text=None):
+        axis = self._validate_axis(axis)
+        ranges = list(self.axis_range_indices)
+        texts = list(self.axis_range_text)
+        ranges[axis] = None if indices is None else tuple(int(index) for index in indices)
+        texts[axis] = None if text is None else str(text)
+        return replace(self, axis_range_indices=tuple(ranges), axis_range_text=tuple(texts))
+
     def with_channel(self, channel):
         return replace(self, channel=ChannelMode(channel))
 
@@ -176,6 +228,21 @@ class ViewState:
         else:
             line_axis = migrated.line_axis
 
+        if self.montage_axis is not None and self.montage_axis < ndim and shape[self.montage_axis] != 1:
+            montage_axis = self.montage_axis
+            if image_axes is not None and montage_axis in image_axes:
+                montage_axis = None
+        else:
+            montage_axis = None
+        montage_indices = None
+        montage_text = None
+        if montage_axis is not None and self.montage_indices is not None:
+            montage_indices = tuple(index for index in self.montage_indices if 0 <= index < shape[montage_axis])
+            if not montage_indices:
+                montage_axis = None
+            else:
+                montage_text = self.montage_text
+
         axis_flipped = migrated.axis_flipped
         axis_fftshifted = migrated.axis_fftshifted
         if preserve_flags:
@@ -187,6 +254,18 @@ class ViewState:
                 bool(self.axis_fftshifted[axis]) if axis < len(self.axis_fftshifted) else False
                 for axis in range(ndim)
             )
+        axis_range_indices = []
+        axis_range_text = []
+        for axis in range(ndim):
+            indices = self.axis_range_indices[axis] if axis < len(self.axis_range_indices) else None
+            text = self.axis_range_text[axis] if axis < len(self.axis_range_text) else None
+            if indices is None:
+                axis_range_indices.append(None)
+                axis_range_text.append(None)
+                continue
+            kept = tuple(index for index in indices if 0 <= index < shape[axis])
+            axis_range_indices.append(kept or None)
+            axis_range_text.append(text if kept else None)
 
         return ViewState(
             ndim=ndim,
@@ -198,6 +277,12 @@ class ViewState:
             scale=self.scale,
             axis_flipped=axis_flipped,
             axis_fftshifted=axis_fftshifted,
+            montage_axis=montage_axis,
+            montage_columns=self.montage_columns,
+            montage_indices=montage_indices,
+            montage_text=montage_text,
+            axis_range_indices=tuple(axis_range_indices),
+            axis_range_text=tuple(axis_range_text),
         )
 
     def display_axes(self):
@@ -228,6 +313,14 @@ class ViewState:
         if self.line_axis is not None:
             self._validate_axis(self.line_axis)
 
+        if self.montage_axis is not None:
+            self._validate_axis(self.montage_axis)
+            if self.image_axes is not None and self.montage_axis in self.image_axes:
+                raise ValueError("montage axis cannot also be an image axis")
+            if self.montage_indices is not None:
+                for index in self.montage_indices:
+                    self._validate_slice_index(self.montage_axis, index)
+
         if len(self.slice_indices) != self.ndim:
             raise ValueError("slice_indices length must match ndim")
         for axis, index in enumerate(self.slice_indices):
@@ -237,6 +330,14 @@ class ViewState:
             raise ValueError("axis_flipped length must match ndim")
         if len(self.axis_fftshifted) != self.ndim:
             raise ValueError("axis_fftshifted length must match ndim")
+        if len(self.axis_range_indices) != self.ndim:
+            raise ValueError("axis_range_indices length must match ndim")
+        if len(self.axis_range_text) != self.ndim:
+            raise ValueError("axis_range_text length must match ndim")
+        for axis, indices in enumerate(self.axis_range_indices):
+            if indices is not None:
+                for index in indices:
+                    self._validate_slice_index(axis, index)
 
         return self
 

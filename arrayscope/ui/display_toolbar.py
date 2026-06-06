@@ -14,7 +14,6 @@ class DisplayToolbar(QtWidgets.QToolBar):
     aspectChanged = Qt.QtCore.Signal(str)
     windowModeChanged = Qt.QtCore.Signal(str)
     autoWindowRequested = Qt.QtCore.Signal()
-    liveProfileToggled = Qt.QtCore.Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__("Display", parent)
@@ -59,12 +58,6 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.auto_window_action.setToolTip("Auto window levels")
         self.auto_window_action.triggered.connect(self.autoWindowRequested)
 
-        self.live_profile_action = self.addAction("Profile")
-        set_action_icon(self.live_profile_action, "show_chart")
-        self.live_profile_action.setCheckable(True)
-        self.live_profile_action.setToolTip("Toggle live profile")
-        self.live_profile_action.toggled.connect(self.liveProfileToggled)
-
     def set_channel_options(self, enabled_channels):
         for index in range(self.channel_combo.count()):
             value = self.channel_combo.itemData(index)
@@ -92,7 +85,4 @@ class DisplayToolbar(QtWidgets.QToolBar):
                 combo.blockSignals(True)
                 combo.setCurrentIndex(index)
                 combo.blockSignals(False)
-        if live_profile is not None:
-            self.live_profile_action.blockSignals(True)
-            self.live_profile_action.setChecked(bool(live_profile))
-            self.live_profile_action.blockSignals(False)
+        del live_profile

@@ -6,9 +6,11 @@ source of array-view state.
 ## Ownership
 
 - `arrayscope.core.ViewState`: authoritative current view of the derived array: shape, image
-  axes, profile axis, slice indices, channel, scale, and per-axis flags.
+  axes, profile axis, montage axis, slice indices, channel, scale, and per-axis flags.
 - `arrayscope.display.slice_engine`: converts `data + ViewState` into display-ready images and
   lines.
+- `arrayscope.display.montage`: tiles already display-prepared image frames into 2D montage/collage
+  images.
 - `arrayscope.operations.pipeline`: immutable NumPy operations plus shape prediction.
 - `arrayscope.operations.slabs`: plans and evaluates the smallest exact base-data slab needed
   for image, profile, scalar hover, and export-frame requests.
@@ -24,10 +26,15 @@ source of array-view state.
   evaluation helpers; they must not mutate the live evaluator directly.
 - `arrayscope.profiles.model` / `arrayscope.profiles.coordinator`: maps image-space marker positions to
   profile view states and line results.
+- `arrayscope.core.roi`: Qt-free ROI geometry, line/polyline/freehand sampling, masks, and finite-value
+  statistics for inspection workflows.
+- `arrayscope.core.histograms`: Qt-free histogram and shared-range comparison helpers for ROI values.
+- `arrayscope.core.compare`: minimal compatible-layer model used by ROI histogram comparisons.
 - `arrayscope.core.window_levels`: decides image window/level reuse or auto-level behavior.
 - `arrayscope.display.ImageView2D`, `arrayscope.ui`, and `arrayscope.ui.docks`: Qt display and controls only.
 - `arrayscope.ui.dimension_strip`, `arrayscope.ui.display_toolbar`, `arrayscope.ui.command_palette`,
-  and `arrayscope.ui.hud`: compact viewer controls, operation discovery, and on-canvas pixel
+  `arrayscope.ui.docks.inspection`, and `arrayscope.ui.hud`: compact viewer controls, operation discovery,
+  ROI inspection controls, and on-canvas pixel
   feedback. They emit user intent and do not own view state.
 - `arrayscope.core.view_recipe`: serializes operations, `ViewState`, and display settings for
   full-view restore. It is pure and does not contain dock geometry.
@@ -111,6 +118,24 @@ while the operation step list is empty, and it appears automatically after the f
 automatic reveal does not mark the dock as user-pinned; clearing the stack hides it again unless the
 user explicitly showed the dock from the View menu. The Profile dock is hidden unless the data is 1D,
 live profile is enabled, or the user explicitly shows it.
+
+The Inspection dock is optional and hidden by default. Basic ROI creation and live-profile toggling are
+available from the image context menu, so ROI use does not require opening a dock. ImageView2D owns ROI
+graphics items, emits complete ROI geometry, and displays a movable semi-transparent ROI info overlay.
+The window computes ROI values from the current displayed scalar image or histogram source and sends
+statistics/histogram results back to the dock and overlay. Extra comparison layers are internal
+scaffolding for same-ROI histogram comparison and are not full session/sync support.
+
+The Profile dock can plot multiple active profile axes. The window evaluates each profile state through
+the existing line evaluator/cache and sends all results to one plot. Complex profile mode is dock-local:
+when global channel mode is `complex`, line evaluation preserves complex samples so the Profile dock can
+choose magnitude, phase, real, imaginary, or magnitude plus phase strip.
+
+Montage is a display mode driven by range text in a non-image dimension slice field, stored on
+`ViewState.montage_axis`. The current image axes remain the tile Y/X axes. Range text on image axes is
+stored as per-axis display ranges, allowing image-axis subsetting such as `0:2:100`. Montage tiles are
+evaluated through the same image snapshot path as normal views and then assembled by the pure montage
+helper.
 
 Operation creation is intentionally available from three places:
 

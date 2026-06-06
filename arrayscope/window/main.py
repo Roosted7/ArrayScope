@@ -18,6 +18,7 @@ from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
 from arrayscope.window.evaluation_controller import EvaluationController
 from arrayscope.window.file_reload import FileReloadMixin
+from arrayscope.window.inspection import InspectionWorkflowMixin
 from arrayscope.window.operation_actions import OperationActionsMixin
 from arrayscope.window.render import RenderMixin
 from arrayscope.window.state_sync import StateSyncMixin
@@ -28,6 +29,7 @@ class ArrayScopeWindow(
     DisplayControlBuildMixin,
     StateSyncMixin,
     OperationActionsMixin,
+    InspectionWorkflowMixin,
     DimensionControlMixin,
     RenderMixin,
     ExportWorkflowMixin,
@@ -63,6 +65,7 @@ class ArrayScopeWindow(
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document
         self.operation_evaluator = self.operation_coordinator.evaluator
+        self._init_compare_document(data)
         self.evaluation_controller = EvaluationController(self)
         self.pixel_evaluation_controller = EvaluationController(self)
         self.profile_evaluation_controller = EvaluationController(self)
@@ -76,6 +79,7 @@ class ArrayScopeWindow(
         self._selector_class_name = selector_class_name
         self._operation_dock_user_visible = False
         self._profile_dock_user_visible = False
+        self._inspection_dock_user_visible = False
         self._last_operation_axis = None
         self._focused_dimension_axis = None
         self._active_slice_axis = None

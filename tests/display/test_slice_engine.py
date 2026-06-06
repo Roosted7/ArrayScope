@@ -112,6 +112,15 @@ def test_make_image_3d_slices_non_display_axis_and_applies_channel_and_scale():
     np.testing.assert_allclose(image.data, expected)
 
 
+def test_make_image_applies_display_axis_ranges():
+    data = np.arange(5 * 6).reshape(5, 6)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0).with_axis_range(0, (0, 2, 4), "0:2:100")
+
+    image = make_image(data, state)
+
+    np.testing.assert_array_equal(image.data, data[(0, 2, 4), :].T)
+
+
 def test_make_image_ndslice_reversed_axes_preserves_existing_orientation():
     data = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
     state = state_for(
@@ -218,6 +227,15 @@ def test_make_line_1d_uses_channel_conversion():
     assert line.axis == 0
     assert line.data.shape == (3,)
     np.testing.assert_array_equal(line.data, np.array([2.0, 4.0, 6.0]))
+
+
+def test_make_line_complex_channel_preserves_complex_values_for_profile_modes():
+    data = np.array([1 + 2j, 3 + 4j, 5 + 6j])
+    state = state_for(data.shape, line_axis=0, channel=ChannelMode.COMPLEX)
+
+    line = make_line(data, state)
+
+    np.testing.assert_array_equal(line.data, data)
 
 
 def test_make_line_3d_slices_other_axes():

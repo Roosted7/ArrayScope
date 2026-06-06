@@ -7,7 +7,7 @@ import numpy as np
 import pyqtgraph.Qt as Qt
 
 from arrayscope.display.colormaps import gray_colormap, phase_colormap
-from arrayscope.profiles.coordinator import ProfileRender
+from arrayscope.display.montage import make_montage_from_images, optimal_montage_columns
 from arrayscope.profiles.model import clamp_marker_position, image_hover_indices, profile_y_range
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.view_state import ChannelMode, ScaleMode
@@ -118,7 +118,10 @@ class RenderMixin:
             return
         if self.view_state.image_axes is None:
             return
-        clamped = clamp_marker_position(self.view_state.shape, self.view_state.image_axes, image_x, image_y)
+        clamped = self._clamp_profile_marker_point(image_x, image_y)
+        if clamped is None:
+            self._clear_live_profile_marker()
+            return
         if (float(clamped[0]), float(clamped[1])) != (float(image_x), float(image_y)):
             self.img_view.setProfileMarker(clamped[0], clamped[1], visible=True)
         self._pending_profile_point = (float(clamped[0]), float(clamped[1]))
@@ -151,45 +154,97 @@ class RenderMixin:
         document = self.document
         image_levels = self.img_view.getLevels()
         y_range_mode = self.profile_dock.y_range_mode()
-        line_axis = self.view_state.line_axis
-        clamped = self.profile_coordinator.clamp_marker(view_state, point[0], point[1])
+        profile_axes = tuple(getattr(self, "profile_axes", ()) or ((self.view_state.line_axis,) if self.view_state.line_axis is not None else ()))
+        clamped = self._clamp_profile_marker_point(point[0], point[1])
         if clamped is None:
             self._clear_live_profile_marker()
             return
-        profile_state = self.profile_coordinator.state_from_marker(view_state, clamped[0], clamped[1], line_axis=line_axis)
-        if profile_state is None:
+        profile_states, profile_label_suffix = self._profile_states_for_display_point(view_state, clamped[0], clamped[1], profile_axes)
+        if not profile_states:
             self._clear_live_profile_marker()
             return
         y_range = profile_y_range(y_range_mode, image_levels)
-        cached = self.operation_evaluator.cached_line(profile_state)
-        if cached is not None:
-            self.profile_dock.update_line_result(cached, profile_state, y_range=y_range)
+        cached_entries = []
+        for profile_state in profile_states:
+            cached = self.operation_evaluator.cached_line(profile_state)
+            if cached is None:
+                cached_entries = []
+                break
+            cached_entries.append((cached, profile_state, f"dim {profile_state.line_axis}{profile_label_suffix}"))
+        if cached_entries:
+            self.profile_dock.update_line_results(tuple(cached_entries), y_range=y_range)
             self._update_operation_dock()
             self.profile_dock.show()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
             return
 
         def evaluate():
-            return evaluate_line_snapshot(document, profile_state)
+            return tuple((profile_state, evaluate_line_snapshot(document, profile_state)) for profile_state in profile_states)
 
-        document_key = self.operation_evaluator.line_key(profile_state, document=document)[1]
+        document_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document)[1] for profile_state in profile_states}
 
-        def done(result):
-            if document_key != self.operation_evaluator.line_key(profile_state)[1]:
-                return
-            line_result = self.operation_evaluator.store_line_result(profile_state, result)
-            profile_render = ProfileRender(view_state=profile_state, line_result=line_result, marker_position=clamped, y_range=y_range)
-            self.profile_dock.update_line_result(profile_render.line_result, profile_render.view_state, y_range=profile_render.y_range)
+        def done(results):
+            entries = []
+            for profile_state, result in results:
+                if document_keys[profile_state] != self.operation_evaluator.line_key(profile_state)[1]:
+                    return
+                line_result = self.operation_evaluator.store_line_result(profile_state, result)
+                entries.append((line_result, profile_state, f"dim {profile_state.line_axis}{profile_label_suffix}"))
+            self.profile_dock.update_line_results(tuple(entries), y_range=y_range)
             self._update_operation_dock()
             self.profile_dock.show()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
-            self._prefetch_profiles_near_marker(view_state, point[0], point[1], line_axis=line_axis)
+            if view_state.montage_axis is None:
+                for axis in profile_axes:
+                    self._prefetch_profiles_near_marker(view_state, point[0], point[1], line_axis=axis)
 
         def error(exc):
             show_status_message(self, f"Live profile update failed: {exc}")
             self._clear_live_profile_marker()
 
         self.profile_evaluation_controller.start(evaluate, on_done=done, on_error=error)
+
+    def _clamp_profile_marker_point(self, image_x, image_y):
+        if self.view_state.image_axes is None:
+            return None
+        montage_geometry = getattr(self, "_current_montage_geometry", None)
+        if montage_geometry is not None and self.view_state.montage_axis is not None and getattr(self.img_view, "image", None) is not None:
+            return _clamp_to_montage_tile(montage_geometry, image_x, image_y)
+        return clamp_marker_position(self.view_state.shape, self.view_state.image_axes, image_x, image_y)
+
+    def _profile_states_for_display_point(self, view_state, image_x, image_y, profile_axes):
+        montage_geometry = getattr(self, "_current_montage_geometry", None)
+        tile_index = None
+        if montage_geometry is not None and view_state.montage_axis is not None:
+            mapped = _map_montage_point(montage_geometry, image_x, image_y)
+            if mapped is None:
+                return (), ""
+            tile_index, image_x, image_y = mapped
+            view_state = view_state.with_slice(view_state.montage_axis, tile_index).with_montage_axis(None)
+
+        if view_state.image_axes is None:
+            return (), ""
+        primary_axis, secondary_axis = view_state.image_axes
+        local_x = int(round(float(image_x)))
+        local_y = int(round(float(image_y)))
+        actual_x = _display_index_to_axis_index(view_state, secondary_axis, local_x)
+        actual_y = _display_index_to_axis_index(view_state, primary_axis, local_y)
+        if actual_x is None or actual_y is None:
+            return (), ""
+
+        states = []
+        for axis in profile_axes:
+            axis = int(axis)
+            if axis < 0 or axis >= view_state.ndim:
+                continue
+            profile_state = view_state.with_line_axis(axis)
+            if axis != primary_axis:
+                profile_state = profile_state.with_slice(primary_axis, actual_y).with_axis_range(primary_axis, None)
+            if axis != secondary_axis:
+                profile_state = profile_state.with_slice(secondary_axis, actual_x).with_axis_range(secondary_axis, None)
+            states.append(profile_state)
+        suffix = "" if tile_index is None or self.view_state.montage_axis is None else f" d{self.view_state.montage_axis}={tile_index}"
+        return tuple(states), suffix
 
     def _clear_live_profile_marker(self):
         if hasattr(self, "img_view"):
@@ -267,6 +322,9 @@ class RenderMixin:
     def update_image_view(self, *, force_autolevel: bool = False):
         if self.view_state.image_axes is None: # No image view for 1D data
             return
+        if self.view_state.montage_axis is not None:
+            return self.update_montage_view(force_autolevel=force_autolevel)
+        self._current_montage_geometry = None
             
         al = True
         force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
@@ -340,6 +398,89 @@ class RenderMixin:
             on_slow=slow,
         )
 
+    def update_montage_view(self, *, force_autolevel: bool = False):
+        axis = self.view_state.montage_axis
+        if axis is None or self.view_state.image_axes is None or axis in self.view_state.image_axes:
+            return
+        force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
+        if getattr(self, '_force_autolevel', False):
+            self._force_autolevel = False
+        window_mode = self._current_window_mode()
+        previous_levels = None
+        previous_bounds = None
+        if not force_auto and getattr(self.img_view, "image", None) is not None:
+            try:
+                previous_levels = self.img_view.getLevels()
+                previous_bounds = self.img_view.getHistogramDataBounds()
+            except Exception:
+                previous_levels = None
+                previous_bounds = None
+
+        colormap_lut = None
+        if self.view_state.channel == ChannelMode.COMPLEX:
+            colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
+        view_state = self.view_state
+        document = self.document
+        indices = tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
+        indices = indices[:256]
+        viewport_size = self.img_view.graphicsView.viewport().size()
+        viewport_shape = (max(1, viewport_size.height()), max(1, viewport_size.width()))
+
+        def evaluate():
+            images = []
+            histograms = []
+            any_histogram = False
+            for index in indices:
+                tile_state = view_state.with_slice(axis, index).with_montage_axis(None)
+                result = evaluate_image_snapshot(document, tile_state, colormap_lut=colormap_lut)
+                images.append(result.value.data)
+                histograms.append(result.value.histogram_data)
+                any_histogram = any_histogram or result.value.histogram_data is not None
+            columns = view_state.montage_columns
+            if columns is None and images:
+                columns = optimal_montage_columns(
+                    len(images),
+                    images[0].shape[:2],
+                    viewport_shape,
+                )
+            display_image = make_montage_from_images(
+                images,
+                histogram_images=histograms if any_histogram else images,
+                columns=columns,
+            )
+            geometry = _montage_geometry(indices, images[0].shape[:2] if images else (1, 1), columns or 1, gap=1)
+            return display_image, geometry
+
+        def slow():
+            self.img_view.setImageStale(True)
+            self.img_view.setEvaluationOverlay(True, "Updating montage...")
+            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
+            self._update_operation_dock()
+
+        generation_key = (id(document), document.steps, view_state)
+
+        def done(payload):
+            if generation_key != (id(self.document), self.document.steps, self.view_state):
+                self.img_view.setImageStale(False)
+                self.img_view.setEvaluationOverlay(False)
+                return
+            display_image, geometry = payload
+            self._current_montage_geometry = geometry
+            self._apply_display_image(
+                display_image,
+                window_mode=window_mode,
+                previous_levels=previous_levels,
+                previous_bounds=previous_bounds,
+                force_auto=force_auto,
+            )
+
+        def error(exc):
+            self.img_view.setImageStale(False)
+            self.img_view.setEvaluationOverlay(False)
+            show_status_message(self, f"Montage update failed: {exc}")
+
+        self.evaluation_controller.start(evaluate, on_done=done, on_error=error, on_slow=slow)
+
     def _apply_display_image(self, display_image, *, window_mode, previous_levels, previous_bounds, force_auto):
         try:
             current_bounds = self._display_histogram_bounds(display_image)
@@ -369,6 +510,7 @@ class RenderMixin:
             self.apply_axis_flips()
             self.img_view.setImageStale(False)
             self.img_view.setEvaluationOverlay(False)
+            self._refresh_inspection_dock()
             
         except Exception as e:
             show_status_message(self, f"Image update failed: {e}")
@@ -602,22 +744,33 @@ class RenderMixin:
         view_state = self.view_state
         y_range = self._current_profile_y_range()
         document = self.document
-        cached = self.operation_evaluator.cached_line(view_state)
-        if cached is not None:
-            self.profile_dock.update_line_result(cached, view_state, y_range=y_range)
+        profile_axes = tuple(getattr(self, "profile_axes", ()) or ((view_state.line_axis,) if view_state.line_axis is not None else ()))
+        profile_states = tuple(view_state.with_line_axis(axis) for axis in profile_axes)
+        cached_entries = []
+        for profile_state in profile_states:
+            cached = self.operation_evaluator.cached_line(profile_state)
+            if cached is None:
+                cached_entries = []
+                break
+            cached_entries.append((cached, profile_state, f"dim {profile_state.line_axis}"))
+        if cached_entries:
+            self.profile_dock.update_line_results(tuple(cached_entries), y_range=y_range)
             self._update_operation_dock()
             return
 
         def evaluate():
-            return evaluate_line_snapshot(document, view_state)
+            return tuple((profile_state, evaluate_line_snapshot(document, profile_state)) for profile_state in profile_states)
 
-        document_key = self.operation_evaluator.line_key(view_state, document=document)[1]
+        document_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document)[1] for profile_state in profile_states}
 
-        def done(result):
-            if document_key != self.operation_evaluator.line_key(view_state)[1]:
-                return
-            line_result = self.operation_evaluator.store_line_result(view_state, result)
-            self.profile_dock.update_line_result(line_result, view_state, y_range=y_range)
+        def done(results):
+            entries = []
+            for profile_state, result in results:
+                if document_keys[profile_state] != self.operation_evaluator.line_key(profile_state)[1]:
+                    return
+                line_result = self.operation_evaluator.store_line_result(profile_state, result)
+                entries.append((line_result, profile_state, f"dim {profile_state.line_axis}"))
+            self.profile_dock.update_line_results(tuple(entries), y_range=y_range)
             self._update_operation_dock()
 
         self.profile_evaluation_controller.start(
@@ -651,5 +804,76 @@ class RenderMixin:
         self.update_shift_indicators()
         self.update_image_view(force_autolevel=force_autolevel)
         self.update_line_plot()
+        self._refresh_inspection_dock()
         self._update_operation_dock()
         self._sync_progressive_docks()
+
+
+def _montage_geometry(indices, tile_shape, columns, gap=1):
+    count = len(indices)
+    columns = max(1, int(columns))
+    rows = int(math.ceil(count / columns)) if count else 0
+    return {
+        "indices": tuple(int(index) for index in indices),
+        "tile_height": int(tile_shape[0]),
+        "tile_width": int(tile_shape[1]),
+        "columns": columns,
+        "rows": rows,
+        "gap": max(0, int(gap)),
+    }
+
+
+def _map_montage_point(geometry, image_x, image_y):
+    x = int(round(float(image_x)))
+    y = int(round(float(image_y)))
+    tile_width = geometry["tile_width"]
+    tile_height = geometry["tile_height"]
+    gap = geometry["gap"]
+    stride_x = tile_width + gap
+    stride_y = tile_height + gap
+    column = x // stride_x
+    row = y // stride_y
+    if column < 0 or row < 0 or column >= geometry["columns"] or row >= geometry["rows"]:
+        return None
+    local_x = x - column * stride_x
+    local_y = y - row * stride_y
+    if local_x < 0 or local_x >= tile_width or local_y < 0 or local_y >= tile_height:
+        return None
+    tile_number = row * geometry["columns"] + column
+    if tile_number >= len(geometry["indices"]):
+        return None
+    return geometry["indices"][tile_number], local_x, local_y
+
+
+def _clamp_to_montage_tile(geometry, image_x, image_y):
+    x = int(round(float(image_x)))
+    y = int(round(float(image_y)))
+    tile_width = geometry["tile_width"]
+    tile_height = geometry["tile_height"]
+    gap = geometry["gap"]
+    best = None
+    best_distance = None
+    for tile_number, _index in enumerate(geometry["indices"]):
+        row = tile_number // geometry["columns"]
+        column = tile_number % geometry["columns"]
+        x0 = column * (tile_width + gap)
+        y0 = row * (tile_height + gap)
+        cx = max(x0, min(x, x0 + tile_width - 1))
+        cy = max(y0, min(y, y0 + tile_height - 1))
+        distance = (cx - x) ** 2 + (cy - y) ** 2
+        if best_distance is None or distance < best_distance:
+            best = (cx, cy)
+            best_distance = distance
+    return best
+
+
+def _display_index_to_axis_index(view_state, axis, display_index):
+    indices = view_state.axis_range_indices[axis]
+    display_index = int(display_index)
+    if indices is None:
+        if display_index < 0 or display_index >= view_state.shape[axis]:
+            return None
+        return display_index
+    if display_index < 0 or display_index >= len(indices):
+        return None
+    return int(indices[display_index])

@@ -196,6 +196,21 @@ def test_transposed_image_axes_swaps_axes_without_touching_flags():
     assert transposed.axis_flipped == state.axis_flipped
 
 
+def test_montage_axis_validates_and_migrates_with_shape():
+    state = ViewState.from_shape((3, 4, 5)).with_montage_axis(2, columns=3, indices=(0, 2, 4), text="0:5:2")
+
+    assert state.montage_axis == 2
+    assert state.montage_columns == 3
+    assert state.montage_indices == (0, 2, 4)
+    assert state.montage_text == "0:5:2"
+
+    with pytest.raises(ValueError, match="montage axis"):
+        state.with_montage_axis(0)
+
+    migrated = state.for_shape((3, 4))
+    assert migrated.montage_axis is None
+
+
 def test_view_state_module_has_no_qt_or_pyqtgraph_imports():
     tree = ast.parse(VIEW_STATE_PATH.read_text())
 

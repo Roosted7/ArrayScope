@@ -166,8 +166,16 @@ class DimensionControlMixin:
         if axis >= self.data.ndim:
             return
         if role == "p":
-            self._set_view_state(self.view_state.with_line_axis(int(axis)))
-            self.profile_axes = (self.view_state.line_axis,)
+            current = list(getattr(self, "profile_axes", ()))
+            axis = int(axis)
+            if axis in current and len(current) > 1:
+                current.remove(axis)
+            elif axis not in current:
+                current.append(axis)
+            else:
+                current = [axis]
+            self.profile_axes = tuple(current)
+            self._set_view_state(self.view_state.with_line_axis(self.profile_axes[0]))
             if hasattr(self, "profile_dock"):
                 self.profile_dock.set_axes(self.data.shape, self.view_state.line_axis)
         elif role in ("y", "x"):
@@ -179,6 +187,15 @@ class DimensionControlMixin:
                 self.render(reason=f"dimension-{role}-flip")
                 return
             self._set_view_state(self.view_state.with_image_axis(role, axis))
+            if self.view_state.montage_axis in self.view_state.image_axes:
+                self._set_view_state(self.view_state.with_montage_axis(None))
+        elif role == "m":
+            if self.view_state.image_axes is None or int(axis) in self.view_state.image_axes:
+                return
+            if self.view_state.montage_axis == int(axis):
+                self._set_view_state(self.view_state.with_montage_axis(None))
+            else:
+                self._set_view_state(self.view_state.with_montage_axis(int(axis)))
         self.render(reason=f"dimension-{role}")
 
     def transposeView(self, event):
@@ -236,6 +253,7 @@ class DimensionControlMixin:
                     bProfile.setChecked(i in self.profile_axes)
         else:
             image_axes = self._image_axes()
+            montage_axis = self.view_state.montage_axis
             for i, w in enumerate(self.widgets['spins']['slice_indices']):
                 bPrim = self.widgets['buttons']['primary'][i]
                 bSecondary = self.widgets['buttons']['secondary'][i]
@@ -255,14 +273,17 @@ class DimensionControlMixin:
                     bSecondary.setEnabled(False)
                     bProfile.setEnabled(False)
                     bProfile.setChecked(False)
-                elif i in image_axes:
+                elif i in image_axes or i == montage_axis:
                     w.setEnabled(False)
                     if self.view_state.image_axes is not None and i == self.view_state.image_axes[0]:
                         bPrim.setChecked(True)
                         bSecondary.setChecked(False)
-                    else:
+                    elif self.view_state.image_axes is not None and i == self.view_state.image_axes[1]:
                         bPrim.setChecked(False)
                         bSecondary.setChecked(True)
+                    else:
+                        bPrim.setChecked(False)
+                        bSecondary.setChecked(False)
                     bPrim.setEnabled(False)
                     bSecondary.setEnabled(False)
                     bProfile.setEnabled(True)

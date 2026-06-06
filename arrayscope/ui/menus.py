@@ -50,6 +50,10 @@ class WindowMenuMixin:
         profile_action.triggered.connect(lambda visible: self._set_profile_dock_visible_from_user(visible))
         view_menu.addAction(operation_action)
         view_menu.addAction(profile_action)
+        if hasattr(self, "inspection_dock"):
+            inspection_action = self.inspection_dock.toggleViewAction()
+            inspection_action.triggered.connect(lambda visible: self._set_inspection_dock_visible_from_user(visible))
+            view_menu.addAction(inspection_action)
         command_palette_action = QtGui.QAction("Command Palette", self)
         set_action_icon(command_palette_action, "search")
         command_palette_action.setShortcut(QtGui.QKeySequence("Ctrl+K"))

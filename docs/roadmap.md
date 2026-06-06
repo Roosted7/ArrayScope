@@ -69,14 +69,14 @@ Goal: cover the most useful ArrayShow-like inspection workflows.
 
 * [x] Single profile axis.
 * [x] Live image-hover profile.
-* [ ] Multiple profile axes.
-* [ ] Better complex profile modes: magnitude, phase, real/imag, phase color strip. Magnitude/phase/real/imag modes are implemented; phase color strip remains.
+* [x] Multiple profile axes.
+* [x] Better complex profile modes: magnitude, phase, real/imag, phase color strip.
 * [x] Profile export.
-* [ ] Montage role (`M`) for 2D stacked/collage views.
+* [x] Montage role (`M`) for 2D stacked/collage views.
 * [x] One-axis plot mode as a natural fallback when only one display dimension is selected.
-* [ ] ROI line/rectangle tools.
-* [ ] ROI statistics.
-* [ ] Histogram comparisons for ROI / multiple arrays.
+* [x] ROI line/rectangle tools.
+* [x] ROI statistics.
+* [x] Histogram comparisons for ROI / multiple arrays.
 
 ## Phase 5 — Multi-window and sessions
 
@@ -93,10 +93,9 @@ Goal: make repeated inspection work reproducible and efficient.
 
 ## Phase 6 — Scientific/MRI-specific quality of life
 
-* [ ] Axis labels and units.
+* [ ] Axis labels and units, from file metadata or from `asc` keyword arguments (or in UI manually).
 * [ ] Source metadata display panel.
 * [ ] Coil/RSS helpers.
-* [ ] K-space presets.
 * [ ] BART export.
 * [ ] NIfTI export with affine metadata where available.
 * [ ] Improved DICOM series metadata and grouping diagnostics.

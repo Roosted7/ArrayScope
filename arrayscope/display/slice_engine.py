@@ -67,6 +67,7 @@ def make_image(data, state, colormap_lut=None):
         raise ValueError("image_axes must be set to make an image")
 
     image_data = data[_slice_for_display_axes(state, state.image_axes)]
+    image_data = _apply_axis_ranges_to_display_data(image_data, state, state.image_axes)
 
     # Preserve the existing viewer orientation: when primary precedes secondary
     # in ndarray order, transpose after slicing.
@@ -96,6 +97,7 @@ def make_image_from_slab(slab, request, colormap_lut=None):
         raise ValueError("image_axes must be set to make an image")
 
     image_data = np.asarray(slab)
+    image_data = _apply_axis_ranges_to_display_data(image_data, state, state.image_axes)
     if state.image_axes[0] < state.image_axes[1] and image_data.ndim >= 2:
         image_data = np.transpose(image_data)
     image_data = np.squeeze(image_data)
@@ -130,8 +132,10 @@ def make_line(data, state):
         raise ValueError("line_axis must be set to make a line")
 
     line_data = data[_slice_for_display_axes(state, (state.line_axis,))]
-    line_data = apply_channel(line_data, state.channel)
-    line_data = _apply_scale(line_data, state.scale)
+    line_data = _apply_axis_ranges_to_display_data(line_data, state, (state.line_axis,))
+    if state.channel != ChannelMode.COMPLEX:
+        line_data = apply_channel(line_data, state.channel)
+        line_data = _apply_scale(line_data, state.scale)
     line_data = np.squeeze(line_data)
     return DisplayLine(data=line_data, axis=state.line_axis)
 
@@ -141,8 +145,11 @@ def make_line_from_slab(slab, request):
     if state.line_axis is None:
         raise ValueError("line_axis must be set to make a line")
 
-    line_data = apply_channel(np.asarray(slab), state.channel)
-    line_data = _apply_scale(line_data, state.scale)
+    line_data = np.asarray(slab)
+    line_data = _apply_axis_ranges_to_display_data(line_data, state, (state.line_axis,))
+    if state.channel != ChannelMode.COMPLEX:
+        line_data = apply_channel(line_data, state.channel)
+        line_data = _apply_scale(line_data, state.scale)
     line_data = np.squeeze(line_data)
     return DisplayLine(data=line_data, axis=state.line_axis)
 
@@ -173,6 +180,19 @@ def _apply_scale(data, scale):
     return data
 
 
+def _apply_axis_ranges_to_display_data(data, state, display_axes):
+    result = np.asarray(data)
+    result_axis = 0
+    for original_axis in range(state.ndim):
+        if original_axis not in display_axes:
+            continue
+        indices = state.axis_range_indices[original_axis]
+        if indices is not None:
+            result = np.take(result, tuple(indices), axis=result_axis)
+        result_axis += 1
+    return result
+
+
 def _validated_state_for_data(data, state):
     state = ViewState(
         ndim=state.ndim,
@@ -184,6 +204,12 @@ def _validated_state_for_data(data, state):
         scale=state.scale,
         axis_flipped=state.axis_flipped,
         axis_fftshifted=state.axis_fftshifted,
+        montage_axis=state.montage_axis,
+        montage_columns=state.montage_columns,
+        montage_indices=state.montage_indices,
+        montage_text=state.montage_text,
+        axis_range_indices=state.axis_range_indices,
+        axis_range_text=state.axis_range_text,
     )
     if tuple(data.shape) != state.shape:
         raise ValueError(f"data shape {tuple(data.shape)} does not match view state shape {state.shape}")

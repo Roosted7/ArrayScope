@@ -39,6 +39,7 @@ class ProfileDock(QtWidgets.QDockWidget):
         controls.addWidget(QtWidgets.QLabel("Mode:"))
         self.profile_mode_combo = QtWidgets.QComboBox()
         self.profile_mode_combo.addItem("Magnitude", "abs")
+        self.profile_mode_combo.addItem("Magnitude + phase", "abs_phase")
         self.profile_mode_combo.addItem("Phase", "angle")
         self.profile_mode_combo.addItem("Real", "real")
         self.profile_mode_combo.addItem("Imaginary", "imag")
@@ -94,6 +95,15 @@ class ProfileDock(QtWidgets.QDockWidget):
     def update_line_result(self, line_result, view_state, y_range=None):
         line_result = self._line_result_for_mode(line_result)
         self.line_plot.update_line_result(line_result, view_state, y_range=y_range)
+
+    def update_line_results(self, line_entries, y_range=None):
+        converted = []
+        phase_strip = None
+        for line_result, view_state, label in line_entries:
+            if phase_strip is None and self.profile_mode() == "abs_phase" and np.iscomplexobj(line_result.data):
+                phase_strip = np.angle(line_result.data)
+            converted.append((self._line_result_for_mode(line_result), view_state, label))
+        self.line_plot.update_line_results(tuple(converted), y_range=y_range, phase_strip_data=phase_strip)
 
     def profile_mode(self):
         return self.profile_mode_combo.currentData() or "abs"

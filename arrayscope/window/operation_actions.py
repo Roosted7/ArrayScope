@@ -75,8 +75,10 @@ class OperationActionsMixin:
         profile_action.triggered.connect(lambda checked=False, dim=dim: self.set_profile_axis_from_menu(dim))
         live_profile_action = menu.addAction("Live profile from this axis")
         set_action_icon(live_profile_action, "monitor_heart")
+        live_profile_action.setCheckable(True)
+        live_profile_action.setChecked(self.widgets["buttons"]["display"]["live_profile"].isChecked() and dim in getattr(self, "profile_axes", ()))
         live_profile_action.setEnabled(not self.singleton[dim])
-        live_profile_action.triggered.connect(lambda checked=False, dim=dim: self._enable_live_profile_for_axis(dim))
+        live_profile_action.triggered.connect(lambda checked=False, dim=dim: self._set_live_profile_for_axis_from_menu(dim, bool(checked)))
         menu.addSeparator()
         for entry in operation_entries():
             action = menu.addAction(entry.label)
@@ -92,6 +94,12 @@ class OperationActionsMixin:
         self.widgets["buttons"]["display"]["live_profile"].setChecked(True)
         if hasattr(self, "display_toolbar"):
             self.display_toolbar.set_current(live_profile=True)
+
+    def _set_live_profile_for_axis_from_menu(self, dim, enabled):
+        if enabled:
+            self._enable_live_profile_for_axis(dim)
+        else:
+            self.widgets["buttons"]["display"]["live_profile"].setChecked(False)
 
     def set_profile_axis_from_menu(self, dim):
         self.set_dimension_role("p", dim)
@@ -203,6 +211,11 @@ class OperationActionsMixin:
                 PaletteCommand("auto_window", "Auto window levels", icon="tonality"),
                 PaletteCommand("reset_layout", "Reset layout", icon="reset_wrench"),
                 PaletteCommand("toggle_profile", "Toggle profile dock", icon="show_chart"),
+                PaletteCommand("show_inspection", "Show inspection dock", icon="analytics"),
+                PaletteCommand("roi_line", "Line ROI tool", icon="show_chart"),
+                PaletteCommand("roi_rectangle", "Rectangle ROI tool", icon="crop"),
+                PaletteCommand("roi_polyline", "Polyline ROI tool", icon="waves"),
+                PaletteCommand("roi_freehand", "Freehand ROI tool", icon="edit"),
                 PaletteCommand("export_derived", "Export derived array", icon="download"),
                 PaletteCommand("save_recipe", "Save operation recipe", icon="save"),
                 PaletteCommand("load_recipe", "Load operation recipe", icon="folder_open"),
@@ -228,6 +241,11 @@ class OperationActionsMixin:
             "auto_window": self.auto_window_levels,
             "reset_layout": self.reset_layout,
             "toggle_profile": self.toggle_profile_dock,
+            "show_inspection": self._show_inspection_dock,
+            "roi_line": lambda: self._select_roi_tool("roi_line"),
+            "roi_rectangle": lambda: self._select_roi_tool("roi_rectangle"),
+            "roi_polyline": lambda: self._select_roi_tool("roi_polyline"),
+            "roi_freehand": lambda: self._select_roi_tool("roi_freehand"),
             "export_derived": self.export_derived_array,
             "save_recipe": self.save_operation_recipe,
             "load_recipe": self.load_operation_recipe,
@@ -238,6 +256,12 @@ class OperationActionsMixin:
         if action is not None:
             return action()
         return None
+
+    def _select_roi_tool(self, tool):
+        if hasattr(self, "inspection_dock"):
+            self.inspection_dock.set_current_tool(tool)
+        self._on_inspection_tool_changed(tool)
+        self._show_inspection_dock()
 
     def _choose_operation_axis(self, entry):
         choices = self._axis_choices()
