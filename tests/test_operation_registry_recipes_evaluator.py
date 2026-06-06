@@ -28,6 +28,7 @@ load_module("slice_engine")
 operation_pipeline = load_module("operation_pipeline")
 operation_registry = load_module("operation_registry")
 operation_recipes = load_module("operation_recipes")
+cache_status = load_module("cache_status")
 operation_evaluator = load_module("operation_evaluator")
 
 ArrayDocument = operation_pipeline.ArrayDocument
@@ -41,6 +42,7 @@ ReverseAxis = operation_pipeline.ReverseAxis
 RootSumSquares = operation_pipeline.RootSumSquares
 SplitComplexAxis = operation_pipeline.SplitComplexAxis
 OperationEvaluator = operation_evaluator.OperationEvaluator
+CacheStatus = cache_status.CacheStatus
 ViewState = view_state.ViewState
 
 
@@ -167,6 +169,21 @@ def test_display_cache_invalidates_for_operations_and_view_state():
     evaluator.image(state)
     assert evaluator.derived_evaluations == 2
     assert evaluator.image_evaluations == 3
+
+
+def test_display_cache_status_tracks_display_hit_and_miss():
+    data = np.arange(3 * 4).reshape(3, 4).astype(float)
+    state = ViewState.from_shape(data.shape)
+    evaluator = OperationEvaluator(ArrayDocument(data))
+
+    evaluator.current_data()
+    assert evaluator.last_status.status == CacheStatus.READY
+
+    evaluator.image(state)
+    assert evaluator.last_status.status == CacheStatus.READY
+
+    evaluator.image(state)
+    assert evaluator.last_status.status == CacheStatus.CACHED
 
 
 def test_line_cache_and_base_data_remains_unmodified():

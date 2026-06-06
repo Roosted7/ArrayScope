@@ -16,11 +16,14 @@ from .dimension_roles import DimensionRoles
 from .imageview2d import ImageView2D
 from .operation_dock import OperationStackDock
 from .operation_evaluator import OperationEvaluator
-from .operation_pipeline import ArrayDocument
+from .operation_pipeline import ArrayDocument, evaluate_shape
 from .operation_recipes import load_recipe, save_recipe
 from .operation_registry import create_operation, operation_entries
+from .operation_stack import delete_operation, move_operation, reorder_operations
 from .profile import clamp_marker_position, profile_state_from_image_hover, profile_y_range
 from .profile_dock import ProfileDock
+from .settings_state import AppSettingsState, settings_from_mapping, settings_to_mapping
+from .theme import ThemeChoice, apply_theme_to_qapplication
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 from .view_state import ChannelMode, ScaleMode, ViewState
 from .window_levels import choose_window_levels
@@ -58,6 +61,9 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
     def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
         super(ArrayScopeWindow, self).__init__()
         self.resize(800,800)
+        self._settings = Qt.QtCore.QSettings("ArrayScope", "ArrayScope")
+        self.app_settings = self._load_app_settings()
+        self._apply_theme_choice(self.app_settings.theme, persist=False)
 
         self.base_data = data
         self.document = ArrayDocument(self.base_data)
@@ -466,9 +472,15 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             on_save_recipe=self.save_operation_recipe,
             on_load_recipe=self.load_operation_recipe,
             on_materialize=self.materialize_current_array,
+            on_delete_selected=self.delete_selected_operation,
+            on_move_selected_up=lambda index: self.move_selected_operation(index, -1),
+            on_move_selected_down=lambda index: self.move_selected_operation(index, 1),
+            on_reorder=self.reorder_operations,
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
         self._update_operation_dock()
+        self._setup_menus()
+        self._restore_window_settings()
         
         # Initialize complex indicators for size-2 real dimensions
         self.update_complex_indicators()
@@ -499,6 +511,107 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         if filepath is not None:
             self._file_watcher = Qt.QtCore.QFileSystemWatcher([str(filepath)])
             self._file_watcher.fileChanged.connect(self._on_file_changed)
+
+    def _load_app_settings(self):
+        return settings_from_mapping(
+            {
+                "theme": self._settings.value("theme", ThemeChoice.SYSTEM.value),
+                "prefetch_nearby_slices": self._settings.value("prefetch_nearby_slices", False),
+            }
+        )
+
+    def _save_app_settings(self):
+        for key, value in settings_to_mapping(self.app_settings).items():
+            self._settings.setValue(key, value)
+
+    def _setup_menus(self):
+        view_menu = self.menuBar().addMenu("View")
+        view_menu.addAction(self.operation_dock.toggleViewAction())
+        view_menu.addAction(self.profile_dock.toggleViewAction())
+        view_menu.addSeparator()
+        reset_layout_action = QtGui.QAction("Reset layout", self)
+        reset_layout_action.triggered.connect(self.reset_layout)
+        view_menu.addAction(reset_layout_action)
+
+        theme_menu = self.menuBar().addMenu("Theme")
+        self._theme_actions = {}
+        self._theme_action_group = QtGui.QActionGroup(self)
+        self._theme_action_group.setExclusive(True)
+        for choice, label in (
+            (ThemeChoice.SYSTEM, "System / Native"),
+            (ThemeChoice.NATIVE, "Native"),
+            (ThemeChoice.DARK, "Dark"),
+            (ThemeChoice.LIGHT, "Light"),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            self._theme_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, choice=choice: self._apply_theme_choice(choice))
+            theme_menu.addAction(action)
+            self._theme_actions[choice] = action
+        self._sync_theme_actions()
+
+    def _sync_theme_actions(self):
+        if not hasattr(self, "_theme_actions"):
+            return
+        for choice, action in self._theme_actions.items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.theme == choice)
+            action.blockSignals(False)
+
+    def _apply_theme_choice(self, choice, persist=True):
+        result = apply_theme_to_qapplication(QtWidgets.QApplication.instance(), choice)
+        if result.warning:
+            print(f"Theme warning: {result.warning}")
+            if persist:
+                QtWidgets.QMessageBox.warning(self, "Theme Warning", result.warning)
+        theme_to_store = result.requested if result.applied == result.requested else result.applied
+        self.applied_theme = result.applied
+        self.theme_backend = result.backend
+        self.app_settings = AppSettingsState(theme=theme_to_store, prefetch_nearby_slices=getattr(self, "app_settings", AppSettingsState()).prefetch_nearby_slices)
+        if persist:
+            self._save_app_settings()
+        self._sync_theme_actions()
+
+    def _set_prefetch_enabled(self, enabled):
+        self.app_settings = AppSettingsState(theme=self.app_settings.theme, prefetch_nearby_slices=bool(enabled))
+        self._save_app_settings()
+
+    def _restore_window_settings(self):
+        geometry = self._settings.value("geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        state = self._settings.value("window_state")
+        if state is not None:
+            self.restoreState(state)
+        if not self.profile_dock.isVisible() and self.data.ndim == 1:
+            self.profile_dock.show()
+        Qt.QtCore.QTimer.singleShot(0, self._resize_default_docks)
+
+    def reset_layout(self):
+        self.profile_dock.setFloating(False)
+        self.profile_dock.hide()
+        if self.data.ndim == 1:
+            self.profile_dock.show()
+        self.operation_dock.setFloating(False)
+        self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
+        self.operation_dock.show()
+        self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
+        Qt.QtCore.QTimer.singleShot(0, self._resize_default_docks)
+
+    def _resize_default_docks(self):
+        try:
+            if self.profile_dock.isVisible() and not self.profile_dock.isFloating():
+                self.resizeDocks([self.profile_dock], [max(140, int(self.height() * 0.23))], Qt.QtCore.Qt.Orientation.Vertical)
+            if self.operation_dock.isVisible() and not self.operation_dock.isFloating():
+                self.resizeDocks([self.operation_dock], [max(220, int(self.width() * 0.24))], Qt.QtCore.Qt.Orientation.Horizontal)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self._settings.setValue("geometry", self.saveGeometry())
+        self._settings.setValue("window_state", self.saveState())
+        self._save_app_settings()
+        super().closeEvent(event)
 
 
 
@@ -604,7 +717,20 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
 
     def _update_operation_dock(self):
         if hasattr(self, "operation_dock"):
-            self.operation_dock.set_operations(self.document.operations)
+            self.operation_dock.set_operations(
+                self.document.operations,
+                output_shape=self.document.current_shape,
+                cache_status=self.operation_evaluator.last_status,
+                operation_shapes=self._operation_shapes(),
+            )
+
+    def _operation_shapes(self):
+        shapes = []
+        shape = tuple(self.base_data.shape)
+        for operation in self.document.operations:
+            shape = evaluate_shape(shape, (operation,))
+            shapes.append(shape)
+        return tuple(shapes)
 
     def _replace_base_data(self, data):
         self.base_data = data
@@ -767,6 +893,39 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
     def undo_last_operation(self):
         self._set_document(self.document.without_last_operation())
         self.update()
+
+    def delete_selected_operation(self, index):
+        if index is None:
+            return
+        try:
+            operations = delete_operation(self.document.operations, index, self.base_data.shape)
+            self._set_document(ArrayDocument(self.base_data, operations=operations))
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot delete operation:\n{e}")
+            return
+        self.update()
+
+    def move_selected_operation(self, index, direction):
+        if index is None:
+            return
+        try:
+            operations = move_operation(self.document.operations, index, direction, self.base_data.shape)
+            self._set_document(ArrayDocument(self.base_data, operations=operations))
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot reorder operation:\n{e}")
+            return
+        self.update()
+
+    def reorder_operations(self, order):
+        try:
+            operations = reorder_operations(self.document.operations, order, self.base_data.shape)
+            self._set_document(ArrayDocument(self.base_data, operations=operations))
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot reorder operation stack:\n{e}")
+            self._update_operation_dock()
+            return False
+        self.update()
+        return True
 
     def clear_operations(self):
         self._set_document(ArrayDocument(self.base_data))
@@ -1041,6 +1200,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
 
             line_result = self.operation_evaluator.line(profile_state)
             self.profile_dock.update_line_result(line_result, profile_state, y_range=self._current_profile_y_range())
+            self._update_operation_dock()
             self.profile_dock.show()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
         except Exception as e:
@@ -1191,6 +1351,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self.img_view.setImage(display_image.data, autoLevels=al, levels=levels)
+            self._update_operation_dock()
             
             # Apply axis flips after setting the image
             self.apply_axis_flips()
@@ -1296,6 +1457,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self._sync_view_state_from_window()
         line_result = self.operation_evaluator.line(self.view_state)
         self.profile_dock.update_line_result(line_result, self.view_state, y_range=self._current_profile_y_range())
+        self._update_operation_dock()
 
     def _on_view_range_changed(self):
         """Update display group title when view range changes (for fit mode)."""
