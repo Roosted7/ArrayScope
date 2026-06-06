@@ -43,7 +43,9 @@ PATH=~/miniconda3/bin:$PATH direnv exec . conda env update -f environment.yml --
 
 * Add tests for new behavior.
 * Run relevant existing tests and update them only when behavior intentionally changed.
-* Do a small coherence pass if architecture, public behavior, or documentation changed.
+* Check and ensure coherence across architecture, public behavior, and documentation.
+  * Through file inspection, small tests, full UI simulations (simulate interactions, and check rendered results)
+  * Iterate when needed (from updating docs, to bugs, all the way to improving looks and feels)
 * End with a handoff note containing:
 
   * what changed;

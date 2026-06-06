@@ -15,6 +15,7 @@ from .line_plot import LinePlotController
 class ProfileDock(QtWidgets.QDockWidget):
     def __init__(self, parent, on_axis_changed):
         super().__init__("Profile", parent)
+        self.setObjectName("ProfileDock")
         self._on_axis_changed = on_axis_changed
         self._updating_axis = False
 
