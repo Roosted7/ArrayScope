@@ -43,6 +43,12 @@ def view_state_to_mapping(state: ViewState):
         "scale": state.scale.value,
         "axis_flipped": list(state.axis_flipped),
         "axis_fftshifted": list(state.axis_fftshifted),
+        "montage_axis": state.montage_axis,
+        "montage_columns": state.montage_columns,
+        "montage_indices": list(state.montage_indices) if state.montage_indices is not None else None,
+        "montage_text": state.montage_text,
+        "axis_range_indices": [list(value) if value is not None else None for value in state.axis_range_indices],
+        "axis_range_text": list(state.axis_range_text),
     }
 
 
@@ -59,6 +65,15 @@ def view_state_from_mapping(mapping, base_shape):
         scale=mapping.get("scale", "linear"),
         axis_flipped=tuple(mapping.get("axis_flipped", (False,) * len(tuple(base_shape)))),
         axis_fftshifted=tuple(mapping.get("axis_fftshifted", (False,) * len(tuple(base_shape)))),
+        montage_axis=mapping.get("montage_axis"),
+        montage_columns=mapping.get("montage_columns"),
+        montage_indices=tuple(mapping["montage_indices"]) if mapping.get("montage_indices") is not None else None,
+        montage_text=mapping.get("montage_text"),
+        axis_range_indices=tuple(
+            None if value is None else tuple(value)
+            for value in mapping.get("axis_range_indices", (None,) * len(tuple(base_shape)))
+        ),
+        axis_range_text=tuple(mapping.get("axis_range_text", (None,) * len(tuple(base_shape)))),
     )
     return state.for_shape(base_shape, preserve_flags=True)
 

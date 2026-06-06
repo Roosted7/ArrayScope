@@ -26,8 +26,12 @@ class WindowLayoutManager:
         win = self.window
         win._operation_dock_user_visible = False
         win._profile_dock_user_visible = False
+        win._inspection_dock_user_visible = False
         win.profile_dock.setFloating(False)
         win.profile_dock.hide()
+        if hasattr(win, "inspection_dock"):
+            win.inspection_dock.setFloating(False)
+            win.inspection_dock.hide()
         if win.data.ndim == 1:
             win.profile_dock.show()
         win.operation_dock.setFloating(False)
@@ -71,6 +75,14 @@ class WindowLayoutManager:
             elif not win.profile_dock.isFloating():
                 changed = changed or win.profile_dock.isVisible()
                 self.set_dock_visible_later(win.profile_dock, False)
+        if hasattr(win, "inspection_dock"):
+            should_show_inspection = getattr(win, "_inspection_dock_user_visible", False)
+            if should_show_inspection:
+                changed = changed or not win.inspection_dock.isVisible()
+                self.set_dock_visible_later(win.inspection_dock, True)
+            elif not win.inspection_dock.isFloating():
+                changed = changed or win.inspection_dock.isVisible()
+                self.set_dock_visible_later(win.inspection_dock, False)
         if changed:
             self.schedule_view_geometry_refresh()
 
@@ -89,17 +101,15 @@ class WindowLayoutManager:
                 live_profile = win.widgets["buttons"]["display"]["live_profile"].isChecked()
                 if win.data.ndim == 1 or live_profile or getattr(win, "_profile_dock_user_visible", False):
                     return
+            if dock is getattr(win, "inspection_dock", None):
+                if getattr(win, "_inspection_dock_user_visible", False):
+                    return
         dock.setVisible(bool(visible))
 
     def refresh_view_geometry(self):
         win = self.window
         if hasattr(win, "centralWidget") and win.centralWidget() is not None:
             win.centralWidget().updateGeometry()
-        hint = win.sizeHint()
-        if hint.isValid():
-            win.resize(max(win.width(), hint.width()), max(win.height(), hint.height()))
-        if hasattr(win, "img_view") and win.data.ndim >= 2:
-            win.img_view.getView().autoRange()
 
     def resize_profile_dock_default(self):
         win = self.window
@@ -118,5 +128,7 @@ class WindowLayoutManager:
                 win.resizeDocks([win.profile_dock], [max(140, int(win.height() * 0.23))], Qt.QtCore.Qt.Orientation.Vertical)
             if win.operation_dock.isVisible() and not win.operation_dock.isFloating():
                 win.resizeDocks([win.operation_dock], [max(220, int(win.width() * 0.24))], Qt.QtCore.Qt.Orientation.Horizontal)
+            if hasattr(win, "inspection_dock") and win.inspection_dock.isVisible() and not win.inspection_dock.isFloating():
+                win.resizeDocks([win.inspection_dock], [max(240, int(win.width() * 0.24))], Qt.QtCore.Qt.Orientation.Horizontal)
         except Exception:
             pass

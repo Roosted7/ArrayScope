@@ -216,6 +216,125 @@ def test_dimension_strip_wraps_for_many_dimensions(qt_app):
         _process_events(qt_app)
 
 
+def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
+    _clear_arrayscope_settings()
+
+    for name in list(sys.modules):
+        if name == "arrayscope" or name.startswith("arrayscope."):
+            del sys.modules[name]
+
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.arange(24 * 24, dtype=float).reshape(24, 24)
+    win = ArrayScopeWindow(data)
+    try:
+        win.resize(940, 640)
+        win.show()
+        _process_events(qt_app)
+
+        win.inspection_dock.set_current_tool("roi_rectangle")
+        rectangle = win.img_view.createRoi(RoiKind.RECTANGLE, rect=(3, 4, 8, 7))
+        polyline = win.img_view.createRoi(RoiKind.POLYLINE, points=((1, 1), (12, 3), (18, 18)))
+        freehand = win.img_view.createRoi(RoiKind.FREEHAND_POLYGON, points=((8, 8), (19, 8), (19, 20), (8, 20)))
+        win._add_compare_layer(data + 1000, label="offset")
+        _process_events(qt_app, count=12)
+
+        assert not win.inspection_dock.isVisible()
+        assert win.img_view._roi_info_panel is not None
+        assert win.img_view._roi_info_panel.isVisible()
+        assert len(win.img_view.roiSelections()) == 3
+        assert win.inspection_dock.stats_table.rowCount() == 3
+        assert len(win.inspection_dock.histogram_plot.listDataItems()) >= 6
+        assert rectangle.geometry.kind == RoiKind.RECTANGLE
+        assert polyline.geometry.kind == RoiKind.POLYLINE
+        assert freehand.geometry.points[0] == freehand.geometry.points[-1]
+
+        _grab_widget(win, "arrayscope_roi_inspection_view.png", min_width=500, min_height=400)
+        win._show_inspection_dock()
+        _process_events(qt_app)
+        assert win.inspection_dock.isVisible()
+        assert win.inspection_dock.isFloating()
+        _grab_widget(win.inspection_dock.widget(), "arrayscope_roi_inspection_dock.png", min_width=240, min_height=260)
+    finally:
+        win.close()
+        _process_events(qt_app)
+
+
+def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
+    from pyqtgraph.Qt import QtCore
+
+    _clear_arrayscope_settings()
+
+    for name in list(sys.modules):
+        if name == "arrayscope" or name.startswith("arrayscope."):
+            del sys.modules[name]
+
+    from arrayscope.window import ArrayScopeWindow
+
+    base = np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6)
+    data = base + 1j * (base + 1)
+    win = ArrayScopeWindow(data)
+    try:
+        win.resize(980, 700)
+        win.show()
+        _process_events(qt_app)
+
+        win.set_profile_axis(2)
+        win.set_dimension_role("p", 1)
+        win.profile_dock.profile_mode_combo.setCurrentIndex(win.profile_dock.profile_mode_combo.findData("abs_phase"))
+        win.widgets["buttons"]["display"]["live_profile"].setChecked(True)
+        win.img_view.setProfileMarker(2, 2, visible=True)
+        win._on_profile_marker_moved(2, 2)
+        win._update_live_profile_from_pending_pos()
+        _process_events(qt_app, count=80)
+
+        assert win.profile_dock.isVisible()
+        assert len(win.profile_axes) == 2
+        assert len(win.profile_dock.line_plot.curves) >= 2
+        assert win.profile_dock.line_plot.legend is not None
+        assert win.profile_dock.line_plot.phase_strip is not None
+        _grab_widget(win.profile_dock.widget, "arrayscope_multi_profile_phase_strip.png", min_width=300, min_height=90)
+
+        win.widgets["buttons"]["display"]["live_profile"].setChecked(False)
+        win.dimension_strip.chip(0).slice_edit.setText("0:2:100")
+        win._on_slice_text_changed(0, "0:2:100")
+        _process_events(qt_app, count=12)
+        assert win.view_state.axis_range_indices[0] == (0, 2)
+        assert win.view_state.axis_range_text[0] == "0:2:100"
+
+        win.dimension_strip.chip(2).slice_edit.setText(":")
+        win._on_slice_text_changed(2, ":")
+        QtCore.QThread.msleep(80)
+        _process_events(qt_app, count=30)
+
+        assert win.view_state.montage_axis == 2
+        assert win.view_state.montage_text == ":"
+        assert win.img_view.image is not None
+        assert max(win.img_view.image.shape[:2]) > data.shape[1]
+
+        win.widgets["buttons"]["display"]["live_profile"].setChecked(True)
+        win.set_profile_axis(1)
+        geometry = win._current_montage_geometry
+        tile_width = geometry["tile_width"]
+        gap = geometry["gap"]
+        second_tile_x = tile_width + gap + 1
+        win.img_view.setProfileMarker(second_tile_x, 1, visible=True)
+        win._on_profile_marker_moved(second_tile_x, 1)
+        win._update_live_profile_from_pending_pos()
+        _process_events(qt_app, count=80)
+        assert win.profile_dock.line_plot.curves
+        assert win.profile_dock.line_plot.curves[0].name().endswith("d2=1")
+
+        win.img_view.setProfileMarker(tile_width, 1, visible=True)
+        win._on_profile_marker_moved(tile_width, 1)
+        assert win.img_view.profileMarkerPosition()[0] != float(tile_width)
+        _grab_widget(win, "arrayscope_montage_view.png", min_width=500, min_height=400)
+    finally:
+        win.close()
+        _process_events(qt_app)
+
+
 def test_pixel_status_label_elides_slice_context_first(qt_app):
     from arrayscope.ui.status_label import PixelStatusLabel
 

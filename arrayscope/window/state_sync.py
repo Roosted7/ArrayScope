@@ -53,8 +53,37 @@ class StateSyncMixin:
         if axis >= self.view_state.ndim:
             return
         self._active_slice_axis = int(axis)
-        self._set_view_state(self.view_state.with_slice(axis, value))
+        state = self.view_state.with_slice(axis, value).with_axis_range(axis, None)
+        if state.montage_axis == int(axis):
+            state = state.with_montage_axis(None)
+        self._set_view_state(state)
         self.render(reason="slice")
+
+    def _on_slice_text_changed(self, axis, text):
+        axis = int(axis)
+        text = str(text).strip()
+        if axis >= self.view_state.ndim:
+            return
+        if ":" not in text:
+            try:
+                self._on_slice_index_changed(axis, int(text))
+            except ValueError:
+                self._sync_controls_from_view_state()
+            return
+        try:
+            indices = _indices_from_slice_text(text, self.data.shape[axis])
+        except ValueError:
+            self._sync_controls_from_view_state()
+            return
+        if not indices:
+            self._sync_controls_from_view_state()
+            return
+        self._active_slice_axis = axis
+        if self.view_state.image_axes is not None and axis in self.view_state.image_axes:
+            self._set_view_state(self.view_state.with_axis_range(axis, indices=indices, text=text))
+        else:
+            self._set_view_state(self.view_state.with_montage_axis(axis, indices=indices, text=text))
+        self.render(reason="slice-range")
 
     def _on_channel_clicked(self, name):
         self._set_view_state(self.view_state.with_channel(name))
@@ -183,3 +212,37 @@ class StateSyncMixin:
 
     def _current_is_complex(self):
         return np.issubdtype(np.dtype(self.data.dtype), np.complexfloating)
+
+
+def _indices_from_slice_text(text, axis_size):
+    parts = str(text).split(":")
+    if len(parts) > 3:
+        raise ValueError("slice range must have at most start:stop:step")
+
+    def parse(part):
+        part = part.strip()
+        return None if part == "" else int(part)
+
+    while len(parts) < 3:
+        parts.append("")
+    if len(str(text).split(":")) == 3:
+        start, step, stop = (parse(part) for part in parts[:3])
+        if step is None:
+            step = 1
+        if start is None:
+            start = 0 if step > 0 else int(axis_size) - 1
+        if stop is None:
+            stop = int(axis_size) - 1 if step > 0 else 0
+        if step == 0:
+            raise ValueError("slice step cannot be zero")
+        end = min(int(axis_size) - 1, stop) if step > 0 else max(0, stop)
+        values = []
+        current = max(0, min(int(axis_size) - 1, start))
+        while (current <= end if step > 0 else current >= end):
+            values.append(current)
+            current += step
+        return tuple(values)
+    start, stop, step = (parse(part) for part in parts[:3])
+    if step == 0:
+        raise ValueError("slice step cannot be zero")
+    return tuple(range(*slice(start, stop, step).indices(int(axis_size))))

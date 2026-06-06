@@ -4,6 +4,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.display.imageview2d import ImageView2D
+from arrayscope.ui.docks.inspection import InspectionDock
 from arrayscope.ui.docks.operations import OperationStackDock
 from arrayscope.ui.docks.profiles import ProfileDock
 from arrayscope.ui.dimension_strip import DimensionStrip
@@ -231,6 +232,7 @@ class DisplayControlBuildMixin:
         self.dimension_strip = DimensionStrip(data.ndim, self)
         self.dimension_strip.roleChanged.connect(self.set_dimension_role)
         self.dimension_strip.sliceChanged.connect(self._on_slice_index_changed)
+        self.dimension_strip.sliceTextChanged.connect(self._on_slice_text_changed)
         self.dimension_strip.operationRequested.connect(lambda axis: self._show_operation_context_menu_for_axis(axis))
         self.dimension_strip.focusedAxisChanged.connect(lambda axis: setattr(self, "_focused_dimension_axis", int(axis)))
         for container in self.dim_containers:
@@ -305,7 +307,7 @@ class DisplayControlBuildMixin:
         live_profile.setStyleSheet(self.RADIO_BUTTON_STYLE)
         live_profile.setToolTip("Update the line plot from the mouse position in the image view")
         live_profile.toggled.connect(self._on_live_profile_toggled)
-        display_layout.addWidget(live_profile)
+        live_profile.hide()
         
         # Optional: tooltip hints
         self.widgets['buttons']['display']['square_pixels'].setToolTip('Lock to 1:1 pixel aspect')
@@ -338,6 +340,10 @@ class DisplayControlBuildMixin:
         self.image_tab.setLayout(self.image_tab_layout)
         self.img_view.getView().scene().sigMouseMoved.connect(lambda pos: self._on_image_mouse_moved(pos))
         self.img_view.set_profile_marker_callback(self._on_profile_marker_moved)
+        self.img_view.roiCreated.connect(self._on_roi_created)
+        self.img_view.roiChanged.connect(self._on_roi_changed)
+        self.img_view.roiDeleted.connect(self._on_roi_deleted)
+        self.img_view.imageContextMenuRequested.connect(self._show_image_context_menu)
         
         # Connect to view range changes to update aspect ratio in fit mode
         self.img_view.getView().sigRangeChanged.connect(self._on_view_range_changed)
@@ -369,7 +375,6 @@ class DisplayControlBuildMixin:
         self.display_toolbar.aspectChanged.connect(self._on_aspect_toolbar_changed)
         self.display_toolbar.windowModeChanged.connect(self._on_window_mode_changed)
         self.display_toolbar.autoWindowRequested.connect(self.auto_window_levels)
-        self.display_toolbar.liveProfileToggled.connect(self._set_live_profile_checked)
         self.layouts['topUp'].addWidget(self.display_toolbar)
         self.layouts['topUp'].addWidget(self.widgets['labels']['pixelValue'])
         self.layouts['topUp'].addWidget(self.widgets['labels']['arrayInfo'])
@@ -410,6 +415,16 @@ class DisplayControlBuildMixin:
         self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
         self.profile_dock.visibilityChanged.connect(self._on_profile_dock_visibility_changed)
         self.profile_dock.hide()
+        self.inspection_dock = InspectionDock(
+            self,
+            on_tool_changed=self._on_inspection_tool_changed,
+            on_add_roi=self._add_roi_for_tool,
+            on_delete_roi=self._delete_roi,
+            on_clear_rois=self._clear_rois,
+        )
+        self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.inspection_dock)
+        self.inspection_dock.setFloating(True)
+        self.inspection_dock.hide()
         self.operation_dock = OperationStackDock(
             self,
             on_undo=self.undo_last_operation,

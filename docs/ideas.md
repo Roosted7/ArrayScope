@@ -46,6 +46,7 @@ Rules:
 * Add linked crosshair between image and profile views.
 * Add optional image marker snapping to integer pixels, center of pixel, or nearest local maximum.
 * Add multi-array compare modes: difference, ratio, phase difference, overlay, linked cursor.
+* Make ROI compare layers public, operation-aware, and session-backed instead of the current internal compatible-2D histogram scaffold.
 
 ## Operation / pipeline ideas
 

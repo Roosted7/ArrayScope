@@ -93,6 +93,9 @@ class LinePlotController:
         self.widget.scene().sigMouseMoved.connect(self.on_hover)
 
         self.curve = None
+        self.curves = []
+        self.phase_strip = None
+        self.legend = None
         self.base_range = None
         self.base_pen_width = 3.0
         self.min_pen = 2.0
@@ -105,43 +108,73 @@ class LinePlotController:
         self.update_line_result(make_line(data, view_state), view_state)
 
     def update_line_result(self, line_result, view_state, y_range=None):
+        self.update_line_results(((line_result, view_state, ""),), y_range=y_range)
+
+    def update_line_results(self, line_entries, y_range=None, phase_strip_data=None):
         self.widget.clear()
         self.widget.showGrid(x=True, y=True, alpha=0.25)
         self.widget.addItem(self.crosshair)
         self.crosshair.setVisible(False)
+        self.curves = []
+        self.curve = None
+        self.phase_strip = None
+        self.legend = None
+        self.current_line_data = None
 
         try:
-            line_data = line_result.data
-
-            if line_data.ndim == 1:
-                self.current_line_data = line_data
-
-                if self.plot_style == "bar":
+            entries = tuple(line_entries)
+            if not entries:
+                self.current_line_data = None
+                return
+            if len(entries) > 1:
+                self.legend = self.widget.addLegend(offset=(8, 8))
+            colors = ((50, 100, 200), (220, 90, 50), (40, 150, 90), (160, 90, 210), (220, 160, 40))
+            first_axis = None
+            for index, (line_result, view_state, label) in enumerate(entries):
+                line_data = np.asarray(line_result.data)
+                if line_data.ndim != 1:
+                    show_status_message(self.owner, f"Expected 1D profile, got {line_data.ndim}D shape {line_data.shape}")
+                    continue
+                if self.current_line_data is None:
+                    self.current_line_data = line_data
+                if first_axis is None:
+                    first_axis = view_state.line_axis
+                color = colors[index % len(colors)]
+                if self.plot_style == "bar" and len(entries) == 1:
                     x = np.arange(len(line_data))
-                    brush = pg.mkBrush(50, 100, 200, 180)
-                    pen = pg.mkPen(50, 100, 200)
-                    self.curve = pg.BarGraphItem(x=x, height=line_data, width=0.8, brush=brush, pen=pen)
-                    self.widget.addItem(self.curve)
+                    item = pg.BarGraphItem(x=x, height=line_data, width=0.8, brush=pg.mkBrush(*color, 180), pen=pg.mkPen(*color))
+                    self.widget.addItem(item)
                 else:
-                    pen = pg.mkPen(color=(50, 100, 200), width=2)
-                    self.curve = self.widget.plot(line_data, pen=pen, name="")
-
+                    pen = pg.mkPen(color=color, width=2)
+                    item = self.widget.plot(line_data, pen=pen, name=label or f"dim {view_state.line_axis}")
+                self.curves.append(item)
+                if self.curve is None:
+                    self.curve = item
                 if self.base_range is None:
-                    x_min = 0
-                    x_max = len(line_data) - 1
-                    self.base_range = max(1.0, (x_max - x_min))
-                if y_range is not None:
-                    self.widget.getViewBox().setYRange(float(y_range[0]), float(y_range[1]), padding=0)
-                else:
-                    self.widget.enableAutoRange(axis="y")
+                    self.base_range = max(1.0, len(line_data) - 1)
+            if phase_strip_data is not None:
+                self._add_phase_strip(np.asarray(phase_strip_data))
+            if y_range is not None:
+                self.widget.getViewBox().setYRange(float(y_range[0]), float(y_range[1]), padding=0)
             else:
-                show_status_message(self.owner, f"Expected 1D profile, got {line_data.ndim}D shape {line_data.shape}")
-
-            self.widget.setLabel("bottom", f"Index along dim {view_state.line_axis}")
+                self.widget.enableAutoRange(axis="y")
+            if first_axis is not None:
+                self.widget.setLabel("bottom", f"Index along dim {first_axis}")
 
         except Exception as e:
             show_status_message(self.owner, f"Line plot update failed: {e}")
             self.current_line_data = None
+
+    def _add_phase_strip(self, phase_data):
+        if phase_data.ndim != 1 or phase_data.size == 0:
+            return
+        normalized = ((phase_data + np.pi) / (2.0 * np.pi)).reshape(1, -1)
+        self.phase_strip = pg.ImageItem(normalized)
+        self.phase_strip.setLookupTable(_phase_lut())
+        self.phase_strip.setLevels((0, 1))
+        self.phase_strip.setOpacity(0.85)
+        self.phase_strip.setRect(Qt.QtCore.QRectF(0, -0.08, max(1, phase_data.size - 1), 0.06))
+        self.widget.addItem(self.phase_strip)
 
     def toggle_style(self):
         self.plot_style = "bar" if self.plot_style == "line" else "line"
@@ -208,3 +241,12 @@ def _decimal_places(number):
     if isinstance(number, (int, np.integer)):
         return 0
     return int(max(1, (number.as_integer_ratio()[1]).bit_length()))
+
+
+def _phase_lut():
+    positions = np.linspace(0.0, 1.0, 256)
+    hsv = np.zeros((256, 4), dtype=np.ubyte)
+    for index, hue in enumerate(positions):
+        color = pg.hsvColor(float(hue), sat=1.0, val=1.0)
+        hsv[index] = [color.red(), color.green(), color.blue(), 255]
+    return hsv
