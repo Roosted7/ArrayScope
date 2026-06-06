@@ -37,10 +37,21 @@ class StateSyncMixin:
             channel_buttons[self.view_state.channel.value].setChecked(True)
         self.widgets['buttons']['processing']['linear'].setChecked(self.view_state.scale == ScaleMode.LINEAR)
         self.widgets['buttons']['processing']['symlog'].setChecked(self.view_state.scale == ScaleMode.SYMLOG)
+        if hasattr(self, "dimension_strip"):
+            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
+        if hasattr(self, "display_toolbar"):
+            self.display_toolbar.set_current(
+                channel=self.view_state.channel.value,
+                scale=self.view_state.scale.value,
+                aspect=getattr(self.img_view, "displayMode", "square_pixels") if hasattr(self, "img_view") else "square_pixels",
+                window_mode="absolute" if self.widgets['buttons']['display']['window_absolute'].isChecked() else "relative",
+                live_profile=self.widgets['buttons']['display']['live_profile'].isChecked(),
+            )
 
     def _on_slice_index_changed(self, axis, value):
         if axis >= self.view_state.ndim:
             return
+        self._active_slice_axis = int(axis)
         self._set_view_state(self.view_state.with_slice(axis, value))
         self.render(reason="slice")
 
@@ -104,11 +115,14 @@ class StateSyncMixin:
                 )
 
         self.tab_widget.setTabEnabled(0, ndim >= 2)
+        self.tab_widget.setVisible(ndim >= 2)
         if hasattr(self, "profile_dock"):
             self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
             if ndim == 1:
                 self.profile_dock.show()
                 self.profile_dock.raise_()
+        if hasattr(self, "dimension_strip"):
+            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
 
         self.update_complex_indicators()
         self.update_shift_indicators()
@@ -122,10 +136,67 @@ class StateSyncMixin:
                 output_shape=self.document.current_shape,
                 cache_status=self.operation_evaluator.last_status,
                 operation_shapes=self._operation_shapes(),
+                steps=self.document.steps,
+                operation_dtypes=self._operation_dtypes(),
             )
+            self._sync_progressive_docks()
 
     def _operation_shapes(self):
         return self.operation_coordinator.operation_shapes()
+
+    def _operation_dtypes(self):
+        return self.operation_coordinator.operation_dtypes()
+
+    def _sync_progressive_docks(self):
+        changed = False
+        if hasattr(self, "operation_dock"):
+            has_steps = bool(self.document.steps)
+            if has_steps:
+                changed = changed or not self.operation_dock.isVisible()
+                self._set_dock_visible_later(self.operation_dock, True)
+            elif not getattr(self, "_operation_dock_user_visible", False):
+                changed = changed or self.operation_dock.isVisible()
+                self._set_dock_visible_later(self.operation_dock, False)
+        if hasattr(self, "profile_dock"):
+            live_profile = self.widgets["buttons"]["display"]["live_profile"].isChecked()
+            should_show_profile = self.data.ndim == 1 or live_profile or getattr(self, "_profile_dock_user_visible", False)
+            if should_show_profile:
+                changed = changed or not self.profile_dock.isVisible()
+                self._set_dock_visible_later(self.profile_dock, True)
+            elif not self.profile_dock.isFloating():
+                changed = changed or self.profile_dock.isVisible()
+                self._set_dock_visible_later(self.profile_dock, False)
+        if changed:
+            self._schedule_view_geometry_refresh()
+
+    def _schedule_view_geometry_refresh(self):
+        import pyqtgraph.Qt as Qt
+
+        Qt.QtCore.QTimer.singleShot(0, self._refresh_view_geometry)
+
+    def _set_dock_visible_later(self, dock, visible):
+        import pyqtgraph.Qt as Qt
+
+        Qt.QtCore.QTimer.singleShot(0, lambda dock=dock, visible=visible: self._apply_queued_dock_visibility(dock, visible))
+
+    def _apply_queued_dock_visibility(self, dock, visible):
+        if not visible:
+            if dock is getattr(self, "operation_dock", None) and self.document.steps:
+                return
+            if dock is getattr(self, "profile_dock", None):
+                live_profile = self.widgets["buttons"]["display"]["live_profile"].isChecked()
+                if self.data.ndim == 1 or live_profile or getattr(self, "_profile_dock_user_visible", False):
+                    return
+        dock.setVisible(bool(visible))
+
+    def _refresh_view_geometry(self):
+        if hasattr(self, "centralWidget") and self.centralWidget() is not None:
+            self.centralWidget().updateGeometry()
+        hint = self.sizeHint()
+        if hint.isValid():
+            self.resize(max(self.width(), hint.width()), max(self.height(), hint.height()))
+        if hasattr(self, "img_view") and self.data.ndim >= 2:
+            self.img_view.getView().autoRange()
 
     def _replace_base_data(self, data):
         self.operation_coordinator.replace_base_data(data)

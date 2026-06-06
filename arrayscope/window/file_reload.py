@@ -21,6 +21,7 @@ from arrayscope.export.video import VideoExportWorker, VideoExportDialog, VideoE
 from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.io.numpy_save_qt import save_current_numpy_file
+from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
 
 
@@ -31,7 +32,7 @@ class FileReloadMixin:
             result = save_current_numpy_file(self, self.data, self._filepath)
             if result is not None:
                 file_path, output_shape = result
-                print(f"Saved array {list(output_shape)} to {file_path}")
+                show_status_message(self, f"Saved array {list(output_shape)} to {file_path}")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Save Error", f"Failed to save NumPy file:\n{e}")
 

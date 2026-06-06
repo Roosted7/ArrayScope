@@ -45,6 +45,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._profile_handle = None
         self._profile_marker_callback = None
         self._profile_marker_updating = False
+        self._hud_widget = None
         
         # Create the UI layout
         self.setupUI()
@@ -75,8 +76,9 @@ class ImageView2D(QtWidgets.QWidget):
         self.levelMin = 0.0
         self.levelMax = 1.0
 
-        self._profile_vline = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen((230, 60, 30, 180), width=1))
-        self._profile_hline = pg.InfiniteLine(angle=0, movable=True, pen=pg.mkPen((230, 60, 30, 180), width=1))
+        marker_pen = pg.mkPen((230, 60, 30, 180), width=1)
+        self._profile_vline = pg.InfiniteLine(angle=90, movable=True, pen=marker_pen)
+        self._profile_hline = pg.InfiniteLine(angle=0, movable=True, pen=marker_pen)
         self._profile_handle = pg.TargetItem(
             pos=(0, 0),
             size=14,
@@ -323,12 +325,14 @@ class ImageView2D(QtWidgets.QWidget):
             return
         self._profile_marker_updating = True
         try:
+            self._profile_handle.setPos(float(x), float(y))
+            self._update_profile_line_bounds()
             self._profile_vline.setValue(float(x))
             self._profile_hline.setValue(float(y))
-            self._profile_handle.setPos(float(x), float(y))
             self._profile_vline.setVisible(bool(visible))
             self._profile_hline.setVisible(bool(visible))
             self._profile_handle.setVisible(bool(visible))
+            self.view.update()
         finally:
             self._profile_marker_updating = False
 
@@ -366,10 +370,14 @@ class ImageView2D(QtWidgets.QWidget):
             return
         self._profile_marker_updating = True
         try:
+            self._update_profile_line_bounds()
+            x = float(self._profile_vline.value())
+            y = float(self._profile_hline.value())
             if self._profile_handle is not None:
-                self._profile_handle.setPos(float(self._profile_vline.value()), float(self._profile_hline.value()))
+                self._profile_handle.setPos(x, y)
         finally:
             self._profile_marker_updating = False
+        self.view.update()
         if self._profile_marker_callback is None:
             return
         position = self.profileMarkerPosition()
@@ -382,14 +390,27 @@ class ImageView2D(QtWidgets.QWidget):
         if self._profile_handle is None:
             return
         pos = self._profile_handle.pos()
+        x = float(pos.x())
+        y = float(pos.y())
         self._profile_marker_updating = True
         try:
-            self._profile_vline.setValue(float(pos.x()))
-            self._profile_hline.setValue(float(pos.y()))
+            self._update_profile_line_bounds()
+            self._profile_vline.setValue(x)
+            self._profile_hline.setValue(y)
+            self.view.update()
         finally:
             self._profile_marker_updating = False
         if self._profile_marker_callback is not None:
-            self._profile_marker_callback(float(pos.x()), float(pos.y()))
+            self._profile_marker_callback(x, y)
+
+    def _update_profile_line_bounds(self):
+        if self.image is None:
+            return
+        height, width = self.image.shape[:2]
+        if self._profile_vline is not None:
+            self._profile_vline.setBounds((0, max(0, width - 1)))
+        if self._profile_hline is not None:
+            self._profile_hline.setBounds((0, max(0, height - 1)))
         
     def clear(self):
         """Clear the displayed image"""
@@ -414,6 +435,33 @@ class ImageView2D(QtWidgets.QWidget):
             raise ValueError(f"Unknown display mode: {mode}")
         self.displayMode = mode
         self._updateAspectRatio()
+
+    def fitToView(self):
+        self.setDisplayMode("fit")
+        self.view.autoRange()
+
+    def oneToOne(self):
+        self.setDisplayMode("square_pixels")
+        self.view.autoRange()
+
+    def autoWindow(self):
+        self.autoLevels()
+
+    def setHudWidget(self, widget):
+        self._hud_widget = widget
+        if widget is not None:
+            widget.setParent(self.graphicsView)
+            widget.hide()
+
+    def showHudText(self, text, scene_pos):
+        if self._hud_widget is None:
+            return
+        local = self.graphicsView.mapFromScene(scene_pos)
+        self._hud_widget.show_text_near(text, local)
+
+    def hideHud(self):
+        if self._hud_widget is not None:
+            self._hud_widget.hide()
         
     def _updateAspectRatio(self):
         """Update the aspect ratio based on display mode"""

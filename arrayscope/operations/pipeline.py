@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from uuid import uuid4
 from typing import Protocol, Tuple
 
 import numpy as np
@@ -195,31 +196,63 @@ class SplitComplexAxis:
 
 
 @dataclass(frozen=True)
+class OperationStep:
+    operation: ArrayOperation
+    enabled: bool = True
+    step_id: str = field(default_factory=lambda: uuid4().hex)
+
+
+@dataclass(frozen=True, init=False)
 class ArrayDocument:
     """Base array plus an ordered list of operations for its derived view."""
 
     base_data: object
-    operations: Tuple[ArrayOperation, ...] = field(default_factory=tuple)
+    steps: Tuple[OperationStep, ...] = field(default_factory=tuple)
     current_shape: Shape = field(init=False)
 
-    def __post_init__(self):
-        object.__setattr__(self, "operations", tuple(self.operations))
-        object.__setattr__(self, "current_shape", evaluate_shape(np.shape(self.base_data), self.operations))
+    def __init__(self, base_data, operations=(), *, steps=None):
+        object.__setattr__(self, "base_data", base_data)
+        if steps is None:
+            steps = tuple(OperationStep(operation) for operation in operations)
+        else:
+            steps = tuple(_coerce_step(step) for step in steps)
+        object.__setattr__(self, "steps", steps)
+        object.__setattr__(self, "current_shape", evaluate_shape(np.shape(self.base_data), self.enabled_operations))
 
     @property
     def shape(self) -> Shape:
         return self.current_shape
 
+    @property
+    def operations(self) -> Tuple[ArrayOperation, ...]:
+        return self.enabled_operations
+
+    @property
+    def enabled_operations(self) -> Tuple[ArrayOperation, ...]:
+        return tuple(step.operation for step in self.steps if step.enabled)
+
     def with_operation(self, operation: ArrayOperation) -> "ArrayDocument":
-        return replace(self, operations=self.operations + (operation,))
+        return ArrayDocument(self.base_data, steps=self.steps + (OperationStep(operation),))
 
     def without_last_operation(self) -> "ArrayDocument":
-        if not self.operations:
+        if not self.steps:
             return self
-        return replace(self, operations=self.operations[:-1])
+        return ArrayDocument(self.base_data, steps=self.steps[:-1])
+
+    def with_step_enabled(self, index, enabled) -> "ArrayDocument":
+        index = _validate_step_index(index, self.steps)
+        steps = list(self.steps)
+        steps[index] = replace(steps[index], enabled=bool(enabled))
+        return ArrayDocument(self.base_data, steps=tuple(steps))
+
+    def with_replaced_operation(self, index, operation: ArrayOperation) -> "ArrayDocument":
+        index = _validate_step_index(index, self.steps)
+        steps = list(self.steps)
+        steps[index] = replace(steps[index], operation=operation)
+        return ArrayDocument(self.base_data, steps=tuple(steps))
 
     def materialize(self):
-        return evaluate(self.base_data, self.operations)
+        return evaluate(self.base_data, self.enabled_operations)
 
 
 def evaluate(base_data, operations):
@@ -234,6 +267,19 @@ def evaluate_shape(base_shape, operations) -> Shape:
     for operation in operations:
         shape = operation.output_shape(shape)
     return shape
+
+
+def _coerce_step(step) -> OperationStep:
+    if isinstance(step, OperationStep):
+        return step
+    return OperationStep(step)
+
+
+def _validate_step_index(index, steps):
+    index = int(index)
+    if index < 0 or index >= len(steps):
+        raise IndexError("operation step index is out of range")
+    return index
 
 
 def _validate_axis(shape, axis) -> int:

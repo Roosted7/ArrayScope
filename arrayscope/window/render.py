@@ -11,6 +11,7 @@ from arrayscope.profiles.model import clamp_marker_position, image_hover_indices
 from arrayscope.display.slice_engine import apply_channel
 from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
+from arrayscope.ui.toasts import show_status_message
 
 
 def getNumberOfDecimalPlaces(number):
@@ -38,9 +39,30 @@ class RenderMixin:
                 value = apply_channel(self.operation_evaluator.current_data()[tuple(index)], self.view_state.channel)
                 decimal_places = getNumberOfDecimalPlaces(abs(value))
                 if decimal_places > 5:
-                    self.widgets['labels']['pixelValue'].setText("({}, {}) = {:.3e}".format (x_i, y_i, value))
+                    value_text = "({}, {}) = {:.3e}".format (x_i, y_i, value)
                 else:
-                    self.widgets['labels']['pixelValue'].setText("({}, {}) = {:.{}f}".format (x_i, y_i, value, decimal_places))
+                    value_text = "({}, {}) = {:.{}f}".format (x_i, y_i, value, decimal_places)
+                context = self._slice_context_text()
+                text = value_text
+                if context:
+                    text = f"{value_text} | {context}"
+                label = self.widgets['labels']['pixelValue']
+                if hasattr(label, "set_pixel_status"):
+                    label.set_pixel_status(value_text, context)
+                else:
+                    label.setText(text)
+                if hasattr(self, "img_view"):
+                    self.img_view.showHudText(text, pos)
+                show_status_message(self, text, timeout=1500)
+                return
+        if hasattr(self, "img_view"):
+            self.img_view.hideHud()
+
+    def _slice_context_text(self):
+        axes = self.view_state.non_display_axes()
+        if not axes:
+            return ""
+        return " ".join(f"d{axis}={self.view_state.slice_indices[axis]}" for axis in axes)
 
     def _on_image_mouse_moved(self, pos):
         self.getPixel(pos)
@@ -99,7 +121,7 @@ class RenderMixin:
             self.profile_dock.show()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
         except Exception as e:
-            print(f"Live profile update failed: {e}")
+            show_status_message(self, f"Live profile update failed: {e}")
             self._clear_live_profile_marker()
 
     def _clear_live_profile_marker(self):
@@ -107,15 +129,22 @@ class RenderMixin:
             self.img_view.hideProfileMarker()
 
     def _on_live_profile_toggled(self, enabled):
+        if hasattr(self, "display_toolbar"):
+            self.display_toolbar.set_current(live_profile=enabled)
         if enabled and hasattr(self, "profile_dock"):
+            self._profile_dock_user_visible = True
             if not self.profile_dock.isVisible():
-                self.profile_dock.setFloating(True)
-                self.profile_dock.resize(560, 260)
+                if not self.profile_dock.isFloating():
+                    self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
+                else:
+                    self.profile_dock.resize(560, 260)
             self.profile_dock.show()
             self.profile_dock.raise_()
+            self._schedule_view_geometry_refresh()
             self.img_view.getView().setCursor(Qt.QtCore.Qt.CursorShape.CrossCursor)
             self._ensure_profile_marker()
         if not enabled:
+            self._profile_dock_user_visible = False
             self._pending_profile_pos = None
             self._pending_profile_point = None
             self._profile_timer.stop()
@@ -124,6 +153,7 @@ class RenderMixin:
             self.update_line_plot()
 
     def _on_profile_dock_visibility_changed(self, visible):
+        self._profile_dock_user_visible = bool(visible)
         if not visible and self.widgets['buttons']['display']['live_profile'].isChecked():
             self.widgets['buttons']['display']['live_profile'].setChecked(False)
         elif visible and not self.profile_dock.isFloating():
@@ -227,7 +257,7 @@ class RenderMixin:
             self.apply_axis_flips()
             
         except Exception as e:
-            print(f'Image update failed: {e}')
+            show_status_message(self, f"Image update failed: {e}")
 
     def _current_window_mode(self):
         if self.widgets['buttons']['display']['window_absolute'].isChecked():
@@ -254,6 +284,44 @@ class RenderMixin:
             self.img_view.setDisplayMode('square_fov')
         elif self.widgets['buttons']['display']['fit'].isChecked():
             self.img_view.setDisplayMode('fit')
+
+    def _on_aspect_toolbar_changed(self, mode):
+        for name, checked in (
+            ("square_pixels", mode == "square_pixels"),
+            ("square_fov", mode == "square_fov"),
+            ("fit", mode == "fit"),
+        ):
+            self.widgets['buttons']['display'][name].setChecked(checked)
+        self.update_display_mode()
+        self.render(reason="aspect")
+
+    def _on_window_mode_changed(self, mode):
+        self.widgets['buttons']['display']['window_relative'].setChecked(mode != "absolute")
+        self.widgets['buttons']['display']['window_absolute'].setChecked(mode == "absolute")
+        self.render(reason="window-mode")
+
+    def _set_live_profile_checked(self, enabled):
+        self.widgets['buttons']['display']['live_profile'].setChecked(bool(enabled))
+
+    def fit_image_to_view(self):
+        self.widgets['buttons']['display']['fit'].setChecked(True)
+        self.img_view.fitToView()
+        self._sync_controls_from_view_state()
+
+    def one_to_one_image(self):
+        self.widgets['buttons']['display']['square_pixels'].setChecked(True)
+        self.img_view.oneToOne()
+        self._sync_controls_from_view_state()
+
+    def auto_window_levels(self):
+        self._force_autolevel = True
+        self.render(reason="auto-window", force_autolevel=True)
+
+    def toggle_profile_dock(self):
+        visible = not self.profile_dock.isVisible()
+        self._profile_dock_user_visible = visible
+        self.profile_dock.setVisible(visible)
+        self._sync_progressive_docks()
 
     def _processing_pressed(self, btn):
         """Called on processing button press; if the button is already checked
@@ -345,6 +413,8 @@ class RenderMixin:
     def render(self, *, reason: str = "state", force_autolevel: bool = False):
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._sync_controls_from_view_state()
+        if hasattr(self, "tab_widget"):
+            self.tab_widget.setVisible(self.data.ndim >= 2)
         self._update_channel_controls()
         self.update_dimension_controls()
         self.update_complex_indicators()
@@ -352,3 +422,4 @@ class RenderMixin:
         self.update_image_view(force_autolevel=force_autolevel)
         self.update_line_plot()
         self._update_operation_dock()
+        self._sync_progressive_docks()

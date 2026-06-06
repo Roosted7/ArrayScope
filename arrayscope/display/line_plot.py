@@ -14,6 +14,7 @@ import pyqtgraph as pg
 import pyqtgraph.Qt as Qt
 
 from arrayscope.display.slice_engine import make_line
+from arrayscope.ui.toasts import show_status_message
 
 
 class AxisConstrainedViewBox(pg.ViewBox):
@@ -82,6 +83,7 @@ class LinePlotController:
     def __init__(self, owner):
         self.owner = owner
         self.widget = pg.PlotWidget(viewBox=AxisConstrainedViewBox(owner))
+        self.widget.showGrid(x=True, y=True, alpha=0.25)
         pg.setConfigOptions(antialias=True)
 
         self.current_line_data = None
@@ -104,6 +106,7 @@ class LinePlotController:
 
     def update_line_result(self, line_result, view_state, y_range=None):
         self.widget.clear()
+        self.widget.showGrid(x=True, y=True, alpha=0.25)
         self.widget.addItem(self.crosshair)
         self.crosshair.setVisible(False)
 
@@ -132,12 +135,12 @@ class LinePlotController:
                 else:
                     self.widget.enableAutoRange(axis="y")
             else:
-                print(f"Warning: Expected 1D data but got {line_data.ndim}D data with shape {line_data.shape}")
+                show_status_message(self.owner, f"Expected 1D profile, got {line_data.ndim}D shape {line_data.shape}")
 
             self.widget.setLabel("bottom", f"Index along dim {view_state.line_axis}")
 
         except Exception as e:
-            print(f"Line plot update failed: {e}")
+            show_status_message(self.owner, f"Line plot update failed: {e}")
             self.current_line_data = None
 
     def toggle_style(self):
@@ -165,8 +168,8 @@ class LinePlotController:
             if current_pen.widthF() != new_width:
                 new_pen = pg.mkPen(self.color, width=new_width)
                 self.curve.setPen(new_pen)
-        except Exception as e:
-            print(f"Thickness update failed: {e}")
+        except Exception:
+            return
 
     def on_hover(self, pos):
         if self.current_line_data is None:
@@ -178,7 +181,12 @@ class LinePlotController:
             idx = int(round(mouse_point.x()))
             if 0 <= idx < len(self.current_line_data):
                 value = self.current_line_data[idx]
-                self.owner.widgets["labels"]["pixelValue"].setText(_format_hover_value(idx, value))
+                label = self.owner.widgets["labels"]["pixelValue"]
+                text = _format_hover_value(idx, value)
+                if hasattr(label, "set_pixel_status"):
+                    label.set_pixel_status(text)
+                else:
+                    label.setText(text)
                 self.crosshair.setValue(idx)
                 if not self.crosshair.isVisible():
                     self.crosshair.setVisible(True)

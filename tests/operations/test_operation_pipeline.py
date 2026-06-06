@@ -138,6 +138,29 @@ def test_document_is_undoable_by_removing_operations():
     np.testing.assert_array_equal(undone.materialize(), data[:, :, 1:4])
 
 
+def test_operation_steps_can_be_disabled_and_reenabled():
+    data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
+    document = ArrayDocument(data).with_operation(Crop(axis=2, start=1, stop=4)).with_operation(Mean(axis=0))
+
+    disabled = document.with_step_enabled(1, False)
+    assert disabled.current_shape == (2, 3, 3)
+    np.testing.assert_array_equal(disabled.materialize(), data[:, :, 1:4])
+    assert disabled.operations == (Crop(axis=2, start=1, stop=4),)
+
+    reenabled = disabled.with_step_enabled(1, True)
+    assert reenabled.current_shape == (3, 3)
+    np.testing.assert_array_equal(reenabled.materialize(), np.mean(data[:, :, 1:4], axis=0))
+
+
+def test_operation_step_edit_replaces_operation_and_updates_values():
+    data = np.arange(3 * 5).reshape(3, 5)
+    document = ArrayDocument(data).with_operation(Crop(axis=1, start=1, stop=4))
+    edited = document.with_replaced_operation(0, Crop(axis=1, start=2, stop=5))
+
+    assert edited.current_shape == (3, 3)
+    np.testing.assert_array_equal(edited.materialize(), data[:, 2:5])
+
+
 def test_axis_and_crop_validation_use_current_derived_shape():
     document = ArrayDocument(np.zeros((2, 3))).with_operation(Mean(axis=0))
 

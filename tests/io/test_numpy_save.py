@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from arrayscope.io.numpy_save import default_numpy_filename, selected_numpy_data
+from arrayscope.io.numpy_save import default_numpy_filename, estimate_nbytes, save_derived_array, selected_numpy_data
 
 
 def test_default_numpy_filename_uses_source_stem_and_nii_gz_suffix():
@@ -24,6 +24,35 @@ def test_selected_numpy_data_applies_ranges_and_optional_squeeze():
     assert squeezed.shape == (2, 3)
     np.testing.assert_array_equal(unsqueezed, data[1:2, 0:2, 1:4])
     assert unsqueezed.shape == (1, 2, 3)
+
+
+def test_derived_array_export_writes_npy_sidecars(tmp_path):
+    data = np.arange(6).reshape(2, 3)
+    written = save_derived_array(
+        tmp_path / "derived.npy",
+        data,
+        recipe_json='{"recipe": true}',
+        view_recipe_json='{"view": true}',
+    )
+
+    assert [path.name for path in written] == ["derived.npy", "derived.recipe.json", "derived.view.json"]
+    np.testing.assert_array_equal(np.load(written[0]), data)
+    assert written[1].read_text(encoding="utf-8").strip() == '{"recipe": true}'
+    assert written[2].read_text(encoding="utf-8").strip() == '{"view": true}'
+
+
+def test_derived_array_export_writes_npz_payload(tmp_path):
+    data = np.arange(4)
+    written = save_derived_array(tmp_path / "derived.npz", data, recipe_json="recipe", view_recipe_json="view")
+
+    with np.load(written[0]) as archive:
+        np.testing.assert_array_equal(archive["array"], data)
+        assert str(archive["recipe_json"]) == "recipe"
+        assert str(archive["view_recipe_json"]) == "view"
+
+
+def test_estimate_nbytes_uses_shape_and_dtype():
+    assert estimate_nbytes((2, 3), np.float32) == 24
 
 
 def test_numpy_save_helpers_have_no_qt_or_pyqtgraph_imports():

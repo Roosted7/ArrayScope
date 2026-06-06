@@ -33,9 +33,9 @@ Persist the following through `QSettings`:
 - selected theme;
 
 Add a reset-layout action that restores the intended first-run layout: image
-view gets most of the window, the Operations dock remains visible on the side,
-and the Profile dock remains hidden unless the user explicitly shows or needs
-it.
+view gets most of the window, the Operations dock is hidden while the operation
+stack is empty, and the Profile dock remains hidden unless the user explicitly
+shows or needs it.
 
 The Operations dock is allowed to edit the operation list by deleting selected
 operations and reordering rows by drag/drop. Reorders are validated against the
@@ -54,8 +54,9 @@ Theme support remains small and optional-package-free. ArrayScope uses built-in
 Qt palettes for dark and light themes; optional external theme backends are not
 part of the current theme contract.
 
-The persistence boundary is the main window and app settings, not the operation
-recipe format. Recipes still save operation stacks only, not UI state.
+The persistence boundary is the main window and app settings. Operation recipes
+save operation stacks only. Full view recipes are a separate format for
+operations plus view/display state.
 
 Nearby-slice prefetching is not exposed in the UI until it actually works. It
 remains a separate task because it needs careful cache-key invalidation and must

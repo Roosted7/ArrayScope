@@ -24,15 +24,15 @@ This roadmap is intentionally practical. It should track accepted work, not ever
 
 Goal: make `asc(data)` feel lightweight enough for quick plotting.
 
-* [ ] Canvas-first default layout.
-* [ ] Hide empty/unused docks by default.
-* [ ] Remove unnecessary central tab chrome unless multiple central views are active.
-* [ ] Compact dimension chips with clear `Y`, `X`, `P` roles.
-* [ ] Clear, minimal display controls for channel, scale, aspect, and window mode.
-* [ ] Good default keyboard shortcuts for fit, 1:1, auto window, slice stepping, and profile toggle.
-* [ ] User-facing status/toast messages instead of stdout prints.
-* [ ] Layout persistence and reset layout.
-* [ ] Native/light/dark theme behavior that is reliable and readable.
+* [x] Canvas-first default layout.
+* [x] Hide empty/unused docks by default.
+* [x] Remove unnecessary central tab chrome unless multiple central views are active.
+* [x] Compact dimension chips with clear `Y`/`X` roles and profile actions.
+* [x] Clear, minimal display controls for channel, scale, aspect, and window mode.
+* [x] Good default keyboard shortcuts for fit, 1:1, auto window, slice stepping, and profile toggle.
+* [x] User-facing status/toast messages instead of stdout prints.
+* [x] Layout persistence and reset layout.
+* [x] Native/light/dark theme behavior that is reliable and readable.
 
 ## Phase 2 — Operation workflow v1
 
@@ -42,13 +42,13 @@ Goal: make the operation stack powerful but understandable.
 * [x] Add recipe save/load for operations.
 * [x] Add undo/clear/materialize.
 * [x] Add operation delete/reorder.
-* [ ] Make operation rows visually richer and easier to manipulate.
-* [ ] Add enable/disable operation.
-* [ ] Add operation parameter editing for crop.
-* [ ] Add shape/dtype/size estimate for current derived output.
-* [ ] Add derived-array export to `.npy` / `.npz`.
-* [ ] Save recipe sidecar with derived-array export.
-* [ ] Add full view recipe: operations + `ViewState` + display settings.
+* [x] Make operation rows visually richer and easier to manipulate.
+* [x] Add enable/disable operation.
+* [x] Add operation parameter editing for crop.
+* [x] Add shape/dtype/size estimate for current derived output.
+* [x] Add derived-array export to `.npy` / `.npz`.
+* [x] Save recipe sidecar with derived-array export.
+* [x] Add full view recipe: operations + `ViewState` + display settings.
 
 ## Phase 3 — Performance and large-array behavior
 
@@ -70,10 +70,10 @@ Goal: cover the most useful ArrayShow-like inspection workflows.
 * [x] Single profile axis.
 * [x] Live image-hover profile.
 * [ ] Multiple profile axes.
-* [ ] Better complex profile modes: magnitude, phase, real/imag, phase color strip.
-* [ ] Profile export.
+* [ ] Better complex profile modes: magnitude, phase, real/imag, phase color strip. Magnitude/phase/real/imag modes are implemented; phase color strip remains.
+* [x] Profile export.
 * [ ] Montage role (`M`) for 2D stacked/collage views.
-* [ ] One-axis plot mode as a natural fallback when only one display dimension is selected.
+* [x] One-axis plot mode as a natural fallback when only one display dimension is selected.
 * [ ] ROI line/rectangle tools.
 * [ ] ROI statistics.
 * [ ] Histogram comparisons for ROI / multiple arrays.

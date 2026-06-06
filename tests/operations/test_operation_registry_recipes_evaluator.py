@@ -65,6 +65,7 @@ SplitComplexAxis = operation_pipeline.SplitComplexAxis
 OperationEvaluator = operation_evaluator.OperationEvaluator
 CacheStatus = cache_status.CacheStatus
 ViewState = view_state.ViewState
+OperationStep = operation_pipeline.OperationStep
 
 
 def test_operation_registry_contains_expected_dimension_actions():
@@ -118,6 +119,20 @@ def test_recipe_file_round_trip(tmp_path):
     loaded = operation_recipes.load_recipe(recipe_path, base_shape=(3, 4))
 
     assert loaded == operations
+
+
+def test_recipe_v2_preserves_disabled_steps():
+    steps = (
+        OperationStep(Crop(axis=1, start=1, stop=3), enabled=True),
+        OperationStep(Mean(axis=0), enabled=False),
+    )
+
+    text = operation_recipes.dumps_recipe(steps)
+    loaded_steps = operation_recipes.loads_recipe_steps(text, base_shape=(3, 4))
+
+    assert tuple(step.operation for step in loaded_steps) == tuple(step.operation for step in steps)
+    assert tuple(step.enabled for step in loaded_steps) == (True, False)
+    assert operation_recipes.loads_recipe(text, base_shape=(3, 4)) == (Crop(axis=1, start=1, stop=3),)
 
 
 def test_invalid_recipe_validation_reports_clear_error():
@@ -190,6 +205,19 @@ def test_display_cache_invalidates_for_operations_and_view_state():
     evaluator.image(state)
     assert evaluator.derived_evaluations == 2
     assert evaluator.image_evaluations == 3
+
+
+def test_display_cache_invalidates_for_step_enabled_flag():
+    data = np.arange(3 * 4).reshape(3, 4).astype(float)
+    state = ViewState.from_shape(data.shape)
+    document = ArrayDocument(data).with_operation(ReverseAxis(axis=0))
+    evaluator = OperationEvaluator(document)
+
+    evaluator.image(state)
+    evaluator.set_document(document.with_step_enabled(0, False))
+    evaluator.image(state)
+
+    assert evaluator.derived_evaluations == 2
 
 
 def test_display_cache_status_tracks_display_hit_and_miss():

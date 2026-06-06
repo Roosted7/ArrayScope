@@ -11,6 +11,8 @@ Rules:
 
 ## UI / UX ideas
 
+* For 1D arrays, consider making the profile plot the central widget instead of a dock so the first
+  viewport has no sparse empty central area.
 * Canvas-first default layout: for simple 2D arrays, show only image, histogram, compact dimension controls, and minimal display controls.
 * Hide the Operations dock by default when there are no operations; show it automatically after the first operation.
 * Hide the Profile dock by default unless live profile is enabled, data is 1D, or a profile axis is selected.
@@ -20,7 +22,7 @@ Rules:
 * Add a command palette / locator, e.g. `Ctrl+K`, for commands such as “FFT dim 2”, “RSS dim 3”, “save recipe”, “show profile”.
 * Add an operation palette/search: searchable list of operations with short descriptions and compatible dimensions.
 * Add on-canvas HUD overlays for pixel value, cursor index, current window/level, zoom, and active operation stack summary.
-* Add compact dimension chips: size, role badges (`Y`, `X`, `P`, later `M`), slice index, and context menu.
+* Consider adding optional profile/montage badges to dimension chips later if the per-dimension menu is not discoverable enough.
 * Add hover tooltips for dimension roles and operation rows.
 * Add a “compact controls” mode for quick plotting and a “full controls” mode for inspection.
 * Add keyboard-first navigation: arrow keys/scroll for active slice dimension, shortcuts for active dimension selection, `F` fit, `1` 1:1 pixels, `A` auto window.

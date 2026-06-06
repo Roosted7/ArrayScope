@@ -5,6 +5,7 @@ from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.app.settings_state import AppSettingsState, settings_from_mapping, settings_to_mapping
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
+from arrayscope.ui.toasts import show_status_message
 
 
 class WindowMenuMixin:
@@ -21,9 +22,31 @@ class WindowMenuMixin:
             self._settings.setValue(key, value)
 
     def _setup_menus(self):
+        file_menu = self.menuBar().addMenu("File")
+        save_recipe_action = QtGui.QAction("Save Operation Recipe", self)
+        save_recipe_action.triggered.connect(self.save_operation_recipe)
+        load_recipe_action = QtGui.QAction("Load Operation Recipe", self)
+        load_recipe_action.triggered.connect(self.load_operation_recipe)
+        save_view_action = QtGui.QAction("Save View Recipe", self)
+        save_view_action.triggered.connect(self.save_view_recipe)
+        load_view_action = QtGui.QAction("Load View Recipe", self)
+        load_view_action.triggered.connect(self.load_view_recipe)
+        export_derived_action = QtGui.QAction("Export Derived Array", self)
+        export_derived_action.triggered.connect(self.export_derived_array)
+        for action in (save_recipe_action, load_recipe_action, save_view_action, load_view_action, export_derived_action):
+            file_menu.addAction(action)
+
         view_menu = self.menuBar().addMenu("View")
-        view_menu.addAction(self.operation_dock.toggleViewAction())
-        view_menu.addAction(self.profile_dock.toggleViewAction())
+        operation_action = self.operation_dock.toggleViewAction()
+        operation_action.triggered.connect(lambda visible: self._set_operation_dock_visible_from_user(visible))
+        profile_action = self.profile_dock.toggleViewAction()
+        profile_action.triggered.connect(lambda visible: self._set_profile_dock_visible_from_user(visible))
+        view_menu.addAction(operation_action)
+        view_menu.addAction(profile_action)
+        command_palette_action = QtGui.QAction("Command Palette", self)
+        command_palette_action.setShortcut(QtGui.QKeySequence("Ctrl+K"))
+        command_palette_action.triggered.connect(self.open_command_palette)
+        view_menu.addAction(command_palette_action)
         view_menu.addSeparator()
         reset_layout_action = QtGui.QAction("Reset layout", self)
         reset_layout_action.triggered.connect(self.reset_layout)
@@ -57,7 +80,7 @@ class WindowMenuMixin:
     def _apply_theme_choice(self, choice, persist=True):
         result = apply_theme_to_qapplication(QtWidgets.QApplication.instance(), choice)
         if result.warning:
-            print(f"Theme warning: {result.warning}")
+            show_status_message(self, f"Theme warning: {result.warning}")
             if persist:
                 QtWidgets.QMessageBox.warning(self, "Theme Warning", result.warning)
         theme_to_store = result.requested if result.applied == result.requested else result.applied
@@ -81,18 +104,34 @@ class WindowMenuMixin:
             self.restoreState(state)
         if not self.profile_dock.isVisible() and self.data.ndim == 1:
             self.profile_dock.show()
+        self._sync_progressive_docks()
         Qt.QtCore.QTimer.singleShot(0, self._resize_default_docks)
 
     def reset_layout(self):
+        self._operation_dock_user_visible = False
+        self._profile_dock_user_visible = False
         self.profile_dock.setFloating(False)
         self.profile_dock.hide()
         if self.data.ndim == 1:
             self.profile_dock.show()
         self.operation_dock.setFloating(False)
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
-        self.operation_dock.show()
+        if self.document.steps:
+            self.operation_dock.show()
+        else:
+            self.operation_dock.hide()
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
         Qt.QtCore.QTimer.singleShot(0, self._resize_default_docks)
+
+    def _set_operation_dock_visible_from_user(self, visible):
+        self._operation_dock_user_visible = bool(visible)
+        self.operation_dock.setVisible(bool(visible))
+        self._schedule_view_geometry_refresh()
+
+    def _set_profile_dock_visible_from_user(self, visible):
+        self._profile_dock_user_visible = bool(visible)
+        self.profile_dock.setVisible(bool(visible))
+        self._schedule_view_geometry_refresh()
 
     def _resize_default_docks(self):
         try:
