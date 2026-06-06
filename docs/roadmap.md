@@ -1,23 +1,117 @@
 # Roadmap
 
-## Must
-- [x] Extract ViewState.
-- [x] Extract slice/display engine.
-- [x] Extract dimension operations.
-- [x] Keep existing ndslice behavior working.
-- [x] Add complex display tests.
+This roadmap is intentionally practical. It should track accepted work, not every idea.
 
-## Should
-- [x] Dimension context menu from operation registry.
-- [ ] Interactive line profile over selected dimension.
-- [ ] Linked window state sync.
+## Phase 0 — Foundation cleanup
 
-## Could
-- [ ] Montage/collage view.
-- [ ] ROI statistics.
-- [ ] Export movies.
+* [x] Rename/fork into ArrayScope.
+* [x] Add `ViewState`.
+* [x] Add pure `slice_engine`.
+* [x] Add pure dimension operations.
+* [x] Add operation pipeline and recipes.
+* [x] Add operation dock.
+* [x] Add profile dock and live image-driven profiles.
+* [x] Split code into focused package areas: app, core, display, operations, profiles, ui, window, export, io.
+* [ ] Fix pure/GUI test separation so pure tests do not require `pyqtgraph`.
+* [ ] Clean broad copy-pasted imports from mixins.
+* [ ] Split the remaining large UI builder into smaller components.
+* [ ] Decide and document theme strategy: built-in palette only vs optional backend.
+* [ ] Add clean-environment import test.
+
+## Phase 1 — Small, fast, pleasant viewer
+
+Goal: make `asc(data)` feel lightweight enough for quick plotting.
+
+* [ ] Canvas-first default layout.
+* [ ] Hide empty/unused docks by default.
+* [ ] Remove unnecessary central tab chrome unless multiple central views are active.
+* [ ] Compact dimension chips with clear `Y`, `X`, `P` roles.
+* [ ] Clear, minimal display controls for channel, scale, aspect, and window mode.
+* [ ] Good default keyboard shortcuts for fit, 1:1, auto window, slice stepping, and profile toggle.
+* [ ] User-facing status/toast messages instead of stdout prints.
+* [ ] Layout persistence and reset layout.
+* [ ] Native/light/dark theme behavior that is reliable and readable.
+
+## Phase 2 — Operation workflow v1
+
+Goal: make the operation stack powerful but understandable.
+
+* [x] Add operation registry.
+* [x] Add recipe save/load for operations.
+* [x] Add undo/clear/materialize.
+* [x] Add operation delete/reorder.
+* [ ] Make operation rows visually richer and easier to manipulate.
+* [ ] Add enable/disable operation.
+* [ ] Add operation parameter editing for crop.
+* [ ] Add shape/dtype/size estimate for current derived output.
+* [ ] Add derived-array export to `.npy` / `.npz`.
+* [ ] Save recipe sidecar with derived-array export.
+* [ ] Add full view recipe: operations + `ViewState` + display settings.
+
+## Phase 3 — Performance and large-array behavior
+
+Goal: keep the UI responsive on real MRI/reconstruction arrays.
+
+* [ ] Add evaluation timing and cache diagnostics.
+* [ ] Add slab-based evaluator for image/profile views.
+* [ ] Avoid full materialization for display when operations permit slice-first evaluation.
+* [ ] Add bounded image/profile cache.
+* [ ] Add optional nearby-slice prefetch after slab evaluation works.
+* [ ] Add cancellation/ignore-stale behavior for background evaluation.
+* [ ] Add memory-budget controls or guardrails.
+* [ ] Warn before expensive full materialization/export.
+
+## Phase 4 — Profiles, montage, ROI
+
+Goal: cover the most useful ArrayShow-like inspection workflows.
+
+* [x] Single profile axis.
+* [x] Live image-hover profile.
+* [ ] Multiple profile axes.
+* [ ] Better complex profile modes: magnitude, phase, real/imag, phase color strip.
+* [ ] Profile export.
+* [ ] Montage role (`M`) for 2D stacked/collage views.
+* [ ] One-axis plot mode as a natural fallback when only one display dimension is selected.
+* [ ] ROI line/rectangle tools.
+* [ ] ROI statistics.
+* [ ] Histogram comparisons for ROI / multiple arrays.
+
+## Phase 5 — Multi-window and sessions
+
+Goal: make repeated inspection work reproducible and efficient.
+
+* [ ] Session save/load: data reference, operation stack, view state, display settings, layout.
+* [ ] Multi-window sync proposal.
+* [ ] Opt-in sync groups for slice indices.
+* [ ] Opt-in sync for window levels/channel/scale.
+* [ ] Opt-in sync for operation stack.
+* [ ] Opt-in sync for cursor/profile marker.
+* [ ] Soft failure when sync target shape is incompatible.
+* [ ] Copy/paste view recipe between windows.
+
+## Phase 6 — Scientific/MRI-specific quality of life
+
+* [ ] Axis labels and units.
+* [ ] Source metadata display panel.
+* [ ] Coil/RSS helpers.
+* [ ] K-space presets.
+* [ ] BART export.
+* [ ] NIfTI export with affine metadata where available.
+* [ ] Improved DICOM series metadata and grouping diagnostics.
+* [ ] Optional Gyrotools `PRecon` integration for reading Philips raw or image data.
+* [ ] Optional `ismrmrd` integration for reading ISMRMRD datasets.
+* [ ] Optional Siemens `gt-twixtools` integration for reading Siemens raw data.
+
+## Pre-release work
+
+* [ ] Update README, pyproject URLs/authors, documented extras, and screenshots.
+* [ ] Add examples for Julia and MATLAB usage
 
 ## Won't for now
-- Full ArrayShow parity.
-- Plugin system.
-- QML rewrite.
+
+* Full MATLAB ArrayShow parity.
+* Full napari replacement.
+* Plugin system.
+* QML rewrite.
+* GPU compute backend.
+* General node-graph pipeline editor.
