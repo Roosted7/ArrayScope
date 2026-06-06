@@ -1,11 +1,13 @@
 import numpy as np
 import os
+import logging
 from arrayscope.app.qt_binding import prefer_pyside6
 
 prefer_pyside6()
 
 from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 from arrayscope.display.slice_engine import make_export_frame
+from arrayscope.operations.evaluator import evaluate_export_frame_snapshot
 
 # Compatibility for PyQt5/PySide6 signal naming
 try:
@@ -19,7 +21,7 @@ try:
     import imageio_ffmpeg
     HAS_IMAGEIO = True
 except ImportError:
-    print("imageio not available. MP4/WebM export will be disabled.")
+    logging.getLogger(__name__).warning("imageio not available. MP4/WebM export will be disabled.")
     HAS_IMAGEIO = False
 
 
@@ -28,15 +30,19 @@ class VideoExportWorker(QtCore.QThread):
     progress_updated = Signal(int, str)  # (current_frame, status_text)
     export_finished = Signal(bool, str)  # (success, message)
     
-    def __init__(self, data, view_state, export_dim, output_path, fps, format_type,
+    def __init__(self, data=None, view_state=None, export_dim=0, output_path=None, fps=10, format_type="gif",
                  levels=None, pixel_ratio_mode='square_pixels', display_mode='square_pixels',
-                 widget_ratio=1.0, colormap_lut=None, window_level_mode='displayed'):
+                 widget_ratio=1.0, colormap_lut=None, window_level_mode='displayed',
+                 evaluator=None, data_shape=None, document=None):
         super().__init__()
         self.pixel_ratio_mode = pixel_ratio_mode
         self.display_mode = display_mode
         self.widget_ratio = widget_ratio
         self.colormap_lut = colormap_lut
         self.data = data
+        self.evaluator = evaluator
+        self.document = document
+        self.data_shape = tuple(data_shape if data_shape is not None else getattr(data, "shape", ()))
         self.view_state = view_state
         self.export_dim = export_dim
         self.output_path = output_path
@@ -49,7 +55,7 @@ class VideoExportWorker(QtCore.QThread):
     def run(self):
         """Main export routine"""
         try:
-            total_frames = self.data.shape[self.export_dim]
+            total_frames = self.data_shape[self.export_dim]
             frames = []
             
             # Generate all frames first to compute consistent levels if needed
@@ -58,13 +64,29 @@ class VideoExportWorker(QtCore.QThread):
                     self.export_finished.emit(False, "Export cancelled")
                     return
                 
-                display_frame = make_export_frame(
-                    self.data,
-                    self.view_state,
-                    self.export_dim,
-                    frame_idx,
-                    colormap_lut=self.colormap_lut,
-                )
+                if self.document is not None:
+                    display_frame = evaluate_export_frame_snapshot(
+                        self.document,
+                        self.view_state,
+                        self.export_dim,
+                        frame_idx,
+                        colormap_lut=self.colormap_lut,
+                    ).value
+                elif self.evaluator is not None:
+                    display_frame = self.evaluator.export_frame(
+                        self.view_state,
+                        self.export_dim,
+                        frame_idx,
+                        colormap_lut=self.colormap_lut,
+                    )
+                else:
+                    display_frame = make_export_frame(
+                        self.data,
+                        self.view_state,
+                        self.export_dim,
+                        frame_idx,
+                        colormap_lut=self.colormap_lut,
+                    )
                 frame_rgb = self._display_image_to_rgb(display_frame)
                 frame_rgb = self._apply_view_flips(frame_rgb)
 

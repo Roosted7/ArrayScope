@@ -6,6 +6,21 @@ import numpy as np
 
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import ArrayDocument, evaluate_shape
+from arrayscope.operations.pipeline import (
+    CenteredFFT,
+    CenteredIFFT,
+    CombineRealImagAxis,
+    Conjugate,
+    Crop,
+    FFTShift,
+    Maximum,
+    Mean,
+    Minimum,
+    ReverseAxis,
+    RootSumSquares,
+    SplitComplexAxis,
+    Sum,
+)
 from arrayscope.operations.registry import create_operation
 from arrayscope.operations.stack import delete_step, move_step, reorder_steps, replace_step_operation, set_step_enabled
 
@@ -70,7 +85,7 @@ class OperationCoordinator:
         return self.set_document(ArrayDocument(self.base_data))
 
     def materialize(self):
-        self.base_data = np.array(self.evaluator.current_data(), copy=True)
+        self.base_data = np.array(self.document.materialize(), copy=True)
         return self.set_document(ArrayDocument(self.base_data))
 
     def operation_shapes(self):
@@ -83,14 +98,36 @@ class OperationCoordinator:
         return tuple(shapes)
 
     def operation_dtypes(self):
+        return self.operation_dtype_estimates()
+
+    def operation_dtype_estimates(self):
         dtypes = []
-        data = self.base_data
+        dtype = getattr(self.base_data, "dtype", None)
         for step in self.document.steps:
             if step.enabled:
-                data = step.operation.apply(data)
-            dtypes.append(getattr(data, "dtype", None))
+                dtype = _operation_output_dtype(dtype, step.operation)
+            dtypes.append(dtype)
         return tuple(dtypes)
 
     def _reject_scalar(self, document):
         if len(document.current_shape) < 1:
             raise ValueError("operation would produce a scalar, which this viewer cannot display yet")
+
+
+def _operation_output_dtype(dtype, operation):
+    if dtype is None:
+        return None
+    dtype = np.dtype(dtype)
+    if isinstance(operation, (Crop, ReverseAxis, FFTShift, Conjugate, Maximum, Minimum)):
+        return dtype
+    if isinstance(operation, Mean):
+        return np.mean(np.empty((1,), dtype=dtype)).dtype
+    if isinstance(operation, Sum):
+        return np.sum(np.empty((1,), dtype=dtype)).dtype
+    if isinstance(operation, RootSumSquares):
+        return np.asarray(np.abs(np.empty((1,), dtype=dtype))).dtype
+    if isinstance(operation, (CenteredFFT, CenteredIFFT, CombineRealImagAxis)):
+        return np.result_type(dtype, np.complex64)
+    if isinstance(operation, SplitComplexAxis):
+        return np.asarray(np.real(np.empty((1,), dtype=dtype))).dtype
+    return dtype

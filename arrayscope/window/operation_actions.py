@@ -7,6 +7,7 @@ from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.core.view_recipe import DisplaySettings, ViewRecipe, load_view_recipe as load_view_recipe_file, save_view_recipe as save_view_recipe_file
 from arrayscope.io.numpy_save import estimate_nbytes, save_derived_array
+from arrayscope.operations.evaluator import LARGE_MATERIALIZE_BYTES
 from arrayscope.operations.recipes import dumps_recipe, load_recipe_steps, save_recipe
 from arrayscope.operations.registry import get_operation_entry, operation_entries
 from arrayscope.ui.command_palette import CommandPaletteDialog, PaletteCommand
@@ -113,9 +114,9 @@ class OperationActionsMixin:
         if entry.id in {"mean", "rss", "sum", "max", "min"} and self.data.ndim <= 1:
             return False
         if entry.id == "combine_real_imag":
-            return (not np.iscomplexobj(self.data)) and self.data.shape[dim] == 2
+            return (not self._current_is_complex()) and self.data.shape[dim] == 2
         if entry.id == "split_complex":
-            return np.iscomplexobj(self.data) and self.data.shape[dim] == 1
+            return self._current_is_complex() and self.data.shape[dim] == 1
         return True
 
     def _append_operation(self, operation_id, dim=None):
@@ -373,9 +374,25 @@ class OperationActionsMixin:
         self.render(reason="recipe-load", force_autolevel=True)
 
     def materialize_current_array(self):
-        self.operation_coordinator.materialize()
-        self._set_document(self.operation_coordinator.document)
-        self.render(reason="materialize", force_autolevel=True)
+        if not self._confirm_expensive_full_array("Materialize", self.data.shape, self.data.dtype):
+            return
+        document = self.document
+
+        def evaluate():
+            return np.array(document.materialize(), copy=True)
+
+        def done(data):
+            self.operation_coordinator.replace_base_data(data)
+            self._set_document(self.operation_coordinator.document)
+            self.render(reason="materialize", force_autolevel=True)
+            show_status_message(self, "Materialized current derived array")
+
+        self.evaluation_controller.start(
+            evaluate,
+            on_done=done,
+            on_error=lambda exc: QtWidgets.QMessageBox.warning(self, "Materialize Error", f"Failed to materialize:\n{exc}"),
+            on_slow=lambda: show_status_message(self, "Materializing derived array..."),
+        )
 
     def set_operation_enabled(self, index, enabled):
         try:
@@ -414,21 +431,46 @@ class OperationActionsMixin:
         )
         if not file_path:
             return None
-        data = self.operation_evaluator.current_data()
-        if estimate_nbytes(data.shape, data.dtype) > 512 * 1024 * 1024:
-            result = QtWidgets.QMessageBox.warning(
-                self,
-                "Large Export",
-                "The derived array is larger than 512 MiB. Continue?",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-            )
-            if result != QtWidgets.QMessageBox.StandardButton.Yes:
-                return None
+        if not self._confirm_expensive_full_array("Export", self.data.shape, self.data.dtype):
+            return None
         recipe_json = dumps_recipe(self.document.steps)
         view_recipe_json = self._current_view_recipe_json()
-        written = save_derived_array(file_path, data, recipe_json=recipe_json, view_recipe_json=view_recipe_json, sidecar=True)
-        show_status_message(self, f"Exported derived array to {written[0]}")
-        return written
+        document = self.document
+
+        def evaluate_and_save():
+            data = document.materialize()
+            return save_derived_array(file_path, data, recipe_json=recipe_json, view_recipe_json=view_recipe_json, sidecar=True)
+
+        def done(written):
+            show_status_message(self, f"Exported derived array to {written[0]}")
+
+        self.evaluation_controller.start(
+            evaluate_and_save,
+            on_done=done,
+            on_error=lambda exc: QtWidgets.QMessageBox.warning(self, "Export Error", f"Failed to export derived array:\n{exc}"),
+            on_slow=lambda: show_status_message(self, "Exporting derived array..."),
+        )
+        return None
+
+    def _confirm_expensive_full_array(self, action, shape, dtype):
+        nbytes = estimate_nbytes(shape, dtype)
+        expensive_fft = any(
+            type(step.operation).__name__ in {"CenteredFFT", "CenteredIFFT"}
+            and getattr(step.operation, "axis", 0) < len(self.base_data.shape)
+            and self.base_data.shape[getattr(step.operation, "axis")] > 4096
+            for step in self.document.steps
+            if step.enabled
+        )
+        if nbytes <= LARGE_MATERIALIZE_BYTES and not expensive_fft:
+            return True
+        message = f"{action} will evaluate the full derived array ({_format_nbytes(nbytes)}). Continue?"
+        result = QtWidgets.QMessageBox.warning(
+            self,
+            f"Large {action}",
+            message,
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return result == QtWidgets.QMessageBox.StandardButton.Yes
 
     def save_view_recipe(self):
         file_path, _ = get_save_file_name(
@@ -519,3 +561,11 @@ def _operation_icon_name(operation_id):
         "combine_real_imag": "join_inner",
         "split_complex": "call_split",
     }.get(operation_id, "data_array")
+
+
+def _format_nbytes(nbytes):
+    nbytes = int(nbytes)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if nbytes < 1024 or unit == "GiB":
+            return f"{nbytes:.0f} {unit}" if unit == "B" else f"{nbytes:.1f} {unit}"
+        nbytes /= 1024

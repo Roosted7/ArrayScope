@@ -92,6 +92,9 @@ class OperationStackDock(QtWidgets.QDockWidget):
         self._operation_dtypes = ()
         self._output_shape = None
         self._cache_status = None
+        self._image_cache_status = None
+        self._profile_cache_status = None
+        self._derived_estimate = None
 
         body = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout()
@@ -119,9 +122,13 @@ class OperationStackDock(QtWidgets.QDockWidget):
         layout.addWidget(self.operation_list, 1)
 
         self.shape_label = QtWidgets.QLabel("Output shape: -")
-        self.cache_status_label = QtWidgets.QLabel("Cache: Cold")
+        self.cache_status_label = QtWidgets.QLabel("View cache: Cold")
+        self.profile_cache_status_label = QtWidgets.QLabel("Profile/pixel cache: Cold")
+        self.derived_estimate_label = QtWidgets.QLabel("Full derived: -")
         layout.addWidget(self.shape_label)
         layout.addWidget(self.cache_status_label)
+        layout.addWidget(self.profile_cache_status_label)
+        layout.addWidget(self.derived_estimate_label)
 
         button_layout = QtWidgets.QGridLayout()
         self.undo_button = QtWidgets.QPushButton("Undo")
@@ -185,6 +192,9 @@ class OperationStackDock(QtWidgets.QDockWidget):
         operations,
         output_shape=None,
         cache_status=None,
+        image_cache_status=None,
+        profile_cache_status=None,
+        derived_estimate=None,
         operation_shapes=None,
         steps=None,
         operation_dtypes=None,
@@ -195,6 +205,9 @@ class OperationStackDock(QtWidgets.QDockWidget):
         self._operation_dtypes = tuple(operation_dtypes or ())
         self._output_shape = output_shape
         self._cache_status = cache_status
+        self._image_cache_status = image_cache_status
+        self._profile_cache_status = profile_cache_status
+        self._derived_estimate = derived_estimate
         previous_row = self.operation_list.currentRow()
         self.operation_list.clear()
         row_count = len(self._steps) if self._steps else len(operations)
@@ -223,10 +236,22 @@ class OperationStackDock(QtWidgets.QDockWidget):
         self.export_button.setEnabled(True)
         self.save_view_button.setEnabled(True)
         self.shape_label.setText(f"Output shape: {tuple(output_shape) if output_shape is not None else '-'}")
-        if cache_status is not None:
-            self.cache_status_label.setText(f"Cache: {cache_status.status.value}")
-            self.cache_status_label.setToolTip(cache_status.message)
-            self.cache_status_label.setStyleSheet(_cache_status_style(cache_status.status.value))
+        if image_cache_status is None:
+            image_cache_status = cache_status
+        if image_cache_status is not None:
+            self.cache_status_label.setText(f"View cache: {_cache_status_summary(image_cache_status)}")
+            self.cache_status_label.setToolTip(_cache_status_tooltip(image_cache_status))
+            self.cache_status_label.setStyleSheet(_cache_status_style(image_cache_status.status.value))
+        if profile_cache_status is not None:
+            self.profile_cache_status_label.setText(f"Profile/pixel cache: {_cache_status_summary(profile_cache_status)}")
+            self.profile_cache_status_label.setToolTip(_cache_status_tooltip(profile_cache_status))
+            self.profile_cache_status_label.setStyleSheet(_cache_status_style(profile_cache_status.status.value))
+        if derived_estimate is not None:
+            shape, dtype, nbytes = derived_estimate
+            self.derived_estimate_label.setText(f"Full derived: {tuple(shape)} {dtype} {_format_nbytes(nbytes)}")
+            self.derived_estimate_label.setToolTip(
+                f"Estimated full materialized derived array\nshape: {tuple(shape)}\ndtype: {dtype}\nsize: {_format_nbytes(nbytes)}"
+            )
         self._update_button_state()
 
     def _operation_text(self, index, operation):
@@ -283,8 +308,6 @@ class OperationStackDock(QtWidgets.QDockWidget):
             if dtype is not None:
                 parts.append(str(dtype) if compact else f"dtype {dtype}")
                 parts.append(_format_nbytes(_estimate_nbytes(shape, dtype)))
-        if self._cache_status is not None:
-            parts.append(self._cache_status.status.value)
         return " | ".join(parts)
 
     def current_operation_index(self):
@@ -331,6 +354,9 @@ class OperationStackDock(QtWidgets.QDockWidget):
                 self._operations,
                 output_shape=self._output_shape,
                 cache_status=self._cache_status,
+                image_cache_status=self._image_cache_status,
+                profile_cache_status=self._profile_cache_status,
+                derived_estimate=self._derived_estimate,
                 operation_shapes=self._operation_shapes,
             )
             return False
@@ -340,6 +366,9 @@ class OperationStackDock(QtWidgets.QDockWidget):
                 self._operations,
                 output_shape=self._output_shape,
                 cache_status=self._cache_status,
+                image_cache_status=self._image_cache_status,
+                profile_cache_status=self._profile_cache_status,
+                derived_estimate=self._derived_estimate,
                 operation_shapes=self._operation_shapes,
             )
             return False
@@ -354,6 +383,35 @@ def _cache_status_style(status):
     if status == "Computing":
         return "QLabel { background: rgba(180, 140, 40, 50); padding: 2px 4px; border-radius: 3px; }"
     return "QLabel { background: rgba(128, 128, 128, 35); padding: 2px 4px; border-radius: 3px; }"
+
+
+def _cache_status_summary(cache_status):
+    text = cache_status.status.value
+    last_eval_ms = getattr(cache_status, "last_eval_ms", None)
+    if last_eval_ms is not None:
+        text += f", {last_eval_ms:.0f} ms"
+    bytes_used = getattr(cache_status, "bytes_used", None)
+    max_bytes = getattr(cache_status, "max_bytes", None)
+    if bytes_used is not None and max_bytes:
+        text += f", {_format_nbytes(bytes_used)}/{_format_nbytes(max_bytes)}"
+    return text
+
+
+def _cache_status_tooltip(cache_status):
+    parts = [getattr(cache_status, "message", "")]
+    for label, attr in (
+        ("Entries", "entries"),
+        ("Hits", "hits"),
+        ("Misses", "misses"),
+        ("Evictions", "evictions"),
+    ):
+        if hasattr(cache_status, attr):
+            parts.append(f"{label}: {getattr(cache_status, attr)}")
+    if getattr(cache_status, "last_eval_ms", None) is not None:
+        parts.append(f"Last evaluation: {cache_status.last_eval_ms:.1f} ms")
+    if hasattr(cache_status, "bytes_used"):
+        parts.append(f"Memory: {_format_nbytes(cache_status.bytes_used)} / {_format_nbytes(cache_status.max_bytes)}")
+    return "\n".join(part for part in parts if part)
 
 
 def _estimate_nbytes(shape, dtype):

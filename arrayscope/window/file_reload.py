@@ -30,7 +30,7 @@ class FileReloadMixin:
     def _save_current_numpy_file(self):
         """Save the currently displayed array state to a NumPy .npy file."""
         try:
-            result = save_current_numpy_file(self, self.data, self._filepath)
+            result = save_current_numpy_file(self, self.document.materialize(), self._filepath)
             if result is not None:
                 file_path, output_shape = result
                 show_status_message(self, f"Saved array {list(output_shape)} to {file_path}")

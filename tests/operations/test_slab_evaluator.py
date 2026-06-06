@@ -1,0 +1,182 @@
+import ast
+from pathlib import Path
+
+import numpy as np
+
+from arrayscope.core.view_state import ChannelMode, ViewState
+from arrayscope.display.slice_engine import (
+    make_export_frame,
+    make_image,
+    make_image_from_slab,
+    make_line,
+    make_line_from_slab,
+    make_scalar_from_slab,
+    apply_channel,
+)
+from arrayscope.operations.pipeline import (
+    ArrayDocument,
+    CenteredFFT,
+    CombineRealImagAxis,
+    Crop,
+    FFTShift,
+    Mean,
+    ReverseAxis,
+    RootSumSquares,
+    SplitComplexAxis,
+    OperationStep,
+)
+from arrayscope.operations.slabs import evaluate_slab, plan_slab, request_for_export_frame, request_for_image, request_for_line, request_for_scalar
+
+
+def _assert_image_and_line_match(data, operations):
+    document = ArrayDocument(data, operations=operations)
+    state = ViewState.from_shape(document.current_shape)
+    full = document.materialize()
+
+    image_request = request_for_image(state)
+    lazy_image = make_image_from_slab(evaluate_slab(document, image_request), image_request)
+    full_image = make_image(full, state)
+    np.testing.assert_allclose(lazy_image.data, full_image.data)
+
+    line_request = request_for_line(state)
+    lazy_line = make_line_from_slab(evaluate_slab(document, line_request), line_request)
+    full_line = make_line(full, state)
+    np.testing.assert_allclose(lazy_line.data, full_line.data)
+
+
+def test_lazy_slab_matches_materialized_image_and_line_for_existing_operations():
+    data = np.arange(4 * 5 * 6).reshape(4, 5, 6).astype(float)
+
+    for operations in (
+        (Crop(axis=1, start=1, stop=4),),
+        (ReverseAxis(axis=0),),
+        (Mean(axis=1),),
+        (RootSumSquares(axis=1),),
+        (FFTShift(axis=2),),
+        (CenteredFFT(axis=2),),
+        (Mean(axis=1), CenteredFFT(axis=1)),
+        (Crop(axis=1, start=1, stop=4), ReverseAxis(axis=0), CenteredFFT(axis=2)),
+    ):
+        _assert_image_and_line_match(data, operations)
+
+
+def test_lazy_slab_matches_materialized_complex_axis_operations():
+    real_imag = np.arange(4 * 5 * 2).reshape(4, 5, 2).astype(float)
+    _assert_image_and_line_match(real_imag, (CombineRealImagAxis(axis=2),))
+
+    complex_singleton = (np.arange(4 * 5).reshape(4, 5).astype(float) + 1j).reshape(4, 5, 1)
+    _assert_image_and_line_match(complex_singleton, (SplitComplexAxis(axis=2),))
+
+
+def test_lazy_scalar_matches_materialized_value_after_fft_axis_expansion():
+    data = np.arange(4 * 5 * 6).reshape(4, 5, 6).astype(float)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    state = ViewState.from_shape(document.current_shape)
+    index = (1, 2, 3)
+
+    request = request_for_scalar(state, index)
+    lazy_value = make_scalar_from_slab(evaluate_slab(document, request), request)
+    full_value = document.materialize()[index]
+
+    np.testing.assert_allclose(lazy_value, full_value)
+    plan = plan_slab(document, request)
+    assert plan.base_shape == (6,)
+
+
+def test_simple_slice_only_operations_return_views_and_do_not_modify_base():
+    data = np.arange(4 * 5 * 6).reshape(4, 5, 6).astype(float)
+    original = data.copy()
+    document = ArrayDocument(data, operations=(Crop(axis=1, start=1, stop=4), ReverseAxis(axis=0)))
+    state = ViewState.from_shape(document.current_shape)
+
+    slab = evaluate_slab(document, request_for_image(state))
+
+    assert np.shares_memory(slab, data)
+    np.testing.assert_array_equal(data, original)
+
+
+def test_slab_and_cache_modules_have_no_qt_or_pyqtgraph_imports():
+    root = Path(__file__).parents[2]
+    for path in (
+        root / "arrayscope" / "operations" / "slabs.py",
+        root / "arrayscope" / "operations" / "cache.py",
+    ):
+        tree = ast.parse(path.read_text())
+        imported_roots = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_roots.extend(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_roots.append(node.module.split(".")[0])
+
+        assert "pyqtgraph" not in imported_roots
+        assert not any(name.startswith(("PyQt", "PySide")) for name in imported_roots)
+
+
+def test_random_small_arrays_match_materialized_image_export_profile_and_scalar_paths():
+    rng = np.random.default_rng(123)
+    real_data = rng.normal(size=(4, 5, 6))
+    complex_parts = rng.normal(size=(4, 5, 2))
+    complex_singleton = (rng.normal(size=(4, 5)) + 1j * rng.normal(size=(4, 5))).reshape(4, 5, 1)
+
+    documents = [
+        ArrayDocument(real_data, operations=(Crop(axis=1, start=1, stop=5), ReverseAxis(axis=0), CenteredFFT(axis=2), RootSumSquares(axis=1))),
+        ArrayDocument(real_data, operations=(Crop(axis=1, start=0, stop=4), Mean(axis=1), CenteredFFT(axis=1))),
+        ArrayDocument(complex_parts, operations=(CombineRealImagAxis(axis=2),)),
+        ArrayDocument(complex_singleton, operations=(SplitComplexAxis(axis=2), ReverseAxis(axis=0))),
+        ArrayDocument(
+            real_data,
+            steps=(
+                OperationStep(Crop(axis=1, start=1, stop=4), enabled=True),
+                OperationStep(ReverseAxis(axis=0), enabled=False),
+                OperationStep(CenteredFFT(axis=2), enabled=True),
+            ),
+        ),
+        ArrayDocument(real_data, operations=(CenteredFFT(axis=2), Crop(axis=1, start=1, stop=5), ReverseAxis(axis=0))),
+    ]
+
+    for document in documents:
+        full = document.materialize()
+        state = ViewState.from_shape(document.current_shape)
+        if np.iscomplexobj(full):
+            channels = (ChannelMode.ABS, ChannelMode.ANGLE, ChannelMode.REAL)
+        else:
+            channels = (ChannelMode.REAL,)
+        for channel in channels:
+            state = state.with_channel(channel)
+            image_request = request_for_image(state)
+            np.testing.assert_allclose(
+                make_image_from_slab(evaluate_slab(document, image_request), image_request).data,
+                make_image(full, state).data,
+                rtol=1e-6,
+                atol=1e-6,
+            )
+
+            line_request = request_for_line(state)
+            np.testing.assert_allclose(
+                make_line_from_slab(evaluate_slab(document, line_request), line_request).data,
+                make_line(full, state).data,
+                rtol=1e-6,
+                atol=1e-6,
+            )
+
+            if state.image_axes is not None:
+                frame_axis = next((axis for axis in range(state.ndim) if axis not in state.image_axes and state.shape[axis] > 1), None)
+                if frame_axis is not None:
+                    frame_index = min(1, state.shape[frame_axis] - 1)
+                    export_request = request_for_export_frame(state, frame_axis, frame_index)
+                    np.testing.assert_allclose(
+                        make_image_from_slab(evaluate_slab(document, export_request), export_request).data,
+                        make_export_frame(full, state, frame_axis, frame_index).data,
+                        rtol=1e-6,
+                        atol=1e-6,
+                    )
+
+            scalar_index = tuple(min(1, size - 1) for size in state.shape)
+            scalar_request = request_for_scalar(state, scalar_index)
+            np.testing.assert_allclose(
+                make_scalar_from_slab(evaluate_slab(document, scalar_request), scalar_request),
+                np.asarray(apply_channel(full[scalar_index if scalar_index else ()], channel)).item(),
+                rtol=1e-6,
+                atol=1e-6,
+            )

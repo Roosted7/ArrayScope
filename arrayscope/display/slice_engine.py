@@ -89,6 +89,31 @@ def make_image(data, state, colormap_lut=None):
     return DisplayImage(data=image_data, default_levels=default_levels)
 
 
+def make_image_from_slab(slab, request, colormap_lut=None):
+    """Create a display image from an already evaluated image slab."""
+    state = request.view_state
+    if state.image_axes is None:
+        raise ValueError("image_axes must be set to make an image")
+
+    image_data = np.asarray(slab)
+    if state.image_axes[0] < state.image_axes[1] and image_data.ndim >= 2:
+        image_data = np.transpose(image_data)
+    image_data = np.squeeze(image_data)
+
+    if state.channel == ChannelMode.COMPLEX:
+        rgb_data, magnitude_data = complex_to_rgb(image_data, colormap_lut=colormap_lut)
+        return DisplayImage(data=rgb_data, histogram_data=magnitude_data)
+
+    default_levels = None
+    if state.channel == ChannelMode.ANGLE:
+        default_levels = (-np.pi, np.pi)
+
+    image_data = apply_channel(image_data, state.channel)
+    image_data = _apply_scale(image_data, state.scale)
+    image_data = np.nan_to_num(image_data)
+    return DisplayImage(data=image_data, default_levels=default_levels)
+
+
 def with_slice_index(state, axis, index):
     return state.with_slice(axis, index)
 
@@ -109,6 +134,24 @@ def make_line(data, state):
     line_data = _apply_scale(line_data, state.scale)
     line_data = np.squeeze(line_data)
     return DisplayLine(data=line_data, axis=state.line_axis)
+
+
+def make_line_from_slab(slab, request):
+    state = request.view_state
+    if state.line_axis is None:
+        raise ValueError("line_axis must be set to make a line")
+
+    line_data = apply_channel(np.asarray(slab), state.channel)
+    line_data = _apply_scale(line_data, state.scale)
+    line_data = np.squeeze(line_data)
+    return DisplayLine(data=line_data, axis=state.line_axis)
+
+
+def make_scalar_from_slab(slab, request):
+    state = request.view_state
+    value = apply_channel(np.asarray(slab), state.channel)
+    value = _apply_scale(value, state.scale)
+    return np.asarray(value).item()
 
 
 def _slice_for_display_axes(state, display_axes):

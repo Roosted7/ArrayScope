@@ -7,10 +7,12 @@ import numpy as np
 import pyqtgraph.Qt as Qt
 
 from arrayscope.display.colormaps import gray_colormap, phase_colormap
+from arrayscope.profiles.coordinator import ProfileRender
 from arrayscope.profiles.model import clamp_marker_position, image_hover_indices, profile_y_range
-from arrayscope.display.slice_engine import apply_channel
+from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
+from arrayscope.operations.evaluator import evaluate_image_snapshot, evaluate_line_snapshot, evaluate_scalar_snapshot
 from arrayscope.ui.toasts import show_status_message
 
 
@@ -25,6 +27,13 @@ class RenderMixin:
     def getPixel(self, pos):
         img = self.img_view.image
         if img is None or self.view_state.image_axes is None:
+            label = self.widgets['labels']['pixelValue']
+            if hasattr(label, "set_pixel_status"):
+                label.set_pixel_status("Pixel value updating...", self._slice_context_text())
+            else:
+                label.setText("Pixel value updating...")
+            if hasattr(self, "img_view"):
+                self.img_view.showHudText("Pixel value updating...", pos)
             return
         container = self.img_view.getView()
         if container.sceneBoundingRect().contains(pos): 
@@ -36,13 +45,8 @@ class RenderMixin:
                 index = list(self.view_state.slice_indices)
                 index[primary_axis] = y_i
                 index[secondary_axis] = x_i
-                value = apply_channel(self.operation_evaluator.current_data()[tuple(index)], self.view_state.channel)
-                decimal_places = getNumberOfDecimalPlaces(abs(value))
-                if decimal_places > 5:
-                    value_text = "({}, {}) = {:.3e}".format (x_i, y_i, value)
-                else:
-                    value_text = "({}, {}) = {:.{}f}".format (x_i, y_i, value, decimal_places)
                 context = self._slice_context_text()
+                value_text = f"({x_i}, {y_i}) = updating..."
                 text = value_text
                 if context:
                     text = f"{value_text} | {context}"
@@ -54,9 +58,49 @@ class RenderMixin:
                 if hasattr(self, "img_view"):
                     self.img_view.showHudText(text, pos)
                 show_status_message(self, text, timeout=1500)
+                self._request_pixel_value(tuple(index), x_i, y_i, context, pos)
                 return
         if hasattr(self, "img_view"):
             self.img_view.hideHud()
+
+    def _request_pixel_value(self, index, x_i, y_i, context, pos):
+        view_state = self.view_state
+        document = self.document
+
+        def done(value):
+            try:
+                decimal_places = getNumberOfDecimalPlaces(abs(value))
+                if decimal_places > 5:
+                    value_text = "({}, {}) = {:.3e}".format(x_i, y_i, value)
+                else:
+                    value_text = "({}, {}) = {:.{}f}".format(x_i, y_i, value, decimal_places)
+            except Exception:
+                value_text = f"({x_i}, {y_i}) = {value}"
+            text = value_text if not context else f"{value_text} | {context}"
+            label = self.widgets['labels']['pixelValue']
+            if hasattr(label, "set_pixel_status"):
+                label.set_pixel_status(value_text, context)
+            else:
+                label.setText(text)
+            if hasattr(self, "img_view"):
+                self.img_view.showHudText(text, pos)
+
+        cached = self.operation_evaluator.cached_scalar(view_state, index)
+        if cached is not None:
+            done(cached)
+            return
+
+        def evaluate():
+            return evaluate_scalar_snapshot(document, view_state, index)
+
+        document_key = self.operation_evaluator.scalar_key(view_state, index, document=document)[1]
+
+        def done_result(result):
+            if document_key != self.operation_evaluator.scalar_key(view_state, index)[1]:
+                return
+            done(self.operation_evaluator.store_scalar_result(view_state, index, result))
+
+        self.pixel_evaluation_controller.start(evaluate, on_done=done_result, on_error=lambda _exc: None, slow_ms=0)
 
     def _slice_context_text(self):
         axes = self.view_state.non_display_axes()
@@ -103,26 +147,49 @@ class RenderMixin:
             mouse_point = view.mapSceneToView(pos)
             point = (mouse_point.x(), mouse_point.y())
 
-        try:
-            profile_render = self.profile_coordinator.render_from_marker(
-                self.operation_evaluator,
-                self.view_state,
-                point[0],
-                point[1],
-                line_axis=self.view_state.line_axis,
-                y_range_mode=self.profile_dock.y_range_mode(),
-                image_levels=self.img_view.getLevels(),
-            )
-            if profile_render is None:
-                self._clear_live_profile_marker()
+        view_state = self.view_state
+        document = self.document
+        image_levels = self.img_view.getLevels()
+        y_range_mode = self.profile_dock.y_range_mode()
+        line_axis = self.view_state.line_axis
+        clamped = self.profile_coordinator.clamp_marker(view_state, point[0], point[1])
+        if clamped is None:
+            self._clear_live_profile_marker()
+            return
+        profile_state = self.profile_coordinator.state_from_marker(view_state, clamped[0], clamped[1], line_axis=line_axis)
+        if profile_state is None:
+            self._clear_live_profile_marker()
+            return
+        y_range = profile_y_range(y_range_mode, image_levels)
+        cached = self.operation_evaluator.cached_line(profile_state)
+        if cached is not None:
+            self.profile_dock.update_line_result(cached, profile_state, y_range=y_range)
+            self._update_operation_dock()
+            self.profile_dock.show()
+            self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
+            return
+
+        def evaluate():
+            return evaluate_line_snapshot(document, profile_state)
+
+        document_key = self.operation_evaluator.line_key(profile_state, document=document)[1]
+
+        def done(result):
+            if document_key != self.operation_evaluator.line_key(profile_state)[1]:
                 return
+            line_result = self.operation_evaluator.store_line_result(profile_state, result)
+            profile_render = ProfileRender(view_state=profile_state, line_result=line_result, marker_position=clamped, y_range=y_range)
             self.profile_dock.update_line_result(profile_render.line_result, profile_render.view_state, y_range=profile_render.y_range)
             self._update_operation_dock()
             self.profile_dock.show()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
-        except Exception as e:
-            show_status_message(self, f"Live profile update failed: {e}")
+            self._prefetch_profiles_near_marker(view_state, point[0], point[1], line_axis=line_axis)
+
+        def error(exc):
+            show_status_message(self, f"Live profile update failed: {exc}")
             self._clear_live_profile_marker()
+
+        self.profile_evaluation_controller.start(evaluate, on_done=done, on_error=error)
 
     def _clear_live_profile_marker(self):
         if hasattr(self, "img_view"):
@@ -160,13 +227,7 @@ class RenderMixin:
             Qt.QtCore.QTimer.singleShot(0, self._resize_profile_dock_default)
 
     def _resize_profile_dock_default(self):
-        if not hasattr(self, "profile_dock") or not self.profile_dock.isVisible() or self.profile_dock.isFloating():
-            return
-        target_height = max(140, int(self.height() * 0.23))
-        try:
-            self.resizeDocks([self.profile_dock], [target_height], Qt.QtCore.Qt.Orientation.Vertical)
-        except Exception:
-            pass
+        self.layout_manager.resize_profile_dock_default()
 
     def _ensure_profile_marker(self):
         position = self.img_view.profileMarkerPosition()
@@ -224,12 +285,63 @@ class RenderMixin:
                 previous_levels = None
                 previous_bounds = None
 
-        
+        colormap_lut = None
+        if self.view_state.channel == ChannelMode.COMPLEX:
+            colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
+        view_state = self.view_state
+        document = self.document
+        cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut)
+        if cached is not None:
+            self._apply_display_image(
+                cached,
+                window_mode=window_mode,
+                previous_levels=previous_levels,
+                previous_bounds=previous_bounds,
+                force_auto=force_auto,
+            )
+            return
+
+        def evaluate():
+            return evaluate_image_snapshot(document, view_state, colormap_lut=colormap_lut)
+
+        def slow():
+            self.img_view.setImageStale(True)
+            self.img_view.setEvaluationOverlay(True, "Updating view...")
+            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image view")
+            self._update_operation_dock()
+
+        document_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)[1]
+
+        def done(result):
+            if document_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut)[1]:
+                self.img_view.setImageStale(False)
+                self.img_view.setEvaluationOverlay(False)
+                return
+            display_image = self.operation_evaluator.store_image_result(view_state, colormap_lut, result)
+            self._apply_display_image(
+                display_image,
+                window_mode=window_mode,
+                previous_levels=previous_levels,
+                previous_bounds=previous_bounds,
+                force_auto=force_auto,
+            )
+            self._prefetch_nearby_slices(view_state, colormap_lut)
+
+        def error(exc):
+            self.img_view.setImageStale(False)
+            self.img_view.setEvaluationOverlay(False)
+            show_status_message(self, f"Image update failed: {exc}")
+
+        self.evaluation_controller.start(
+            evaluate,
+            on_done=done,
+            on_error=error,
+            on_stale=lambda: (self.img_view.setImageStale(False), self.img_view.setEvaluationOverlay(False)),
+            on_slow=slow,
+        )
+
+    def _apply_display_image(self, display_image, *, window_mode, previous_levels, previous_bounds, force_auto):
         try:
-            colormap_lut = None
-            if self.view_state.channel == ChannelMode.COMPLEX:
-                colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
-            display_image = self.operation_evaluator.image(self.view_state, colormap_lut=colormap_lut)
             current_bounds = self._display_histogram_bounds(display_image)
             level_decision = choose_window_levels(
                 mode=window_mode,
@@ -255,9 +367,104 @@ class RenderMixin:
             
             # Apply axis flips after setting the image
             self.apply_axis_flips()
+            self.img_view.setImageStale(False)
+            self.img_view.setEvaluationOverlay(False)
             
         except Exception as e:
             show_status_message(self, f"Image update failed: {e}")
+
+    def _prefetch_nearby_slices(self, view_state, colormap_lut):
+        axis = getattr(self, "_active_slice_axis", None)
+        if axis is None or view_state.image_axes is None or axis in view_state.image_axes:
+            return
+        document = self.document
+        document_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)[1]
+        size = view_state.shape[axis]
+        current = view_state.slice_indices[axis]
+        last = getattr(self, "_last_prefetch_slice_index", None)
+        direction = 0 if last is None else (1 if current >= last else -1)
+        self._last_prefetch_slice_index = current
+        deltas = self._prefetch_deltas(direction, max_radius=min(12, max(2, size - 1)))
+        scheduled = 0
+        for delta in deltas:
+            if scheduled >= 16:
+                break
+            index = current + delta
+            if 0 <= index < size:
+                prefetch_state = view_state.with_slice(axis, index)
+                self.evaluation_controller.start_prefetch(
+                    lambda prefetch_state=prefetch_state, document=document: self.operation_evaluator.prefetch_image_snapshot(
+                        document,
+                        prefetch_state,
+                        colormap_lut=colormap_lut,
+                    ),
+                    on_done=lambda result, prefetch_state=prefetch_state, document=document, document_key=document_key: self._store_prefetch_image_if_current(
+                        document,
+                        document_key,
+                        prefetch_state,
+                        colormap_lut,
+                        result,
+                    ),
+                )
+                scheduled += 1
+
+    def _prefetch_deltas(self, direction, *, max_radius):
+        radii = range(1, int(max_radius) + 1)
+        if direction > 0:
+            return tuple(delta for radius in radii for delta in (radius, -radius))
+        if direction < 0:
+            return tuple(delta for radius in radii for delta in (-radius, radius))
+        return tuple(delta for radius in radii for delta in (-radius, radius))
+
+    def _prefetch_profiles_near_marker(self, view_state, image_x, image_y, *, line_axis=None):
+        if view_state.image_axes is None or line_axis is None:
+            return
+        document = self.document
+        primary_axis, secondary_axis = view_state.image_axes
+        cx = int(round(image_x))
+        cy = int(round(image_y))
+        max_radius = 4
+        scheduled = 0
+        document_key_cache = {}
+        for radius in range(0, max_radius + 1):
+            points = []
+            if radius == 0:
+                points.append((cx, cy))
+            else:
+                for dx in (-radius, radius):
+                    points.append((cx + dx, cy))
+                for dy in (-radius, radius):
+                    points.append((cx, cy + dy))
+            for x, y in points:
+                if scheduled >= 24:
+                    return
+                if not (0 <= x < view_state.shape[secondary_axis] and 0 <= y < view_state.shape[primary_axis]):
+                    continue
+                profile_state = self.profile_coordinator.state_from_marker(view_state, x, y, line_axis=line_axis)
+                if profile_state is None:
+                    continue
+                document_key_cache[profile_state] = self.operation_evaluator.line_key(profile_state, document=document)[1]
+                self.profile_evaluation_controller.start_prefetch(
+                    lambda profile_state=profile_state, document=document: self.operation_evaluator.prefetch_line_snapshot(document, profile_state),
+                    on_done=lambda result, profile_state=profile_state, document=document, key=document_key_cache[profile_state]: self._store_prefetch_profile_if_current(
+                        document,
+                        key,
+                        profile_state,
+                        result,
+                    ),
+                )
+                scheduled += 1
+
+    def _store_prefetch_profile_if_current(self, document, document_key, profile_state, result):
+        if document_key != self.operation_evaluator.line_key(profile_state)[1]:
+            return False
+        return self.operation_evaluator.store_prefetch_line_result(document, profile_state, result)
+
+    def _store_prefetch_image_if_current(self, document, document_key, view_state, colormap_lut, result):
+        current_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut)[1]
+        if document_key != current_key:
+            return False
+        return self.operation_evaluator.store_prefetch_image_result(document, view_state, colormap_lut, result)
 
     def _current_window_mode(self):
         if self.widgets['buttons']['display']['window_absolute'].isChecked():
@@ -392,9 +599,32 @@ class RenderMixin:
             if position is not None:
                 self._on_profile_marker_moved(*position)
                 return
-        line_result = self.operation_evaluator.line(self.view_state)
-        self.profile_dock.update_line_result(line_result, self.view_state, y_range=self._current_profile_y_range())
-        self._update_operation_dock()
+        view_state = self.view_state
+        y_range = self._current_profile_y_range()
+        document = self.document
+        cached = self.operation_evaluator.cached_line(view_state)
+        if cached is not None:
+            self.profile_dock.update_line_result(cached, view_state, y_range=y_range)
+            self._update_operation_dock()
+            return
+
+        def evaluate():
+            return evaluate_line_snapshot(document, view_state)
+
+        document_key = self.operation_evaluator.line_key(view_state, document=document)[1]
+
+        def done(result):
+            if document_key != self.operation_evaluator.line_key(view_state)[1]:
+                return
+            line_result = self.operation_evaluator.store_line_result(view_state, result)
+            self.profile_dock.update_line_result(line_result, view_state, y_range=y_range)
+            self._update_operation_dock()
+
+        self.profile_evaluation_controller.start(
+            evaluate,
+            on_done=done,
+            on_error=lambda exc: show_status_message(self, f"Profile update failed: {exc}"),
+        )
 
     def _on_view_range_changed(self):
         """Update display group title when view range changes (for fit mode)."""

@@ -2,9 +2,14 @@
 arrayscope GUI for choosing datasets from multi-dataset files.
 Handles mat, h5, and npz files.
 """
+import logging
+
 import numpy as np
 
 from arrayscope.app.qt_binding import prefer_pyside6
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _show_selector(filepath, selector_class_name, interpret_as_complex):
@@ -297,7 +302,7 @@ class H5DatasetSelector(DatasetSelector):
         for dim_idx, size in enumerate(shape):
             if size == 2:
                 self.interpret_as_complex = dim_idx
-                print(f"Auto-detected complex interpretation: dimension {dim_idx} of '{dataset_path}' (shape {shape})")
+                _LOGGER.info("Auto-detected complex interpretation: dimension %s of '%s' (shape %s)", dim_idx, dataset_path, shape)
                 break
 
     def _is_compound_dataset(self, dataset):

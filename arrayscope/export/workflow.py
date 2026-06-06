@@ -98,7 +98,8 @@ class ExportWorkflowMixin:
         
         # Create worker thread
         worker = VideoExportWorker(
-            data=self.data,
+            document=self.document,
+            data_shape=self.data.shape,
             view_state=self.view_state,
             export_dim=export_dim,
             output_path=file_path,

@@ -46,6 +46,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._profile_marker_callback = None
         self._profile_marker_updating = False
         self._hud_widget = None
+        self._evaluation_overlay = None
         
         # Create the UI layout
         self.setupUI()
@@ -153,6 +154,7 @@ class ImageView2D(QtWidgets.QWidget):
         
         # Update the image display
         self.updateImage(autoHistogramRange=autoHistogramRange)
+        self._update_profile_line_bounds()
         
         # Set levels
         self.histogram.setVisible(True)
@@ -409,8 +411,16 @@ class ImageView2D(QtWidgets.QWidget):
         height, width = self.image.shape[:2]
         if self._profile_vline is not None:
             self._profile_vline.setBounds((0, max(0, width - 1)))
+            self._profile_vline.setSpan(0.0, 1.0)
         if self._profile_hline is not None:
             self._profile_hline.setBounds((0, max(0, height - 1)))
+            self._profile_hline.setSpan(0.0, 1.0)
+        if self._profile_handle is not None:
+            pos = self._profile_handle.pos()
+            x = max(0.0, min(float(pos.x()), float(max(0, width - 1))))
+            y = max(0.0, min(float(pos.y()), float(max(0, height - 1))))
+            if (x, y) != (float(pos.x()), float(pos.y())):
+                self._profile_handle.setPos(x, y)
         
     def clear(self):
         """Clear the displayed image"""
@@ -452,6 +462,27 @@ class ImageView2D(QtWidgets.QWidget):
         if widget is not None:
             widget.setParent(self.graphicsView)
             widget.hide()
+
+    def setEvaluationOverlay(self, visible: bool, text: str = ""):
+        if self._evaluation_overlay is None:
+            overlay = QtWidgets.QLabel(self.graphicsView)
+            overlay.setObjectName("EvaluationOverlay")
+            overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            overlay.setStyleSheet(
+                "QLabel#EvaluationOverlay { background: rgba(20, 20, 20, 170); color: white; "
+                "padding: 6px 8px; border-radius: 4px; }"
+            )
+            self._evaluation_overlay = overlay
+        self._evaluation_overlay.setText(str(text))
+        self._evaluation_overlay.adjustSize()
+        self._evaluation_overlay.move(10, 10)
+        self._evaluation_overlay.setVisible(bool(visible))
+        if visible:
+            self._evaluation_overlay.raise_()
+
+    def setImageStale(self, stale: bool):
+        if self.imageItem is not None:
+            self.imageItem.setOpacity(0.55 if stale else 1.0)
 
     def showHudText(self, text, scene_pos):
         if self._hud_widget is None:
