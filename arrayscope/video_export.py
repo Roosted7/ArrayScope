@@ -29,14 +29,12 @@ class VideoExportWorker(QtCore.QThread):
     export_finished = Signal(bool, str)  # (success, message)
     
     def __init__(self, data, view_state, export_dim, output_path, fps, format_type,
-                 selected_indices, singleton, levels=None, pixel_ratio_mode='square_pixels',
-                 display_mode='square_pixels', widget_ratio=1.0, axis_flipped=None,
-                 colormap_lut=None, window_level_mode='displayed'):
+                 levels=None, pixel_ratio_mode='square_pixels', display_mode='square_pixels',
+                 widget_ratio=1.0, colormap_lut=None, window_level_mode='displayed'):
         super().__init__()
         self.pixel_ratio_mode = pixel_ratio_mode
         self.display_mode = display_mode
         self.widget_ratio = widget_ratio
-        self.axis_flipped = axis_flipped or []
         self.colormap_lut = colormap_lut
         self.data = data
         self.view_state = view_state
@@ -44,8 +42,6 @@ class VideoExportWorker(QtCore.QThread):
         self.output_path = output_path
         self.fps = fps
         self.format_type = format_type
-        self.selected_indices = selected_indices
-        self.singleton = singleton
         self.levels = levels
         self.window_level_mode = (window_level_mode or 'displayed')
         self._is_running = True
@@ -135,11 +131,10 @@ class VideoExportWorker(QtCore.QThread):
 
     def _apply_view_flips(self, frame_rgb):
         try:
-            primary = self.selected_indices[0]
-            if not self.axis_flipped[primary]:  # numpy uses matrix orientation by default
+            primary, secondary = self.view_state.image_axes
+            if not self.view_state.axis_flipped[primary]:  # numpy uses matrix orientation by default
                 frame_rgb = np.flipud(frame_rgb)
-            secondary = self.selected_indices[1]
-            if self.axis_flipped[secondary]:
+            if self.view_state.axis_flipped[secondary]:
                 frame_rgb = np.fliplr(frame_rgb)
         except Exception:
             pass

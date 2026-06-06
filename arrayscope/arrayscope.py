@@ -15,14 +15,17 @@ from .dialogs import SaveRangeDialog
 from .dimension_roles import DimensionRoles
 from .imageview2d import ImageView2D
 from .operation_dock import OperationStackDock
+from .operation_coordinator import OperationCoordinator
 from .operation_evaluator import OperationEvaluator
 from .operation_pipeline import ArrayDocument, evaluate_shape
 from .operation_recipes import load_recipe, save_recipe
-from .operation_registry import create_operation, operation_entries
+from .operation_registry import operation_entries
 from .operation_stack import delete_operation, move_operation, reorder_operations
-from .profile import clamp_marker_position, profile_state_from_image_hover, profile_y_range
+from .profile import clamp_marker_position, image_hover_indices, profile_state_from_image_hover, profile_y_range
+from .profile_coordinator import ProfileCoordinator
 from .profile_dock import ProfileDock
 from .settings_state import AppSettingsState, settings_from_mapping, settings_to_mapping
+from .slice_engine import apply_channel
 from .theme import ThemeChoice, apply_theme_to_qapplication
 from .video_export import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 from .view_state import ChannelMode, ScaleMode, ViewState
@@ -65,21 +68,19 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.app_settings = self._load_app_settings()
         self._apply_theme_choice(self.app_settings.theme, persist=False)
 
-        self.base_data = data
-        self.document = ArrayDocument(self.base_data)
-        self.operation_evaluator = OperationEvaluator(self.document)
+        self.operation_coordinator = OperationCoordinator(data)
+        self.profile_coordinator = ProfileCoordinator()
+        self.base_data = self.operation_coordinator.base_data
+        self.document = self.operation_coordinator.document
+        self.operation_evaluator = self.operation_coordinator.evaluator
         self.data = self.operation_evaluator.current_data()
         self.singleton = [e == 1 for e in list(data.shape)]
-        self.selected_indices = []
-        self.channel = None
-        self.scale = None
+        initial_channel = ChannelMode.COMPLEX if np.iscomplexobj(self.data) else ChannelMode.REAL
+        self.view_state = ViewState.from_shape(self.data.shape).with_channel(initial_channel)
         self._force_autolevel = False
         self._filepath = filepath
         self._dataset_path = dataset_path
         self._selector_class_name = selector_class_name
-        
-        self.axis_flipped = [False] * data.ndim  # Track flip state so that one can toggle dims and come back to the same flip state
-        self.fftshifted = [False] * data.ndim
         
         # If data is real-valued and has size-2 dimensions, arrayscope can combine them as complex (ISMRMD uses this for real/imag parts)
         if np.iscomplexobj(data):
@@ -91,25 +92,9 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         # Store complex_dim for later use (after widgets are created)
         self._initial_complex_dim = complex_dim
         
-        for dim in range(0,data.ndim):
-            if self.singleton[dim] is False and len(self.selected_indices) < 2:
-                self.selected_indices.append(dim)
-        # For 1D arrays, we only need one dimension; for 2D+, ensure we have two
-        if len(self.selected_indices) < 2 and data.ndim >= 2:
-            self.selected_indices = [0, 1]
-        elif len(self.selected_indices) == 0:
-            # Edge case: if all dimensions are singleton, pick first one
-            self.selected_indices = [0]
-        
         # Line plot mode uses a single selected dimension
-        self.line_plot_dimension = 0  # Default to first non-singleton dimension
-        for dim in range(data.ndim):
-            if not self.singleton[dim]:
-                self.line_plot_dimension = dim
-                break
+        self.line_plot_dimension = self.view_state.line_axis or 0
         self.profile_axes = (self.line_plot_dimension,)
-
-        self.view_state = self._make_view_state(slice_indices=[0] * data.ndim)
                 
         self.domain = [Domain.NATIVE for _ in range(data.ndim)]
         self.widgets = {
@@ -303,7 +288,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             
             w = self.widgets['spins']['slice_indices'][i]
             self.dim_containers[i].layout().addWidget(w)
-            w.valueChanged.connect(self.update)
+            w.valueChanged.connect(lambda value, i=i: self._on_slice_index_changed(i, value))
         
         self._setup_export_context_menus()
         self._save_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Save, self)
@@ -325,7 +310,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             btn.setStyleSheet(self.RADIO_BUTTON_STYLE)
             self.channel_button_group.addButton(btn)
             channel_layout.addWidget(btn)
-            btn.clicked.connect(self.update)
+            btn.clicked.connect(lambda checked=False, name=btn.text(): self._on_channel_clicked(name))
         
         channel_group.setLayout(channel_layout)
         controls_layout.addWidget(channel_group)
@@ -343,7 +328,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             processing_layout.addWidget(btn)
             # When a processing button is pressed while already active, force auto-level
             btn.pressed.connect(lambda b=btn: self._processing_pressed(b))
-            btn.clicked.connect(self.update)
+            btn.clicked.connect(lambda checked=False, b=btn: self._on_scale_clicked("symlog" if b is self.widgets['buttons']['processing']['symlog'] else "linear"))
         
         processing_group.setLayout(processing_layout)
         controls_layout.addWidget(processing_group)
@@ -403,7 +388,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.image_tab_layout.addWidget(self.img_view)
         self.image_tab.setLayout(self.image_tab_layout)
         self.img_view.getView().scene().sigMouseMoved.connect(lambda pos: self._on_image_mouse_moved(pos))
-        self.img_view.setProfileMarkerCallback(self._on_profile_marker_moved)
+        self.img_view.set_profile_marker_callback(self._on_profile_marker_moved)
         
         # Connect to view range changes to update aspect ratio in fit mode
         self.img_view.getView().sigRangeChanged.connect(self._on_view_range_changed)
@@ -496,13 +481,8 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             else:
                 self.combineAsComplex(complex_dim) # valid
         
-        # Initialize dimension controls based on data dimensions
-        if len(self.selected_indices) >= 1:
-            self.changedIndex(True, 0, self.selected_indices[0], update=False)
-        if len(self.selected_indices) >= 2:
-            self.changedIndex(True, 1, self.selected_indices[1], update=False)
-        self.update_dimension_controls()  # Initialize dimension controls properly
-        self.update()
+        # Initialize dimension controls based on the authoritative view state.
+        self.render(reason="initial", force_autolevel=True)
         self.show()
 
         # Set up file watcher if a filepath was provided (QFileSystemWatcher uses
@@ -613,40 +593,62 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self._save_app_settings()
         super().closeEvent(event)
 
+    def _set_view_state(self, state):
+        self.view_state = state.for_shape(self.data.shape)
+        self.line_plot_dimension = self.view_state.line_axis if self.view_state.line_axis is not None else 0
+        self.profile_axes = tuple(axis for axis in getattr(self, "profile_axes", (self.line_plot_dimension,)) if axis < self.view_state.ndim)
+        if not self.profile_axes and self.view_state.line_axis is not None:
+            self.profile_axes = (self.view_state.line_axis,)
+        return self.view_state
 
+    def _image_axes(self):
+        return self.view_state.image_axes or ()
 
+    def _axis_flipped(self, axis):
+        return bool(self.view_state.axis_flipped[int(axis)])
 
-    def _make_view_state(self, slice_indices=None):
-        if slice_indices is None:
-            slice_indices = self._current_slice_indices()
-        else:
-            slice_indices = tuple(
-                max(0, min(int(index), self.data.shape[axis] - 1))
-                for axis, index in enumerate(slice_indices)
-            )
+    def _sync_controls_from_view_state(self):
+        if not hasattr(self, "widgets"):
+            return
+        for axis, spinbox in enumerate(self.widgets['spins']['slice_indices'][: self.data.ndim]):
+            spinbox.blockSignals(True)
+            try:
+                spinbox.setMaximum(self.data.shape[axis] - 1)
+                spinbox.setValue(self.view_state.slice_indices[axis])
+            finally:
+                spinbox.blockSignals(False)
 
-        image_axes = None
-        if self.data.ndim >= 2 and len(self.selected_indices) >= 2:
-            image_axes = (self.selected_indices[0], self.selected_indices[1])
+        channel_buttons = self.widgets['buttons']['channel']
+        if self.view_state.channel.value in channel_buttons:
+            channel_buttons[self.view_state.channel.value].setChecked(True)
+        self.widgets['buttons']['processing']['linear'].setChecked(self.view_state.scale == ScaleMode.LINEAR)
+        self.widgets['buttons']['processing']['symlog'].setChecked(self.view_state.scale == ScaleMode.SYMLOG)
 
-        return ViewState(
-            ndim=self.data.ndim,
-            shape=tuple(self.data.shape),
-            image_axes=image_axes,
-            line_axis=self.line_plot_dimension if self.data.ndim >= 1 else None,
-            slice_indices=slice_indices,
-            channel=self._current_channel_mode(),
-            scale=self._current_scale_mode(),
-            axis_flipped=tuple(self.axis_flipped),
-            axis_fftshifted=tuple(self.fftshifted),
-        )
+    def _on_slice_index_changed(self, axis, value):
+        if axis >= self.view_state.ndim:
+            return
+        self._set_view_state(self.view_state.with_slice(axis, value))
+        self.render(reason="slice")
+
+    def _on_channel_clicked(self, name):
+        self._set_view_state(self.view_state.with_channel(name))
+        self._force_autolevel = True
+        self._apply_channel_colormap()
+        self.render(reason="channel", force_autolevel=True)
+
+    def _on_scale_clicked(self, scale):
+        self._set_view_state(self.view_state.with_scale(ScaleMode.SYMLOG if scale == "symlog" else ScaleMode.LINEAR))
+        self._force_autolevel = True
+        self.render(reason="scale", force_autolevel=True)
 
     def _set_document(self, document):
-        evaluator = OperationEvaluator(document)
-        data = evaluator.current_data()
-        self.document = document
-        self.operation_evaluator = evaluator
+        self.operation_coordinator.set_document(document)
+        self.base_data = self.operation_coordinator.base_data
+        self.document = self.operation_coordinator.document
+        self.operation_evaluator = self.operation_coordinator.evaluator
+        data = self.operation_evaluator.current_data()
         self.data = data
+        self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._sync_controls_to_current_data()
         self._force_autolevel = True
         self._update_channel_controls()
@@ -655,10 +657,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
     def _sync_controls_to_current_data(self):
         ndim = self.data.ndim
         self.singleton = [size == 1 for size in self.data.shape]
-        if len(self.axis_flipped) != ndim:
-            self.axis_flipped = [False] * ndim
-        if len(self.fftshifted) != ndim:
-            self.fftshifted = [False] * ndim
+        self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self.domain = [Domain.NATIVE for _ in range(ndim)]
 
         if np.iscomplexobj(self.data):
@@ -668,22 +667,8 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.combined_as_complex = [np.iscomplexobj(self.data) and self.data.shape[i] == 1 for i in range(ndim)]
 
         valid_dims = [i for i in range(ndim) if not self.singleton[i]]
-        if ndim == 1:
-            self.selected_indices = [0]
-        elif ndim >= 2:
-            selected = [i for i in self.selected_indices if i < ndim and not self.singleton[i]]
-            for dim in valid_dims + list(range(ndim)):
-                if len(selected) >= 2:
-                    break
-                if dim not in selected:
-                    selected.append(dim)
-            self.selected_indices = selected[:2]
-        else:
-            self.selected_indices = []
-
-        if ndim >= 1:
-            if self.line_plot_dimension >= ndim or self.singleton[self.line_plot_dimension]:
-                self.line_plot_dimension = valid_dims[0] if valid_dims else 0
+        if ndim >= 1 and (self.line_plot_dimension >= ndim or self.singleton[self.line_plot_dimension]):
+            self.line_plot_dimension = valid_dims[0] if valid_dims else 0
         self.profile_axes = tuple(axis for axis in getattr(self, "profile_axes", ()) if axis < ndim)
         if not self.profile_axes and ndim >= 1:
             self.profile_axes = (self.line_plot_dimension,)
@@ -714,6 +699,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self.update_complex_indicators()
         self.update_shift_indicators()
         self.update_dimension_controls()
+        self._sync_controls_from_view_state()
 
     def _update_operation_dock(self):
         if hasattr(self, "operation_dock"):
@@ -725,54 +711,19 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             )
 
     def _operation_shapes(self):
-        shapes = []
-        shape = tuple(self.base_data.shape)
-        for operation in self.document.operations:
-            shape = evaluate_shape(shape, (operation,))
-            shapes.append(shape)
-        return tuple(shapes)
+        return self.operation_coordinator.operation_shapes()
 
     def _replace_base_data(self, data):
-        self.base_data = data
-        self.document = ArrayDocument(self.base_data)
-        self.operation_evaluator = OperationEvaluator(self.document)
+        self.operation_coordinator.replace_base_data(data)
+        self.base_data = self.operation_coordinator.base_data
+        self.document = self.operation_coordinator.document
+        self.operation_evaluator = self.operation_coordinator.evaluator
         self.data = self.operation_evaluator.current_data()
+        self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._sync_controls_to_current_data()
         self._update_channel_controls()
         self._update_operation_dock()
 
-    def _sync_view_state_from_window(self):
-        self.view_state = self._make_view_state()
-        return self.view_state
-
-    def _current_slice_indices(self):
-        if not hasattr(self, 'widgets'):
-            return (0,) * self.data.ndim
-
-        indices = []
-        for axis, spinbox in enumerate(self.widgets['spins']['slice_indices'][: self.data.ndim]):
-            indices.append(max(0, min(spinbox.value(), self.data.shape[axis] - 1)))
-        return tuple(indices)
-
-    def _current_channel_mode(self):
-        if hasattr(self, 'widgets'):
-            channel_buttons = self.widgets['buttons']['channel']
-            for name, button in channel_buttons.items():
-                if button.isChecked():
-                    return ChannelMode(name)
-
-        if self.channel is not None:
-            return ChannelMode(self.channel)
-        return ChannelMode.REAL
-
-    def _current_scale_mode(self):
-        if hasattr(self, 'widgets') and self.widgets['buttons']['processing']['symlog'].isChecked():
-            return ScaleMode.SYMLOG
-        if self.scale is not None:
-            return ScaleMode(self.scale)
-        return ScaleMode.LINEAR
-
-    
     def dimClicked(self, event, label, dim):
         if dim >= self.data.ndim or self.singleton[dim]:
             return
@@ -848,16 +799,13 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             parameters = self._collect_operation_parameters(operation_id, dim)
             if parameters is None:
                 return
-            operation = create_operation(operation_id, axis=dim, parameters=parameters)
-            new_document = self.document.with_operation(operation)
-            if len(new_document.current_shape) < 1:
-                raise ValueError("operation would produce a scalar, which this viewer cannot display yet")
-            self._set_document(new_document)
+            self.operation_coordinator.append_operation(operation_id, axis=dim, parameters=parameters)
+            self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Operation Error", f"Failed to apply operation:\n{e}")
             return
 
-        self.update()
+        self.render(reason="operation", force_autolevel=True)
 
     def _collect_operation_parameters(self, operation_id, dim):
         if operation_id != "crop":
@@ -891,45 +839,47 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         return {"start": start, "stop": stop}
 
     def undo_last_operation(self):
-        self._set_document(self.document.without_last_operation())
-        self.update()
+        self.operation_coordinator.undo()
+        self._set_document(self.operation_coordinator.document)
+        self.render(reason="operation-undo", force_autolevel=True)
 
     def delete_selected_operation(self, index):
         if index is None:
             return
         try:
-            operations = delete_operation(self.document.operations, index, self.base_data.shape)
-            self._set_document(ArrayDocument(self.base_data, operations=operations))
+            self.operation_coordinator.delete(index)
+            self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot delete operation:\n{e}")
             return
-        self.update()
+        self.render(reason="operation-delete", force_autolevel=True)
 
     def move_selected_operation(self, index, direction):
         if index is None:
             return
         try:
-            operations = move_operation(self.document.operations, index, direction, self.base_data.shape)
-            self._set_document(ArrayDocument(self.base_data, operations=operations))
+            self.operation_coordinator.move(index, direction)
+            self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot reorder operation:\n{e}")
             return
-        self.update()
+        self.render(reason="operation-move", force_autolevel=True)
 
     def reorder_operations(self, order):
         try:
-            operations = reorder_operations(self.document.operations, order, self.base_data.shape)
-            self._set_document(ArrayDocument(self.base_data, operations=operations))
+            self.operation_coordinator.reorder(order)
+            self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot reorder operation stack:\n{e}")
             self._update_operation_dock()
             return False
-        self.update()
+        self.render(reason="operation-reorder", force_autolevel=True)
         return True
 
     def clear_operations(self):
-        self._set_document(ArrayDocument(self.base_data))
-        self.update()
+        self.operation_coordinator.clear()
+        self._set_document(self.operation_coordinator.document)
+        self.render(reason="operation-clear", force_autolevel=True)
 
     def save_operation_recipe(self):
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -958,23 +908,21 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             return
         try:
             operations = load_recipe(file_path, self.base_data.shape)
-            document = ArrayDocument(self.base_data, operations=operations)
-            if len(document.current_shape) < 1:
-                raise ValueError("recipe produces a scalar, which this viewer cannot display yet")
+            self.operation_coordinator.load_operations(operations)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Recipe Load Error", f"Failed to load recipe:\n{e}")
             return
         try:
-            self._set_document(document)
+            self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Recipe Load Error", f"Failed to load recipe:\n{e}")
             return
-        self.update()
+        self.render(reason="recipe-load", force_autolevel=True)
 
     def materialize_current_array(self):
-        self.base_data = np.array(self.operation_evaluator.current_data(), copy=True)
-        self._set_document(ArrayDocument(self.base_data))
-        self.update()
+        self.operation_coordinator.materialize()
+        self._set_document(self.operation_coordinator.document)
+        self.render(reason="materialize", force_autolevel=True)
 
     def update_shift_indicators(self):
         for i, shift_label in enumerate(self.widgets['labels']['shift']):
@@ -995,26 +943,23 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
     
     def flipAxisClicked(self, event, dim):
         """Handle click on flip axis icon"""
-        # Only respond if this dimension is currently selected
-        if dim not in self.selected_indices:
+        image_axes = self._image_axes()
+        if dim not in image_axes and dim != self.view_state.line_axis:
             return
-        
-        # Toggle flip
-        self.axis_flipped[dim] = not self.axis_flipped[dim]
-        
+        self._set_view_state(self.view_state.with_axis_flipped(dim, not self._axis_flipped(dim)))
         self.update_flip_icons()
-        self._sync_view_state_from_window()
         self.apply_axis_flips()
         
     def update_flip_icons(self):
+        image_axes = self._image_axes()
         for i, flip_label in enumerate(self.widgets['labels']['flip']):
-            if i in self.selected_indices:
+            if i in image_axes:
                 # In line plot mode, only show horizontal flip icon for the plot dimension
                 if self.is_line_plot_mode():
-                    if i == self.line_plot_dimension:
+                    if i == self.view_state.line_axis:
                         flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeHorCursor))
                         flip_label.setToolTip("Flip X axis")
-                        if self.axis_flipped[i]:
+                        if self._axis_flipped(i):
                             flip_label.setText('⬅️')    
                         else:
                             flip_label.setText('➡️')
@@ -1022,17 +967,17 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                         flip_label.setText('')  # Hide flip icons for non-plot dimensions
                         flip_label.setToolTip('')
                 # In image view mode, show vertical flip for primary, horizontal for secondary
-                elif i == self.selected_indices[0]:
+                elif self.view_state.image_axes is not None and i == self.view_state.image_axes[0]:
                     flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeVerCursor))
                     flip_label.setToolTip("Flip Y")
-                    if self.axis_flipped[i]:
+                    if self._axis_flipped(i):
                         flip_label.setText('⬇️')
                     else:
                         flip_label.setText('⬆️')
-                elif len(self.selected_indices) > 1 and i == self.selected_indices[1]:
+                elif self.view_state.image_axes is not None and i == self.view_state.image_axes[1]:
                     flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeHorCursor))
                     flip_label.setToolTip("Flip X")
-                    if self.axis_flipped[i]:
+                    if self._axis_flipped(i):
                         flip_label.setText('⬅️')
                     else:
                         flip_label.setText('➡️')
@@ -1044,24 +989,19 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                 flip_label.setToolTip('')
     
     def apply_axis_flips(self):
-
-        
         if self.is_line_plot_mode():
             plot_view = self.plot_widget.getViewBox()
-            plot_dim = self.line_plot_dimension
-            plot_view.invertX(self.axis_flipped[plot_dim])
+            plot_dim = self.view_state.line_axis
+            if plot_dim is not None:
+                plot_view.invertX(self._axis_flipped(plot_dim))
         else:
-            if self.data.ndim == 1: # Shouldn't ever be in view mode for 1D data
+            if self.view_state.image_axes is None:
                 return
             
             view = self.img_view.getView()
-            
-            y_dim = self.selected_indices[0]
-            view.invertY(self.axis_flipped[y_dim])
-
-            if len(self.selected_indices) > 1:
-                x_dim = self.selected_indices[1]
-                view.invertX(self.axis_flipped[x_dim])
+            y_dim, x_dim = self.view_state.image_axes
+            view.invertY(self._axis_flipped(y_dim))
+            view.invertX(self._axis_flipped(x_dim))
 
     def update_complex_indicators(self):
         """Initialize or update ℝ/ℂ indicators for dimensions that can be combined as complex"""
@@ -1096,16 +1036,13 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             'angle': is_complex,
         }
 
-        checked_channel = next(
-            (name for name, button in channel_buttons.items() if button.isChecked()),
-            None,
-        )
-
         for name, button in channel_buttons.items():
             button.setEnabled(enabled_channels[name])
 
-        if checked_channel not in enabled_channels or not enabled_channels[checked_channel]:
+        checked_channel = self.view_state.channel.value
+        if not enabled_channels.get(checked_channel, False):
             checked_channel = 'complex' if is_complex else 'real'
+            self._set_view_state(self.view_state.with_channel(checked_channel))
 
         channel_buttons[checked_channel].setChecked(True)
     
@@ -1131,20 +1068,24 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
     
     def getPixel(self, pos):
         img = self.img_view.image
+        if img is None or self.view_state.image_axes is None:
+            return
         container = self.img_view.getView()
         if container.sceneBoundingRect().contains(pos): 
             mousePoint = container.mapSceneToView(pos) 
-            x_i = math.floor(mousePoint.x()) 
-            y_i = math.floor(mousePoint.y()) 
-            if x_i >= 0 and x_i < img.shape [ 0 ] and y_i >= 0 and y_i < img.shape[1]:
-                if img.ndim == 3 and img.shape[-1] in (3, 4):
-                    self.widgets['labels']['pixelValue'].setText(f"({x_i}, {y_i}) RGB = {img[x_i, y_i, :3].tolist()}")
-                    return
-                decimal_places = getNumberOfDecimalPlaces(abs(img[x_i ,y_i]))
+            hover = image_hover_indices(self.view_state, math.floor(mousePoint.x()), math.floor(mousePoint.y()))
+            if hover is not None:
+                x_i, y_i = hover
+                primary_axis, secondary_axis = self.view_state.image_axes
+                index = list(self.view_state.slice_indices)
+                index[primary_axis] = y_i
+                index[secondary_axis] = x_i
+                value = apply_channel(self.operation_evaluator.current_data()[tuple(index)], self.view_state.channel)
+                decimal_places = getNumberOfDecimalPlaces(abs(value))
                 if decimal_places > 5:
-                    self.widgets['labels']['pixelValue'].setText("({}, {}) = {:.3e}".format (x_i, y_i, img[x_i ,y_i]))
+                    self.widgets['labels']['pixelValue'].setText("({}, {}) = {:.3e}".format (x_i, y_i, value))
                 else:
-                    self.widgets['labels']['pixelValue'].setText("({}, {}) = {:.{}f}".format (x_i, y_i, img[x_i ,y_i], decimal_places))
+                    self.widgets['labels']['pixelValue'].setText("({}, {}) = {:.{}f}".format (x_i, y_i, value, decimal_places))
 
     def _on_image_mouse_moved(self, pos):
         self.getPixel(pos)
@@ -1154,7 +1095,6 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             return
         if not self.profile_dock.isVisible():
             return
-        self._sync_view_state_from_window()
         if self.view_state.image_axes is None:
             return
         clamped = clamp_marker_position(self.view_state.shape, self.view_state.image_axes, image_x, image_y)
@@ -1187,19 +1127,19 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             point = (mouse_point.x(), mouse_point.y())
 
         try:
-            self._sync_view_state_from_window()
-            profile_state = profile_state_from_image_hover(
+            profile_render = self.profile_coordinator.render_from_marker(
+                self.operation_evaluator,
                 self.view_state,
                 point[0],
                 point[1],
-                line_axis=self.line_plot_dimension,
+                line_axis=self.view_state.line_axis,
+                y_range_mode=self.profile_dock.y_range_mode(),
+                image_levels=self.img_view.getLevels(),
             )
-            if profile_state is None:
+            if profile_render is None:
                 self._clear_live_profile_marker()
                 return
-
-            line_result = self.operation_evaluator.line(profile_state)
-            self.profile_dock.update_line_result(line_result, profile_state, y_range=self._current_profile_y_range())
+            self.profile_dock.update_line_result(profile_render.line_result, profile_render.view_state, y_range=profile_render.y_range)
             self._update_operation_dock()
             self.profile_dock.show()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
@@ -1253,7 +1193,6 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             self._on_profile_marker_moved(*position)
 
     def _default_profile_marker_position(self):
-        self._sync_view_state_from_window()
         if self.view_state.image_axes is None:
             return (0, 0)
         primary_axis, secondary_axis = self.view_state.image_axes
@@ -1274,40 +1213,17 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         return phase_colormap()
 
     def _apply_channel_colormap(self):
-        if self.channel in ('complex', 'angle'):
+        if self.view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
             self.img_view.setColorMap(self._phase_colormap())
         else:
             self.img_view.setColorMap(gray_colormap())
 
-    def update_image_view(self):
-        if self.data.ndim == 1: # No image view for 1D data
+    def update_image_view(self, *, force_autolevel: bool = False):
+        if self.view_state.image_axes is None: # No image view for 1D data
             return
             
         al = True
-        old_channel = self.channel
-        oldscale = self.scale
-        
-        if self.widgets['buttons']['channel']['complex'].isChecked():
-            self.channel = 'complex'
-        elif self.widgets['buttons']['channel']['abs'].isChecked():
-            self.channel = 'abs'
-        elif self.widgets['buttons']['channel']['angle'].isChecked():
-            self.channel = 'angle'
-        elif self.widgets['buttons']['channel']['real'].isChecked():
-            self.channel = 'real'
-        elif self.widgets['buttons']['channel']['imag'].isChecked():
-            self.channel = 'imag'
-        
-        if self.widgets['buttons']['processing']['symlog'].isChecked():
-            self.scale = 'symlog'
-        else:
-            self.scale = None
-        
-        changed_channel = old_channel != self.channel
-        changed_scale = oldscale != self.scale
-        if changed_channel:
-            self._apply_channel_colormap()
-        force_auto = changed_scale or changed_channel or getattr(self, '_force_autolevel', False)
+        force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
         window_mode = self._current_window_mode()
         # reset the one-shot flag after using it
         if getattr(self, '_force_autolevel', False):
@@ -1325,7 +1241,6 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
 
         
         try:
-            self._sync_view_state_from_window()
             colormap_lut = None
             if self.view_state.channel == ChannelMode.COMPLEX:
                 colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
@@ -1400,7 +1315,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         self._update_display_group_title()
 
         # Force update to ensure view changes immediately
-        self.update_image_view()
+        self.render(reason="processing-pressed", force_autolevel=True)
 
     def _update_display_group_title(self):
         """Update the display group title with aspect ratio information."""
@@ -1454,7 +1369,6 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             if position is not None:
                 self._on_profile_marker_moved(*position)
                 return
-        self._sync_view_state_from_window()
         line_result = self.operation_evaluator.line(self.view_state)
         self.profile_dock.update_line_result(line_result, self.view_state, y_range=self._current_profile_y_range())
         self._update_operation_dock()
@@ -1474,72 +1388,46 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         return False
 
     def set_profile_axis(self, axis):
-        self.line_plot_dimension = int(axis)
-        self.profile_axes = (self.line_plot_dimension,)
-        self._sync_view_state_from_window()
-        self.update_dimension_controls()
-        self.update_line_plot()
+        self._set_view_state(self.view_state.with_line_axis(int(axis)))
+        self.profile_axes = (self.view_state.line_axis,)
+        if hasattr(self, "profile_dock"):
+            self.profile_dock.set_axes(self.data.shape, self.view_state.line_axis)
+        self.render(reason="profile-axis")
 
     def set_dimension_role(self, role, axis):
         if axis >= self.data.ndim:
             return
         if role == "p":
-            self.profile_axes = (int(axis),)
-            self.line_plot_dimension = self.profile_axes[0]
+            self._set_view_state(self.view_state.with_line_axis(int(axis)))
+            self.profile_axes = (self.view_state.line_axis,)
             if hasattr(self, "profile_dock"):
-                self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
+                self.profile_dock.set_axes(self.data.shape, self.view_state.line_axis)
         elif role in ("y", "x"):
-            if len(self.selected_indices) < 2:
+            if self.view_state.image_axes is None:
                 return
-            roles = DimensionRoles.from_axes(tuple(self.selected_indices[:2]), self.profile_axes)
-            roles = roles.with_image_axis(role, axis)
-            self.selected_indices = list(roles.image_axes)
-        self.update_dimension_controls()
-        self._sync_view_state_from_window()
-        self.update()
+            self._set_view_state(self.view_state.with_image_axis(role, axis))
+        self.render(reason=f"dimension-{role}")
 
     def transposeView(self, event):
-        old_primary = self.selected_indices[0]
-        old_secondary = self.selected_indices[1]
+        if self.view_state.image_axes is None:
+            return
+        self._set_view_state(self.view_state.transposed_image_axes())
+        self.render(reason="transpose")
 
-        # Swap the flip states along with the dimensions (prevents the axes from appearing flipped after transpose)
-        self.axis_flipped[old_primary], self.axis_flipped[old_secondary] = self.axis_flipped[old_secondary], self.axis_flipped[old_primary]
-        
-        self.changedIndex(event, 0, old_secondary, update=False)
-        self.changedIndex(event, 1, old_primary, update=True)
+    def render(self, *, reason: str = "state", force_autolevel: bool = False):
+        self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
+        self._sync_controls_from_view_state()
+        self._update_channel_controls()
+        self.update_dimension_controls()
+        self.update_complex_indicators()
+        self.update_shift_indicators()
+        self.update_image_view(force_autolevel=force_autolevel)
+        self.update_line_plot()
+        self._update_operation_dock()
 
     def update(self):
-        self.update_slice()
-        self.update_image_view()
-        self.update_line_plot()
-        self._sync_view_state_from_window()
+        self.render(reason="legacy-update")
 
-    def update_slice(self):
-        """Update slice for image view mode"""
-        self.slice = [slice(None)] * self.data.ndim
-        for dim in range(0, self.data.ndim):
-            if dim in self.selected_indices:
-                self.slice[dim] = slice(None) # pass?
-            else:
-                val = self.widgets['spins']['slice_indices'][dim].value()
-                self.slice[dim] = slice(val, val+1)
-
-    def changedIndex(self, checked, which_one, idx, update=True):
-        if self.is_line_plot_mode():
-            # In line plot mode, only use primary button to select the dimension to plot along
-            if which_one == 0:  # Primary button clicked
-                self.line_plot_dimension = idx
-        else:
-            # In image view mode, use the original two-dimension selection
-            # For 1D arrays, we don't have a second dimension
-            if which_one < len(self.selected_indices):
-                self.selected_indices[which_one] = idx
-        
-        self.update_dimension_controls()
-        self._sync_view_state_from_window()
-        if update is True:
-            self.update()
-    
     def update_dimension_controls(self):
         """Update button and spinbox states based on current mode"""
         if self.is_line_plot_mode():
@@ -1585,7 +1473,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                     bSecondary.setChecked(False)
                     bProfile.setChecked(i in self.profile_axes)
         else:
-            # Image view mode: original two-dimension selection behavior
+            image_axes = self._image_axes()
             for i, w in enumerate(self.widgets['spins']['slice_indices']):
                 bPrim = self.widgets['buttons']['primary'][i]
                 bSecondary = self.widgets['buttons']['secondary'][i]
@@ -1605,9 +1493,9 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                     bSecondary.setEnabled(False)
                     bProfile.setEnabled(False)
                     bProfile.setChecked(False)
-                elif i in self.selected_indices:
+                elif i in image_axes:
                     w.setEnabled(False)
-                    if i == self.selected_indices[0]:
+                    if self.view_state.image_axes is not None and i == self.view_state.image_axes[0]:
                         bPrim.setChecked(True)
                         bSecondary.setChecked(False)
                     else:
@@ -1626,11 +1514,9 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
                     bSecondary.setChecked(False)
                     bProfile.setChecked(i in self.profile_axes)
                     
-            # Only set buttons if we have at least 2 selected indices
-            if len(self.selected_indices) >= 1:
-                self.widgets['buttons']['primary'][self.selected_indices[0]].setChecked(True)
-            if len(self.selected_indices) >= 2:
-                self.widgets['buttons']['secondary'][self.selected_indices[1]].setChecked(True)
+            if self.view_state.image_axes is not None:
+                self.widgets['buttons']['primary'][self.view_state.image_axes[0]].setChecked(True)
+                self.widgets['buttons']['secondary'][self.view_state.image_axes[1]].setChecked(True)
         
         self.update_flip_icons()
         self.update_shift_indicators()
@@ -1642,7 +1528,7 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         
         # Check for 'T' key to transpose view (swap X and Y dimensions)
         if key == Qt.QtCore.Qt.Key.Key_T and modifiers == Qt.QtCore.Qt.KeyboardModifier.NoModifier:
-            if not self.is_line_plot_mode() and len(self.selected_indices) >= 2:
+            if not self.is_line_plot_mode() and self.view_state.image_axes is not None:
                 self.transposeView(event)
                 event.accept()
                 return
@@ -1791,7 +1677,6 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             lut = None
         
         # Create worker thread
-        self._sync_view_state_from_window()
         worker = VideoExportWorker(
             data=self.data,
             view_state=self.view_state,
@@ -1800,13 +1685,10 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
             fps=settings['fps'],
             format_type=settings['format'],
             window_level_mode=settings.get('window_level', 'displayed'),
-            selected_indices=self.selected_indices,
-            singleton=self.singleton,
             levels=levels,
             pixel_ratio_mode=settings.get('pixel_ratio', 'square_pixels'),
             display_mode=display_mode,
             widget_ratio=widget_ratio,
-            axis_flipped=self.axis_flipped,
             colormap_lut=lut
         )
         
@@ -1948,35 +1830,10 @@ class ArrayScopeWindow(QtWidgets.QMainWindow):
         for i in range(new_ndim):
             self.widgets['spins']['slice_indices'][i].setMaximum(new_data.shape[i] - 1)
 
-        # Clamp selected_indices: keep existing choices where still valid, fill from valid dims
-        valid_dims = [i for i in range(new_ndim) if not self.singleton[i]]
-        clamped = [i for i in self.selected_indices if i < new_ndim and not self.singleton[i]]
-        for d in valid_dims:
-            if len(clamped) >= 2:
-                break
-            if d not in clamped:
-                clamped.append(d)
-        if not clamped and valid_dims:
-            clamped = [valid_dims[0]]
-        self.selected_indices = clamped[:2]
-
-        # Clamp line_plot_dimension
-        if self.line_plot_dimension >= new_ndim or self.singleton[self.line_plot_dimension]:
-            for d in range(new_ndim):
-                if not self.singleton[d]:
-                    self.line_plot_dimension = d
-                    break
-
-        self.axis_flipped = [False] * new_ndim
-        self.fftshifted = [False] * new_ndim
-
+        self._set_view_state(self.view_state.for_shape(new_data.shape, preserve_flags=True))
         self._update_channel_controls()
         self.update_complex_indicators()
         self.update_shift_indicators()
-        if len(self.selected_indices) >= 1:
-            self.changedIndex(True, 0, self.selected_indices[0], update=False)
-        if len(self.selected_indices) >= 2:
-            self.changedIndex(True, 1, self.selected_indices[1], update=False)
         self.update_dimension_controls()
         self._force_autolevel = True
-        self.update()
+        self.render(reason="reload", force_autolevel=True)

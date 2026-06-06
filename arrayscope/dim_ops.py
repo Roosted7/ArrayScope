@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .axis_utils import validate_axis
+
 
 def centered_fft(data, axis):
     """Apply the viewer's centered forward FFT transform along one axis."""
@@ -57,8 +59,4 @@ def split_complex_axis(data, axis):
 
 
 def _validate_axis(data, axis):
-    axis = int(axis)
-    ndim = np.ndim(data)
-    if axis < 0 or axis >= ndim:
-        raise ValueError(f"axis {axis} is out of bounds for {ndim}D data")
-    return axis
+    return validate_axis(np.ndim(data), axis)

@@ -351,7 +351,15 @@ class ImageView2D(QtWidgets.QWidget):
 
     def setProfileMarkerCallback(self, callback):
         """Set a callback called with image-space x/y when the marker moves."""
+        self.set_profile_marker_callback(callback)
+
+    def set_profile_marker_callback(self, callback):
+        """Set a callback called with image-space x/y when the marker moves."""
         self._profile_marker_callback = callback
+
+    def clear_profile_marker_callback(self):
+        """Clear the callback called when the marker moves."""
+        self._profile_marker_callback = None
 
     def _on_profile_marker_changed(self, *_args):
         if self._profile_marker_updating:

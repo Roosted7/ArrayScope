@@ -7,10 +7,8 @@ from typing import Protocol, Tuple
 
 import numpy as np
 
-try:
-    from . import dim_ops
-except ImportError:  # pragma: no cover - supports direct module loading in tests
-    import dim_ops
+from . import dim_ops
+from .axis_utils import validate_axis
 
 
 Shape = Tuple[int, ...]
@@ -239,11 +237,7 @@ def evaluate_shape(base_shape, operations) -> Shape:
 
 
 def _validate_axis(shape, axis) -> int:
-    axis = int(axis)
-    ndim = len(shape)
-    if axis < 0 or axis >= ndim:
-        raise ValueError(f"axis {axis} is out of bounds for {ndim}D data")
-    return axis
+    return validate_axis(shape, axis)
 
 
 def _validate_crop_bounds(axis_size, start, stop):

@@ -1,17 +1,20 @@
 import ast
-import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 
-DIM_OPS_PATH = Path(__file__).parents[1] / "arrayscope" / "dim_ops.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope_dim_ops_for_test", DIM_OPS_PATH)
-dim_ops = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = dim_ops
-SPEC.loader.exec_module(dim_ops)
+ROOT = Path(__file__).parents[1]
+PACKAGE = types.ModuleType("arrayscope")
+PACKAGE.__path__ = [str(ROOT / "arrayscope")]
+sys.modules.setdefault("arrayscope", PACKAGE)
+
+from arrayscope import dim_ops
+
+DIM_OPS_PATH = ROOT / "arrayscope" / "dim_ops.py"
 
 
 def test_centered_fft_and_ifft_match_existing_viewer_transform():
