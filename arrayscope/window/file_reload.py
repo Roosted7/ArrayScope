@@ -20,7 +20,7 @@ from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
 from arrayscope.export.video import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
-from arrayscope.io.numpy_save import save_current_numpy_file
+from arrayscope.io.numpy_save_qt import save_current_numpy_file
 from arrayscope.window.domain import Domain
 
 

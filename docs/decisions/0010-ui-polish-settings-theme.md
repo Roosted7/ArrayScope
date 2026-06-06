@@ -50,9 +50,9 @@ or cached once a synchronous evaluation returns.
 
 ## Consequences
 
-Theme support remains small and optional-package-free by default. This keeps
-ArrayScope usable on minimal installations and leaves room to try packages such
-as `pyqtdarktheme-fork` or `qt-material` later without changing the UI contract.
+Theme support remains small and optional-package-free. ArrayScope uses built-in
+Qt palettes for dark and light themes; optional external theme backends are not
+part of the current theme contract.
 
 The persistence boundary is the main window and app settings, not the operation
 recipe format. Recipes still save operation stacks only, not UI state.

@@ -13,6 +13,17 @@ from arrayscope.window.domain import Domain
 
 class DisplayControlBuildMixin:
     def _build_window_ui(self, data, filepath):
+        self._create_widget_registry(data)
+        self._create_button_groups_and_profile_timer()
+        self._create_layout_registry()
+        self._build_dimension_role_bar(data)
+        self._build_display_controls_panel()
+        self._build_main_canvas()
+        self._build_header_bar(filepath)
+        self._compose_central_layout()
+        self._build_docks_and_restore_layout()
+
+    def _create_widget_registry(self, data):
         self.domain = [Domain.NATIVE for _ in range(data.ndim)]
         self.widgets = {
             'buttons': {
@@ -58,7 +69,8 @@ class DisplayControlBuildMixin:
                 'slice_indices': [QtWidgets.QSpinBox(minimum=0, maximum=data.shape[i]-1) for i in range(data.ndim)]
             }
         }
-        
+
+    def _create_button_groups_and_profile_timer(self):
         # Create a button group for the channel radio buttons
         self.channel_button_group = QtWidgets.QButtonGroup()
         self.channel_button_group.addButton(self.widgets['buttons']['channel']['complex'])
@@ -89,7 +101,8 @@ class DisplayControlBuildMixin:
         self._profile_timer.setSingleShot(True)
         self._profile_timer.setInterval(40)
         self._profile_timer.timeout.connect(self._update_live_profile_from_pending_pos)
-        
+
+    def _create_layout_registry(self):
         self.layouts = {
             'main': QtWidgets.QVBoxLayout(),
             'top': QtWidgets.QVBoxLayout(),
@@ -104,7 +117,8 @@ class DisplayControlBuildMixin:
             'slice': QtWidgets.QHBoxLayout(),
             'hover': QtWidgets.QHBoxLayout()
         }
-        
+
+    def _build_dimension_role_bar(self, data):
         for i, label in enumerate(self.widgets['labels']['dims']):
             label.mousePressEvent = lambda event, i=i, l=label: self.dimClicked(event, l, i)
             label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
@@ -210,7 +224,8 @@ class DisplayControlBuildMixin:
         self._setup_export_context_menus()
         self._save_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Save, self)
         self._save_shortcut.activated.connect(self._save_current_numpy_file)
-        
+
+    def _build_display_controls_panel(self):
         # Create a single compact control panel with all radio buttons
         controls_widget = QtWidgets.QWidget()
         controls_layout = QtWidgets.QVBoxLayout()
@@ -293,7 +308,8 @@ class DisplayControlBuildMixin:
         
         controls_widget.setLayout(controls_layout)
         self.layouts['botRight'].addWidget(controls_widget)
-        
+
+    def _build_main_canvas(self):
         # Create tab widget for switching between image and line plot views
         self.tab_widget = QtWidgets.QTabWidget()
         
@@ -321,6 +337,7 @@ class DisplayControlBuildMixin:
         # Add tab widget to the main layout
         self.layouts['topDown'].addWidget(self.tab_widget)
 
+    def _build_header_bar(self, filepath):
         # Reload / file-changed button (⟳ by default, ⚠️ when file changes on disk)
         self._reload_btn = QtWidgets.QPushButton("⟳")
         self._reload_btn.setStyleSheet("QPushButton { font-size: 18pt; padding: 1px 2px; margin: 0px; border: none; background: transparent; }")
@@ -334,6 +351,7 @@ class DisplayControlBuildMixin:
         self.layouts['topUp'].addWidget(self.widgets['labels']['pixelValue'])
         self.layouts['topUp'].addWidget(self.widgets['labels']['arrayInfo'])
 
+    def _compose_central_layout(self):
         self.layouts['botLeft'].addLayout(self.layouts['dims'])
         
         
@@ -360,6 +378,8 @@ class DisplayControlBuildMixin:
         tmp = QtWidgets.QWidget()
         tmp.setLayout(self.layouts['main'])
         self.setCentralWidget(tmp)
+
+    def _build_docks_and_restore_layout(self):
         self.profile_dock = ProfileDock(self, on_axis_changed=self.set_profile_axis)
         self.line_plot = self.profile_dock.line_plot
         self.plot_widget = self.profile_dock.widget
@@ -387,3 +407,4 @@ class DisplayControlBuildMixin:
         # Initialize complex indicators for size-2 real dimensions
         self.update_complex_indicators()
         self.update_shift_indicators()
+

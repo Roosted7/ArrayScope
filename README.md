@@ -1,7 +1,3 @@
-[![Python versions](https://img.shields.io/pypi/pyversions/arrayscope.svg)](https://pypi.org/project/arrayscope/)
-[![PyPI version](https://img.shields.io/pypi/v/arrayscope.svg)](https://pypi.org/project/arrayscope/)
-[![License](https://img.shields.io/github/license/henricryden/arrayscope.svg)](https://github.com/henricryden/arrayscope/blob/main/LICENSE)
-[![Downloads](https://static.pepy.tech/personalized-badge/arrayscope?period=total&units=international_system&left_color=black&right_color=green&left_text=downloads)](https://pepy.tech/projects/arrayscope)
 # arrayscope
 
 **Quick interactive visualization for N-dimensional NumPy arrays**
@@ -42,11 +38,7 @@ Data slicing and dimension selection should be intuitive: click the two dimensio
 
 **Video export**
 Right-clicking a dimension button to export a video or PNG frames along that dimension.
-The video export functionality is optional, and can be installed with
-
-```bash
-pip install arrayscope[video_export]
-```
+Video export uses the default `imageio`, `imageio-ffmpeg`, and `Pillow` dependencies.
 ![Export](docs/images/video_export.gif)
 
 
@@ -128,12 +120,10 @@ Double click to open.
 
 ## Installation
 
-### From PyPI
+### Install
 
 ```bash
 pip install arrayscope
-# Or, if you want just the package without pulling in dependencies:
-pip install --no-deps arrayscope
 ```
 
 ArrayScope uses PySide6 by default through PyQtGraph's Qt abstraction.
@@ -149,7 +139,7 @@ If `dcm2niix` is missing or conversion fails, arrayscope reports a clear error i
 ### From source
 
 ```bash
-git clone https://github.com/henricryden/arrayscope.git
+git clone <this-repository>
 cd arrayscope
 
 # Use directly without installing

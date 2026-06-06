@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[2]
 PATH = ROOT / "arrayscope" / "core" / "cache_status.py"
 SPEC = importlib.util.spec_from_file_location("arrayscope.core.cache_status", PATH)
 cache_status = importlib.util.module_from_spec(SPEC)

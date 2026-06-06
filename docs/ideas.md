@@ -97,13 +97,7 @@ Rules:
 
 ## Technical debt
 
-* Split `arrayscope.io.numpy_save` into pure selection helpers and Qt save-dialog workflow.
-* Remove broad copy-pasted imports from window/UI/export mixins.
-* Split `DisplayControlBuildMixin._build_window_ui()` into focused builders.
-* Update README and package metadata to match the fork identity and current features.
-* Define optional dependencies accurately; do not document extras that do not exist.
 * Replace print-based warnings with logging or user-facing status messages.
-* Decide whether theme backend support should remain built-in-palette only or support optional external backends.
 * Preserve axis identity metadata across shape-changing operation stacks.
 * Add first-class scalar display support for operation stacks that reduce all dimensions.
 * Clarify FFT naming: current centered FFT/IFFT follow viewer convention but may surprise users expecting NumPy direction.

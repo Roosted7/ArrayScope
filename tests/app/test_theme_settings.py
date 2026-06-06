@@ -3,11 +3,8 @@ import sys
 import types
 from pathlib import Path
 
-import numpy as np
-import pytest
 
-
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[2]
 PACKAGE = types.ModuleType("arrayscope")
 PACKAGE.__path__ = [str(ROOT / "arrayscope")]
 sys.modules.setdefault("arrayscope", PACKAGE)
@@ -43,47 +40,40 @@ def load_module(name):
     return module
 
 
-load_module("axis_utils")
-load_module("dim_ops")
-load_module("operation_pipeline")
-load_module("operation_stack")
-load_module("cache_status")
-load_module("slice_engine")
-load_module("operation_evaluator")
-load_module("operation_registry")
-operation_coordinator = load_module("operation_coordinator")
-
-OperationCoordinator = operation_coordinator.OperationCoordinator
+theme = load_module("theme")
+settings_state = load_module("settings_state")
 
 
-def test_operation_coordinator_appends_reorders_and_materializes():
-    data = np.arange(3 * 4).reshape(3, 4)
-    coordinator = OperationCoordinator(data)
+def test_theme_backend_uses_builtin_palette_when_optional_backend_missing():
+    result = theme.choose_theme_backend("dark", available_backends=())
 
-    coordinator.append_operation("crop", axis=1, parameters={"start": 1, "stop": 4})
-    coordinator.append_operation("reverse", axis=0)
-
-    assert coordinator.shape == (3, 3)
-    assert coordinator.operation_shapes() == ((3, 3), (3, 3))
-
-    result = coordinator.evaluator.current_data()
-    np.testing.assert_array_equal(result, np.flip(data[:, 1:4], axis=0))
-
-    coordinator.materialize()
-    assert coordinator.document.operations == ()
-    np.testing.assert_array_equal(coordinator.base_data, result)
+    assert result.requested == theme.ThemeChoice.DARK
+    assert result.applied == theme.ThemeChoice.DARK
+    assert result.backend == "builtin"
+    assert result.warning is None
 
 
-def test_operation_coordinator_delete_and_move_validate_against_base_shape():
-    data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
-    coordinator = OperationCoordinator(data)
-    coordinator.append_operation("crop", axis=2, parameters={"start": 1, "stop": 4})
-    coordinator.append_operation("mean", axis=0)
+def test_builtin_light_palette_path_is_selectable():
+    result = theme.choose_theme_backend("light", available_backends=())
 
-    with pytest.raises(ValueError, match="out of bounds"):
-        coordinator.move(1, -1)
+    assert result.applied == theme.ThemeChoice.LIGHT
+    assert result.backend == "builtin"
 
-    assert coordinator.shape == (3, 3)
 
-    coordinator.delete(0)
-    assert coordinator.shape == (3, 4)
+def test_normalize_theme_choice_accepts_enum_values():
+    assert theme.normalize_theme_choice(theme.ThemeChoice.DARK) == theme.ThemeChoice.DARK
+
+
+def test_theme_backend_keeps_builtin_palette_even_when_optional_backend_available():
+    result = theme.choose_theme_backend("light", available_backends=("qdarktheme",))
+
+    assert result.applied == theme.ThemeChoice.LIGHT
+    assert result.backend == "builtin"
+
+
+def test_settings_round_trip_defaults_and_values():
+    settings = settings_state.settings_from_mapping({"theme": "dark", "prefetch_nearby_slices": "true"})
+    values = settings_state.settings_to_mapping(settings)
+
+    assert values == {"theme": "dark", "prefetch_nearby_slices": True}
+    assert settings_state.settings_from_mapping({}).theme == theme.ThemeChoice.SYSTEM
