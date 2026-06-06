@@ -34,7 +34,7 @@ class OperationEvaluator:
     last_status: CacheStatusSnapshot = CacheStatusSnapshot(CacheStatus.COLD, "No evaluation yet")
 
     def set_document(self, document: ArrayDocument):
-        if document.operations != self.document.operations or document.base_data is not self.document.base_data:
+        if document.steps != self.document.steps or document.base_data is not self.document.base_data:
             self.document = document
             self.clear_cache()
         else:
@@ -103,7 +103,7 @@ class OperationEvaluator:
 
 
 def _document_key(document: ArrayDocument):
-    return (id(document.base_data), document.operations)
+    return (id(document.base_data), document.steps)
 
 
 def _lut_key(colormap_lut):

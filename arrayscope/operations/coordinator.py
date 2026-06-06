@@ -7,7 +7,7 @@ import numpy as np
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import ArrayDocument, evaluate_shape
 from arrayscope.operations.registry import create_operation
-from arrayscope.operations.stack import delete_operation, move_operation, reorder_operations
+from arrayscope.operations.stack import delete_step, move_step, reorder_steps, replace_step_operation, set_step_enabled
 
 
 class OperationCoordinator:
@@ -39,19 +39,31 @@ class OperationCoordinator:
         return self.set_document(ArrayDocument(self.base_data))
 
     def delete(self, index):
-        operations = delete_operation(self.document.operations, index, self.base_data.shape)
-        return self.set_document(ArrayDocument(self.base_data, operations=operations))
+        steps = delete_step(self.document.steps, index, self.base_data.shape)
+        return self.set_document(ArrayDocument(self.base_data, steps=steps))
 
     def move(self, index, direction):
-        operations = move_operation(self.document.operations, index, direction, self.base_data.shape)
-        return self.set_document(ArrayDocument(self.base_data, operations=operations))
+        steps = move_step(self.document.steps, index, direction, self.base_data.shape)
+        return self.set_document(ArrayDocument(self.base_data, steps=steps))
 
     def reorder(self, order):
-        operations = reorder_operations(self.document.operations, order, self.base_data.shape)
-        return self.set_document(ArrayDocument(self.base_data, operations=operations))
+        steps = reorder_steps(self.document.steps, order, self.base_data.shape)
+        return self.set_document(ArrayDocument(self.base_data, steps=steps))
+
+    def set_enabled(self, index, enabled):
+        steps = set_step_enabled(self.document.steps, index, enabled, self.base_data.shape)
+        return self.set_document(ArrayDocument(self.base_data, steps=steps))
+
+    def replace_operation(self, index, operation_id, axis=None, parameters=None):
+        operation = create_operation(operation_id, axis=axis, parameters=parameters or {})
+        steps = replace_step_operation(self.document.steps, index, operation, self.base_data.shape)
+        return self.set_document(ArrayDocument(self.base_data, steps=steps))
 
     def load_operations(self, operations):
         return self.set_document(ArrayDocument(self.base_data, operations=tuple(operations)))
+
+    def load_steps(self, steps):
+        return self.set_document(ArrayDocument(self.base_data, steps=tuple(steps)))
 
     def replace_base_data(self, data):
         self.base_data = data
@@ -64,12 +76,21 @@ class OperationCoordinator:
     def operation_shapes(self):
         shapes = []
         shape = tuple(self.base_data.shape)
-        for operation in self.document.operations:
-            shape = evaluate_shape(shape, (operation,))
+        for step in self.document.steps:
+            if step.enabled:
+                shape = evaluate_shape(shape, (step.operation,))
             shapes.append(shape)
         return tuple(shapes)
+
+    def operation_dtypes(self):
+        dtypes = []
+        data = self.base_data
+        for step in self.document.steps:
+            if step.enabled:
+                data = step.operation.apply(data)
+            dtypes.append(getattr(data, "dtype", None))
+        return tuple(dtypes)
 
     def _reject_scalar(self, document):
         if len(document.current_shape) < 1:
             raise ValueError("operation would produce a scalar, which this viewer cannot display yet")
-

@@ -13,6 +13,7 @@ from arrayscope.export.workflow import ExportWorkflowMixin
 from arrayscope.ui.dimension_controls import DimensionControlMixin
 from arrayscope.ui.display_controls import DisplayControlBuildMixin
 from arrayscope.ui.menus import WindowMenuMixin
+from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
 from arrayscope.window.file_reload import FileReloadMixin
 from arrayscope.window.operation_actions import OperationActionsMixin
@@ -50,7 +51,7 @@ class ArrayScopeWindow(
 
     def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
         super(ArrayScopeWindow, self).__init__()
-        self.resize(800,800)
+        self.resize(600,800)
         self._settings = Qt.QtCore.QSettings("ArrayScope", "ArrayScope")
         self.app_settings = self._load_app_settings()
         self._apply_theme_choice(self.app_settings.theme, persist=False)
@@ -68,6 +69,12 @@ class ArrayScopeWindow(
         self._filepath = filepath
         self._dataset_path = dataset_path
         self._selector_class_name = selector_class_name
+        self._operation_dock_user_visible = False
+        self._profile_dock_user_visible = False
+        self._last_operation_axis = None
+        self._focused_dimension_axis = None
+        self._active_slice_axis = None
+        self.statusBar()
         
         # If data is real-valued and has size-2 dimensions, arrayscope can combine them as complex (ISMRMD uses this for real/imag parts)
         if np.iscomplexobj(data):
@@ -87,11 +94,11 @@ class ArrayScopeWindow(
         
         if complex_dim is not None: # user requested combining as complex
             if complex_dim < 0 or complex_dim >= data.ndim:
-                print(f"Warning: complex_dim={complex_dim} is out of range for {data.ndim}D array. Ignoring.")
+                show_status_message(self, f"complex_dim={complex_dim} is out of range for {data.ndim}D array. Ignoring.")
             elif np.iscomplexobj(data):
-                print(f"Warning: Data is already complex. Ignoring complex_dim={complex_dim}.")
+                show_status_message(self, f"Data is already complex. Ignoring complex_dim={complex_dim}.")
             elif data.shape[complex_dim] != 2:
-                print(f"Warning: Dimension {complex_dim} has shape {data.shape[complex_dim]}, not 2. Cannot combine as complex. Ignoring.")
+                show_status_message(self, f"Dimension {complex_dim} has shape {data.shape[complex_dim]}, not 2. Cannot combine as complex.")
             else:
                 self.combineAsComplex(complex_dim) # valid
         
@@ -105,3 +112,8 @@ class ArrayScopeWindow(
         if filepath is not None:
             self._file_watcher = Qt.QtCore.QFileSystemWatcher([str(filepath)])
             self._file_watcher.fileChanged.connect(self._on_file_changed)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "dimension_strip"):
+            self.dimension_strip._schedule_relayout()

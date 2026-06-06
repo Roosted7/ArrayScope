@@ -124,6 +124,8 @@ class DimensionControlMixin:
 
         for name, button in channel_buttons.items():
             button.setEnabled(enabled_channels[name])
+        if hasattr(self, "display_toolbar"):
+            self.display_toolbar.set_channel_options(enabled_channels)
 
         checked_channel = self.view_state.channel.value
         if not enabled_channels.get(checked_channel, False):
@@ -131,6 +133,8 @@ class DimensionControlMixin:
             self._set_view_state(self.view_state.with_channel(checked_channel))
 
         channel_buttons[checked_channel].setChecked(True)
+        if hasattr(self, "display_toolbar"):
+            self.display_toolbar.set_current(channel=checked_channel)
     
     def complexOrRealClicked(self, event, dim):
         if self.can_combine_as_complex[dim] and not self.combined_as_complex[dim]:
@@ -169,6 +173,11 @@ class DimensionControlMixin:
                 self.profile_dock.set_axes(self.data.shape, self.view_state.line_axis)
         elif role in ("y", "x"):
             if self.view_state.image_axes is None:
+                return
+            role_index = 0 if role == "y" else 1
+            if self.view_state.image_axes[role_index] == int(axis):
+                self._set_view_state(self.view_state.with_axis_flipped(axis, not self._axis_flipped(axis)))
+                self.render(reason=f"dimension-{role}-flip")
                 return
             self._set_view_state(self.view_state.with_image_axis(role, axis))
         self.render(reason=f"dimension-{role}")
@@ -274,6 +283,10 @@ class DimensionControlMixin:
         
         self.update_flip_icons()
         self.update_shift_indicators()
+        if hasattr(self, "dimension_strip"):
+            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
+            for container in getattr(self, "dim_containers", []):
+                container.hide()
     
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts"""
@@ -284,6 +297,44 @@ class DimensionControlMixin:
         if key == Qt.QtCore.Qt.Key.Key_T and modifiers == Qt.QtCore.Qt.KeyboardModifier.NoModifier:
             if not self.is_line_plot_mode() and self.view_state.image_axes is not None:
                 self.transposeView(event)
+                event.accept()
+                return
+
+        if key == Qt.QtCore.Qt.Key.Key_K and modifiers == Qt.QtCore.Qt.KeyboardModifier.ControlModifier:
+            self.open_command_palette()
+            event.accept()
+            return
+
+        if modifiers == Qt.QtCore.Qt.KeyboardModifier.NoModifier:
+            if key == Qt.QtCore.Qt.Key.Key_F:
+                self.fit_image_to_view()
+                event.accept()
+                return
+            if key == Qt.QtCore.Qt.Key.Key_1:
+                self.one_to_one_image()
+                event.accept()
+                return
+            if key == Qt.QtCore.Qt.Key.Key_A:
+                self.auto_window_levels()
+                event.accept()
+                return
+            if key == Qt.QtCore.Qt.Key.Key_P:
+                self.toggle_profile_dock()
+                event.accept()
+                return
+            if key == Qt.QtCore.Qt.Key.Key_L:
+                live = self.widgets['buttons']['display']['live_profile']
+                live.setChecked(not live.isChecked())
+                event.accept()
+                return
+            if key in (Qt.QtCore.Qt.Key.Key_BracketLeft, Qt.QtCore.Qt.Key.Key_BracketRight):
+                self.step_active_slice(-1 if key == Qt.QtCore.Qt.Key.Key_BracketLeft else 1)
+                event.accept()
+                return
+
+        if modifiers == Qt.QtCore.Qt.KeyboardModifier.ShiftModifier:
+            if key in (Qt.QtCore.Qt.Key.Key_BracketLeft, Qt.QtCore.Qt.Key.Key_BracketRight):
+                self.step_active_slice(-10 if key == Qt.QtCore.Qt.Key.Key_BracketLeft else 10)
                 event.accept()
                 return
         
@@ -297,21 +348,37 @@ class DimensionControlMixin:
                 
         # Pass event to parent if not handled
         super().keyPressEvent(event)
+
+    def step_active_slice(self, delta):
+        axis = getattr(self, "_active_slice_axis", None)
+        if axis is None or axis in self.view_state.display_axes() or self.data.shape[axis] == 1:
+            for candidate in self.view_state.non_display_axes():
+                if self.data.shape[candidate] > 1:
+                    axis = candidate
+                    break
+        if axis is None and self.view_state.line_axis is not None:
+            axis = self.view_state.line_axis
+        if axis is None or axis >= self.data.ndim or self.data.shape[axis] <= 1:
+            self.statusBar().showMessage("No slice axis available", 2500)
+            return
+        current = self.view_state.slice_indices[axis]
+        new_value = max(0, min(self.data.shape[axis] - 1, current + int(delta)))
+        self._on_slice_index_changed(axis, new_value)
     
     def setColormap(self, colormap_name):
         """Set the colormap for the image view"""
         try:
             colormap = named_colormap(colormap_name)
             if colormap is None:
-                print(f"Unknown colormap: {colormap_name}")
+                self.statusBar().showMessage(f"Unknown colormap: {colormap_name}", 3000)
                 return
 
             # Apply colormap to the image view
             self.img_view.setColorMap(colormap)
-            #self.current_colormap = colormap_name
+            self.current_colormap = colormap_name
             
         except Exception as e:
-            print(f"Failed to set colormap {colormap_name}: {e}")
+            self.statusBar().showMessage(f"Failed to set colormap {colormap_name}: {e}", 3000)
     
     def eventFilter(self, obj, event):
         if obj == self.tab_widget.tabBar():

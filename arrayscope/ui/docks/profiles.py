@@ -8,8 +8,10 @@ prefer_pyside6()
 
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
+import numpy as np
 
 from arrayscope.display.line_plot import LinePlotController
+from arrayscope.ui.file_dialogs import get_save_file_name
 
 
 class ProfileDock(QtWidgets.QDockWidget):
@@ -24,15 +26,6 @@ class ProfileDock(QtWidgets.QDockWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        title_row = QtWidgets.QHBoxLayout()
-        title_row.addWidget(QtWidgets.QLabel("Profile"))
-        title_row.addStretch()
-        self.float_button = QtWidgets.QPushButton("Float")
-        self.close_button = QtWidgets.QPushButton("Close")
-        title_row.addWidget(self.float_button)
-        title_row.addWidget(self.close_button)
-        layout.addLayout(title_row)
-
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(QtWidgets.QLabel("Axis:"))
         self.axis_combo = QtWidgets.QComboBox()
@@ -42,6 +35,15 @@ class ProfileDock(QtWidgets.QDockWidget):
         self.y_scale_combo.addItem("Match image window", "match_image")
         self.y_scale_combo.addItem("Auto", "auto")
         controls.addWidget(self.y_scale_combo)
+        controls.addWidget(QtWidgets.QLabel("Mode:"))
+        self.profile_mode_combo = QtWidgets.QComboBox()
+        self.profile_mode_combo.addItem("Magnitude", "abs")
+        self.profile_mode_combo.addItem("Phase", "angle")
+        self.profile_mode_combo.addItem("Real", "real")
+        self.profile_mode_combo.addItem("Imaginary", "imag")
+        controls.addWidget(self.profile_mode_combo)
+        self.export_button = QtWidgets.QPushButton("Export")
+        controls.addWidget(self.export_button)
         controls.addStretch()
         layout.addLayout(controls)
 
@@ -65,9 +67,8 @@ class ProfileDock(QtWidgets.QDockWidget):
         self.resize(560, 260)
 
         self.axis_combo.currentIndexChanged.connect(self._axis_index_changed)
-        self.float_button.clicked.connect(self._toggle_floating)
-        self.close_button.clicked.connect(self.hide)
-        self.topLevelChanged.connect(self._top_level_changed)
+        self.profile_mode_combo.currentIndexChanged.connect(lambda _index: parent.update_line_plot())
+        self.export_button.clicked.connect(self.export_profile)
 
     @property
     def widget(self):
@@ -89,7 +90,34 @@ class ProfileDock(QtWidgets.QDockWidget):
         return self.y_scale_combo.currentData() or "match_image"
 
     def update_line_result(self, line_result, view_state, y_range=None):
+        line_result = self._line_result_for_mode(line_result)
         self.line_plot.update_line_result(line_result, view_state, y_range=y_range)
+
+    def profile_mode(self):
+        return self.profile_mode_combo.currentData() or "abs"
+
+    def export_profile(self):
+        data = self.line_plot.current_line_data
+        if data is None:
+            return None
+        file_path, _ = get_save_file_name(
+            self,
+            "Export profile",
+            "arrayscope-profile.csv",
+            "CSV files (*.csv);;NumPy files (*.npy)",
+        )
+        if not file_path:
+            return None
+        x = np.arange(len(data))
+        if file_path.lower().endswith(".npy"):
+            payload = np.column_stack([x, data])
+            np.save(file_path, payload)
+        else:
+            if not file_path.lower().endswith(".csv"):
+                file_path += ".csv"
+            payload = np.column_stack([x, data])
+            np.savetxt(file_path, payload, delimiter=",", header="index,value", comments="")
+        return file_path
 
     def hide_crosshair(self):
         self.line_plot.hide_crosshair()
@@ -97,21 +125,24 @@ class ProfileDock(QtWidgets.QDockWidget):
     def toggle_style(self):
         self.line_plot.toggle_style()
 
-    def _toggle_floating(self):
-        self.setFloating(not self.isFloating())
-
-    def _top_level_changed(self, floating):
-        self.float_button.setText("Dock" if floating else "Float")
-        if floating:
-            flags = self.windowFlags()
-            flags |= Qt.QtCore.Qt.WindowType.Window
-            flags &= ~Qt.QtCore.Qt.WindowType.FramelessWindowHint
-            self.setWindowFlags(flags)
-            self.show()
-
     def _axis_index_changed(self, index):
         if self._updating_axis or index < 0:
             return
         axis = self.axis_combo.itemData(index)
         if axis is not None:
             self._on_axis_changed(int(axis))
+
+    def _line_result_for_mode(self, line_result):
+        data = line_result.data
+        if np.iscomplexobj(data):
+            mode = self.profile_mode()
+            if mode == "angle":
+                data = np.angle(data)
+            elif mode == "real":
+                data = np.real(data)
+            elif mode == "imag":
+                data = np.imag(data)
+            else:
+                data = np.abs(data)
+            return type(line_result)(data=data, axis=line_result.axis)
+        return line_result

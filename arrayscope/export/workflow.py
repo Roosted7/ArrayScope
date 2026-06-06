@@ -7,6 +7,7 @@ from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.operations.registry import operation_entries
 from arrayscope.export.video import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
+from arrayscope.ui.file_dialogs import get_existing_directory, get_save_file_name
 
 
 class ExportWorkflowMixin:
@@ -55,7 +56,7 @@ class ExportWorkflowMixin:
         # Get file save path (for PNG frames we ask for a directory)
         file_path = None
         if settings['format'] == 'png':
-            dir_path = QtWidgets.QFileDialog.getExistingDirectory(
+            dir_path = get_existing_directory(
                 self, "Export frames to directory", os.path.expanduser("~")
             )
             if not dir_path:
@@ -63,7 +64,7 @@ class ExportWorkflowMixin:
             file_path = dir_path
         else:
             file_filter = f"{settings['format'].upper()} files (*.{settings['format']})"
-            file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            file_path, _ = get_save_file_name(
                 self, f"Export Video as {settings['format'].upper()}", 
                 f"export.{settings['format']}", file_filter
             )

@@ -7,6 +7,7 @@ from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.io.numpy_save import default_numpy_filename, selected_numpy_data
 from arrayscope.ui.dialogs import SaveRangeDialog
+from arrayscope.ui.file_dialogs import get_save_file_name
 
 
 def save_current_numpy_file(parent, data, source_filepath=None):
@@ -20,7 +21,7 @@ def save_current_numpy_file(parent, data, source_filepath=None):
         squeeze=range_dialog.should_squeeze(),
     )
 
-    file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+    file_path, _ = get_save_file_name(
         parent,
         "Save current array as NumPy file",
         default_numpy_filename(source_filepath),

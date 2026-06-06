@@ -8,6 +8,10 @@ from pyqtgraph.Qt import QtGui, QtWidgets
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.ui.docks.operations import OperationStackDock
 from arrayscope.ui.docks.profiles import ProfileDock
+from arrayscope.ui.dimension_strip import DimensionStrip
+from arrayscope.ui.display_toolbar import DisplayToolbar
+from arrayscope.ui.hud import PixelHud
+from arrayscope.ui.status_label import PixelStatusLabel
 from arrayscope.window.domain import Domain
 
 
@@ -62,7 +66,7 @@ class DisplayControlBuildMixin:
                 'secondary': QtWidgets.QLabel('X'),
                 'slice': QtWidgets.QLabel('Slice'),
                 'dimensions': QtWidgets.QLabel('Dimensions'),
-                'pixelValue': QtWidgets.QLabel(''),
+                'pixelValue': PixelStatusLabel(),
                 'arrayInfo': QtWidgets.QLabel('')
             },
             'spins': {
@@ -224,6 +228,14 @@ class DisplayControlBuildMixin:
         self._setup_export_context_menus()
         self._save_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Save, self)
         self._save_shortcut.activated.connect(self._save_current_numpy_file)
+        self.dimension_strip = DimensionStrip(data.ndim, self)
+        self.dimension_strip.roleChanged.connect(self.set_dimension_role)
+        self.dimension_strip.sliceChanged.connect(self._on_slice_index_changed)
+        self.dimension_strip.operationRequested.connect(lambda axis: self._show_operation_context_menu_for_axis(axis))
+        self.dimension_strip.focusedAxisChanged.connect(lambda axis: setattr(self, "_focused_dimension_axis", int(axis)))
+        for container in self.dim_containers:
+            container.hide()
+        self.layouts['dims'].addWidget(self.dimension_strip, 1)
 
     def _build_display_controls_panel(self):
         # Create a single compact control panel with all radio buttons
@@ -307,6 +319,8 @@ class DisplayControlBuildMixin:
         controls_layout.addStretch()
         
         controls_widget.setLayout(controls_layout)
+        self.display_controls_widget = controls_widget
+        controls_widget.hide()
         self.layouts['botRight'].addWidget(controls_widget)
 
     def _build_main_canvas(self):
@@ -318,6 +332,8 @@ class DisplayControlBuildMixin:
         self.image_tab_layout = QtWidgets.QVBoxLayout()
         
         self.img_view = ImageView2D()
+        self.pixel_hud = PixelHud()
+        self.img_view.setHudWidget(self.pixel_hud)
         self.image_tab_layout.addWidget(self.img_view)
         self.image_tab.setLayout(self.image_tab_layout)
         self.img_view.getView().scene().sigMouseMoved.connect(lambda pos: self._on_image_mouse_moved(pos))
@@ -328,6 +344,7 @@ class DisplayControlBuildMixin:
         
         # Add tabs to tab widget
         self.tab_widget.addTab(self.image_tab, "Image View")
+        self.tab_widget.tabBar().hide()
         
         # Connect tab change handler
         self.tab_widget.currentChanged.connect(self.on_tab_changed)
@@ -348,6 +365,14 @@ class DisplayControlBuildMixin:
         self._reload_btn.setVisible(filepath is not None)
         self._set_emoji_font(self._reload_btn)
         self.layouts['topUp'].addWidget(self._reload_btn)
+        self.display_toolbar = DisplayToolbar(self)
+        self.display_toolbar.channelChanged.connect(self._on_channel_clicked)
+        self.display_toolbar.scaleChanged.connect(self._on_scale_clicked)
+        self.display_toolbar.aspectChanged.connect(self._on_aspect_toolbar_changed)
+        self.display_toolbar.windowModeChanged.connect(self._on_window_mode_changed)
+        self.display_toolbar.autoWindowRequested.connect(self.auto_window_levels)
+        self.display_toolbar.liveProfileToggled.connect(self._set_live_profile_checked)
+        self.layouts['topUp'].addWidget(self.display_toolbar)
         self.layouts['topUp'].addWidget(self.widgets['labels']['pixelValue'])
         self.layouts['topUp'].addWidget(self.widgets['labels']['arrayInfo'])
 
@@ -398,6 +423,12 @@ class DisplayControlBuildMixin:
             on_move_selected_up=lambda index: self.move_selected_operation(index, -1),
             on_move_selected_down=lambda index: self.move_selected_operation(index, 1),
             on_reorder=self.reorder_operations,
+            on_add_operation=self.open_operation_adder,
+            on_export_derived=self.export_derived_array,
+            on_save_view_recipe=self.save_view_recipe,
+            on_load_view_recipe=self.load_view_recipe,
+            on_enabled_changed=self.set_operation_enabled,
+            on_edit_operation=self.edit_operation,
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
         self._update_operation_dock()
@@ -407,4 +438,3 @@ class DisplayControlBuildMixin:
         # Initialize complex indicators for size-2 real dimensions
         self.update_complex_indicators()
         self.update_shift_indicators()
-
