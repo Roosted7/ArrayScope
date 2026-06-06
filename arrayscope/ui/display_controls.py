@@ -11,6 +11,7 @@ from arrayscope.ui.docks.profiles import ProfileDock
 from arrayscope.ui.dimension_strip import DimensionStrip
 from arrayscope.ui.display_toolbar import DisplayToolbar
 from arrayscope.ui.hud import PixelHud
+from arrayscope.ui.icons import set_button_icon
 from arrayscope.ui.status_label import PixelStatusLabel
 from arrayscope.window.domain import Domain
 
@@ -191,7 +192,7 @@ class DisplayControlBuildMixin:
             # Add dimension label (centered, takes remaining space)
             self.widgets['labels']['dims'][i].setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignCenter)
             label_layout.addWidget(self.widgets['labels']['dims'][i], 1)
-            # Add complex indicator (ℝ/ℂ)
+            # Add complex-state indicator.
             label_layout.addWidget(self.widgets['labels']['complex'][i])
             
             label_row.setLayout(label_layout)
@@ -355,15 +356,13 @@ class DisplayControlBuildMixin:
         self.layouts['topDown'].addWidget(self.tab_widget)
 
     def _build_header_bar(self, filepath):
-        # Reload / file-changed button (⟳ by default, ⚠️ when file changes on disk)
-        self._reload_btn = QtWidgets.QPushButton("⟳")
-        self._reload_btn.setStyleSheet("QPushButton { font-size: 18pt; padding: 1px 2px; margin: 0px; border: none; background: transparent; }")
-        self._reload_btn.setToolTip("Reload file")
+        self._reload_btn = QtWidgets.QPushButton()
+        self._reload_btn.setStyleSheet("QPushButton { padding: 1px 2px; margin: 0px; border: none; background: transparent; }")
+        set_button_icon(self._reload_btn, "refresh", tooltip="Reload file")
         self._reload_btn.setFlat(True)
         self._reload_btn.setFixedSize(28, 20)
         self._reload_btn.clicked.connect(self._reload_file)
         self._reload_btn.setVisible(filepath is not None)
-        self._set_emoji_font(self._reload_btn)
         self.layouts['topUp'].addWidget(self._reload_btn)
         self.display_toolbar = DisplayToolbar(self)
         self.display_toolbar.channelChanged.connect(self._on_channel_clicked)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from arrayscope.ui.icons import set_button_icon
+
 
 class DimensionChip(QtWidgets.QFrame):
     roleChanged = Qt.QtCore.Signal(str, int)
@@ -31,8 +33,8 @@ class DimensionChip(QtWidgets.QFrame):
         self.axis_label.setMinimumWidth(52)
         layout.addWidget(self.axis_label)
 
-        self.y_button = QtWidgets.QToolButton(text="Y", checkable=True)
-        self.x_button = QtWidgets.QToolButton(text="X", checkable=True)
+        self.y_button = QtWidgets.QToolButton(checkable=True)
+        self.x_button = QtWidgets.QToolButton(checkable=True)
         for role, button in (("y", self.y_button), ("x", self.x_button)):
             button.setFixedSize(24, 22)
             button.clicked.connect(lambda _checked=False, role=role: self.roleChanged.emit(role, self.axis))
@@ -45,8 +47,8 @@ class DimensionChip(QtWidgets.QFrame):
         self.slice_spin.valueChanged.connect(lambda value: self.sliceChanged.emit(self.axis, int(value)))
         layout.addWidget(self.slice_spin)
 
-        self.ops_button = QtWidgets.QToolButton(text="+")
-        self.ops_button.setToolTip("Add operation on this dimension")
+        self.ops_button = QtWidgets.QToolButton()
+        set_button_icon(self.ops_button, "add", tooltip="Add operation on this dimension")
         self.ops_button.clicked.connect(lambda: self.operationRequested.emit(self.axis))
         layout.addWidget(self.ops_button)
         self.setLayout(layout)
@@ -61,8 +63,8 @@ class DimensionChip(QtWidgets.QFrame):
         is_x = len(image_axes) > 1 and image_axes[1] == self.axis
         self.y_button.setChecked(is_y)
         self.x_button.setChecked(is_x)
-        self.y_button.setText("v" if is_y and view_state.axis_flipped[self.axis] else ("^" if is_y else "Y"))
-        self.x_button.setText(">" if is_x and view_state.axis_flipped[self.axis] else ("<" if is_x else "X"))
+        set_button_icon(self.y_button, "arrow_downward" if is_y and view_state.axis_flipped[self.axis] else "arrow_upward")
+        set_button_icon(self.x_button, "arrow_forward" if is_x and view_state.axis_flipped[self.axis] else "arrow_back")
         self.y_button.setToolTip("Flip Y direction" if is_y else f"Use dim {self.axis} as image Y axis")
         self.x_button.setToolTip("Flip X direction" if is_x else f"Use dim {self.axis} as image X axis")
         is_display_axis = self.axis in image_axes

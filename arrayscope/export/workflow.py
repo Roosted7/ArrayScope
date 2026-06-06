@@ -8,6 +8,7 @@ from pyqtgraph.Qt import QtWidgets
 from arrayscope.operations.registry import operation_entries
 from arrayscope.export.video import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
 from arrayscope.ui.file_dialogs import get_existing_directory, get_save_file_name
+from arrayscope.ui.icons import set_action_icon
 
 
 class ExportWorkflowMixin:
@@ -28,12 +29,14 @@ class ExportWorkflowMixin:
         operations_menu = menu.addMenu("Operations")
         for entry in operation_entries():
             action = operations_menu.addAction(entry.label)
+            set_action_icon(action, "data_array")
             action.setEnabled(self._operation_entry_enabled(entry, dim))
             action.triggered.connect(lambda checked=False, operation_id=entry.id: self._append_operation(operation_id, dim))
 
         menu.addSeparator()
         
         export_action = menu.addAction("Export along this dimension...")
+        set_action_icon(export_action, "download")
         export_action.triggered.connect(lambda: self._start_export(dim))
         
         # Show menu at cursor position

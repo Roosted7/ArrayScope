@@ -12,6 +12,7 @@ import numpy as np
 
 from arrayscope.display.line_plot import LinePlotController
 from arrayscope.ui.file_dialogs import get_save_file_name
+from arrayscope.ui.icons import set_button_icon
 
 
 class ProfileDock(QtWidgets.QDockWidget):
@@ -43,6 +44,7 @@ class ProfileDock(QtWidgets.QDockWidget):
         self.profile_mode_combo.addItem("Imaginary", "imag")
         controls.addWidget(self.profile_mode_combo)
         self.export_button = QtWidgets.QPushButton("Export")
+        set_button_icon(self.export_button, "download")
         controls.addWidget(self.export_button)
         controls.addStretch()
         layout.addLayout(controls)

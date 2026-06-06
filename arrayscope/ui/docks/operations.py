@@ -10,6 +10,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from arrayscope.operations.registry import describe_operation
+from arrayscope.ui.icons import material_icon, set_button_icon
 
 
 class ElidedLabel(QtWidgets.QLabel):
@@ -100,6 +101,8 @@ class OperationStackDock(QtWidgets.QDockWidget):
         header = QtWidgets.QHBoxLayout()
         self.add_button = QtWidgets.QPushButton("Add")
         self.palette_button = QtWidgets.QPushButton("Search")
+        set_button_icon(self.add_button, "add")
+        set_button_icon(self.palette_button, "search")
         header.addWidget(self.add_button)
         header.addWidget(self.palette_button)
         header.addStretch(1)
@@ -130,6 +133,18 @@ class OperationStackDock(QtWidgets.QDockWidget):
         self.export_button = QtWidgets.QPushButton("Export Derived")
         self.save_view_button = QtWidgets.QPushButton("Save View")
         self.load_view_button = QtWidgets.QPushButton("Load View")
+        for button, icon_name in (
+            (self.undo_button, "undo"),
+            (self.clear_button, "delete_sweep"),
+            (self.delete_button, "delete"),
+            (self.save_button, "save"),
+            (self.load_button, "folder_open"),
+            (self.materialize_button, "inventory_2"),
+            (self.export_button, "download"),
+            (self.save_view_button, "view_quilt"),
+            (self.load_view_button, "folder_open"),
+        ):
+            set_button_icon(button, icon_name)
 
         button_layout.addWidget(self.undo_button, 0, 0)
         button_layout.addWidget(self.clear_button, 0, 1)
@@ -225,7 +240,8 @@ class OperationStackDock(QtWidgets.QDockWidget):
         layout = QtWidgets.QHBoxLayout()
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(5)
-        drag = QtWidgets.QLabel("::")
+        drag = QtWidgets.QLabel()
+        drag.setPixmap(material_icon("drag_indicator").pixmap(18, 18))
         drag.setToolTip("Drag to reorder")
         layout.addWidget(drag)
         enabled = QtWidgets.QCheckBox()
@@ -244,15 +260,15 @@ class OperationStackDock(QtWidgets.QDockWidget):
         meta.setStyleSheet("QLabel { color: palette(mid); font-size: 8pt; }")
         text_col.addWidget(meta)
         layout.addLayout(text_col, 1)
-        edit = QtWidgets.QToolButton(text="E")
+        edit = QtWidgets.QToolButton()
+        set_button_icon(edit, "edit", tooltip="Edit operation")
         edit.setFixedSize(24, 24)
-        edit.setToolTip("Edit operation")
         edit.setEnabled(type(operation).__name__ == "Crop")
         edit.clicked.connect(lambda _checked=False, index=index: self._on_edit_operation(index) if self._on_edit_operation is not None else None)
         layout.addWidget(edit)
-        delete = QtWidgets.QToolButton(text="X")
+        delete = QtWidgets.QToolButton()
+        set_button_icon(delete, "delete", tooltip="Delete operation")
         delete.setFixedSize(24, 24)
-        delete.setToolTip("Delete operation")
         delete.clicked.connect(lambda _checked=False, index=index: self._on_delete_selected(index))
         layout.addWidget(delete)
         row.setLayout(layout)
@@ -355,4 +371,3 @@ def _format_nbytes(nbytes):
         if nbytes < 1024 or unit == "GiB":
             return f"{nbytes:.0f} {unit}" if unit == "B" else f"{nbytes:.1f} {unit}"
         nbytes /= 1024
-
