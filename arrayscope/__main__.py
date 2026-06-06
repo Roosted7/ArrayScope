@@ -7,7 +7,7 @@ import numpy as np
 from pathlib import Path
 from arrayscope.app.launch import arrayscope
 from arrayscope.io.selectors import H5DatasetSelector, NpzDatasetSelector, MatDatasetSelector
-from arrayscope.io.file_interpreters import load_path
+from arrayscope.io.file_interpreters import data_file_suffix, load_path
 
 
 def main():
@@ -42,7 +42,7 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
             continue
         
         try:
-            suffix = ''.join(filepath.suffixes).lower()
+            suffix = data_file_suffix(filepath)
             # Single-dataset formats and DICOM directories are handled by file_interpreters.load_path
             if filepath.is_dir() or suffix in ['.npy', '.rec', '.cfl', '.dcm', '.nii', '.nii.gz', '.txt']:
                 loaded = load_path(filepath)
@@ -50,7 +50,7 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
                 detected_format = loaded.metadata.get('detected_format')
                 if detected_format:
                     title = f"{title} [{detected_format}]"
-                arrayscope(data=loaded.data, title=title, block=False, filepath=filepath)
+                arrayscope(data=loaded.data, title=title, block=True, filepath=filepath)
                 continue
             
             # Multi-dataset formats - use selectors
@@ -66,7 +66,7 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
                 continue
             
             # Select and view dataset (shows GUI if multiple datasets)
-            if not selector.view(block=False):
+            if not selector.view(block=True):
                 print(f"No compatible datasets found in {filepath}")
             
         except Exception as e:

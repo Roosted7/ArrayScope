@@ -29,6 +29,9 @@ class PhilipsRECLoader:
         self.xml_path = self.rec_path.with_suffix('.xml')
         
         if not self.xml_path.exists():
+            self.xml_path = self.rec_path.with_suffix('.XML')
+        
+        if not self.xml_path.exists():
             raise FileNotFoundError(f"XML metadata file not found: {self.xml_path}")
         
         # Validate this is a Philips XLMREC file
@@ -540,7 +543,7 @@ def load_path(filepath):
         data = loader.load()
         return LoadedPath(data=data, metadata=loader.metadata)
 
-    suffix = ''.join(filepath.suffixes).lower()
+    suffix = data_file_suffix(filepath)
 
     if suffix == '.npy':
         data = np.load(filepath)
@@ -602,3 +605,10 @@ def load_file(filepath):
         
     """
     return load_path(filepath).data
+
+
+def data_file_suffix(filepath):
+    """Return the supported data suffix, preserving only known compound suffixes."""
+    path = Path(filepath)
+    suffixes = [suffix.lower() for suffix in path.suffixes]
+    return ".nii.gz" if suffixes[-2:] == [".nii", ".gz"] else path.suffix.lower()
