@@ -3,7 +3,7 @@
 ArrayScope array-derived views are represented as a base data reference plus an
 ordered list of immutable operations.
 
-The operation pipeline lives in `arrayscope/operation_pipeline.py`. It must not
+The operation pipeline lives in `arrayscope.operations.pipeline`. It must not
 import Qt or pyqtgraph. GUI code may eventually translate user intent into
 pipeline operations, but the operation definitions and evaluation rules remain
 pure NumPy.

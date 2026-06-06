@@ -6,7 +6,7 @@ Accepted.
 
 ## Decision
 
-`arrayscope/view_state.py` is the Qt-free, authoritative description of the
+`arrayscope.core.view_state` is the Qt-free, authoritative description of the
 current view of the derived array.
 
 It owns:

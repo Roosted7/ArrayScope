@@ -1,6 +1,6 @@
 # 0003 — Dimension operations boundary
 
-Dimension operations that create derived array values live in `arrayscope/dim_ops.py`.
+Dimension operations that create derived array values live in `arrayscope.operations.dim_ops`.
 
 It must not import Qt or pyqtgraph.
 

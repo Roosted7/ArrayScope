@@ -1,14 +1,18 @@
-"""
-arrayscope - Interactive N-dimensional array viewer with FFT support
-"""
+"""Callable public package API for ArrayScope."""
 
-from .qt_binding import prefer_pyside6
+from __future__ import annotations
 
-prefer_pyside6()
+import sys
+import types
 
-from .imageview2d import ImageView2D
-from .launch import arrayscope
-from .window import ArrayScopeWindow, Domain
+from arrayscope.app.launch import arrayscope as _arrayscope
 
 __version__ = "0.0.1"
-__all__ = ["arrayscope", "ArrayScopeWindow", "ImageView2D", "Domain"]
+
+
+class _CallableArrayScopeModule(types.ModuleType):
+    def __call__(self, data, *args, **kwargs):
+        return _arrayscope(data, *args, **kwargs)
+
+
+sys.modules[__name__].__class__ = _CallableArrayScopeModule

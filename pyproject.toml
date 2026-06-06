@@ -54,5 +54,5 @@ Homepage = "https://github.com/henricryden/arrayscope"
 Documentation = "https://github.com/henricryden/arrayscope#readme"
 "Bug Tracker" = "https://github.com/henricryden/arrayscope/issues"
 
-[tool.setuptools]
-packages = ["arrayscope"]
+[tool.setuptools.packages.find]
+include = ["arrayscope*"]
