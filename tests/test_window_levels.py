@@ -5,8 +5,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
-WINDOW_LEVELS_PATH = ROOT / "arrayscope" / "window_levels.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope_window_levels_for_test", WINDOW_LEVELS_PATH)
+WINDOW_LEVELS_PATH = ROOT / "arrayscope" / "core" / "window_levels.py"
+SPEC = importlib.util.spec_from_file_location("arrayscope.core.window_levels", WINDOW_LEVELS_PATH)
 window_levels = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = window_levels
 SPEC.loader.exec_module(window_levels)

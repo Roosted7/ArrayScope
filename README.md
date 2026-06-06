@@ -8,11 +8,11 @@
 
 A python package for browsing slices, applying FFTs, and inspecting data.
 
-Quickly checking multi-dimensional data usually means writing the same matplotlib boilerplate over and over. This tool lets you just call `arrayscope(data)` and interactively explore what you've got.
+Quickly checking multi-dimensional data usually means writing the same matplotlib boilerplate over and over. This tool lets you just call `asc(data)` and interactively explore what you've got.
 
 ## Usage
 ```python
-from arrayscope import arrayscope
+import arrayscope as asc
 import numpy as np
 
 # Create some data
@@ -24,7 +24,7 @@ mag = np.exp(-(X**2 + Y**2 + Z**2) / 10)
 pha = np.pi/4 * (X + Y + Z)
 complex_data = mag * np.exp(1j * pha)
 
-arrayscope(complex_data, title='3D Complex Gaussian')
+asc(complex_data, title='3D Complex Gaussian')
 ```
 
 ![Showcase](docs/images/showcase.gif)
@@ -77,17 +77,17 @@ Flip the primary axis for matrix-style (origin upper-left).
 
 By default, windows open in separate processes, allowing multiple simultaneous views:
 ```python
-arrayscope(data1)
-arrayscope(data2) # Both windows appear
+asc(data1)
+asc(data2) # Both windows appear
 ```
 
 Use `block=True` to wait for the window to close before continuing:
 ```python
-arrayscope(data1, block=True)  # Script pauses here
-arrayscope(data2)  # Shown after first closes
+asc(data1, block=True)  # Script pauses here
+asc(data2)  # Shown after first closes
 ```
 
-If Qt is already initialized in the current process, `arrayscope(..., block=False)`
+If Qt is already initialized in the current process, `asc(..., block=False)`
 cannot safely fork a child process. In that case:
 
 - In IPython/Jupyter with `%gui qt`, arrayscope opens inline in the current process (still non-blocking).

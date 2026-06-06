@@ -1,4 +1,5 @@
 import ast
+import importlib.util
 import sys
 import types
 from pathlib import Path
@@ -12,9 +13,11 @@ PACKAGE = types.ModuleType("arrayscope")
 PACKAGE.__path__ = [str(ROOT / "arrayscope")]
 sys.modules.setdefault("arrayscope", PACKAGE)
 
-from arrayscope import dim_ops
-
-DIM_OPS_PATH = ROOT / "arrayscope" / "dim_ops.py"
+DIM_OPS_PATH = ROOT / "arrayscope" / "operations" / "dim_ops.py"
+SPEC = importlib.util.spec_from_file_location("arrayscope.operations.dim_ops", DIM_OPS_PATH)
+dim_ops = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = dim_ops
+SPEC.loader.exec_module(dim_ops)
 
 
 def test_centered_fft_and_ifft_match_existing_viewer_transform():

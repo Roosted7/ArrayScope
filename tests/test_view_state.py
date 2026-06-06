@@ -1,4 +1,5 @@
 import ast
+import importlib.util
 import sys
 import types
 from pathlib import Path
@@ -10,9 +11,11 @@ PACKAGE = types.ModuleType("arrayscope")
 PACKAGE.__path__ = [str(ROOT / "arrayscope")]
 sys.modules.setdefault("arrayscope", PACKAGE)
 
-from arrayscope import view_state as view_state_module
-
-VIEW_STATE_PATH = ROOT / "arrayscope" / "view_state.py"
+VIEW_STATE_PATH = ROOT / "arrayscope" / "core" / "view_state.py"
+SPEC = importlib.util.spec_from_file_location("arrayscope.core.view_state", VIEW_STATE_PATH)
+view_state_module = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = view_state_module
+SPEC.loader.exec_module(view_state_module)
 
 ChannelMode = view_state_module.ChannelMode
 ScaleMode = view_state_module.ScaleMode

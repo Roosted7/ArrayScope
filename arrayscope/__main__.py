@@ -5,9 +5,9 @@ Command-line interface for arrayscope.
 import argparse
 import numpy as np
 from pathlib import Path
-from .launch import arrayscope
-from .selectors import H5DatasetSelector, NpzDatasetSelector, MatDatasetSelector
-from .file_interpreters import load_path
+from arrayscope.app.launch import arrayscope
+from arrayscope.io.selectors import H5DatasetSelector, NpzDatasetSelector, MatDatasetSelector
+from arrayscope.io.file_interpreters import load_path
 
 
 def main():

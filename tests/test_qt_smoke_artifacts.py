@@ -46,7 +46,7 @@ def test_main_window_interactions_create_useful_artifacts(qt_app):
         if name == "arrayscope" or name.startswith("arrayscope."):
             del sys.modules[name]
 
-    from arrayscope.arrayscope import ArrayScopeWindow
+    from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(_make_data())
     try:

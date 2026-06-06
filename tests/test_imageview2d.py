@@ -6,7 +6,7 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 
 def test_profile_marker_callback_replacement_and_programmatic_move(qt_app):
-    from arrayscope.imageview2d import ImageView2D
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     calls = []

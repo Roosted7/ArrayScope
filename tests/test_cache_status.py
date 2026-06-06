@@ -4,8 +4,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
-PATH = ROOT / "arrayscope" / "cache_status.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope_cache_status_for_test", PATH)
+PATH = ROOT / "arrayscope" / "core" / "cache_status.py"
+SPEC = importlib.util.spec_from_file_location("arrayscope.core.cache_status", PATH)
 cache_status = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = cache_status
 SPEC.loader.exec_module(cache_status)
