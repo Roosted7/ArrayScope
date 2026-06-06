@@ -5,6 +5,7 @@ from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.app.settings_state import AppSettingsState, settings_from_mapping, settings_to_mapping
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
+from arrayscope.ui.icons import set_action_icon
 from arrayscope.ui.toasts import show_status_message
 
 
@@ -24,14 +25,19 @@ class WindowMenuMixin:
     def _setup_menus(self):
         file_menu = self.menuBar().addMenu("File")
         save_recipe_action = QtGui.QAction("Save Operation Recipe", self)
+        set_action_icon(save_recipe_action, "save")
         save_recipe_action.triggered.connect(self.save_operation_recipe)
         load_recipe_action = QtGui.QAction("Load Operation Recipe", self)
+        set_action_icon(load_recipe_action, "folder_open")
         load_recipe_action.triggered.connect(self.load_operation_recipe)
         save_view_action = QtGui.QAction("Save View Recipe", self)
+        set_action_icon(save_view_action, "view_quilt")
         save_view_action.triggered.connect(self.save_view_recipe)
         load_view_action = QtGui.QAction("Load View Recipe", self)
+        set_action_icon(load_view_action, "folder_open")
         load_view_action.triggered.connect(self.load_view_recipe)
         export_derived_action = QtGui.QAction("Export Derived Array", self)
+        set_action_icon(export_derived_action, "download")
         export_derived_action.triggered.connect(self.export_derived_array)
         for action in (save_recipe_action, load_recipe_action, save_view_action, load_view_action, export_derived_action):
             file_menu.addAction(action)
@@ -44,11 +50,13 @@ class WindowMenuMixin:
         view_menu.addAction(operation_action)
         view_menu.addAction(profile_action)
         command_palette_action = QtGui.QAction("Command Palette", self)
+        set_action_icon(command_palette_action, "search")
         command_palette_action.setShortcut(QtGui.QKeySequence("Ctrl+K"))
         command_palette_action.triggered.connect(self.open_command_palette)
         view_menu.addAction(command_palette_action)
         view_menu.addSeparator()
         reset_layout_action = QtGui.QAction("Reset layout", self)
+        set_action_icon(reset_layout_action, "reset_wrench")
         reset_layout_action.triggered.connect(self.reset_layout)
         view_menu.addAction(reset_layout_action)
 

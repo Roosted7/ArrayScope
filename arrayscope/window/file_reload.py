@@ -21,6 +21,7 @@ from arrayscope.export.video import VideoExportWorker, VideoExportDialog, VideoE
 from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.io.numpy_save_qt import save_current_numpy_file
+from arrayscope.ui.icons import set_button_icon
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
 
@@ -38,7 +39,7 @@ class FileReloadMixin:
 
     def _on_file_changed(self, path):
         """Called by QFileSystemWatcher when the source file changes on disk."""
-        self._reload_btn.setText("⚠️")
+        set_button_icon(self._reload_btn, "warning", tooltip="File changed - click to reload")
         self._reload_btn.setToolTip("File changed — click to reload")
         # Re-add the path: handles atomic replacement where the original inode disappears
         if self._file_watcher:
@@ -74,7 +75,7 @@ class FileReloadMixin:
                     selected = selector.show()
                     if selected is None:
                         selector.close()
-                        return  # User cancelled — keep ⚠️ visible
+                        return  # User cancelled; keep the file-changed indicator visible.
                     new_data = selector.load_data(selected)
                     new_dataset_path = selected
                     selector.close()
@@ -90,7 +91,7 @@ class FileReloadMixin:
 
             self._dataset_path = new_dataset_path
             self._reset_data(new_data)
-            self._reload_btn.setText("⟳")
+            set_button_icon(self._reload_btn, "refresh", tooltip="Reload file")
             self._reload_btn.setToolTip("Reload file")
             if self._file_watcher and self._filepath:
                 self._file_watcher.addPath(str(self._filepath))

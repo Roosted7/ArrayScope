@@ -6,6 +6,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui
 
 from arrayscope.display.colormaps import named_colormap
+from arrayscope.ui.icons import clear_label_icon, set_label_icon
 from arrayscope.ui.shortcuts import colormap_name_for_key
 
 
@@ -46,32 +47,32 @@ class DimensionControlMixin:
                         flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeHorCursor))
                         flip_label.setToolTip("Flip X axis")
                         if self._axis_flipped(i):
-                            flip_label.setText('⬅️')    
+                            set_label_icon(flip_label, "arrow_back")
                         else:
-                            flip_label.setText('➡️')
+                            set_label_icon(flip_label, "arrow_forward")
                     else:
-                        flip_label.setText('')  # Hide flip icons for non-plot dimensions
+                        clear_label_icon(flip_label)  # Hide flip icons for non-plot dimensions
                         flip_label.setToolTip('')
                 # In image view mode, show vertical flip for primary, horizontal for secondary
                 elif self.view_state.image_axes is not None and i == self.view_state.image_axes[0]:
                     flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeVerCursor))
                     flip_label.setToolTip("Flip Y")
                     if self._axis_flipped(i):
-                        flip_label.setText('⬇️')
+                        set_label_icon(flip_label, "arrow_downward")
                     else:
-                        flip_label.setText('⬆️')
+                        set_label_icon(flip_label, "arrow_upward")
                 elif self.view_state.image_axes is not None and i == self.view_state.image_axes[1]:
                     flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeHorCursor))
                     flip_label.setToolTip("Flip X")
                     if self._axis_flipped(i):
-                        flip_label.setText('⬅️')
+                        set_label_icon(flip_label, "arrow_back")
                     else:
-                        flip_label.setText('➡️')
+                        set_label_icon(flip_label, "arrow_forward")
                 else:
-                    flip_label.setText('')  # Clear for dimensions not in primary/secondary
+                    clear_label_icon(flip_label)  # Clear for dimensions not in primary/secondary
                     flip_label.setToolTip('')
             else:
-                flip_label.setText('')  # Clear for unselected dimensions
+                clear_label_icon(flip_label)  # Clear for unselected dimensions
                 flip_label.setToolTip('')
     
     def apply_axis_flips(self):
@@ -90,23 +91,23 @@ class DimensionControlMixin:
             view.invertX(self._axis_flipped(x_dim))
 
     def update_complex_indicators(self):
-        """Initialize or update ℝ/ℂ indicators for dimensions that can be combined as complex"""
+        """Initialize or update indicators for dimensions that can be combined as complex."""
         for i in range(self.data.ndim):
             indicator = self.widgets['labels']['complex'][i]
             
             if self.combined_as_complex[i]:
-                indicator.setText('ℂ')
+                set_label_icon(indicator, "functions")
                 indicator.setStyleSheet(self.FLIP_ICON_STYLE + " QLabel {font-weight: bold; }")
                 indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
                 indicator.setToolTip(f'Split to real')
             elif self.can_combine_as_complex[i]:
-                indicator.setText('ℝ')
+                set_label_icon(indicator, "data_object")
                 indicator.setStyleSheet(self.FLIP_ICON_STYLE + " QLabel {font-weight: bold; }")
                 indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
                 indicator.setToolTip(f'Combine as complex')
             else:
                 # No indicator, already-complex data or non-size-2 dimensions
-                indicator.setText('')
+                clear_label_icon(indicator)
                 indicator.setToolTip('')
                 indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
 

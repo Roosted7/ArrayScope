@@ -5,6 +5,8 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
+from arrayscope.ui.icons import set_action_icon
+
 
 class DisplayToolbar(QtWidgets.QToolBar):
     channelChanged = Qt.QtCore.Signal(str)
@@ -53,10 +55,12 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.addWidget(self.window_combo)
 
         self.auto_window_action = self.addAction("Auto")
+        set_action_icon(self.auto_window_action, "tonality")
         self.auto_window_action.setToolTip("Auto window levels")
         self.auto_window_action.triggered.connect(self.autoWindowRequested)
 
         self.live_profile_action = self.addAction("Profile")
+        set_action_icon(self.live_profile_action, "show_chart")
         self.live_profile_action.setCheckable(True)
         self.live_profile_action.setToolTip("Toggle live profile")
         self.live_profile_action.toggled.connect(self.liveProfileToggled)

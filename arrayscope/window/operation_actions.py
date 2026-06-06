@@ -11,6 +11,7 @@ from arrayscope.operations.recipes import dumps_recipe, load_recipe_steps, save_
 from arrayscope.operations.registry import get_operation_entry, operation_entries
 from arrayscope.ui.command_palette import CommandPaletteDialog, PaletteCommand
 from arrayscope.ui.file_dialogs import get_open_file_name, get_save_file_name
+from arrayscope.ui.icons import set_action_icon
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
 
@@ -68,14 +69,17 @@ class OperationActionsMixin:
 
         menu = QtWidgets.QMenu(self)
         profile_action = menu.addAction("Use as profile axis")
+        set_action_icon(profile_action, "show_chart")
         profile_action.setEnabled(not self.singleton[dim])
         profile_action.triggered.connect(lambda checked=False, dim=dim: self.set_profile_axis_from_menu(dim))
         live_profile_action = menu.addAction("Live profile from this axis")
+        set_action_icon(live_profile_action, "monitor_heart")
         live_profile_action.setEnabled(not self.singleton[dim])
         live_profile_action.triggered.connect(lambda checked=False, dim=dim: self._enable_live_profile_for_axis(dim))
         menu.addSeparator()
         for entry in operation_entries():
             action = menu.addAction(entry.label)
+            set_action_icon(action, _operation_icon_name(entry.id))
             action.setData(entry.id)
             action.setEnabled(self._operation_entry_enabled(entry, dim))
             action.triggered.connect(lambda checked=False, operation_id=entry.id, dim=dim: self.request_operation(operation_id, dim))
@@ -188,21 +192,21 @@ class OperationActionsMixin:
 
     def open_command_palette(self):
         commands = [
-            PaletteCommand(entry.id, entry.label, kind="operation", requires_axis=entry.requires_axis)
+            PaletteCommand(entry.id, entry.label, kind="operation", requires_axis=entry.requires_axis, icon=_operation_icon_name(entry.id))
             for entry in operation_entries()
         ]
         commands.extend(
             [
-                PaletteCommand("fit", "Fit image to viewport"),
-                PaletteCommand("one_to_one", "Set image aspect to 1:1"),
-                PaletteCommand("auto_window", "Auto window levels"),
-                PaletteCommand("reset_layout", "Reset layout"),
-                PaletteCommand("toggle_profile", "Toggle profile dock"),
-                PaletteCommand("export_derived", "Export derived array"),
-                PaletteCommand("save_recipe", "Save operation recipe"),
-                PaletteCommand("load_recipe", "Load operation recipe"),
-                PaletteCommand("save_view_recipe", "Save view recipe"),
-                PaletteCommand("load_view_recipe", "Load view recipe"),
+                PaletteCommand("fit", "Fit image to viewport", icon="fit_screen"),
+                PaletteCommand("one_to_one", "Set image aspect to 1:1", icon="aspect_ratio"),
+                PaletteCommand("auto_window", "Auto window levels", icon="tonality"),
+                PaletteCommand("reset_layout", "Reset layout", icon="reset_wrench"),
+                PaletteCommand("toggle_profile", "Toggle profile dock", icon="show_chart"),
+                PaletteCommand("export_derived", "Export derived array", icon="download"),
+                PaletteCommand("save_recipe", "Save operation recipe", icon="save"),
+                PaletteCommand("load_recipe", "Load operation recipe", icon="folder_open"),
+                PaletteCommand("save_view_recipe", "Save view recipe", icon="view_quilt"),
+                PaletteCommand("load_view_recipe", "Load view recipe", icon="folder_open"),
             ]
         )
         default_axis = self._default_operation_axis()
@@ -500,3 +504,18 @@ class OperationActionsMixin:
                 pass
         if settings.profile_visible:
             self.profile_dock.show()
+
+
+def _operation_icon_name(operation_id):
+    return {
+        "crop": "crop",
+        "mean": "functions",
+        "sum": "functions",
+        "max": "vertical_align_top",
+        "min": "vertical_align_bottom",
+        "rss": "analytics",
+        "centered_fft": "waves",
+        "centered_ifft": "waves",
+        "combine_real_imag": "join_inner",
+        "split_complex": "call_split",
+    }.get(operation_id, "data_array")

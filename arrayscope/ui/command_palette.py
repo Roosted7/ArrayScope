@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
+from arrayscope.ui.icons import material_icon
+
 
 @dataclass(frozen=True)
 class PaletteCommand:
@@ -14,6 +16,7 @@ class PaletteCommand:
     label: str
     kind: str = "command"
     requires_axis: bool = False
+    icon: str = "search"
 
 
 class CommandPaletteDialog(QtWidgets.QDialog):
@@ -74,7 +77,8 @@ class CommandPaletteDialog(QtWidgets.QDialog):
         self.list_widget.clear()
         for command in self._filtered:
             prefix = "op" if command.kind == "operation" else "cmd"
-            self.list_widget.addItem(f"{prefix}: {command.label}")
+            item = QtWidgets.QListWidgetItem(material_icon(command.icon), f"{prefix}: {command.label}")
+            self.list_widget.addItem(item)
         if self._filtered:
             self.list_widget.setCurrentRow(0)
         self._sync_axis_visibility()
