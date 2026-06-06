@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[2]
 WINDOW_LEVELS_PATH = ROOT / "arrayscope" / "core" / "window_levels.py"
 SPEC = importlib.util.spec_from_file_location("arrayscope.core.window_levels", WINDOW_LEVELS_PATH)
 window_levels = importlib.util.module_from_spec(SPEC)

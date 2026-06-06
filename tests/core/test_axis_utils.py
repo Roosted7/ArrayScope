@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 
-AXIS_UTILS_PATH = Path(__file__).parents[1] / "arrayscope" / "core" / "axis_utils.py"
+AXIS_UTILS_PATH = Path(__file__).parents[2] / "arrayscope" / "core" / "axis_utils.py"
 SPEC = importlib.util.spec_from_file_location("arrayscope.core.axis_utils", AXIS_UTILS_PATH)
 axis_utils = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = axis_utils

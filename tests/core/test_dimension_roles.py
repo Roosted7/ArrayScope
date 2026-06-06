@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[2]
 DIMENSION_ROLES_PATH = ROOT / "arrayscope" / "core" / "dimension_roles.py"
 SPEC = importlib.util.spec_from_file_location("arrayscope.core.dimension_roles", DIMENSION_ROLES_PATH)
 dimension_roles = importlib.util.module_from_spec(SPEC)

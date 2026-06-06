@@ -12,11 +12,13 @@ This roadmap is intentionally practical. It should track accepted work, not ever
 * [x] Add operation dock.
 * [x] Add profile dock and live image-driven profiles.
 * [x] Split code into focused package areas: app, core, display, operations, profiles, ui, window, export, io.
-* [ ] Fix pure/GUI test separation so pure tests do not require `pyqtgraph`.
-* [ ] Clean broad copy-pasted imports from mixins.
-* [ ] Split the remaining large UI builder into smaller components.
-* [ ] Decide and document theme strategy: built-in palette only vs optional backend.
-* [ ] Add clean-environment import test.
+* [x] Fix pure/GUI test separation so pure tests do not require `pyqtgraph`.
+* [x] Clean broad copy-pasted imports from mixins.
+* [x] Split the remaining large UI builder into smaller components.
+* [x] Decide and document theme strategy: built-in palette only.
+* [x] Add pure-helper import checks.
+* [x] Group tests by package area.
+* [x] Add AxisInfo design proposal before montage/sync.
 
 ## Phase 1 — Small, fast, pleasant viewer
 

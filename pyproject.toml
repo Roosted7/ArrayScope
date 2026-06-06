@@ -3,12 +3,12 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "arrayscope"
+name = "ArrayScope"
 version = "0.0.1"
 description = "Interactive N-dimensional numpy array viewer with FFT support"
 readme = "README.md"
 authors = [
-    {name = "Henric Rydén", email = "henric.ryden@gmail.com"}
+    {name = "ArrayScope contributors"}
 ]
 license = "MIT"
 classifiers = [
@@ -49,10 +49,5 @@ dev = [
     "pytest>=7.0.0",
     "twine>=4.0.0",
 ]
-[project.urls]
-Homepage = "https://github.com/henricryden/arrayscope"
-Documentation = "https://github.com/henricryden/arrayscope#readme"
-"Bug Tracker" = "https://github.com/henricryden/arrayscope/issues"
-
 [tool.setuptools.packages.find]
 include = ["arrayscope*"]

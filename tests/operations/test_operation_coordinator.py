@@ -4,9 +4,10 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[2]
 PACKAGE = types.ModuleType("arrayscope")
 PACKAGE.__path__ = [str(ROOT / "arrayscope")]
 sys.modules.setdefault("arrayscope", PACKAGE)
@@ -43,37 +44,46 @@ def load_module(name):
 
 
 load_module("axis_utils")
-view_state = load_module("view_state")
-load_module("profile")
-load_module("slice_engine")
+load_module("dim_ops")
 load_module("operation_pipeline")
+load_module("operation_stack")
 load_module("cache_status")
-operation_evaluator = load_module("operation_evaluator")
-profile_coordinator = load_module("profile_coordinator")
+load_module("slice_engine")
+load_module("operation_evaluator")
+load_module("operation_registry")
+operation_coordinator = load_module("operation_coordinator")
 
-ViewState = view_state.ViewState
-ArrayDocument = sys.modules["arrayscope.operations.pipeline"].ArrayDocument
-OperationEvaluator = operation_evaluator.OperationEvaluator
-ProfileCoordinator = profile_coordinator.ProfileCoordinator
+OperationCoordinator = operation_coordinator.OperationCoordinator
 
 
-def test_profile_coordinator_clamps_and_renders_line_result():
+def test_operation_coordinator_appends_reorders_and_materializes():
+    data = np.arange(3 * 4).reshape(3, 4)
+    coordinator = OperationCoordinator(data)
+
+    coordinator.append_operation("crop", axis=1, parameters={"start": 1, "stop": 4})
+    coordinator.append_operation("reverse", axis=0)
+
+    assert coordinator.shape == (3, 3)
+    assert coordinator.operation_shapes() == ((3, 3), (3, 3))
+
+    result = coordinator.evaluator.current_data()
+    np.testing.assert_array_equal(result, np.flip(data[:, 1:4], axis=0))
+
+    coordinator.materialize()
+    assert coordinator.document.operations == ()
+    np.testing.assert_array_equal(coordinator.base_data, result)
+
+
+def test_operation_coordinator_delete_and_move_validate_against_base_shape():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
-    state = ViewState.from_shape(data.shape).with_line_axis(2)
-    coordinator = ProfileCoordinator()
-    evaluator = OperationEvaluator(ArrayDocument(data))
+    coordinator = OperationCoordinator(data)
+    coordinator.append_operation("crop", axis=2, parameters={"start": 1, "stop": 4})
+    coordinator.append_operation("mean", axis=0)
 
-    result = coordinator.render_from_marker(
-        evaluator,
-        state,
-        10,
-        -2,
-        line_axis=2,
-        y_range_mode="match_image",
-        image_levels=(1, 9),
-    )
+    with pytest.raises(ValueError, match="out of bounds"):
+        coordinator.move(1, -1)
 
-    assert result.marker_position == (2, 0)
-    assert result.view_state.slice_indices == (0, 2, 0)
-    assert result.y_range == (1.0, 9.0)
-    np.testing.assert_array_equal(result.line_result.data, data[0, 2, :])
+    assert coordinator.shape == (3, 3)
+
+    coordinator.delete(0)
+    assert coordinator.shape == (3, 4)

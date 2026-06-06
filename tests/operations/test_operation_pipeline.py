@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[2]
 PACKAGE = types.ModuleType("arrayscope")
 PACKAGE.__path__ = [str(ROOT / "arrayscope")]
 sys.modules.setdefault("arrayscope", PACKAGE)

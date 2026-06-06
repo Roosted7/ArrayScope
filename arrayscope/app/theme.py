@@ -1,10 +1,9 @@
-"""Small optional-backend theme abstraction for ArrayScope."""
+"""Small built-in Qt palette theme abstraction for ArrayScope."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from importlib import import_module
 from typing import Optional
 
 
@@ -36,35 +35,14 @@ def normalize_theme_choice(choice) -> ThemeChoice:
 
 def choose_theme_backend(choice, available_backends=()) -> ThemeResult:
     choice = normalize_theme_choice(choice)
-    available = set(available_backends)
     if choice in (ThemeChoice.SYSTEM, ThemeChoice.NATIVE):
         return ThemeResult(choice, choice, "native")
     return ThemeResult(choice, choice, "builtin")
 
 
-def detected_theme_backends():
-    backends = []
-    for module_name in ("qdarktheme", "qt_material"):
-        try:
-            import_module(module_name)
-        except Exception:
-            continue
-        backends.append(module_name)
-    return tuple(backends)
-
-
 def apply_theme_to_qapplication(app, choice) -> ThemeResult:
     choice = normalize_theme_choice(choice)
-    backends = detected_theme_backends()
-    result = choose_theme_backend(choice, backends)
-    if result.backend == "qdarktheme" and result.applied in (ThemeChoice.DARK, ThemeChoice.LIGHT):
-        try:
-            qdarktheme = import_module("qdarktheme")
-            qdarktheme.setup_theme(result.applied.value)
-            return result
-        except Exception as exc:
-            result = ThemeResult(choice, ThemeChoice.NATIVE, "native", f"Theme backend failed: {exc}")
-
+    result = choose_theme_backend(choice)
     _apply_builtin_palette(app, result.applied)
     return result
 

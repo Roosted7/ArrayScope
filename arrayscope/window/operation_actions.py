@@ -1,25 +1,12 @@
 from __future__ import annotations
 
-import math
-import os
-from pathlib import Path
-
 import numpy as np
 
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
-from arrayscope.display.colormaps import gray_colormap, named_colormap, phase_colormap
-from arrayscope.ui.dialogs import SaveRangeDialog
 from arrayscope.operations.recipes import load_recipe, save_recipe
 from arrayscope.operations.registry import operation_entries
-from arrayscope.profiles.model import clamp_marker_position, image_hover_indices, profile_y_range
-from arrayscope.display.slice_engine import apply_channel
-from arrayscope.app.settings_state import AppSettingsState, settings_from_mapping, settings_to_mapping
-from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
-from arrayscope.export.video import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
-from arrayscope.core.view_state import ChannelMode, ScaleMode
-from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.window.domain import Domain
 
 
@@ -223,4 +210,3 @@ class OperationActionsMixin:
         self.operation_coordinator.materialize()
         self._set_document(self.operation_coordinator.document)
         self.render(reason="materialize", force_autolevel=True)
-
