@@ -25,3 +25,41 @@ def test_profile_marker_callback_replacement_and_programmatic_move(qt_app):
     view._profile_vline.setValue(4)
     assert len(calls) == 1
     view.close()
+
+
+def test_evaluation_overlay_and_stale_opacity(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.arange(16, dtype=float).reshape(4, 4))
+    view.show()
+    qt_app.processEvents()
+
+    view.setImageStale(True)
+    view.setEvaluationOverlay(True, "Updating view...")
+
+    assert view.imageItem.opacity() == 0.55
+    assert view._evaluation_overlay.isVisible()
+    assert view._evaluation_overlay.text() == "Updating view..."
+
+    view.setImageStale(False)
+    view.setEvaluationOverlay(False)
+    assert view.imageItem.opacity() == 1.0
+    assert not view._evaluation_overlay.isVisible()
+    view.close()
+
+
+def test_profile_marker_bounds_update_when_image_shape_changes(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.zeros((8, 10), dtype=float))
+    view.setProfileMarker(9, 7, visible=True)
+    assert view._profile_vline.maxRange == (0, 9)
+    assert view._profile_hline.maxRange == (0, 7)
+
+    view.setImage(np.zeros((4, 5), dtype=float))
+    assert view._profile_vline.maxRange == (0, 4)
+    assert view._profile_hline.maxRange == (0, 3)
+    assert view.profileMarkerPosition() == (4.0, 3.0)
+    view.close()

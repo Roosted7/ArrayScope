@@ -3,9 +3,13 @@ import numpy as np
 import struct
 import subprocess
 import tempfile
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -425,13 +429,13 @@ class DicomDirectoryLoader:
                     )
 
                 stacking_label, stacking_key, stacking_values = _describe_stacking_axis(sidecar_metadata)
-                print(f"Dataset stacked automatically along new dimension: {stacking_label}")
+                _LOGGER.info("Dataset stacked automatically along new dimension: %s", stacking_label)
                 if stacking_key is not None and stacking_values is not None:
-                    print(f"  {stacking_key}: {stacking_values}")
+                    _LOGGER.info("  %s: %s", stacking_key, stacking_values)
                 if stacking_key == 'SeriesNumber':
                     series_descriptions = [metadata.get('SeriesDescription') for metadata in sidecar_metadata]
                     if any(description is not None for description in series_descriptions):
-                        print(f"  SeriesDescription: {series_descriptions}")
+                        _LOGGER.info("  SeriesDescription: %s", series_descriptions)
                 data = np.stack(arrays, axis=-1)
 
             self.metadata.update({

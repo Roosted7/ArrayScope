@@ -73,6 +73,9 @@ Rules:
 * Add cancellation/ignore-stale logic for background workers.
 * Add cache memory budget, e.g. max frames or max MB.
 * Add performance HUD/debug panel showing cache hits/misses, materialized shape, and evaluation time.
+* Add a user-facing cache budget setting with presets for laptop, workstation, and memory-constrained sessions.
+* Add explicit export progress for derived-array `.npy/.npz` saves after materialization is complete.
+* Add benchmark fixtures for representative MRI stacks so cache and slab changes can be compared over time.
 * Add optional memory-mapped array support for large `.npy` files.
 * Consider zarr/dask later, but do not introduce them before the internal lazy evaluator is clean.
 

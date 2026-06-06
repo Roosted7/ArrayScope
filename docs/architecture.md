@@ -10,11 +10,18 @@ source of array-view state.
 - `arrayscope.display.slice_engine`: converts `data + ViewState` into display-ready images and
   lines.
 - `arrayscope.operations.pipeline`: immutable NumPy operations plus shape prediction.
+- `arrayscope.operations.slabs`: plans and evaluates the smallest exact base-data slab needed
+  for image, profile, scalar hover, and export-frame requests.
+- `arrayscope.operations.cache`: bounded LRU caches and cache diagnostics for evaluated display
+  results.
 - `arrayscope.operations.pipeline.OperationStep`: ordered operation rows with enable/disable
   state. `ArrayDocument.operations` is the active enabled operation sequence; `steps` is the
   pipeline UI/document sequence.
 - `arrayscope.operations.coordinator`: owns the operation document, evaluator, stack edits,
   and materialization.
+- `arrayscope.operations.evaluator.OperationEvaluator`: UI-thread owner of display/profile caches,
+  evaluation status, and diagnostics. Background workers use immutable document snapshots and pure
+  evaluation helpers; they must not mutate the live evaluator directly.
 - `arrayscope.profiles.model` / `arrayscope.profiles.coordinator`: maps image-space marker positions to
   profile view states and line results.
 - `arrayscope.core.window_levels`: decides image window/level reuse or auto-level behavior.
@@ -25,6 +32,10 @@ source of array-view state.
 - `arrayscope.core.view_recipe`: serializes operations, `ViewState`, and display settings for
   full-view restore. It is pure and does not contain dock geometry.
 - `arrayscope.window.main.ArrayScopeWindow`: wires Qt signals to state changes, then calls `render()`.
+- `arrayscope.window.evaluation_controller`: owns background display/profile/pixel evaluation
+  dispatch, latest-generation checks, and stale-result ignoring.
+- `arrayscope.window.layout_controller.WindowLayoutManager`: owns first-run layout restore, reset
+  layout, progressive dock visibility, dock default sizes, and post-restore geometry fixups.
 - `arrayscope.app.launch`: QApplication creation, multiprocessing launch, and IPython Qt event-loop handling.
 - `arrayscope.io`: file loading, dataset selectors, and save workflows.
 - `arrayscope.export`: video/frame export workers and UI workflow.
@@ -39,13 +50,21 @@ User actions update `ViewState` or the operation coordinator. `render()` then:
 
 1. migrates `ViewState` to the current derived shape;
 2. syncs controls from `ViewState`;
-3. renders image/profile data through the evaluator;
+3. requests image/profile data through the evaluator;
 4. applies view-only axis flips;
 5. updates docks, labels, HUD text, compact controls, and cache status.
 
 Do not read widget values to reconstruct `ViewState`. Widget state is an output
 of render, except transient UI-only state such as dock visibility and histogram
 interaction.
+
+The window tracks derived-array metadata from `ArrayDocument.current_shape` and dtype estimates.
+It must not materialize the derived array as normal state. Full derived evaluation is reserved for
+explicit materialize/save/export actions. Display evaluation uses slab-first requests through
+`OperationEvaluator`; slow Qt-visible requests run through `EvaluationController` so the previous
+image/profile remains visible and stale worker results cannot overwrite newer user intent. Workers
+capture immutable `ArrayDocument`/`ViewState` snapshots and return results to the UI thread; only the
+UI thread commits cache/status updates to the live evaluator.
 
 ## Interdependency Map
 
@@ -72,6 +91,7 @@ When changing `operation_pipeline`, check:
 - operation dock
 - evaluator cache keys
 - `ViewState.for_shape()`
+- `arrayscope.operations.slabs`
 
 ## Placement Guide
 

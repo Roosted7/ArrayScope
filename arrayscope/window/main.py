@@ -8,6 +8,7 @@ from pyqtgraph.Qt import QtWidgets
 import platform
 from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.profiles.coordinator import ProfileCoordinator
+from arrayscope.core.array_metadata import derived_info_for
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.export.workflow import ExportWorkflowMixin
 from arrayscope.ui.dimension_controls import DimensionControlMixin
@@ -15,6 +16,7 @@ from arrayscope.ui.display_controls import DisplayControlBuildMixin
 from arrayscope.ui.menus import WindowMenuMixin
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
+from arrayscope.window.evaluation_controller import EvaluationController
 from arrayscope.window.file_reload import FileReloadMixin
 from arrayscope.window.operation_actions import OperationActionsMixin
 from arrayscope.window.render import RenderMixin
@@ -61,9 +63,12 @@ class ArrayScopeWindow(
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document
         self.operation_evaluator = self.operation_coordinator.evaluator
-        self.data = self.operation_evaluator.current_data()
-        self.singleton = [e == 1 for e in list(data.shape)]
-        initial_channel = ChannelMode.COMPLEX if np.iscomplexobj(self.data) else ChannelMode.REAL
+        self.evaluation_controller = EvaluationController(self)
+        self.pixel_evaluation_controller = EvaluationController(self)
+        self.profile_evaluation_controller = EvaluationController(self)
+        self.data = derived_info_for(self.document)
+        self.singleton = [e == 1 for e in list(self.data.shape)]
+        initial_channel = ChannelMode.COMPLEX if np.issubdtype(self.data.dtype, np.complexfloating) else ChannelMode.REAL
         self.view_state = ViewState.from_shape(self.data.shape).with_channel(initial_channel)
         self._force_autolevel = False
         self._filepath = filepath

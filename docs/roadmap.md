@@ -54,14 +54,14 @@ Goal: make the operation stack powerful but understandable.
 
 Goal: keep the UI responsive on real MRI/reconstruction arrays.
 
-* [ ] Add evaluation timing and cache diagnostics.
-* [ ] Add slab-based evaluator for image/profile views.
-* [ ] Avoid full materialization for display when operations permit slice-first evaluation.
-* [ ] Add bounded image/profile cache.
-* [ ] Add optional nearby-slice prefetch after slab evaluation works.
-* [ ] Add cancellation/ignore-stale behavior for background evaluation.
-* [ ] Add memory-budget controls or guardrails.
-* [ ] Warn before expensive full materialization/export.
+* [x] Add evaluation timing and cache diagnostics.
+* [x] Add slab-based evaluator for image/profile views.
+* [x] Avoid full materialization for display when operations permit slice-first evaluation.
+* [x] Add bounded image/profile cache.
+* [x] Add optional nearby-slice prefetch after slab evaluation works.
+* [x] Add cancellation/ignore-stale behavior for background evaluation.
+* [x] Add memory-budget controls or guardrails.
+* [x] Warn before expensive full materialization/export.
 
 ## Phase 4 — Profiles, montage, ROI
 

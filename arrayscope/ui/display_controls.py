@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import numpy as np
-
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
@@ -13,6 +11,7 @@ from arrayscope.ui.display_toolbar import DisplayToolbar
 from arrayscope.ui.hud import PixelHud
 from arrayscope.ui.icons import set_button_icon
 from arrayscope.ui.status_label import PixelStatusLabel
+from arrayscope.window.layout_controller import WindowLayoutManager
 from arrayscope.window.domain import Domain
 
 
@@ -36,11 +35,11 @@ class DisplayControlBuildMixin:
                 'secondary': [QtWidgets.QPushButton('X', checkable=True) for i in range(data.ndim)],
                 'profile': [QtWidgets.QPushButton('P', checkable=True) for i in range(data.ndim)],
                 'channel': {
-                    'complex': QtWidgets.QRadioButton('complex', enabled=np.iscomplexobj(self.data)),
-                    'real': QtWidgets.QRadioButton('real', enabled=np.iscomplexobj(self.data)),
-                    'imag': QtWidgets.QRadioButton('imag', enabled=np.iscomplexobj(self.data)),
-                    'abs': QtWidgets.QRadioButton('abs', enabled=np.iscomplexobj(self.data)),
-                    'angle': QtWidgets.QRadioButton('angle', enabled=np.iscomplexobj(self.data)),
+                    'complex': QtWidgets.QRadioButton('complex', enabled=self._current_is_complex()),
+                    'real': QtWidgets.QRadioButton('real', enabled=self._current_is_complex()),
+                    'imag': QtWidgets.QRadioButton('imag', enabled=self._current_is_complex()),
+                    'abs': QtWidgets.QRadioButton('abs', enabled=self._current_is_complex()),
+                    'angle': QtWidgets.QRadioButton('angle', enabled=self._current_is_complex()),
                 },
                 'processing': {
                     #'log': QtWidgets.QRadioButton('log', checkable=True),
@@ -430,6 +429,7 @@ class DisplayControlBuildMixin:
             on_edit_operation=self.edit_operation,
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
+        self.layout_manager = WindowLayoutManager(self)
         self._update_operation_dock()
         self._setup_menus()
         self._restore_window_settings()

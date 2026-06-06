@@ -193,17 +193,17 @@ def test_display_cache_invalidates_for_operations_and_view_state():
     first = evaluator.image(state)
     second = evaluator.image(state)
     assert first is second
-    assert evaluator.derived_evaluations == 1
+    assert evaluator.derived_evaluations == 0
     assert evaluator.image_evaluations == 1
 
     shifted_state = state.with_slice(0, 1)
     evaluator.image(shifted_state)
-    assert evaluator.derived_evaluations == 1
+    assert evaluator.derived_evaluations == 0
     assert evaluator.image_evaluations == 2
 
     evaluator.set_document(evaluator.document.with_operation(ReverseAxis(axis=0)))
     evaluator.image(state)
-    assert evaluator.derived_evaluations == 2
+    assert evaluator.derived_evaluations == 0
     assert evaluator.image_evaluations == 3
 
 
@@ -217,7 +217,8 @@ def test_display_cache_invalidates_for_step_enabled_flag():
     evaluator.set_document(document.with_step_enabled(0, False))
     evaluator.image(state)
 
-    assert evaluator.derived_evaluations == 2
+    assert evaluator.derived_evaluations == 0
+    assert evaluator.image_evaluations == 2
 
 
 def test_display_cache_status_tracks_display_hit_and_miss():

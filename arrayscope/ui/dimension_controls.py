@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import numpy as np
-
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui
 
@@ -113,7 +111,7 @@ class DimensionControlMixin:
 
     def _update_channel_controls(self):
         """Keep channel options in sync with the current array dtype."""
-        is_complex = np.iscomplexobj(self.data)
+        is_complex = self._current_is_complex()
         channel_buttons = self.widgets['buttons']['channel']
         enabled_channels = {
             'complex': is_complex,

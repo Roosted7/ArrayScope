@@ -151,7 +151,7 @@ pip install -e .
 
 ## Requirements
 
-- Python >= 3.8
+- Python >= 3.10
 - NumPy >= 1.20.0
 - PyQtGraph >= 0.14.0
 - PySide6 >= 6.4.0
@@ -174,11 +174,3 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## Acknowledgments
 
 Built with [PyQtGraph](https://www.pyqtgraph.org/) for high-performance visualization.
-
-
----
-Henric Rydén
-
-Karolinska University Hospital
-
-Stockholm, Sweden
