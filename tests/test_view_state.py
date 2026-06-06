@@ -1,15 +1,18 @@
 import ast
-import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
-VIEW_STATE_PATH = Path(__file__).parents[1] / "arrayscope" / "view_state.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope_view_state_for_test", VIEW_STATE_PATH)
-view_state_module = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = view_state_module
-SPEC.loader.exec_module(view_state_module)
+ROOT = Path(__file__).parents[1]
+PACKAGE = types.ModuleType("arrayscope")
+PACKAGE.__path__ = [str(ROOT / "arrayscope")]
+sys.modules.setdefault("arrayscope", PACKAGE)
+
+from arrayscope import view_state as view_state_module
+
+VIEW_STATE_PATH = ROOT / "arrayscope" / "view_state.py"
 
 ChannelMode = view_state_module.ChannelMode
 ScaleMode = view_state_module.ScaleMode
@@ -141,6 +144,53 @@ def test_channel_scale_and_axis_flags_are_validated_and_updated():
     assert updated.scale == ScaleMode.SYMLOG
     assert updated.axis_flipped == (True, False)
     assert updated.axis_fftshifted == (False, True)
+
+
+def test_for_shape_preserves_surviving_flags_and_clamps_slices():
+    state = (
+        ViewState.from_shape((3, 4, 5))
+        .with_slice(0, 2)
+        .with_slice(1, 3)
+        .with_axis_flipped(1, True)
+        .with_axis_fftshifted(2, True)
+    )
+
+    migrated = state.for_shape((3, 2))
+
+    assert migrated.shape == (3, 2)
+    assert migrated.image_axes == (0, 1)
+    assert migrated.slice_indices == (2, 1)
+    assert migrated.axis_flipped == (False, True)
+    assert migrated.axis_fftshifted == (False, False)
+
+
+def test_for_shape_uses_line_axis_only_for_1d():
+    state = ViewState.from_shape((3, 4)).with_axis_flipped(0, True)
+
+    migrated = state.for_shape((5,))
+
+    assert migrated.image_axes is None
+    assert migrated.line_axis == 0
+    assert migrated.axis_flipped == (True,)
+
+
+def test_with_image_axis_keeps_axes_distinct():
+    state = ViewState.from_shape((3, 4, 5))
+
+    moved_y = state.with_image_axis("y", 1)
+    moved_x = state.with_image_axis("x", 0)
+
+    assert moved_y.image_axes == (1, 0)
+    assert moved_x.image_axes == (1, 0)
+
+
+def test_transposed_image_axes_swaps_axes_without_touching_flags():
+    state = ViewState.from_shape((3, 4, 5)).with_axis_flipped(0, True)
+
+    transposed = state.transposed_image_axes()
+
+    assert transposed.image_axes == (1, 0)
+    assert transposed.axis_flipped == state.axis_flipped
 
 
 def test_view_state_module_has_no_qt_or_pyqtgraph_imports():

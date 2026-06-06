@@ -50,3 +50,6 @@ build/
 
 # MATLAB ArrayShow (reference)
 docs/references/arrShow
+
+# Test artifacts
+tests/artifacts/
