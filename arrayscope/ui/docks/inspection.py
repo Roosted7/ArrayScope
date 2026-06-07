@@ -14,16 +14,18 @@ from pyqtgraph.Qt import QtWidgets
 from arrayscope.core.roi import RoiKind
 from arrayscope.ui.docks.common import StandardDockWidget, add_size_grip, configure_standard_dock
 from arrayscope.ui.icons import set_button_icon
+from arrayscope.ui.roi_model import RoiTableModel
 
 
 class InspectionDock(StandardDockWidget):
-    def __init__(self, parent, *, on_tool_changed, on_add_roi, on_delete_roi, on_clear_rois):
+    def __init__(self, parent, *, on_tool_changed, on_add_roi, on_delete_roi, on_clear_rois, on_select_roi=None):
         super().__init__("Inspection", parent)
         self.setObjectName("InspectionDock")
         self._on_tool_changed = on_tool_changed
         self._on_add_roi = on_add_roi
         self._on_delete_roi = on_delete_roi
         self._on_clear_rois = on_clear_rois
+        self._on_select_roi = on_select_roi
         self._roi_ids = []
         self._stats_by_roi = {}
         self._updating = False
@@ -58,16 +60,14 @@ class InspectionDock(StandardDockWidget):
         controls.addStretch()
         layout.addLayout(controls)
 
-        self.roi_list = QtWidgets.QListWidget()
-        self.roi_list.setMaximumHeight(96)
-        layout.addWidget(self.roi_list)
-
-        self.stats_table = QtWidgets.QTableWidget(0, 7)
-        self.stats_table.setHorizontalHeaderLabels(("ROI", "Kind", "Count", "Mean", "Std", "Min", "Max"))
+        self.roi_model = RoiTableModel(self)
+        self.stats_table = QtWidgets.QTableView()
+        self.stats_table.setModel(self.roi_model)
         self.stats_table.verticalHeader().hide()
         self.stats_table.horizontalHeader().setStretchLastSection(True)
         self.stats_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.stats_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.stats_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         layout.addWidget(self.stats_table)
 
         self.histogram_plot = pg.PlotWidget()
@@ -90,6 +90,7 @@ class InspectionDock(StandardDockWidget):
         self.add_button.clicked.connect(self._add_clicked)
         self.delete_button.clicked.connect(self._delete_clicked)
         self.clear_button.clicked.connect(self._clear_clicked)
+        self.stats_table.selectionModel().selectionChanged.connect(self._selection_changed)
 
     def current_tool(self):
         return self.tool_combo.currentData() or "cursor"
@@ -100,36 +101,18 @@ class InspectionDock(StandardDockWidget):
             self.tool_combo.setCurrentIndex(index)
 
     def set_rois(self, selections):
-        current = self.current_roi_id()
-        self._updating = True
-        try:
-            self.roi_list.clear()
-            self._roi_ids = []
-            for selection in selections:
-                self._roi_ids.append(selection.id)
-                item = QtWidgets.QListWidgetItem(_roi_item_text(selection))
-                item.setData(Qt.QtCore.Qt.ItemDataRole.UserRole, selection.id)
-                item.setCheckState(
-                    Qt.QtCore.Qt.CheckState.Checked
-                    if selection.enabled
-                    else Qt.QtCore.Qt.CheckState.Unchecked
-                )
-                self.roi_list.addItem(item)
-                if selection.id == current:
-                    self.roi_list.setCurrentItem(item)
-        finally:
-            self._updating = False
+        self._roi_ids = [selection.id for selection in selections]
 
     def current_roi_id(self):
-        item = self.roi_list.currentItem()
-        if item is None:
+        index = self.stats_table.currentIndex()
+        if not index.isValid():
             return None
-        return item.data(Qt.QtCore.Qt.ItemDataRole.UserRole)
+        return self.roi_model.roi_id_for_row(index.row())
 
     def set_statistics(self, stats_by_roi):
         self._stats_by_roi = dict(stats_by_roi)
-        self.stats_table.setRowCount(len(self._stats_by_roi))
-        for row, (roi_id, payload) in enumerate(self._stats_by_roi.items()):
+        rows = []
+        for roi_id, payload in self._stats_by_roi.items():
             selection, stats = payload
             values = (
                 selection.label,
@@ -139,19 +122,20 @@ class InspectionDock(StandardDockWidget):
                 _fmt(stats.std),
                 _fmt(stats.minimum),
                 _fmt(stats.maximum),
+                "",
             )
-            for column, value in enumerate(values):
-                self.stats_table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+            rows.append({"id": roi_id, "values": values, "enabled": selection.enabled, "color": selection.color})
+        self.roi_model.set_rows(rows)
         self.stats_table.resizeColumnsToContents()
 
     def set_histograms(self, histogram_results):
         self.histogram_plot.clear()
-        colors = ((230, 60, 30), (40, 120, 210), (40, 150, 90), (180, 90, 210), (220, 150, 40))
         for index, result in enumerate(histogram_results):
             if result.counts.size == 0:
                 continue
             centers = (result.edges[:-1] + result.edges[1:]) * 0.5
-            pen = pg.mkPen(colors[index % len(colors)], width=2)
+            color = getattr(result, "color", None) or _color_for_histogram_name(result.name, self._stats_by_roi)
+            pen = pg.mkPen(color, width=2)
             self.histogram_plot.plot(centers, result.counts, pen=pen, name=result.name)
 
     def _tool_changed(self, _index):
@@ -169,6 +153,13 @@ class InspectionDock(StandardDockWidget):
     def _clear_clicked(self):
         self._on_clear_rois()
 
+    def _selection_changed(self, *_args):
+        if self._updating or self._on_select_roi is None:
+            return
+        roi_id = self.current_roi_id()
+        if roi_id is not None:
+            self._on_select_roi(roi_id)
+
 
 def _roi_item_text(selection):
     geometry = selection.geometry
@@ -185,3 +176,10 @@ def _fmt(value):
     if isinstance(value, (float, np.floating)):
         return f"{float(value):.4g}"
     return str(value)
+
+
+def _color_for_histogram_name(name, stats_by_roi):
+    for _roi_id, (selection, _stats) in stats_by_roi.items():
+        if str(name).startswith(selection.label):
+            return selection.color
+    return (230, 60, 30)

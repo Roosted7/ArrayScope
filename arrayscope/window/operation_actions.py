@@ -90,7 +90,7 @@ class OperationActionsMixin:
         menu.exec(widget.mapToGlobal(pos))
 
     def _enable_live_profile_for_axis(self, dim):
-        self.set_dimension_role("p", dim)
+        self.set_profile_axes_exactly((dim,))
         self.widgets["buttons"]["display"]["live_profile"].setChecked(True)
         if hasattr(self, "display_toolbar"):
             self.display_toolbar.set_current(live_profile=True)
@@ -102,12 +102,9 @@ class OperationActionsMixin:
             self.widgets["buttons"]["display"]["live_profile"].setChecked(False)
 
     def set_profile_axis_from_menu(self, dim):
-        self.set_dimension_role("p", dim)
+        self.set_profile_axes_exactly((dim,))
         self._profile_dock_user_visible = True
-        if not self.profile_dock.isFloating():
-            self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
-        self.profile_dock.show()
-        self.profile_dock.raise_()
+        self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="profile-axis-menu")
         self._schedule_view_geometry_refresh()
 
     def _show_operation_context_menu_for_axis(self, dim):
@@ -569,7 +566,8 @@ class OperationActionsMixin:
             except Exception:
                 pass
         if settings.profile_visible:
-            self.profile_dock.show()
+            self._profile_dock_user_visible = True
+            self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="view-recipe")
 
 
 def _operation_icon_name(operation_id):

@@ -35,6 +35,12 @@ class CacheDiagnosticsSnapshot:
     misses: int = 0
     evictions: int = 0
     last_eval_ms: float | None = None
+    prefetch_scheduled: int = 0
+    prefetch_deduped: int = 0
+    prefetch_limited: int = 0
+    prefetch_skipped: int = 0
+    prefetch_stored: int = 0
+    prefetch_stale: int = 0
 
 
 def cache_status_for_hit(hit: bool, has_error: bool = False) -> CacheStatusSnapshot:

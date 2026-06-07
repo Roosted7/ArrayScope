@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Iterable
 
 from arrayscope.core.view_state import ViewState
@@ -66,6 +67,13 @@ class DisplayPointMapping:
 
 
 @dataclass(frozen=True)
+class DisplayPointContext:
+    mapping: DisplayPointMapping
+    value_prefix: str
+    context_text: str
+
+
+@dataclass(frozen=True)
 class DisplayGeometry:
     view_state: ViewState
     display_shape: tuple[int, int]
@@ -82,8 +90,8 @@ class DisplayGeometry:
     def display_point_to_array_index(self, x: float, y: float) -> DisplayPointMapping | None:
         if self.view_state.image_axes is None:
             return None
-        display_x = int(round(float(x)))
-        display_y = int(round(float(y)))
+        display_x = int(math.floor(float(x)))
+        display_y = int(math.floor(float(y)))
         local_x = display_x
         local_y = display_y
         tile_number = None
@@ -142,14 +150,31 @@ class DisplayGeometry:
     def clamp_display_point(self, x: float, y: float) -> tuple[int, int] | None:
         if self.view_state.image_axes is None:
             return None
-        point_x = int(round(float(x)))
-        point_y = int(round(float(y)))
+        point_x = int(math.floor(float(x)))
+        point_y = int(math.floor(float(y)))
         if self.montage is not None:
             return self._clamp_to_montage_tile(point_x, point_y)
         primary_axis, secondary_axis = self.view_state.image_axes
         width = self._display_axis_size(self.view_state, secondary_axis)
         height = self._display_axis_size(self.view_state, primary_axis)
         return (max(0, min(point_x, width - 1)), max(0, min(point_y, height - 1)))
+
+    def context_for_display_point(self, x: float, y: float) -> DisplayPointContext | None:
+        mapping = self.display_point_to_array_index(x, y)
+        if mapping is None:
+            return None
+        context_axes = self.view_state.non_display_axes()
+        parts = []
+        for axis in context_axes:
+            if axis == mapping.montage_axis and mapping.montage_index is not None:
+                parts.append(f"d{axis}={mapping.montage_index}")
+            else:
+                parts.append(f"d{axis}={mapping.array_index[axis]}")
+        return DisplayPointContext(
+            mapping=mapping,
+            value_prefix=f"({mapping.local_x}, {mapping.local_y})",
+            context_text=" ".join(parts),
+        )
 
     def _map_montage_point(self, x: int, y: int):
         geometry = self.montage
@@ -216,4 +241,3 @@ class DisplayGeometry:
         if display_index < 0 or display_index >= len(indices):
             return None
         return int(indices[display_index])
-

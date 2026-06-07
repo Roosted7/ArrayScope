@@ -408,23 +408,25 @@ class DisplayControlBuildMixin:
         self.setCentralWidget(tmp)
 
     def _build_docks_and_restore_layout(self):
+        self.layout_manager = WindowLayoutManager(self)
         self.profile_dock = ProfileDock(self, on_axis_changed=self.set_profile_axis)
         self.line_plot = self.profile_dock.line_plot
         self.plot_widget = self.profile_dock.widget
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
         self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
         self.profile_dock.visibilityChanged.connect(self._on_profile_dock_visibility_changed)
-        self.profile_dock.hide()
+        self.layout_manager.set_managed_dock_visible(self.profile_dock, False, reason="initial", preserve_canvas=False)
         self.inspection_dock = InspectionDock(
             self,
             on_tool_changed=self._on_inspection_tool_changed,
             on_add_roi=self._add_roi_for_tool,
             on_delete_roi=self._delete_roi,
             on_clear_rois=self._clear_rois,
+            on_select_roi=self._select_roi,
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.inspection_dock)
         self.inspection_dock.visibilityChanged.connect(self._on_inspection_dock_visibility_changed)
-        self.inspection_dock.hide()
+        self.layout_manager.set_managed_dock_visible(self.inspection_dock, False, reason="initial", preserve_canvas=False)
         self.operation_dock = OperationStackDock(
             self,
             on_undo=self.undo_last_operation,
@@ -445,7 +447,6 @@ class DisplayControlBuildMixin:
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
         self.operation_dock.visibilityChanged.connect(self._on_operation_dock_visibility_changed)
-        self.layout_manager = WindowLayoutManager(self)
         self._update_operation_dock()
         self._setup_menus()
         self._restore_window_settings()

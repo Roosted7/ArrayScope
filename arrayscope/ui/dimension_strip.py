@@ -109,13 +109,15 @@ class DimensionChip(QtWidgets.QFrame):
         self.p_button.setChecked(is_p)
         set_button_icon(self.y_button, "arrow_downward" if is_y and view_state.axis_flipped[self.axis] else "arrow_upward")
         set_button_icon(self.x_button, "arrow_forward" if is_x and view_state.axis_flipped[self.axis] else "arrow_back")
-        self.y_button.setToolTip("Flip Y direction" if is_y else f"Use dim {self.axis} as image Y axis")
-        self.x_button.setToolTip("Flip X direction" if is_x else f"Use dim {self.axis} as image X axis")
+        tiled_tooltip = "Tiled dimension cannot also be image X/Y. Clear the range first."
+        self.y_button.setToolTip(tiled_tooltip if is_m else ("Flip Y direction" if is_y else f"Use dim {self.axis} as image Y axis"))
+        self.x_button.setToolTip(tiled_tooltip if is_m else ("Flip X direction" if is_x else f"Use dim {self.axis} as image X axis"))
         self.p_button.setToolTip(f"Toggle dim {self.axis} as profile axis")
         is_display_axis = self.axis in image_axes or is_m
         is_singleton = size == 1
-        self.y_button.setEnabled(not is_singleton and view_state.image_axes is not None)
-        self.x_button.setEnabled(not is_singleton and view_state.image_axes is not None)
+        can_use_as_image = not is_singleton and not is_m and view_state.image_axes is not None
+        self.y_button.setEnabled(can_use_as_image)
+        self.x_button.setEnabled(can_use_as_image)
         self.p_button.setEnabled(not is_singleton)
         self.slice_edit.blockSignals(True)
         try:

@@ -102,7 +102,22 @@ class FileReloadMixin:
         old_ndim = self.data.ndim
         new_ndim = new_data.ndim
 
-        if new_ndim != old_ndim:
+        preserve_steps = bool(getattr(self.document, "steps", ()))
+        try:
+            self._reload_base_data(new_data, preserve_steps=preserve_steps)
+        except Exception as exc:
+            if not preserve_steps:
+                raise
+            choice = self._confirm_reload_clearing_operations(exc)
+            if choice == "cancel":
+                return
+            if choice == "save":
+                saved = self.save_view_recipe()
+                if not saved:
+                    return
+            self._reload_base_data(new_data, preserve_steps=False)
+
+        if self.data.ndim != old_ndim:
             # Per-dimension widgets were built for old_ndim and cannot be rebuilt in-place.
             # Open a fresh window with the new data and close this one.
             win = type(self)(new_data,
@@ -114,29 +129,47 @@ class FileReloadMixin:
             self.close()
             return
 
-        self._replace_base_data(new_data)
-        self.singleton = [e == 1 for e in new_data.shape]
+        self.singleton = [e == 1 for e in self.data.shape]
 
-        if np.iscomplexobj(new_data):
-            self.can_combine_as_complex = [False] * new_ndim
+        if np.issubdtype(np.dtype(self.data.dtype), np.complexfloating):
+            self.can_combine_as_complex = [False] * self.data.ndim
         else:
-            self.can_combine_as_complex = [new_data.shape[i] == 2 for i in range(new_ndim)]
-        self.combined_as_complex = [False] * new_ndim
+            self.can_combine_as_complex = [self.data.shape[i] == 2 for i in range(self.data.ndim)]
+        self.combined_as_complex = [False] * self.data.ndim
 
         # Reset FFT domain state and dim label styling
-        self.domain = [Domain.NATIVE for _ in range(new_ndim)]
+        self.domain = [Domain.NATIVE for _ in range(self.data.ndim)]
         for i, label in enumerate(self.widgets['labels']['dims']):
             label.setStyleSheet(self.DIMENSION_LABEL_STYLE)
-            label.setText(f'[{new_data.shape[i]}]')
+            if i < self.data.ndim:
+                label.setText(f'[{self.data.shape[i]}]')
 
         # Update spinbox maximums (auto-clamps current value)
-        for i in range(new_ndim):
-            self.widgets['spins']['slice_indices'][i].setMaximum(new_data.shape[i] - 1)
+        for i in range(self.data.ndim):
+            self.widgets['spins']['slice_indices'][i].setMaximum(self.data.shape[i] - 1)
 
-        self._set_view_state(self.view_state.for_shape(new_data.shape, preserve_flags=True))
+        self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._update_channel_controls()
         self.update_complex_indicators()
         self.update_shift_indicators()
         self.update_dimension_controls()
         self._force_autolevel = True
         self.render(reason="reload", force_autolevel=True)
+
+    def _confirm_reload_clearing_operations(self, exc):
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setWindowTitle("Reload Incompatible With Operations")
+        box.setText("The reloaded data is not compatible with the current operation stack.")
+        box.setInformativeText(f"{exc}\n\nClear operations and reload, save a view recipe first, or cancel?")
+        clear_button = box.addButton("Reload and clear operations", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        save_button = box.addButton("Save view recipe first", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        cancel_button = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is clear_button:
+            return "clear"
+        if clicked is save_button:
+            return "save"
+        return "cancel"

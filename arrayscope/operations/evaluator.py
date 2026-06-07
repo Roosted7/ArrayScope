@@ -55,6 +55,12 @@ class OperationEvaluator:
     image_evaluations: int = 0
     line_evaluations: int = 0
     scalar_evaluations: int = 0
+    prefetch_scheduled: int = 0
+    prefetch_deduped: int = 0
+    prefetch_limited: int = 0
+    prefetch_skipped: int = 0
+    prefetch_stored: int = 0
+    prefetch_stale: int = 0
     display_generation: int = 0
     last_status: CacheStatusSnapshot = CacheStatusSnapshot(CacheStatus.COLD, "No evaluation yet")
     last_diagnostics: object | None = None
@@ -251,8 +257,10 @@ class OperationEvaluator:
     def prefetch_image_snapshot(self, document, view_state, colormap_lut=None):
         key = self.image_key(view_state, colormap_lut=colormap_lut, document=document)
         if self._image_cache.get(key) is not None:
+            self.prefetch_skipped += 1
             return None
         if self._image_cache.bytes_used > int(self._image_cache.max_bytes * 0.8):
+            self.prefetch_skipped += 1
             return None
         return evaluate_image_snapshot(document, view_state, colormap_lut=colormap_lut)
 
@@ -260,15 +268,19 @@ class OperationEvaluator:
         if result is None:
             return False
         if _document_key(document) != _document_key(self.document):
+            self.prefetch_stale += 1
             return False
         self.store_image_result(view_state, colormap_lut, result)
+        self.prefetch_stored += 1
         return True
 
     def prefetch_line_snapshot(self, document, view_state):
         key = self.line_key(view_state, document=document)
         if self._profile_cache.get(key) is not None:
+            self.prefetch_skipped += 1
             return None
         if self._profile_cache.bytes_used > int(self._profile_cache.max_bytes * 0.8):
+            self.prefetch_skipped += 1
             return None
         return evaluate_line_snapshot(document, view_state)
 
@@ -276,9 +288,23 @@ class OperationEvaluator:
         if result is None:
             return False
         if _document_key(document) != _document_key(self.document):
+            self.prefetch_stale += 1
             return False
         self.store_line_result(view_state, result)
+        self.prefetch_stored += 1
         return True
+
+    def note_prefetch_scheduled(self):
+        self.prefetch_scheduled += 1
+
+    def note_prefetch_deduped(self):
+        self.prefetch_deduped += 1
+
+    def note_prefetch_limited(self):
+        self.prefetch_limited += 1
+
+    def note_prefetch_stale(self):
+        self.prefetch_stale += 1
 
     def cache_diagnostics(self):
         if self.last_diagnostics is not None:
@@ -286,15 +312,25 @@ class OperationEvaluator:
         return self._image_cache.diagnostics(self.last_status.status, self.last_status.message)
 
     def image_cache_diagnostics(self):
-        return self._image_cache.diagnostics(self.last_status.status, self.last_status.message)
+        return self._image_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())
 
     def profile_cache_diagnostics(self):
-        return self._profile_cache.diagnostics(self.last_status.status, self.last_status.message)
+        return self._profile_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())
 
     def derived_estimate(self):
         dtype = _estimated_dtype(self.document)
         nbytes = int(np.prod(self.document.current_shape, dtype=np.int64)) * np.dtype(dtype).itemsize
         return tuple(self.document.current_shape), np.dtype(dtype), nbytes
+
+    def _prefetch_diagnostics(self):
+        return {
+            "prefetch_scheduled": int(self.prefetch_scheduled),
+            "prefetch_deduped": int(self.prefetch_deduped),
+            "prefetch_limited": int(self.prefetch_limited),
+            "prefetch_skipped": int(self.prefetch_skipped),
+            "prefetch_stored": int(self.prefetch_stored),
+            "prefetch_stale": int(self.prefetch_stale),
+        }
 
 
 def _document_key(document: ArrayDocument):

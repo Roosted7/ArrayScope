@@ -50,12 +50,16 @@ class InspectionWorkflowMixin:
         return selection
 
     def _on_roi_created(self, selection):
+        self.roi_store = self.roi_store.upsert(selection)
         self._refresh_inspection_dock()
 
     def _on_roi_changed(self, _roi_id, _geometry):
+        if hasattr(self, "img_view"):
+            self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections()).select(_roi_id)
         self._refresh_inspection_dock()
 
     def _on_roi_deleted(self, _roi_id):
+        self.roi_store = self.roi_store.remove(_roi_id)
         self._refresh_inspection_dock()
 
     def _delete_roi(self, roi_id):
@@ -66,7 +70,13 @@ class InspectionWorkflowMixin:
     def _clear_rois(self):
         if hasattr(self, "img_view"):
             self.img_view.clearRois()
+        self.roi_store = self.roi_store.clear()
         self._refresh_inspection_dock()
+
+    def _select_roi(self, roi_id):
+        self.roi_store = self.roi_store.select(roi_id)
+        if hasattr(self, "img_view"):
+            self.img_view.highlightRoi(roi_id)
 
     def _show_inspection_dock(self):
         if not hasattr(self, "inspection_dock"):
@@ -74,14 +84,13 @@ class InspectionWorkflowMixin:
         self._inspection_dock_user_visible = True
         if self.inspection_dock.isFloating():
             self.inspection_dock.setFloating(False)
-        self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.inspection_dock)
-        self.layout_manager.set_dock_visible_preserving_canvas(self.inspection_dock, True)
-        self.inspection_dock.raise_()
+        self.layout_manager.set_managed_dock_visible(self.inspection_dock, True, reason="show-inspection")
 
     def _refresh_inspection_dock(self):
         if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
             return
-        selections = self.img_view.roiSelections()
+        self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
+        selections = self.roi_store.selections
         self.inspection_dock.set_rois(selections)
         image = self._roi_source_image()
         stats_by_roi = OrderedDict()

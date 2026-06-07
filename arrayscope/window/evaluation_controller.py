@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from queue import SimpleQueue
+from dataclasses import dataclass
 
 from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.app.errors import handle_ui_exception, traceback_text
@@ -10,6 +11,12 @@ from arrayscope.app.errors import handle_ui_exception, traceback_text
 prefer_pyside6()
 
 import pyqtgraph.Qt as Qt
+
+
+@dataclass(frozen=True)
+class PrefetchStart:
+    scheduled: bool
+    reason: str = "scheduled"
 
 
 class _EvaluationRunnable(Qt.QtCore.QRunnable):
@@ -45,11 +52,13 @@ class _PrefetchRunnable(Qt.QtCore.QRunnable):
 class EvaluationController(Qt.QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.pool = Qt.QtCore.QThreadPool.globalInstance()
+        self.pool = Qt.QtCore.QThreadPool(self)
         self.generation = 0
         self._pending = set()
         self._runnables = {}
         self._handlers = {}
+        self._prefetch_keys = set()
+        self._max_prefetch = 32
         self._queue = SimpleQueue()
         self._poll_timer = Qt.QtCore.QTimer(self)
         self._poll_timer.setInterval(10)
@@ -59,6 +68,19 @@ class EvaluationController(Qt.QtCore.QObject):
         self.generation += 1
         self._pending.clear()
         return self.generation
+
+    def clear_queued(self):
+        self.generation += 1
+        self.pool.clear()
+        self._pending.clear()
+        self._handlers.clear()
+        self._runnables.clear()
+        self._prefetch_keys.clear()
+        self._poll_timer.stop()
+        return self.generation
+
+    def shutdown_for_close(self):
+        return self.clear_queued()
 
     def start(self, fn, *, on_done, on_error=None, on_stale=None, on_slow=None, slow_ms=100):
         self.generation += 1
@@ -74,14 +96,20 @@ class EvaluationController(Qt.QtCore.QObject):
         self._ensure_polling()
         return generation
 
-    def start_prefetch(self, fn, on_done=None):
-        key = ("prefetch", id(fn), len(self._runnables))
+    def start_prefetch(self, fn, on_done=None, *, key=None):
+        key = ("prefetch", id(fn), len(self._runnables)) if key is None else key
+        if key in self._prefetch_keys:
+            return PrefetchStart(False, "deduped")
+        if len(self._prefetch_keys) >= self._max_prefetch:
+            return PrefetchStart(False, "limited")
+        self._prefetch_keys.add(key)
         runnable = _PrefetchRunnable(fn, self._queue, key)
         self._runnables[key] = runnable
         if on_done is not None:
             self._handlers[key] = (on_done, None, None)
         self.pool.start(runnable)
         self._ensure_polling()
+        return PrefetchStart(True)
 
     def _emit_slow(self, generation, callback):
         if generation in self._pending and generation == self.generation:
@@ -95,6 +123,7 @@ class EvaluationController(Qt.QtCore.QObject):
         while not self._queue.empty():
             kind, key, value = self._queue.get()
             if kind == "prefetch_done":
+                self._prefetch_keys.discard(key)
                 self._runnables.pop(key, None)
                 on_done, _on_error, _on_stale = self._handlers.pop(key, (None, None, None))
                 if on_done is not None:
@@ -104,6 +133,7 @@ class EvaluationController(Qt.QtCore.QObject):
                         handle_ui_exception("prefetch callback", exc)
                 continue
             if kind == "prefetch_failed":
+                self._prefetch_keys.discard(key)
                 self._runnables.pop(key, None)
                 self._handlers.pop(key, None)
                 continue

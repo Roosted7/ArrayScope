@@ -59,7 +59,7 @@ class BoundedArrayCache:
         self.put(key, value)
         return value, False
 
-    def diagnostics(self, status=CacheStatus.READY, message=""):
+    def diagnostics(self, status=CacheStatus.READY, message="", **extra):
         return CacheDiagnosticsSnapshot(
             status=status,
             message=message,
@@ -70,6 +70,7 @@ class BoundedArrayCache:
             misses=int(self.misses),
             evictions=int(self.evictions),
             last_eval_ms=self.last_eval_ms,
+            **extra,
         )
 
     def _evict(self):

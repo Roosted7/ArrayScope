@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 
 import numpy as np
+from hypothesis import given, settings, strategies as st
 
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.slice_engine import (
@@ -58,6 +59,23 @@ def test_lazy_slab_matches_materialized_image_and_line_for_existing_operations()
         (Crop(axis=1, start=1, stop=4), ReverseAxis(axis=0), CenteredFFT(axis=2)),
     ):
         _assert_image_and_line_match(data, operations)
+
+
+def test_slab_matches_materialized_after_crop_reverse_same_axis():
+    data = np.arange(4 * 5 * 6).reshape(4, 5, 6)
+    document = ArrayDocument(
+        data,
+        operations=(
+            Crop(axis=1, start=1, stop=4),
+            ReverseAxis(axis=1),
+        ),
+    )
+    state = ViewState.from_shape(document.current_shape).with_image_axes(0, 1)
+
+    lazy = make_image_from_slab(evaluate_slab(document, request_for_image(state)), request_for_image(state))
+    full = make_image(document.materialize(), state)
+
+    np.testing.assert_array_equal(lazy.data, full.data)
 
 
 def test_lazy_slab_matches_materialized_complex_axis_operations():
@@ -177,6 +195,92 @@ def test_random_small_arrays_match_materialized_image_export_profile_and_scalar_
             np.testing.assert_allclose(
                 make_scalar_from_slab(evaluate_slab(document, scalar_request), scalar_request),
                 np.asarray(apply_channel(full[scalar_index if scalar_index else ()], channel)).item(),
+                rtol=1e-6,
+                atol=1e-6,
+            )
+
+
+@st.composite
+def _small_document_specs(draw):
+    ndim = draw(st.integers(2, 4))
+    shape = tuple(draw(st.integers(2, 5)) for _ in range(ndim))
+    current_shape = shape
+    operations = []
+    max_ops = draw(st.integers(0, 5))
+    for _ in range(max_ops):
+        candidates = ["reverse", "crop", "fftshift", "fft"]
+        if len(current_shape) > 1:
+            candidates.extend(["mean", "rss"])
+        kind = draw(st.sampled_from(candidates))
+        axis = draw(st.integers(0, len(current_shape) - 1))
+        size = current_shape[axis]
+        if kind == "reverse":
+            operations.append(ReverseAxis(axis))
+        elif kind == "crop":
+            start = draw(st.integers(0, size - 1))
+            stop = draw(st.integers(start + 1, size))
+            operations.append(Crop(axis, start, stop))
+            current_shape = current_shape[:axis] + (stop - start,) + current_shape[axis + 1 :]
+        elif kind == "fftshift":
+            operations.append(FFTShift(axis))
+        elif kind == "fft":
+            operations.append(CenteredFFT(axis))
+        elif kind == "mean" and len(current_shape) > 1:
+            operations.append(Mean(axis))
+            current_shape = current_shape[:axis] + current_shape[axis + 1 :]
+        elif kind == "rss" and len(current_shape) > 1:
+            operations.append(RootSumSquares(axis))
+            current_shape = current_shape[:axis] + current_shape[axis + 1 :]
+        if len(current_shape) < 1:
+            break
+    return shape, tuple(operations)
+
+
+@given(_small_document_specs())
+@settings(max_examples=80, deadline=None)
+def test_hypothesis_lazy_slab_matches_materialized_image_line_scalar_and_export(spec):
+    shape, operations = spec
+    data = np.arange(int(np.prod(shape)), dtype=float).reshape(shape)
+    document = ArrayDocument(data, operations=operations)
+    if len(document.current_shape) < 1:
+        return
+    full = document.materialize()
+    state = ViewState.from_shape(document.current_shape)
+
+    if state.image_axes is not None:
+        image_request = request_for_image(state)
+        np.testing.assert_allclose(
+            make_image_from_slab(evaluate_slab(document, image_request), image_request).data,
+            make_image(full, state).data,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+    line_request = request_for_line(state)
+    np.testing.assert_allclose(
+        make_line_from_slab(evaluate_slab(document, line_request), line_request).data,
+        make_line(full, state).data,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+    scalar_index = tuple(min(1, size - 1) for size in state.shape)
+    scalar_request = request_for_scalar(state, scalar_index)
+    np.testing.assert_allclose(
+        make_scalar_from_slab(evaluate_slab(document, scalar_request), scalar_request),
+        np.asarray(apply_channel(full[scalar_index], state.channel)).item(),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+    if state.image_axes is not None:
+        frame_axis = next((axis for axis in range(state.ndim) if axis not in state.image_axes and state.shape[axis] > 1), None)
+        if frame_axis is not None:
+            frame_index = min(1, state.shape[frame_axis] - 1)
+            export_request = request_for_export_frame(state, frame_axis, frame_index)
+            np.testing.assert_allclose(
+                make_image_from_slab(evaluate_slab(document, export_request), export_request).data,
+                make_export_frame(full, state, frame_axis, frame_index).data,
                 rtol=1e-6,
                 atol=1e-6,
             )

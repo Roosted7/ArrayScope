@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -149,9 +151,13 @@ def loads_view_recipe(text: str, base_shape):
 
 
 def save_view_recipe(path, recipe: ViewRecipe):
-    with open(path, "w", encoding="utf-8") as recipe_file:
+    path = os.fspath(path)
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as recipe_file:
+        temporary_path = recipe_file.name
         recipe_file.write(dumps_view_recipe(recipe))
         recipe_file.write("\n")
+    os.replace(temporary_path, path)
 
 
 def load_view_recipe(path, base_shape):

@@ -22,3 +22,21 @@ def test_evaluation_controller_ignores_stale_results(qt_app):
 
     assert done == ["new"]
     assert stale == ["old"]
+
+
+def test_evaluation_controller_dedupes_and_limits_prefetch(qt_app):
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    controller = EvaluationController()
+    first = controller.start_prefetch(lambda: "a", key=("prefetch", 1))
+    duplicate = controller.start_prefetch(lambda: "b", key=("prefetch", 1))
+    controller._max_prefetch = 1
+    limited = controller.start_prefetch(lambda: "c", key=("prefetch", 2))
+
+    controller.shutdown_for_close()
+
+    assert first.scheduled
+    assert not duplicate.scheduled
+    assert duplicate.reason == "deduped"
+    assert not limited.scheduled
+    assert limited.reason == "limited"

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import fields, is_dataclass
 
 from arrayscope.operations.pipeline import OperationStep, evaluate_shape
@@ -119,9 +121,13 @@ def loads_recipe_steps(text: str, base_shape):
 
 
 def save_recipe(path, operations):
-    with open(path, "w", encoding="utf-8") as recipe_file:
+    path = os.fspath(path)
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as recipe_file:
+        temporary_path = recipe_file.name
         recipe_file.write(dumps_recipe(operations))
         recipe_file.write("\n")
+    os.replace(temporary_path, path)
 
 
 def load_recipe(path, base_shape):

@@ -32,3 +32,11 @@ rows left-to-right.
 
 Operations without a slab rule may fall back to full materialization, but all currently registered
 operations have exact slab behavior.
+
+Phase 4b tightened slice composition for lazy slabs. Crop, reverse, and fftshift
+map requested output coordinates back to explicit source index sequences, then
+convert those sequences back to basic slices only when that is exact. Non-basic
+sequences are applied axis-by-axis with isolated indexing so NumPy advanced
+index broadcasting cannot change dimensional meaning. Materialized-vs-lazy
+differential tests now cover image, profile, scalar, and export-frame paths,
+including generated crop/reverse/reduction/FFT combinations.

@@ -44,15 +44,18 @@ class WindowMenuMixin:
             file_menu.addAction(action)
 
         view_menu = self.menuBar().addMenu("View")
-        operation_action = self.operation_dock.toggleViewAction()
-        operation_action.triggered.connect(lambda visible: self._set_operation_dock_visible_from_user(visible))
-        profile_action = self.profile_dock.toggleViewAction()
-        profile_action.triggered.connect(lambda visible: self._set_profile_dock_visible_from_user(visible))
+        operation_action = self.layout_manager.make_managed_dock_action(
+            "Operations", self.operation_dock, self._set_operation_dock_visible_from_user
+        )
+        profile_action = self.layout_manager.make_managed_dock_action(
+            "Profile", self.profile_dock, self._set_profile_dock_visible_from_user
+        )
         view_menu.addAction(operation_action)
         view_menu.addAction(profile_action)
         if hasattr(self, "inspection_dock"):
-            inspection_action = self.inspection_dock.toggleViewAction()
-            inspection_action.triggered.connect(lambda visible: self._set_inspection_dock_visible_from_user(visible))
+            inspection_action = self.layout_manager.make_managed_dock_action(
+                "Inspection", self.inspection_dock, self._set_inspection_dock_visible_from_user
+            )
             view_menu.addAction(inspection_action)
         command_palette_action = QtGui.QAction("Command Palette", self)
         set_action_icon(command_palette_action, "search")
@@ -173,14 +176,11 @@ class WindowMenuMixin:
         for controller_name in ("evaluation_controller", "pixel_evaluation_controller", "profile_evaluation_controller"):
             controller = getattr(self, controller_name, None)
             if controller is not None:
-                controller.cancel_pending()
+                controller.shutdown_for_close()
         if hasattr(self, "_profile_timer"):
             self._profile_timer.stop()
-        for dock_name in ("inspection_dock", "profile_dock", "operation_dock"):
-            dock = getattr(self, dock_name, None)
-            if dock is not None:
-                dock.hide()
-                dock.close()
+        if hasattr(self, "layout_manager"):
+            self.layout_manager.close_managed_docks_for_shutdown()
         super().closeEvent(event)
         Qt.QtCore.QTimer.singleShot(0, self._quit_if_last_arrayscope_window)
 
