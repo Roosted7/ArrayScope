@@ -72,12 +72,11 @@ class InspectionWorkflowMixin:
         if not hasattr(self, "inspection_dock"):
             return
         self._inspection_dock_user_visible = True
-        self.inspection_dock.setFloating(True)
-        if not self.inspection_dock.isFloating():
-            self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.inspection_dock)
-        self.inspection_dock.show()
+        if self.inspection_dock.isFloating():
+            self.inspection_dock.setFloating(False)
+        self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.inspection_dock)
+        self.layout_manager.set_dock_visible_preserving_canvas(self.inspection_dock, True)
         self.inspection_dock.raise_()
-        self._schedule_view_geometry_refresh()
 
     def _refresh_inspection_dock(self):
         if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
@@ -131,11 +130,7 @@ class InspectionWorkflowMixin:
         return np.asarray(source)
 
     def _set_inspection_dock_visible_from_user(self, visible):
-        self._inspection_dock_user_visible = bool(visible)
-        if visible:
-            self.inspection_dock.setFloating(True)
-        self.inspection_dock.setVisible(bool(visible))
-        self._schedule_view_geometry_refresh()
+        self.layout_manager.set_inspection_dock_visible_from_user(visible)
 
     def _show_image_context_menu(self, global_pos, image_point=None):
         menu = QtWidgets.QMenu(self)

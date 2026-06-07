@@ -11,6 +11,16 @@ ROI, profile interaction, or viewport behavior.
 - Use Fit and 1:1 and confirm those actions intentionally change the viewport.
 - Show/hide Profile, Operations, and Inspection docks and confirm the image
   viewport does not jump.
+- Open the Inspection dock and confirm it defaults to a left-docked panel next
+  to the 2D view, not a floating overlay.
+- Close a non-floating dock and confirm the 2D view keeps its size when the main
+  window can reasonably shrink or move to preserve it.
+- Float each dock manually and confirm it has a usable title bar, can be moved,
+  and exposes a bottom-right resize grip.
+- Close the Inspection dock directly, then perform unrelated UI actions; it
+  should not re-open unless explicitly requested.
+- Close the main window while docks have been shown/floated; the application
+  should fully exit when no other ArrayScope windows remain.
 
 ## Coordinates
 
@@ -50,4 +60,3 @@ ROI, profile interaction, or viewport behavior.
 
 - Run a focused UI test with `ARRAYSCOPE_STRICT_UI=1` and confirm callback
   exceptions fail the test instead of being swallowed.
-

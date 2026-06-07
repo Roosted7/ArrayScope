@@ -217,6 +217,8 @@ def test_dimension_strip_wraps_for_many_dimensions(qt_app):
 
 
 def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
+    from pyqtgraph.Qt import QtCore
+
     _clear_arrayscope_settings()
 
     for name in list(sys.modules):
@@ -254,7 +256,8 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         win._show_inspection_dock()
         _process_events(qt_app)
         assert win.inspection_dock.isVisible()
-        assert win.inspection_dock.isFloating()
+        assert not win.inspection_dock.isFloating()
+        assert win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
         _grab_widget(win.inspection_dock.widget(), "arrayscope_roi_inspection_dock.png", min_width=240, min_height=260)
     finally:
         win.close()

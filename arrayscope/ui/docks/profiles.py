@@ -11,11 +11,12 @@ from pyqtgraph.Qt import QtWidgets
 import numpy as np
 
 from arrayscope.display.line_plot import LinePlotController
+from arrayscope.ui.docks.common import StandardDockWidget, add_size_grip, configure_standard_dock
 from arrayscope.ui.file_dialogs import get_save_file_name
 from arrayscope.ui.icons import set_button_icon
 
 
-class ProfileDock(QtWidgets.QDockWidget):
+class ProfileDock(StandardDockWidget):
     def __init__(self, parent, on_axis_changed):
         super().__init__("Profile", parent)
         self.setObjectName("ProfileDock")
@@ -52,6 +53,7 @@ class ProfileDock(QtWidgets.QDockWidget):
 
         self.line_plot = LinePlotController(parent)
         layout.addWidget(self.line_plot.widget, 1)
+        add_size_grip(layout)
 
         body.setLayout(layout)
         self.setWidget(body)
@@ -61,11 +63,7 @@ class ProfileDock(QtWidgets.QDockWidget):
             | Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
             | Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
+        configure_standard_dock(self, min_size=(360, 220))
         self.setWindowTitle("Profile")
         self.resize(560, 260)
 
