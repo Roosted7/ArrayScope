@@ -110,3 +110,33 @@ def test_imageview_inspection_tool_validation(qt_app):
     with pytest.raises(ValueError, match="unknown inspection tool"):
         view.setInspectionTool("bad")
     view.close()
+
+
+def test_imageview_preserves_view_range_for_same_shape_by_default(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.zeros((8, 10), dtype=float))
+    view.getView().setRange(xRange=(2, 5), yRange=(1, 6), padding=0)
+    before = view.getView().viewRange()
+
+    view.setImage(np.ones((8, 10), dtype=float))
+    after = view.getView().viewRange()
+
+    assert after == before
+    view.close()
+
+
+def test_imageview_resets_view_range_when_shape_changes(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.viewport import ViewportPolicy
+
+    view = ImageView2D()
+    view.setImage(np.zeros((8, 10), dtype=float))
+    view.getView().setRange(xRange=(2, 5), yRange=(1, 6), padding=0)
+
+    view.setImage(np.ones((4, 5), dtype=float), viewport_policy=ViewportPolicy.RESET_FOR_NEW_SHAPE)
+    after = view.getView().viewRange()
+
+    assert after != [[2.0, 5.0], [1.0, 6.0]]
+    view.close()

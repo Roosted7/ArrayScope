@@ -14,7 +14,9 @@ dependencies:
   - imageio-ffmpeg>=0.4
   - pillow>=8.0
   - pytest
+  - hypothesis
   - pip
   - pip:
       - -e .
+      - pytest-qt>=4.4.0
       - qt-material-icons>=0.3.0

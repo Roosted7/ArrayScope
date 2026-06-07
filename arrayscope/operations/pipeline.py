@@ -8,8 +8,9 @@ from typing import Protocol, Tuple
 
 import numpy as np
 
-from arrayscope.operations import dim_ops
+from arrayscope.core.axis_info import axes_for_shape, output_axes_for_operations
 from arrayscope.core.axis_utils import validate_axis
+from arrayscope.operations import dim_ops
 
 
 Shape = Tuple[int, ...]
@@ -208,16 +209,28 @@ class ArrayDocument:
 
     base_data: object
     steps: Tuple[OperationStep, ...] = field(default_factory=tuple)
+    revision: int = 0
+    base_axes: tuple = field(default_factory=tuple)
+    current_axes: tuple = field(init=False)
     current_shape: Shape = field(init=False)
 
-    def __init__(self, base_data, operations=(), *, steps=None):
+    def __init__(self, base_data, operations=(), *, steps=None, revision=0, axes=None):
         object.__setattr__(self, "base_data", base_data)
         if steps is None:
             steps = tuple(OperationStep(operation) for operation in operations)
         else:
             steps = tuple(_coerce_step(step) for step in steps)
+        base_shape = np.shape(self.base_data)
+        base_axes = axes_for_shape(axes, base_shape)
+        current_shape = evaluate_shape(base_shape, tuple(step.operation for step in steps if step.enabled))
+        current_axes = output_axes_for_operations(base_axes, tuple(step.operation for step in steps if step.enabled))
+        if tuple(axis.size for axis in current_axes) != tuple(current_shape):
+            current_axes = axes_for_shape(current_axes, current_shape)
         object.__setattr__(self, "steps", steps)
-        object.__setattr__(self, "current_shape", evaluate_shape(np.shape(self.base_data), self.enabled_operations))
+        object.__setattr__(self, "revision", int(revision))
+        object.__setattr__(self, "base_axes", base_axes)
+        object.__setattr__(self, "current_shape", current_shape)
+        object.__setattr__(self, "current_axes", current_axes)
 
     @property
     def shape(self) -> Shape:
@@ -232,24 +245,30 @@ class ArrayDocument:
         return tuple(step.operation for step in self.steps if step.enabled)
 
     def with_operation(self, operation: ArrayOperation) -> "ArrayDocument":
-        return ArrayDocument(self.base_data, steps=self.steps + (OperationStep(operation),))
+        return ArrayDocument(self.base_data, steps=self.steps + (OperationStep(operation),), revision=self.revision, axes=self.base_axes)
 
     def without_last_operation(self) -> "ArrayDocument":
         if not self.steps:
             return self
-        return ArrayDocument(self.base_data, steps=self.steps[:-1])
+        return ArrayDocument(self.base_data, steps=self.steps[:-1], revision=self.revision, axes=self.base_axes)
 
     def with_step_enabled(self, index, enabled) -> "ArrayDocument":
         index = _validate_step_index(index, self.steps)
         steps = list(self.steps)
         steps[index] = replace(steps[index], enabled=bool(enabled))
-        return ArrayDocument(self.base_data, steps=tuple(steps))
+        return ArrayDocument(self.base_data, steps=tuple(steps), revision=self.revision, axes=self.base_axes)
 
     def with_replaced_operation(self, index, operation: ArrayOperation) -> "ArrayDocument":
         index = _validate_step_index(index, self.steps)
         steps = list(self.steps)
         steps[index] = replace(steps[index], operation=operation)
-        return ArrayDocument(self.base_data, steps=tuple(steps))
+        return ArrayDocument(self.base_data, steps=tuple(steps), revision=self.revision, axes=self.base_axes)
+
+    def with_data_changed(self, base_data=None) -> "ArrayDocument":
+        data = self.base_data if base_data is None else base_data
+        axes = self.base_axes if data is self.base_data else None
+        steps = self.steps if data is self.base_data else ()
+        return ArrayDocument(data, steps=steps, revision=self.revision + 1, axes=axes)
 
     def materialize(self):
         return evaluate(self.base_data, self.enabled_operations)

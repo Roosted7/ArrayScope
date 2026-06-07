@@ -2,8 +2,10 @@
 
 ## Status
 
-Proposal. Do not implement montage, linked-window sync, or full view recipes
-against positional axes alone.
+First internal implementation. `arrayscope.core.axis_info.AxisInfo` exists and
+`ArrayDocument` exposes `base_axes` and `current_axes` matching the current
+operation stack. Full session role matching, linked-window sync, editable labels,
+coordinates, and xarray integration remain future work.
 
 ## Problem
 
@@ -23,7 +25,7 @@ and reconstruction-pipeline workflows.
 
 ## Proposed Model
 
-Add a Qt-free axis metadata model in `arrayscope.core.axis_info`:
+ArrayScope has a Qt-free axis metadata model in `arrayscope.core.axis_info`:
 
 ```python
 from dataclasses import dataclass, replace
@@ -66,8 +68,8 @@ Every shape-changing operation should transform axis metadata alongside shape:
 - Split complex keeps the axis ID, updates `size` to 2, and may annotate
   `coordinate="real-imag"`.
 
-Shape prediction and axis metadata prediction should be paired. A future
-operation API can expose:
+Shape prediction and axis metadata prediction are paired internally through
+helper functions. A future operation API can expose:
 
 ```python
 def output_shape(self, shape: Shape) -> Shape: ...
@@ -106,10 +108,10 @@ positional `AxisInfo` values and mark the session as positional.
 
 ## Acceptance Criteria For First Implementation
 
-- `AxisInfo` and helpers live in `arrayscope.core` and import no Qt.
-- `ArrayDocument` can expose `current_axes` matching `current_shape`.
-- Existing operation tests gain axis metadata cases for crop, reduction,
+- [x] `AxisInfo` and helpers live in `arrayscope.core` and import no Qt.
+- [x] `ArrayDocument` can expose `current_axes` matching `current_shape`.
+- [x] Existing operation tests gain axis metadata cases for crop, reduction,
   combine/split, and FFT-like preservation.
-- The UI can keep using integer axes while showing labels from `AxisInfo`.
-- No montage or sync feature relies only on post-operation integer axis
+- [x] The UI can keep using integer axes while showing labels from `AxisInfo`.
+- [x] No montage or sync feature relies only on post-operation integer axis
   positions.

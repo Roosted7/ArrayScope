@@ -64,7 +64,11 @@ class OperationEvaluator:
         self._profile_cache = BoundedArrayCache(DEFAULT_PROFILE_CACHE_BYTES, 256)
 
     def set_document(self, document: ArrayDocument):
-        if document.steps != self.document.steps or document.base_data is not self.document.base_data:
+        if (
+            document.steps != self.document.steps
+            or document.base_data is not self.document.base_data
+            or document.revision != self.document.revision
+        ):
             self.document = document
             self.clear_cache()
         else:
@@ -294,7 +298,9 @@ class OperationEvaluator:
 
 
 def _document_key(document: ArrayDocument):
-    return (id(document.base_data), tuple(np.shape(document.base_data)), document.steps)
+    dtype = getattr(document.base_data, "dtype", None)
+    dtype_key = None if dtype is None else str(np.dtype(dtype))
+    return (id(document.base_data), tuple(np.shape(document.base_data)), dtype_key, int(document.revision), document.steps)
 
 
 def _lut_key(colormap_lut):

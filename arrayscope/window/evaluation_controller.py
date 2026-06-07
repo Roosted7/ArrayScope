@@ -5,6 +5,7 @@ from __future__ import annotations
 from queue import SimpleQueue
 
 from arrayscope.app.qt_binding import prefer_pyside6
+from arrayscope.app.errors import handle_ui_exception, traceback_text
 
 prefer_pyside6()
 
@@ -22,6 +23,7 @@ class _EvaluationRunnable(Qt.QtCore.QRunnable):
         try:
             self.queue.put(("finished", self.generation, self.fn()))
         except Exception as exc:
+            exc.arrayscope_traceback = traceback_text(exc)
             self.queue.put(("failed", self.generation, exc))
 
 
@@ -36,6 +38,7 @@ class _PrefetchRunnable(Qt.QtCore.QRunnable):
         try:
             self.queue.put(("prefetch_done", self.key, self.fn()))
         except Exception as exc:
+            exc.arrayscope_traceback = traceback_text(exc)
             self.queue.put(("prefetch_failed", self.key, exc))
 
 
@@ -97,8 +100,8 @@ class EvaluationController(Qt.QtCore.QObject):
                 if on_done is not None:
                     try:
                         on_done(value)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        handle_ui_exception("prefetch callback", exc)
                 continue
             if kind == "prefetch_failed":
                 self._runnables.pop(key, None)
@@ -133,3 +136,5 @@ class EvaluationController(Qt.QtCore.QObject):
             return
         if on_error is not None:
             on_error(exc)
+        else:
+            handle_ui_exception("background evaluation", exc)

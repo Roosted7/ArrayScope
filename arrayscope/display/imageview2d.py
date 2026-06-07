@@ -18,6 +18,7 @@ from arrayscope.core.roi import (
     close_polygon,
     simplify_polyline,
 )
+from arrayscope.display.viewport import ViewportPolicy
 
 
 class ImageView2D(QtWidgets.QWidget):
@@ -83,17 +84,17 @@ class ImageView2D(QtWidgets.QWidget):
             self.view = view
         self.graphicsView.setCentralItem(self.view)
         self.view.setAspectLocked(True)
-        self.view.invertY()
+        self.view.invertY(True)
         
         # Create image item if not provided
         if imageItem is None:
-            self.imageItem = ImageItem()
+            self.imageItem = ImageItem(axisOrder="row-major")
         else:
             self.imageItem = imageItem
         self.view.addItem(self.imageItem)
         
         # Setup histogram
-        self.histogramImageItem = ImageItem()
+        self.histogramImageItem = ImageItem(axisOrder="row-major")
         self.histogram.setImageItem(self.histogramImageItem)
         self.histogram.setLevelMode('mono')  # Force mono mode for scalar values
         self.histogram.item.sigLevelsChanged.connect(self._on_histogram_levels_changed)
@@ -141,9 +142,9 @@ class ImageView2D(QtWidgets.QWidget):
         self.histogram = pg.HistogramLUTWidget()
         self.layout.addWidget(self.histogram)
         
-    def setImage(self, img, autoRange=True, autoLevels=True, levels=None, 
+    def setImage(self, img, autoRange=None, autoLevels=True, levels=None, 
                  pos=None, scale=None, transform=None, autoHistogramRange=True,
-                 histogramData=None):
+                 histogramData=None, viewport_policy=ViewportPolicy.PRESERVE):
         """
         Set the image to be displayed.
         
@@ -168,11 +169,14 @@ class ImageView2D(QtWidgets.QWidget):
         """
         if not isinstance(img, np.ndarray):
             raise TypeError("Image must be a numpy array")
+        viewport_policy = _coerce_viewport_policy(viewport_policy, autoRange)
             
         is_rgb = self._is_rgb_image(img)
         if img.ndim != 2 and not is_rgb:
             raise ValueError("ImageView2D only supports 2D scalar or RGB images")
             
+        previous_shape = None if self.image is None else tuple(self.image.shape[:2])
+        previous_range = self.view.viewRange()
         self.image = img
         self.imageDisp = None
         self.histogramSource = histogramData
@@ -207,9 +211,10 @@ class ImageView2D(QtWidgets.QWidget):
             
         # Update aspect ratio based on display mode
         self._updateAspectRatio()
-        
-        # Auto range the view
-        if autoRange:
+
+        if viewport_policy == ViewportPolicy.PRESERVE and previous_shape == tuple(img.shape[:2]):
+            self.view.setRange(xRange=previous_range[0], yRange=previous_range[1], padding=0)
+        elif viewport_policy in (ViewportPolicy.FIT_ONCE, ViewportPolicy.RESET_FOR_NEW_SHAPE):
             self.autoRange()
             
     def updateImage(self, autoHistogramRange=True):
@@ -711,12 +716,6 @@ class ImageView2D(QtWidgets.QWidget):
         elif self.displayMode == 'fit':
             # Fit: allow free aspect so the whole image fits inside the view box
             self.view.setAspectLocked(False)
-            # Ensure view box ranges cover the image exactly
-            self.view.autoRange()
-        
-        # Trigger a refresh of the view
-        if hasattr(self, 'imageItem') and self.imageItem is not None:
-            self.view.autoRange()
 
     # --- Qt Events -----------------------------------------------------
     def eventFilter(self, obj, event):
@@ -774,8 +773,14 @@ class ImageView2D(QtWidgets.QWidget):
     def resizeEvent(self, event):
         """On resize, if in 'fit' mode keep the image fully visible."""
         super().resizeEvent(event)
-        if self.displayMode == 'fit' and self.image is not None:
-            self.view.autoRange()
+
+
+def _coerce_viewport_policy(viewport_policy, auto_range):
+    if auto_range is not None:
+        viewport_policy = ViewportPolicy.FIT_ONCE if bool(auto_range) else ViewportPolicy.PRESERVE
+    if isinstance(viewport_policy, ViewportPolicy):
+        return viewport_policy
+    return ViewportPolicy(str(viewport_policy))
 
 
 def _default_roi_label(kind, index):

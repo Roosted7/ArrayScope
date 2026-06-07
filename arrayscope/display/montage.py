@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from arrayscope.display.geometry import MontageGeometry
 from arrayscope.display.slice_engine import DisplayImage
 
 
@@ -18,14 +19,24 @@ class MontageLayout:
     gap: int = 1
 
 
-def make_montage_from_images(images, *, histogram_images=None, columns=None, gap=1):
+@dataclass(frozen=True)
+class RenderedMontage:
+    image: DisplayImage
+    geometry: MontageGeometry
+
+
+def make_montage(images, *, histogram_images=None, columns=None, gap=1, indices=None):
     images = tuple(np.asarray(image) for image in images)
     if not images:
-        return DisplayImage(np.zeros((1, 1), dtype=float))
+        geometry = MontageGeometry(indices=(), tile_shape=(1, 1), columns=1, rows=0, gap=max(0, int(gap)))
+        return RenderedMontage(DisplayImage(np.zeros((1, 1), dtype=float)), geometry)
     first = images[0]
     if first.ndim not in (2, 3):
         raise ValueError(f"montage images must be 2D scalar or RGB, got shape {first.shape}")
     count = len(images)
+    indices = tuple(range(count)) if indices is None else tuple(int(index) for index in indices)
+    if len(indices) != count:
+        raise ValueError("indices length must match image count")
     columns = int(columns or np.ceil(np.sqrt(count)))
     columns = max(1, min(columns, count))
     rows = int(np.ceil(count / columns))
@@ -45,7 +56,8 @@ def make_montage_from_images(images, *, histogram_images=None, columns=None, gap
         montage[y0 : y0 + height, x0 : x0 + width, ...] = image
         if hist_montage is not None and index < len(histogram_images):
             hist_montage[y0 : y0 + height, x0 : x0 + width] = histogram_images[index]
-    return DisplayImage(data=montage, histogram_data=hist_montage)
+    geometry = MontageGeometry(indices=indices, tile_shape=(height, width), columns=columns, rows=rows, gap=gap)
+    return RenderedMontage(DisplayImage(data=montage, histogram_data=hist_montage), geometry)
 
 
 def optimal_montage_columns(count, tile_shape, viewport_shape, gap=1):

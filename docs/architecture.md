@@ -11,6 +11,11 @@ source of array-view state.
   lines.
 - `arrayscope.display.montage`: tiles already display-prepared image frames into 2D montage/collage
   images.
+- `arrayscope.display.geometry`: the pure display-coordinate contract for normal image and montage
+  views. It maps display points to array indices and profile states using the geometry committed with
+  the current image.
+- `arrayscope.display.viewport`: explicit viewport update policy for preserving, fitting, or
+  resetting the 2D ViewBox.
 - `arrayscope.operations.pipeline`: immutable NumPy operations plus shape prediction.
 - `arrayscope.operations.slabs`: plans and evaluates the smallest exact base-data slab needed
   for image, profile, scalar hover, and export-frame requests.
@@ -19,13 +24,16 @@ source of array-view state.
 - `arrayscope.operations.pipeline.OperationStep`: ordered operation rows with enable/disable
   state. `ArrayDocument.operations` is the active enabled operation sequence; `steps` is the
   pipeline UI/document sequence.
+- `arrayscope.operations.pipeline.ArrayDocument.revision`: explicit input-data revision token used
+  in evaluator cache keys. Base arrays are treated as immutable until the owner calls
+  `notify_data_changed()` or replaces the data.
 - `arrayscope.operations.coordinator`: owns the operation document, evaluator, stack edits,
   and materialization.
 - `arrayscope.operations.evaluator.OperationEvaluator`: UI-thread owner of display/profile caches,
   evaluation status, and diagnostics. Background workers use immutable document snapshots and pure
   evaluation helpers; they must not mutate the live evaluator directly.
-- `arrayscope.profiles.model` / `arrayscope.profiles.coordinator`: maps image-space marker positions to
-  profile view states and line results.
+- `arrayscope.profiles.model` / `arrayscope.profiles.coordinator`: profile display policy and line
+  result orchestration. Display-point to profile-state mapping belongs to `arrayscope.display.geometry`.
 - `arrayscope.core.roi`: Qt-free ROI geometry, line/polyline/freehand sampling, masks, and finite-value
   statistics for inspection workflows.
 - `arrayscope.core.histograms`: Qt-free histogram and shared-range comparison helpers for ROI values.
@@ -61,6 +69,17 @@ User actions update `ViewState` or the operation coordinator. `render()` then:
 4. applies view-only axis flips;
 5. updates docks, labels, HUD text, compact controls, and cache status.
 
+Display images are row-major `(height, width)`. Display `x` is image column,
+display `y` is image row, and `ViewState.image_axes` is `(y_axis, x_axis)`.
+ROI geometry uses the same display coordinates. Montage tile shapes are also
+`(height, width)`. Axis flips are view-only ViewBox inversions and do not change
+the array index represented by image-item coordinates.
+
+Every committed 2D image has a matching `DisplayGeometry`. Pixel hover, live
+profiles, profile marker clamping, montage tile lookup, and future linked
+cursor behavior must use that geometry instead of reconstructing coordinates
+from widget state.
+
 Do not read widget values to reconstruct `ViewState`. Widget state is an output
 of render, except transient UI-only state such as dock visibility and histogram
 interaction.
@@ -72,6 +91,13 @@ explicit materialize/save/export actions. Display evaluation uses slab-first req
 image/profile remains visible and stale worker results cannot overwrite newer user intent. Workers
 capture immutable `ArrayDocument`/`ViewState` snapshots and return results to the UI thread; only the
 UI thread commits cache/status updates to the live evaluator.
+
+Viewport changes are explicit. Normal renders preserve the current ViewBox
+range. The view fits or resets only on the first image, display-shape changes,
+or user-requested Fit/1:1 actions.
+
+In development and tests, `ARRAYSCOPE_STRICT_UI=1` makes GUI programming
+exceptions log their traceback and re-raise instead of being silently swallowed.
 
 ## Interdependency Map
 
@@ -125,6 +151,9 @@ graphics items, emits complete ROI geometry, and displays a movable semi-transpa
 The window computes ROI values from the current displayed scalar image or histogram source and sends
 statistics/histogram results back to the dock and overlay. Extra comparison layers are internal
 scaffolding for same-ROI histogram comparison and are not full session/sync support.
+ROI sampling is display-space in Phase 4a. Montage histogram sources contain
+`NaN` in gaps, so ROI statistics ignore inter-tile spacing. Full nD ROI
+back-projection is intentionally deferred.
 
 The Profile dock can plot multiple active profile axes. The window evaluates each profile state through
 the existing line evaluator/cache and sends all results to one plot. Complex profile mode is dock-local:

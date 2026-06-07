@@ -51,42 +51,44 @@ class OperationCoordinator:
         return self.set_document(self.document.without_last_operation())
 
     def clear(self):
-        return self.set_document(ArrayDocument(self.base_data))
+        return self.set_document(self._document(steps=()))
 
     def delete(self, index):
         steps = delete_step(self.document.steps, index, self.base_data.shape)
-        return self.set_document(ArrayDocument(self.base_data, steps=steps))
+        return self.set_document(self._document(steps=steps))
 
     def move(self, index, direction):
         steps = move_step(self.document.steps, index, direction, self.base_data.shape)
-        return self.set_document(ArrayDocument(self.base_data, steps=steps))
+        return self.set_document(self._document(steps=steps))
 
     def reorder(self, order):
         steps = reorder_steps(self.document.steps, order, self.base_data.shape)
-        return self.set_document(ArrayDocument(self.base_data, steps=steps))
+        return self.set_document(self._document(steps=steps))
 
     def set_enabled(self, index, enabled):
         steps = set_step_enabled(self.document.steps, index, enabled, self.base_data.shape)
-        return self.set_document(ArrayDocument(self.base_data, steps=steps))
+        return self.set_document(self._document(steps=steps))
 
     def replace_operation(self, index, operation_id, axis=None, parameters=None):
         operation = create_operation(operation_id, axis=axis, parameters=parameters or {})
         steps = replace_step_operation(self.document.steps, index, operation, self.base_data.shape)
-        return self.set_document(ArrayDocument(self.base_data, steps=steps))
+        return self.set_document(self._document(steps=steps))
 
     def load_operations(self, operations):
-        return self.set_document(ArrayDocument(self.base_data, operations=tuple(operations)))
+        return self.set_document(ArrayDocument(self.base_data, operations=tuple(operations), revision=self.document.revision, axes=self.document.base_axes))
 
     def load_steps(self, steps):
-        return self.set_document(ArrayDocument(self.base_data, steps=tuple(steps)))
+        return self.set_document(self._document(steps=tuple(steps)))
 
     def replace_base_data(self, data):
-        self.base_data = data
-        return self.set_document(ArrayDocument(self.base_data))
+        return self.set_document(self.document.with_data_changed(data))
+
+    def mark_base_data_changed(self):
+        return self.set_document(self.document.with_data_changed())
 
     def materialize(self):
         self.base_data = np.array(self.document.materialize(), copy=True)
-        return self.set_document(ArrayDocument(self.base_data))
+        return self.set_document(self.document.with_data_changed(self.base_data))
 
     def operation_shapes(self):
         shapes = []
@@ -112,6 +114,9 @@ class OperationCoordinator:
     def _reject_scalar(self, document):
         if len(document.current_shape) < 1:
             raise ValueError("operation would produce a scalar, which this viewer cannot display yet")
+
+    def _document(self, *, steps):
+        return ArrayDocument(self.base_data, steps=tuple(steps), revision=self.document.revision, axes=self.document.base_axes)
 
 
 def _operation_output_dtype(dtype, operation):
