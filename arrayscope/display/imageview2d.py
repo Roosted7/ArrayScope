@@ -18,7 +18,8 @@ from arrayscope.core.roi import (
     close_polygon,
     simplify_polyline,
 )
-from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
+from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
 
 
 class ImageView2D(QtWidgets.QWidget):
@@ -72,6 +73,8 @@ class ImageView2D(QtWidgets.QWidget):
         self._drawing_points = []
         self._drawing_active = False
         self._freehand_spacing = 1.0
+        self.viewport_controller = ViewportController()
+        self._viewport_applying = False
         
         # Create the UI layout
         self.setupUI()
@@ -126,6 +129,7 @@ class ImageView2D(QtWidgets.QWidget):
         self.view.addItem(self._profile_vline)
         self.view.addItem(self._profile_hline)
         self.view.addItem(self._profile_handle)
+        self.view.sigRangeChanged.connect(self._on_view_range_changed)
         
     def setupUI(self):
         """Create the user interface"""
@@ -176,7 +180,6 @@ class ImageView2D(QtWidgets.QWidget):
             raise ValueError("ImageView2D only supports 2D scalar or RGB images")
             
         previous_shape = None if self.image is None else tuple(self.image.shape[:2])
-        previous_range = self.view.viewRange()
         self.image = img
         self.imageDisp = None
         self.histogramSource = histogramData
@@ -212,10 +215,7 @@ class ImageView2D(QtWidgets.QWidget):
         # Update aspect ratio based on display mode
         self._updateAspectRatio()
 
-        if viewport_policy == ViewportPolicy.PRESERVE and previous_shape == tuple(img.shape[:2]):
-            self.view.setRange(xRange=previous_range[0], yRange=previous_range[1], padding=0)
-        elif viewport_policy in (ViewportPolicy.FIT_ONCE, ViewportPolicy.RESET_FOR_NEW_SHAPE):
-            self.autoRange()
+        self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy)
             
     def updateImage(self, autoHistogramRange=True):
         """Update the displayed image"""
@@ -253,7 +253,11 @@ class ImageView2D(QtWidgets.QWidget):
     def autoRange(self):
         """Auto scale and pan the view to fit the image"""
         if self.imageDisp is not None:
-            self.view.autoRange()
+            self._viewport_applying = True
+            try:
+                self.view.autoRange(padding=0)
+            finally:
+                self._viewport_applying = False
             
     def _updateImageLevels(self, image=None):
         """Update the min/max levels from the current image data"""
@@ -506,11 +510,21 @@ class ImageView2D(QtWidgets.QWidget):
 
     def fitToView(self):
         self.setDisplayMode("fit")
-        self.view.autoRange()
+        if self.image is not None:
+            self._viewport_applying = True
+            try:
+                self.viewport_controller.fit(self.view)
+            finally:
+                self._viewport_applying = False
 
     def oneToOne(self):
         self.setDisplayMode("square_pixels")
-        self.view.autoRange()
+        if self.image is not None:
+            self._viewport_applying = True
+            try:
+                self.viewport_controller.one_to_one(self.view, self.image.shape[:2], self.graphicsView.viewport().size())
+            finally:
+                self._viewport_applying = False
 
     def autoWindow(self):
         self.autoLevels()
@@ -603,7 +617,7 @@ class ImageView2D(QtWidgets.QWidget):
         )
         roi_id = f"roi-{self._roi_counter + 1}"
         self._roi_counter += 1
-        color = (230, 60, 30) if color is None else tuple(int(value) for value in color[:3])
+        color = DEFAULT_ROI_COLORS[(self._roi_counter - 1) % len(DEFAULT_ROI_COLORS)] if color is None else tuple(int(value) for value in color[:3])
         selection = RoiSelection(
             id=roi_id,
             label=label or _default_roi_label(kind, self._roi_counter),
@@ -632,6 +646,13 @@ class ImageView2D(QtWidgets.QWidget):
 
     def roiSelections(self):
         return tuple(selection for _item, selection in self._roi_items.values())
+
+    def highlightRoi(self, roi_id):
+        roi_id = str(roi_id)
+        for current_id, (item, selection) in self._roi_items.items():
+            width = 4 if current_id == roi_id else 2
+            item.setPen(pg.mkPen(selection.color + (255,), width=width))
+        return roi_id in self._roi_items
 
     def _item_for_roi(self, selection):
         geometry = selection.geometry
@@ -717,8 +738,31 @@ class ImageView2D(QtWidgets.QWidget):
             # Fit: allow free aspect so the whole image fits inside the view box
             self.view.setAspectLocked(False)
 
+    def _apply_viewport_policy(self, image_shape, viewport_policy):
+        self._viewport_applying = True
+        try:
+            self.viewport_controller.apply_after_image(
+                self.view,
+                image_shape,
+                self.graphicsView.viewport().size(),
+                policy=viewport_policy,
+            )
+        finally:
+            self._viewport_applying = False
+
+    def _on_view_range_changed(self, *_args):
+        if not self._viewport_applying:
+            self.viewport_controller.note_user_range_changed()
+
     # --- Qt Events -----------------------------------------------------
     def eventFilter(self, obj, event):
+        if obj is self.graphicsView.viewport() and event.type() == QtCore.QEvent.Type.Resize:
+            if self.image is not None:
+                self._viewport_applying = True
+                try:
+                    self.viewport_controller.resize(self.view, self.image.shape[:2], event.size())
+                finally:
+                    self._viewport_applying = False
         if obj is self.graphicsView.viewport() and self._handle_context_menu_event(event):
             return True
         if obj is self.graphicsView.viewport() and self._handle_roi_drawing_event(event):

@@ -92,6 +92,57 @@ Goal: Interaction hardening, Coordinate-space contract, and GUI regression suite
 * [x] Cache revision/invalidation policy
 * [x] ROI coordinate-space policy
 
+## Phase 4b: hardening and debt burn-down
+
+Goal: fix bugs, harden interactions, and burn down technical debt before phase 5
+
+### P0 — correctness
+
+* [x] Fix lazy slab crop/reverse/reduction differential failures.
+* [x] Add materialized-vs-lazy differential tests.
+* [x] Fix file reload semantics so operations are preserved when compatible.
+* [x] Fix stale async pixel/profile/render commit guards.
+
+### P1 — interaction/state
+
+* [x] Replace toggleViewAction() with managed dock actions.
+* [x] Route all dock visibility through WindowLayoutManager.
+* [x] Add an architecture test forbidding direct managed dock show/hide.
+* [x] Implement ViewportController.
+* [x] Implement true Fit and true 1:1.
+* [x] Disable tiled-dimension X/Y buttons and defensively guard state transitions.
+* [x] Make empty montage/range text clear to scalar midpoint.
+* [x] Fix live-profile axis selection to set exactly one axis.
+
+### P2 — montage/ROI polish
+
+* [x] Move hover/context labels into DisplayGeometry.
+* [x] Fix duplicate montage context text.
+* [x] Add tile borders and “showing N of M tiles” warning.
+* [x] Convert ROI UI to RoiStore + QAbstractTableModel.
+* [x] Add ROI color/selection/delete synchronization.
+
+### P3 — performance and resilience
+
+* [x] Fix image prefetch key bug.
+* [x] Add in-flight prefetch dedupe and queue limits.
+* [x] Add local thread-pool cancellation/clear-on-close.
+* [x] Add cache diagnostics for hit/miss/prefetch usefulness.
+* [x] Consider smarter predictive cache only after measuring.
+
+### Testing infrastructure
+
+Run in CI:
+
+* [x] pure tests
+* [x] Hypothesis differential tests
+* [x] Qt interaction tests with pytest-qt
+* [x] strict UI mode tests
+* [x] screenshot smoke tests
+* [x] architecture guard tests
+
+At least one CI job should run: `ARRAYSCOPE_STRICT_UI=1 pytest tests/ui`
+
 ## Phase 5 — Multi-window and sessions
 
 Goal: make repeated inspection work reproducible and efficient.

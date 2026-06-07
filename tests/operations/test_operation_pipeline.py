@@ -161,6 +161,38 @@ def test_operation_step_edit_replaces_operation_and_updates_values():
     np.testing.assert_array_equal(edited.materialize(), data[:, 2:5])
 
 
+def test_reload_base_data_preserves_compatible_operations():
+    data = np.arange(2 * 4).reshape(2, 4)
+    document = ArrayDocument(data).with_operation(Crop(axis=1, start=1, stop=3)).with_operation(ReverseAxis(axis=0))
+
+    reloaded = document.reload_base_data(np.ones((2, 4)), preserve_steps=True)
+
+    assert reloaded.revision == document.revision + 1
+    assert reloaded.steps == document.steps
+    assert reloaded.current_shape == (2, 2)
+
+
+def test_reload_base_data_can_clear_operations_explicitly():
+    data = np.arange(2 * 4).reshape(2, 4)
+    document = ArrayDocument(data).with_operation(Crop(axis=1, start=1, stop=3))
+
+    reloaded = document.reload_base_data(np.ones((2, 4)), preserve_steps=False)
+
+    assert reloaded.steps == ()
+    assert reloaded.current_shape == (2, 4)
+
+
+def test_mark_base_data_changed_preserves_operations_and_base_identity():
+    data = np.arange(2 * 4).reshape(2, 4)
+    document = ArrayDocument(data).with_operation(ReverseAxis(axis=0))
+
+    changed = document.mark_base_data_changed()
+
+    assert changed.base_data is data
+    assert changed.steps == document.steps
+    assert changed.revision == document.revision + 1
+
+
 def test_axis_and_crop_validation_use_current_derived_shape():
     document = ArrayDocument(np.zeros((2, 3))).with_operation(Mean(axis=0))
 

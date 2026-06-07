@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -53,14 +52,13 @@ class RenderMixin:
         if container.sceneBoundingRect().contains(pos): 
             mousePoint = container.mapSceneToView(pos) 
             geometry = getattr(self, "display_geometry", None)
-            mapping = None if geometry is None else geometry.display_point_to_array_index(math.floor(mousePoint.x()), math.floor(mousePoint.y()))
-            if mapping is not None:
+            point_context = None if geometry is None else geometry.context_for_display_point(mousePoint.x(), mousePoint.y())
+            if point_context is not None:
+                mapping = point_context.mapping
                 x_i, y_i = mapping.local_x, mapping.local_y
                 index = mapping.array_index
-                context = self._slice_context_text()
-                if mapping.montage_axis is not None and mapping.montage_index is not None:
-                    context = f"{context} d{mapping.montage_axis}={mapping.montage_index}".strip()
-                value_text = f"({x_i}, {y_i}) = updating..."
+                context = point_context.context_text
+                value_text = f"{point_context.value_prefix} = updating..."
                 text = value_text
                 if context:
                     text = f"{value_text} | {context}"
@@ -80,8 +78,12 @@ class RenderMixin:
     def _request_pixel_value(self, index, x_i, y_i, context, pos):
         view_state = self.view_state
         document = self.document
+        self._pixel_request_id = getattr(self, "_pixel_request_id", 0) + 1
+        request_id = self._pixel_request_id
 
         def done(value):
+            if request_id != getattr(self, "_pixel_request_id", 0):
+                return
             try:
                 decimal_places = getNumberOfDecimalPlaces(abs(value))
                 if decimal_places > 5:
@@ -110,6 +112,8 @@ class RenderMixin:
         document_key = self.operation_evaluator.scalar_key(view_state, index, document=document)[1]
 
         def done_result(result):
+            if request_id != getattr(self, "_pixel_request_id", 0):
+                return
             if document_key != self.operation_evaluator.scalar_key(view_state, index)[1]:
                 return
             done(self.operation_evaluator.store_scalar_result(view_state, index, result))
@@ -166,6 +170,8 @@ class RenderMixin:
 
         view_state = self.view_state
         document = self.document
+        self._profile_request_id = getattr(self, "_profile_request_id", 0) + 1
+        request_id = self._profile_request_id
         image_levels = self.img_view.getLevels()
         y_range_mode = self.profile_dock.y_range_mode()
         profile_axes = tuple(getattr(self, "profile_axes", ()) or ((self.view_state.line_axis,) if self.view_state.line_axis is not None else ()))
@@ -186,9 +192,10 @@ class RenderMixin:
                 break
             cached_entries.append((cached, profile_state, f"dim {profile_state.line_axis}{profile_label_suffix}"))
         if cached_entries:
+            if request_id != getattr(self, "_profile_request_id", 0):
+                return
             self.profile_dock.update_line_results(tuple(cached_entries), y_range=y_range)
             self._update_operation_dock()
-            self.profile_dock.show()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
             return
 
@@ -198,6 +205,8 @@ class RenderMixin:
         document_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document)[1] for profile_state in profile_states}
 
         def done(results):
+            if request_id != getattr(self, "_profile_request_id", 0):
+                return
             entries = []
             for profile_state, result in results:
                 if document_keys[profile_state] != self.operation_evaluator.line_key(profile_state)[1]:
@@ -206,7 +215,6 @@ class RenderMixin:
                 entries.append((line_result, profile_state, f"dim {profile_state.line_axis}{profile_label_suffix}"))
             self.profile_dock.update_line_results(tuple(entries), y_range=y_range)
             self._update_operation_dock()
-            self.profile_dock.show()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
             if view_state.montage_axis is None:
                 for axis in profile_axes:
@@ -244,13 +252,9 @@ class RenderMixin:
             self.display_toolbar.set_current(live_profile=enabled)
         if enabled and hasattr(self, "profile_dock"):
             self._profile_dock_user_visible = True
-            if not self.profile_dock.isVisible():
-                if not self.profile_dock.isFloating():
-                    self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
-                else:
-                    self.profile_dock.resize(560, 260)
-            self.profile_dock.show()
-            self.profile_dock.raise_()
+            if self.profile_dock.isFloating():
+                self.profile_dock.resize(560, 260)
+            self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="live-profile")
             self._schedule_view_geometry_refresh()
             self.img_view.getView().setCursor(Qt.QtCore.Qt.CursorShape.CrossCursor)
             self._ensure_profile_marker()
@@ -433,8 +437,10 @@ class RenderMixin:
             colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         view_state = self.view_state
         document = self.document
-        indices = tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
-        indices = indices[:256]
+        all_indices = tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
+        indices = all_indices[:256]
+        if len(all_indices) > len(indices):
+            show_status_message(self, f"Showing first {len(indices)} of {len(all_indices)} montage tiles", timeout=4000)
         viewport_size = self.img_view.graphicsView.viewport().size()
         viewport_shape = (max(1, viewport_size.height()), max(1, viewport_size.width()))
 
@@ -550,7 +556,6 @@ class RenderMixin:
         if axis is None or view_state.image_axes is None or axis in view_state.image_axes:
             return
         document = self.document
-        document_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)[1]
         size = view_state.shape[axis]
         current = view_state.slice_indices[axis]
         last = getattr(self, "_last_prefetch_slice_index", None)
@@ -564,21 +569,29 @@ class RenderMixin:
             index = current + delta
             if 0 <= index < size:
                 prefetch_state = view_state.with_slice(axis, index)
-                self.evaluation_controller.start_prefetch(
+                prefetch_key = self.operation_evaluator.image_key(
+                    prefetch_state,
+                    colormap_lut=colormap_lut,
+                    document=document,
+                )
+                started = self.evaluation_controller.start_prefetch(
                     lambda prefetch_state=prefetch_state, document=document: self.operation_evaluator.prefetch_image_snapshot(
                         document,
                         prefetch_state,
                         colormap_lut=colormap_lut,
                     ),
-                    on_done=lambda result, prefetch_state=prefetch_state, document=document, document_key=document_key: self._store_prefetch_image_if_current(
+                    on_done=lambda result, prefetch_state=prefetch_state, document=document, prefetch_key=prefetch_key: self._store_prefetch_image_if_current(
                         document,
-                        document_key,
+                        prefetch_key,
                         prefetch_state,
                         colormap_lut,
                         result,
                     ),
+                    key=prefetch_key,
                 )
-                scheduled += 1
+                self._note_prefetch_start(started)
+                if started.scheduled:
+                    scheduled += 1
 
     def _prefetch_deltas(self, direction, *, max_radius):
         radii = range(1, int(max_radius) + 1)
@@ -616,7 +629,7 @@ class RenderMixin:
                 if profile_state is None:
                     continue
                 document_key_cache[profile_state] = self.operation_evaluator.line_key(profile_state, document=document)[1]
-                self.profile_evaluation_controller.start_prefetch(
+                started = self.profile_evaluation_controller.start_prefetch(
                     lambda profile_state=profile_state, document=document: self.operation_evaluator.prefetch_line_snapshot(document, profile_state),
                     on_done=lambda result, profile_state=profile_state, document=document, key=document_key_cache[profile_state]: self._store_prefetch_profile_if_current(
                         document,
@@ -624,19 +637,32 @@ class RenderMixin:
                         profile_state,
                         result,
                     ),
+                    key=document_key_cache[profile_state],
                 )
-                scheduled += 1
+                self._note_prefetch_start(started)
+                if started.scheduled:
+                    scheduled += 1
 
     def _store_prefetch_profile_if_current(self, document, document_key, profile_state, result):
         if document_key != self.operation_evaluator.line_key(profile_state)[1]:
+            self.operation_evaluator.note_prefetch_stale()
             return False
         return self.operation_evaluator.store_prefetch_line_result(document, profile_state, result)
 
     def _store_prefetch_image_if_current(self, document, document_key, view_state, colormap_lut, result):
-        current_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut)[1]
+        current_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut)
         if document_key != current_key:
+            self.operation_evaluator.note_prefetch_stale()
             return False
         return self.operation_evaluator.store_prefetch_image_result(document, view_state, colormap_lut, result)
+
+    def _note_prefetch_start(self, started):
+        if started.scheduled:
+            self.operation_evaluator.note_prefetch_scheduled()
+        elif started.reason == "deduped":
+            self.operation_evaluator.note_prefetch_deduped()
+        elif started.reason == "limited":
+            self.operation_evaluator.note_prefetch_limited()
 
     def _current_window_mode(self):
         if self.widgets['buttons']['display']['window_absolute'].isChecked():

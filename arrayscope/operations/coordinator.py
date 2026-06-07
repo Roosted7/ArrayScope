@@ -81,14 +81,20 @@ class OperationCoordinator:
         return self.set_document(self._document(steps=tuple(steps)))
 
     def replace_base_data(self, data):
-        return self.set_document(self.document.with_data_changed(data))
+        return self.replace_base_and_clear_steps(data)
+
+    def reload_base_data(self, data, *, preserve_steps=True):
+        return self.set_document(self.document.reload_base_data(data, preserve_steps=preserve_steps))
+
+    def replace_base_and_clear_steps(self, data):
+        return self.set_document(self.document.replace_base_and_clear_steps(data))
 
     def mark_base_data_changed(self):
-        return self.set_document(self.document.with_data_changed())
+        return self.set_document(self.document.mark_base_data_changed())
 
     def materialize(self):
         self.base_data = np.array(self.document.materialize(), copy=True)
-        return self.set_document(self.document.with_data_changed(self.base_data))
+        return self.replace_base_and_clear_steps(self.base_data)
 
     def operation_shapes(self):
         shapes = []

@@ -11,10 +11,14 @@ matplotlib as a dependency.
 
 Basic ROI operations are available from the image view context menu. Creating an ROI does not open the
 Inspection dock; instead, a movable semi-transparent overlay on top of the 2D view shows the most
-important ROI values. The Inspection dock remains optional, floats by default when opened, and provides
-the full ROI list, finite-value statistics, and shared-range histogram comparisons. ROI statistics are
-computed from the current displayed scalar image or the image histogram source, so complex RGB views
-use the same magnitude source as the image histogram.
+important ROI values. The Inspection dock remains optional, defaults to a left-docked panel when opened,
+and provides finite-value statistics and shared-range histogram comparisons. ROI statistics are computed
+from the current displayed scalar image or the image histogram source, so complex RGB views use the same
+magnitude source as the image histogram.
+
+Phase 4b added a shared ROI store and `QAbstractTableModel` for dock rows. ROI colors are assigned once
+and reused by image graphics, table rows, and histogram curves. Table selection highlights the matching
+ROI, and delete/clear paths synchronize back to the image view.
 
 A minimal compare-layer scaffold exists for same-ROI histogram comparison against compatible 2D
 arrays. It is intentionally not full Phase 5 session or synchronized-window support.

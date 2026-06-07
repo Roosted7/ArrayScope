@@ -49,12 +49,12 @@ class WindowLayoutManager:
     def set_operation_dock_visible_from_user(self, visible):
         win = self.window
         win._operation_dock_user_visible = bool(visible)
-        self.set_dock_visible_preserving_canvas(win.operation_dock, bool(visible))
+        self.set_managed_dock_visible(win.operation_dock, bool(visible), reason="user-operation")
 
     def set_profile_dock_visible_from_user(self, visible):
         win = self.window
         win._profile_dock_user_visible = bool(visible)
-        self.set_dock_visible_preserving_canvas(win.profile_dock, bool(visible))
+        self.set_managed_dock_visible(win.profile_dock, bool(visible), reason="user-profile")
 
     def set_inspection_dock_visible_from_user(self, visible):
         win = self.window
@@ -62,7 +62,7 @@ class WindowLayoutManager:
         if visible and win.inspection_dock.isFloating():
             win.inspection_dock.setFloating(False)
             win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, win.inspection_dock)
-        self.set_dock_visible_preserving_canvas(win.inspection_dock, bool(visible))
+        self.set_managed_dock_visible(win.inspection_dock, bool(visible), reason="user-inspection")
 
     def sync_progressive_docks(self):
         win = self.window
@@ -113,22 +113,80 @@ class WindowLayoutManager:
             if dock is getattr(win, "inspection_dock", None):
                 if getattr(win, "_inspection_dock_user_visible", False):
                     return
-        self.set_dock_visible_preserving_canvas(dock, bool(visible))
+        self.set_managed_dock_visible(dock, bool(visible), reason="progressive")
 
     def set_dock_visible_preserving_canvas(self, dock, visible):
+        return self.set_managed_dock_visible(dock, visible, reason="legacy")
+
+    def set_managed_dock_visible(self, dock, visible, *, reason, preserve_canvas=True, raise_dock=True):
         win = self.window
-        if dock.isVisible() == bool(visible):
+        currently_visible = dock.isVisible() if win.isVisible() else not dock.isHidden()
+        if currently_visible == bool(visible):
+            if visible and raise_dock:
+                dock.raise_()
             return
-        before = self._view_snapshot()
+        before = self._view_snapshot() if preserve_canvas else None
         if visible and not dock.isFloating():
-            self._grow_for_opening_dock(dock)
+            self._ensure_default_dock_area(dock)
+            if preserve_canvas:
+                self._grow_for_opening_dock(dock)
         self._visibility_preserve_active = True
         try:
             dock.setVisible(bool(visible))
+            if visible and raise_dock:
+                dock.raise_()
         finally:
             self._visibility_preserve_active = False
-        Qt.QtCore.QTimer.singleShot(0, lambda before=before: self._restore_view_snapshot_if_reasonable(before, retry=True))
+        if preserve_canvas:
+            Qt.QtCore.QTimer.singleShot(0, lambda before=before: self._restore_view_snapshot_if_reasonable(before, retry=True))
         self.schedule_view_geometry_refresh()
+
+    def make_managed_dock_action(self, text, dock, setter):
+        action = Qt.QtGui.QAction(text, self.window)
+        action.setCheckable(True)
+        action.setChecked(dock.isVisible())
+
+        def on_triggered(_checked=False):
+            setter(not dock.isVisible())
+
+        def sync_checked(visible):
+            blocker = Qt.QtCore.QSignalBlocker(action)
+            try:
+                action.setChecked(bool(visible))
+            finally:
+                del blocker
+
+        action.triggered.connect(on_triggered)
+        dock.visibilityChanged.connect(sync_checked)
+        return action
+
+    def close_managed_docks_for_shutdown(self):
+        for dock in self._managed_docks():
+            if dock is None:
+                continue
+            self._visibility_preserve_active = True
+            try:
+                dock.hide()
+                dock.close()
+            finally:
+                self._visibility_preserve_active = False
+
+    def _managed_docks(self):
+        win = self.window
+        return (
+            getattr(win, "inspection_dock", None),
+            getattr(win, "profile_dock", None),
+            getattr(win, "operation_dock", None),
+        )
+
+    def _ensure_default_dock_area(self, dock):
+        win = self.window
+        if dock is getattr(win, "inspection_dock", None):
+            win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        elif dock is getattr(win, "profile_dock", None):
+            win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        elif dock is getattr(win, "operation_dock", None):
+            win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
     def refresh_view_geometry(self):
         win = self.window

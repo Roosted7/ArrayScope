@@ -57,6 +57,7 @@ def test_prefetch_fills_cache_without_incrementing_visible_evaluation_count():
 
     assert evaluator.image_evaluations == visible_count
     assert evaluator.cache_diagnostics().status == CacheStatus.CACHED
+    assert evaluator.image_cache_diagnostics().prefetch_stored == 1
 
 
 def test_prefetch_store_uses_document_key_not_array_equality():
@@ -67,6 +68,22 @@ def test_prefetch_store_uses_document_key_not_array_equality():
     result = evaluator.prefetch_image_snapshot(other_document, state)
 
     assert evaluator.store_prefetch_image_result(other_document, state, None, result) is False
+    assert evaluator.image_cache_diagnostics().prefetch_stale == 1
+
+
+def test_prefetch_diagnostics_track_scheduling_outcomes():
+    evaluator = OperationEvaluator(ArrayDocument(np.arange(6).reshape(2, 3)))
+
+    evaluator.note_prefetch_scheduled()
+    evaluator.note_prefetch_deduped()
+    evaluator.note_prefetch_limited()
+    evaluator.note_prefetch_stale()
+
+    diagnostics = evaluator.image_cache_diagnostics()
+    assert diagnostics.prefetch_scheduled == 1
+    assert diagnostics.prefetch_deduped == 1
+    assert diagnostics.prefetch_limited == 1
+    assert diagnostics.prefetch_stale == 1
 
 
 def test_cache_invalidates_when_document_revision_changes_for_same_array_object():

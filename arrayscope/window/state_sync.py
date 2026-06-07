@@ -64,6 +64,15 @@ class StateSyncMixin:
         text = str(text).strip()
         if axis >= self.view_state.ndim:
             return
+        if text == "":
+            midpoint = max(0, int(self.data.shape[axis]) // 2)
+            state = self.view_state.with_slice(axis, midpoint).with_axis_range(axis, None)
+            if state.montage_axis == axis:
+                state = state.with_montage_axis(None)
+            self._active_slice_axis = axis
+            self._set_view_state(state)
+            self.render(reason="slice-empty-midpoint")
+            return
         if ":" not in text:
             try:
                 self._on_slice_index_changed(axis, int(text))
@@ -148,8 +157,7 @@ class StateSyncMixin:
         if hasattr(self, "profile_dock"):
             self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
             if ndim == 1:
-                self.profile_dock.show()
-                self.profile_dock.raise_()
+                self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="one-dimensional")
         if hasattr(self, "dimension_strip"):
             self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
 
@@ -195,7 +203,14 @@ class StateSyncMixin:
         self.layout_manager.refresh_view_geometry()
 
     def _replace_base_data(self, data):
-        self.operation_coordinator.replace_base_data(data)
+        self.operation_coordinator.replace_base_and_clear_steps(data)
+        self._sync_after_document_data_change()
+
+    def _reload_base_data(self, data, *, preserve_steps=True):
+        self.operation_coordinator.reload_base_data(data, preserve_steps=preserve_steps)
+        self._sync_after_document_data_change()
+
+    def _sync_after_document_data_change(self):
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document
         self.operation_evaluator = self.operation_coordinator.evaluator

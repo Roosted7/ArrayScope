@@ -264,11 +264,21 @@ class ArrayDocument:
         steps[index] = replace(steps[index], operation=operation)
         return ArrayDocument(self.base_data, steps=tuple(steps), revision=self.revision, axes=self.base_axes)
 
-    def with_data_changed(self, base_data=None) -> "ArrayDocument":
-        data = self.base_data if base_data is None else base_data
-        axes = self.base_axes if data is self.base_data else None
-        steps = self.steps if data is self.base_data else ()
+    def mark_base_data_changed(self) -> "ArrayDocument":
+        return ArrayDocument(self.base_data, steps=self.steps, revision=self.revision + 1, axes=self.base_axes)
+
+    def reload_base_data(self, data, *, preserve_steps=True) -> "ArrayDocument":
+        steps = self.steps if preserve_steps else ()
+        axes = self.base_axes if np.shape(data) == np.shape(self.base_data) else None
         return ArrayDocument(data, steps=steps, revision=self.revision + 1, axes=axes)
+
+    def replace_base_and_clear_steps(self, data) -> "ArrayDocument":
+        return ArrayDocument(data, steps=(), revision=self.revision + 1)
+
+    def with_data_changed(self, base_data=None) -> "ArrayDocument":
+        if base_data is None or base_data is self.base_data:
+            return self.mark_base_data_changed()
+        return self.replace_base_and_clear_steps(base_data)
 
     def materialize(self):
         return evaluate(self.base_data, self.enabled_operations)

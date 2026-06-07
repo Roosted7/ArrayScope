@@ -10,6 +10,7 @@ from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
 from arrayscope.core.view_state import ChannelMode, ViewState
+from arrayscope.core.roi_store import RoiStore
 from arrayscope.export.workflow import ExportWorkflowMixin
 from arrayscope.ui.dimension_controls import DimensionControlMixin
 from arrayscope.ui.display_controls import DisplayControlBuildMixin
@@ -98,6 +99,7 @@ class ArrayScopeWindow(
         # Line plot mode uses a single selected dimension
         self.line_plot_dimension = self.view_state.line_axis or 0
         self.profile_axes = (self.line_plot_dimension,)
+        self.roi_store = RoiStore()
                 
         self._build_window_ui(data, filepath)
         

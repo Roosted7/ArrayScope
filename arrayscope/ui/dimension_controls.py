@@ -157,11 +157,21 @@ class DimensionControlMixin:
         self._append_operation("split_complex", dim)
     
     def set_profile_axis(self, axis):
-        self._set_view_state(self.view_state.with_line_axis(int(axis)))
-        self.profile_axes = (self.view_state.line_axis,)
+        self.set_profile_axes_exactly((axis,))
+        self.render(reason="profile-axis")
+
+    def set_profile_axes_exactly(self, axes):
+        axes = tuple(int(axis) for axis in axes)
+        axes = tuple(axis for axis in axes if 0 <= axis < self.data.ndim and not self.singleton[axis])
+        if not axes and self.view_state.line_axis is not None:
+            axes = (self.view_state.line_axis,)
+        if not axes:
+            return
+        self.profile_axes = axes
+        self._set_view_state(self.view_state.with_line_axis(axes[0]))
         if hasattr(self, "profile_dock"):
             self.profile_dock.set_axes(self.data.shape, self.view_state.line_axis)
-        self.render(reason="profile-axis")
+        return self.view_state
 
     def set_dimension_role(self, role, axis):
         if axis >= self.data.ndim:
@@ -181,6 +191,9 @@ class DimensionControlMixin:
                 self.profile_dock.set_axes(self.data.shape, self.view_state.line_axis)
         elif role in ("y", "x"):
             if self.view_state.image_axes is None:
+                return
+            if self.view_state.montage_axis == int(axis):
+                self.statusBar().showMessage("Clear the tiled range before using this dimension as image X/Y", 2500)
                 return
             role_index = 0 if role == "y" else 1
             if self.view_state.image_axes[role_index] == int(axis):

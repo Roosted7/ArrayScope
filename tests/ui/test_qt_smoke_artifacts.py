@@ -246,7 +246,7 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         assert win.img_view._roi_info_panel is not None
         assert win.img_view._roi_info_panel.isVisible()
         assert len(win.img_view.roiSelections()) == 3
-        assert win.inspection_dock.stats_table.rowCount() == 3
+        assert win.inspection_dock.roi_model.rowCount() == 3
         assert len(win.inspection_dock.histogram_plot.listDataItems()) >= 6
         assert rectangle.geometry.kind == RoiKind.RECTANGLE
         assert polyline.geometry.kind == RoiKind.POLYLINE

@@ -28,6 +28,14 @@ def test_2d_plain_image_point_maps_to_array_index():
     assert mapping.local_y == 1
 
 
+def test_display_point_uses_floor_pixel_cell_mapping():
+    state = state_for((3, 4), line_axis=0)
+    geometry = DisplayGeometry(state, (3, 4))
+
+    assert geometry.display_point_to_array_index(2.9, 1.8).array_index == (1, 2)
+    assert geometry.display_point_to_array_index(-0.1, 1.0) is None
+
+
 def test_3d_sliced_image_preserves_non_display_slice():
     state = state_for((2, 3, 4), image_axes=(1, 2), line_axis=0, slices=(1, 0, 0))
     geometry = DisplayGeometry(state, (3, 4))
@@ -63,6 +71,17 @@ def test_montage_point_maps_tile_and_local_position():
     assert mapping.local_x == 1
     assert mapping.local_y == 1
     assert mapping.array_index == (1, 1, 1)
+
+
+def test_context_for_montage_point_labels_tiled_axis_once():
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 3), text=":")
+    montage = MontageGeometry(indices=(0, 1, 3), tile_shape=(2, 3), columns=2, rows=2, gap=1)
+    geometry = DisplayGeometry(state, (5, 7), montage=montage)
+
+    context = geometry.context_for_display_point(5, 1)
+
+    assert context.value_prefix == "(1, 1)"
+    assert context.context_text == "d2=1"
 
 
 def test_montage_gaps_and_missing_last_tile_return_none():
@@ -124,4 +143,3 @@ def test_display_point_mapping_property_bounds_and_ranges(height, width, x, y, u
         assert mapping.array_index[0] == y_range[mapping.local_y]
     if x_range:
         assert mapping.array_index[1] == x_range[mapping.local_x]
-

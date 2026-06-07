@@ -40,6 +40,8 @@ Rules:
 * Extend montage to two non-image dimensions with explicit row/column montage axes.
 * Add line-profile export presets for CSV/NPY with axis metadata columns.
 * Add ROI tools for point and ellipse selections.
+* Add per-ROI draggable info callouts with connector lines that stay anchored correctly while panning,
+  zooming, and resizing.
 * Add linked crosshair between image and profile views.
 * Add optional image marker snapping to integer pixels, center of pixel, or nearest local maximum.
 * Add multi-array compare modes: difference, ratio, phase difference, overlay, linked cursor.
@@ -71,6 +73,8 @@ Rules:
 * Add explicit export progress for derived-array `.npy/.npz` saves after materialization is complete.
 * Add benchmark fixtures for representative MRI stacks so cache and slab changes can be compared over time.
 * Add optional memory-mapped array support for large `.npy` files.
+* Measure prefetch usefulness on representative 3D/4D datasets before adding predictive cache heuristics
+  beyond nearby-slice/profile prefetch.
 * Consider zarr/dask later, but do not introduce them before the internal lazy evaluator is clean.
 
 ## IO / MRI ideas
@@ -91,6 +95,7 @@ Rules:
 * Add a clean-environment import test: `python -c "import arrayscope"`.
 * Add tests for recipe compatibility across shape-changing operations.
 * Add benchmark-style tests for display refresh on representative 3D/4D arrays.
+* Add CI workflow updates for strict UI and screenshot artifact tests if the repository gains GitHub Actions.
 
 ## Technical debt
 
@@ -99,6 +104,8 @@ Rules:
 * Clarify FFT naming: current centered FFT/IFFT follow viewer convention but may surprise users expecting NumPy direction.
 * Add public data-mutation ergonomics beyond `notify_data_changed()`, such as context managers or observable data sources.
 * Consider a debug overlay showing the current `DisplayGeometry` mapping under the cursor when strict UI mode is enabled.
+* Consider a deliberate migration from current `start:step:stop` range text to Python `start:stop:step`
+  syntax with a compatibility warning or explicit preference.
 
 ## Maybe later
 

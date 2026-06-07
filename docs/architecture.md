@@ -14,8 +14,8 @@ source of array-view state.
 - `arrayscope.display.geometry`: the pure display-coordinate contract for normal image and montage
   views. It maps display points to array indices and profile states using the geometry committed with
   the current image.
-- `arrayscope.display.viewport`: explicit viewport update policy for preserving, fitting, or
-  resetting the 2D ViewBox.
+- `arrayscope.display.viewport`: explicit viewport update policy and `ViewportController` for
+  preserving, fitting, resetting, and true 1:1 2D ViewBox ranges.
 - `arrayscope.operations.pipeline`: immutable NumPy operations plus shape prediction.
 - `arrayscope.operations.slabs`: plans and evaluates the smallest exact base-data slab needed
   for image, profile, scalar hover, and export-frame requests.
@@ -50,7 +50,8 @@ source of array-view state.
 - `arrayscope.window.evaluation_controller`: owns background display/profile/pixel evaluation
   dispatch, latest-generation checks, and stale-result ignoring.
 - `arrayscope.window.layout_controller.WindowLayoutManager`: owns first-run layout restore, reset
-  layout, progressive dock visibility, dock default sizes, and post-restore geometry fixups.
+  layout, progressive dock visibility, managed dock menu actions, dock default sizes, shutdown dock
+  closing, and post-restore geometry fixups.
 - `arrayscope.app.launch`: QApplication creation, multiprocessing launch, and IPython Qt event-loop handling.
 - `arrayscope.io`: file loading, dataset selectors, and save workflows.
 - `arrayscope.export`: video/frame export workers and UI workflow.
@@ -78,7 +79,9 @@ the array index represented by image-item coordinates.
 Every committed 2D image has a matching `DisplayGeometry`. Pixel hover, live
 profiles, profile marker clamping, montage tile lookup, and future linked
 cursor behavior must use that geometry instead of reconstructing coordinates
-from widget state.
+from widget state. Display point mapping uses pixel cells: `[x, x+1)` maps to
+column `x`, and `[y, y+1)` maps to row `y`. Hover/status context text also
+comes from `DisplayGeometry` so montage axes are labelled once.
 
 Do not read widget values to reconstruct `ViewState`. Widget state is an output
 of render, except transient UI-only state such as dock visibility and histogram
@@ -92,9 +95,23 @@ image/profile remains visible and stale worker results cannot overwrite newer us
 capture immutable `ArrayDocument`/`ViewState` snapshots and return results to the UI thread; only the
 UI thread commits cache/status updates to the live evaluator.
 
-Viewport changes are explicit. Normal renders preserve the current ViewBox
-range. The view fits or resets only on the first image, display-shape changes,
-or user-requested Fit/1:1 actions.
+Viewport changes are explicit. `ViewportController` tracks untouched, user,
+fit, and one-to-one modes. Normal renders preserve the current ViewBox range.
+The first image fits, display-shape changes fit only while untouched, explicit
+Fit refits, and explicit 1:1 computes a range where one image pixel maps to one
+viewport pixel.
+
+File reload is distinct from data mutation and replacement. In-place mutation
+uses `mark_base_data_changed()` / `notify_data_changed()` and preserves
+operations while incrementing the revision. File reload uses
+`reload_base_data(..., preserve_steps=True)` and preserves compatible operation
+stacks. Explicit replacement/materialization uses
+`replace_base_and_clear_steps()`.
+
+Background evaluation uses local per-window `QThreadPool` instances. Closing a
+window clears queued work, increments generations, stops polling, and ignores
+late results. Prefetch requests are keyed, deduped, bounded, and counted in
+cache diagnostics.
 
 In development and tests, `ARRAYSCOPE_STRICT_UI=1` makes GUI programming
 exceptions log their traceback and re-raise instead of being silently swallowed.
