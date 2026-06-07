@@ -40,24 +40,25 @@ def test_render_preserves_viewport_for_same_display_shape(qtbot):
         win.close()
 
 
-def test_dock_show_hide_preserves_viewport(qtbot):
+def test_dock_show_hide_preserves_image_view_size(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
     try:
+        win.resize(700, 420)
         _process_events(qtbot)
-        view = win.img_view.getView()
-        view.setRange(xRange=(2, 5), yRange=(2, 6), padding=0)
-        before = view.viewRange()
+        before_size = win.img_view.size()
 
-        win.toggle_profile_dock()
-        _process_events(qtbot, count=12)
-        win.toggle_profile_dock()
-        _process_events(qtbot, count=12)
+        win._show_inspection_dock()
+        _process_events(qtbot, count=30)
+        win._set_inspection_dock_visible_from_user(False)
+        _process_events(qtbot, count=30)
 
-        np.testing.assert_allclose(view.viewRange(), before, atol=1e-9)
+        after_size = win.img_view.size()
+        assert abs(after_size.width() - before_size.width()) <= 1
+        assert abs(after_size.height() - before_size.height()) <= 1
     finally:
         win.close()
 
@@ -90,3 +91,113 @@ def test_strict_ui_mode_raises_callback_exceptions(monkeypatch):
 
     with pytest.raises(RuntimeError, match="boom"):
         handle_ui_exception("test callback", RuntimeError("boom"))
+
+
+def test_inspection_dock_defaults_left_and_stays_closed_after_direct_close(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+
+        win._show_inspection_dock()
+        _process_events(qtbot, count=12)
+        assert win.inspection_dock.isVisible()
+        assert not win.inspection_dock.isFloating()
+        assert win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+
+        win.inspection_dock.close()
+        _process_events(qtbot, count=12)
+        assert not win.inspection_dock.isVisible()
+        assert not win._inspection_dock_user_visible
+
+        win._refresh_inspection_dock()
+        _process_events(qtbot, count=12)
+        assert not win.inspection_dock.isVisible()
+    finally:
+        win.close()
+
+
+def test_closing_docked_inspection_preserves_image_view_size(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(32 * 32, dtype=float).reshape(32, 32))
+    qtbot.addWidget(win)
+    try:
+        win.resize(900, 620)
+        _process_events(qtbot)
+        win._show_inspection_dock()
+        _process_events(qtbot, count=20)
+        before = win.img_view.size()
+
+        win.inspection_dock.close()
+        _process_events(qtbot, count=30)
+        after = win.img_view.size()
+
+        assert abs(after.width() - before.width()) <= 1
+        assert abs(after.height() - before.height()) <= 1
+    finally:
+        win.close()
+
+
+def test_profile_dock_defaults_bottom_when_opened_from_view_menu(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(32 * 32, dtype=float).reshape(32, 32))
+    qtbot.addWidget(win)
+    try:
+        win.move(0, 0)
+        win.resize(700, 420)
+        _process_events(qtbot, count=20)
+        win._set_profile_dock_visible_from_user(True)
+        _process_events(qtbot, count=40)
+
+        assert win.profile_dock.isVisible()
+        assert not win.profile_dock.isFloating()
+        assert win.dockWidgetArea(win.profile_dock) == QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
+    finally:
+        win.close()
+
+
+def test_opening_dock_uses_current_dock_extent_for_window_growth(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(24 * 24, dtype=float).reshape(24, 24))
+    qtbot.addWidget(win)
+    try:
+        win.setGeometry(420, 20, 320, 500)
+        _process_events(qtbot, count=20)
+        win.inspection_dock.resize(420, 300)
+        width_delta, height_delta = win.layout_manager._dock_extent_for_area(win.inspection_dock)
+
+        assert width_delta >= 420
+        assert height_delta == 0
+
+        win._set_inspection_dock_visible_from_user(True)
+        _process_events(qtbot, count=40)
+        assert win.inspection_dock.isVisible()
+    finally:
+        win.close()
+
+
+def test_docks_have_size_grips_and_floatable_features(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtWidgets
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        for dock in (win.inspection_dock, win.profile_dock, win.operation_dock):
+            assert dock.features() & QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            assert dock.features() & QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+            assert dock.findChildren(QtWidgets.QSizeGrip)
+    finally:
+        win.close()

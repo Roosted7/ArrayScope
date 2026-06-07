@@ -155,6 +155,9 @@ class WindowMenuMixin:
     def _set_profile_dock_visible_from_user(self, visible):
         self.layout_manager.set_profile_dock_visible_from_user(visible)
 
+    def _set_inspection_dock_visible_from_user(self, visible):
+        self.layout_manager.set_inspection_dock_visible_from_user(visible)
+
     def _resize_default_docks(self):
         self.layout_manager.resize_default_docks()
 
@@ -162,4 +165,33 @@ class WindowMenuMixin:
         self._settings.setValue("geometry", self.saveGeometry())
         self._settings.setValue("window_state", self.saveState())
         self._save_app_settings()
+        self._closing = True
+        watcher = getattr(self, "_file_watcher", None)
+        if watcher is not None:
+            watcher.deleteLater()
+            self._file_watcher = None
+        for controller_name in ("evaluation_controller", "pixel_evaluation_controller", "profile_evaluation_controller"):
+            controller = getattr(self, controller_name, None)
+            if controller is not None:
+                controller.cancel_pending()
+        if hasattr(self, "_profile_timer"):
+            self._profile_timer.stop()
+        for dock_name in ("inspection_dock", "profile_dock", "operation_dock"):
+            dock = getattr(self, dock_name, None)
+            if dock is not None:
+                dock.hide()
+                dock.close()
         super().closeEvent(event)
+        Qt.QtCore.QTimer.singleShot(0, self._quit_if_last_arrayscope_window)
+
+    def _quit_if_last_arrayscope_window(self):
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        visible_arrayscope = [
+            widget
+            for widget in app.topLevelWidgets()
+            if widget is not self and type(widget).__name__ == type(self).__name__ and widget.isVisible()
+        ]
+        if not visible_arrayscope:
+            app.quit()

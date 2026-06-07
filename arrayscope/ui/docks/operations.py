@@ -10,6 +10,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from arrayscope.operations.registry import describe_operation
+from arrayscope.ui.docks.common import StandardDockWidget, add_size_grip, configure_standard_dock
 from arrayscope.ui.icons import material_icon, set_button_icon
 
 
@@ -49,7 +50,7 @@ class OperationListWidget(QtWidgets.QListWidget):
                 event.ignore()
 
 
-class OperationStackDock(QtWidgets.QDockWidget):
+class OperationStackDock(StandardDockWidget):
     def __init__(
         self,
         parent,
@@ -163,6 +164,7 @@ class OperationStackDock(QtWidgets.QDockWidget):
         button_layout.addWidget(self.save_view_button, 3, 1)
         button_layout.addWidget(self.load_view_button, 4, 0, 1, 2)
         layout.addLayout(button_layout)
+        add_size_grip(layout)
 
         body.setLayout(layout)
         self.setWidget(body)
@@ -186,6 +188,7 @@ class OperationStackDock(QtWidgets.QDockWidget):
             | Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea
             | Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
         )
+        configure_standard_dock(self, min_size=(300, 260))
 
     def set_operations(
         self,

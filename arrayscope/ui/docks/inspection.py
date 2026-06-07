@@ -12,10 +12,11 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.core.roi import RoiKind
+from arrayscope.ui.docks.common import StandardDockWidget, add_size_grip, configure_standard_dock
 from arrayscope.ui.icons import set_button_icon
 
 
-class InspectionDock(QtWidgets.QDockWidget):
+class InspectionDock(StandardDockWidget):
     def __init__(self, parent, *, on_tool_changed, on_add_roi, on_delete_roi, on_clear_rois):
         super().__init__("Inspection", parent)
         self.setObjectName("InspectionDock")
@@ -31,9 +32,6 @@ class InspectionDock(QtWidgets.QDockWidget):
         layout = QtWidgets.QVBoxLayout()
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
-
-        self.drag_handle = _DockDragHandle(self)
-        layout.addWidget(self.drag_handle)
 
         controls = QtWidgets.QHBoxLayout()
         self.tool_combo = QtWidgets.QComboBox()
@@ -76,6 +74,7 @@ class InspectionDock(QtWidgets.QDockWidget):
         self.histogram_plot.showGrid(x=True, y=True, alpha=0.25)
         self.histogram_plot.setMinimumHeight(120)
         layout.addWidget(self.histogram_plot, 1)
+        add_size_grip(layout)
 
         body.setLayout(layout)
         self.setWidget(body)
@@ -85,11 +84,7 @@ class InspectionDock(QtWidgets.QDockWidget):
             | Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
             | Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
+        configure_standard_dock(self, min_size=(360, 260))
 
         self.tool_combo.currentIndexChanged.connect(self._tool_changed)
         self.add_button.clicked.connect(self._add_clicked)
@@ -190,42 +185,3 @@ def _fmt(value):
     if isinstance(value, (float, np.floating)):
         return f"{float(value):.4g}"
     return str(value)
-
-
-class _DockDragHandle(QtWidgets.QFrame):
-    def __init__(self, dock):
-        super().__init__(dock)
-        self._dock = dock
-        self._drag_pos = None
-        self.setObjectName("InspectionDockDragHandle")
-        self.setCursor(Qt.QtCore.Qt.CursorShape.SizeAllCursor)
-        self.setStyleSheet(
-            "QFrame#InspectionDockDragHandle { background: palette(midlight); border-radius: 3px; }"
-            "QLabel { font-weight: bold; padding: 3px 6px; }"
-        )
-        layout = QtWidgets.QHBoxLayout()
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(4)
-        label = QtWidgets.QLabel("Inspection")
-        layout.addWidget(label)
-        layout.addStretch()
-        self.setLayout(layout)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.QtCore.Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self._dock.frameGeometry().topLeft()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._drag_pos is None:
-            return super().mouseMoveEvent(event)
-        if not self._dock.isFloating():
-            self._dock.setFloating(True)
-        self._dock.move(event.globalPosition().toPoint() - self._drag_pos)
-        event.accept()
-
-    def mouseReleaseEvent(self, event):
-        self._drag_pos = None
-        event.accept()

@@ -422,8 +422,8 @@ class DisplayControlBuildMixin:
             on_delete_roi=self._delete_roi,
             on_clear_rois=self._clear_rois,
         )
-        self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.inspection_dock)
-        self.inspection_dock.setFloating(True)
+        self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.inspection_dock)
+        self.inspection_dock.visibilityChanged.connect(self._on_inspection_dock_visibility_changed)
         self.inspection_dock.hide()
         self.operation_dock = OperationStackDock(
             self,
@@ -444,6 +444,7 @@ class DisplayControlBuildMixin:
             on_edit_operation=self.edit_operation,
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
+        self.operation_dock.visibilityChanged.connect(self._on_operation_dock_visibility_changed)
         self.layout_manager = WindowLayoutManager(self)
         self._update_operation_dock()
         self._setup_menus()

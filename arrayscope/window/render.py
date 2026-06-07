@@ -264,11 +264,26 @@ class RenderMixin:
             self.update_line_plot()
 
     def _on_profile_dock_visibility_changed(self, visible):
+        if getattr(self, "_closing", False):
+            return
         self._profile_dock_user_visible = bool(visible)
         if not visible and self.widgets['buttons']['display']['live_profile'].isChecked():
             self.widgets['buttons']['display']['live_profile'].setChecked(False)
-        elif visible and not self.profile_dock.isFloating():
-            Qt.QtCore.QTimer.singleShot(0, self._resize_profile_dock_default)
+
+    def _on_inspection_dock_visibility_changed(self, visible):
+        if getattr(self, "_closing", False):
+            return
+        self._inspection_dock_user_visible = bool(visible)
+        if visible and self.inspection_dock.isFloating():
+            self.inspection_dock.resize(max(self.inspection_dock.width(), 420), max(self.inspection_dock.height(), 300))
+
+    def _on_operation_dock_visibility_changed(self, visible):
+        if getattr(self, "_closing", False):
+            return
+        if not visible:
+            self._operation_dock_user_visible = False
+        elif self.operation_dock.isFloating():
+            self.operation_dock.resize(max(self.operation_dock.width(), 340), max(self.operation_dock.height(), 300))
 
     def _resize_profile_dock_default(self):
         self.layout_manager.resize_profile_dock_default()
@@ -684,9 +699,7 @@ class RenderMixin:
 
     def toggle_profile_dock(self):
         visible = not self.profile_dock.isVisible()
-        self._profile_dock_user_visible = visible
-        self.profile_dock.setVisible(visible)
-        self._sync_progressive_docks()
+        self.layout_manager.set_profile_dock_visible_from_user(visible)
 
     def _processing_pressed(self, btn):
         """Called on processing button press; if the button is already checked
