@@ -35,18 +35,16 @@ Rules:
 
 ## Dimension and viewing ideas
 
-* Add first-class axis metadata: original axis id, label, size, units, spacing, and source axis after reductions.
+* Expose axis metadata in the UI: user-renamable labels, units, spacing, coordinates, and file-derived defaults.
 * Support user-renamable dimensions, e.g. `x`, `y`, `z`, `coil`, `time`, `echo`, `channel`.
-* Add a montage role (`M`) for creating 2D grid/collage views over one or two dimensions.
-* Add multiple profile axes with either overlaid curves or stacked mini-plots.
-* Add profile modes for complex data: magnitude, phase, real/imag pair, and magnitude with phase color strip.
-* Add line-profile export to CSV/NPY.
-* Add ROI tools: point, line, rectangle, ellipse, freehand later.
-* Add ROI statistics: mean, max, min, std, RSS, histogram.
+* Extend montage to two non-image dimensions with explicit row/column montage axes.
+* Add line-profile export presets for CSV/NPY with axis metadata columns.
+* Add ROI tools for point and ellipse selections.
 * Add linked crosshair between image and profile views.
 * Add optional image marker snapping to integer pixels, center of pixel, or nearest local maximum.
 * Add multi-array compare modes: difference, ratio, phase difference, overlay, linked cursor.
 * Make ROI compare layers public, operation-aware, and session-backed instead of the current internal compatible-2D histogram scaffold.
+* Add full nD ROI back-projection from display-space ROI geometry for operation-aware source-array measurement.
 
 ## Operation / pipeline ideas
 
@@ -66,12 +64,7 @@ Rules:
 
 ## Performance ideas
 
-* Replace full derived-array materialization during image/profile updates with slab-based evaluation.
-* Slice as early as possible, then apply operations only to the minimal data needed for the displayed image/profile.
 * Support lazy/view-like ops for crop, reverse, conjugate, and simple slicing.
-* Add bounded display-frame cache keyed by document, view state, channel, scale, windowing, and colormap.
-* Add optional nearby-slice prefetch after the evaluator is slab-based.
-* Add cancellation/ignore-stale logic for background workers.
 * Add cache memory budget, e.g. max frames or max MB.
 * Add performance HUD/debug panel showing cache hits/misses, materialized shape, and evaluation time.
 * Add a user-facing cache budget setting with presets for laptop, workstation, and memory-constrained sessions.
@@ -94,19 +87,18 @@ Rules:
 
 * Keep pure tests independent of Qt and pyqtgraph imports.
 * Split GUI workflows from pure helpers when adding new features.
-* Add smoke tests for minimal viewer launch, operation dock, profile dock, and dimension controls.
 * Add screenshot/artifact tests for UI regressions, but keep them few and meaningful.
 * Add a clean-environment import test: `python -c "import arrayscope"`.
 * Add tests for recipe compatibility across shape-changing operations.
-* Add tests for axis identity once axis metadata exists.
 * Add benchmark-style tests for display refresh on representative 3D/4D arrays.
 
 ## Technical debt
 
 * Replace print-based warnings with logging or user-facing status messages.
-* Preserve axis identity metadata across shape-changing operation stacks.
 * Add first-class scalar display support for operation stacks that reduce all dimensions.
 * Clarify FFT naming: current centered FFT/IFFT follow viewer convention but may surprise users expecting NumPy direction.
+* Add public data-mutation ergonomics beyond `notify_data_changed()`, such as context managers or observable data sources.
+* Consider a debug overlay showing the current `DisplayGeometry` mapping under the cursor when strict UI mode is enabled.
 
 ## Maybe later
 

@@ -68,11 +68,7 @@ def make_image(data, state, colormap_lut=None):
 
     image_data = data[_slice_for_display_axes(state, state.image_axes)]
     image_data = _apply_axis_ranges_to_display_data(image_data, state, state.image_axes)
-
-    # Preserve the existing viewer orientation: when primary precedes secondary
-    # in ndarray order, transpose after slicing.
-    if state.image_axes[0] < state.image_axes[1]:
-        image_data = np.transpose(image_data)
+    image_data = _reorder_display_axes(image_data, state, state.image_axes)
 
     image_data = np.squeeze(image_data)
 
@@ -98,8 +94,7 @@ def make_image_from_slab(slab, request, colormap_lut=None):
 
     image_data = np.asarray(slab)
     image_data = _apply_axis_ranges_to_display_data(image_data, state, state.image_axes)
-    if state.image_axes[0] < state.image_axes[1] and image_data.ndim >= 2:
-        image_data = np.transpose(image_data)
+    image_data = _reorder_display_axes(image_data, state, state.image_axes)
     image_data = np.squeeze(image_data)
 
     if state.channel == ChannelMode.COMPLEX:
@@ -191,6 +186,23 @@ def _apply_axis_ranges_to_display_data(data, state, display_axes):
             result = np.take(result, tuple(indices), axis=result_axis)
         result_axis += 1
     return result
+
+
+def _reorder_display_axes(data, state, display_axes):
+    display_axes = tuple(int(axis) for axis in display_axes)
+    if len(display_axes) <= 1:
+        return data
+    if np.ndim(data) == state.ndim:
+        source = tuple(display_axes)
+        destination = tuple(range(len(display_axes)))
+        if source == destination:
+            return data
+        return np.moveaxis(data, source, destination)
+    current_order = tuple(axis for axis in range(state.ndim) if axis in set(display_axes))
+    if current_order == display_axes:
+        return data
+    permutation = tuple(current_order.index(axis) for axis in display_axes)
+    return np.transpose(data, permutation)
 
 
 def _validated_state_for_data(data, state):

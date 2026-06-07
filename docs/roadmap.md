@@ -78,6 +78,20 @@ Goal: cover the most useful ArrayShow-like inspection workflows.
 * [x] ROI statistics.
 * [x] Histogram comparisons for ROI / multiple arrays.
 
+## Phase 4a - Improve coordinate usage and GUI
+
+Goal: Interaction hardening, Coordinate-space contract, and GUI regression suite
+
+* [x] AxisInfo / axis identity metadata
+* [x] DisplayGeometry / coordinate mapping contract
+* [x] Viewport preservation policy
+* [x] Strict GUI error/logging mode
+* [x] Manual regression checklist
+* [x] pytest-qt interaction tests
+* [x] Hypothesis/property tests for mapping
+* [x] Cache revision/invalidation policy
+* [x] ROI coordinate-space policy
+
 ## Phase 5 — Multi-window and sessions
 
 Goal: make repeated inspection work reproducible and efficient.

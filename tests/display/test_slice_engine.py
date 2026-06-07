@@ -83,14 +83,14 @@ def test_apply_channel_values():
     np.testing.assert_allclose(apply_channel(data, ChannelMode.ANGLE), np.angle(data))
 
 
-def test_make_image_2d_real_preserves_existing_transpose_behavior():
+def test_make_image_2d_real_uses_row_major_orientation():
     data = np.arange(6).reshape(2, 3)
     state = state_for(data.shape, image_axes=(0, 1), line_axis=0)
 
     image = make_image(data, state)
 
-    assert image.data.shape == (3, 2)
-    np.testing.assert_array_equal(image.data, data.T)
+    assert image.data.shape == (2, 3)
+    np.testing.assert_array_equal(image.data, data)
     assert image.histogram_data is None
 
 
@@ -107,8 +107,8 @@ def test_make_image_3d_slices_non_display_axis_and_applies_channel_and_scale():
 
     image = make_image(data, state)
 
-    expected = symlog(data[1, :, :].T)
-    assert image.data.shape == (4, 3)
+    expected = symlog(data[1, :, :])
+    assert image.data.shape == (3, 4)
     np.testing.assert_allclose(image.data, expected)
 
 
@@ -118,10 +118,10 @@ def test_make_image_applies_display_axis_ranges():
 
     image = make_image(data, state)
 
-    np.testing.assert_array_equal(image.data, data[(0, 2, 4), :].T)
+    np.testing.assert_array_equal(image.data, data[(0, 2, 4), :])
 
 
-def test_make_image_ndslice_reversed_axes_preserves_existing_orientation():
+def test_make_image_ndslice_reversed_axes_uses_image_axis_order():
     data = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
     state = state_for(
         data.shape,
@@ -133,8 +133,8 @@ def test_make_image_ndslice_reversed_axes_preserves_existing_orientation():
 
     image = make_image(data, state)
 
-    expected = np.squeeze(data[1:2, :, 2:3, :])
-    assert image.data.shape == (3, 5)
+    expected = np.squeeze(data[1:2, :, 2:3, :]).T
+    assert image.data.shape == (5, 3)
     np.testing.assert_array_equal(image.data, expected)
 
 
@@ -166,7 +166,7 @@ def test_make_image_angle_sets_default_levels_and_values():
     image = make_image(data, state)
 
     assert image.default_levels == (-np.pi, np.pi)
-    np.testing.assert_allclose(image.data, np.angle(data.T))
+    np.testing.assert_allclose(image.data, np.angle(data))
 
 
 def test_make_image_complex_real_imag_and_abs_channels():
@@ -176,9 +176,9 @@ def test_make_image_complex_real_imag_and_abs_channels():
     imag_state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.IMAG)
     abs_state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.ABS)
 
-    np.testing.assert_array_equal(make_image(data, real_state).data, np.real(data.T))
-    np.testing.assert_array_equal(make_image(data, imag_state).data, np.imag(data.T))
-    np.testing.assert_allclose(make_image(data, abs_state).data, np.abs(data.T))
+    np.testing.assert_array_equal(make_image(data, real_state).data, np.real(data))
+    np.testing.assert_array_equal(make_image(data, imag_state).data, np.imag(data))
+    np.testing.assert_allclose(make_image(data, abs_state).data, np.abs(data))
 
 
 def test_make_image_complex_returns_rgb_and_magnitude_histogram():
@@ -193,7 +193,7 @@ def test_make_image_complex_returns_rgb_and_magnitude_histogram():
     assert image.data.shape == (2, 2, 3)
     np.testing.assert_array_equal(image.histogram_data, np.ones((2, 2)))
     np.testing.assert_array_equal(image.data[0, 0], lut[127])
-    np.testing.assert_array_equal(image.data[1, 0], lut[255])
+    np.testing.assert_array_equal(image.data[0, 1], lut[255])
 
 
 def test_make_image_complex_rgb_uses_phase_for_color_and_magnitude_for_histogram():
@@ -208,9 +208,9 @@ def test_make_image_complex_rgb_uses_phase_for_color_and_magnitude_for_histogram
     image = make_image(data, state, colormap_lut=lut)
 
     assert image.data.shape == (2, 2, 3)
-    np.testing.assert_array_equal(image.histogram_data, np.abs(data.T))
+    np.testing.assert_array_equal(image.histogram_data, np.abs(data))
     np.testing.assert_array_equal(image.data[0, 0], lut[1])
-    np.testing.assert_array_equal(image.data[1, 0], lut[2])
+    np.testing.assert_array_equal(image.data[1, 0], lut[3])
 
 
 def test_complex_to_rgb_rejects_bad_lut_shape():

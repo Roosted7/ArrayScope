@@ -13,7 +13,6 @@ from arrayscope.display.colormaps import gray_colormap, named_colormap, phase_co
 from arrayscope.ui.dialogs import SaveRangeDialog
 from arrayscope.operations.recipes import load_recipe, save_recipe
 from arrayscope.operations.registry import operation_entries
-from arrayscope.profiles.model import clamp_marker_position, image_hover_indices, profile_y_range
 from arrayscope.display.slice_engine import apply_channel
 from arrayscope.app.settings_state import AppSettingsState, settings_from_mapping, settings_to_mapping
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication

@@ -1,19 +1,33 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
 import pyqtgraph.Qt as Qt
 
+from arrayscope.app.errors import handle_ui_exception
 from arrayscope.display.colormaps import gray_colormap, phase_colormap
-from arrayscope.display.montage import make_montage_from_images, optimal_montage_columns
-from arrayscope.profiles.model import clamp_marker_position, image_hover_indices, profile_y_range
+from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.display.montage import make_montage, optimal_montage_columns
+from arrayscope.display.slice_engine import DisplayImage
+from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.operations.evaluator import _document_key
+from arrayscope.profiles.model import profile_y_range
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.operations.evaluator import evaluate_image_snapshot, evaluate_line_snapshot, evaluate_scalar_snapshot
 from arrayscope.ui.toasts import show_status_message
+
+
+@dataclass(frozen=True)
+class RenderedView:
+    view_state: object
+    document_key: tuple
+    display_image: DisplayImage
+    geometry: DisplayGeometry
 
 
 def getNumberOfDecimalPlaces(number):
@@ -38,14 +52,14 @@ class RenderMixin:
         container = self.img_view.getView()
         if container.sceneBoundingRect().contains(pos): 
             mousePoint = container.mapSceneToView(pos) 
-            hover = image_hover_indices(self.view_state, math.floor(mousePoint.x()), math.floor(mousePoint.y()))
-            if hover is not None:
-                x_i, y_i = hover
-                primary_axis, secondary_axis = self.view_state.image_axes
-                index = list(self.view_state.slice_indices)
-                index[primary_axis] = y_i
-                index[secondary_axis] = x_i
+            geometry = getattr(self, "display_geometry", None)
+            mapping = None if geometry is None else geometry.display_point_to_array_index(math.floor(mousePoint.x()), math.floor(mousePoint.y()))
+            if mapping is not None:
+                x_i, y_i = mapping.local_x, mapping.local_y
+                index = mapping.array_index
                 context = self._slice_context_text()
+                if mapping.montage_axis is not None and mapping.montage_index is not None:
+                    context = f"{context} d{mapping.montage_axis}={mapping.montage_index}".strip()
                 value_text = f"({x_i}, {y_i}) = updating..."
                 text = value_text
                 if context:
@@ -205,46 +219,21 @@ class RenderMixin:
         self.profile_evaluation_controller.start(evaluate, on_done=done, on_error=error)
 
     def _clamp_profile_marker_point(self, image_x, image_y):
-        if self.view_state.image_axes is None:
+        geometry = getattr(self, "display_geometry", None)
+        if geometry is None:
             return None
-        montage_geometry = getattr(self, "_current_montage_geometry", None)
-        if montage_geometry is not None and self.view_state.montage_axis is not None and getattr(self.img_view, "image", None) is not None:
-            return _clamp_to_montage_tile(montage_geometry, image_x, image_y)
-        return clamp_marker_position(self.view_state.shape, self.view_state.image_axes, image_x, image_y)
+        return geometry.clamp_display_point(image_x, image_y)
 
     def _profile_states_for_display_point(self, view_state, image_x, image_y, profile_axes):
-        montage_geometry = getattr(self, "_current_montage_geometry", None)
-        tile_index = None
-        if montage_geometry is not None and view_state.montage_axis is not None:
-            mapped = _map_montage_point(montage_geometry, image_x, image_y)
-            if mapped is None:
-                return (), ""
-            tile_index, image_x, image_y = mapped
-            view_state = view_state.with_slice(view_state.montage_axis, tile_index).with_montage_axis(None)
-
-        if view_state.image_axes is None:
+        geometry = getattr(self, "display_geometry", None)
+        if geometry is None:
             return (), ""
-        primary_axis, secondary_axis = view_state.image_axes
-        local_x = int(round(float(image_x)))
-        local_y = int(round(float(image_y)))
-        actual_x = _display_index_to_axis_index(view_state, secondary_axis, local_x)
-        actual_y = _display_index_to_axis_index(view_state, primary_axis, local_y)
-        if actual_x is None or actual_y is None:
+        mapping = geometry.display_point_to_array_index(image_x, image_y)
+        if mapping is None:
             return (), ""
-
-        states = []
-        for axis in profile_axes:
-            axis = int(axis)
-            if axis < 0 or axis >= view_state.ndim:
-                continue
-            profile_state = view_state.with_line_axis(axis)
-            if axis != primary_axis:
-                profile_state = profile_state.with_slice(primary_axis, actual_y).with_axis_range(primary_axis, None)
-            if axis != secondary_axis:
-                profile_state = profile_state.with_slice(secondary_axis, actual_x).with_axis_range(secondary_axis, None)
-            states.append(profile_state)
-        suffix = "" if tile_index is None or self.view_state.montage_axis is None else f" d{self.view_state.montage_axis}={tile_index}"
-        return tuple(states), suffix
+        states = geometry.display_point_to_profile_states(image_x, image_y, profile_axes)
+        suffix = "" if mapping.montage_axis is None or mapping.montage_index is None else f" d{mapping.montage_axis}={mapping.montage_index}"
+        return states, suffix
 
     def _clear_live_profile_marker(self):
         if hasattr(self, "img_view"):
@@ -294,11 +283,12 @@ class RenderMixin:
             self._on_profile_marker_moved(*position)
 
     def _default_profile_marker_position(self):
-        if self.view_state.image_axes is None:
+        geometry = getattr(self, "display_geometry", None)
+        if geometry is None:
             return (0, 0)
-        primary_axis, secondary_axis = self.view_state.image_axes
-        x = (self.view_state.shape[secondary_axis] - 1) / 2.0
-        y = (self.view_state.shape[primary_axis] - 1) / 2.0
+        height, width = geometry.display_shape
+        x = (width - 1) / 2.0
+        y = (height - 1) / 2.0
         return (round(x), round(y))
 
     def _current_profile_y_range(self):
@@ -306,7 +296,8 @@ class RenderMixin:
             return None
         try:
             image_levels = self.img_view.getLevels()
-        except Exception:
+        except Exception as exc:
+            handle_ui_exception("profile y range levels", exc)
             image_levels = None
         return profile_y_range(self.profile_dock.y_range_mode(), image_levels)
 
@@ -339,7 +330,8 @@ class RenderMixin:
             try:
                 previous_levels = self.img_view.getLevels()
                 previous_bounds = self.img_view.getHistogramDataBounds()
-            except Exception:
+            except Exception as exc:
+                handle_ui_exception("previous image levels", exc)
                 previous_levels = None
                 previous_bounds = None
 
@@ -350,8 +342,10 @@ class RenderMixin:
         document = self.document
         cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut)
         if cached is not None:
+            geometry = DisplayGeometry(view_state=view_state, display_shape=cached.data.shape[:2])
             self._apply_display_image(
                 cached,
+                geometry=geometry,
                 window_mode=window_mode,
                 previous_levels=previous_levels,
                 previous_bounds=previous_bounds,
@@ -376,8 +370,10 @@ class RenderMixin:
                 self.img_view.setEvaluationOverlay(False)
                 return
             display_image = self.operation_evaluator.store_image_result(view_state, colormap_lut, result)
+            geometry = DisplayGeometry(view_state=view_state, display_shape=display_image.data.shape[:2])
             self._apply_display_image(
                 display_image,
+                geometry=geometry,
                 window_mode=window_mode,
                 previous_levels=previous_levels,
                 previous_bounds=previous_bounds,
@@ -412,7 +408,8 @@ class RenderMixin:
             try:
                 previous_levels = self.img_view.getLevels()
                 previous_bounds = self.img_view.getHistogramDataBounds()
-            except Exception:
+            except Exception as exc:
+                handle_ui_exception("previous montage levels", exc)
                 previous_levels = None
                 previous_bounds = None
 
@@ -443,13 +440,14 @@ class RenderMixin:
                     images[0].shape[:2],
                     viewport_shape,
                 )
-            display_image = make_montage_from_images(
+            rendered = make_montage(
                 images,
                 histogram_images=histograms if any_histogram else images,
                 columns=columns,
+                indices=indices,
             )
-            geometry = _montage_geometry(indices, images[0].shape[:2] if images else (1, 1), columns or 1, gap=1)
-            return display_image, geometry
+            geometry = DisplayGeometry(view_state=view_state, display_shape=rendered.image.data.shape[:2], montage=rendered.geometry)
+            return RenderedView(view_state=view_state, document_key=_document_key(document), display_image=rendered.image, geometry=geometry)
 
         def slow():
             self.img_view.setImageStale(True)
@@ -457,17 +455,17 @@ class RenderMixin:
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
             self._update_operation_dock()
 
-        generation_key = (id(document), document.steps, view_state)
+        generation_key = (_document_key(document), view_state)
 
-        def done(payload):
-            if generation_key != (id(self.document), self.document.steps, self.view_state):
+        def done(rendered_view):
+            if generation_key != (_document_key(self.document), self.view_state):
                 self.img_view.setImageStale(False)
                 self.img_view.setEvaluationOverlay(False)
                 return
-            display_image, geometry = payload
-            self._current_montage_geometry = geometry
+            self._current_montage_geometry = rendered_view.geometry.montage
             self._apply_display_image(
-                display_image,
+                rendered_view.display_image,
+                geometry=rendered_view.geometry,
                 window_mode=window_mode,
                 previous_levels=previous_levels,
                 previous_bounds=previous_bounds,
@@ -481,8 +479,9 @@ class RenderMixin:
 
         self.evaluation_controller.start(evaluate, on_done=done, on_error=error, on_slow=slow)
 
-    def _apply_display_image(self, display_image, *, window_mode, previous_levels, previous_bounds, force_auto):
+    def _apply_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto):
         try:
+            viewport_policy = self._viewport_policy_for_display_shape(display_image.data.shape[:2])
             current_bounds = self._display_histogram_bounds(display_image)
             level_decision = choose_window_levels(
                 mode=window_mode,
@@ -501,9 +500,11 @@ class RenderMixin:
                     autoLevels=al,
                     levels=levels,
                     histogramData=display_image.histogram_data,
+                    viewport_policy=viewport_policy,
                 )
             else:
-                self.img_view.setImage(display_image.data, autoLevels=al, levels=levels)
+                self.img_view.setImage(display_image.data, autoLevels=al, levels=levels, viewport_policy=viewport_policy)
+            self.display_geometry = geometry
             self._update_operation_dock()
             
             # Apply axis flips after setting the image
@@ -513,7 +514,21 @@ class RenderMixin:
             self._refresh_inspection_dock()
             
         except Exception as e:
+            handle_ui_exception("image update", e)
             show_status_message(self, f"Image update failed: {e}")
+
+    def _viewport_policy_for_display_shape(self, display_shape):
+        display_shape = tuple(int(size) for size in display_shape)
+        requested = getattr(self, "_next_viewport_policy", None)
+        if requested is not None:
+            self._next_viewport_policy = None
+            self._last_display_shape = display_shape
+            return requested
+        previous_shape = getattr(self, "_last_display_shape", None)
+        self._last_display_shape = display_shape
+        if previous_shape is None or tuple(previous_shape) != display_shape:
+            return ViewportPolicy.RESET_FOR_NEW_SHAPE
+        return ViewportPolicy.PRESERVE
 
     def _prefetch_nearby_slices(self, view_state, colormap_lut):
         axis = getattr(self, "_active_slice_axis", None)
@@ -621,7 +636,8 @@ class RenderMixin:
             finite_data = data[np.isfinite(data)]
             if len(finite_data) > 0:
                 return (float(np.min(finite_data)), float(np.max(finite_data)))
-        except Exception:
+        except Exception as exc:
+            handle_ui_exception("display histogram bounds", exc)
             return None
         return None
     
@@ -680,7 +696,8 @@ class RenderMixin:
                 self._force_autolevel = True
             else:
                 self._force_autolevel = False
-        except Exception:
+        except Exception as exc:
+            handle_ui_exception("processing button", exc)
             self._force_autolevel = False
 
         # Update the display group title
@@ -807,73 +824,3 @@ class RenderMixin:
         self._refresh_inspection_dock()
         self._update_operation_dock()
         self._sync_progressive_docks()
-
-
-def _montage_geometry(indices, tile_shape, columns, gap=1):
-    count = len(indices)
-    columns = max(1, int(columns))
-    rows = int(math.ceil(count / columns)) if count else 0
-    return {
-        "indices": tuple(int(index) for index in indices),
-        "tile_height": int(tile_shape[0]),
-        "tile_width": int(tile_shape[1]),
-        "columns": columns,
-        "rows": rows,
-        "gap": max(0, int(gap)),
-    }
-
-
-def _map_montage_point(geometry, image_x, image_y):
-    x = int(round(float(image_x)))
-    y = int(round(float(image_y)))
-    tile_width = geometry["tile_width"]
-    tile_height = geometry["tile_height"]
-    gap = geometry["gap"]
-    stride_x = tile_width + gap
-    stride_y = tile_height + gap
-    column = x // stride_x
-    row = y // stride_y
-    if column < 0 or row < 0 or column >= geometry["columns"] or row >= geometry["rows"]:
-        return None
-    local_x = x - column * stride_x
-    local_y = y - row * stride_y
-    if local_x < 0 or local_x >= tile_width or local_y < 0 or local_y >= tile_height:
-        return None
-    tile_number = row * geometry["columns"] + column
-    if tile_number >= len(geometry["indices"]):
-        return None
-    return geometry["indices"][tile_number], local_x, local_y
-
-
-def _clamp_to_montage_tile(geometry, image_x, image_y):
-    x = int(round(float(image_x)))
-    y = int(round(float(image_y)))
-    tile_width = geometry["tile_width"]
-    tile_height = geometry["tile_height"]
-    gap = geometry["gap"]
-    best = None
-    best_distance = None
-    for tile_number, _index in enumerate(geometry["indices"]):
-        row = tile_number // geometry["columns"]
-        column = tile_number % geometry["columns"]
-        x0 = column * (tile_width + gap)
-        y0 = row * (tile_height + gap)
-        cx = max(x0, min(x, x0 + tile_width - 1))
-        cy = max(y0, min(y, y0 + tile_height - 1))
-        distance = (cx - x) ** 2 + (cy - y) ** 2
-        if best_distance is None or distance < best_distance:
-            best = (cx, cy)
-            best_distance = distance
-    return best
-
-
-def _display_index_to_axis_index(view_state, axis, display_index):
-    indices = view_state.axis_range_indices[axis]
-    display_index = int(display_index)
-    if indices is None:
-        if display_index < 0 or display_index >= view_state.shape[axis]:
-            return None
-        return display_index
-    if display_index < 0 or display_index >= len(indices):
-        return None
-    return int(indices[display_index])

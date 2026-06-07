@@ -1,0 +1,127 @@
+import pytest
+from hypothesis import given, strategies as st
+
+from arrayscope.core.view_state import ViewState
+from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+
+
+def state_for(shape, image_axes=(0, 1), line_axis=2, slices=None):
+    return ViewState(
+        ndim=len(shape),
+        shape=tuple(shape),
+        image_axes=image_axes,
+        line_axis=line_axis,
+        slice_indices=tuple(slices if slices is not None else (0,) * len(shape)),
+        axis_flipped=(False,) * len(shape),
+        axis_fftshifted=(False,) * len(shape),
+    )
+
+
+def test_2d_plain_image_point_maps_to_array_index():
+    state = state_for((3, 4), line_axis=0)
+    geometry = DisplayGeometry(state, (3, 4))
+
+    mapping = geometry.display_point_to_array_index(2, 1)
+
+    assert mapping.array_index == (1, 2)
+    assert mapping.local_x == 2
+    assert mapping.local_y == 1
+
+
+def test_3d_sliced_image_preserves_non_display_slice():
+    state = state_for((2, 3, 4), image_axes=(1, 2), line_axis=0, slices=(1, 0, 0))
+    geometry = DisplayGeometry(state, (3, 4))
+
+    assert geometry.display_point_to_array_index(3, 2).array_index == (1, 2, 3)
+
+
+def test_reversed_image_axes_use_y_then_x_axis_roles():
+    state = state_for((2, 3, 4, 5), image_axes=(3, 1), line_axis=2, slices=(1, 0, 0, 0))
+    geometry = DisplayGeometry(state, (5, 3))
+
+    assert geometry.display_point_to_array_index(2, 4).array_index == (1, 2, 0, 4)
+
+
+def test_image_axis_subrange_maps_display_index_to_actual_axis_index():
+    state = state_for((5, 6), line_axis=0).with_axis_range(0, (0, 2, 4), "0:2:100")
+    geometry = DisplayGeometry(state, (3, 6))
+
+    assert geometry.display_point_to_array_index(5, 2).array_index == (4, 5)
+    assert geometry.display_point_to_array_index(5, 3) is None
+
+
+def test_montage_point_maps_tile_and_local_position():
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 3), text=":")
+    montage = MontageGeometry(indices=(0, 1, 3), tile_shape=(2, 3), columns=2, rows=2, gap=1)
+    geometry = DisplayGeometry(state, (5, 7), montage=montage)
+
+    mapping = geometry.display_point_to_array_index(5, 1)
+
+    assert mapping.tile_number == 1
+    assert mapping.montage_axis == 2
+    assert mapping.montage_index == 1
+    assert mapping.local_x == 1
+    assert mapping.local_y == 1
+    assert mapping.array_index == (1, 1, 1)
+
+
+def test_montage_gaps_and_missing_last_tile_return_none():
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=2, rows=2, gap=1)
+    geometry = DisplayGeometry(state, (5, 7), montage=montage)
+
+    assert geometry.display_point_to_array_index(3, 1) is None
+    assert geometry.display_point_to_array_index(5, 4) is None
+
+
+def test_clamp_display_point_uses_nearest_valid_montage_tile():
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1), text=":")
+    montage = MontageGeometry(indices=(0, 1), tile_shape=(2, 3), columns=2, rows=1, gap=1)
+    geometry = DisplayGeometry(state, (2, 7), montage=montage)
+
+    assert geometry.clamp_display_point(3, 1) in {(2, 1), (4, 1)}
+
+
+def test_profile_states_under_montage_include_tile_slice_and_local_xy():
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=2).with_montage_axis(2, indices=(0, 2), text=":")
+    montage = MontageGeometry(indices=(0, 2), tile_shape=(2, 3), columns=2, rows=1, gap=1)
+    geometry = DisplayGeometry(state, (2, 7), montage=montage)
+
+    states = geometry.display_point_to_profile_states(5, 1, (1, 2))
+
+    assert tuple(profile_state.line_axis for profile_state in states) == (1, 2)
+    assert states[0].slice_indices == (1, 0, 2)
+    assert states[1].slice_indices == (1, 1, 2)
+
+
+@given(
+    height=st.integers(1, 8),
+    width=st.integers(1, 8),
+    x=st.integers(-2, 10),
+    y=st.integers(-2, 10),
+    use_y_range=st.booleans(),
+    use_x_range=st.booleans(),
+)
+def test_display_point_mapping_property_bounds_and_ranges(height, width, x, y, use_y_range, use_x_range):
+    state = state_for((height, width), line_axis=0)
+    y_range = tuple(range(0, height, 2)) if use_y_range else None
+    x_range = tuple(range(0, width, 2)) if use_x_range else None
+    if y_range:
+        state = state.with_axis_range(0, y_range, "range")
+    if x_range:
+        state = state.with_axis_range(1, x_range, "range")
+    display_shape = (len(y_range) if y_range else height, len(x_range) if x_range else width)
+    geometry = DisplayGeometry(state, display_shape)
+
+    mapping = geometry.display_point_to_array_index(x, y)
+    if mapping is None:
+        assert x < 0 or y < 0 or x >= display_shape[1] or y >= display_shape[0]
+        return
+
+    assert 0 <= mapping.array_index[0] < height
+    assert 0 <= mapping.array_index[1] < width
+    if y_range:
+        assert mapping.array_index[0] == y_range[mapping.local_y]
+    if x_range:
+        assert mapping.array_index[1] == x_range[mapping.local_x]
+

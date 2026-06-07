@@ -3,6 +3,7 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui
 
+from arrayscope.app.errors import handle_ui_exception
 from arrayscope.display.colormaps import named_colormap
 from arrayscope.ui.icons import clear_label_icon, set_label_icon
 from arrayscope.ui.shortcuts import colormap_name_for_key
@@ -85,7 +86,7 @@ class DimensionControlMixin:
             
             view = self.img_view.getView()
             y_dim, x_dim = self.view_state.image_axes
-            view.invertY(self._axis_flipped(y_dim))
+            view.invertY(not self._axis_flipped(y_dim))
             view.invertX(self._axis_flipped(x_dim))
 
     def update_complex_indicators(self):
@@ -398,6 +399,7 @@ class DimensionControlMixin:
             self.current_colormap = colormap_name
             
         except Exception as e:
+            handle_ui_exception("set colormap", e)
             self.statusBar().showMessage(f"Failed to set colormap {colormap_name}: {e}", 3000)
     
     def eventFilter(self, obj, event):

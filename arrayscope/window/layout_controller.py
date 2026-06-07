@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pyqtgraph.Qt as Qt
 
+from arrayscope.app.errors import handle_ui_exception
+
 
 class WindowLayoutManager:
     def __init__(self, window):
@@ -118,8 +120,8 @@ class WindowLayoutManager:
         target_height = max(140, int(win.height() * 0.23))
         try:
             win.resizeDocks([win.profile_dock], [target_height], Qt.QtCore.Qt.Orientation.Vertical)
-        except Exception:
-            pass
+        except Exception as exc:
+            handle_ui_exception("resize profile dock", exc)
 
     def resize_default_docks(self):
         win = self.window
@@ -130,5 +132,5 @@ class WindowLayoutManager:
                 win.resizeDocks([win.operation_dock], [max(220, int(win.width() * 0.24))], Qt.QtCore.Qt.Orientation.Horizontal)
             if hasattr(win, "inspection_dock") and win.inspection_dock.isVisible() and not win.inspection_dock.isFloating():
                 win.resizeDocks([win.inspection_dock], [max(240, int(win.width() * 0.24))], Qt.QtCore.Qt.Orientation.Horizontal)
-        except Exception:
-            pass
+        except Exception as exc:
+            handle_ui_exception("resize default docks", exc)

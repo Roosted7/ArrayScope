@@ -4,6 +4,7 @@ from arrayscope.core.cache_status import CacheStatus
 from arrayscope.core.view_state import ViewState
 from arrayscope.operations.cache import BoundedArrayCache
 from arrayscope.operations.evaluator import OperationEvaluator
+from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.operations.pipeline import ArrayDocument, ReverseAxis
 
 
@@ -66,3 +67,30 @@ def test_prefetch_store_uses_document_key_not_array_equality():
     result = evaluator.prefetch_image_snapshot(other_document, state)
 
     assert evaluator.store_prefetch_image_result(other_document, state, None, result) is False
+
+
+def test_cache_invalidates_when_document_revision_changes_for_same_array_object():
+    data = np.arange(3 * 4).reshape(3, 4).astype(float)
+    state = ViewState.from_shape(data.shape)
+    evaluator = OperationEvaluator(ArrayDocument(data))
+
+    first = evaluator.image(state)
+    data[0, 0] = 999
+    evaluator.set_document(evaluator.document.with_data_changed())
+    second = evaluator.image(state)
+
+    assert evaluator.document.revision == 1
+    assert first is not second
+    assert second.data[0, 0] == 999
+
+
+def test_operation_coordinator_marks_base_data_changed_and_replaces_base_data_revision():
+    data = np.arange(6).reshape(2, 3)
+    coordinator = OperationCoordinator(data)
+    initial_revision = coordinator.document.revision
+
+    coordinator.mark_base_data_changed()
+    assert coordinator.document.revision == initial_revision + 1
+
+    coordinator.replace_base_data(data)
+    assert coordinator.document.revision == initial_revision + 2
