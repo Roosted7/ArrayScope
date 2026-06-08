@@ -1,49 +1,17 @@
-import os
+import time
 
 import numpy as np
+import pytest
 
-os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-
-def _process_events(qtbot, count=8):
-    for _ in range(count):
-        qtbot.wait(10)
-
-
-def _clear_arrayscope_settings():
-    from pyqtgraph.Qt import QtCore
-
-    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
-    settings.clear()
-    settings.sync()
-
-
-def _view_action(win, text):
-    for action in win.menuBar().actions():
-        if action.text() == "View":
-            for child in action.menu().actions():
-                if child.text() == text:
-                    return child
-    raise AssertionError(f"View action not found: {text}")
-
-
-def test_view_menu_uses_managed_dock_actions(qtbot):
-    _clear_arrayscope_settings()
-    from arrayscope.window import ArrayScopeWindow
-
-    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
-    qtbot.addWidget(win)
-    try:
-        _process_events(qtbot)
-        action = _view_action(win, "Inspection")
-        action.trigger()
-        _process_events(qtbot, count=20)
-
-        assert win.inspection_dock.isVisible()
-        assert action.isChecked()
-    finally:
-        win.close()
+from tests.ui.helpers import (
+    assert_panel_invariants as _assert_panel_invariants,
+    assert_size_close as _assert_size_close,
+    clear_arrayscope_settings as _clear_arrayscope_settings,
+    panel_body as _panel_body,
+    process_events as _process_events,
+    view_action as _view_action,
+    wait_for_panel_preserve as _wait_for_panel_preserve,
+)
 
 
 def test_tiled_dimension_x_y_buttons_are_disabled_and_guarded(qtbot):
