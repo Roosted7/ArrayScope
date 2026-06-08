@@ -20,17 +20,23 @@ The supported close/hide paths are the managed title-bar Hide button, View menu 
 `closeEvent` lifecycle override, so native dock close behavior is not a second managed-panel state
 machine.
 
-`WindowLayoutManager` owns the outer-window geometry transition. Opening or redocking a panel grows the
-main window by a stored panel extent plus Qt's dock separator extent; hiding or detaching consumes the
-same active extent and shrinks the main window after the panel has left the dock layout. Hidden and
-detached panels are removed from `QMainWindow`'s dock layout so their minimum sizes cannot affect the
-canvas.
+`WindowLayoutManager` owns the outer-window size transition. Opening, hiding, detaching, and redocking
+managed panels preserve the central viewer with a post-layout transaction: record the central widget
+size, apply the panel change, let the `QMainWindow` layout settle, then correct the top-level size with
+`resize()`. A short generation-guarded `QTimer` retry loop verifies the result because Qt and Wayland
+compositors may apply configure/layout changes asynchronously. ArrayScope does not call `setGeometry()`
+or intentionally move the top-left window position for preserve-canvas behavior. Users can disable this
+best-effort main-window resizing from the View menu.
+
+Hidden and detached panels are removed from `QMainWindow`'s dock layout so their minimum sizes cannot
+affect the canvas.
 
 ## Consequences
 
 Panel state is owned by ArrayScope instead of inferred from native dock floating state. The implementation
-does not use native `QDockWidget.setFloating()`, view-size snapshots, or retry timers for managed panel
-transitions.
+does not use native `QDockWidget.setFloating()`, view-size snapshots, or top-level position-setting APIs
+for managed panel transitions. Perfect preservation is not guaranteed when the compositor constrains the
+requested size; the contract is best effort.
 
 ## Rejected alternatives
 
@@ -44,6 +50,8 @@ Qt tests cover title-bar detach, drag-to-detach, hide, redock, re-show, and rese
 open/close with no prior manual resize, operation close while Inspection remains open, and detached
 dialogs containing the original panel body. Lifecycle tests also cover detach, detached-dialog close,
 View menu hide while detached, reopen, redock, hide, reopen, and reset layout without stale dialogs.
+Preserve-canvas tests cover resize-only correction, no intentional position movement, the off setting,
+and settings persistence.
 
 ## Manual checks required
 

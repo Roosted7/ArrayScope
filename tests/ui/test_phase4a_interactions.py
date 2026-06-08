@@ -20,6 +20,24 @@ def _clear_arrayscope_settings():
     settings.sync()
 
 
+def _view_action(win, text):
+    for action in win.menuBar().actions():
+        if action.text() == "View":
+            for child in action.menu().actions():
+                if child.text() == text:
+                    return child
+    raise AssertionError(f"View action not found: {text}")
+
+
+def _wait_for_panel_preserve(qtbot):
+    _process_events(qtbot, count=50)
+
+
+def _assert_size_close(actual, expected, tolerance=1):
+    assert abs(actual.width() - expected.width()) <= tolerance
+    assert abs(actual.height() - expected.height()) <= tolerance
+
+
 def test_render_preserves_viewport_for_same_display_shape(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -61,6 +79,111 @@ def test_dock_show_hide_preserves_image_view_size(qtbot):
         assert abs(after_size.height() - before_size.height()) <= 1
     finally:
         win.close()
+
+
+def test_panel_open_hide_preserves_central_widget_size_with_resize_transaction(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        win.resize(900, 620)
+        _process_events(qtbot, count=20)
+        target = QtCore.QSize(win.centralWidget().size())
+
+        win._show_inspection_dock()
+        _wait_for_panel_preserve(qtbot)
+        _assert_size_close(win.centralWidget().size(), target)
+
+        win._set_inspection_dock_visible_from_user(False)
+        _wait_for_panel_preserve(qtbot)
+        _assert_size_close(win.centralWidget().size(), target)
+    finally:
+        win.close()
+
+
+def test_panel_preserve_transaction_does_not_move_window_position(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        win.move(100, 80)
+        win.resize(900, 620)
+        _process_events(qtbot, count=20)
+        before = QtCore.QPoint(win.pos())
+        if win.pos() != before:
+            return
+
+        win._show_inspection_dock()
+        _wait_for_panel_preserve(qtbot)
+        assert win.pos() == before
+
+        win._set_inspection_dock_visible_from_user(False)
+        _wait_for_panel_preserve(qtbot)
+        assert win.pos() == before
+    finally:
+        win.close()
+
+
+def test_panel_resize_behavior_off_does_not_resize_main_window(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import AppSettingsState, PanelResizeBehavior
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        win.resize(900, 620)
+        _process_events(qtbot, count=20)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme,
+            prefetch_nearby_slices=win.app_settings.prefetch_nearby_slices,
+            panel_resize_behavior=PanelResizeBehavior.OFF,
+        )
+        before_central_size = win.centralWidget().size()
+        before_generation = win.layout_manager._canvas_preserve_generation
+
+        win._show_inspection_dock()
+        _wait_for_panel_preserve(qtbot)
+
+        assert win.layout_manager._canvas_preserve_generation == before_generation
+        assert win.centralWidget().size().width() < before_central_size.width()
+    finally:
+        win.close()
+
+
+def test_view_menu_preserve_canvas_setting_persists(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import PanelResizeBehavior
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        action = _view_action(win, "Preserve Canvas Size on Panel Changes")
+        assert action.isChecked()
+        action.trigger()
+        _process_events(qtbot, count=5)
+        assert not action.isChecked()
+        assert win.app_settings.panel_resize_behavior == PanelResizeBehavior.OFF
+    finally:
+        win.close()
+
+    second = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(second)
+    try:
+        _process_events(qtbot, count=20)
+        action = _view_action(second, "Preserve Canvas Size on Panel Changes")
+        assert not action.isChecked()
+        assert second.app_settings.panel_resize_behavior == PanelResizeBehavior.OFF
+    finally:
+        second.close()
 
 
 def test_montage_roi_gap_source_is_nan(qtbot):

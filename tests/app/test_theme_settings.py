@@ -72,8 +72,14 @@ def test_theme_backend_keeps_builtin_palette_even_when_optional_backend_availabl
 
 
 def test_settings_round_trip_defaults_and_values():
-    settings = settings_state.settings_from_mapping({"theme": "dark", "prefetch_nearby_slices": "true"})
+    settings = settings_state.settings_from_mapping(
+        {"theme": "dark", "prefetch_nearby_slices": "true", "panel_resize_behavior": "off"}
+    )
     values = settings_state.settings_to_mapping(settings)
 
-    assert values == {"theme": "dark", "prefetch_nearby_slices": True}
-    assert settings_state.settings_from_mapping({}).theme == theme.ThemeChoice.SYSTEM
+    assert values == {"theme": "dark", "prefetch_nearby_slices": True, "panel_resize_behavior": "off"}
+    defaults = settings_state.settings_from_mapping({})
+    assert defaults.theme == theme.ThemeChoice.SYSTEM
+    assert defaults.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
+    unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})
+    assert unknown.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT

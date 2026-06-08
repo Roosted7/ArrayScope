@@ -3,7 +3,7 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
-from arrayscope.app.settings_state import AppSettingsState, settings_from_mapping, settings_to_mapping
+from arrayscope.app.settings_state import AppSettingsState, PanelResizeBehavior, settings_from_mapping, settings_to_mapping
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
 from arrayscope.operations.registry import operation_entries
 from arrayscope.ui.icons import set_action_icon, verify_icon_names
@@ -16,6 +16,7 @@ class WindowMenuMixin:
             {
                 "theme": self._settings.value("theme", ThemeChoice.SYSTEM.value),
                 "prefetch_nearby_slices": self._settings.value("prefetch_nearby_slices", False),
+                "panel_resize_behavior": self._settings.value("panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value),
             }
         )
 
@@ -63,6 +64,11 @@ class WindowMenuMixin:
         command_palette_action.triggered.connect(self.open_command_palette)
         view_menu.addAction(command_palette_action)
         view_menu.addSeparator()
+        preserve_canvas_action = QtGui.QAction("Preserve Canvas Size on Panel Changes", self, checkable=True)
+        preserve_canvas_action.setChecked(self.app_settings.panel_resize_behavior == PanelResizeBehavior.BEST_EFFORT)
+        preserve_canvas_action.triggered.connect(self._set_preserve_canvas_enabled)
+        view_menu.addAction(preserve_canvas_action)
+        self._preserve_canvas_action = preserve_canvas_action
         reset_layout_action = QtGui.QAction("Reset layout", self)
         set_action_icon(reset_layout_action, "reset_wrench")
         reset_layout_action.triggered.connect(self.reset_layout)
@@ -106,13 +112,31 @@ class WindowMenuMixin:
         theme_to_store = result.requested if result.applied == result.requested else result.applied
         self.applied_theme = result.applied
         self.theme_backend = result.backend
-        self.app_settings = AppSettingsState(theme=theme_to_store, prefetch_nearby_slices=getattr(self, "app_settings", AppSettingsState()).prefetch_nearby_slices)
+        current = getattr(self, "app_settings", AppSettingsState())
+        self.app_settings = AppSettingsState(
+            theme=theme_to_store,
+            prefetch_nearby_slices=current.prefetch_nearby_slices,
+            panel_resize_behavior=current.panel_resize_behavior,
+        )
         if persist:
             self._save_app_settings()
         self._sync_theme_actions()
 
     def _set_prefetch_enabled(self, enabled):
-        self.app_settings = AppSettingsState(theme=self.app_settings.theme, prefetch_nearby_slices=bool(enabled))
+        self.app_settings = AppSettingsState(
+            theme=self.app_settings.theme,
+            prefetch_nearby_slices=bool(enabled),
+            panel_resize_behavior=self.app_settings.panel_resize_behavior,
+        )
+        self._save_app_settings()
+
+    def _set_preserve_canvas_enabled(self, enabled):
+        behavior = PanelResizeBehavior.BEST_EFFORT if enabled else PanelResizeBehavior.OFF
+        self.app_settings = AppSettingsState(
+            theme=self.app_settings.theme,
+            prefetch_nearby_slices=self.app_settings.prefetch_nearby_slices,
+            panel_resize_behavior=behavior,
+        )
         self._save_app_settings()
 
     def verify_icons(self):
