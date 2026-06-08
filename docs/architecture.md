@@ -58,9 +58,11 @@ source of array-view state.
   `DETACHED`, and `StandardDockWidget` has no custom close lifecycle override.
 - `arrayscope.window.layout_controller.WindowLayoutManager`: owns first-run layout restore, reset
   layout, progressive panel visibility, managed panel menu actions, dock default sizes, shutdown dock
-  closing, and panel transition geometry. Panel show/hide/detach/redock uses deterministic reserved
-  extents, including the Qt dock separator extent, instead of view snapshots, retry timers, or native
-  `QDockWidget` floating state.
+  closing, and panel transition geometry. Panel show/hide/detach/redock preserves the central viewer
+  size with a post-layout transaction: it records the central widget size, applies the panel change,
+  then corrects the top-level size with `resize()` over a short `QTimer` retry loop. It does not call
+  `setGeometry()` or intentionally move the window position; users can turn this best-effort behavior
+  off in the View menu. Managed panels still avoid native `QDockWidget` floating state.
 - `arrayscope.app.launch`: QApplication creation, multiprocessing launch, and IPython Qt event-loop handling.
 - `arrayscope.io`: file loading, dataset selectors, and save workflows.
 - `arrayscope.export`: video/frame export workers and UI workflow.
@@ -102,6 +104,9 @@ interaction.
 Managed panel visibility uses supported ArrayScope paths only: the managed title-bar Hide button,
 View menu actions, or `WindowLayoutManager` programmatic methods. Native `QDockWidget.closeEvent`
 semantics are not an app-level lifecycle path for managed panels.
+The preserve-canvas transaction is best effort because the window manager or compositor may constrain
+top-level sizes; ArrayScope requests size correction with `resize()` and accepts the remaining error
+after bounded retries.
 
 The window tracks derived-array metadata from `ArrayDocument.current_shape` and dtype estimates.
 It must not materialize the derived array as normal state. Full derived evaluation is reserved for

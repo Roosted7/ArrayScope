@@ -245,12 +245,12 @@ goal: No silent memory blowups, no broken panel ownership states, no misleading 
 
 Main goal: Panel transitions preserve the central viewer size as best as Wayland permits.
 
-* [ ] Replace setGeometry-based panel delta with post-layout central-widget correction.
-* [ ] Use resize(), not setGeometry(), for preserve-canvas behavior.
-* [ ] Add QTimer-based verification retries.
-* [ ] Do not move window position during preserve.
-* [ ] Add setting: preserve canvas on panel changes = best effort / off.
-* [ ] Add manual Wayland test doc.
+* [x] Replace setGeometry-based panel delta with post-layout central-widget correction.
+* [x] Use resize(), not setGeometry(), for preserve-canvas behavior.
+* [x] Add QTimer-based verification retries.
+* [x] Do not move window position during preserve.
+* [x] Add setting: preserve canvas on panel changes = best effort / off.
+* [x] Add manual Wayland test doc.
 
 ### P2 — bounded montage renderer v1
 

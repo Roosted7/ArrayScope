@@ -3,6 +3,8 @@
 Run these checks before release-level changes to rendering, montage, panels, viewport behavior, or
 background evaluation.
 
+For Wayland-specific managed-panel checks, also run `docs/manual-regression-wayland-panels.md`.
+
 ## Rapid Visible Rendering
 
 - Open a 3D or 4D array with at least one operation in the stack.

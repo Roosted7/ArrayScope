@@ -99,3 +99,12 @@ def test_detached_dialog_hide_takes_body_before_state_change():
 def test_managed_panel_code_does_not_use_native_set_floating():
     text = (ROOT / "arrayscope" / "window" / "panels.py").read_text()
     assert ".setFloating(" not in text
+
+
+def test_layout_controller_preserves_canvas_without_set_geometry_or_clamping():
+    text = (ROOT / "arrayscope" / "window" / "layout_controller.py").read_text()
+    assert ".setGeometry(" not in text
+    assert "_clamp_to_available_screen" not in text
+    assert ".resize(" in text
+    assert "run_panel_transition_preserving_canvas" in text
+    assert "_correct_canvas_size" in text
