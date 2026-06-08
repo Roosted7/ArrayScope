@@ -28,7 +28,12 @@ background evaluation.
 
 - Show, hide, detach with the title-bar button, detach by dragging the title bar, redock with the
   detached-window Dock button, and reset Operations, Profile, and Inspection panels.
+- For each managed panel, run this exact lifecycle sequence: open from View, detach, close the
+  detached dialog, reopen from View, detach again, redock with the detached-window Dock button, hide
+  from View, and reopen from View.
 - Confirm each detached panel window contains the original panel content, not only the redock controls.
+- Confirm the panel content is present after every reopen/redock and the View menu check state tracks
+  hidden versus visible/detached state throughout the sequence.
 - On Wayland, move each detached panel with the custom title/move handle.
 - Confirm detached panels use tool windows rather than native floating docks.
 - Confirm opening a panel grows the main window, and hiding/detaching it shrinks the main window while

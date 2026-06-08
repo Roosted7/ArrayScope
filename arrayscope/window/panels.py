@@ -80,10 +80,10 @@ class PanelManager:
         del reason, preserve_canvas
         panel = self._panels_by_name[str(name)]
         if panel.location == PanelLocation.DETACHED:
-            self.window.layout_manager.redock_managed_panel(panel.dock, reason="show-docked", preserve_canvas=False)
+            self.redock_panel(panel.name, reason="show-docked", preserve_canvas=False)
             return
-        if QtWidgets.QDockWidget.widget(panel.dock) is not panel.body:
-            panel.dock.setWidget(panel.body)
+        self._destroy_dialog_and_take_body(panel)
+        self._set_body_in_dock(panel)
         self.window.addDockWidget(panel.last_dock_area, panel.dock)
         panel.dock.setVisible(True)
         panel.location = PanelLocation.DOCKED
@@ -93,10 +93,10 @@ class PanelManager:
         del reason, preserve_canvas
         panel = self._panels_by_name[str(name)]
         if panel.dialog is not None:
-            panel.dialog.hide()
+            self._destroy_dialog_and_take_body(panel)
+            self._store_body_in_hidden_dock(panel)
         else:
-            self.window.removeDockWidget(panel.dock)
-        panel.dock.setVisible(False)
+            self._hide_dock(panel)
         panel.location = PanelLocation.HIDDEN
         self._sync_view_action(panel)
 
@@ -108,44 +108,17 @@ class PanelManager:
                 panel.dialog.show()
                 panel.dialog.raise_()
             return
-        panel.last_dock_area = self.window.dockWidgetArea(panel.dock)
-        body = QtWidgets.QDockWidget.widget(panel.dock)
-        if body is not panel.body:
-            panel.body = body
-        if panel.body is None:
-            raise RuntimeError(f"panel {panel.name!r} has no body widget to detach")
-        panel.body.setParent(None)
-        panel.placeholder = QtWidgets.QWidget(panel.dock)
-        panel.dock.setWidget(panel.placeholder)
+        if panel.location == PanelLocation.DOCKED:
+            panel.last_dock_area = self.window.dockWidgetArea(panel.dock)
+        self._create_detached_dialog(panel)
         panel.location = PanelLocation.DETACHED
-        panel.dock.setVisible(False)
-        self.window.removeDockWidget(panel.dock)
-        dialog = _DetachedPanelDialog(
-            self.window,
-            panel.title,
-            panel.body,
-            on_redock=lambda _checked=False, dock=panel.dock: self.window.layout_manager.redock_managed_panel(dock, reason="dialog"),
-        )
-        dialog.closedByUser.connect(lambda name=name: self._hide_detached_from_dialog(name))
-        panel.dialog = dialog
-        dialog.resize(max(320, panel.body.width()), max(220, panel.body.height()))
-        dialog.show()
         self._sync_view_action(panel)
 
     def redock_panel(self, name, *, reason, preserve_canvas=True):
         del reason, preserve_canvas
         panel = self._panels_by_name[str(name)]
-        if panel.dialog is not None:
-            body = panel.dialog.take_body()
-            if body is not None:
-                panel.body = body
-            panel.dialog._closing_for_redock = True
-            panel.dialog.close()
-            panel.dialog = None
-        if panel.body is None:
-            raise RuntimeError(f"panel {panel.name!r} has no body widget to redock")
-        panel.body.setParent(None)
-        panel.dock.setWidget(panel.body)
+        self._destroy_dialog_and_take_body(panel)
+        self._set_body_in_dock(panel)
         self.window.addDockWidget(panel.last_dock_area, panel.dock)
         panel.dock.setVisible(True)
         panel.location = PanelLocation.DOCKED
@@ -164,8 +137,63 @@ class PanelManager:
 
     def _hide_detached_from_dialog(self, name):
         panel = self._panels_by_name[str(name)]
+        self._destroy_dialog_and_take_body(panel)
+        self._store_body_in_hidden_dock(panel)
         panel.location = PanelLocation.HIDDEN
         self._sync_view_action(panel)
+
+    def _destroy_dialog_and_take_body(self, panel: ManagedPanel) -> QtWidgets.QWidget | None:
+        if panel.dialog is None:
+            return panel.body
+        dialog = panel.dialog
+        body = dialog.take_body()
+        dialog._closing_for_redock = True
+        dialog.close()
+        dialog.deleteLater()
+        panel.dialog = None
+        if body is not None:
+            panel.body = body
+        return panel.body
+
+    def _set_body_in_dock(self, panel: ManagedPanel) -> None:
+        if panel.body is None:
+            raise RuntimeError(f"panel {panel.name!r} has no body widget")
+        if panel.placeholder is not None and panel.placeholder is not panel.body:
+            panel.placeholder.deleteLater()
+            panel.placeholder = None
+        if QtWidgets.QDockWidget.widget(panel.dock) is not panel.body:
+            panel.body.setParent(None)
+            panel.dock.setWidget(panel.body)
+
+    def _store_body_in_hidden_dock(self, panel: ManagedPanel) -> None:
+        self._set_body_in_dock(panel)
+        self._hide_dock(panel)
+
+    def _hide_dock(self, panel: ManagedPanel) -> None:
+        panel.dock.setVisible(False)
+        self.window.removeDockWidget(panel.dock)
+
+    def _create_detached_dialog(self, panel: ManagedPanel) -> None:
+        self._destroy_dialog_and_take_body(panel)
+        body = QtWidgets.QDockWidget.widget(panel.dock)
+        if body is not None:
+            panel.body = body
+        if panel.body is None:
+            raise RuntimeError(f"panel {panel.name!r} has no body widget to detach")
+        panel.body.setParent(None)
+        panel.placeholder = QtWidgets.QWidget(panel.dock)
+        panel.dock.setWidget(panel.placeholder)
+        self._hide_dock(panel)
+        dialog = _DetachedPanelDialog(
+            self.window,
+            panel.title,
+            panel.body,
+            on_redock=lambda _checked=False, dock=panel.dock: self.window.layout_manager.redock_managed_panel(dock, reason="dialog"),
+        )
+        dialog.closedByUser.connect(lambda name=panel.name: self._hide_detached_from_dialog(name))
+        panel.dialog = dialog
+        dialog.resize(max(320, panel.body.width()), max(220, panel.body.height()))
+        dialog.show()
 
     def _sync_view_action(self, panel):
         action = getattr(panel.dock, "_arrayscope_managed_action", None)

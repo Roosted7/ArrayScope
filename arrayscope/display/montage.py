@@ -136,6 +136,12 @@ class RenderedTile:
     slab_shape: tuple[int, ...]
     slab_nbytes: int | None
 
+    def nbytes(self) -> int:
+        total = int(self.image.nbytes)
+        if isinstance(self.histogram_data, np.ndarray):
+            total += int(self.histogram_data.nbytes)
+        return total
+
 
 def make_montage(images, *, histogram_images=None, columns=None, gap=1, indices=None):
     images = tuple(np.asarray(image) for image in images)

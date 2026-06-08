@@ -189,7 +189,7 @@ Goal: Make ArrayScope responsive, bounded, and predictable under real interactiv
 
 * [x] Fix slice_engine display-axis preservation
 * [x] Add render memory estimates
-* [x] Prevent giant montage allocations
+* [~] Prevent giant montage allocations (full-montage allocation is guarded, but the current renderer still assembles a bounded local visible-tile collage)
 
 ### P1 — latest-only evaluation scheduler
 
@@ -200,16 +200,16 @@ Goal: Make ArrayScope responsive, bounded, and predictable under real interactiv
 ### P2 — Tiled montage renderer
 
 * [x] `MontagePlan` for separation
-* [x] Evaluate only visible tiles
-* [x] Cache tile results
-* [x] Sample histogram/levels
+* [~] Evaluate only visible tiles (still commits a local mini-montage rather than a viewport-origin canvas)
+* [~] Cache tile results (tile byte accounting fixed in Phase 4e P0; predictive/byte-based selection deferred)
+* [~] Sample histogram/levels (full viewport-canvas histogram behavior deferred)
 
 ### P3 — Managed panels instead of floating QDockWidgets
 
 * [x] Introduce `PanelManager` for authoritative state
 * [x] Use QDockWidget only for docked panels, for detached panels; use `QDialog` / tool window
 * [x] Ensure Wayland move functionality, through `startSystemMove()`
-* [x] Preserve canvas size on every panel transition
+* [~] Preserve canvas size on every panel transition (setGeometry-based best effort remains; transaction rewrite deferred to Phase 4e P1)
 
 ### P4 — Viewport model and toolbar UX
 
@@ -220,13 +220,70 @@ Goal: Make ArrayScope responsive, bounded, and predictable under real interactiv
 
 * [x] One interaction-mode owner: `class InteractionMode(Enum)`
 * [x] Debounce and background ROI stats (visible/selected ROI immediately, histograms when idle)
-* [x] Hidden panels do not compute (only refresh when shown)
+* [~] Hidden panels do not compute (only refresh when shown)
 
 ### P6 — Docs, metrics, and regression pipeline
 
 * [x] Add performance budgets
-* [x] Add benchmark/stress tests
-* [x] Update manual regression docs (OS/window-manager behavior)
+* [~] Add benchmark/stress tests
+* [x] Update manual regression docs (OS/window-manager behavior; Phase 4e P0 adds explicit panel lifecycle sequence)
+
+## Phase 4e
+
+### P0 — correctness and memory stop-the-bleeding
+
+goal: No silent memory blowups, no broken panel ownership states, no misleading “done” docs.
+
+* [x] Fix BoundedArrayCache byte accounting for RenderedTile.
+* [x] Add tests for cached tile byte accounting and eviction.
+* [x] Fix PanelManager DETACHED → HIDDEN and HIDDEN → DOCKED body ownership.
+* [x] Remove or neuter StandardDockWidget.closeEvent override.
+* [x] Add panel lifecycle tests for detach/hide/show/redock/reset.
+* [x] Mark roadmap Phase 4d partial where appropriate.
+
+### P1 — Wayland preserve-canvas transaction
+
+Main goal: Panel transitions preserve the central viewer size as best as Wayland permits.
+
+* [ ] Replace setGeometry-based panel delta with post-layout central-widget correction.
+* [ ] Use resize(), not setGeometry(), for preserve-canvas behavior.
+* [ ] Add QTimer-based verification retries.
+* [ ] Do not move window position during preserve.
+* [ ] Add setting: preserve canvas on panel changes = best effort / off.
+* [ ] Add manual Wayland test doc.
+
+### P2 — bounded montage renderer v1
+
+Main goal: Montage never allocates based on total stack size during interaction.
+
+* [ ] Add byte-based visible tile selection.
+* [ ] Replace local mini-montage with viewport canvas + origin.
+* [ ] Make DisplayGeometry understand montage canvas origin.
+* [ ] Use sampled histogram data for montage levels instead of full hist collage where possible.
+* [ ] Add RSS stress test.
+* [ ] Keep multi-ImageItem path abandoned for now.
+
+### P3 — operation cost model and FFT backend
+
+Main goal: Slow operations become predictable, measurable, and configurable.
+
+* [ ] Add OperationCapabilities / OperationCost metadata.
+* [ ] Add peak-memory estimates for reductions, RSS, complex conversion, FFT.
+* [ ] Add scipy.fft backend with worker control.
+* [ ] Add optional pyFFTW backend later.
+* [ ] Add app settings for FFT workers and render memory budget.
+* [ ] Add benchmarks for raw slicing, FFT slicing, montage, ROI stats.
+
+### P4 — scheduler v2
+
+Main goal: Visible work always wins.
+
+* [ ] Keep visible render max_workers=1 and latest-only.
+* [ ] Add cost-aware decision: sync/cached, async, refuse, degraded preview.
+* [ ] Add idle-only prefetch.
+* [ ] Add cache hit-rate diagnostics.
+* [ ] Add adaptive prefetch only after measurement.
+* [ ] Add cooperative cancellation points for chunked operations.
 
 ## Phase 5 — Multi-window and sessions
 

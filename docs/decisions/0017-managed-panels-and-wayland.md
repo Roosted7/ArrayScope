@@ -11,6 +11,14 @@ ArrayScope now has a `PanelManager` with explicit `HIDDEN`, `DOCKED`, and `DETAC
 panels use `QDockWidget` with a managed title bar that provides hide and detach buttons; dragging that
 title bar also detaches the panel. Detached panels reparent the same panel body into a `QDialog` tool
 window with a move handle that calls `QWindow.startSystemMove()` and a Dock button for redocking.
+Hidden panels store their body back in the hidden dock, not in a hidden dialog. `panel.dialog` is
+non-`None` only while the panel state is `DETACHED`; hiding a detached panel first takes the body back
+from the dialog and destroys the dialog.
+
+The supported close/hide paths are the managed title-bar Hide button, View menu actions, and
+`WindowLayoutManager` programmatic methods. `StandardDockWidget` intentionally has no custom
+`closeEvent` lifecycle override, so native dock close behavior is not a second managed-panel state
+machine.
 
 `WindowLayoutManager` owns the outer-window geometry transition. Opening or redocking a panel grows the
 main window by a stored panel extent plus Qt's dock separator extent; hiding or detaching consumes the
@@ -34,7 +42,8 @@ that it makes dock lifecycle behavior harder to reason about.
 Qt tests cover title-bar detach, drag-to-detach, hide, redock, re-show, and reset layout using
 `PanelManager.location()` instead of `QDockWidget.isFloating()`. Regression tests cover operation-dock
 open/close with no prior manual resize, operation close while Inspection remains open, and detached
-dialogs containing the original panel body.
+dialogs containing the original panel body. Lifecycle tests also cover detach, detached-dialog close,
+View menu hide while detached, reopen, redock, hide, reopen, and reset layout without stale dialogs.
 
 ## Manual checks required
 

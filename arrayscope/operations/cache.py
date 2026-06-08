@@ -81,6 +81,15 @@ class BoundedArrayCache:
 
 
 def _nbytes(value):
+    nbytes_method = getattr(value, "nbytes", None)
+    if callable(nbytes_method):
+        return int(nbytes_method())
+    if hasattr(value, "image") and isinstance(getattr(value, "image"), np.ndarray):
+        total = int(value.image.nbytes)
+        histogram_data = getattr(value, "histogram_data", None)
+        if isinstance(histogram_data, np.ndarray):
+            total += int(histogram_data.nbytes)
+        return total
     if hasattr(value, "data") and isinstance(getattr(value, "data"), np.ndarray):
         total = int(value.data.nbytes)
         histogram_data = getattr(value, "histogram_data", None)

@@ -93,9 +93,9 @@ def test_strict_ui_mode_raises_callback_exceptions(monkeypatch):
         handle_ui_exception("test callback", RuntimeError("boom"))
 
 
-def test_inspection_dock_defaults_left_and_stays_closed_after_direct_close(qtbot):
+def test_inspection_dock_defaults_left_and_stays_closed_after_managed_title_close(qtbot):
     _clear_arrayscope_settings()
-    from pyqtgraph.Qt import QtCore
+    from pyqtgraph.Qt import QtCore, QtWidgets
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
@@ -108,7 +108,9 @@ def test_inspection_dock_defaults_left_and_stays_closed_after_direct_close(qtbot
         assert win.inspection_dock.isVisible()
         assert win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
 
-        win.inspection_dock.close()
+        close_button = win.inspection_dock.findChild(QtWidgets.QToolButton, "ManagedDockCloseButton")
+        assert close_button is not None
+        close_button.click()
         _process_events(qtbot, count=12)
         assert not win.inspection_dock.isVisible()
         assert not win._inspection_dock_user_visible
@@ -120,8 +122,9 @@ def test_inspection_dock_defaults_left_and_stays_closed_after_direct_close(qtbot
         win.close()
 
 
-def test_direct_closing_docked_inspection_does_not_restore_canvas_snapshot(qtbot):
+def test_managed_title_closing_docked_inspection_does_not_restore_canvas_snapshot(qtbot):
     _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtWidgets
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(32 * 32, dtype=float).reshape(32, 32))
@@ -134,7 +137,9 @@ def test_direct_closing_docked_inspection_does_not_restore_canvas_snapshot(qtbot
         before = win.img_view.size()
         before_window = win.size()
 
-        win.inspection_dock.close()
+        close_button = win.inspection_dock.findChild(QtWidgets.QToolButton, "ManagedDockCloseButton")
+        assert close_button is not None
+        close_button.click()
         _process_events(qtbot, count=30)
         after = win.img_view.size()
         after_window = win.size()

@@ -53,7 +53,9 @@ source of array-view state.
 - `arrayscope.window.panels.PanelManager`: owns managed panel state and panel body reparenting. Docked
   panels use `QDockWidget`; detached panels use `QDialog`/tool windows with a `startSystemMove()` move
   handle. Hidden and detached panels are removed from the `QMainWindow` dock layout so they cannot
-  leave stale minimum-size constraints behind.
+  leave stale minimum-size constraints behind. Hidden panels keep their body in the hidden dock;
+  detached panels keep their body in the dialog. `panel.dialog` is `None` unless the panel location is
+  `DETACHED`, and `StandardDockWidget` has no custom close lifecycle override.
 - `arrayscope.window.layout_controller.WindowLayoutManager`: owns first-run layout restore, reset
   layout, progressive panel visibility, managed panel menu actions, dock default sizes, shutdown dock
   closing, and panel transition geometry. Panel show/hide/detach/redock uses deterministic reserved
@@ -96,6 +98,10 @@ directly. It does not schedule scalar evaluation or show an intermediate
 Do not read widget values to reconstruct `ViewState`. Widget state is an output
 of render, except transient UI-only state such as dock visibility and histogram
 interaction.
+
+Managed panel visibility uses supported ArrayScope paths only: the managed title-bar Hide button,
+View menu actions, or `WindowLayoutManager` programmatic methods. Native `QDockWidget.closeEvent`
+semantics are not an app-level lifecycle path for managed panels.
 
 The window tracks derived-array metadata from `ArrayDocument.current_shape` and dtype estimates.
 It must not materialize the derived array as normal state. Full derived evaluation is reserved for
