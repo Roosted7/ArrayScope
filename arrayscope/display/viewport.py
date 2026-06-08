@@ -68,6 +68,15 @@ class ViewportController:
         self.mode = ViewportMode.FIT
         _fit(view_box)
 
+    def set_fit_locked(self, view_box, enabled: bool):
+        if enabled:
+            self.fit(view_box)
+        elif self.mode == ViewportMode.FIT:
+            self.mode = ViewportMode.USER
+
+    def is_fit_locked(self) -> bool:
+        return self.mode == ViewportMode.FIT
+
     def one_to_one(self, view_box, image_shape, viewport_size):
         self.mode = ViewportMode.ONE_TO_ONE
         _set_one_to_one(view_box, image_shape, viewport_size)

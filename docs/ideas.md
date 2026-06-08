@@ -100,6 +100,9 @@ Rules:
 ## Technical debt
 
 * Replace print-based warnings with logging or user-facing status messages.
+* Revisit multi-`ImageItem` tiled montage display after isolating the PySide/PyQtGraph offscreen paint
+  instability; the Phase 4d plan/cache contract is ready, but the current commit path uses a bounded
+  loaded-tile collage for stability.
 * Add first-class scalar display support for operation stacks that reduce all dimensions.
 * Clarify FFT naming: current centered FFT/IFFT follow viewer convention but may surprise users expecting NumPy direction.
 * Add public data-mutation ergonomics beyond `notify_data_changed()`, such as context managers or observable data sources.

@@ -7,12 +7,16 @@ from dataclasses import dataclass
 import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.window.panels import PanelLocation
 
 
 @dataclass
 class ManagedDockState:
     user_visible: bool | None = None
     auto_visible: bool = False
+    reserved_extent: int | None = None
+    active_extent: int | None = None
+    last_area: Qt.QtCore.Qt.DockWidgetArea | None = None
 
 
 class WindowLayoutManager:
@@ -41,21 +45,18 @@ class WindowLayoutManager:
         for dock in self._managed_docks():
             if dock is not None:
                 self._state_for(dock).user_visible = None
-        self._apply_dock_floating_raw(win.profile_dock, False)
         self.set_managed_dock_visible(win.profile_dock, False, reason="reset", preserve_canvas=False)
         if hasattr(win, "inspection_dock"):
-            self._apply_dock_floating_raw(win.inspection_dock, False)
-            self._redock_managed_dock(win.inspection_dock)
+            self.redock_managed_panel(win.inspection_dock, reason="reset", preserve_canvas=False)
             self.set_managed_dock_visible(win.inspection_dock, False, reason="reset", preserve_canvas=False)
         if win.data.ndim == 1:
             self.set_managed_dock_visible(win.profile_dock, True, reason="reset-one-dimensional", preserve_canvas=False)
-        self._apply_dock_floating_raw(win.operation_dock, False)
-        self._redock_managed_dock(win.operation_dock)
+        self.redock_managed_panel(win.operation_dock, reason="reset", preserve_canvas=False)
         if win.document.steps:
             self.set_managed_dock_visible(win.operation_dock, True, reason="reset-operations", preserve_canvas=False)
         else:
             self.set_managed_dock_visible(win.operation_dock, False, reason="reset-operations", preserve_canvas=False)
-        self._redock_managed_dock(win.profile_dock)
+        self._add_dock_to_panel_area(win.profile_dock)
         Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
 
     def set_operation_dock_visible_from_user(self, visible):
@@ -129,36 +130,67 @@ class WindowLayoutManager:
 
     def set_managed_dock_visible(self, dock, visible, *, reason, preserve_canvas=True, raise_dock=True):
         win = self.window
+        panel_manager = getattr(win, "panel_manager", None)
+        panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+        if panel is not None and panel.location == PanelLocation.DETACHED:
+            if visible:
+                if panel.dialog is not None:
+                    panel.dialog.show()
+                    panel.dialog.raise_()
+            else:
+                panel_manager.hide_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
+            self.schedule_view_geometry_refresh()
+            return
+        if panel is not None and visible and Qt.QtWidgets.QDockWidget.widget(dock) is not panel.body:
+            self._apply_panel_visibility_delta(dock, opening=True, preserve_canvas=preserve_canvas)
+            panel_manager.redock_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
+            self.schedule_view_geometry_refresh()
+            return
         currently_visible = dock.isVisible() if win.isVisible() else not dock.isHidden()
         if currently_visible == bool(visible):
             if visible and raise_dock:
                 dock.raise_()
             return
-        before = self._view_snapshot() if preserve_canvas else None
-        if visible and not dock.isFloating():
-            self._redock_managed_dock(dock)
-            if preserve_canvas:
-                self._grow_for_opening_dock(dock)
+        if visible:
+            self._add_dock_to_panel_area(dock)
+        transition_geometry = Qt.QtCore.QRect(win.geometry())
+        if visible:
+            self._apply_panel_visibility_delta(dock, opening=True, preserve_canvas=preserve_canvas)
         self._visibility_preserve_active = True
         try:
             self._apply_dock_visibility_raw(dock, bool(visible))
+            if panel is not None:
+                panel.location = PanelLocation.DOCKED if visible else PanelLocation.HIDDEN
+                if not visible:
+                    win.removeDockWidget(dock)
             if visible and raise_dock:
                 dock.raise_()
         finally:
             self._visibility_preserve_active = False
-        if preserve_canvas:
-            Qt.QtCore.QTimer.singleShot(0, lambda before=before: self._restore_view_snapshot_if_reasonable(before, retry=True))
+        if not visible:
+            self._activate_main_window_layout()
+            self._apply_panel_visibility_delta(
+                dock,
+                opening=False,
+                preserve_canvas=preserve_canvas,
+                base_geometry=transition_geometry,
+            )
         self.schedule_view_geometry_refresh()
 
     def make_managed_dock_action(self, text, dock, setter):
         action = Qt.QtGui.QAction(text, self.window)
         action.setCheckable(True)
         action.setChecked(dock.isVisible() if self.window.isVisible() else not dock.isHidden())
+        dock._arrayscope_managed_action = action
 
         def on_triggered(checked=False):
             setter(bool(checked))
 
         def sync_checked(visible):
+            panel_manager = getattr(self.window, "panel_manager", None)
+            panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+            if panel is not None and panel.location == PanelLocation.DETACHED:
+                visible = True
             blocker = Qt.QtCore.QSignalBlocker(action)
             try:
                 action.setChecked(bool(visible))
@@ -191,164 +223,148 @@ class WindowLayoutManager:
     def _state_for(self, dock):
         return self._dock_states.setdefault(dock, ManagedDockState())
 
-    def set_managed_dock_floating(self, dock, floating, *, reason, preserve_canvas=True):
-        before = self._view_snapshot() if preserve_canvas else None
-        self._apply_dock_floating_raw(dock, bool(floating))
-        if not floating:
-            self._redock_managed_dock(dock)
-        if preserve_canvas:
-            Qt.QtCore.QTimer.singleShot(0, lambda before=before: self._restore_view_snapshot_if_reasonable(before, retry=True))
+    def detach_managed_dock(self, dock, *, reason, preserve_canvas=True):
+        panel_manager = getattr(self.window, "panel_manager", None)
+        panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+        if panel is None:
+            return
+        was_docked = panel.location == PanelLocation.DOCKED
+        transition_geometry = Qt.QtCore.QRect(self.window.geometry())
+        panel_manager.detach_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
+        if was_docked:
+            self._activate_main_window_layout()
+            self._apply_panel_visibility_delta(
+                dock,
+                opening=False,
+                preserve_canvas=preserve_canvas,
+                base_geometry=transition_geometry,
+            )
+        self.schedule_view_geometry_refresh()
+
+    def redock_managed_panel(self, dock, *, reason, preserve_canvas=True):
+        panel_manager = getattr(self.window, "panel_manager", None)
+        panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+        if panel is None:
+            return
+        if panel.location != PanelLocation.DOCKED:
+            self._apply_panel_visibility_delta(dock, opening=True, preserve_canvas=preserve_canvas)
+        panel_manager.redock_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
         self.schedule_view_geometry_refresh()
 
     def _apply_dock_visibility_raw(self, dock, visible):
         dock.setVisible(bool(visible))
 
-    def _apply_dock_floating_raw(self, dock, floating):
-        dock.setFloating(bool(floating))
-
-    def _redock_managed_dock(self, dock):
+    def _add_dock_to_panel_area(self, dock):
         win = self.window
-        if dock is getattr(win, "inspection_dock", None):
-            win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
-        elif dock is getattr(win, "profile_dock", None):
-            win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, dock)
-        elif dock is getattr(win, "operation_dock", None):
-            win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        area = self._dock_area_for_transition(dock)
+        win.addDockWidget(area, dock)
 
     def refresh_view_geometry(self):
         win = self.window
         if hasattr(win, "centralWidget") and win.centralWidget() is not None:
             win.centralWidget().updateGeometry()
 
-    def _view_snapshot(self):
-        rect = self._view_global_rect()
-        view_box = getattr(getattr(self.window, "img_view", None), "getView", lambda: None)()
-        view_range = None if view_box is None else view_box.viewRange()
-        return None if rect is None else (rect, view_range)
-
-    def _view_global_rect(self):
-        win = self.window
-        view = getattr(win, "img_view", None)
-        if view is None or not view.isVisible():
-            return None
-        top_left = view.mapToGlobal(Qt.QtCore.QPoint(0, 0))
-        return Qt.QtCore.QRect(top_left, view.size())
-
-    def _restore_view_snapshot_if_reasonable(self, before, *, retry=False):
-        if before is None:
-            return
-        before_rect, before_range = before
-        win = self.window
-        if getattr(win, "_closing", False):
-            return
-        if win.isMaximized() or win.isFullScreen():
-            self._restore_view_range(before_range)
-            self.refresh_view_geometry()
-            return
-        view = getattr(win, "img_view", None)
-        if view is None or not view.isVisible():
-            return
-        after = self._view_global_rect()
-        if after is None:
-            self.refresh_view_geometry()
-            return
-        delta_w = int(before_rect.width() - after.width())
-        delta_h = int(before_rect.height() - after.height())
-        move_delta = before_rect.topLeft() - after.topLeft()
-        if delta_w == 0 and delta_h == 0 and move_delta.isNull():
-            self.refresh_view_geometry()
-            return
-        current = win.geometry()
-        target = Qt.QtCore.QRect(current)
-        minimum = win.minimumSize()
-        target.setWidth(max(int(minimum.width()), current.width() + delta_w))
-        target.setHeight(max(int(minimum.height()), current.height() + delta_h))
-        target.translate(move_delta)
-        screen = win.screen()
-        available = screen.availableGeometry() if screen is not None else None
-        if available is not None:
-            if target.width() > available.width():
-                target.setWidth(available.width())
-            if target.height() > available.height():
-                target.setHeight(available.height())
-            if target.left() < available.left():
-                target.moveLeft(available.left())
-            if target.top() < available.top():
-                target.moveTop(available.top())
-            if target.right() > available.right():
-                target.moveRight(available.right())
-            if target.bottom() > available.bottom():
-                target.moveBottom(available.bottom())
-        if target != current:
-            win.setGeometry(target)
-        self._restore_view_range(before_range)
-        Qt.QtCore.QTimer.singleShot(0, lambda view_range=before_range: self._restore_view_range(view_range))
-        if retry:
-            Qt.QtCore.QTimer.singleShot(50, lambda before=(before_rect, before_range): self._restore_view_snapshot_if_reasonable(before, retry=False))
+    def _activate_main_window_layout(self):
+        layout = self.window.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
         self.refresh_view_geometry()
 
-    def _restore_view_range(self, view_range):
-        if view_range is None:
-            return
-        view_box = getattr(getattr(self.window, "img_view", None), "getView", lambda: None)()
-        if view_box is not None:
-            view_box.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
-
-    def _grow_for_opening_dock(self, dock):
+    def _apply_panel_visibility_delta(self, dock, *, opening, preserve_canvas, base_geometry=None):
         win = self.window
-        if win.isMaximized() or win.isFullScreen():
+        if not preserve_canvas or win.isMaximized() or win.isFullScreen():
             return
-        area = win.dockWidgetArea(dock)
-        width_delta, height_delta = self._dock_extent_for_area(dock, area)
+        area = self._dock_area_for_transition(dock)
+        state = self._state_for(dock)
+        if opening:
+            width_delta, height_delta = self._dock_extent_for_area(dock, area)
+            state.active_extent = width_delta if self._is_horizontal_dock_area(area) else height_delta
+        elif state.active_extent is not None:
+            extent = int(state.active_extent)
+            width_delta = extent if self._is_horizontal_dock_area(area) else 0
+            height_delta = 0 if self._is_horizontal_dock_area(area) else extent
+        else:
+            width_delta, height_delta = self._dock_extent_for_area(dock, area)
         if width_delta <= 0 and height_delta <= 0:
             return
-        target = Qt.QtCore.QRect(win.geometry())
-        target.setWidth(target.width() + width_delta)
-        target.setHeight(target.height() + height_delta)
-        if area == Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea:
-            target.translate(-width_delta, 0)
-        elif area == Qt.QtCore.Qt.DockWidgetArea.TopDockWidgetArea:
-            target.translate(0, -height_delta)
+        target = Qt.QtCore.QRect(win.geometry() if base_geometry is None else base_geometry)
+        minimum = win.minimumSize()
+        sign = 1 if opening else -1
+        target.setWidth(max(int(minimum.width()), target.width() + sign * width_delta))
+        target.setHeight(max(int(minimum.height()), target.height() + sign * height_delta))
         target = self._clamp_to_available_screen(target)
         if target != win.geometry():
             win.setGeometry(target)
+        if not opening:
+            state.active_extent = None
 
     def _dock_extent_for_area(self, dock, area=None):
         if area is None:
-            area = self.window.dockWidgetArea(dock)
-        dock_extent = dock.size().expandedTo(dock.minimumSizeHint()).expandedTo(dock.minimumSize())
-        width_delta = int(dock_extent.width()) if area in (
+            area = self._dock_area_for_transition(dock)
+        state = self._state_for(dock)
+        if dock.isVisible():
+            current = dock.width() if self._is_horizontal_dock_area(area) else dock.height()
+            if current > 0:
+                state.reserved_extent = max(int(state.reserved_extent or 0), int(current))
+        fallback_extent = self._default_dock_extent(dock, area)
+        panel_extent = max(int(state.reserved_extent or 0), fallback_extent)
+        state.reserved_extent = panel_extent
+        extent = panel_extent + self._dock_separator_extent()
+        state.last_area = area
+        width_delta = extent if self._is_horizontal_dock_area(area) else 0
+        height_delta = 0 if self._is_horizontal_dock_area(area) else extent
+        return width_delta, height_delta
+
+    def _dock_area_for_transition(self, dock):
+        panel_manager = getattr(self.window, "panel_manager", None)
+        panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+        if panel is not None:
+            return panel.last_dock_area
+        state = self._state_for(dock)
+        if state.last_area is not None:
+            return state.last_area
+        return self.window.dockWidgetArea(dock)
+
+    def _default_dock_extent(self, dock, area):
+        hint = dock.sizeHint().expandedTo(dock.minimumSizeHint()).expandedTo(dock.minimumSize())
+        body = Qt.QtWidgets.QDockWidget.widget(dock)
+        if body is not None:
+            hint = hint.expandedTo(body.sizeHint()).expandedTo(body.minimumSizeHint()).expandedTo(body.minimumSize())
+        if self._is_horizontal_dock_area(area):
+            return max(220, int(hint.width()))
+        return max(140, int(hint.height()))
+
+    def _dock_separator_extent(self):
+        try:
+            return int(self.window.style().pixelMetric(Qt.QtWidgets.QStyle.PixelMetric.PM_DockWidgetSeparatorExtent))
+        except Exception:
+            return 6
+
+    def _is_horizontal_dock_area(self, area):
+        return area in (
             Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
             Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
-        ) else 0
-        height_delta = int(dock_extent.height()) if area in (
-            Qt.QtCore.Qt.DockWidgetArea.TopDockWidgetArea,
-            Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea,
-        ) else 0
-        return width_delta, height_delta
+        )
 
     def _clamp_to_available_screen(self, target):
         screen = self.window.screen()
         available = screen.availableGeometry() if screen is not None else None
         if available is None:
             return target
-        if target.width() > available.width():
-            target.setWidth(available.width())
-        if target.height() > available.height():
-            target.setHeight(available.height())
-        if target.left() < available.left():
+        if target.width() <= available.width() and target.left() < available.left():
             target.moveLeft(available.left())
-        if target.top() < available.top():
+        if target.height() <= available.height() and target.top() < available.top():
             target.moveTop(available.top())
-        if target.right() > available.right():
+        if target.width() <= available.width() and target.right() > available.right():
             target.moveRight(available.right())
-        if target.bottom() > available.bottom():
+        if target.height() <= available.height() and target.bottom() > available.bottom():
             target.moveBottom(available.bottom())
         return target
 
     def resize_profile_dock_default(self):
         win = self.window
-        if not hasattr(win, "profile_dock") or not win.profile_dock.isVisible() or win.profile_dock.isFloating():
+        if not hasattr(win, "profile_dock") or not win.profile_dock.isVisible():
             return
         target_height = max(140, int(win.height() * 0.23))
         try:
@@ -359,11 +375,11 @@ class WindowLayoutManager:
     def resize_default_docks(self):
         win = self.window
         try:
-            if win.profile_dock.isVisible() and not win.profile_dock.isFloating():
+            if win.profile_dock.isVisible():
                 win.resizeDocks([win.profile_dock], [max(140, int(win.height() * 0.23))], Qt.QtCore.Qt.Orientation.Vertical)
-            if win.operation_dock.isVisible() and not win.operation_dock.isFloating():
+            if win.operation_dock.isVisible():
                 win.resizeDocks([win.operation_dock], [max(220, int(win.width() * 0.24))], Qt.QtCore.Qt.Orientation.Horizontal)
-            if hasattr(win, "inspection_dock") and win.inspection_dock.isVisible() and not win.inspection_dock.isFloating():
+            if hasattr(win, "inspection_dock") and win.inspection_dock.isVisible():
                 win.resizeDocks([win.inspection_dock], [max(240, int(win.width() * 0.24))], Qt.QtCore.Qt.Orientation.Horizontal)
         except Exception as exc:
             handle_ui_exception("resize default docks", exc)

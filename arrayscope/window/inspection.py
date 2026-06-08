@@ -12,6 +12,8 @@ from pyqtgraph.Qt import QtWidgets
 from arrayscope.core.compare import CompareDocument, compatible_roi_shape
 from arrayscope.core.histograms import HistogramSpec, comparison_histograms
 from arrayscope.core.roi import RoiKind, roi_statistics, roi_values
+from arrayscope.window.evaluation_controller import EvalPriority
+from arrayscope.window.interaction_mode import InteractionMode
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,12 @@ class InspectionWorkflowMixin:
         return self.compare_document.layers[-1]
 
     def _on_inspection_tool_changed(self, tool):
+        if tool == "profile":
+            self.interaction_mode = InteractionMode.LIVE_PROFILE
+        else:
+            self.interaction_mode = InteractionMode(tool)
+            if hasattr(self, "widgets"):
+                self.widgets["buttons"]["display"]["live_profile"].setChecked(False)
         if hasattr(self, "img_view"):
             self.img_view.setInspectionTool(tool)
         if tool == "profile":
@@ -94,6 +102,8 @@ class InspectionWorkflowMixin:
             return
         self._inspection_dock_user_visible = True
         self.layout_manager.set_managed_dock_visible(self.inspection_dock, True, reason="show-inspection")
+        if getattr(self, "_inspection_stale", False):
+            self._refresh_inspection_dock_now()
 
     def _refresh_inspection_dock(self):
         self._schedule_refresh_inspection_dock("refresh")
@@ -104,6 +114,12 @@ class InspectionWorkflowMixin:
         self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
         selections = self.roi_store.selections
         self.inspection_dock.set_rois(selections)
+        if not self.inspection_dock.isVisible():
+            self._inspection_stale = True
+            stats_by_roi = self._hidden_roi_statistics(selections)
+            self.inspection_dock.set_statistics(stats_by_roi)
+            self._update_roi_info_overlay(stats_by_roi)
+            return
         if not hasattr(self, "_roi_refresh_timer"):
             self._roi_refresh_timer = Qt.QtCore.QTimer(self)
             self._roi_refresh_timer.setSingleShot(True)
@@ -115,6 +131,10 @@ class InspectionWorkflowMixin:
     def _refresh_inspection_dock_now(self):
         if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
             return
+        if not self.inspection_dock.isVisible():
+            self._inspection_stale = True
+            return
+        self._inspection_stale = False
         self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
         selections = self.roi_store.selections
         self.inspection_dock.set_rois(selections)
@@ -126,8 +146,11 @@ class InspectionWorkflowMixin:
         if work_size <= 250_000:
             self._apply_roi_inspection_snapshot_if_current(key, self._compute_roi_inspection_snapshot(key, image, selections, layers))
             return
-        self.roi_evaluation_controller.start(
+        self.roi_evaluation_controller.start_latest(
             lambda key=key, image=image, selections=selections, layers=layers: self._compute_roi_inspection_snapshot(key, image, selections, layers),
+            key=key,
+            priority=EvalPriority.SELECTED_ROI,
+            replace_group="roi-inspection",
             on_done=lambda snapshot, key=key: self._apply_roi_inspection_snapshot_if_current(key, snapshot),
             on_error=lambda exc: None,
             slow_ms=0,
@@ -249,3 +272,16 @@ class InspectionWorkflowMixin:
             count = f" n={stats.finite_count}"
             lines.append(f"{label}: {kind}{count}{mean}")
         self.img_view.setRoiInfoText("\n".join(lines))
+
+    def _hidden_roi_statistics(self, selections):
+        image = self._roi_source_image()
+        stats_by_roi = OrderedDict()
+        if image is not None:
+            for selection in selections:
+                if not selection.enabled:
+                    continue
+                try:
+                    stats_by_roi[selection.id] = (selection, roi_statistics(roi_values(image, selection.geometry)))
+                except Exception:
+                    continue
+        return stats_by_roi

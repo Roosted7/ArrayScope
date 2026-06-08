@@ -12,7 +12,9 @@ from arrayscope.ui.display_toolbar import DisplayToolbar
 from arrayscope.ui.hud import PixelHud
 from arrayscope.ui.icons import set_button_icon
 from arrayscope.ui.status_label import PixelStatusLabel
+from arrayscope.ui.widgets import configure_tool_button
 from arrayscope.window.layout_controller import WindowLayoutManager
+from arrayscope.window.panels import PanelManager
 from arrayscope.window.domain import Domain
 
 
@@ -357,18 +359,16 @@ class DisplayControlBuildMixin:
         self.layouts['topDown'].addWidget(self.tab_widget)
 
     def _build_header_bar(self, filepath):
-        self._reload_btn = QtWidgets.QPushButton()
-        self._reload_btn.setStyleSheet("QPushButton { padding: 1px 2px; margin: 0px; border: none; background: transparent; }")
+        self._reload_btn = QtWidgets.QToolButton()
         set_button_icon(self._reload_btn, "refresh", tooltip="Reload file")
-        self._reload_btn.setFlat(True)
-        self._reload_btn.setFixedSize(28, 20)
+        configure_tool_button(self._reload_btn)
         self._reload_btn.clicked.connect(self._reload_file)
         self._reload_btn.setVisible(filepath is not None)
         self.layouts['topUp'].addWidget(self._reload_btn)
         self.display_toolbar = DisplayToolbar(self)
         self.display_toolbar.channelChanged.connect(self._on_channel_clicked)
         self.display_toolbar.scaleChanged.connect(self._on_scale_clicked)
-        self.display_toolbar.fitRequested.connect(self.fit_image_to_view)
+        self.display_toolbar.fitRequested.connect(lambda checked=False: self.fit_image_to_view(bool(checked)))
         self.display_toolbar.oneToOneRequested.connect(self.one_to_one_image)
         self.display_toolbar.windowModeChanged.connect(self._on_window_mode_changed)
         self.display_toolbar.autoWindowRequested.connect(self.auto_window_levels)
@@ -406,10 +406,12 @@ class DisplayControlBuildMixin:
 
     def _build_docks_and_restore_layout(self):
         self.layout_manager = WindowLayoutManager(self)
+        self.panel_manager = PanelManager(self)
         self.profile_dock = ProfileDock(self, on_axis_changed=self.set_profile_axis)
         self.line_plot = self.profile_dock.line_plot
         self.plot_widget = self.profile_dock.widget
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
+        self.panel_manager.register_panel("profile", "Profile", self.profile_dock, default_area=Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea)
         self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
         self.profile_dock.visibilityChanged.connect(self._on_profile_dock_visibility_changed)
         self.layout_manager.set_managed_dock_visible(self.profile_dock, False, reason="initial", preserve_canvas=False)
@@ -422,6 +424,7 @@ class DisplayControlBuildMixin:
             on_select_roi=self._select_roi,
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.inspection_dock)
+        self.panel_manager.register_panel("inspection", "Inspection", self.inspection_dock, default_area=Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea)
         self.inspection_dock.visibilityChanged.connect(self._on_inspection_dock_visibility_changed)
         self.layout_manager.set_managed_dock_visible(self.inspection_dock, False, reason="initial", preserve_canvas=False)
         self.operation_dock = OperationStackDock(
@@ -443,6 +446,7 @@ class DisplayControlBuildMixin:
             on_edit_operation=self.edit_operation,
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
+        self.panel_manager.register_panel("operations", "Operations", self.operation_dock, default_area=Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
         self.operation_dock.visibilityChanged.connect(self._on_operation_dock_visibility_changed)
         self._update_operation_dock()
         self._setup_menus()

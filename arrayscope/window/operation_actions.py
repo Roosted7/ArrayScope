@@ -255,6 +255,12 @@ class OperationActionsMixin:
         return None
 
     def _select_roi_tool(self, tool):
+        from arrayscope.window.interaction_mode import InteractionMode
+
+        mode = InteractionMode(tool)
+        self.interaction_mode = mode
+        if hasattr(self, "widgets") and tool != "profile":
+            self.widgets["buttons"]["display"]["live_profile"].setChecked(False)
         if tool in {"roi_polyline", "roi_freehand"}:
             if hasattr(self, "img_view"):
                 return self.img_view.beginRoiDrawingOnce(tool)

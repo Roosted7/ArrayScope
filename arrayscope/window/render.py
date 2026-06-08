@@ -9,9 +9,18 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.display.colormaps import gray_colormap, phase_colormap
 from arrayscope.display.geometry import DisplayGeometry
-from arrayscope.display.montage import make_montage, optimal_montage_columns
+from arrayscope.display.levels import finite_bounds
+from arrayscope.display.montage import make_montage, make_montage_plan, optimal_montage_columns
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportIntent, ViewportPolicy
+from arrayscope.core.memory_budget import (
+    MONTAGE_BUDGET_BYTES,
+    PREFETCH_BUDGET_BYTES,
+    VISIBLE_RENDER_BUDGET_BYTES,
+    estimate_display_image_bytes,
+    estimate_montage_bytes,
+    format_bytes,
+)
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
@@ -19,6 +28,8 @@ from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.operations.evaluator import evaluate_image_snapshot, evaluate_line_snapshot, evaluate_scalar_snapshot
 from arrayscope.ui.toasts import show_status_message
+from arrayscope.window.evaluation_controller import EvalPriority
+from arrayscope.window.interaction_mode import InteractionMode
 
 
 @dataclass(frozen=True)
@@ -34,6 +45,22 @@ def getNumberOfDecimalPlaces(number):
         return int(0)
     else:
         return int(max(1, (number.as_integer_ratio()[1]).bit_length()))
+
+
+def _histogram_sample_for_tiles(rendered_tiles):
+    arrays = []
+    for rendered in rendered_tiles:
+        source = rendered.histogram_data if rendered.histogram_data is not None else rendered.image
+        data = np.asarray(source)
+        if data.ndim == 3:
+            data = 0.2126 * data[..., 0].astype(float) + 0.7152 * data[..., 1].astype(float) + 0.0722 * data[..., 2].astype(float)
+        arrays.append(np.ravel(data))
+    if not arrays:
+        return None
+    sample = np.concatenate(arrays)
+    if sample.size > 1_000_000:
+        sample = sample[:: max(1, sample.size // 1_000_000)]
+    return sample.reshape(1, -1)
 
 
 class RenderMixin:
@@ -66,6 +93,17 @@ class RenderMixin:
             self.img_view.hideHud()
 
     def _hover_value_from_display(self, mapping):
+        if hasattr(self.img_view, "valueAtDisplayMapping"):
+            value = self.img_view.valueAtDisplayMapping(mapping)
+            if value is not None:
+                if isinstance(value, np.ndarray):
+                    return tuple(value.tolist())
+                if np.isscalar(value):
+                    try:
+                        return value.item()
+                    except AttributeError:
+                        return value
+                return value
         source = getattr(self.img_view, "histogramSource", None)
         if source is None:
             source = getattr(self.img_view, "image", None)
@@ -247,7 +285,14 @@ class RenderMixin:
             show_status_message(self, f"Live profile update failed: {exc}")
             self._clear_live_profile_marker()
 
-        self.profile_evaluation_controller.start(evaluate, on_done=done, on_error=error)
+        self.profile_evaluation_controller.start_latest(
+            evaluate,
+            key=tuple(request_keys.values()),
+            priority=EvalPriority.LIVE_PROFILE,
+            replace_group="live-profile",
+            on_done=done,
+            on_error=error,
+        )
 
     def _clamp_profile_marker_point(self, image_x, image_y):
         geometry = getattr(self, "display_geometry", None)
@@ -274,17 +319,18 @@ class RenderMixin:
         if hasattr(self, "display_toolbar"):
             self.display_toolbar.set_current(live_profile=enabled)
         if enabled and hasattr(self, "profile_dock"):
+            self.interaction_mode = InteractionMode.LIVE_PROFILE
             self._profile_dock_user_visible = None
             if hasattr(self, "img_view"):
                 self.img_view.cancelPendingRoiDrawing()
                 self.img_view.setInspectionTool("profile")
-            if self.profile_dock.isFloating():
-                self.profile_dock.resize(560, 260)
             self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="live-profile")
             self._schedule_view_geometry_refresh()
             self.img_view.getView().setCursor(Qt.QtCore.Qt.CursorShape.CrossCursor)
             self._ensure_profile_marker()
         if not enabled:
+            if getattr(self, "interaction_mode", None) == InteractionMode.LIVE_PROFILE:
+                self.interaction_mode = InteractionMode.CURSOR
             if getattr(self, "_profile_dock_user_visible", None) is not True:
                 self._profile_dock_user_visible = None
             self._pending_profile_pos = None
@@ -311,8 +357,8 @@ class RenderMixin:
             return
         if not visible:
             self._inspection_dock_user_visible = False
-        if visible and self.inspection_dock.isFloating():
-            self.inspection_dock.resize(max(self.inspection_dock.width(), 420), max(self.inspection_dock.height(), 300))
+        if visible and getattr(self, "_inspection_stale", False):
+            self._refresh_inspection_dock_now()
 
     def _on_operation_dock_visibility_changed(self, visible):
         if getattr(self, "_closing", False):
@@ -321,8 +367,6 @@ class RenderMixin:
             return
         if not visible:
             self._operation_dock_user_visible = False
-        if visible and self.operation_dock.isFloating():
-            self.operation_dock.resize(max(self.operation_dock.width(), 340), max(self.operation_dock.height(), 300))
 
     def _resize_profile_dock_default(self):
         self.layout_manager.resize_profile_dock_default()
@@ -406,6 +450,14 @@ class RenderMixin:
                 force_auto=force_auto,
             )
             return
+        estimated_bytes = self._estimated_image_display_bytes(view_state)
+        if estimated_bytes > VISIBLE_RENDER_BUDGET_BYTES:
+            show_status_message(
+                self,
+                f"Image view would allocate {format_bytes(estimated_bytes)}. Reduce image-axis ranges or switch axes.",
+                timeout=6000,
+            )
+            return
 
         def evaluate():
             return evaluate_image_snapshot(document, view_state, colormap_lut=colormap_lut)
@@ -440,11 +492,14 @@ class RenderMixin:
             self.img_view.setEvaluationOverlay(False)
             show_status_message(self, f"Image update failed: {exc}")
 
-        self.evaluation_controller.start(
+        self.visible_evaluation_controller.start_latest(
             evaluate,
+            key=request_key,
+            priority=EvalPriority.VISIBLE_IMAGE,
+            replace_group="visible-image",
             on_done=done,
             on_error=error,
-            on_stale=lambda: (self.img_view.setImageStale(False), self.img_view.setEvaluationOverlay(False)),
+            on_stale=lambda: None,
             on_slow=slow,
         )
 
@@ -473,37 +528,64 @@ class RenderMixin:
         view_state = self.view_state
         document = self.document
         all_indices = tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
-        indices = all_indices[:256]
-        if len(all_indices) > len(indices):
-            show_status_message(self, f"Showing first {len(indices)} of {len(all_indices)} montage tiles", timeout=4000)
         viewport_size = self.img_view.graphicsView.viewport().size()
         viewport_shape = (max(1, viewport_size.height()), max(1, viewport_size.width()))
+        tile_shape = self._montage_tile_shape(view_state)
+        columns = view_state.montage_columns
+        if columns is None and all_indices:
+            columns = optimal_montage_columns(len(all_indices), tile_shape, viewport_shape)
+        estimate = estimate_montage_bytes(
+            tile_shape,
+            len(all_indices),
+            getattr(document.base_data, "dtype", np.dtype(float)),
+            rgb=view_state.channel == ChannelMode.COMPLEX,
+            histogram=True,
+            columns=columns,
+        )
+        if estimate > MONTAGE_BUDGET_BYTES:
+            show_status_message(
+                self,
+                f"Montage would allocate {format_bytes(estimate)}. Showing visible tiles only; reduce tile count or zoom in for detail.",
+                timeout=6000,
+            )
+        plan = make_montage_plan(
+            view_state,
+            axis=axis,
+            indices=all_indices,
+            tile_shape=tile_shape,
+            columns=columns,
+            viewport_shape=viewport_shape,
+        )
+        current_range = self.img_view.getView().viewRange() if getattr(self.img_view, "image", None) is not None else None
+        visible_tiles = plan.tiles_intersecting(current_range, margin_tiles=1)
+        if len(visible_tiles) > 64:
+            visible_tiles = visible_tiles[:64]
+            show_status_message(self, "Montage view is dense; loading first 64 visible tiles", timeout=4000)
+        cached_tiles = []
+        missing_tiles = []
+        for tile in visible_tiles:
+            cached = self.operation_evaluator.cached_montage_tile(
+                tile.view_state,
+                montage_axis=axis,
+                source_index=tile.source_index,
+                colormap_lut=colormap_lut,
+            )
+            if cached is None:
+                missing_tiles.append(tile)
+            else:
+                cached_tiles.append(cached)
+        geometry = DisplayGeometry(view_state=view_state, display_shape=plan.display_shape, montage=plan.geometry)
+        generation_key = (
+            "montage_tiles",
+            _document_key(document),
+            view_state,
+            tuple(tile.source_index for tile in visible_tiles),
+            colormap_lut.tobytes() if colormap_lut is not None else None,
+            viewport_shape if view_state.montage_columns is None else None,
+        )
 
         def evaluate():
-            images = []
-            histograms = []
-            any_histogram = False
-            for index in indices:
-                tile_state = view_state.with_slice(axis, index).with_montage_axis(None)
-                result = evaluate_image_snapshot(document, tile_state, colormap_lut=colormap_lut)
-                images.append(result.value.data)
-                histograms.append(result.value.histogram_data)
-                any_histogram = any_histogram or result.value.histogram_data is not None
-            columns = view_state.montage_columns
-            if columns is None and images:
-                columns = optimal_montage_columns(
-                    len(images),
-                    images[0].shape[:2],
-                    viewport_shape,
-                )
-            rendered = make_montage(
-                images,
-                histogram_images=histograms if any_histogram else images,
-                columns=columns,
-                indices=indices,
-            )
-            geometry = DisplayGeometry(view_state=view_state, display_shape=rendered.image.data.shape[:2], montage=rendered.geometry)
-            return RenderedView(view_state=view_state, document_key=_document_key(document), display_image=rendered.image, geometry=geometry)
+            return tuple((tile, evaluate_image_snapshot(document, tile.view_state, colormap_lut=colormap_lut)) for tile in missing_tiles)
 
         def slow():
             self.img_view.setImageStale(True)
@@ -511,15 +593,37 @@ class RenderMixin:
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
             self._update_operation_dock()
 
-        generation_key = ("montage", _document_key(document), view_state, indices, colormap_lut.tobytes() if colormap_lut is not None else None, viewport_shape if view_state.montage_columns is None else None)
+        def apply_tiles(rendered_tiles):
+            rendered_tiles = tuple(sorted(rendered_tiles, key=lambda rendered: rendered.tile.montage_index))
+            if not rendered_tiles:
+                return
+            rendered = make_montage(
+                [tile.image for tile in rendered_tiles],
+                histogram_images=[
+                    tile.histogram_data if tile.histogram_data is not None else tile.image
+                    for tile in rendered_tiles
+                ],
+                columns=min(plan.columns, len(rendered_tiles)),
+                indices=tuple(tile.tile.source_index for tile in rendered_tiles),
+            )
+            rendered_geometry = DisplayGeometry(view_state=view_state, display_shape=rendered.image.data.shape[:2], montage=rendered.geometry)
+            self._current_montage_geometry = rendered.geometry
+            self._apply_display_image(
+                rendered.image,
+                geometry=rendered_geometry,
+                window_mode=window_mode,
+                previous_levels=previous_levels,
+                previous_bounds=previous_bounds,
+                force_auto=force_auto,
+            )
 
-        def done(rendered_view):
-            current_indices = tuple(self.view_state.montage_indices or tuple(range(int(self.view_state.shape[axis]))))[:256] if self.view_state.montage_axis == axis else ()
+        def done(results):
+            current_indices = tuple(self.view_state.montage_indices or tuple(range(int(self.view_state.shape[axis])))) if self.view_state.montage_axis == axis else ()
             current_key = (
-                "montage",
+                "montage_tiles",
                 _document_key(self.document),
                 self.view_state,
-                current_indices,
+                tuple(tile.source_index for tile in visible_tiles) if current_indices == all_indices else (),
                 colormap_lut.tobytes() if colormap_lut is not None else None,
                 viewport_shape if self.view_state.montage_columns is None else None,
             )
@@ -527,15 +631,10 @@ class RenderMixin:
                 self.img_view.setImageStale(False)
                 self.img_view.setEvaluationOverlay(False)
                 return
-            self._current_montage_geometry = rendered_view.geometry.montage
-            self._apply_display_image(
-                rendered_view.display_image,
-                geometry=rendered_view.geometry,
-                window_mode=window_mode,
-                previous_levels=previous_levels,
-                previous_bounds=previous_bounds,
-                force_auto=force_auto,
-            )
+            rendered_tiles = list(cached_tiles)
+            for tile, result in results:
+                rendered_tiles.append(self.operation_evaluator.store_montage_tile_result(tile, montage_axis=axis, colormap_lut=colormap_lut, result=result))
+            apply_tiles(tuple(rendered_tiles))
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
             self._update_operation_dock()
 
@@ -544,7 +643,31 @@ class RenderMixin:
             self.img_view.setEvaluationOverlay(False)
             show_status_message(self, f"Montage update failed: {exc}")
 
-        self.evaluation_controller.start(evaluate, on_done=done, on_error=error, on_slow=slow)
+        if cached_tiles:
+            apply_tiles(tuple(cached_tiles))
+        if not missing_tiles:
+            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
+            self._update_operation_dock()
+            return
+
+        self.visible_evaluation_controller.start_latest(
+            evaluate,
+            key=generation_key,
+            priority=EvalPriority.VISIBLE_IMAGE,
+            replace_group="visible-montage",
+            on_done=done,
+            on_error=error,
+            on_slow=slow,
+        )
+
+    def _montage_tile_shape(self, view_state):
+        primary_axis, secondary_axis = view_state.image_axes
+        primary_indices = view_state.axis_range_indices[primary_axis]
+        secondary_indices = view_state.axis_range_indices[secondary_axis]
+        return (
+            len(primary_indices) if primary_indices is not None else int(view_state.shape[primary_axis]),
+            len(secondary_indices) if secondary_indices is not None else int(view_state.shape[secondary_axis]),
+        )
 
     def _apply_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto):
         try:
@@ -598,7 +721,16 @@ class RenderMixin:
         return ViewportPolicy.PRESERVE
 
     def _prefetch_nearby_slices(self, view_state, colormap_lut):
+        if not getattr(self.app_settings, "prefetch_nearby_slices", False):
+            self.operation_evaluator.note_prefetch_skipped()
+            return
         if self.document.steps:
+            self.operation_evaluator.note_prefetch_skipped()
+            return
+        if view_state.montage_axis is not None:
+            self.operation_evaluator.note_prefetch_skipped()
+            return
+        if self._estimated_image_display_bytes(view_state) > PREFETCH_BUDGET_BYTES:
             self.operation_evaluator.note_prefetch_skipped()
             return
         axis = getattr(self, "_active_slice_axis", None)
@@ -623,7 +755,7 @@ class RenderMixin:
                     colormap_lut=colormap_lut,
                     document=document,
                 )
-                started = self.evaluation_controller.start_prefetch(
+                started = self.prefetch_evaluation_controller.start_prefetch(
                     lambda prefetch_state=prefetch_state, document=document: self.operation_evaluator.prefetch_image_snapshot(
                         document,
                         prefetch_state,
@@ -723,13 +855,21 @@ class RenderMixin:
         if data is None:
             data = display_image.data
         try:
-            finite_data = data[np.isfinite(data)]
-            if len(finite_data) > 0:
-                return (float(np.min(finite_data)), float(np.max(finite_data)))
+            return finite_bounds(data)
         except Exception as exc:
             handle_ui_exception("display histogram bounds", exc)
             return None
-        return None
+
+    def _estimated_image_display_bytes(self, view_state):
+        if view_state.image_axes is None:
+            return 0
+        shape = []
+        for axis in view_state.image_axes:
+            indices = view_state.axis_range_indices[axis]
+            shape.append(len(indices) if indices is not None else view_state.shape[axis])
+        dtype = getattr(self.document.base_data, "dtype", np.dtype(float))
+        rgb = view_state.channel == ChannelMode.COMPLEX
+        return estimate_display_image_bytes(tuple(shape), dtype, rgb=rgb, histogram=rgb)
     
     def update_display_mode(self):
         """Update the display mode for the image view"""
@@ -752,13 +892,25 @@ class RenderMixin:
     def _set_live_profile_checked(self, enabled):
         self.widgets['buttons']['display']['live_profile'].setChecked(bool(enabled))
 
-    def fit_image_to_view(self):
-        self.widgets['buttons']['display']['fit'].setChecked(True)
-        self.img_view.fitToView()
+    def fit_image_to_view(self, enabled=True):
+        self.widgets['buttons']['display']['fit'].setChecked(bool(enabled))
+        if hasattr(self, "display_toolbar"):
+            blocker = Qt.QtCore.QSignalBlocker(self.display_toolbar.fit_action)
+            try:
+                self.display_toolbar.fit_action.setChecked(bool(enabled))
+            finally:
+                del blocker
+        self.img_view.setFitLocked(bool(enabled))
         self._sync_controls_from_view_state()
 
     def one_to_one_image(self):
         self.widgets['buttons']['display']['square_pixels'].setChecked(True)
+        if hasattr(self, "display_toolbar"):
+            blocker = Qt.QtCore.QSignalBlocker(self.display_toolbar.fit_action)
+            try:
+                self.display_toolbar.fit_action.setChecked(False)
+            finally:
+                del blocker
         self.img_view.oneToOne()
         self._sync_controls_from_view_state()
 
@@ -858,8 +1010,11 @@ class RenderMixin:
             self.profile_dock.update_line_results(tuple(entries), y_range=y_range)
             self._update_operation_dock()
 
-        self.profile_evaluation_controller.start(
+        self.profile_evaluation_controller.start_latest(
             evaluate,
+            key=tuple(request_keys.values()),
+            priority=EvalPriority.LIVE_PROFILE,
+            replace_group="profile-plot",
             on_done=done,
             on_error=lambda exc: show_status_message(self, f"Profile update failed: {exc}"),
         )

@@ -53,6 +53,7 @@ ViewState = view_state.ViewState
 apply_channel = slice_engine.apply_channel
 complex_to_rgb = slice_engine.complex_to_rgb
 make_image = slice_engine.make_image
+make_image_from_slab = slice_engine.make_image_from_slab
 make_export_frame = slice_engine.make_export_frame
 make_line = slice_engine.make_line
 symlog = slice_engine.symlog
@@ -119,6 +120,76 @@ def test_make_image_applies_display_axis_ranges():
     image = make_image(data, state)
 
     np.testing.assert_array_equal(image.data, data[(0, 2, 4), :])
+
+
+def test_make_image_preserves_one_row_axis_range():
+    data = np.arange(2 * 3).reshape(2, 3)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0).with_axis_range(0, (0,), "0")
+
+    image = make_image(data, state)
+
+    assert image.data.shape == (1, 3)
+    np.testing.assert_array_equal(image.data, data[[0], :])
+
+
+def test_make_image_preserves_one_column_axis_range():
+    data = np.arange(2 * 3).reshape(2, 3)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0).with_axis_range(1, (2,), "2")
+
+    image = make_image(data, state)
+
+    assert image.data.shape == (2, 1)
+    np.testing.assert_array_equal(image.data, data[:, [2]])
+
+
+def test_make_image_reversed_axes_preserves_one_pixel_range():
+    data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
+    state = state_for(data.shape, image_axes=(2, 1), line_axis=2, slices=(1, 0, 0)).with_axis_range(1, (2,), "2")
+
+    image = make_image(data, state)
+
+    expected = data[1, [2], :].T
+    assert image.data.shape == (4, 1)
+    np.testing.assert_array_equal(image.data, expected)
+
+
+def test_make_image_complex_rgb_preserves_one_row_axis_range():
+    data = np.array([[1 + 0j, 1j, -1 + 0j], [-1j, 2 + 0j, 2j]])
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX).with_axis_range(0, (1,), "1")
+
+    image = make_image(data, state)
+
+    assert image.data.shape == (1, 3, 3)
+    assert image.histogram_data.shape == (1, 3)
+    np.testing.assert_array_equal(image.histogram_data, np.abs(data[[1], :]))
+
+
+class _FakeImageRequest:
+    def __init__(self, view_state, ranged_axes=()):
+        self.view_state = view_state
+        self.ranged_axes = tuple(ranged_axes)
+
+
+def test_make_image_from_slab_preserves_one_row_axis_range():
+    data = np.arange(2 * 3).reshape(2, 3)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0).with_axis_range(0, (0,), "0")
+    slab = data[[0], :]
+
+    image = make_image_from_slab(slab, _FakeImageRequest(state, ranged_axes=(0,)))
+
+    assert image.data.shape == (1, 3)
+    np.testing.assert_array_equal(image.data, slab)
+
+
+def test_make_image_from_slab_preserves_one_column_axis_range():
+    data = np.arange(2 * 3).reshape(2, 3)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0).with_axis_range(1, (2,), "2")
+    slab = data[:, [2]]
+
+    image = make_image_from_slab(slab, _FakeImageRequest(state, ranged_axes=(1,)))
+
+    assert image.data.shape == (2, 1)
+    np.testing.assert_array_equal(image.data, slab)
 
 
 def test_make_image_ndslice_reversed_axes_uses_image_axis_order():

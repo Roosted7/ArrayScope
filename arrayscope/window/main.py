@@ -20,6 +20,7 @@ from arrayscope.window.domain import Domain
 from arrayscope.window.evaluation_controller import EvaluationController
 from arrayscope.window.file_reload import FileReloadMixin
 from arrayscope.window.inspection import InspectionWorkflowMixin
+from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.operation_actions import OperationActionsMixin
 from arrayscope.window.render import RenderMixin
 from arrayscope.window.state_sync import StateSyncMixin
@@ -67,10 +68,12 @@ class ArrayScopeWindow(
         self.document = self.operation_coordinator.document
         self.operation_evaluator = self.operation_coordinator.evaluator
         self._init_compare_document(data)
-        self.evaluation_controller = EvaluationController(self)
-        self.pixel_evaluation_controller = EvaluationController(self)
-        self.profile_evaluation_controller = EvaluationController(self)
-        self.roi_evaluation_controller = EvaluationController(self)
+        self.visible_evaluation_controller = EvaluationController(self, max_workers=1, name="visible")
+        self.evaluation_controller = self.visible_evaluation_controller
+        self.pixel_evaluation_controller = EvaluationController(self, max_workers=1, name="pixel")
+        self.profile_evaluation_controller = EvaluationController(self, max_workers=1, name="profile")
+        self.roi_evaluation_controller = EvaluationController(self, max_workers=1, name="roi")
+        self.prefetch_evaluation_controller = EvaluationController(self, max_workers=1, name="prefetch")
         self.data = derived_info_for(self.document)
         self.singleton = [e == 1 for e in list(self.data.shape)]
         initial_channel = ChannelMode.COMPLEX if np.issubdtype(self.data.dtype, np.complexfloating) else ChannelMode.REAL
@@ -102,6 +105,7 @@ class ArrayScopeWindow(
         self.line_plot_dimension = self.view_state.line_axis or 0
         self.profile_axes = (self.line_plot_dimension,)
         self.roi_store = RoiStore()
+        self.interaction_mode = InteractionMode.CURSOR
                 
         self._build_window_ui(data, filepath)
         

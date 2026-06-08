@@ -78,3 +78,36 @@ def test_optimal_montage_columns_maximizes_fitted_viewport_area():
     columns = montage.optimal_montage_columns(8, (10, 10), (100, 240), gap=1)
 
     assert columns == 5
+
+
+def test_montage_plan_display_shape_matches_grid():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 3, 5)).with_montage_axis(2, indices=(0, 1, 2, 3, 4), text=":")
+
+    plan = montage.make_montage_plan(state, axis=2, indices=(0, 1, 2, 3, 4), tile_shape=(2, 3), columns=2, gap=1)
+
+    assert plan.grid_shape == (3, 2)
+    assert plan.display_shape == (8, 7)
+
+
+def test_montage_plan_visible_tiles_intersect_view_range():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 3, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 3), columns=3, gap=1)
+
+    visible = plan.tiles_intersecting(((4.0, 8.0), (0.0, 2.0)), margin_tiles=0)
+
+    assert tuple(tile.source_index for tile in visible) == (1, 2)
+
+
+def test_montage_plan_preserves_source_indices():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 3, 10)).with_montage_axis(2, indices=(2, 4, 8), text="2:2:10")
+    plan = montage.make_montage_plan(state, axis=2, indices=(2, 4, 8), tile_shape=(2, 3), columns=2)
+
+    assert tuple(tile.source_index for tile in plan.tiles) == (2, 4, 8)
+    assert plan.geometry.indices == (2, 4, 8)
+    assert tuple(tile.view_state.slice_indices[2] for tile in plan.tiles) == (2, 4, 8)

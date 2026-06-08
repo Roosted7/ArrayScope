@@ -25,6 +25,7 @@ from arrayscope.core.cache_status import (
     cache_status_ready,
     CacheStatus,
 )
+from arrayscope.display.montage import RenderedTile
 from arrayscope.display.slice_engine import make_image, make_image_from_slab, make_line, make_line_from_slab, make_scalar_from_slab
 
 
@@ -195,11 +196,31 @@ class OperationEvaluator:
         document = self.document if document is None else document
         return ("export_frame", _document_key(document), _request_key(request_for_export_frame(view_state, frame_axis, frame_index)), _lut_key(colormap_lut))
 
+    def montage_tile_key(self, tile_state, *, montage_axis, source_index, colormap_lut=None, document=None):
+        document = self.document if document is None else document
+        return (
+            "montage_tile",
+            _document_key(document),
+            int(montage_axis),
+            int(source_index),
+            _request_key(request_for_image(tile_state)),
+            _lut_key(colormap_lut),
+        )
+
     def cached_image(self, view_state, colormap_lut=None):
         cached = self._image_cache.get(self.image_key(view_state, colormap_lut=colormap_lut))
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
             self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.CACHED, "Using cached image view")
+        return cached
+
+    def cached_montage_tile(self, tile_state, *, montage_axis, source_index, colormap_lut=None):
+        cached = self._image_cache.get(
+            self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut)
+        )
+        if cached is not None:
+            self.last_status = cache_status_for_hit(True)
+            self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.CACHED, "Using cached montage tile")
         return cached
 
     def cached_line(self, view_state):
@@ -253,6 +274,23 @@ class OperationEvaluator:
         self.last_status = cache_status_ready("Export frame cached")
         self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.READY, _request_message("Export frame cached", result))
         return result.value
+
+    def store_montage_tile_result(self, tile, *, montage_axis, colormap_lut, result: EvaluationResult):
+        key = self.montage_tile_key(tile.view_state, montage_axis=montage_axis, source_index=tile.source_index, colormap_lut=colormap_lut)
+        value = RenderedTile(
+            tile=tile,
+            image=result.value.data,
+            histogram_data=result.value.histogram_data,
+            eval_ms=result.eval_ms,
+            slab_shape=result.slab_shape,
+            slab_nbytes=result.slab_nbytes,
+        )
+        self._image_cache.last_eval_ms = result.eval_ms
+        self._image_cache.put(key, value)
+        self.image_evaluations += 1
+        self.last_status = cache_status_ready("Montage tile cached")
+        self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.READY, _request_message("Montage tile cached", result))
+        return value
 
     def prefetch_image_snapshot(self, document, view_state, colormap_lut=None):
         key = self.image_key(view_state, colormap_lut=colormap_lut, document=document)

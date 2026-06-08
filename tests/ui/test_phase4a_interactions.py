@@ -106,7 +106,6 @@ def test_inspection_dock_defaults_left_and_stays_closed_after_direct_close(qtbot
         win._show_inspection_dock()
         _process_events(qtbot, count=12)
         assert win.inspection_dock.isVisible()
-        assert not win.inspection_dock.isFloating()
         assert win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
 
         win.inspection_dock.close()
@@ -133,12 +132,15 @@ def test_direct_closing_docked_inspection_does_not_restore_canvas_snapshot(qtbot
         win._show_inspection_dock()
         _process_events(qtbot, count=20)
         before = win.img_view.size()
+        before_window = win.size()
 
         win.inspection_dock.close()
         _process_events(qtbot, count=30)
         after = win.img_view.size()
+        after_window = win.size()
 
-        assert after.width() > before.width()
+        assert abs(after.width() - before.width()) <= 2
+        assert after_window.width() < before_window.width()
         assert not win.inspection_dock.isVisible()
         assert win._inspection_dock_user_visible is False
     finally:
@@ -160,7 +162,6 @@ def test_profile_dock_defaults_bottom_when_opened_from_view_menu(qtbot):
         _process_events(qtbot, count=40)
 
         assert win.profile_dock.isVisible()
-        assert not win.profile_dock.isFloating()
         assert win.dockWidgetArea(win.profile_dock) == QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
     finally:
         win.close()
@@ -188,17 +189,19 @@ def test_opening_dock_uses_current_dock_extent_for_window_growth(qtbot):
         win.close()
 
 
-def test_docks_have_size_grips_and_floatable_features(qtbot):
+def test_docks_have_size_grips_and_managed_detach(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
+    from arrayscope.window.panels import PanelLocation
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
     try:
         for dock in (win.inspection_dock, win.profile_dock, win.operation_dock):
-            assert dock.features() & QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
             assert dock.features() & QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
             assert dock.findChildren(QtWidgets.QSizeGrip)
+        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
     finally:
         win.close()
