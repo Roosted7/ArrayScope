@@ -60,7 +60,12 @@ source of array-view state.
   layout, progressive panel visibility, managed panel menu actions, dock default sizes, shutdown dock
   closing, and panel transition geometry. Panel show/hide/detach/redock preserves the central viewer
   size with a post-layout transaction: it records the central widget size, applies the panel change,
-  then corrects the top-level size with `resize()` over a short `QTimer` retry loop. It does not call
+  then corrects the top-level size with `resize()` over a short `QTimer` retry loop. The final retry
+  temporarily fixes the top-level `QWidget` and `QWindow` minimum and maximum size to make the Wayland
+  size request harder for the compositor to ignore, then restores the original constraints. When Qt
+  reports success without a remaining central-widget delta, the transaction still briefly advertises
+  the current top-level size as fixed and repeats QWidget/QWindow resize/update requests as Wayland
+  commit pokes. It does not call
   `setGeometry()` or intentionally move the window position; users can turn this best-effort behavior
   off in the View menu. Managed panels still avoid native `QDockWidget` floating state.
 - `arrayscope.app.launch`: QApplication creation, multiprocessing launch, and IPython Qt event-loop handling.
@@ -105,8 +110,12 @@ Managed panel visibility uses supported ArrayScope paths only: the managed title
 View menu actions, or `WindowLayoutManager` programmatic methods. Native `QDockWidget.closeEvent`
 semantics are not an app-level lifecycle path for managed panels.
 The preserve-canvas transaction is best effort because the window manager or compositor may constrain
-top-level sizes; ArrayScope requests size correction with `resize()` and accepts the remaining error
-after bounded retries.
+top-level sizes; ArrayScope requests size correction with `resize()`, escalates once with temporary
+QWidget/QWindow min/max size constraints, sends repeated commit pokes when Qt already reports the
+target layout, and accepts the remaining error after bounded retries. Detach transitions intentionally
+skip the strong fixed-size/nudge escalation so the new detached tool window can map cleanly. Temporary
+stdout diagnostics with the `[ArrayScope preserve-canvas]` prefix remain while Wayland behavior is being
+debugged.
 
 The window tracks derived-array metadata from `ArrayDocument.current_shape` and dtype estimates.
 It must not materialize the derived array as normal state. Full derived evaluation is reserved for
