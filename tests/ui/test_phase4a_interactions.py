@@ -121,7 +121,7 @@ def test_inspection_dock_defaults_left_and_stays_closed_after_direct_close(qtbot
         win.close()
 
 
-def test_closing_docked_inspection_preserves_image_view_size(qtbot):
+def test_direct_closing_docked_inspection_does_not_restore_canvas_snapshot(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -138,8 +138,9 @@ def test_closing_docked_inspection_preserves_image_view_size(qtbot):
         _process_events(qtbot, count=30)
         after = win.img_view.size()
 
-        assert abs(after.width() - before.width()) <= 1
-        assert abs(after.height() - before.height()) <= 1
+        assert after.width() > before.width()
+        assert not win.inspection_dock.isVisible()
+        assert win._inspection_dock_user_visible is False
     finally:
         win.close()
 

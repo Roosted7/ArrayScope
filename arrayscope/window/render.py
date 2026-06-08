@@ -38,46 +38,53 @@ def getNumberOfDecimalPlaces(number):
 
 class RenderMixin:
     def getPixel(self, pos):
-        img = self.img_view.image
-        if img is None or self.view_state.image_axes is None:
+        source = getattr(self.img_view, "histogramSource", None)
+        if source is None:
+            source = getattr(self.img_view, "image", None)
+        if source is None or self.view_state.image_axes is None:
             label = self.widgets['labels']['pixelValue']
             if hasattr(label, "set_pixel_status"):
-                label.set_pixel_status("Pixel value updating...", self._slice_context_text())
+                label.set_pixel_status("", self._slice_context_text())
             else:
-                label.setText("Pixel value updating...")
+                label.setText("")
             if hasattr(self, "img_view"):
-                self.img_view.showHudText("Pixel value updating...", pos)
+                self.img_view.hideHud()
             return
         container = self.img_view.getView()
-        if container.sceneBoundingRect().contains(pos): 
-            mousePoint = container.mapSceneToView(pos) 
-            geometry = getattr(self, "display_geometry", None)
-            point_context = None if geometry is None else geometry.context_for_display_point(mousePoint.x(), mousePoint.y())
-            if point_context is not None:
-                mapping = point_context.mapping
-                x_i, y_i = mapping.local_x, mapping.local_y
-                index = mapping.array_index
-                context = point_context.context_text
-                cached = self.operation_evaluator.cached_scalar(self.view_state, tuple(index))
-                if cached is not None:
-                    self._commit_pixel_value(cached, x_i, y_i, context, pos)
-                    return
-                value_text = f"{point_context.value_prefix} = updating..."
-                text = value_text
-                if context:
-                    text = f"{value_text} | {context}"
-                label = self.widgets['labels']['pixelValue']
-                if hasattr(label, "set_pixel_status"):
-                    label.set_pixel_status(value_text, context)
-                else:
-                    label.setText(text)
-                if hasattr(self, "img_view"):
-                    self.img_view.showHudText(text, pos)
-                show_status_message(self, text, timeout=1500)
-                self._request_pixel_value(tuple(index), x_i, y_i, context, pos)
-                return
+        mousePoint = container.mapSceneToView(pos)
+        geometry = getattr(self, "display_geometry", None)
+        point_context = None if geometry is None else geometry.context_for_display_point(mousePoint.x(), mousePoint.y())
+        if point_context is not None:
+            mapping = point_context.mapping
+            x_i, y_i = mapping.local_x, mapping.local_y
+            context = point_context.context_text
+            value = self._hover_value_from_display(mapping)
+            if value is not None:
+                self._commit_pixel_value(value, x_i, y_i, context, pos)
+            return
         if hasattr(self, "img_view"):
             self.img_view.hideHud()
+
+    def _hover_value_from_display(self, mapping):
+        source = getattr(self.img_view, "histogramSource", None)
+        if source is None:
+            source = getattr(self.img_view, "image", None)
+        if source is None:
+            return None
+        data = np.asarray(source)
+        y_i = int(mapping.local_y)
+        x_i = int(mapping.local_x)
+        if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
+            return None
+        value = data[y_i, x_i]
+        if isinstance(value, np.ndarray):
+            return tuple(value.tolist())
+        if np.isscalar(value):
+            try:
+                return value.item()
+            except AttributeError:
+                return value
+        return value
 
     def _request_pixel_value(self, index, x_i, y_i, context, pos):
         view_state = self.view_state
@@ -111,11 +118,20 @@ class RenderMixin:
 
     def _commit_pixel_value(self, value, x_i, y_i, context, pos):
         try:
-            decimal_places = getNumberOfDecimalPlaces(abs(value))
-            if decimal_places > 5:
-                value_text = "({}, {}) = {:.3e}".format(x_i, y_i, value)
+            if isinstance(value, (tuple, list)):
+                values = []
+                for entry in value:
+                    try:
+                        values.append(f"{float(entry):.4g}")
+                    except Exception:
+                        values.append(str(entry))
+                value_text = f"({x_i}, {y_i}) = ({', '.join(values)})"
             else:
-                value_text = "({}, {}) = {:.{}f}".format(x_i, y_i, value, decimal_places)
+                decimal_places = getNumberOfDecimalPlaces(abs(value))
+                if decimal_places > 5:
+                    value_text = "({}, {}) = {:.3e}".format(x_i, y_i, value)
+                else:
+                    value_text = "({}, {}) = {:.{}f}".format(x_i, y_i, value, decimal_places)
         except Exception:
             value_text = f"({x_i}, {y_i}) = {value}"
         text = value_text if not context else f"{value_text} | {context}"
@@ -258,7 +274,10 @@ class RenderMixin:
         if hasattr(self, "display_toolbar"):
             self.display_toolbar.set_current(live_profile=enabled)
         if enabled and hasattr(self, "profile_dock"):
-            self._profile_dock_user_visible = True
+            self._profile_dock_user_visible = None
+            if hasattr(self, "img_view"):
+                self.img_view.cancelPendingRoiDrawing()
+                self.img_view.setInspectionTool("profile")
             if self.profile_dock.isFloating():
                 self.profile_dock.resize(560, 260)
             self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="live-profile")
@@ -266,7 +285,8 @@ class RenderMixin:
             self.img_view.getView().setCursor(Qt.QtCore.Qt.CursorShape.CrossCursor)
             self._ensure_profile_marker()
         if not enabled:
-            self._profile_dock_user_visible = False
+            if getattr(self, "_profile_dock_user_visible", None) is not True:
+                self._profile_dock_user_visible = None
             self._pending_profile_pos = None
             self._pending_profile_point = None
             self._profile_timer.stop()
@@ -277,23 +297,31 @@ class RenderMixin:
     def _on_profile_dock_visibility_changed(self, visible):
         if getattr(self, "_closing", False):
             return
-        self._profile_dock_user_visible = bool(visible)
+        if getattr(self.layout_manager, "_visibility_preserve_active", False):
+            return
+        if not visible:
+            self._profile_dock_user_visible = False
         if not visible and self.widgets['buttons']['display']['live_profile'].isChecked():
             self.widgets['buttons']['display']['live_profile'].setChecked(False)
 
     def _on_inspection_dock_visibility_changed(self, visible):
         if getattr(self, "_closing", False):
             return
-        self._inspection_dock_user_visible = bool(visible)
+        if getattr(self.layout_manager, "_visibility_preserve_active", False):
+            return
+        if not visible:
+            self._inspection_dock_user_visible = False
         if visible and self.inspection_dock.isFloating():
             self.inspection_dock.resize(max(self.inspection_dock.width(), 420), max(self.inspection_dock.height(), 300))
 
     def _on_operation_dock_visibility_changed(self, visible):
         if getattr(self, "_closing", False):
             return
+        if getattr(self.layout_manager, "_visibility_preserve_active", False):
+            return
         if not visible:
             self._operation_dock_user_visible = False
-        elif self.operation_dock.isFloating():
+        if visible and self.operation_dock.isFloating():
             self.operation_dock.resize(max(self.operation_dock.width(), 340), max(self.operation_dock.height(), 300))
 
     def _resize_profile_dock_default(self):
@@ -570,6 +598,9 @@ class RenderMixin:
         return ViewportPolicy.PRESERVE
 
     def _prefetch_nearby_slices(self, view_state, colormap_lut):
+        if self.document.steps:
+            self.operation_evaluator.note_prefetch_skipped()
+            return
         axis = getattr(self, "_active_slice_axis", None)
         if axis is None or view_state.image_axes is None or axis in view_state.image_axes:
             return
@@ -582,7 +613,7 @@ class RenderMixin:
         deltas = self._prefetch_deltas(direction, max_radius=min(12, max(2, size - 1)))
         scheduled = 0
         for delta in deltas:
-            if scheduled >= 16:
+            if scheduled >= 8:
                 break
             index = current + delta
             if 0 <= index < size:
@@ -723,22 +754,12 @@ class RenderMixin:
 
     def fit_image_to_view(self):
         self.widgets['buttons']['display']['fit'].setChecked(True)
-        self._next_viewport_policy = ViewportIntent.FIT
-        if getattr(self.img_view, "image", None) is not None:
-            self.img_view.fitToView()
-            self.render(reason="viewport-fit")
-        else:
-            self.img_view.fitToView()
+        self.img_view.fitToView()
         self._sync_controls_from_view_state()
 
     def one_to_one_image(self):
         self.widgets['buttons']['display']['square_pixels'].setChecked(True)
-        self._next_viewport_policy = ViewportIntent.ONE_TO_ONE
-        if getattr(self.img_view, "image", None) is not None:
-            self.img_view.oneToOne()
-            self.render(reason="viewport-one-to-one")
-        else:
-            self.img_view.oneToOne()
+        self.img_view.oneToOne()
         self._sync_controls_from_view_state()
 
     def auto_window_levels(self):
@@ -868,7 +889,7 @@ class RenderMixin:
         self.update_complex_indicators()
         self.update_shift_indicators()
         self.update_image_view(force_autolevel=force_autolevel)
-        self.update_line_plot()
-        self._refresh_inspection_dock()
+        if self.profile_dock.isVisible() or self.widgets['buttons']['display']['live_profile'].isChecked():
+            self.update_line_plot()
         self._update_operation_dock()
         self._sync_progressive_docks()

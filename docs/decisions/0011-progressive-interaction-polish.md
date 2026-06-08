@@ -53,6 +53,9 @@ Native platform file dialogs are not used for ArrayScope save/load workflows bec
 under some Qt/PySide environments. The UI uses non-native `QFileDialog` instances so navigation and
 filename editing stay responsive.
 
-Phase 4c keeps `QDockWidget` itself boring: managed docks no longer override Qt lifecycle methods.
-`WindowLayoutManager` owns managed dock visibility, floating/redocking, menu checked state, and canvas
-preservation for menu actions and direct close-button paths.
+Phase 4c keeps `QDockWidget` itself boring: managed docks no longer override Qt lifecycle methods and
+the layout manager no longer installs event filters to repair arbitrary direct close/hide events.
+`WindowLayoutManager` owns explicit menu/reset/restore/progressive visibility and floating/redocking.
+Each progressive dock has simple user intent: explicitly visible, explicitly hidden, or no user
+opinion. A user-hidden Operations dock stays hidden even while steps exist; progressive rules may only
+auto-open docks when the user has not explicitly hidden them.

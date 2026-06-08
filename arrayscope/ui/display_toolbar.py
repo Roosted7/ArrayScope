@@ -11,7 +11,8 @@ from arrayscope.ui.icons import set_action_icon
 class DisplayToolbar(QtWidgets.QToolBar):
     channelChanged = Qt.QtCore.Signal(str)
     scaleChanged = Qt.QtCore.Signal(str)
-    aspectChanged = Qt.QtCore.Signal(str)
+    fitRequested = Qt.QtCore.Signal()
+    oneToOneRequested = Qt.QtCore.Signal()
     windowModeChanged = Qt.QtCore.Signal(str)
     autoWindowRequested = Qt.QtCore.Signal()
 
@@ -36,13 +37,15 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.addWidget(QtWidgets.QLabel("Scale "))
         self.addWidget(self.scale_combo)
 
-        self.aspect_combo = QtWidgets.QComboBox()
-        self.aspect_combo.addItem("Fit", "fit")
-        self.aspect_combo.addItem("1:1", "one_to_one")
-        self.aspect_combo.currentIndexChanged.connect(lambda _i: self.aspectChanged.emit(self.aspect_combo.currentData()))
         self.addSeparator()
-        self.addWidget(QtWidgets.QLabel("View "))
-        self.addWidget(self.aspect_combo)
+        self.fit_action = self.addAction("Fit")
+        set_action_icon(self.fit_action, "fit_screen")
+        self.fit_action.setToolTip("Fit image to viewport")
+        self.fit_action.triggered.connect(lambda _checked=False: self.fitRequested.emit())
+        self.one_to_one_action = self.addAction("1:1")
+        set_action_icon(self.one_to_one_action, "aspect_ratio")
+        self.one_to_one_action.setToolTip("Show image at one screen pixel per image pixel")
+        self.one_to_one_action.triggered.connect(lambda _checked=False: self.oneToOneRequested.emit())
 
         self.window_combo = QtWidgets.QComboBox()
         self.window_combo.addItem("Relative", "relative")
@@ -74,7 +77,6 @@ class DisplayToolbar(QtWidgets.QToolBar):
         for combo, value in (
             (self.channel_combo, channel),
             (self.scale_combo, scale),
-            (self.aspect_combo, aspect),
             (self.window_combo, window_mode),
         ):
             if value is None:
@@ -84,4 +86,4 @@ class DisplayToolbar(QtWidgets.QToolBar):
                 combo.blockSignals(True)
                 combo.setCurrentIndex(index)
                 combo.blockSignals(False)
-        del live_profile
+        del aspect, live_profile

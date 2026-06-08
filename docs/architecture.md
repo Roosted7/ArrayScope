@@ -51,8 +51,9 @@ source of array-view state.
   dispatch, latest-generation checks, and stale-result ignoring.
 - `arrayscope.window.layout_controller.WindowLayoutManager`: owns first-run layout restore, reset
   layout, progressive dock visibility, managed dock floating/redocking, managed dock menu actions,
-  dock default sizes, shutdown dock closing, direct-close canvas preservation, and post-restore
-  geometry fixups. Managed dock widgets do not override Qt dock lifecycle methods.
+  dock default sizes, shutdown dock closing, and post-restore geometry fixups. Managed dock behavior is
+  driven by explicit user/menu/reset/restore/progressive actions; arbitrary direct dock lifecycle
+  events are left to Qt.
 - `arrayscope.app.launch`: QApplication creation, multiprocessing launch, and IPython Qt event-loop handling.
 - `arrayscope.io`: file loading, dataset selectors, and save workflows.
 - `arrayscope.export`: video/frame export workers and UI workflow.
@@ -83,6 +84,9 @@ cursor behavior must use that geometry instead of reconstructing coordinates
 from widget state. Display point mapping uses pixel cells: `[x, x+1)` maps to
 column `x`, and `[y, y+1)` maps to row `y`. Hover/status context text also
 comes from `DisplayGeometry` so montage axes are labelled once.
+Pixel hover reads the committed displayed scalar image or histogram source
+directly. It does not schedule scalar evaluation or show an intermediate
+“updating” value during normal mouse movement.
 
 Do not read widget values to reconstruct `ViewState`. Widget state is an output
 of render, except transient UI-only state such as dock visibility and histogram
@@ -114,7 +118,9 @@ stacks. Explicit replacement/materialization uses
 Background evaluation uses local per-window `QThreadPool` instances. Closing a
 window clears queued work, increments generations, stops polling, and ignores
 late results. Prefetch requests are keyed, deduped, bounded, and counted in
-cache diagnostics.
+cache diagnostics. Operation-backed image prefetch is disabled until visible
+rendering, profile/ROI work, hover, and prefetch can be ordered by an explicit
+priority scheduler.
 
 Channel mode tracks automatic versus user-selected intent. Invalid channels are
 coerced when dtype changes, for example complex-only channels fall back to real
@@ -172,8 +178,10 @@ user explicitly showed the dock from the View menu. The Profile dock is hidden u
 live profile is enabled, or the user explicitly shows it.
 
 The Inspection dock is optional and hidden by default. Basic ROI creation and live-profile toggling are
-available from the image context menu, so ROI use does not require opening a dock. ImageView2D owns ROI
-graphics items, emits complete ROI geometry, and displays a movable semi-transparent ROI info overlay.
+available from the image context menu, so ROI use does not require opening a dock. The Inspection dock
+manages analysis and immediate line/rectangle ROI creation; freehand and polyline drawing are one-shot
+canvas interactions owned by `ImageView2D`. ImageView2D owns ROI graphics items, emits complete ROI
+geometry, and displays a movable semi-transparent ROI info overlay.
 The window debounces ROI statistics and histogram updates from the current displayed scalar image or
 histogram source, then sends settled results back to the dock and overlay. Small snapshots compute
 directly; larger ROI/image combinations run through the ROI evaluation controller and commit only if

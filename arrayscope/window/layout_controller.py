@@ -2,29 +2,23 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 
 
-class _ManagedDockEventFilter(Qt.QtCore.QObject):
-    def __init__(self, manager):
-        super().__init__(manager.window)
-        self.manager = manager
-
-    def eventFilter(self, watched, event):
-        if event.type() in (Qt.QtCore.QEvent.Type.Close, Qt.QtCore.QEvent.Type.Hide):
-            self.manager._prepare_direct_dock_close(watched)
-        return False
+@dataclass
+class ManagedDockState:
+    user_visible: bool | None = None
+    auto_visible: bool = False
 
 
 class WindowLayoutManager:
     def __init__(self, window):
         self.window = window
-        self._desired_visibility = {}
-        self._visible_snapshots = {}
-        self._dock_event_filter = _ManagedDockEventFilter(self)
-        self._filtered_docks = set()
+        self._dock_states = {}
 
     def restore_window_settings(self):
         win = self.window
@@ -41,9 +35,12 @@ class WindowLayoutManager:
 
     def reset_layout(self):
         win = self.window
-        win._operation_dock_user_visible = False
-        win._profile_dock_user_visible = False
-        win._inspection_dock_user_visible = False
+        win._operation_dock_user_visible = None
+        win._profile_dock_user_visible = None
+        win._inspection_dock_user_visible = None
+        for dock in self._managed_docks():
+            if dock is not None:
+                self._state_for(dock).user_visible = None
         self._apply_dock_floating_raw(win.profile_dock, False)
         self.set_managed_dock_visible(win.profile_dock, False, reason="reset", preserve_canvas=False)
         if hasattr(win, "inspection_dock"):
@@ -64,18 +61,19 @@ class WindowLayoutManager:
     def set_operation_dock_visible_from_user(self, visible):
         win = self.window
         win._operation_dock_user_visible = bool(visible)
+        self._state_for(win.operation_dock).user_visible = bool(visible)
         self.set_managed_dock_visible(win.operation_dock, bool(visible), reason="user-operation")
 
     def set_profile_dock_visible_from_user(self, visible):
         win = self.window
         win._profile_dock_user_visible = bool(visible)
+        self._state_for(win.profile_dock).user_visible = bool(visible)
         self.set_managed_dock_visible(win.profile_dock, bool(visible), reason="user-profile")
 
     def set_inspection_dock_visible_from_user(self, visible):
         win = self.window
         win._inspection_dock_user_visible = bool(visible)
-        if visible and win.inspection_dock.isFloating():
-            self.set_managed_dock_floating(win.inspection_dock, False, reason="user-inspection-redock")
+        self._state_for(win.inspection_dock).user_visible = bool(visible)
         self.set_managed_dock_visible(win.inspection_dock, bool(visible), reason="user-inspection")
 
     def sync_progressive_docks(self):
@@ -83,29 +81,23 @@ class WindowLayoutManager:
         changed = False
         if hasattr(win, "operation_dock"):
             has_steps = bool(win.document.steps)
-            if has_steps:
+            user_visible = getattr(win, "_operation_dock_user_visible", None)
+            if has_steps and user_visible is not False:
                 changed = changed or not win.operation_dock.isVisible()
                 self.set_dock_visible_later(win.operation_dock, True)
-            elif not getattr(win, "_operation_dock_user_visible", False):
+            elif not has_steps and user_visible is not True:
                 changed = changed or win.operation_dock.isVisible()
                 self.set_dock_visible_later(win.operation_dock, False)
         if hasattr(win, "profile_dock"):
             live_profile = win.widgets["buttons"]["display"]["live_profile"].isChecked()
-            should_show_profile = win.data.ndim == 1 or live_profile or getattr(win, "_profile_dock_user_visible", False)
+            user_visible = getattr(win, "_profile_dock_user_visible", None)
+            should_show_profile = (win.data.ndim == 1 or live_profile or user_visible is True) and user_visible is not False
             if should_show_profile:
                 changed = changed or not win.profile_dock.isVisible()
                 self.set_dock_visible_later(win.profile_dock, True)
-            elif not win.profile_dock.isFloating():
+            elif user_visible is not True:
                 changed = changed or win.profile_dock.isVisible()
                 self.set_dock_visible_later(win.profile_dock, False)
-        if hasattr(win, "inspection_dock"):
-            should_show_inspection = getattr(win, "_inspection_dock_user_visible", False)
-            if should_show_inspection:
-                changed = changed or not win.inspection_dock.isVisible()
-                self.set_dock_visible_later(win.inspection_dock, True)
-            elif not win.inspection_dock.isFloating():
-                changed = changed or win.inspection_dock.isVisible()
-                self.set_dock_visible_later(win.inspection_dock, False)
         if changed:
             self.schedule_view_geometry_refresh()
 
@@ -113,19 +105,22 @@ class WindowLayoutManager:
         Qt.QtCore.QTimer.singleShot(0, self.refresh_view_geometry)
 
     def set_dock_visible_later(self, dock, visible):
+        self._state_for(dock).auto_visible = bool(visible)
         Qt.QtCore.QTimer.singleShot(0, lambda dock=dock, visible=visible: self.apply_queued_dock_visibility(dock, visible))
 
     def apply_queued_dock_visibility(self, dock, visible):
         win = self.window
         if not visible:
             if dock is getattr(win, "operation_dock", None) and win.document.steps:
-                return
+                if getattr(win, "_operation_dock_user_visible", None) is not False:
+                    return
             if dock is getattr(win, "profile_dock", None):
                 live_profile = win.widgets["buttons"]["display"]["live_profile"].isChecked()
-                if win.data.ndim == 1 or live_profile or getattr(win, "_profile_dock_user_visible", False):
+                user_visible = getattr(win, "_profile_dock_user_visible", None)
+                if (win.data.ndim == 1 or live_profile or user_visible is True) and user_visible is not False:
                     return
             if dock is getattr(win, "inspection_dock", None):
-                if getattr(win, "_inspection_dock_user_visible", False):
+                if getattr(win, "_inspection_dock_user_visible", None) is True:
                     return
         self.set_managed_dock_visible(dock, bool(visible), reason="progressive")
 
@@ -134,8 +129,6 @@ class WindowLayoutManager:
 
     def set_managed_dock_visible(self, dock, visible, *, reason, preserve_canvas=True, raise_dock=True):
         win = self.window
-        self._ensure_dock_filter(dock)
-        self._desired_visibility[dock] = bool(visible)
         currently_visible = dock.isVisible() if win.isVisible() else not dock.isHidden()
         if currently_visible == bool(visible):
             if visible and raise_dock:
@@ -155,14 +148,12 @@ class WindowLayoutManager:
             self._visibility_preserve_active = False
         if preserve_canvas:
             Qt.QtCore.QTimer.singleShot(0, lambda before=before: self._restore_view_snapshot_if_reasonable(before, retry=True))
-        if visible:
-            Qt.QtCore.QTimer.singleShot(50, lambda dock=dock: self._remember_visible_snapshot(dock))
         self.schedule_view_geometry_refresh()
 
     def make_managed_dock_action(self, text, dock, setter):
         action = Qt.QtGui.QAction(text, self.window)
         action.setCheckable(True)
-        action.setChecked(self.desired_visibility_for(dock))
+        action.setChecked(dock.isVisible() if self.window.isVisible() else not dock.isHidden())
 
         def on_triggered(checked=False):
             setter(bool(checked))
@@ -197,46 +188,8 @@ class WindowLayoutManager:
             getattr(win, "operation_dock", None),
         )
 
-    def _ensure_dock_filter(self, dock):
-        if dock in self._filtered_docks:
-            return
-        dock.installEventFilter(self._dock_event_filter)
-        dock.visibilityChanged.connect(lambda visible, dock=dock: self._on_managed_dock_visibility_changed(dock, visible))
-        self._filtered_docks.add(dock)
-
-    def _prepare_direct_dock_close(self, dock):
-        if getattr(self, "_visibility_preserve_active", False) or dock.isFloating():
-            return
-        if dock not in self._managed_docks():
-            return
-        before = self._view_snapshot()
-        if before is not None:
-            self._schedule_snapshot_restore(before)
-
-    def _remember_visible_snapshot(self, dock):
-        if dock.isVisible() and not dock.isFloating():
-            snapshot = self._view_snapshot()
-            if snapshot is not None:
-                self._visible_snapshots[dock] = snapshot
-
-    def _on_managed_dock_visibility_changed(self, dock, visible):
-        if visible:
-            Qt.QtCore.QTimer.singleShot(50, lambda dock=dock: self._remember_visible_snapshot(dock))
-            return
-        if getattr(self, "_visibility_preserve_active", False) or dock.isFloating():
-            return
-        snapshot = self._visible_snapshots.get(dock)
-        if snapshot is not None:
-            self._schedule_snapshot_restore(snapshot)
-
-    def _schedule_snapshot_restore(self, snapshot):
-        for delay in (0, 50, 150, 300):
-            Qt.QtCore.QTimer.singleShot(delay, lambda snapshot=snapshot: self._restore_view_snapshot_if_reasonable(snapshot, retry=False))
-
-    def desired_visibility_for(self, dock):
-        if dock in self._desired_visibility:
-            return bool(self._desired_visibility[dock])
-        return dock.isVisible() if self.window.isVisible() else not dock.isHidden()
+    def _state_for(self, dock):
+        return self._dock_states.setdefault(dock, ManagedDockState())
 
     def set_managed_dock_floating(self, dock, floating, *, reason, preserve_canvas=True):
         before = self._view_snapshot() if preserve_canvas else None

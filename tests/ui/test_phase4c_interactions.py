@@ -28,7 +28,7 @@ def _view_action(win, text):
     raise AssertionError(f"View action not found: {text}")
 
 
-def test_managed_docks_survive_repeated_menu_and_direct_close(qtbot):
+def test_operations_dock_does_not_auto_reopen_after_user_close(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -36,19 +36,68 @@ def test_managed_docks_survive_repeated_menu_and_direct_close(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        for text, dock_name in (("Inspection", "inspection_dock"), ("Profile", "profile_dock"), ("Operations", "operation_dock")):
-            action = _view_action(win, text)
-            dock = getattr(win, dock_name)
-            for _ in range(5):
-                action.trigger()
-                _process_events(qtbot, count=12)
-                assert dock.isVisible()
-                dock.close()
-                _process_events(qtbot, count=35)
-                assert not dock.isVisible()
-            action.trigger()
-            _process_events(qtbot, count=12)
-            assert dock.isVisible()
+        win.request_operation("reverse", 0)
+        _process_events(qtbot, count=25)
+        action = _view_action(win, "Operations")
+        assert win.operation_dock.isVisible()
+        assert action.isChecked()
+
+        action.trigger()
+        _process_events(qtbot, count=20)
+        win._update_operation_dock()
+        win.layout_manager.sync_progressive_docks()
+        _process_events(qtbot, count=20)
+
+        assert not win.operation_dock.isVisible()
+        assert not action.isChecked()
+    finally:
+        win.close()
+
+
+def test_floating_inspection_show_does_not_redock(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        action = _view_action(win, "Inspection")
+        action.trigger()
+        _process_events(qtbot, count=15)
+        win.layout_manager.set_managed_dock_floating(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=10)
+        assert win.inspection_dock.isFloating()
+
+        action.trigger()
+        _process_events(qtbot, count=15)
+        assert not win.inspection_dock.isVisible()
+        action.trigger()
+        _process_events(qtbot, count=15)
+
+        assert win.inspection_dock.isVisible()
+        assert win.inspection_dock.isFloating()
+    finally:
+        win.close()
+
+
+def test_reset_layout_redocks_managed_docks(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_floating(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=15)
+        assert win.inspection_dock.isFloating()
+
+        win.reset_layout()
+        _process_events(qtbot, count=20)
+
+        assert not win.inspection_dock.isFloating()
     finally:
         win.close()
 
@@ -100,30 +149,61 @@ def test_toolbar_fit_and_one_to_one_are_viewport_commands(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
-        win.one_to_one_image()
+        def fail_render(*args, **kwargs):
+            raise AssertionError("Fit/1:1 must not render")
+
+        win.render = fail_render
+        win.display_toolbar.one_to_one_action.trigger()
         _process_events(qtbot, count=20)
         assert win.img_view.viewport_controller.mode == ViewportMode.ONE_TO_ONE
-        win.fit_image_to_view()
+        win.display_toolbar.fit_action.trigger()
         _process_events(qtbot, count=20)
         assert win.img_view.viewport_controller.mode == ViewportMode.FIT
-        assert win.display_toolbar.aspect_combo.findData("square_fov") == -1
+        assert not hasattr(win.display_toolbar, "aspect_combo")
     finally:
         win.close()
 
 
-def test_cached_hover_value_does_not_show_updating(qtbot):
+def test_hover_reads_display_without_scalar_evaluation(qtbot, monkeypatch):
     _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
-        index = (1, 2)
-        win.operation_evaluator.scalar(win.view_state, index)
-        win._request_pixel_value(index, 2, 1, "", win.img_view.getView().mapViewToScene(win.img_view.getView().viewRect().center()))
+        monkeypatch.setattr(win.pixel_evaluation_controller, "start", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("scalar eval scheduled")))
+        scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(2.1, 1.1))
+        win.getPixel(scene_pos)
         _process_events(qtbot, count=5)
-        assert "updating" not in win.widgets["labels"]["pixelValue"].text().lower()
+        text = win.widgets["labels"]["pixelValue"].text().lower()
+        assert "updating" not in text
+        assert "7" in text
+    finally:
+        win.close()
+
+
+def test_hover_reads_op_backed_display_without_scalar_evaluation(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.request_operation("reverse", 0)
+        _process_events(qtbot, count=30)
+        monkeypatch.setattr(win.pixel_evaluation_controller, "start", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("scalar eval scheduled")))
+        scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(2.1, 1.1))
+        win.getPixel(scene_pos)
+        _process_events(qtbot, count=5)
+        text = win.widgets["labels"]["pixelValue"].text().lower()
+        assert "updating" not in text
+        assert "12" in text
     finally:
         win.close()
 
@@ -168,5 +248,44 @@ def test_roi_statistics_refresh_is_debounced(qtbot, monkeypatch):
 
         assert len(calls) == 1
         assert win.inspection_dock.roi_model.rowCount() == 3
+    finally:
+        win.close()
+
+
+def test_render_with_hidden_profile_and_live_profile_off_skips_line_plot(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(20 * 30, dtype=float).reshape(20, 30))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.layout_manager.set_managed_dock_visible(win.profile_dock, False, reason="test", preserve_canvas=False)
+        win.widgets["buttons"]["display"]["live_profile"].setChecked(False)
+        _process_events(qtbot, count=10)
+        monkeypatch.setattr(win, "update_line_plot", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hidden profile work ran")))
+
+        win.render(reason="hidden-profile-test")
+        _process_events(qtbot, count=10)
+    finally:
+        win.close()
+
+
+def test_render_refreshes_inspection_once_on_image_commit(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(20 * 30, dtype=float).reshape(20, 30))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        calls = []
+        original = win._refresh_inspection_dock
+        monkeypatch.setattr(win, "_refresh_inspection_dock", lambda *args, **kwargs: (calls.append(1), original(*args, **kwargs))[1])
+
+        win.render(reason="inspection-refresh-test")
+        _process_events(qtbot, count=10)
+
+        assert len(calls) == 1
     finally:
         win.close()

@@ -44,6 +44,9 @@ class InspectionWorkflowMixin:
     def _add_roi_for_tool_at(self, tool, image_point):
         if not hasattr(self, "img_view"):
             return None
+        if tool in {"roi_polyline", "roi_freehand"}:
+            self.img_view.beginRoiDrawingOnce(tool)
+            return None
         mapping = {
             "roi_line": RoiKind.LINE,
             "roi_rectangle": RoiKind.RECTANGLE,
@@ -90,8 +93,6 @@ class InspectionWorkflowMixin:
         if not hasattr(self, "inspection_dock"):
             return
         self._inspection_dock_user_visible = True
-        if self.inspection_dock.isFloating():
-            self.layout_manager.set_managed_dock_floating(self.inspection_dock, False, reason="show-inspection-redock")
         self.layout_manager.set_managed_dock_visible(self.inspection_dock, True, reason="show-inspection")
 
     def _refresh_inspection_dock(self):
@@ -204,8 +205,8 @@ class InspectionWorkflowMixin:
         for label, tool in (
             ("Add line ROI", "roi_line"),
             ("Add rectangle ROI", "roi_rectangle"),
-            ("Add polyline ROI", "roi_polyline"),
-            ("Add freehand ROI", "roi_freehand"),
+            ("Draw polyline ROI", "roi_polyline"),
+            ("Draw freehand ROI", "roi_freehand"),
         ):
             action = menu.addAction(label)
             action.triggered.connect(lambda checked=False, tool=tool, image_point=image_point: self._add_roi_for_tool_at(tool, image_point))

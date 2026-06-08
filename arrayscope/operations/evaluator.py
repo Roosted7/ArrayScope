@@ -306,6 +306,9 @@ class OperationEvaluator:
     def note_prefetch_stale(self):
         self.prefetch_stale += 1
 
+    def note_prefetch_skipped(self):
+        self.prefetch_skipped += 1
+
     def cache_diagnostics(self):
         if self.last_diagnostics is not None:
             return self.last_diagnostics

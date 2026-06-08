@@ -80,9 +80,9 @@ class ArrayScopeWindow(
         self._filepath = filepath
         self._dataset_path = dataset_path
         self._selector_class_name = selector_class_name
-        self._operation_dock_user_visible = False
-        self._profile_dock_user_visible = False
-        self._inspection_dock_user_visible = False
+        self._operation_dock_user_visible = None
+        self._profile_dock_user_visible = None
+        self._inspection_dock_user_visible = None
         self._last_operation_axis = None
         self._focused_dimension_axis = None
         self._active_slice_axis = None

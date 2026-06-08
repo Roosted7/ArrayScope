@@ -61,3 +61,15 @@ def test_window_render_does_not_compare_partial_document_keys():
     assert "image_key(view_state, colormap_lut=colormap_lut)[1]" not in text
     assert "line_key(profile_state)[1]" not in text
     assert "scalar_key(view_state, index)[1]" not in text
+
+
+def test_layout_controller_has_no_dock_event_filter_repair_machinery():
+    text = (ROOT / "arrayscope" / "window" / "layout_controller.py").read_text()
+    forbidden = (
+        "_ManagedDockEventFilter",
+        "_visible_snapshots",
+        "_schedule_snapshot_restore",
+        "_prepare_direct_dock_close",
+    )
+    for token in forbidden:
+        assert token not in text
