@@ -2,7 +2,8 @@ import numpy as np
 
 from arrayscope.core.cache_status import CacheStatus
 from arrayscope.core.view_state import ViewState
-from arrayscope.operations.cache import BoundedArrayCache
+from arrayscope.display.montage import MontageTile, RenderedTile
+from arrayscope.operations.cache import BoundedArrayCache, _nbytes
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.operations.pipeline import ArrayDocument, ReverseAxis
@@ -23,6 +24,61 @@ def test_bounded_array_cache_tracks_hits_misses_and_evictions():
     assert diagnostics.misses == 1
     assert diagnostics.evictions >= 1
     assert diagnostics.bytes_used <= diagnostics.max_bytes
+
+
+def test_bounded_cache_counts_rendered_tile_bytes():
+    tile = MontageTile(
+        montage_index=0,
+        source_index=0,
+        row=0,
+        col=0,
+        x0=0,
+        y0=0,
+        width=100,
+        height=100,
+        view_state=None,
+    )
+    rendered = RenderedTile(
+        tile=tile,
+        image=np.zeros((100, 100), dtype=np.float32),
+        histogram_data=np.zeros((100, 100), dtype=np.float32),
+        eval_ms=0.0,
+        slab_shape=(),
+        slab_nbytes=None,
+    )
+
+    assert rendered.nbytes() == 80_000
+    assert _nbytes(rendered) == 80_000
+
+    large_cache = BoundedArrayCache(max_bytes=100_000, max_entries=96)
+    large_cache.put("tile", rendered)
+    assert large_cache.bytes_used == 80_000
+    assert len(large_cache._items) == 1
+
+    small_cache = BoundedArrayCache(max_bytes=1024, max_entries=96)
+    small_cache.put("tile", rendered)
+    assert small_cache.bytes_used == 0
+    assert len(small_cache._items) == 0
+    assert small_cache.evictions == 1
+
+
+def test_bounded_cache_uses_nbytes_protocol_before_fallbacks():
+    class ProtocolValue:
+        image = np.zeros((100, 100), dtype=np.float32)
+
+        def nbytes(self):
+            return 12
+
+    assert _nbytes(ProtocolValue()) == 12
+
+
+def test_bounded_cache_counts_image_and_histogram_attrs_without_protocol():
+    class ImageValue:
+        def __init__(self):
+            self.image = np.zeros((5, 6), dtype=np.float32)
+            self.histogram_data = np.zeros((5, 6), dtype=np.float64)
+
+    assert _nbytes(ImageValue()) == 360
 
 
 def test_operation_evaluator_uses_bounded_display_cache_and_invalidates_by_document():

@@ -73,3 +73,29 @@ def test_layout_controller_has_no_dock_event_filter_repair_machinery():
     )
     for token in forbidden:
         assert token not in text
+
+
+def test_standard_dock_widget_has_no_close_event_lifecycle_override():
+    text = (ROOT / "arrayscope" / "ui" / "docks" / "common.py").read_text()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "StandardDockWidget":
+            assert all(not isinstance(child, ast.FunctionDef) or child.name != "closeEvent" for child in node.body)
+            return
+    raise AssertionError("StandardDockWidget class not found")
+
+
+def test_detached_dialog_hide_takes_body_before_state_change():
+    text = (ROOT / "arrayscope" / "window" / "panels.py").read_text()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_hide_detached_from_dialog":
+            segment = ast.get_source_segment(text, node) or ""
+            assert "take_body" in segment or "_destroy_dialog_and_take_body" in segment
+            return
+    raise AssertionError("_hide_detached_from_dialog not found")
+
+
+def test_managed_panel_code_does_not_use_native_set_floating():
+    text = (ROOT / "arrayscope" / "window" / "panels.py").read_text()
+    assert ".setFloating(" not in text
