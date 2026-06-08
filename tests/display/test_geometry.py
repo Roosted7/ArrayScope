@@ -113,6 +113,44 @@ def test_profile_states_under_montage_include_tile_slice_and_local_xy():
     assert states[1].slice_indices == (1, 1, 2)
 
 
+def test_montage_canvas_origin_maps_hover_to_global_source_index():
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
+    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
+
+    mapping = geometry.display_point_to_array_index(1, 1)
+
+    assert mapping.montage_index == 10
+    assert mapping.array_index == (1, 1, 10)
+
+
+def test_montage_canvas_origin_gap_returns_none():
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
+    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
+
+    assert geometry.display_point_to_array_index(3, 1) is None
+
+
+def test_montage_canvas_origin_profile_state_uses_global_tile_slice():
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=2).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
+    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
+
+    states = geometry.display_point_to_profile_states(9, 1, (1, 2))
+
+    assert states[0].slice_indices == (1, 0, 12)
+    assert states[1].slice_indices == (1, 1, 12)
+
+
+def test_montage_canvas_clamp_returns_canvas_local_point():
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
+    geometry = DisplayGeometry(state, (2, 7), montage=montage, montage_origin_x=4, montage_origin_y=6)
+
+    assert geometry.clamp_display_point(3, 1) in {(2, 1), (4, 1)}
+
+
 @given(
     height=st.integers(1, 8),
     width=st.integers(1, 8),

@@ -70,9 +70,6 @@ class ImageView2D(QtWidgets.QWidget):
         self._roi_info_panel = None
         self._inspection_tool = "cursor"
         self._roi_items = {}
-        self._tile_items = {}
-        self._tile_histogram_sources = {}
-        self._tile_mode = False
         self._roi_counter = 0
         self._drawing_points = []
         self._pending_roi_draw_tool = None
@@ -178,7 +175,6 @@ class ImageView2D(QtWidgets.QWidget):
         """
         if not isinstance(img, np.ndarray):
             raise TypeError("Image must be a numpy array")
-        self.clearTiles()
         viewport_policy = _coerce_viewport_policy(viewport_policy, autoRange)
             
         is_rgb = self._is_rgb_image(img)
@@ -227,9 +223,6 @@ class ImageView2D(QtWidgets.QWidget):
         """Update the displayed image"""
         if self.image is None:
             return
-        if self._tile_mode:
-            return
-            
         # For 2D images, we can display directly
         self.imageDisp = self.image
         
@@ -494,69 +487,13 @@ class ImageView2D(QtWidgets.QWidget):
         """Clear the displayed image"""
         self.image = None
         self.imageDisp = None
-        self.clearTiles()
         self.imageItem.clear()
         self.hideProfileMarker()
 
-    def clearTiles(self):
-        for item in tuple(self._tile_items.values()):
-            self.view.removeItem(item)
-        self._tile_items.clear()
-        self._tile_histogram_sources.clear()
-        self._tile_mode = False
-
-    def setImageTiles(self, plan, tiles, *, histogram_sample=None, autoLevels=True, levels=None, viewport_policy=ViewportPolicy.PRESERVE):
-        self._tile_mode = True
-        wanted = {int(tile.tile.montage_index): tile for tile in tiles}
-        for montage_index, item in tuple(self._tile_items.items()):
-            if montage_index not in wanted:
-                self.view.removeItem(item)
-                self._tile_items.pop(montage_index, None)
-                self._tile_histogram_sources.pop(montage_index, None)
-        self.imageItem.clear()
-        self.image = _ImageShapeProxy(plan.display_shape)
-        self.imageDisp = None
-        self.histogramSource = histogram_sample
-        for montage_index, rendered in wanted.items():
-            item = self._tile_items.get(montage_index)
-            if item is None:
-                item = ImageItem(axisOrder="row-major")
-                self._tile_items[montage_index] = item
-                self.view.addItem(item)
-            transform = QtGui.QTransform()
-            transform.translate(rendered.tile.x0, rendered.tile.y0)
-            item.setTransform(transform)
-            item.setImage(rendered.image, autoLevels=False)
-            self._tile_histogram_sources[montage_index] = rendered.histogram_data if rendered.histogram_data is not None else rendered.image
-        self.histogram.setVisible(True)
-        if histogram_sample is not None:
-            self.histogram.setImageItem(self.histogramImageItem)
-            self.histogramImageItem.setImage(histogram_sample, autoLevels=False)
-        if levels is None and autoLevels:
-            self._updateImageLevels(histogram_sample)
-            self.setLevels(self.levelMin, self.levelMax)
-        elif levels is not None:
-            self.setLevels(*levels)
-        self._updateAspectRatio()
-        self._apply_viewport_policy(plan.display_shape, viewport_policy)
-
     def valueAtDisplayMapping(self, mapping):
-        if not self._tile_mode:
-            source = self.histogramSource
-            if source is None:
-                source = self.image
-            if source is None or not hasattr(source, "shape"):
-                return None
-            data = np.asarray(source)
-            y_i = int(mapping.local_y)
-            x_i = int(mapping.local_x)
-            if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
-                return None
-            return data[y_i, x_i]
-        tile_number = getattr(mapping, "tile_number", None)
-        if tile_number is None:
-            return None
-        source = self._tile_histogram_sources.get(int(tile_number))
+        source = self.histogramSource
+        if source is None:
+            source = self.image
         if source is None:
             return None
         data = np.asarray(source)
@@ -648,8 +585,6 @@ class ImageView2D(QtWidgets.QWidget):
     def setImageStale(self, stale: bool):
         if self.imageItem is not None:
             self.imageItem.setOpacity(0.55 if stale else 1.0)
-        for item in self._tile_items.values():
-            item.setOpacity(0.55 if stale else 1.0)
 
     def showHudText(self, text, scene_pos):
         if self._hud_widget is None:
@@ -977,7 +912,3 @@ class _MovableInfoPanel(QtWidgets.QLabel):
         self._drag_offset = None
         event.accept()
 
-
-class _ImageShapeProxy:
-    def __init__(self, shape):
-        self.shape = tuple(int(size) for size in shape)

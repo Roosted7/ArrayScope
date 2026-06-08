@@ -108,3 +108,22 @@ def test_layout_controller_preserves_canvas_without_set_geometry_or_clamping():
     assert ".resize(" in text
     assert "run_panel_transition_preserving_canvas" in text
     assert "_correct_canvas_size" in text
+
+
+def test_window_render_montage_view_does_not_call_make_montage():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "update_montage_view":
+            segment = ast.get_source_segment(text, node) or ""
+            assert "make_montage(" not in segment
+            assert "make_montage_viewport_canvas(" in segment
+            return
+    raise AssertionError("update_montage_view not found")
+
+
+def test_imageview2d_has_no_multi_imageitem_tile_display_path():
+    text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
+    forbidden = ("setImageTiles", "clearTiles", "_tile_items", "_tile_histogram_sources", "_tile_mode")
+    for token in forbidden:
+        assert token not in text

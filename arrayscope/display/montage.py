@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 
 import numpy as np
 
+from arrayscope.core.memory_budget import estimate_viewport_canvas_bytes, format_bytes
 from arrayscope.display.geometry import MontageGeometry
 from arrayscope.display.slice_engine import DisplayImage
 
@@ -66,6 +68,39 @@ class MontagePlan:
             rows=self.rows,
             gap=self.gap,
         )
+
+    def tile_at(self, x: int, y: int) -> MontageTile | None:
+        x = int(x)
+        y = int(y)
+        if x < 0 or y < 0 or not self.tiles:
+            return None
+        tile_height, tile_width = self.tile_shape
+        stride_x = tile_width + self.gap
+        stride_y = tile_height + self.gap
+        if stride_x <= 0 or stride_y <= 0:
+            return None
+        column = x // stride_x
+        row = y // stride_y
+        if column < 0 or row < 0 or column >= self.columns or row >= self.rows:
+            return None
+        local_x = x - column * stride_x
+        local_y = y - row * stride_y
+        if local_x < 0 or local_x >= tile_width or local_y < 0 or local_y >= tile_height:
+            return None
+        tile_number = row * self.columns + column
+        if tile_number >= len(self.tiles):
+            return None
+        return self.tiles[tile_number]
+
+    def display_rect_for_tiles(self, tiles: Sequence[MontageTile]) -> tuple[int, int, int, int] | None:
+        tiles = tuple(tiles)
+        if not tiles:
+            return None
+        x0 = min(int(tile.x0) for tile in tiles)
+        y0 = min(int(tile.y0) for tile in tiles)
+        x1 = max(int(tile.x0 + tile.width) for tile in tiles)
+        y1 = max(int(tile.y0 + tile.height) for tile in tiles)
+        return x0, y0, x1, y1
 
     def tiles_intersecting(self, view_range, *, margin_tiles=1) -> tuple[MontageTile, ...]:
         if view_range is None:
@@ -143,6 +178,19 @@ class RenderedTile:
         return total
 
 
+@dataclass(frozen=True)
+class MontageViewportCanvas:
+    data: np.ndarray
+    histogram_data: np.ndarray | None
+    origin_x: int
+    origin_y: int
+    full_plan: MontagePlan
+
+    @property
+    def display_shape(self) -> tuple[int, int]:
+        return self.data.shape[:2]
+
+
 def make_montage(images, *, histogram_images=None, columns=None, gap=1, indices=None):
     images = tuple(np.asarray(image) for image in images)
     if not images:
@@ -176,6 +224,119 @@ def make_montage(images, *, histogram_images=None, columns=None, gap=1, indices=
             hist_montage[y0 : y0 + height, x0 : x0 + width] = histogram_images[index]
     geometry = MontageGeometry(indices=indices, tile_shape=(height, width), columns=columns, rows=rows, gap=gap)
     return RenderedMontage(DisplayImage(data=montage, histogram_data=hist_montage), geometry)
+
+
+def make_montage_viewport_canvas(
+    plan: MontagePlan,
+    rendered_tiles: Sequence[RenderedTile],
+    *,
+    view_range=None,
+    viewport_shape: tuple[int, int] | None = None,
+    budget_bytes: int,
+    dtype=None,
+    rgb: bool = False,
+    include_histogram: bool = True,
+) -> MontageViewportCanvas:
+    rendered_tiles = tuple(rendered_tiles)
+    if not rendered_tiles:
+        data_dtype = np.dtype(dtype if dtype is not None else float)
+        data = np.zeros((1, 1, 4), dtype=np.uint8) if rgb else np.zeros((1, 1), dtype=data_dtype)
+        histogram_data = np.full((1, 1), np.nan, dtype=np.float32) if include_histogram else None
+        return MontageViewportCanvas(data, histogram_data, 0, 0, plan)
+
+    tile_by_index = {int(rendered.tile.montage_index): rendered for rendered in rendered_tiles}
+    loaded_tiles = tuple(rendered.tile for rendered in rendered_tiles)
+    loaded_rect = plan.display_rect_for_tiles(loaded_tiles)
+    if loaded_rect is None:
+        raise ValueError("rendered_tiles must contain at least one tile")
+    full_height, full_width = plan.display_shape
+    if view_range is None:
+        rect = loaded_rect
+    else:
+        rect = _rect_for_view_range(view_range, plan, viewport_shape)
+        rect = _intersect_rect(rect, (0, 0, full_width, full_height))
+        rect = _intersect_rect(rect, loaded_rect) or loaded_rect
+    x0, y0, x1, y1 = rect
+    width = max(1, int(x1) - int(x0))
+    height = max(1, int(y1) - int(y0))
+    sample = np.asarray(rendered_tiles[0].image)
+    if dtype is None:
+        dtype = sample.dtype
+    canvas_shape = (height, width) + sample.shape[2:]
+    estimated = estimate_viewport_canvas_bytes((height, width), dtype, rgb=rgb or sample.ndim == 3, histogram=include_histogram)
+    if estimated > int(budget_bytes):
+        raise MemoryError(
+            f"Montage viewport canvas would allocate {format_bytes(estimated)} "
+            f"over budget {format_bytes(int(budget_bytes))}."
+        )
+    data = np.zeros(canvas_shape, dtype=sample.dtype)
+    histogram_data = np.full((height, width), np.nan, dtype=np.float32) if include_histogram else None
+    canvas_rect = (int(x0), int(y0), int(x0) + width, int(y0) + height)
+    for rendered in sorted(tile_by_index.values(), key=lambda item: item.tile.montage_index):
+        _copy_rendered_tile_into_canvas(rendered, data, histogram_data, canvas_rect)
+    return MontageViewportCanvas(data, histogram_data, int(x0), int(y0), plan)
+
+
+def _rect_for_view_range(view_range, plan: MontagePlan, viewport_shape) -> tuple[int, int, int, int]:
+    x_range, y_range = view_range
+    x0, x1 = sorted((float(x_range[0]), float(x_range[1])))
+    y0, y1 = sorted((float(y_range[0]), float(y_range[1])))
+    stride_x = int(plan.tile_shape[1]) + int(plan.gap)
+    stride_y = int(plan.tile_shape[0]) + int(plan.gap)
+    margin_x = max(0, stride_x)
+    margin_y = max(0, stride_y)
+    if viewport_shape is not None:
+        margin_y = max(margin_y, min(int(viewport_shape[0]), stride_y))
+        margin_x = max(margin_x, min(int(viewport_shape[1]), stride_x))
+    return (
+        int(np.floor(x0)) - margin_x,
+        int(np.floor(y0)) - margin_y,
+        int(np.ceil(x1)) + margin_x,
+        int(np.ceil(y1)) + margin_y,
+    )
+
+
+def _intersect_rect(a, b) -> tuple[int, int, int, int] | None:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    x0 = max(int(ax0), int(bx0))
+    y0 = max(int(ay0), int(by0))
+    x1 = min(int(ax1), int(bx1))
+    y1 = min(int(ay1), int(by1))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
+
+
+def _copy_rendered_tile_into_canvas(rendered: RenderedTile, data, histogram_data, canvas_rect) -> None:
+    tile = rendered.tile
+    tile_rect = (int(tile.x0), int(tile.y0), int(tile.x0 + tile.width), int(tile.y0 + tile.height))
+    clipped = _intersect_rect(tile_rect, canvas_rect)
+    if clipped is None:
+        return
+    x0, y0, x1, y1 = clipped
+    source_x0 = x0 - tile_rect[0]
+    source_y0 = y0 - tile_rect[1]
+    dest_x0 = x0 - canvas_rect[0]
+    dest_y0 = y0 - canvas_rect[1]
+    height = y1 - y0
+    width = x1 - x0
+    data[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...] = rendered.image[
+        source_y0 : source_y0 + height,
+        source_x0 : source_x0 + width,
+        ...,
+    ]
+    if histogram_data is None:
+        return
+    source = rendered.histogram_data
+    if source is None:
+        source = rendered.image
+        if np.asarray(source).ndim == 3:
+            return
+    histogram_data[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width] = np.asarray(source)[
+        source_y0 : source_y0 + height,
+        source_x0 : source_x0 + width,
+    ]
 
 
 def optimal_montage_columns(count, tile_shape, viewport_shape, gap=1):

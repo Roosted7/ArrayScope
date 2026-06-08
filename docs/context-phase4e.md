@@ -114,11 +114,12 @@ def test_bounded_cache_counts_rendered_tile_bytes():
 
 This is P0!
 
-## Serious issue 2: the montage renderer is only partially tiled
+## Resolved in Phase 4e P2: the montage renderer was only partially tiled
 
-We now have MontagePlan, MontageTile, visible-tile selection, and tile caching. Good.
+Before Phase 4e P2, ArrayScope had MontagePlan, MontageTile, visible-tile selection, and tile caching,
+but the final commit path assembled a local mini-montage:
 
-But the final commit path still does this:
+Historical pre-P2 code:
 
 ```
 rendered = make_montage(
@@ -129,7 +130,7 @@ rendered = make_montage(
 )
 ```
 
-So you are still assembling visible tiles into one local collage. That is better than assembling the full montage, but it is not a true tiled renderer yet.
+That was better than assembling the full montage, but it was not a true bounded viewport renderer.
 
 ### The problem
 
@@ -151,16 +152,10 @@ It also still allocates:
 
 A fixed 64-tile cap is not enough. Sixty-four 4096×4096 float tiles is still enormous.
 
-### Fix (direction)
+### Implemented fix
 
-For Phase 4d, choose one of these two approaches.
-
-#### Option A — viewport-sized composite canvas
-
-Try this one first!
-This is probably the best next step, since many ImageItems caused segfaults.
-
-Instead of making a mini-montage from visible tiles, create a canvas bounded by viewport/display budget:
+Phase 4e P2 chose a viewport-sized composite canvas. Instead of making a mini-montage from visible
+tiles, interactive rendering creates a canvas bounded by viewport/display budget:
 
 - canvas shape ≈ visible viewport in data pixels, plus margin
 - tile images are copied into their correct clipped positions
@@ -189,7 +184,7 @@ tile = full_plan.tile_at(global_x, global_y)
 
 This keeps one ImageItem, avoids segfaults from many items, and preserves global montage coordinates.
 
-#### Option B — keep local mini-montage but make it explicit
+#### Rejected option — keep local mini-montage but make it explicit
 
 This is simpler but less correct. Only use when option A is not possible.
 
