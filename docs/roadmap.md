@@ -147,7 +147,7 @@ At least one CI job should run: `ARRAYSCOPE_STRICT_UI=1 pytest tests/ui`
 
 Goal: fix remaining bugs and harden interactions before adding multi-window and session features.
 
-### Phase 4c-1 — recovery stability
+### 1 — recovery stability
 
 * [x] Fix display-axis range extraction bug.
 * [x] Compare full async request keys, not partial document keys.
@@ -161,7 +161,7 @@ Goal: fix remaining bugs and harden interactions before adding multi-window and 
 * [x] Replace hover scalar evaluation with direct committed-display reads.
 * [x] Move freehand/polyline ROI drawing to one-shot canvas interaction.
 
-### Phase 4c-2 — performance discipline
+### 2 — performance discipline
 
 * [x] Debounce ROI stats.
 * [x] Move heavy ROI histograms/stats off UI thread.
@@ -170,7 +170,7 @@ Goal: fix remaining bugs and harden interactions before adding multi-window and 
 * [x] Disable operation-backed image prefetch until a priority scheduler exists.
 * [x] Avoid hidden profile/inspection render-tail work.
 
-### Phase 4c-3 — real-path tests
+### 3 — real-path tests
 
 * [x] Add deterministic tests for every known manual bug.
 * [x] Expand Hypothesis tests to arbitrary image axes and axis ranges.
@@ -180,6 +180,53 @@ Goal: fix remaining bugs and harden interactions before adding multi-window and 
 * [x] Add real operation dock user-close regression test.
 * [x] Add real hover path tests that fail on scalar scheduling or “updating”.
 * [x] Add viewport toolbar tests that fail if Fit/1:1 render data.
+
+## Phase 4d - Improve realworld usage
+
+Goal: Make ArrayScope responsive, bounded, and predictable under real interactive use.
+
+### P0 — correctness and memory safety
+
+* [x] Fix slice_engine display-axis preservation
+* [x] Add render memory estimates
+* [x] Prevent giant montage allocations
+
+### P1 — latest-only evaluation scheduler
+
+* [x] Implement visible-render replacement semantics
+* [x] Split evaluation categories
+* [x] Add `EvalPriority`
+
+### P2 — Tiled montage renderer
+
+* [x] `MontagePlan` for separation
+* [x] Evaluate only visible tiles
+* [x] Cache tile results
+* [x] Sample histogram/levels
+
+### P3 — Managed panels instead of floating QDockWidgets
+
+* [x] Introduce `PanelManager` for authoritative state
+* [x] Use QDockWidget only for docked panels, for detached panels; use `QDialog` / tool window
+* [x] Ensure Wayland move functionality, through `startSystemMove()`
+* [x] Preserve canvas size on every panel transition
+
+### P4 — Viewport model and toolbar UX
+
+* [x] Fit becomes a checkable locked mode (but 1:1 remains momentary)
+* [x] All button should look and behave like buttons (hover, pressed, checked)
+
+### P5 — ROI/profile responsiveness
+
+* [x] One interaction-mode owner: `class InteractionMode(Enum)`
+* [x] Debounce and background ROI stats (visible/selected ROI immediately, histograms when idle)
+* [x] Hidden panels do not compute (only refresh when shown)
+
+### P6 — Docs, metrics, and regression pipeline
+
+* [x] Add performance budgets
+* [x] Add benchmark/stress tests
+* [x] Update manual regression docs (OS/window-manager behavior)
 
 ## Phase 5 — Multi-window and sessions
 

@@ -25,6 +25,118 @@ class RenderedMontage:
     geometry: MontageGeometry
 
 
+@dataclass(frozen=True)
+class MontageTile:
+    montage_index: int
+    source_index: int
+    row: int
+    col: int
+    x0: int
+    y0: int
+    width: int
+    height: int
+    view_state: object
+
+
+@dataclass(frozen=True)
+class MontagePlan:
+    axis: int
+    tile_shape: tuple[int, int]
+    grid_shape: tuple[int, int]
+    columns: int
+    rows: int
+    gap: int
+    tiles: tuple[MontageTile, ...]
+
+    @property
+    def display_shape(self) -> tuple[int, int]:
+        height, width = self.tile_shape
+        rows, columns = self.grid_shape
+        return (
+            rows * height + self.gap * max(0, rows - 1),
+            columns * width + self.gap * max(0, columns - 1),
+        )
+
+    @property
+    def geometry(self) -> MontageGeometry:
+        return MontageGeometry(
+            indices=tuple(tile.source_index for tile in self.tiles),
+            tile_shape=self.tile_shape,
+            columns=self.columns,
+            rows=self.rows,
+            gap=self.gap,
+        )
+
+    def tiles_intersecting(self, view_range, *, margin_tiles=1) -> tuple[MontageTile, ...]:
+        if view_range is None:
+            return self.tiles[: min(len(self.tiles), max(1, self.columns * 2))]
+        x_range, y_range = view_range
+        x0, x1 = sorted((float(x_range[0]), float(x_range[1])))
+        y0, y1 = sorted((float(y_range[0]), float(y_range[1])))
+        margin_x = (self.tile_shape[1] + self.gap) * max(0, int(margin_tiles))
+        margin_y = (self.tile_shape[0] + self.gap) * max(0, int(margin_tiles))
+        x0 -= margin_x
+        x1 += margin_x
+        y0 -= margin_y
+        y1 += margin_y
+        visible = []
+        for tile in self.tiles:
+            tile_x1 = tile.x0 + tile.width
+            tile_y1 = tile.y0 + tile.height
+            if tile_x1 >= x0 and tile.x0 <= x1 and tile_y1 >= y0 and tile.y0 <= y1:
+                visible.append(tile)
+        if not visible and self.tiles:
+            return self.tiles[: min(len(self.tiles), max(1, self.columns))]
+        return tuple(visible)
+
+
+def make_montage_plan(view_state, *, axis, indices, tile_shape, columns=None, viewport_shape=None, gap=1):
+    indices = tuple(int(index) for index in indices)
+    count = len(indices)
+    tile_shape = (int(tile_shape[0]), int(tile_shape[1]))
+    gap = max(0, int(gap))
+    if count == 0:
+        return MontagePlan(int(axis), tile_shape, (0, 1), 1, 0, gap, ())
+    if columns is None:
+        if viewport_shape is None:
+            columns = int(np.ceil(np.sqrt(count)))
+        else:
+            columns = optimal_montage_columns(count, tile_shape, viewport_shape, gap=gap)
+    columns = max(1, min(int(columns), count))
+    rows = int(np.ceil(count / columns))
+    tiles = []
+    for montage_index, source_index in enumerate(indices):
+        row = montage_index // columns
+        col = montage_index % columns
+        x0 = col * (tile_shape[1] + gap)
+        y0 = row * (tile_shape[0] + gap)
+        tile_state = view_state.with_slice(axis, source_index).with_montage_axis(None)
+        tiles.append(
+            MontageTile(
+                montage_index=montage_index,
+                source_index=source_index,
+                row=row,
+                col=col,
+                x0=x0,
+                y0=y0,
+                width=tile_shape[1],
+                height=tile_shape[0],
+                view_state=tile_state,
+            )
+        )
+    return MontagePlan(int(axis), tile_shape, (rows, columns), columns, rows, gap, tuple(tiles))
+
+
+@dataclass(frozen=True)
+class RenderedTile:
+    tile: MontageTile
+    image: np.ndarray
+    histogram_data: np.ndarray | None
+    eval_ms: float
+    slab_shape: tuple[int, ...]
+    slab_nbytes: int | None
+
+
 def make_montage(images, *, histogram_images=None, columns=None, gap=1, indices=None):
     images = tuple(np.asarray(image) for image in images)
     if not images:

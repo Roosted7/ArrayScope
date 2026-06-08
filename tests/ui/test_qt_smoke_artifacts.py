@@ -144,7 +144,6 @@ def test_progressive_view_configuration_artifacts(qt_app):
         quick._on_profile_marker_moved(12, 10)
         _process_events(qt_app, count=12)
         assert quick.profile_dock.isVisible()
-        quick.profile_dock.setFloating(False)
         quick.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, quick.profile_dock)
         _process_events(qt_app)
         _grab_widget(quick, "arrayscope_inspect_profile_view.png", min_width=500, min_height=400)
@@ -247,7 +246,6 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         assert win.img_view._roi_info_panel.isVisible()
         assert len(win.img_view.roiSelections()) == 3
         assert win.inspection_dock.roi_model.rowCount() == 3
-        assert len(win.inspection_dock.histogram_plot.listDataItems()) >= 6
         assert rectangle.geometry.kind == RoiKind.RECTANGLE
         assert polyline.geometry.kind == RoiKind.POLYLINE
         assert freehand.geometry.points[0] == freehand.geometry.points[-1]
@@ -256,8 +254,9 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         win._show_inspection_dock()
         _process_events(qt_app)
         assert win.inspection_dock.isVisible()
-        assert not win.inspection_dock.isFloating()
         assert win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+        _process_events(qt_app, count=12)
+        assert len(win.inspection_dock.histogram_plot.listDataItems()) >= 6
         _grab_widget(win.inspection_dock.widget(), "arrayscope_roi_inspection_dock.png", min_width=240, min_height=260)
     finally:
         win.close()

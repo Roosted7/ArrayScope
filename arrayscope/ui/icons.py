@@ -39,6 +39,7 @@ _FALLBACK_PIXMAPS = {
     "arrow_forward": QtWidgets.QStyle.StandardPixmap.SP_ArrowForward,
     "view_quilt": QtWidgets.QStyle.StandardPixmap.SP_FileDialogListView,
     "reset_wrench": QtWidgets.QStyle.StandardPixmap.SP_BrowserReload,
+    "open_in_new": QtWidgets.QStyle.StandardPixmap.SP_TitleBarMaxButton,
     "show_chart": QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon,
     "monitor_heart": QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton,
     "data_array": QtWidgets.QStyle.StandardPixmap.SP_FileIcon,

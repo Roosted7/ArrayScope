@@ -139,6 +139,7 @@ class WindowMenuMixin:
             "call_split",
             "drag_indicator",
             "inventory_2",
+            "open_in_new",
         }
         names.update(entry.id for entry in operation_entries())
         result = verify_icon_names(sorted(names))
@@ -176,7 +177,14 @@ class WindowMenuMixin:
         if watcher is not None:
             watcher.deleteLater()
             self._file_watcher = None
-        for controller_name in ("evaluation_controller", "pixel_evaluation_controller", "profile_evaluation_controller", "roi_evaluation_controller"):
+        for controller_name in (
+            "evaluation_controller",
+            "visible_evaluation_controller",
+            "pixel_evaluation_controller",
+            "profile_evaluation_controller",
+            "roi_evaluation_controller",
+            "prefetch_evaluation_controller",
+        ):
             controller = getattr(self, controller_name, None)
             if controller is not None:
                 controller.shutdown_for_close()

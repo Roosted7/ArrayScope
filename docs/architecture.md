@@ -9,8 +9,8 @@ source of array-view state.
   axes, profile axis, montage axis, slice indices, channel, scale, and per-axis flags.
 - `arrayscope.display.slice_engine`: converts `data + ViewState` into display-ready images and
   lines.
-- `arrayscope.display.montage`: tiles already display-prepared image frames into 2D montage/collage
-  images.
+- `arrayscope.display.montage`: plans montage tile geometry, identifies visible tiles, and keeps the
+  bounded small-collage helper used for currently loaded montage tiles.
 - `arrayscope.display.geometry`: the pure display-coordinate contract for normal image and montage
   views. It maps display points to array indices and profile states using the geometry committed with
   the current image.
@@ -47,13 +47,18 @@ source of array-view state.
 - `arrayscope.core.view_recipe`: serializes operations, `ViewState`, and display settings for
   full-view restore. It is pure and does not contain dock geometry.
 - `arrayscope.window.main.ArrayScopeWindow`: wires Qt signals to state changes, then calls `render()`.
-- `arrayscope.window.evaluation_controller`: owns background display/profile/pixel evaluation
-  dispatch, latest-generation checks, and stale-result ignoring.
+- `arrayscope.window.evaluation_controller`: owns categorized background display/profile/ROI/prefetch
+  dispatch, latest-only replacement groups, local thread pools, queue clearing, cancellation tokens,
+  and stale-result ignoring.
+- `arrayscope.window.panels.PanelManager`: owns managed panel state and panel body reparenting. Docked
+  panels use `QDockWidget`; detached panels use `QDialog`/tool windows with a `startSystemMove()` move
+  handle. Hidden and detached panels are removed from the `QMainWindow` dock layout so they cannot
+  leave stale minimum-size constraints behind.
 - `arrayscope.window.layout_controller.WindowLayoutManager`: owns first-run layout restore, reset
-  layout, progressive dock visibility, managed dock floating/redocking, managed dock menu actions,
-  dock default sizes, shutdown dock closing, and post-restore geometry fixups. Managed dock behavior is
-  driven by explicit user/menu/reset/restore/progressive actions; arbitrary direct dock lifecycle
-  events are left to Qt.
+  layout, progressive panel visibility, managed panel menu actions, dock default sizes, shutdown dock
+  closing, and panel transition geometry. Panel show/hide/detach/redock uses deterministic reserved
+  extents, including the Qt dock separator extent, instead of view snapshots, retry timers, or native
+  `QDockWidget` floating state.
 - `arrayscope.app.launch`: QApplication creation, multiprocessing launch, and IPython Qt event-loop handling.
 - `arrayscope.io`: file loading, dataset selectors, and save workflows.
 - `arrayscope.export`: video/frame export workers and UI workflow.
@@ -103,9 +108,9 @@ montage, and prefetch callbacks compare full evaluator request keys rather than 
 so stale work for the same document but a different `ViewState` cannot replace newer user intent.
 
 Viewport changes are explicit. `ViewportController` tracks untouched, user,
-fit, and one-to-one modes. Normal renders preserve the current ViewBox range.
-The first image fits, display-shape changes fit only while untouched, explicit
-Fit refits, and explicit 1:1 computes a range where one image pixel maps to one
+locked-fit, and one-to-one modes. Normal renders preserve the current ViewBox range.
+The first image fits, display-shape changes fit only while untouched or while locked Fit is enabled,
+Fit disables pan and zoom, and explicit 1:1 computes a range where one image pixel maps to one
 viewport pixel.
 
 File reload is distinct from data mutation and replacement. In-place mutation
@@ -115,12 +120,12 @@ operations while incrementing the revision. File reload uses
 stacks. Explicit replacement/materialization uses
 `replace_base_and_clear_steps()`.
 
-Background evaluation uses local per-window `QThreadPool` instances. Closing a
-window clears queued work, increments generations, stops polling, and ignores
-late results. Prefetch requests are keyed, deduped, bounded, and counted in
-cache diagnostics. Operation-backed image prefetch is disabled until visible
-rendering, profile/ROI work, hover, and prefetch can be ordered by an explicit
-priority scheduler.
+Background evaluation uses categorized local per-window `QThreadPool` instances. Visible rendering,
+profile updates, ROI inspection, and prefetch have separate controllers. Visible/profile/ROI pools use
+one worker and `start_latest()` replacement groups so newer requests clear queued stale work. Closing a
+window clears queued work, increments generations, stops polling, and ignores late results. Prefetch
+requests are keyed, deduped, bounded, off by default, skipped for operation-backed and montage views,
+and counted in cache diagnostics.
 
 Channel mode tracks automatic versus user-selected intent. Invalid channels are
 coerced when dtype changes, for example complex-only channels fall back to real
@@ -198,9 +203,10 @@ choose magnitude, phase, real, imaginary, or magnitude plus phase strip.
 
 Montage is a display mode driven by range text in a non-image dimension slice field, stored on
 `ViewState.montage_axis`. The current image axes remain the tile Y/X axes. Range text on image axes is
-stored as per-axis display ranges, allowing image-axis subsetting such as `0:2:100`. Montage tiles are
-evaluated through the same image snapshot path as normal views and then assembled by the pure montage
-helper.
+stored as per-axis display ranges, allowing image-axis subsetting such as `0:2:100`. Montage uses
+`MontagePlan` to derive grid geometry and visible tiles. Visible tiles are evaluated through the same
+image snapshot path as normal views, cached individually, and assembled only as a bounded loaded-tile
+image. Full giant montage allocation is blocked by render memory estimates.
 
 Operation creation is intentionally available from three places:
 
