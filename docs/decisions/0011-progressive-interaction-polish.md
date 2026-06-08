@@ -52,3 +52,7 @@ multi-axis profiles, and session restore remain future work.
 Native platform file dialogs are not used for ArrayScope save/load workflows because they can freeze
 under some Qt/PySide environments. The UI uses non-native `QFileDialog` instances so navigation and
 filename editing stay responsive.
+
+Phase 4c keeps `QDockWidget` itself boring: managed docks no longer override Qt lifecycle methods.
+`WindowLayoutManager` owns managed dock visibility, floating/redocking, menu checked state, and canvas
+preservation for menu actions and direct close-button paths.

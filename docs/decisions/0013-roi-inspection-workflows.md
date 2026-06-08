@@ -21,4 +21,7 @@ and reused by image graphics, table rows, and histogram curves. Table selection 
 ROI, and delete/clear paths synchronize back to the image view.
 
 A minimal compare-layer scaffold exists for same-ROI histogram comparison against compatible 2D
-arrays. It is intentionally not full Phase 5 session or synchronized-window support.
+arrays. It is intentionally not full Phase 5 session or synchronized-window support. Phase 4c
+debounces ROI statistics/histogram refreshes and moves large ROI computations to the window's ROI
+evaluation controller. ROI rows update immediately, but statistics and histograms commit only when
+the debounced ROI/image request key is still current.

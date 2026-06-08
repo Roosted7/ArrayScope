@@ -500,10 +500,9 @@ class ImageView2D(QtWidgets.QWidget):
 
         Modes:
         - 'square_pixels': force square pixel display (aspect ratio 1.0)
-        - 'square_fov'   : lock aspect ratio to image width/height (field of view square)
         - 'fit'          : allow non-uniform scaling so the entire image fits viewport
         """
-        if mode not in ('square_pixels', 'square_fov', 'fit'):
+        if mode not in ('square_pixels', 'fit'):
             raise ValueError(f"Unknown display mode: {mode}")
         self.displayMode = mode
         self._updateAspectRatio()
@@ -729,11 +728,6 @@ class ImageView2D(QtWidgets.QWidget):
         if self.displayMode == 'square_pixels':
             # Square pixels: maintain 1:1 aspect ratio
             self.view.setAspectLocked(True, ratio=1.0)
-        elif self.displayMode == 'square_fov':
-            # Square FOV: adjust aspect ratio based on image dimensions
-            height, width = self.image.shape[:2]
-            aspect_ratio = width / height
-            self.view.setAspectLocked(True, ratio=aspect_ratio)
         elif self.displayMode == 'fit':
             # Fit: allow free aspect so the whole image fits inside the view box
             self.view.setAspectLocked(False)
@@ -822,7 +816,7 @@ class ImageView2D(QtWidgets.QWidget):
 def _coerce_viewport_policy(viewport_policy, auto_range):
     if auto_range is not None:
         viewport_policy = ViewportPolicy.FIT_ONCE if bool(auto_range) else ViewportPolicy.PRESERVE
-    if isinstance(viewport_policy, ViewportPolicy):
+    if isinstance(viewport_policy, (ViewportPolicy, ViewportIntent)):
         return viewport_policy
     return ViewportPolicy(str(viewport_policy))
 

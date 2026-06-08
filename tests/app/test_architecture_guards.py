@@ -18,10 +18,9 @@ def test_managed_docks_do_not_use_qt_toggle_view_action():
 
 def test_managed_dock_visibility_only_in_layout_controller_and_dock_chrome():
     managed_names = {"profile_dock", "operation_dock", "inspection_dock"}
-    forbidden = {"show", "hide", "setVisible", "close"}
+    forbidden = {"show", "hide", "setVisible", "close", "setFloating"}
     allowed = {
         Path("arrayscope/window/layout_controller.py"),
-        Path("arrayscope/ui/docks/common.py"),
     }
     offenders = []
     for path in (ROOT / "arrayscope").rglob("*.py"):
@@ -44,3 +43,21 @@ def test_managed_dock_visibility_only_in_layout_controller_and_dock_chrome():
             ):
                 offenders.append(f"{rel}:{node.lineno}:{value.attr}.{func.attr}")
     assert offenders == []
+
+
+def test_square_fov_is_not_visible_production_ui():
+    offenders = []
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        rel = path.relative_to(ROOT)
+        text = path.read_text()
+        if "Square FOV" in text or "square_fov" in text:
+            offenders.append(str(rel))
+    assert offenders == []
+
+
+def test_window_render_does_not_compare_partial_document_keys():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    assert ".image_key(" in text
+    assert "image_key(view_state, colormap_lut=colormap_lut)[1]" not in text
+    assert "line_key(profile_state)[1]" not in text
+    assert "scalar_key(view_state, index)[1]" not in text

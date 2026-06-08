@@ -78,6 +78,54 @@ def test_slab_matches_materialized_after_crop_reverse_same_axis():
     np.testing.assert_array_equal(lazy.data, full.data)
 
 
+def test_lazy_image_axis_ranges_match_materialized_for_arbitrary_image_axes():
+    data = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5).astype(float)
+    document = ArrayDocument(
+        data,
+        operations=(
+            Crop(axis=1, start=0, stop=3),
+            ReverseAxis(axis=3),
+            FFTShift(axis=2),
+        ),
+    )
+    full = document.materialize()
+    state = (
+        ViewState.from_shape(document.current_shape)
+        .with_image_axes(3, 1)
+        .with_axis_range(3, (4, 2, 1), "4,2,1")
+        .with_axis_range(1, (0, 2), "0:2:3")
+        .with_slice(0, 1)
+        .with_slice(2, 2)
+    )
+
+    request = request_for_image(state)
+    lazy = make_image_from_slab(evaluate_slab(document, request), request)
+    materialized = make_image(full, state)
+
+    np.testing.assert_array_equal(lazy.data, materialized.data)
+    assert request.ranged_axes == (3, 1)
+
+
+def test_lazy_line_axis_range_matches_materialized_non_arithmetic_indices():
+    data = np.arange(3 * 4 * 5).reshape(3, 4, 5).astype(float)
+    document = ArrayDocument(data, operations=(ReverseAxis(axis=1), CenteredFFT(axis=2)))
+    full = document.materialize()
+    state = (
+        ViewState.from_shape(document.current_shape)
+        .with_line_axis(2)
+        .with_axis_range(2, (4, 1, 3), "4,1,3")
+        .with_slice(0, 2)
+        .with_slice(1, 1)
+    )
+
+    request = request_for_line(state)
+    lazy = make_line_from_slab(evaluate_slab(document, request), request)
+    materialized = make_line(full, state)
+
+    np.testing.assert_allclose(lazy.data, materialized.data)
+    assert request.ranged_axes == (2,)
+
+
 def test_lazy_slab_matches_materialized_complex_axis_operations():
     real_imag = np.arange(4 * 5 * 2).reshape(4, 5, 2).astype(float)
     _assert_image_and_line_match(real_imag, (CombineRealImagAxis(axis=2),))

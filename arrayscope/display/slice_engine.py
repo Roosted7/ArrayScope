@@ -28,6 +28,8 @@ def symlog(data, C=0):
 
 
 def apply_channel(data, channel):
+    if hasattr(channel, "value"):
+        channel = channel.value
     channel = ChannelMode(channel)
     if channel == ChannelMode.COMPLEX:
         return np.abs(data)
@@ -93,7 +95,7 @@ def make_image_from_slab(slab, request, colormap_lut=None):
         raise ValueError("image_axes must be set to make an image")
 
     image_data = np.asarray(slab)
-    image_data = _apply_axis_ranges_to_display_data(image_data, state, state.image_axes)
+    image_data = _apply_axis_ranges_to_display_data(image_data, state, state.image_axes, applied_axes=getattr(request, "ranged_axes", ()))
     image_data = _reorder_display_axes(image_data, state, state.image_axes)
     image_data = np.squeeze(image_data)
 
@@ -141,7 +143,7 @@ def make_line_from_slab(slab, request):
         raise ValueError("line_axis must be set to make a line")
 
     line_data = np.asarray(slab)
-    line_data = _apply_axis_ranges_to_display_data(line_data, state, (state.line_axis,))
+    line_data = _apply_axis_ranges_to_display_data(line_data, state, (state.line_axis,), applied_axes=getattr(request, "ranged_axes", ()))
     if state.channel != ChannelMode.COMPLEX:
         line_data = apply_channel(line_data, state.channel)
         line_data = _apply_scale(line_data, state.scale)
@@ -169,21 +171,25 @@ def _slice_for_display_axes(state, display_axes):
 
 
 def _apply_scale(data, scale):
+    if hasattr(scale, "value"):
+        scale = scale.value
     scale = ScaleMode(scale)
     if scale == ScaleMode.SYMLOG:
         return symlog(data)
     return data
 
 
-def _apply_axis_ranges_to_display_data(data, state, display_axes):
+def _apply_axis_ranges_to_display_data(data, state, display_axes, *, applied_axes=()):
     result = np.asarray(data)
     result_axis = 0
+    applied_axes = {int(axis) for axis in applied_axes}
     for original_axis in range(state.ndim):
         if original_axis not in display_axes:
             continue
         indices = state.axis_range_indices[original_axis]
-        if indices is not None:
-            result = np.take(result, tuple(indices), axis=result_axis)
+        if indices is not None and original_axis not in applied_axes:
+            axis = original_axis if np.ndim(result) == state.ndim else result_axis
+            result = np.take(result, tuple(indices), axis=axis)
         result_axis += 1
     return result
 

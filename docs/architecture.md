@@ -50,8 +50,9 @@ source of array-view state.
 - `arrayscope.window.evaluation_controller`: owns background display/profile/pixel evaluation
   dispatch, latest-generation checks, and stale-result ignoring.
 - `arrayscope.window.layout_controller.WindowLayoutManager`: owns first-run layout restore, reset
-  layout, progressive dock visibility, managed dock menu actions, dock default sizes, shutdown dock
-  closing, and post-restore geometry fixups.
+  layout, progressive dock visibility, managed dock floating/redocking, managed dock menu actions,
+  dock default sizes, shutdown dock closing, direct-close canvas preservation, and post-restore
+  geometry fixups. Managed dock widgets do not override Qt dock lifecycle methods.
 - `arrayscope.app.launch`: QApplication creation, multiprocessing launch, and IPython Qt event-loop handling.
 - `arrayscope.io`: file loading, dataset selectors, and save workflows.
 - `arrayscope.export`: video/frame export workers and UI workflow.
@@ -93,7 +94,9 @@ explicit materialize/save/export actions. Display evaluation uses slab-first req
 `OperationEvaluator`; slow Qt-visible requests run through `EvaluationController` so the previous
 image/profile remains visible and stale worker results cannot overwrite newer user intent. Workers
 capture immutable `ArrayDocument`/`ViewState` snapshots and return results to the UI thread; only the
-UI thread commits cache/status updates to the live evaluator.
+UI thread commits cache/status updates to the live evaluator. Visible image, profile, pixel,
+montage, and prefetch callbacks compare full evaluator request keys rather than only document keys,
+so stale work for the same document but a different `ViewState` cannot replace newer user intent.
 
 Viewport changes are explicit. `ViewportController` tracks untouched, user,
 fit, and one-to-one modes. Normal renders preserve the current ViewBox range.
@@ -112,6 +115,12 @@ Background evaluation uses local per-window `QThreadPool` instances. Closing a
 window clears queued work, increments generations, stops polling, and ignores
 late results. Prefetch requests are keyed, deduped, bounded, and counted in
 cache diagnostics.
+
+Channel mode tracks automatic versus user-selected intent. Invalid channels are
+coerced when dtype changes, for example complex-only channels fall back to real
+when the derived output becomes real. When output becomes complex, an untouched
+default real channel switches to complex display, while a user-selected real
+channel remains real.
 
 In development and tests, `ARRAYSCOPE_STRICT_UI=1` makes GUI programming
 exceptions log their traceback and re-raise instead of being silently swallowed.
@@ -165,9 +174,11 @@ live profile is enabled, or the user explicitly shows it.
 The Inspection dock is optional and hidden by default. Basic ROI creation and live-profile toggling are
 available from the image context menu, so ROI use does not require opening a dock. ImageView2D owns ROI
 graphics items, emits complete ROI geometry, and displays a movable semi-transparent ROI info overlay.
-The window computes ROI values from the current displayed scalar image or histogram source and sends
-statistics/histogram results back to the dock and overlay. Extra comparison layers are internal
-scaffolding for same-ROI histogram comparison and are not full session/sync support.
+The window debounces ROI statistics and histogram updates from the current displayed scalar image or
+histogram source, then sends settled results back to the dock and overlay. Small snapshots compute
+directly; larger ROI/image combinations run through the ROI evaluation controller and commit only if
+their ROI/image request key is still current. Extra comparison layers are internal scaffolding for
+same-ROI histogram comparison and are not full session/sync support.
 ROI sampling is display-space in Phase 4a. Montage histogram sources contain
 `NaN` in gaps, so ROI statistics ignore inter-tile spacing. Full nD ROI
 back-projection is intentionally deferred.

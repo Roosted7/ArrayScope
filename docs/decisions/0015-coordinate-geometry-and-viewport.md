@@ -22,8 +22,10 @@ Axis flips are view-only. They invert the PyQtGraph ViewBox direction and do
 not change the array index encoded by image-item coordinates.
 
 Rendering commits image data and display geometry together. A worker result is
-discarded if the document key or `ViewState` changed after the snapshot was
-taken. This keeps stale background work from replacing newer user intent.
+discarded if the full request key changed after the snapshot was taken. This
+keeps stale background work from replacing newer user intent, including work
+for the same document but a different `ViewState`, pixel index, profile axis,
+montage selection, or colormap.
 
 Viewport changes are explicit. `ViewportController` owns the current viewport
 mode: untouched auto-fit, user-controlled, fit, or one-to-one. Normal render
@@ -31,6 +33,9 @@ calls preserve the current ViewBox range. The first image fits. Display-shape
 changes fit while untouched and preserve center/scale after user pan/zoom.
 Direct Fit refits the image. Direct 1:1 computes a ViewBox range from the
 viewport pixel size instead of calling auto-range.
+
+Phase 4c removed the visible FOV/aspect shortcut until axis spacing metadata
+exists. Fit and 1:1 are viewport commands, not channel/aspect state.
 
 ROI statistics remain display-space in this phase. They sample the displayed
 scalar image or histogram source. Montage histogram sources contain `NaN` in
