@@ -1,23 +1,17 @@
-import os
 import time
 
 import numpy as np
+import pytest
 
-os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-
-def _process_events(qtbot, count=8):
-    for _ in range(count):
-        qtbot.wait(10)
-
-
-def _clear_arrayscope_settings():
-    from pyqtgraph.Qt import QtCore
-
-    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
-    settings.clear()
-    settings.sync()
+from tests.ui.helpers import (
+    assert_panel_invariants as _assert_panel_invariants,
+    assert_size_close as _assert_size_close,
+    clear_arrayscope_settings as _clear_arrayscope_settings,
+    panel_body as _panel_body,
+    process_events as _process_events,
+    view_action as _view_action,
+    wait_for_panel_preserve as _wait_for_panel_preserve,
+)
 
 
 def test_visible_render_controller_uses_latest_only_group(qtbot, monkeypatch):
