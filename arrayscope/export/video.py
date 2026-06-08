@@ -301,15 +301,9 @@ class VideoExportWorker(QtCore.QThread):
             target_w, target_h = w, h
 
             mode = (self.pixel_ratio_mode or 'square_pixels').lower()
-            if mode == 'square_fov':
-                side = max(w, h)
-                target_w = target_h = side
-            elif mode == 'displayed':
+            if mode == 'displayed':
                 dm = (self.display_mode or 'square_pixels').lower()
-                if dm == 'square_fov':
-                    side = max(w, h)
-                    target_w = target_h = side
-                elif dm == 'fit':
+                if dm == 'fit':
                     # Match current widget aspect
                     ratio = self.widget_ratio if self.widget_ratio > 0 else 1.0
                     target_w = max(w, h)
@@ -501,7 +495,7 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
         ratio_layout = QtWidgets.QHBoxLayout()
         ratio_layout.addWidget(QtWidgets.QLabel("Pixel ratio:"))
         self.ratio_combo = QtWidgets.QComboBox()
-        self.ratio_combo.addItems(["Square pixels", "Square FOV", "Displayed"])
+        self.ratio_combo.addItems(["Square pixels", "Displayed"])
         ratio_layout.addWidget(self.ratio_combo)
         layout.addLayout(ratio_layout)
 

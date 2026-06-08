@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph.Qt as Qt
@@ -13,6 +14,13 @@ from arrayscope.core.histograms import HistogramSpec, comparison_histograms
 from arrayscope.core.roi import RoiKind, roi_statistics, roi_values
 
 
+@dataclass(frozen=True)
+class RoiInspectionSnapshot:
+    key: tuple
+    stats_by_roi: OrderedDict
+    histograms: tuple
+
+
 class InspectionWorkflowMixin:
     def _init_compare_document(self, data):
         self.compare_document = CompareDocument.from_base(data)
@@ -21,7 +29,7 @@ class InspectionWorkflowMixin:
         if not hasattr(self, "compare_document"):
             self._init_compare_document(getattr(self, "base_data", data))
         self.compare_document = self.compare_document.with_layer(data, label=label)
-        self._refresh_inspection_dock()
+        self._refresh_inspection_dock_now()
         return self.compare_document.layers[-1]
 
     def _on_inspection_tool_changed(self, tool):
@@ -83,16 +91,54 @@ class InspectionWorkflowMixin:
             return
         self._inspection_dock_user_visible = True
         if self.inspection_dock.isFloating():
-            self.inspection_dock.setFloating(False)
+            self.layout_manager.set_managed_dock_floating(self.inspection_dock, False, reason="show-inspection-redock")
         self.layout_manager.set_managed_dock_visible(self.inspection_dock, True, reason="show-inspection")
 
     def _refresh_inspection_dock(self):
+        self._schedule_refresh_inspection_dock("refresh")
+
+    def _schedule_refresh_inspection_dock(self, reason):
+        if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
+            return
+        self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
+        selections = self.roi_store.selections
+        self.inspection_dock.set_rois(selections)
+        if not hasattr(self, "_roi_refresh_timer"):
+            self._roi_refresh_timer = Qt.QtCore.QTimer(self)
+            self._roi_refresh_timer.setSingleShot(True)
+            self._roi_refresh_timer.setInterval(60)
+            self._roi_refresh_timer.timeout.connect(self._refresh_inspection_dock_now)
+        self._roi_refresh_reason = reason
+        self._roi_refresh_timer.start()
+
+    def _refresh_inspection_dock_now(self):
         if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
             return
         self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
         selections = self.roi_store.selections
         self.inspection_dock.set_rois(selections)
         image = self._roi_source_image()
+        layers = self._compatible_compare_layers(image) if image is not None else ()
+        key = self._roi_inspection_key(image, selections, layers)
+        self._roi_inspection_request_key = key
+        work_size = 0 if image is None else int(np.size(image)) * max(1, sum(1 for selection in selections if selection.enabled))
+        if work_size <= 250_000:
+            self._apply_roi_inspection_snapshot_if_current(key, self._compute_roi_inspection_snapshot(key, image, selections, layers))
+            return
+        self.roi_evaluation_controller.start(
+            lambda key=key, image=image, selections=selections, layers=layers: self._compute_roi_inspection_snapshot(key, image, selections, layers),
+            on_done=lambda snapshot, key=key: self._apply_roi_inspection_snapshot_if_current(key, snapshot),
+            on_error=lambda exc: None,
+            slow_ms=0,
+        )
+
+    def _roi_inspection_key(self, image, selections, layers):
+        image_key = None if image is None else (id(image), tuple(np.shape(image)), str(getattr(image, "dtype", None)))
+        selection_key = tuple((selection.id, selection.enabled, selection.geometry) for selection in selections)
+        layer_key = tuple((layer.label, id(layer.data), tuple(np.shape(layer.data)), str(getattr(layer.data, "dtype", None))) for layer in layers)
+        return image_key, selection_key, layer_key
+
+    def _compute_roi_inspection_snapshot(self, key, image, selections, layers):
         stats_by_roi = OrderedDict()
         hist_inputs = []
         if image is not None:
@@ -106,16 +152,22 @@ class InspectionWorkflowMixin:
                 finite = finite[np.isfinite(finite)]
                 if finite.size:
                     hist_inputs.append((selection.label, finite))
-                for layer in self._compatible_compare_layers(image):
+                for layer in layers:
                     layer_values = roi_values(layer.data, selection.geometry)
                     layer_finite = np.asarray(layer_values).ravel()
                     layer_finite = layer_finite[np.isfinite(layer_finite)]
                     if layer_finite.size:
                         hist_inputs.append((f"{selection.label} / {layer.label}", layer_finite))
-        self.inspection_dock.set_statistics(stats_by_roi)
-        self.inspection_dock.set_histograms(comparison_histograms(hist_inputs, HistogramSpec(bins=96)))
-        self._update_roi_info_overlay(stats_by_roi)
+        return RoiInspectionSnapshot(key, stats_by_roi, comparison_histograms(hist_inputs, HistogramSpec(bins=96)))
+
+    def _apply_roi_inspection_snapshot_if_current(self, key, snapshot):
+        if key != getattr(self, "_roi_inspection_request_key", None):
+            return False
+        self.inspection_dock.set_statistics(snapshot.stats_by_roi)
+        self.inspection_dock.set_histograms(snapshot.histograms)
+        self._update_roi_info_overlay(snapshot.stats_by_roi)
         self._sync_progressive_docks()
+        return True
 
     def _compatible_compare_layers(self, reference_image):
         if not hasattr(self, "compare_document"):

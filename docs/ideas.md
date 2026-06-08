@@ -106,6 +106,9 @@ Rules:
 * Consider a debug overlay showing the current `DisplayGeometry` mapping under the cursor when strict UI mode is enabled.
 * Consider a deliberate migration from current `start:step:stop` range text to Python `start:stop:step`
   syntax with a compatibility warning or explicit preference.
+* Consider detached managed panels backed by `QDialog`/tool windows if platform-specific `QDockWidget`
+  floating behavior remains problematic after the Phase 4c lifecycle cleanup.
+* Reintroduce physical FOV/aspect controls only after axis spacing/unit metadata is available.
 
 ## Maybe later
 

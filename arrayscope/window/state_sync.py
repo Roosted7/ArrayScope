@@ -41,10 +41,12 @@ class StateSyncMixin:
         if hasattr(self, "dimension_strip"):
             self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
         if hasattr(self, "display_toolbar"):
+            viewport_mode = getattr(getattr(self.img_view, "viewport_controller", None), "mode", None) if hasattr(self, "img_view") else None
+            aspect = "one_to_one" if getattr(viewport_mode, "value", None) == "one_to_one" else "fit"
             self.display_toolbar.set_current(
                 channel=self.view_state.channel.value,
                 scale=self.view_state.scale.value,
-                aspect=getattr(self.img_view, "displayMode", "square_pixels") if hasattr(self, "img_view") else "square_pixels",
+                aspect=aspect,
                 window_mode="absolute" if self.widgets['buttons']['display']['window_absolute'].isChecked() else "relative",
                 live_profile=self.widgets['buttons']['display']['live_profile'].isChecked(),
             )
@@ -95,10 +97,31 @@ class StateSyncMixin:
         self.render(reason="slice-range")
 
     def _on_channel_clicked(self, name):
-        self._set_view_state(self.view_state.with_channel(name))
+        self._set_channel(name, user_selected=True)
+        self.render(reason="channel", force_autolevel=True)
+
+    def _set_channel(self, channel, *, user_selected: bool, force_autolevel: bool = True):
+        self._channel_user_selected = bool(user_selected)
+        self._set_view_state(self.view_state.with_channel(channel))
         self._force_autolevel = True
         self._apply_channel_colormap()
-        self.render(reason="channel", force_autolevel=True)
+        self._update_channel_controls()
+        return self.view_state.channel
+
+    def _coerce_channel_for_current_dtype(self):
+        channel = self.view_state.channel
+        is_complex = self._current_is_complex()
+        complex_only = {ChannelMode.COMPLEX, ChannelMode.IMAG, ChannelMode.ANGLE}
+        target = None
+        if not is_complex and channel in complex_only:
+            target = ChannelMode.REAL
+        elif is_complex and not getattr(self, "_channel_user_selected", False) and channel == ChannelMode.REAL:
+            target = ChannelMode.COMPLEX
+        if target is None or target == channel:
+            return False
+        self._set_view_state(self.view_state.with_channel(target))
+        self._apply_channel_colormap()
+        return True
 
     def _on_scale_clicked(self, scale):
         self._set_view_state(self.view_state.with_scale(ScaleMode.SYMLOG if scale == "symlog" else ScaleMode.LINEAR))
@@ -112,6 +135,7 @@ class StateSyncMixin:
         self.operation_evaluator = self.operation_coordinator.evaluator
         self.data = self._derived_info()
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
+        self._coerce_channel_for_current_dtype()
         self._sync_controls_to_current_data()
         self._force_autolevel = True
         self._update_channel_controls()
@@ -216,6 +240,7 @@ class StateSyncMixin:
         self.operation_evaluator = self.operation_coordinator.evaluator
         self.data = self._derived_info()
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
+        self._coerce_channel_for_current_dtype()
         self._sync_controls_to_current_data()
         self._update_channel_controls()
         self._update_operation_dock()
@@ -227,6 +252,7 @@ class StateSyncMixin:
         self.operation_evaluator = self.operation_coordinator.evaluator
         self.data = self._derived_info()
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
+        self._coerce_channel_for_current_dtype()
         self._sync_controls_to_current_data()
         self._force_autolevel = True
         self.render(reason="data-changed", force_autolevel=True)

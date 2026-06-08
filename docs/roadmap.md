@@ -143,6 +143,42 @@ Run in CI:
 
 At least one CI job should run: `ARRAYSCOPE_STRICT_UI=1 pytest tests/ui`
 
+## Phase 4c: stabilization before Phase 5
+
+Goal: fix remaining bugs and harden interactions before adding multi-window and session features.
+
+### P0 correctness
+
+* [x] Fix display-axis range extraction bug.
+* [x] Compare full async request keys, not partial document keys.
+* [x] Fix channel auto/manual behavior.
+* [x] Fix montage/visible-render status stuck on Computing.
+
+### P1 — interaction
+
+* [x] Remove QDockWidget lifecycle overrides.
+* [x] Centralize all dock visibility/floating behavior.
+* [x] Add dock repeated-open/close tests.
+* [x] Remove FOV from UI for now.
+* [x] Make Fit and 1:1 real viewport commands.
+* [x] Stop hover from showing updating on cached/direct values.
+
+### P2 — responsiveness
+
+* [x] Debounce ROI stats.
+* [x] Move heavy ROI histograms/stats off UI thread.
+* [x] Throttle live profile and hover requests.
+* [x] Deduplicate prefetch requests.
+* [x] Keep visible rendering higher priority than prefetch.
+
+### P3 — tests
+
+* [x] Add deterministic tests for every known manual bug.
+* [x] Expand Hypothesis tests to arbitrary image axes and axis ranges.
+* [x] Add pytest-qt action-path tests.
+* [x] Add strict UI mode in CI.
+* [x] Add architecture guards for dock and high-frequency status behavior.
+
 ## Phase 5 — Multi-window and sessions
 
 Goal: make repeated inspection work reproducible and efficient.

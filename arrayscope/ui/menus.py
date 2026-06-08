@@ -173,7 +173,7 @@ class WindowMenuMixin:
         if watcher is not None:
             watcher.deleteLater()
             self._file_watcher = None
-        for controller_name in ("evaluation_controller", "pixel_evaluation_controller", "profile_evaluation_controller"):
+        for controller_name in ("evaluation_controller", "pixel_evaluation_controller", "profile_evaluation_controller", "roi_evaluation_controller"):
             controller = getattr(self, controller_name, None)
             if controller is not None:
                 controller.shutdown_for_close()

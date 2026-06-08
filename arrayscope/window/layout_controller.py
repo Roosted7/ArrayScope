@@ -7,9 +7,24 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 
 
+class _ManagedDockEventFilter(Qt.QtCore.QObject):
+    def __init__(self, manager):
+        super().__init__(manager.window)
+        self.manager = manager
+
+    def eventFilter(self, watched, event):
+        if event.type() in (Qt.QtCore.QEvent.Type.Close, Qt.QtCore.QEvent.Type.Hide):
+            self.manager._prepare_direct_dock_close(watched)
+        return False
+
+
 class WindowLayoutManager:
     def __init__(self, window):
         self.window = window
+        self._desired_visibility = {}
+        self._visible_snapshots = {}
+        self._dock_event_filter = _ManagedDockEventFilter(self)
+        self._filtered_docks = set()
 
     def restore_window_settings(self):
         win = self.window
@@ -20,7 +35,7 @@ class WindowLayoutManager:
         if state is not None:
             win.restoreState(state)
         if not win.profile_dock.isVisible() and win.data.ndim == 1:
-            win.profile_dock.show()
+            self.set_managed_dock_visible(win.profile_dock, True, reason="restore-one-dimensional", preserve_canvas=False)
         self.sync_progressive_docks()
         Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
 
@@ -29,21 +44,21 @@ class WindowLayoutManager:
         win._operation_dock_user_visible = False
         win._profile_dock_user_visible = False
         win._inspection_dock_user_visible = False
-        win.profile_dock.setFloating(False)
-        win.profile_dock.hide()
+        self._apply_dock_floating_raw(win.profile_dock, False)
+        self.set_managed_dock_visible(win.profile_dock, False, reason="reset", preserve_canvas=False)
         if hasattr(win, "inspection_dock"):
-            win.inspection_dock.setFloating(False)
-            win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, win.inspection_dock)
-            win.inspection_dock.hide()
+            self._apply_dock_floating_raw(win.inspection_dock, False)
+            self._redock_managed_dock(win.inspection_dock)
+            self.set_managed_dock_visible(win.inspection_dock, False, reason="reset", preserve_canvas=False)
         if win.data.ndim == 1:
-            win.profile_dock.show()
-        win.operation_dock.setFloating(False)
-        win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, win.operation_dock)
+            self.set_managed_dock_visible(win.profile_dock, True, reason="reset-one-dimensional", preserve_canvas=False)
+        self._apply_dock_floating_raw(win.operation_dock, False)
+        self._redock_managed_dock(win.operation_dock)
         if win.document.steps:
-            win.operation_dock.show()
+            self.set_managed_dock_visible(win.operation_dock, True, reason="reset-operations", preserve_canvas=False)
         else:
-            win.operation_dock.hide()
-        win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, win.profile_dock)
+            self.set_managed_dock_visible(win.operation_dock, False, reason="reset-operations", preserve_canvas=False)
+        self._redock_managed_dock(win.profile_dock)
         Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
 
     def set_operation_dock_visible_from_user(self, visible):
@@ -60,8 +75,7 @@ class WindowLayoutManager:
         win = self.window
         win._inspection_dock_user_visible = bool(visible)
         if visible and win.inspection_dock.isFloating():
-            win.inspection_dock.setFloating(False)
-            win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, win.inspection_dock)
+            self.set_managed_dock_floating(win.inspection_dock, False, reason="user-inspection-redock")
         self.set_managed_dock_visible(win.inspection_dock, bool(visible), reason="user-inspection")
 
     def sync_progressive_docks(self):
@@ -120,6 +134,8 @@ class WindowLayoutManager:
 
     def set_managed_dock_visible(self, dock, visible, *, reason, preserve_canvas=True, raise_dock=True):
         win = self.window
+        self._ensure_dock_filter(dock)
+        self._desired_visibility[dock] = bool(visible)
         currently_visible = dock.isVisible() if win.isVisible() else not dock.isHidden()
         if currently_visible == bool(visible):
             if visible and raise_dock:
@@ -127,27 +143,29 @@ class WindowLayoutManager:
             return
         before = self._view_snapshot() if preserve_canvas else None
         if visible and not dock.isFloating():
-            self._ensure_default_dock_area(dock)
+            self._redock_managed_dock(dock)
             if preserve_canvas:
                 self._grow_for_opening_dock(dock)
         self._visibility_preserve_active = True
         try:
-            dock.setVisible(bool(visible))
+            self._apply_dock_visibility_raw(dock, bool(visible))
             if visible and raise_dock:
                 dock.raise_()
         finally:
             self._visibility_preserve_active = False
         if preserve_canvas:
             Qt.QtCore.QTimer.singleShot(0, lambda before=before: self._restore_view_snapshot_if_reasonable(before, retry=True))
+        if visible:
+            Qt.QtCore.QTimer.singleShot(50, lambda dock=dock: self._remember_visible_snapshot(dock))
         self.schedule_view_geometry_refresh()
 
     def make_managed_dock_action(self, text, dock, setter):
         action = Qt.QtGui.QAction(text, self.window)
         action.setCheckable(True)
-        action.setChecked(dock.isVisible())
+        action.setChecked(self.desired_visibility_for(dock))
 
-        def on_triggered(_checked=False):
-            setter(not dock.isVisible())
+        def on_triggered(checked=False):
+            setter(bool(checked))
 
         def sync_checked(visible):
             blocker = Qt.QtCore.QSignalBlocker(action)
@@ -166,7 +184,7 @@ class WindowLayoutManager:
                 continue
             self._visibility_preserve_active = True
             try:
-                dock.hide()
+                self._apply_dock_visibility_raw(dock, False)
                 dock.close()
             finally:
                 self._visibility_preserve_active = False
@@ -179,7 +197,63 @@ class WindowLayoutManager:
             getattr(win, "operation_dock", None),
         )
 
-    def _ensure_default_dock_area(self, dock):
+    def _ensure_dock_filter(self, dock):
+        if dock in self._filtered_docks:
+            return
+        dock.installEventFilter(self._dock_event_filter)
+        dock.visibilityChanged.connect(lambda visible, dock=dock: self._on_managed_dock_visibility_changed(dock, visible))
+        self._filtered_docks.add(dock)
+
+    def _prepare_direct_dock_close(self, dock):
+        if getattr(self, "_visibility_preserve_active", False) or dock.isFloating():
+            return
+        if dock not in self._managed_docks():
+            return
+        before = self._view_snapshot()
+        if before is not None:
+            self._schedule_snapshot_restore(before)
+
+    def _remember_visible_snapshot(self, dock):
+        if dock.isVisible() and not dock.isFloating():
+            snapshot = self._view_snapshot()
+            if snapshot is not None:
+                self._visible_snapshots[dock] = snapshot
+
+    def _on_managed_dock_visibility_changed(self, dock, visible):
+        if visible:
+            Qt.QtCore.QTimer.singleShot(50, lambda dock=dock: self._remember_visible_snapshot(dock))
+            return
+        if getattr(self, "_visibility_preserve_active", False) or dock.isFloating():
+            return
+        snapshot = self._visible_snapshots.get(dock)
+        if snapshot is not None:
+            self._schedule_snapshot_restore(snapshot)
+
+    def _schedule_snapshot_restore(self, snapshot):
+        for delay in (0, 50, 150, 300):
+            Qt.QtCore.QTimer.singleShot(delay, lambda snapshot=snapshot: self._restore_view_snapshot_if_reasonable(snapshot, retry=False))
+
+    def desired_visibility_for(self, dock):
+        if dock in self._desired_visibility:
+            return bool(self._desired_visibility[dock])
+        return dock.isVisible() if self.window.isVisible() else not dock.isHidden()
+
+    def set_managed_dock_floating(self, dock, floating, *, reason, preserve_canvas=True):
+        before = self._view_snapshot() if preserve_canvas else None
+        self._apply_dock_floating_raw(dock, bool(floating))
+        if not floating:
+            self._redock_managed_dock(dock)
+        if preserve_canvas:
+            Qt.QtCore.QTimer.singleShot(0, lambda before=before: self._restore_view_snapshot_if_reasonable(before, retry=True))
+        self.schedule_view_geometry_refresh()
+
+    def _apply_dock_visibility_raw(self, dock, visible):
+        dock.setVisible(bool(visible))
+
+    def _apply_dock_floating_raw(self, dock, floating):
+        dock.setFloating(bool(floating))
+
+    def _redock_managed_dock(self, dock):
         win = self.window
         if dock is getattr(win, "inspection_dock", None):
             win.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
@@ -212,6 +286,8 @@ class WindowLayoutManager:
             return
         before_rect, before_range = before
         win = self.window
+        if getattr(win, "_closing", False):
+            return
         if win.isMaximized() or win.isFullScreen():
             self._restore_view_range(before_range)
             self.refresh_view_geometry()
@@ -231,7 +307,7 @@ class WindowLayoutManager:
             return
         current = win.geometry()
         target = Qt.QtCore.QRect(current)
-        minimum = win.minimumSizeHint().expandedTo(win.minimumSize())
+        minimum = win.minimumSize()
         target.setWidth(max(int(minimum.width()), current.width() + delta_w))
         target.setHeight(max(int(minimum.height()), current.height() + delta_h))
         target.translate(move_delta)

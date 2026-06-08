@@ -32,6 +32,7 @@ class SlabRequest:
     view_state: object
     keep_axes: tuple[int, ...]
     slice_indices: tuple[int, ...]
+    ranged_axes: tuple[int, ...] = ()
     frame_axis: int | None = None
     frame_index: int | None = None
 
@@ -47,12 +48,13 @@ class SlabPlan:
 
 
 def request_for_image(view_state) -> SlabRequest:
-    return SlabRequest("image", view_state, tuple(view_state.image_axes or ()), tuple(view_state.slice_indices))
+    keep_axes = tuple(view_state.image_axes or ())
+    return SlabRequest("image", view_state, keep_axes, tuple(view_state.slice_indices), _ranged_keep_axes(view_state, keep_axes))
 
 
 def request_for_line(view_state) -> SlabRequest:
     keep_axes = () if view_state.line_axis is None else (int(view_state.line_axis),)
-    return SlabRequest("line", view_state, keep_axes, tuple(view_state.slice_indices))
+    return SlabRequest("line", view_state, keep_axes, tuple(view_state.slice_indices), _ranged_keep_axes(view_state, keep_axes))
 
 
 def request_for_scalar(view_state, index) -> SlabRequest:
@@ -65,11 +67,13 @@ def request_for_scalar(view_state, index) -> SlabRequest:
 def request_for_export_frame(view_state, frame_axis, frame_index) -> SlabRequest:
     slices = list(view_state.slice_indices)
     slices[int(frame_axis)] = int(frame_index)
+    keep_axes = tuple(view_state.image_axes or ())
     return SlabRequest(
         "export_frame",
         view_state,
-        tuple(view_state.image_axes or ()),
+        keep_axes,
         tuple(slices),
+        _ranged_keep_axes(view_state, keep_axes),
         frame_axis=int(frame_axis),
         frame_index=int(frame_index),
     )
@@ -101,13 +105,32 @@ def _spec_for_request(shape, request):
     spec = []
     for axis, size in enumerate(shape):
         if axis in keep_axes:
-            spec.append(slice(None))
+            spec.append(_axis_item_for_keep_axis(request.view_state, axis))
         else:
             index = int(request.slice_indices[axis])
             if index < 0 or index >= int(size):
                 raise IndexError(f"slice index {index} is out of range for axis {axis} with size {size}")
             spec.append(index)
     return tuple(spec)
+
+
+def _ranged_keep_axes(view_state, keep_axes):
+    axis_ranges = getattr(view_state, "axis_range_indices", ())
+    ranged = []
+    for axis in keep_axes:
+        if axis < len(axis_ranges) and axis_ranges[int(axis)] is not None:
+            ranged.append(int(axis))
+    return tuple(ranged)
+
+
+def _axis_item_for_keep_axis(view_state, axis):
+    axis_ranges = getattr(view_state, "axis_range_indices", ())
+    if int(axis) >= len(axis_ranges):
+        return slice(None)
+    indices = axis_ranges[int(axis)]
+    if indices is None:
+        return slice(None)
+    return _sequence_to_basic_index(np.asarray(indices, dtype=np.int64))
 
 
 def _evaluate_ops(data, operations, desired_spec):

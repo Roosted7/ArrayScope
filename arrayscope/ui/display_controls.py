@@ -51,7 +51,6 @@ class DisplayControlBuildMixin:
                 },
                 'display': {
                     'square_pixels': QtWidgets.QRadioButton('Square pixels', checkable=True, checked=True),
-                    'square_fov': QtWidgets.QRadioButton('Square FOV', checkable=True),
                     'fit': QtWidgets.QRadioButton('Fit', checkable=True),
                     'window_relative': QtWidgets.QRadioButton('Relative', checkable=True, checked=True),
                     'window_absolute': QtWidgets.QRadioButton('Absolute', checkable=True),
@@ -94,7 +93,6 @@ class DisplayControlBuildMixin:
         
         self.display_button_group = QtWidgets.QButtonGroup()
         self.display_button_group.addButton(self.widgets['buttons']['display']['square_pixels'])
-        self.display_button_group.addButton(self.widgets['buttons']['display']['square_fov'])
         self.display_button_group.addButton(self.widgets['buttons']['display']['fit'])
 
         self.window_button_group = QtWidgets.QButtonGroup()
@@ -288,7 +286,6 @@ class DisplayControlBuildMixin:
         
         disp_buttons = [
             self.widgets['buttons']['display']['square_pixels'],
-            self.widgets['buttons']['display']['square_fov'],
             self.widgets['buttons']['display']['fit'],
         ]
         for btn in disp_buttons:
@@ -311,7 +308,6 @@ class DisplayControlBuildMixin:
         
         # Optional: tooltip hints
         self.widgets['buttons']['display']['square_pixels'].setToolTip('Lock to 1:1 pixel aspect')
-        self.widgets['buttons']['display']['square_fov'].setToolTip('Lock aspect to image width/height ratio')
         self.widgets['buttons']['display']['fit'].setToolTip('Always fit entire image in viewport')
         
         self.display_group.setLayout(display_layout)

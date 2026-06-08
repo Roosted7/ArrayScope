@@ -128,11 +128,8 @@ class DimensionControlMixin:
             self.display_toolbar.set_channel_options(enabled_channels)
 
         checked_channel = self.view_state.channel.value
-        if not enabled_channels.get(checked_channel, False):
-            checked_channel = 'complex' if is_complex else 'real'
-            self._set_view_state(self.view_state.with_channel(checked_channel))
-
-        channel_buttons[checked_channel].setChecked(True)
+        if checked_channel in channel_buttons:
+            channel_buttons[checked_channel].setChecked(True)
         if hasattr(self, "display_toolbar"):
             self.display_toolbar.set_current(channel=checked_channel)
     

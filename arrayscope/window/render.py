@@ -11,7 +11,7 @@ from arrayscope.display.colormaps import gray_colormap, phase_colormap
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.montage import make_montage, optimal_montage_columns
 from arrayscope.display.slice_engine import DisplayImage
-from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.display.viewport import ViewportIntent, ViewportPolicy
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
@@ -58,6 +58,10 @@ class RenderMixin:
                 x_i, y_i = mapping.local_x, mapping.local_y
                 index = mapping.array_index
                 context = point_context.context_text
+                cached = self.operation_evaluator.cached_scalar(self.view_state, tuple(index))
+                if cached is not None:
+                    self._commit_pixel_value(cached, x_i, y_i, context, pos)
+                    return
                 value_text = f"{point_context.value_prefix} = updating..."
                 text = value_text
                 if context:
@@ -84,22 +88,7 @@ class RenderMixin:
         def done(value):
             if request_id != getattr(self, "_pixel_request_id", 0):
                 return
-            try:
-                decimal_places = getNumberOfDecimalPlaces(abs(value))
-                if decimal_places > 5:
-                    value_text = "({}, {}) = {:.3e}".format(x_i, y_i, value)
-                else:
-                    value_text = "({}, {}) = {:.{}f}".format(x_i, y_i, value, decimal_places)
-            except Exception:
-                value_text = f"({x_i}, {y_i}) = {value}"
-            text = value_text if not context else f"{value_text} | {context}"
-            label = self.widgets['labels']['pixelValue']
-            if hasattr(label, "set_pixel_status"):
-                label.set_pixel_status(value_text, context)
-            else:
-                label.setText(text)
-            if hasattr(self, "img_view"):
-                self.img_view.showHudText(text, pos)
+            self._commit_pixel_value(value, x_i, y_i, context, pos)
 
         cached = self.operation_evaluator.cached_scalar(view_state, index)
         if cached is not None:
@@ -109,16 +98,34 @@ class RenderMixin:
         def evaluate():
             return evaluate_scalar_snapshot(document, view_state, index)
 
-        document_key = self.operation_evaluator.scalar_key(view_state, index, document=document)[1]
+        request_key = self.operation_evaluator.scalar_key(view_state, index, document=document)
 
         def done_result(result):
             if request_id != getattr(self, "_pixel_request_id", 0):
                 return
-            if document_key != self.operation_evaluator.scalar_key(view_state, index)[1]:
+            if request_key != self.operation_evaluator.scalar_key(view_state, index):
                 return
             done(self.operation_evaluator.store_scalar_result(view_state, index, result))
 
         self.pixel_evaluation_controller.start(evaluate, on_done=done_result, on_error=lambda _exc: None, slow_ms=0)
+
+    def _commit_pixel_value(self, value, x_i, y_i, context, pos):
+        try:
+            decimal_places = getNumberOfDecimalPlaces(abs(value))
+            if decimal_places > 5:
+                value_text = "({}, {}) = {:.3e}".format(x_i, y_i, value)
+            else:
+                value_text = "({}, {}) = {:.{}f}".format(x_i, y_i, value, decimal_places)
+        except Exception:
+            value_text = f"({x_i}, {y_i}) = {value}"
+        text = value_text if not context else f"{value_text} | {context}"
+        label = self.widgets['labels']['pixelValue']
+        if hasattr(label, "set_pixel_status"):
+            label.set_pixel_status(value_text, context)
+        else:
+            label.setText(text)
+        if hasattr(self, "img_view"):
+            self.img_view.showHudText(text, pos)
 
     def _slice_context_text(self):
         axes = self.view_state.non_display_axes()
@@ -202,14 +209,14 @@ class RenderMixin:
         def evaluate():
             return tuple((profile_state, evaluate_line_snapshot(document, profile_state)) for profile_state in profile_states)
 
-        document_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document)[1] for profile_state in profile_states}
+        request_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
 
         def done(results):
             if request_id != getattr(self, "_profile_request_id", 0):
                 return
             entries = []
             for profile_state, result in results:
-                if document_keys[profile_state] != self.operation_evaluator.line_key(profile_state)[1]:
+                if request_keys[profile_state] != self.operation_evaluator.line_key(profile_state):
                     return
                 line_result = self.operation_evaluator.store_line_result(profile_state, result)
                 entries.append((line_result, profile_state, f"dim {profile_state.line_axis}{profile_label_suffix}"))
@@ -381,10 +388,10 @@ class RenderMixin:
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image view")
             self._update_operation_dock()
 
-        document_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)[1]
+        request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)
 
         def done(result):
-            if document_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut)[1]:
+            if request_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut):
                 self.img_view.setImageStale(False)
                 self.img_view.setEvaluationOverlay(False)
                 return
@@ -476,10 +483,19 @@ class RenderMixin:
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
             self._update_operation_dock()
 
-        generation_key = (_document_key(document), view_state)
+        generation_key = ("montage", _document_key(document), view_state, indices, colormap_lut.tobytes() if colormap_lut is not None else None, viewport_shape if view_state.montage_columns is None else None)
 
         def done(rendered_view):
-            if generation_key != (_document_key(self.document), self.view_state):
+            current_indices = tuple(self.view_state.montage_indices or tuple(range(int(self.view_state.shape[axis]))))[:256] if self.view_state.montage_axis == axis else ()
+            current_key = (
+                "montage",
+                _document_key(self.document),
+                self.view_state,
+                current_indices,
+                colormap_lut.tobytes() if colormap_lut is not None else None,
+                viewport_shape if self.view_state.montage_columns is None else None,
+            )
+            if generation_key != current_key:
                 self.img_view.setImageStale(False)
                 self.img_view.setEvaluationOverlay(False)
                 return
@@ -492,6 +508,8 @@ class RenderMixin:
                 previous_bounds=previous_bounds,
                 force_auto=force_auto,
             )
+            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
+            self._update_operation_dock()
 
         def error(exc):
             self.img_view.setImageStale(False)
@@ -610,7 +628,7 @@ class RenderMixin:
         cy = int(round(image_y))
         max_radius = 4
         scheduled = 0
-        document_key_cache = {}
+        request_key_cache = {}
         for radius in range(0, max_radius + 1):
             points = []
             if radius == 0:
@@ -628,30 +646,30 @@ class RenderMixin:
                 profile_state = self.profile_coordinator.state_from_marker(view_state, x, y, line_axis=line_axis)
                 if profile_state is None:
                     continue
-                document_key_cache[profile_state] = self.operation_evaluator.line_key(profile_state, document=document)[1]
+                request_key_cache[profile_state] = self.operation_evaluator.line_key(profile_state, document=document)
                 started = self.profile_evaluation_controller.start_prefetch(
                     lambda profile_state=profile_state, document=document: self.operation_evaluator.prefetch_line_snapshot(document, profile_state),
-                    on_done=lambda result, profile_state=profile_state, document=document, key=document_key_cache[profile_state]: self._store_prefetch_profile_if_current(
+                    on_done=lambda result, profile_state=profile_state, document=document, key=request_key_cache[profile_state]: self._store_prefetch_profile_if_current(
                         document,
                         key,
                         profile_state,
                         result,
                     ),
-                    key=document_key_cache[profile_state],
+                    key=request_key_cache[profile_state],
                 )
                 self._note_prefetch_start(started)
                 if started.scheduled:
                     scheduled += 1
 
-    def _store_prefetch_profile_if_current(self, document, document_key, profile_state, result):
-        if document_key != self.operation_evaluator.line_key(profile_state)[1]:
+    def _store_prefetch_profile_if_current(self, document, request_key, profile_state, result):
+        if request_key != self.operation_evaluator.line_key(profile_state):
             self.operation_evaluator.note_prefetch_stale()
             return False
         return self.operation_evaluator.store_prefetch_line_result(document, profile_state, result)
 
-    def _store_prefetch_image_if_current(self, document, document_key, view_state, colormap_lut, result):
+    def _store_prefetch_image_if_current(self, document, request_key, view_state, colormap_lut, result):
         current_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut)
-        if document_key != current_key:
+        if request_key != current_key:
             self.operation_evaluator.note_prefetch_stale()
             return False
         return self.operation_evaluator.store_prefetch_image_result(document, view_state, colormap_lut, result)
@@ -686,20 +704,14 @@ class RenderMixin:
         """Update the display mode for the image view"""
         if self.widgets['buttons']['display']['square_pixels'].isChecked():
             self.img_view.setDisplayMode('square_pixels')
-        elif self.widgets['buttons']['display']['square_fov'].isChecked():
-            self.img_view.setDisplayMode('square_fov')
         elif self.widgets['buttons']['display']['fit'].isChecked():
             self.img_view.setDisplayMode('fit')
 
     def _on_aspect_toolbar_changed(self, mode):
-        for name, checked in (
-            ("square_pixels", mode == "square_pixels"),
-            ("square_fov", mode == "square_fov"),
-            ("fit", mode == "fit"),
-        ):
-            self.widgets['buttons']['display'][name].setChecked(checked)
-        self.update_display_mode()
-        self.render(reason="aspect")
+        if mode == "one_to_one":
+            self.one_to_one_image()
+            return
+        self.fit_image_to_view()
 
     def _on_window_mode_changed(self, mode):
         self.widgets['buttons']['display']['window_relative'].setChecked(mode != "absolute")
@@ -711,12 +723,22 @@ class RenderMixin:
 
     def fit_image_to_view(self):
         self.widgets['buttons']['display']['fit'].setChecked(True)
-        self.img_view.fitToView()
+        self._next_viewport_policy = ViewportIntent.FIT
+        if getattr(self.img_view, "image", None) is not None:
+            self.img_view.fitToView()
+            self.render(reason="viewport-fit")
+        else:
+            self.img_view.fitToView()
         self._sync_controls_from_view_state()
 
     def one_to_one_image(self):
         self.widgets['buttons']['display']['square_pixels'].setChecked(True)
-        self.img_view.oneToOne()
+        self._next_viewport_policy = ViewportIntent.ONE_TO_ONE
+        if getattr(self.img_view, "image", None) is not None:
+            self.img_view.oneToOne()
+            self.render(reason="viewport-one-to-one")
+        else:
+            self.img_view.oneToOne()
         self._sync_controls_from_view_state()
 
     def auto_window_levels(self):
@@ -772,20 +794,6 @@ class RenderMixin:
             finally:
                 self.display_group.setTitle(f'Display {aspect_str}')
             
-        elif mode == 'square_fov':
-            # For square FOV, use the image aspect ratio
-            if hasattr(self.img_view, 'image') and self.img_view.image is not None:
-                shape = self.img_view.image.shape
-                if len(shape) >= 2:
-                    height, width = shape[:2]
-                    ratio = width / height
-                    if abs(ratio - 1.0) < 1e-2:
-                        aspect_str = '(1:1)'
-                    else:
-                        aspect_str = f'({ratio:.2f}:1)'
-                else:
-                    aspect_str = ''
-            self.display_group.setTitle(f'Display {aspect_str}')
         else:
             self.display_group.setTitle('Display')
     
@@ -817,12 +825,12 @@ class RenderMixin:
         def evaluate():
             return tuple((profile_state, evaluate_line_snapshot(document, profile_state)) for profile_state in profile_states)
 
-        document_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document)[1] for profile_state in profile_states}
+        request_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
 
         def done(results):
             entries = []
             for profile_state, result in results:
-                if document_keys[profile_state] != self.operation_evaluator.line_key(profile_state)[1]:
+                if request_keys[profile_state] != self.operation_evaluator.line_key(profile_state):
                     return
                 line_result = self.operation_evaluator.store_line_result(profile_state, result)
                 entries.append((line_result, profile_state, f"dim {profile_state.line_axis}"))
@@ -851,6 +859,7 @@ class RenderMixin:
 
     def render(self, *, reason: str = "state", force_autolevel: bool = False):
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
+        self._coerce_channel_for_current_dtype()
         self._sync_controls_from_view_state()
         if hasattr(self, "tab_widget"):
             self.tab_widget.setVisible(self.data.ndim >= 2)

@@ -37,12 +37,11 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.addWidget(self.scale_combo)
 
         self.aspect_combo = QtWidgets.QComboBox()
-        self.aspect_combo.addItem("1:1", "square_pixels")
-        self.aspect_combo.addItem("FOV", "square_fov")
         self.aspect_combo.addItem("Fit", "fit")
+        self.aspect_combo.addItem("1:1", "one_to_one")
         self.aspect_combo.currentIndexChanged.connect(lambda _i: self.aspectChanged.emit(self.aspect_combo.currentData()))
         self.addSeparator()
-        self.addWidget(QtWidgets.QLabel("Aspect "))
+        self.addWidget(QtWidgets.QLabel("View "))
         self.addWidget(self.aspect_combo)
 
         self.window_combo = QtWidgets.QComboBox()

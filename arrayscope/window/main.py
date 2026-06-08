@@ -70,10 +70,12 @@ class ArrayScopeWindow(
         self.evaluation_controller = EvaluationController(self)
         self.pixel_evaluation_controller = EvaluationController(self)
         self.profile_evaluation_controller = EvaluationController(self)
+        self.roi_evaluation_controller = EvaluationController(self)
         self.data = derived_info_for(self.document)
         self.singleton = [e == 1 for e in list(self.data.shape)]
         initial_channel = ChannelMode.COMPLEX if np.issubdtype(self.data.dtype, np.complexfloating) else ChannelMode.REAL
         self.view_state = ViewState.from_shape(self.data.shape).with_channel(initial_channel)
+        self._channel_user_selected = False
         self._force_autolevel = False
         self._filepath = filepath
         self._dataset_path = dataset_path

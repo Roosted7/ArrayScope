@@ -204,7 +204,7 @@ class OperationActionsMixin:
         commands.extend(
             [
                 PaletteCommand("fit", "Fit image to viewport", icon="fit_screen"),
-                PaletteCommand("one_to_one", "Set image aspect to 1:1", icon="aspect_ratio"),
+                PaletteCommand("one_to_one", "Set image zoom to 1:1", icon="aspect_ratio"),
                 PaletteCommand("auto_window", "Auto window levels", icon="tonality"),
                 PaletteCommand("reset_layout", "Reset layout", icon="reset_wrench"),
                 PaletteCommand("toggle_profile", "Toggle profile dock", icon="show_chart"),
@@ -556,7 +556,9 @@ class OperationActionsMixin:
 
     def _apply_display_settings(self, settings):
         self._set_view_state(self.view_state.with_channel(settings.channel).with_scale(settings.scale))
-        self.img_view.setDisplayMode(settings.aspect_mode)
+        self._coerce_channel_for_current_dtype()
+        aspect_mode = settings.aspect_mode if settings.aspect_mode in {"square_pixels", "fit"} else "fit"
+        self.img_view.setDisplayMode(aspect_mode)
         self.widgets["buttons"]["display"]["window_relative"].setChecked(settings.window_mode != "absolute")
         self.widgets["buttons"]["display"]["window_absolute"].setChecked(settings.window_mode == "absolute")
         self.widgets["buttons"]["display"]["live_profile"].setChecked(settings.live_profile)
