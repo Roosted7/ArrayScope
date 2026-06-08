@@ -111,3 +111,92 @@ def test_montage_plan_preserves_source_indices():
     assert tuple(tile.source_index for tile in plan.tiles) == (2, 4, 8)
     assert plan.geometry.indices == (2, 4, 8)
     assert tuple(tile.view_state.slice_indices[2] for tile in plan.tiles) == (2, 4, 8)
+
+
+def test_montage_plan_tile_at_returns_source_tile_and_ignores_gap():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 3, 9)).with_montage_axis(2, indices=tuple(range(9)), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(9)), tile_shape=(2, 3), columns=3, gap=1)
+
+    tile = plan.tile_at(4, 4)
+
+    assert tile is not None
+    assert tile.source_index == 4
+    assert plan.tile_at(3, 0) is None
+
+
+def test_montage_viewport_canvas_preserves_global_tile_positions():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 3, 20)).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(20)), tile_shape=(2, 3), columns=5, gap=1)
+    rendered = tuple(
+        montage.RenderedTile(
+            tile=plan.tiles[index],
+            image=np.full((2, 3), plan.tiles[index].source_index, dtype=np.float32),
+            histogram_data=np.full((2, 3), plan.tiles[index].source_index, dtype=np.float32),
+            eval_ms=0.0,
+            slab_shape=(2, 3),
+            slab_nbytes=24,
+        )
+        for index in (10, 11, 12)
+    )
+
+    canvas = montage.make_montage_viewport_canvas(
+        plan,
+        rendered,
+        view_range=((0, 12), (6, 8)),
+        budget_bytes=1024 * 1024,
+    )
+
+    assert canvas.origin_y != 0
+    for rendered_tile in rendered:
+        x0 = rendered_tile.tile.x0 - canvas.origin_x
+        y0 = rendered_tile.tile.y0 - canvas.origin_y
+        np.testing.assert_array_equal(canvas.data[y0 : y0 + 2, x0 : x0 + 3], np.full((2, 3), rendered_tile.tile.source_index))
+
+
+def test_montage_viewport_canvas_histogram_marks_gaps_and_unloaded_as_nan():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 2, 3)).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=3, gap=1)
+    rendered = tuple(
+        montage.RenderedTile(
+            tile=plan.tiles[index],
+            image=np.full((2, 2), index, dtype=np.float32),
+            histogram_data=np.full((2, 2), index, dtype=np.float32),
+            eval_ms=0.0,
+            slab_shape=(2, 2),
+            slab_nbytes=16,
+        )
+        for index in (0, 2)
+    )
+
+    canvas = montage.make_montage_viewport_canvas(plan, rendered, view_range=((0, 8), (0, 2)), budget_bytes=1024 * 1024)
+
+    assert np.isnan(canvas.histogram_data[:, 2]).all()
+    assert np.isnan(canvas.histogram_data[:, 3:5]).all()
+    assert np.isfinite(canvas.histogram_data[:, :2]).all()
+    assert np.isfinite(canvas.histogram_data[:, 6:8]).all()
+
+
+def test_montage_viewport_canvas_rejects_over_budget_before_allocation():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((10_000, 10_000, 1)).with_montage_axis(2, indices=(0,), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=(0,), tile_shape=(10_000, 10_000), columns=1, gap=1)
+    rendered = (
+        montage.RenderedTile(
+            tile=plan.tiles[0],
+            image=np.zeros((1, 1), dtype=np.float32),
+            histogram_data=np.zeros((1, 1), dtype=np.float32),
+            eval_ms=0.0,
+            slab_shape=(1, 1),
+            slab_nbytes=4,
+        ),
+    )
+
+    with np.testing.assert_raises(MemoryError):
+        montage.make_montage_viewport_canvas(plan, rendered, view_range=None, budget_bytes=1024)

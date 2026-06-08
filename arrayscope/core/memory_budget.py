@@ -34,6 +34,10 @@ def estimate_display_image_bytes(shape, dtype, *, rgb=False, histogram=False) ->
     return int(total)
 
 
+def estimate_viewport_canvas_bytes(shape, dtype, *, rgb=False, histogram=True) -> int:
+    return estimate_display_image_bytes(shape, dtype, rgb=rgb, histogram=histogram)
+
+
 def estimate_montage_bytes(tile_shape, tile_count, dtype, *, rgb=False, histogram=True, gap=1, columns=None) -> int:
     tile_count = max(0, int(tile_count))
     if tile_count == 0:

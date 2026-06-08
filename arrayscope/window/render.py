@@ -10,7 +10,7 @@ from arrayscope.app.errors import handle_ui_exception
 from arrayscope.display.colormaps import gray_colormap, phase_colormap
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.levels import finite_bounds
-from arrayscope.display.montage import make_montage, make_montage_plan, optimal_montage_columns
+from arrayscope.display.montage import make_montage_plan, make_montage_viewport_canvas, optimal_montage_columns
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportIntent, ViewportPolicy
 from arrayscope.core.memory_budget import (
@@ -45,22 +45,6 @@ def getNumberOfDecimalPlaces(number):
         return int(0)
     else:
         return int(max(1, (number.as_integer_ratio()[1]).bit_length()))
-
-
-def _histogram_sample_for_tiles(rendered_tiles):
-    arrays = []
-    for rendered in rendered_tiles:
-        source = rendered.histogram_data if rendered.histogram_data is not None else rendered.image
-        data = np.asarray(source)
-        if data.ndim == 3:
-            data = 0.2126 * data[..., 0].astype(float) + 0.7152 * data[..., 1].astype(float) + 0.0722 * data[..., 2].astype(float)
-        arrays.append(np.ravel(data))
-    if not arrays:
-        return None
-    sample = np.concatenate(arrays)
-    if sample.size > 1_000_000:
-        sample = sample[:: max(1, sample.size // 1_000_000)]
-    return sample.reshape(1, -1)
 
 
 class RenderMixin:
@@ -414,6 +398,8 @@ class RenderMixin:
         if self.view_state.montage_axis is not None:
             return self.update_montage_view(force_autolevel=force_autolevel)
         self._current_montage_geometry = None
+        self._current_montage_plan = None
+        self._current_montage_canvas = None
             
         al = True
         force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
@@ -556,11 +542,36 @@ class RenderMixin:
             columns=columns,
             viewport_shape=viewport_shape,
         )
-        current_range = self.img_view.getView().viewRange() if getattr(self.img_view, "image", None) is not None else None
+        current_range = self._current_montage_global_view_range() if getattr(self.img_view, "image", None) is not None else None
         visible_tiles = plan.tiles_intersecting(current_range, margin_tiles=1)
-        if len(visible_tiles) > 64:
-            visible_tiles = visible_tiles[:64]
-            show_status_message(self, "Montage view is dense; loading first 64 visible tiles", timeout=4000)
+        output_dtype = np.uint8 if view_state.channel == ChannelMode.COMPLEX else getattr(document.base_data, "dtype", np.dtype(float))
+        visible_tiles, _estimated_visible_bytes, skipped_count = self._select_visible_montage_tiles_by_budget(
+            visible_tiles,
+            tile_shape=tile_shape,
+            output_dtype=output_dtype,
+            rgb=view_state.channel == ChannelMode.COMPLEX,
+            budget_bytes=VISIBLE_RENDER_BUDGET_BYTES,
+        )
+        if not visible_tiles:
+            single_estimate = estimate_display_image_bytes(
+                tile_shape,
+                output_dtype,
+                rgb=view_state.channel == ChannelMode.COMPLEX,
+                histogram=True,
+            )
+            show_status_message(
+                self,
+                f"Montage tile would allocate {format_bytes(single_estimate)}. Zoom out less or reduce tile size/range.",
+                timeout=6000,
+            )
+            return
+        if skipped_count:
+            show_status_message(
+                self,
+                f"Montage loaded {len(visible_tiles)} visible tiles within {format_bytes(VISIBLE_RENDER_BUDGET_BYTES)}; "
+                f"skipped {skipped_count} tiles. Zoom in for detail.",
+                timeout=5000,
+            )
         cached_tiles = []
         missing_tiles = []
         for tile in visible_tiles:
@@ -574,7 +585,6 @@ class RenderMixin:
                 missing_tiles.append(tile)
             else:
                 cached_tiles.append(cached)
-        geometry = DisplayGeometry(view_state=view_state, display_shape=plan.display_shape, montage=plan.geometry)
         generation_key = (
             "montage_tiles",
             _document_key(document),
@@ -597,25 +607,49 @@ class RenderMixin:
             rendered_tiles = tuple(sorted(rendered_tiles, key=lambda rendered: rendered.tile.montage_index))
             if not rendered_tiles:
                 return
-            rendered = make_montage(
-                [tile.image for tile in rendered_tiles],
-                histogram_images=[
-                    tile.histogram_data if tile.histogram_data is not None else tile.image
-                    for tile in rendered_tiles
-                ],
-                columns=min(plan.columns, len(rendered_tiles)),
-                indices=tuple(tile.tile.source_index for tile in rendered_tiles),
+            previous_canvas = getattr(self, "_current_montage_canvas", None)
+            previous_global_range = self._current_montage_global_view_range()
+            canvas = make_montage_viewport_canvas(
+                plan,
+                rendered_tiles,
+                view_range=current_range,
+                viewport_shape=viewport_shape,
+                budget_bytes=VISIBLE_RENDER_BUDGET_BYTES,
+                dtype=output_dtype,
+                rgb=view_state.channel == ChannelMode.COMPLEX,
+                include_histogram=True,
             )
-            rendered_geometry = DisplayGeometry(view_state=view_state, display_shape=rendered.image.data.shape[:2], montage=rendered.geometry)
-            self._current_montage_geometry = rendered.geometry
+            rendered_geometry = DisplayGeometry(
+                view_state=view_state,
+                display_shape=canvas.data.shape[:2],
+                montage=plan.geometry,
+                montage_origin_x=canvas.origin_x,
+                montage_origin_y=canvas.origin_y,
+            )
+            self._current_montage_geometry = plan.geometry
+            self._current_montage_plan = plan
+            self._current_montage_canvas = canvas
+            self._next_viewport_policy = ViewportPolicy.PRESERVE
             self._apply_display_image(
-                rendered.image,
+                DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data),
                 geometry=rendered_geometry,
                 window_mode=window_mode,
                 previous_levels=previous_levels,
                 previous_bounds=previous_bounds,
                 force_auto=force_auto,
             )
+            if previous_canvas is not None and previous_global_range is not None:
+                local_range = (
+                    (
+                        float(previous_global_range[0][0]) - float(canvas.origin_x),
+                        float(previous_global_range[0][1]) - float(canvas.origin_x),
+                    ),
+                    (
+                        float(previous_global_range[1][0]) - float(canvas.origin_y),
+                        float(previous_global_range[1][1]) - float(canvas.origin_y),
+                    ),
+                )
+                self.img_view.getView().setRange(xRange=local_range[0], yRange=local_range[1], padding=0)
 
         def done(results):
             current_indices = tuple(self.view_state.montage_indices or tuple(range(int(self.view_state.shape[axis])))) if self.view_state.montage_axis == axis else ()
@@ -634,7 +668,10 @@ class RenderMixin:
             rendered_tiles = list(cached_tiles)
             for tile, result in results:
                 rendered_tiles.append(self.operation_evaluator.store_montage_tile_result(tile, montage_axis=axis, colormap_lut=colormap_lut, result=result))
-            apply_tiles(tuple(rendered_tiles))
+            try:
+                apply_tiles(tuple(rendered_tiles))
+            except MemoryError as exc:
+                show_status_message(self, str(exc), timeout=6000)
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
             self._update_operation_dock()
 
@@ -644,7 +681,10 @@ class RenderMixin:
             show_status_message(self, f"Montage update failed: {exc}")
 
         if cached_tiles:
-            apply_tiles(tuple(cached_tiles))
+            try:
+                apply_tiles(tuple(cached_tiles))
+            except MemoryError as exc:
+                show_status_message(self, str(exc), timeout=6000)
         if not missing_tiles:
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
             self._update_operation_dock()
@@ -667,6 +707,42 @@ class RenderMixin:
         return (
             len(primary_indices) if primary_indices is not None else int(view_state.shape[primary_axis]),
             len(secondary_indices) if secondary_indices is not None else int(view_state.shape[secondary_axis]),
+        )
+
+    def _select_visible_montage_tiles_by_budget(
+        self,
+        tiles,
+        *,
+        tile_shape,
+        output_dtype,
+        rgb,
+        budget_bytes,
+    ):
+        selected = []
+        used = 0
+        tiles = tuple(tiles)
+        tile_bytes = estimate_display_image_bytes(tile_shape, output_dtype, rgb=rgb, histogram=True)
+        for tile in tiles:
+            if used + tile_bytes > int(budget_bytes):
+                if selected:
+                    break
+                return (), 0, len(tiles)
+            selected.append(tile)
+            used += tile_bytes
+        skipped = max(0, len(tiles) - len(selected))
+        return tuple(selected), int(used), int(skipped)
+
+    def _current_montage_global_view_range(self):
+        try:
+            local_range = self.img_view.getView().viewRange()
+        except Exception:
+            return None
+        canvas = getattr(self, "_current_montage_canvas", None)
+        origin_x = 0 if canvas is None else int(canvas.origin_x)
+        origin_y = 0 if canvas is None else int(canvas.origin_y)
+        return (
+            (float(local_range[0][0]) + origin_x, float(local_range[0][1]) + origin_x),
+            (float(local_range[1][0]) + origin_y, float(local_range[1][1]) + origin_y),
         )
 
     def _apply_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto):

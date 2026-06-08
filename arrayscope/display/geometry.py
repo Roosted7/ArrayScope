@@ -78,6 +78,8 @@ class DisplayGeometry:
     view_state: ViewState
     display_shape: tuple[int, int]
     montage: MontageGeometry | None = None
+    montage_origin_x: int = 0
+    montage_origin_y: int = 0
 
     def __post_init__(self):
         shape = tuple(int(size) for size in self.display_shape)
@@ -86,6 +88,8 @@ class DisplayGeometry:
         if shape[0] < 1 or shape[1] < 1:
             raise ValueError("display dimensions must be at least 1")
         object.__setattr__(self, "display_shape", shape)
+        object.__setattr__(self, "montage_origin_x", int(self.montage_origin_x))
+        object.__setattr__(self, "montage_origin_y", int(self.montage_origin_y))
 
     def display_point_to_array_index(self, x: float, y: float) -> DisplayPointMapping | None:
         if self.view_state.image_axes is None:
@@ -99,7 +103,7 @@ class DisplayGeometry:
         view_state = self.view_state
 
         if self.montage is not None:
-            mapped = self._map_montage_point(display_x, display_y)
+            mapped = self._map_montage_point(display_x + self.montage_origin_x, display_y + self.montage_origin_y)
             if mapped is None:
                 return None
             tile_number, montage_index, local_x, local_y = mapped
@@ -153,7 +157,10 @@ class DisplayGeometry:
         point_x = int(math.floor(float(x)))
         point_y = int(math.floor(float(y)))
         if self.montage is not None:
-            return self._clamp_to_montage_tile(point_x, point_y)
+            global_point = self._clamp_to_montage_tile(point_x + self.montage_origin_x, point_y + self.montage_origin_y)
+            if global_point is None:
+                return None
+            return (global_point[0] - self.montage_origin_x, global_point[1] - self.montage_origin_y)
         primary_axis, secondary_axis = self.view_state.image_axes
         width = self._display_axis_size(self.view_state, secondary_axis)
         height = self._display_axis_size(self.view_state, primary_axis)

@@ -189,7 +189,7 @@ Goal: Make ArrayScope responsive, bounded, and predictable under real interactiv
 
 * [x] Fix slice_engine display-axis preservation
 * [x] Add render memory estimates
-* [~] Prevent giant montage allocations (full-montage allocation is guarded, but the current renderer still assembles a bounded local visible-tile collage)
+* [x] Prevent giant montage allocations
 
 ### P1 — latest-only evaluation scheduler
 
@@ -200,9 +200,9 @@ Goal: Make ArrayScope responsive, bounded, and predictable under real interactiv
 ### P2 — Tiled montage renderer
 
 * [x] `MontagePlan` for separation
-* [~] Evaluate only visible tiles (still commits a local mini-montage rather than a viewport-origin canvas)
+* [x] Evaluate only visible tiles
 * [~] Cache tile results (tile byte accounting fixed in Phase 4e P0; predictive/byte-based selection deferred)
-* [~] Sample histogram/levels (full viewport-canvas histogram behavior deferred)
+* [x] Sample histogram/levels
 
 ### P3 — Managed panels instead of floating QDockWidgets
 
@@ -256,12 +256,12 @@ Main goal: Panel transitions preserve the central viewer size as best as Wayland
 
 Main goal: Montage never allocates based on total stack size during interaction.
 
-* [ ] Add byte-based visible tile selection.
-* [ ] Replace local mini-montage with viewport canvas + origin.
-* [ ] Make DisplayGeometry understand montage canvas origin.
-* [ ] Use sampled histogram data for montage levels instead of full hist collage where possible.
-* [ ] Add RSS stress test.
-* [ ] Keep multi-ImageItem path abandoned for now.
+* [x] Add byte-based visible tile selection.
+* [x] Replace local mini-montage with viewport canvas + origin.
+* [x] Make DisplayGeometry understand montage canvas origin.
+* [x] Use sampled histogram data for montage levels instead of full hist collage where possible.
+* [x] Add RSS stress test.
+* [x] Remove abandoned multi-ImageItem path.
 
 ### P3 — operation cost model and FFT backend
 

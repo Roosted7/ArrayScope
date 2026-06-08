@@ -9,8 +9,9 @@ source of array-view state.
   axes, profile axis, montage axis, slice indices, channel, scale, and per-axis flags.
 - `arrayscope.display.slice_engine`: converts `data + ViewState` into display-ready images and
   lines.
-- `arrayscope.display.montage`: plans montage tile geometry, identifies visible tiles, and keeps the
-  bounded small-collage helper used for currently loaded montage tiles.
+- `arrayscope.display.montage`: plans montage tile geometry, identifies visible tiles, composes the
+  bounded viewport canvas used by interactive montage display, and keeps the small `make_montage()`
+  helper for pure utility/test use.
 - `arrayscope.display.geometry`: the pure display-coordinate contract for normal image and montage
   views. It maps display points to array indices and profile states using the geometry committed with
   the current image.
@@ -224,9 +225,13 @@ choose magnitude, phase, real, imaginary, or magnitude plus phase strip.
 Montage is a display mode driven by range text in a non-image dimension slice field, stored on
 `ViewState.montage_axis`. The current image axes remain the tile Y/X axes. Range text on image axes is
 stored as per-axis display ranges, allowing image-axis subsetting such as `0:2:100`. Montage uses
-`MontagePlan` to derive grid geometry and visible tiles. Visible tiles are evaluated through the same
-image snapshot path as normal views, cached individually, and assembled only as a bounded loaded-tile
-image. Full giant montage allocation is blocked by render memory estimates.
+`MontagePlan` to derive full grid geometry and visible tiles. Visible tiles are evaluated through the
+same image snapshot path as normal views, cached individually, and composed into one bounded
+`MontageViewportCanvas` with `origin_x`/`origin_y` in full montage coordinates. Interactive montage
+display keeps a single `ImageItem`; `DisplayGeometry` maps canvas-local display points through the
+canvas origin into the full montage grid before resolving source tile indices. Histogram/ROI sources
+are canvas-sized and contain `NaN` for gaps and unloaded regions. Full giant montage allocation is
+blocked by render memory estimates and byte-budgeted visible tile selection.
 
 Operation creation is intentionally available from three places:
 

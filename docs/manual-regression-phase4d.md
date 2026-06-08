@@ -17,13 +17,19 @@ For Wayland-specific managed-panel checks, also run `docs/manual-regression-wayl
 
 - Open or synthesize a large stack where full montage would exceed 1 GiB.
 - Enable montage over a broad range.
-- Confirm ArrayScope shows a memory warning instead of allocating a giant collage.
+- Confirm ArrayScope shows a memory warning when relevant and does not allocate a full collage.
 - Confirm the UI remains responsive.
+- Pan through several later montage rows and confirm process memory does not visibly climb after each
+  render.
 
 ## Montage
 
 - Enable montage on a small stack and confirm tile labels/hover context use the montage source index.
+- Pan to later montage tiles and confirm hover and live-profile labels show the real source indices,
+  for example tile 10 reports `d<axis>=10` rather than local tile 0.
 - Draw an ROI across a montage tile gap and confirm gap pixels are ignored.
+- Draw or move an ROI across unloaded canvas regions after panning and confirm unloaded pixels are
+  ignored as `NaN`.
 - Change montage range text and confirm stale montage results do not overwrite the new selection.
 
 ## Panels
