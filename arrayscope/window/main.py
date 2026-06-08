@@ -86,6 +86,7 @@ class ArrayScopeWindow(
         self._operation_dock_user_visible = None
         self._profile_dock_user_visible = None
         self._inspection_dock_user_visible = None
+        self._progressive_preserve_enabled = False
         self._last_operation_axis = None
         self._focused_dimension_axis = None
         self._active_slice_axis = None
@@ -122,6 +123,7 @@ class ArrayScopeWindow(
         # Initialize dimension controls based on the authoritative view state.
         self.render(reason="initial", force_autolevel=True)
         self.show()
+        Qt.QtCore.QTimer.singleShot(0, lambda: setattr(self, "_progressive_preserve_enabled", True))
 
         # Set up file watcher if a filepath was provided (QFileSystemWatcher uses
         # OS-native events: inotify on Linux, FSEvents on macOS, ReadDirectoryChanges on Windows)

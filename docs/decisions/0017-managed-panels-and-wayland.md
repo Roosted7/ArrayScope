@@ -24,9 +24,16 @@ machine.
 managed panels preserve the central viewer with a post-layout transaction: record the central widget
 size, apply the panel change, let the `QMainWindow` layout settle, then correct the top-level size with
 `resize()`. A short generation-guarded `QTimer` retry loop verifies the result because Qt and Wayland
-compositors may apply configure/layout changes asynchronously. ArrayScope does not call `setGeometry()`
-or intentionally move the top-left window position for preserve-canvas behavior. Users can disable this
-best-effort main-window resizing from the View menu.
+compositors may apply configure/layout changes asynchronously. If ordinary `resize()` retries do not
+settle, the final retry temporarily sets the top-level minimum and maximum size to the requested window
+size on both the `QWidget` and its `QWindow`, calls `resize()`, then restores the original constraints.
+If Qt reports the target central layout without a remaining delta, ArrayScope still briefly fixes the
+current top-level size and repeats QWidget/QWindow resize/update requests as commit pokes for Wayland
+compositors. Detach transitions use only the normal correction loop, not the strong fixed-size/nudge
+escalation, so the new detached tool window can map cleanly. ArrayScope does not call
+`setGeometry()` or intentionally move the top-left window position for preserve-canvas behavior. Users
+can disable this best-effort main-window resizing from the View menu. Temporary stdout diagnostics with
+the `[ArrayScope preserve-canvas]` prefix stay in place while Wayland behavior is being debugged.
 
 Hidden and detached panels are removed from `QMainWindow`'s dock layout so their minimum sizes cannot
 affect the canvas.

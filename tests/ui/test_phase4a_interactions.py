@@ -157,6 +157,71 @@ def test_panel_resize_behavior_off_does_not_resize_main_window(qtbot):
         win.close()
 
 
+def test_panel_strong_preserve_temporarily_constrains_final_retry(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        default_minimum = QtCore.QSize(0, 0)
+        default_maximum = QtCore.QSize(16_777_215, 16_777_215)
+        current = win.centralWidget().size()
+        target = QtCore.QSize(current.width() + 24, current.height())
+
+        win.layout_manager._canvas_preserve_generation += 1
+        generation = win.layout_manager._canvas_preserve_generation
+        win.layout_manager._correct_canvas_size(
+            target,
+            attempts=1,
+            generation=generation,
+            dock_extents=(),
+            size_constraints=None,
+            strong_used=False,
+        )
+        _process_events(qtbot, count=2)
+
+        assert win.layout_manager._strong_preserve_constraints is not None
+        assert win.minimumSize() == win.maximumSize()
+
+        _process_events(qtbot, count=35)
+        assert win.minimumSize() == default_minimum
+        assert win.maximumSize() == default_maximum
+    finally:
+        win.close()
+
+
+def test_panel_strong_preserve_release_ignores_stale_generation(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        target = QtCore.QSize(win.size().width() + 12, win.size().height())
+        win.layout_manager._canvas_preserve_generation += 1
+        generation = win.layout_manager._canvas_preserve_generation
+
+        win.layout_manager._apply_strong_preserve_constraints(target, generation)
+        assert win.minimumSize() == target
+        assert win.maximumSize() == target
+
+        win.layout_manager._canvas_preserve_generation += 1
+        win.layout_manager._release_strong_preserve_constraints(generation)
+        assert win.minimumSize() == target
+        assert win.maximumSize() == target
+
+        win.layout_manager._release_strong_preserve_constraints(win.layout_manager._canvas_preserve_generation)
+        assert win.minimumSize() != target
+        assert win.maximumSize() != target
+    finally:
+        win.close()
+
+
 def test_view_menu_preserve_canvas_setting_persists(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import PanelResizeBehavior

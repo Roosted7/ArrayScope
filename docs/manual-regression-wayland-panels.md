@@ -12,6 +12,9 @@ test platform, but Wayland is the target environment for this checklist.
 - Hide each panel from the managed title-bar Hide button and from the View menu.
 - Confirm the main window top-left position does not jump during panel transitions.
 - Confirm the central viewer returns to approximately the same pixel size after each transition.
+- Watch stdout for `[ArrayScope preserve-canvas]` lines. If preservation fails, keep the start,
+  correct, commit-poke, commit-nudge, commit-nudge-finish, strong-apply, and strong-release lines with
+  the bug report.
 - Confirm detached panels still move via the custom title/move handle.
 
 ## Preserve Setting
