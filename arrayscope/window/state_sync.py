@@ -41,12 +41,9 @@ class StateSyncMixin:
         if hasattr(self, "dimension_strip"):
             self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
         if hasattr(self, "display_toolbar"):
-            viewport_mode = getattr(getattr(self.img_view, "viewport_controller", None), "mode", None) if hasattr(self, "img_view") else None
-            aspect = "one_to_one" if getattr(viewport_mode, "value", None) == "one_to_one" else "fit"
             self.display_toolbar.set_current(
                 channel=self.view_state.channel.value,
                 scale=self.view_state.scale.value,
-                aspect=aspect,
                 window_mode="absolute" if self.widgets['buttons']['display']['window_absolute'].isChecked() else "relative",
                 live_profile=self.widgets['buttons']['display']['live_profile'].isChecked(),
             )

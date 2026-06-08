@@ -108,6 +108,10 @@ Rules:
   syntax with a compatibility warning or explicit preference.
 * Consider detached managed panels backed by `QDialog`/tool windows if platform-specific `QDockWidget`
   floating behavior remains problematic after the Phase 4c lifecycle cleanup.
+* Prototype a detached `QDialog`/tool-window panel model for medium-term Wayland reliability instead
+  of repairing `QDockWidget` lifecycle events with event filters.
+* Add a priority scheduler for visible rendering, profile, ROI, hover, and prefetch work before
+  reintroducing operation-backed predictive prefetch.
 * Reintroduce physical FOV/aspect controls only after axis spacing/unit metadata is available.
 
 ## Maybe later

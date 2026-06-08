@@ -71,6 +71,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._roi_items = {}
         self._roi_counter = 0
         self._drawing_points = []
+        self._pending_roi_draw_tool = None
         self._drawing_active = False
         self._freehand_spacing = 1.0
         self.viewport_controller = ViewportController()
@@ -584,13 +585,31 @@ class ImageView2D(QtWidgets.QWidget):
         if tool not in allowed:
             raise ValueError(f"unknown inspection tool: {tool}")
         self._inspection_tool = str(tool)
-        if tool in {"profile", "roi_line", "roi_rectangle", "roi_polyline", "roi_freehand"}:
+        if tool in {"profile", "roi_line", "roi_rectangle"} or self._pending_roi_draw_tool is not None:
             self.getView().setCursor(QtCore.Qt.CursorShape.CrossCursor)
         else:
             self.getView().unsetCursor()
 
     def inspectionTool(self):
         return self._inspection_tool
+
+    def beginRoiDrawingOnce(self, tool):
+        if tool not in {"roi_polyline", "roi_freehand"}:
+            return False
+        self._pending_roi_draw_tool = str(tool)
+        self._drawing_active = False
+        self._drawing_points = []
+        self.getView().setCursor(QtCore.Qt.CursorShape.CrossCursor)
+        return True
+
+    def cancelPendingRoiDrawing(self):
+        self._pending_roi_draw_tool = None
+        self._drawing_active = False
+        self._drawing_points = []
+        if self._inspection_tool in {"profile", "roi_line", "roi_rectangle"}:
+            self.getView().setCursor(QtCore.Qt.CursorShape.CrossCursor)
+        else:
+            self.getView().unsetCursor()
 
     def createRoi(self, kind, *, points=None, rect=None, line_width=1.0, label=None, color=None):
         kind = kind if isinstance(kind, RoiKind) else RoiKind(str(kind))
@@ -602,8 +621,7 @@ class ImageView2D(QtWidgets.QWidget):
         if kind == RoiKind.POLYLINE and len(points) < MIN_POLYLINE_POINTS:
             points = self._default_polyline_points()
         if kind == RoiKind.FREEHAND_POLYGON and len(points) < MIN_FREEHAND_POINTS:
-            x, y, width, height = self._default_rect()
-            points = ((x, y), (x + width, y), (x + width, y + height), (x, y + height))
+            raise ValueError("freehand ROI requires a drag path")
         if kind == RoiKind.FREEHAND_POLYGON:
             points = close_polygon(simplify_polyline(points, DEFAULT_FREEHAND_SIMPLIFY_TOLERANCE))
 
@@ -771,8 +789,9 @@ class ImageView2D(QtWidgets.QWidget):
         return True
 
     def _handle_roi_drawing_event(self, event):
-        if self._inspection_tool not in {"roi_polyline", "roi_freehand"}:
+        if self._pending_roi_draw_tool is None and not self._drawing_active:
             return False
+        tool = self._pending_roi_draw_tool
         event_type = event.type()
         if event_type == QtCore.QEvent.Type.MouseButtonPress and event.button() == QtCore.Qt.MouseButton.LeftButton:
             point = self._event_image_point(event)
@@ -792,10 +811,12 @@ class ImageView2D(QtWidgets.QWidget):
             points = tuple(self._drawing_points)
             self._drawing_active = False
             self._drawing_points = []
-            if self._inspection_tool == "roi_freehand" and len(points) >= MIN_FREEHAND_POINTS:
+            self._pending_roi_draw_tool = None
+            if tool == "roi_freehand" and len(points) >= MIN_FREEHAND_POINTS:
                 self.createRoi(RoiKind.FREEHAND_POLYGON, points=points)
-            elif self._inspection_tool == "roi_polyline" and len(points) >= MIN_POLYLINE_POINTS:
+            elif tool == "roi_polyline" and len(points) >= MIN_POLYLINE_POINTS:
                 self.createRoi(RoiKind.POLYLINE, points=points)
+            self.setInspectionTool(self._inspection_tool if self._inspection_tool in {"cursor", "profile"} else "cursor")
             return True
         return False
 

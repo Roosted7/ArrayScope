@@ -15,7 +15,9 @@ def configure_standard_dock(dock: QtWidgets.QDockWidget, *, min_size=(280, 180))
         | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
         | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
     )
-    dock.setMinimumSize(int(min_size[0]), int(min_size[1]))
+    body = QtWidgets.QDockWidget.widget(dock)
+    if body is not None:
+        body.setMinimumSize(int(min_size[0]), int(min_size[1]))
 
 
 def add_size_grip(layout: QtWidgets.QBoxLayout) -> QtWidgets.QSizeGrip:

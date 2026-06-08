@@ -35,7 +35,10 @@ Direct Fit refits the image. Direct 1:1 computes a ViewBox range from the
 viewport pixel size instead of calling auto-range.
 
 Phase 4c removed the visible FOV/aspect shortcut until axis spacing metadata
-exists. Fit and 1:1 are viewport commands, not channel/aspect state.
+exists. Fit and 1:1 are viewport commands, not channel/aspect state. The toolbar
+exposes them as actions only; triggering them changes the ViewBox and does not
+render or evaluate data. The toolbar does not display a persistent “View: Fit”
+state for normal non-1:1 viewport modes.
 
 ROI statistics remain display-space in this phase. They sample the displayed
 scalar image or histogram source. Montage histogram sources contain `NaN` in

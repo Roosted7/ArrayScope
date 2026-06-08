@@ -211,8 +211,8 @@ class OperationActionsMixin:
                 PaletteCommand("show_inspection", "Show inspection dock", icon="analytics"),
                 PaletteCommand("roi_line", "Line ROI tool", icon="show_chart"),
                 PaletteCommand("roi_rectangle", "Rectangle ROI tool", icon="crop"),
-                PaletteCommand("roi_polyline", "Polyline ROI tool", icon="waves"),
-                PaletteCommand("roi_freehand", "Freehand ROI tool", icon="edit"),
+                PaletteCommand("roi_polyline", "Draw polyline ROI", icon="waves"),
+                PaletteCommand("roi_freehand", "Draw freehand ROI", icon="edit"),
                 PaletteCommand("export_derived", "Export derived array", icon="download"),
                 PaletteCommand("save_recipe", "Save operation recipe", icon="save"),
                 PaletteCommand("load_recipe", "Load operation recipe", icon="folder_open"),
@@ -255,6 +255,10 @@ class OperationActionsMixin:
         return None
 
     def _select_roi_tool(self, tool):
+        if tool in {"roi_polyline", "roi_freehand"}:
+            if hasattr(self, "img_view"):
+                return self.img_view.beginRoiDrawingOnce(tool)
+            return False
         if hasattr(self, "inspection_dock"):
             self.inspection_dock.set_current_tool(tool)
         self._on_inspection_tool_changed(tool)

@@ -42,8 +42,6 @@ class InspectionDock(StandardDockWidget):
             ("Profile", "profile"),
             ("Line", "roi_line"),
             ("Rectangle", "roi_rectangle"),
-            ("Polyline", "roi_polyline"),
-            ("Freehand", "roi_freehand"),
         ):
             self.tool_combo.addItem(label, tool)
         controls.addWidget(self.tool_combo)
@@ -91,6 +89,7 @@ class InspectionDock(StandardDockWidget):
         self.delete_button.clicked.connect(self._delete_clicked)
         self.clear_button.clicked.connect(self._clear_clicked)
         self.stats_table.selectionModel().selectionChanged.connect(self._selection_changed)
+        self.add_button.setEnabled(self.current_tool() in {"roi_line", "roi_rectangle"})
 
     def current_tool(self):
         return self.tool_combo.currentData() or "cursor"
@@ -139,11 +138,14 @@ class InspectionDock(StandardDockWidget):
             self.histogram_plot.plot(centers, result.counts, pen=pen, name=result.name)
 
     def _tool_changed(self, _index):
+        self.add_button.setEnabled(self.current_tool() in {"roi_line", "roi_rectangle"})
         if not self._updating:
             self._on_tool_changed(self.current_tool())
 
     def _add_clicked(self):
-        self._on_add_roi(self.current_tool())
+        tool = self.current_tool()
+        if tool in {"roi_line", "roi_rectangle"}:
+            self._on_add_roi(tool)
 
     def _delete_clicked(self):
         roi_id = self.current_roi_id()

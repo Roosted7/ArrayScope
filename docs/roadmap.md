@@ -147,37 +147,39 @@ At least one CI job should run: `ARRAYSCOPE_STRICT_UI=1 pytest tests/ui`
 
 Goal: fix remaining bugs and harden interactions before adding multi-window and session features.
 
-### P0 correctness
+### Phase 4c-1 — recovery stability
 
 * [x] Fix display-axis range extraction bug.
 * [x] Compare full async request keys, not partial document keys.
 * [x] Fix channel auto/manual behavior.
 * [x] Fix montage/visible-render status stuck on Computing.
-
-### P1 — interaction
-
-* [x] Remove QDockWidget lifecycle overrides.
-* [x] Centralize all dock visibility/floating behavior.
-* [x] Add dock repeated-open/close tests.
+* [x] Simplify dock manager by removing event-filter/snapshot direct-close repair machinery.
+* [x] Add explicit user-hidden intent so Operations does not auto-reopen after user close.
+* [x] Stop forced redocking when showing floating Inspection/Profile docks.
 * [x] Remove FOV from UI for now.
-* [x] Make Fit and 1:1 real viewport commands.
-* [x] Stop hover from showing updating on cached/direct values.
+* [x] Make Fit and 1:1 viewport-only commands.
+* [x] Replace hover scalar evaluation with direct committed-display reads.
+* [x] Move freehand/polyline ROI drawing to one-shot canvas interaction.
 
-### P2 — responsiveness
+### Phase 4c-2 — performance discipline
 
 * [x] Debounce ROI stats.
 * [x] Move heavy ROI histograms/stats off UI thread.
 * [x] Throttle live profile and hover requests.
 * [x] Deduplicate prefetch requests.
-* [x] Keep visible rendering higher priority than prefetch.
+* [x] Disable operation-backed image prefetch until a priority scheduler exists.
+* [x] Avoid hidden profile/inspection render-tail work.
 
-### P3 — tests
+### Phase 4c-3 — real-path tests
 
 * [x] Add deterministic tests for every known manual bug.
 * [x] Expand Hypothesis tests to arbitrary image axes and axis ranges.
 * [x] Add pytest-qt action-path tests.
 * [x] Add strict UI mode in CI.
 * [x] Add architecture guards for dock and high-frequency status behavior.
+* [x] Add real operation dock user-close regression test.
+* [x] Add real hover path tests that fail on scalar scheduling or “updating”.
+* [x] Add viewport toolbar tests that fail if Fit/1:1 render data.
 
 ## Phase 5 — Multi-window and sessions
 

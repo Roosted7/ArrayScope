@@ -1,6 +1,7 @@
 import os
 
 import numpy as np
+import pytest
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
@@ -98,9 +99,42 @@ def test_imageview_creates_polyline_and_freehand_rois(qt_app):
     view.close()
 
 
-def test_imageview_inspection_tool_validation(qt_app):
-    import pytest
+def test_imageview_freehand_requires_points(qt_app):
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.display.imageview2d import ImageView2D
 
+    view = ImageView2D()
+    view.setImage(np.zeros((10, 12), dtype=float))
+
+    with pytest.raises(ValueError, match="freehand ROI requires a drag path"):
+        view.createRoi(RoiKind.FREEHAND_POLYGON)
+    view.close()
+
+
+def test_persistent_polyline_and_freehand_tools_do_not_start_drawing(qt_app):
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.zeros((10, 12), dtype=float))
+    view.setInspectionTool("roi_freehand")
+    event = QtGui.QMouseEvent(
+        QtCore.QEvent.Type.MouseButtonPress,
+        QtCore.QPointF(1, 1),
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+
+    assert not view._handle_roi_drawing_event(event)
+    assert view.beginRoiDrawingOnce("roi_freehand")
+    assert view._handle_roi_drawing_event(event)
+    view.cancelPendingRoiDrawing()
+    view.close()
+
+
+def test_imageview_inspection_tool_validation(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
