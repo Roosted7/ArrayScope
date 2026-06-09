@@ -67,7 +67,7 @@ Rules:
 ## Performance ideas
 
 * Support lazy/view-like ops for crop, reverse, conjugate, and simple slicing.
-* Add a user-facing cache budget setting with presets for laptop, workstation, and memory-constrained sessions.
+* Add optional per-cache manual budget overrides on top of the current memory profile presets if users need finer control.
 * Add richer diagnostics graphs/timelines for cache growth, scheduler activity, and prefetch usefulness.
 * Add explicit export progress for derived-array `.npy/.npz` saves after materialization is complete.
 * Add benchmark fixtures for representative MRI stacks so cache and slab changes can be compared over time.

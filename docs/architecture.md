@@ -126,13 +126,14 @@ interaction.
 Managed panel visibility uses supported ArrayScope paths only: the managed title-bar Hide button,
 View menu actions, or `WindowLayoutManager` programmatic methods. Native `QDockWidget.closeEvent`
 semantics are not an app-level lifecycle path for managed panels.
-The preserve-canvas transaction is best effort because the window manager or compositor may constrain
-top-level sizes; ArrayScope requests size correction with `resize()`, escalates once with temporary
-QWidget/QWindow min/max size constraints, sends repeated commit pokes when Qt already reports the
-target layout, and accepts the remaining error after bounded retries. Detach transitions intentionally
-skip the strong fixed-size/nudge escalation so the new detached tool window can map cleanly. Temporary
-stdout diagnostics with the `[ArrayScope preserve-canvas]` prefix remain while Wayland behavior is being
-debugged.
+Preserve-canvas panel transactions are owned by
+`arrayscope.window.canvas_preserve.CanvasPreserveController`; `WindowLayoutManager` delegates panel
+size transitions to it. `PanelResizeBehavior` supports `off`, `best_effort`, and `strong_wayland`.
+Best effort requests top-level size correction with `resize()` and accepts bounded compositor error.
+Strong Wayland is explicit, Wayland-gated, and may temporarily apply captured QWidget/QWindow min/max
+constraints plus commit pokes/nudges when ordinary correction does not settle. Detach transitions skip
+the strong path so detached tool windows can map cleanly. Preserve-canvas diagnostics are exposed in
+Developer -> Diagnostics; no stdout preserve diagnostics are emitted by default.
 
 The window tracks derived-array metadata from `ArrayDocument.current_shape` and dtype estimates.
 It must not materialize the derived array as normal state. Full derived evaluation is reserved for

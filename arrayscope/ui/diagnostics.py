@@ -10,7 +10,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.core.memory_budget import format_bytes
-from arrayscope.core.runtime_diagnostics import format_runtime_diagnostics
+from arrayscope.core.runtime_diagnostics import format_runtime_diagnostics, format_runtime_diagnostics_sections
 
 
 class _SegmentBar(QtWidgets.QWidget):
@@ -84,6 +84,11 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
+        overview = QtWidgets.QWidget()
+        overview_layout = QtWidgets.QVBoxLayout(overview)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        overview_layout.setSpacing(8)
+
         bars = QtWidgets.QGridLayout()
         bars.setHorizontalSpacing(10)
         bars.setVerticalSpacing(6)
@@ -99,7 +104,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         }
         for row, key in enumerate(("system", "rss", "image", "tile", "profile", "render", "canvas", "prefetch")):
             bars.addWidget(self._bars[key], row // 2, row % 2)
-        layout.addLayout(bars)
+        overview_layout.addLayout(bars)
 
         scheduler_layout = QtWidgets.QVBoxLayout()
         scheduler_layout.setSpacing(4)
@@ -108,18 +113,30 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             bar = _SegmentBar(name)
             self._scheduler_bars[name] = bar
             scheduler_layout.addWidget(bar)
-        layout.addLayout(scheduler_layout)
+        self._canvas_preserve_bar = _SegmentBar("Canvas preserve")
+        scheduler_layout.addWidget(self._canvas_preserve_bar)
+        overview_layout.addLayout(scheduler_layout)
+        layout.addWidget(overview, 0)
 
-        self.text_edit = QtWidgets.QPlainTextEdit()
-        self.text_edit.setReadOnly(True)
         font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
-        self.text_edit.setFont(font)
-        layout.addWidget(self.text_edit, 1)
+        self.tabs = QtWidgets.QTabWidget()
+        self._section_edits = {}
+        for title in ("Memory", "Caches", "Schedulers", "Render", "Canvas Preserve", "Montage", "FFT", "Operations", "All"):
+            edit = QtWidgets.QPlainTextEdit()
+            edit.setReadOnly(True)
+            edit.setFont(font)
+            self._section_edits[title] = edit
+            self.tabs.addTab(edit, title)
+        self.text_edit = self._section_edits["All"]
+        self.tabs.currentChanged.connect(lambda _index: self._refresh_current_text_tab())
+        layout.addWidget(self.tabs, 1)
 
         buttons = QtWidgets.QDialogButtonBox()
-        self.refresh_button = buttons.addButton("Refresh", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole)
+        self.refresh_button = buttons.addButton("Auto text", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole)
+        self.refresh_button.setCheckable(True)
+        self.refresh_button.setChecked(True)
         close_button = buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Close)
-        self.refresh_button.clicked.connect(self.refresh)
+        self.refresh_button.toggled.connect(lambda checked: self.refresh(force_text=True) if checked else None)
         close_button.clicked.connect(self.close)
         layout.addWidget(buttons)
         self.setLayout(layout)
@@ -127,25 +144,60 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         self._timer = Qt.QtCore.QTimer(self)
         self._timer.setInterval(int(interval_ms))
         self._timer.timeout.connect(self.refresh)
-        self.refresh()
+        self._last_snapshot = None
+        self.refresh(force_text=True)
 
-    def refresh(self) -> None:
+    def refresh(self, *, force_text: bool = False) -> None:
         try:
             snapshot = self._snapshot_provider()
-            text = format_runtime_diagnostics(snapshot)
+            self._last_snapshot = snapshot
             self._update_bars(snapshot)
+            if force_text or self.refresh_button.isChecked():
+                self._refresh_current_text_tab(force=force_text)
+            return
         except Exception as exc:
             text = f"Diagnostics unavailable: {exc}"
-        self.text_edit.setPlainText(text)
+        self.current_text_edit().setPlainText(text)
+
+    def current_text_edit(self):
+        widget = self.tabs.currentWidget()
+        return widget if isinstance(widget, QtWidgets.QPlainTextEdit) else self.text_edit
+
+    def _refresh_current_text_tab(self, *, force: bool = False) -> None:
+        if self._last_snapshot is None:
+            return
+        if not force and not self.refresh_button.isChecked():
+            return
+        title = self.tabs.tabText(self.tabs.currentIndex())
+        edit = self._section_edits.get(title)
+        if edit is None:
+            return
+        if title == "All":
+            edit.setPlainText(format_runtime_diagnostics(self._last_snapshot))
+            return
+        sections = format_runtime_diagnostics_sections(self._last_snapshot)
+        edit.setPlainText(sections.get(title, ""))
 
     def _update_bars(self, snapshot) -> None:
         policy = snapshot.memory_policy
         system_used = max(0, int(policy.system_total_bytes) - int(policy.system_available_bytes))
         self._bars["system"].set_usage(used=system_used, total=policy.system_total_bytes)
         self._bars["rss"].set_usage(used=policy.process_rss_bytes, total=policy.system_total_bytes)
-        self._bars["image"].set_usage(used=snapshot.image_cache.bytes_used, total=snapshot.image_cache.max_bytes)
-        self._bars["tile"].set_usage(used=snapshot.tile_cache.bytes_used, total=snapshot.tile_cache.max_bytes)
-        self._bars["profile"].set_usage(used=snapshot.profile_cache.bytes_used, total=snapshot.profile_cache.max_bytes)
+        self._bars["image"].set_usage(
+            used=snapshot.image_cache.bytes_used,
+            total=snapshot.image_cache.max_bytes,
+            detail=f"entries={snapshot.image_cache.entries}, {format_bytes(snapshot.image_cache.bytes_used)} / {format_bytes(snapshot.image_cache.max_bytes)}",
+        )
+        self._bars["tile"].set_usage(
+            used=snapshot.tile_cache.bytes_used,
+            total=snapshot.tile_cache.max_bytes,
+            detail=f"entries={snapshot.tile_cache.entries}, {format_bytes(snapshot.tile_cache.bytes_used)} / {format_bytes(snapshot.tile_cache.max_bytes)}",
+        )
+        self._bars["profile"].set_usage(
+            used=snapshot.profile_cache.bytes_used,
+            total=snapshot.profile_cache.max_bytes,
+            detail=f"entries={snapshot.profile_cache.entries}, {format_bytes(snapshot.profile_cache.bytes_used)} / {format_bytes(snapshot.profile_cache.max_bytes)}",
+        )
         render_used = snapshot.render.estimated_display_bytes
         render_budget = snapshot.render.render_budget_bytes or policy.visible_render_budget_bytes
         self._bars["render"].set_usage(
@@ -196,10 +248,18 @@ class DiagnosticsDialog(QtWidgets.QDialog):
                 ),
                 summary=summary,
             )
+        preserve = snapshot.canvas_preserve
+        result = str(preserve.last_result or "none")
+        color = _preserve_color(result, bool(preserve.active), bool(preserve.strong_used))
+        summary = (
+            f"{result}, mode {preserve.mode}, attempts {preserve.attempts_used}, "
+            f"strong {'yes' if preserve.strong_used else 'no'}"
+        )
+        self._canvas_preserve_bar.set_segments((("state", 1, color),), summary=summary)
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.refresh()
+        self.refresh(force_text=True)
         self._timer.start()
 
     def hideEvent(self, event):
@@ -231,3 +291,17 @@ def _bar_style(fraction: float, *, color_mode: str = "usage") -> str:
         "}"
         f"QProgressBar::chunk {{ background-color: {color}; border-radius: 2px; }}"
     )
+
+
+def _preserve_color(result: str, active: bool, strong_used: bool) -> str:
+    if active:
+        return "#2563eb"
+    if "unsettled" in result:
+        return "#ca8a04"
+    if result.startswith("skipped"):
+        return "#6b7280"
+    if strong_used:
+        return "#c2410c"
+    if result == "settled":
+        return "#15803d"
+    return "#6b7280"

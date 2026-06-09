@@ -20,20 +20,17 @@ The supported close/hide paths are the managed title-bar Hide button, View menu 
 `closeEvent` lifecycle override, so native dock close behavior is not a second managed-panel state
 machine.
 
-`WindowLayoutManager` owns the outer-window size transition. Opening, hiding, detaching, and redocking
-managed panels preserve the central viewer with a post-layout transaction: record the central widget
-size, apply the panel change, let the `QMainWindow` layout settle, then correct the top-level size with
-`resize()`. A short generation-guarded `QTimer` retry loop verifies the result because Qt and Wayland
-compositors may apply configure/layout changes asynchronously. If ordinary `resize()` retries do not
-settle, the final retry temporarily sets the top-level minimum and maximum size to the requested window
-size on both the `QWidget` and its `QWindow`, calls `resize()`, then restores the original constraints.
-If Qt reports the target central layout without a remaining delta, ArrayScope still briefly fixes the
-current top-level size and repeats QWidget/QWindow resize/update requests as commit pokes for Wayland
-compositors. Detach transitions use only the normal correction loop, not the strong fixed-size/nudge
-escalation, so the new detached tool window can map cleanly. ArrayScope does not call
-`setGeometry()` or intentionally move the top-left window position for preserve-canvas behavior. Users
-can disable this best-effort main-window resizing from the View menu. Temporary stdout diagnostics with
-the `[ArrayScope preserve-canvas]` prefix stay in place while Wayland behavior is being debugged.
+`WindowLayoutManager` delegates outer-window size transitions to
+`CanvasPreserveController`. Opening, hiding, detaching, and redocking managed panels can preserve the
+central viewer with a post-layout transaction: record the central widget size, apply the panel change,
+let the `QMainWindow` layout settle, then correct the top-level size with `resize()`. A short
+generation-guarded `QTimer` retry loop verifies the result because Qt and Wayland compositors may apply
+configure/layout changes asynchronously. Strong Wayland mode is opt-in from the View menu; only on a
+Wayland platform may it temporarily set captured QWidget/QWindow minimum and maximum sizes and issue
+commit pokes/nudges when ordinary correction does not settle. Detach transitions use only the normal
+correction loop, not the strong fixed-size/nudge escalation, so the new detached tool window can map
+cleanly. ArrayScope does not call `setGeometry()` or intentionally move the top-left window position
+for preserve-canvas behavior. Preserve state and recent events are visible in Developer -> Diagnostics.
 
 Hidden and detached panels are removed from `QMainWindow`'s dock layout so their minimum sizes cannot
 affect the canvas.
@@ -57,8 +54,8 @@ Qt tests cover title-bar detach, drag-to-detach, hide, redock, re-show, and rese
 open/close with no prior manual resize, operation close while Inspection remains open, and detached
 dialogs containing the original panel body. Lifecycle tests also cover detach, detached-dialog close,
 View menu hide while detached, reopen, redock, hide, reopen, and reset layout without stale dialogs.
-Preserve-canvas tests cover resize-only correction, no intentional position movement, the off setting,
-and settings persistence.
+Preserve-canvas tests cover resize-only correction, no intentional position movement, off/best
+effort/strong Wayland settings, exact constraint restore, and diagnostics events.
 
 ## Manual checks required
 

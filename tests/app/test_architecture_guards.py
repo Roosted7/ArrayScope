@@ -103,11 +103,26 @@ def test_managed_panel_code_does_not_use_native_set_floating():
 
 def test_layout_controller_preserves_canvas_without_set_geometry_or_clamping():
     text = (ROOT / "arrayscope" / "window" / "layout_controller.py").read_text()
+    preserve_text = (ROOT / "arrayscope" / "window" / "canvas_preserve.py").read_text()
     assert ".setGeometry(" not in text
     assert "_clamp_to_available_screen" not in text
-    assert ".resize(" in text
+    assert ".resize(" in preserve_text
     assert "run_panel_transition_preserving_canvas" in text
-    assert "_correct_canvas_size" in text
+    assert "CanvasPreserveController" in text
+
+
+def test_canvas_preserve_controller_owns_strong_preserve_path():
+    layout_text = (ROOT / "arrayscope" / "window" / "layout_controller.py").read_text()
+    preserve_text = (ROOT / "arrayscope" / "window" / "canvas_preserve.py").read_text()
+    assert "[ArrayScope preserve-canvas]" not in layout_text
+    assert "print(" not in layout_text
+    assert "_correct_canvas_size" not in layout_text
+    assert "_apply_strong_preserve_constraints" not in layout_text
+    assert "_release_strong_preserve_constraints" not in layout_text
+    assert "CanvasPreserveController" in preserve_text
+    assert "_correct_canvas_size" in preserve_text
+    assert "_apply_strong_preserve_constraints" in preserve_text
+    assert "commit_nudge" in preserve_text
 
 
 def test_window_render_montage_view_does_not_call_make_montage():

@@ -7,16 +7,8 @@ from dataclasses import dataclass
 import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
-from arrayscope.app.settings_state import PanelResizeBehavior
+from arrayscope.window.canvas_preserve import CanvasPreserveController
 from arrayscope.window.panels import PanelLocation
-
-
-_CANVAS_PRESERVE_ATTEMPTS = 4
-_CANVAS_PRESERVE_RETRY_MS = 16
-_CANVAS_PRESERVE_TOLERANCE_PX = 1
-_CANVAS_STRONG_PRESERVE_HOLD_MS = 250
-_CANVAS_STRONG_PRESERVE_NUDGE_MS = 16
-_QT_WIDGET_SIZE_MAX = 16_777_215
 
 
 @dataclass
@@ -28,20 +20,11 @@ class ManagedDockState:
     last_area: Qt.QtCore.Qt.DockWidgetArea | None = None
 
 
-@dataclass(frozen=True)
-class _WindowSizeConstraints:
-    minimum: Qt.QtCore.QSize
-    maximum: Qt.QtCore.QSize
-    window_minimum: Qt.QtCore.QSize | None = None
-    window_maximum: Qt.QtCore.QSize | None = None
-
-
 class WindowLayoutManager:
     def __init__(self, window):
         self.window = window
         self._dock_states = {}
-        self._canvas_preserve_generation = 0
-        self._strong_preserve_constraints: _WindowSizeConstraints | None = None
+        self.canvas_preserver = CanvasPreserveController(self)
 
     def restore_window_settings(self):
         win = self.window
@@ -178,7 +161,7 @@ class WindowLayoutManager:
                 if raise_dock:
                     dock.raise_()
 
-            self.run_panel_transition_preserving_canvas(transition, preserve_canvas=preserve_canvas)
+            self.run_panel_transition_preserving_canvas(transition, preserve_canvas=preserve_canvas, transition_name="redock")
             self.schedule_view_geometry_refresh()
             return
         currently_visible = dock.isVisible() if win.isVisible() else not dock.isHidden()
@@ -204,7 +187,11 @@ class WindowLayoutManager:
             if not visible:
                 self._activate_main_window_layout()
 
-        self.run_panel_transition_preserving_canvas(transition, preserve_canvas=preserve_canvas)
+        self.run_panel_transition_preserving_canvas(
+            transition,
+            preserve_canvas=preserve_canvas,
+            transition_name="show-docked" if visible else "hide-docked",
+        )
         self.schedule_view_geometry_refresh()
 
     def _window_alive(self) -> bool:
@@ -242,8 +229,7 @@ class WindowLayoutManager:
         return action
 
     def close_managed_docks_for_shutdown(self):
-        self._canvas_preserve_generation += 1
-        self._release_strong_preserve_constraints(force=True)
+        self.canvas_preserver.cancel()
         for dock in self._managed_docks():
             if dock is None:
                 continue
@@ -280,6 +266,7 @@ class WindowLayoutManager:
                 transition,
                 preserve_canvas=preserve_canvas,
                 strong_preserve=False,
+                transition_name="detach",
             )
         else:
             panel_manager.detach_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
@@ -294,7 +281,7 @@ class WindowLayoutManager:
             def transition():
                 panel_manager.redock_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
 
-            self.run_panel_transition_preserving_canvas(transition, preserve_canvas=preserve_canvas)
+            self.run_panel_transition_preserving_canvas(transition, preserve_canvas=preserve_canvas, transition_name="redock")
         else:
             panel_manager.redock_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
         self.schedule_view_geometry_refresh()
@@ -319,266 +306,20 @@ class WindowLayoutManager:
             layout.activate()
         self.refresh_view_geometry()
 
-    def run_panel_transition_preserving_canvas(self, transition, *, preserve_canvas: bool, strong_preserve: bool = True) -> None:
-        if not self._canvas_preserve_enabled(preserve_canvas):
-            transition()
-            self.refresh_view_geometry()
-            return
-        self._release_strong_preserve_constraints(force=True)
-        central = self.window.centralWidget()
-        target_canvas_size = Qt.QtCore.QSize(central.size())
-        start_window_size = Qt.QtCore.QSize(self.window.size())
-        dock_extents = self._visible_managed_dock_extents()
-        size_constraints = self._default_window_size_constraints()
-        self._canvas_preserve_generation += 1
-        generation = self._canvas_preserve_generation
-        print(
-            "[ArrayScope preserve-canvas] start "
-            f"generation={generation} target_canvas={target_canvas_size.width()}x{target_canvas_size.height()} "
-            f"window={self.window.width()}x{self.window.height()} docks={len(dock_extents)}",
-            flush=True,
-        )
-        transition()
-        self._activate_main_window_layout()
-        self._restore_visible_dock_extents(dock_extents)
-        Qt.QtCore.QTimer.singleShot(
-            0,
-            lambda: self._correct_canvas_size(
-                target_canvas_size,
-                attempts=_CANVAS_PRESERVE_ATTEMPTS,
-                generation=generation,
-                dock_extents=dock_extents,
-                size_constraints=size_constraints,
-                strong_used=False,
-                start_window_size=start_window_size,
-                strong_preserve=strong_preserve,
-            ),
-        )
-
-    def _canvas_preserve_enabled(self, preserve_canvas: bool) -> bool:
-        win = self.window
-        settings = getattr(win, "app_settings", None)
-        behavior = getattr(settings, "panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT)
-        return (
-            bool(preserve_canvas)
-            and behavior == PanelResizeBehavior.BEST_EFFORT
-            and not win.isMaximized()
-            and not win.isFullScreen()
-            and win.centralWidget() is not None
-        )
-
-    def _correct_canvas_size(
+    def run_panel_transition_preserving_canvas(
         self,
-        target_canvas_size,
+        transition,
         *,
-        attempts: int,
-        generation: int,
-        dock_extents,
-        size_constraints: _WindowSizeConstraints | None = None,
-        strong_used: bool = False,
-        start_window_size: Qt.QtCore.QSize | None = None,
+        preserve_canvas: bool,
         strong_preserve: bool = True,
+        transition_name: str = "",
     ) -> None:
-        if generation != self._canvas_preserve_generation:
-            return
-        win = self.window
-        central = win.centralWidget()
-        if central is None or attempts <= 0:
-            self._release_strong_preserve_constraints(generation)
-            return
-        layout = win.layout()
-        if layout is not None:
-            layout.invalidate()
-            layout.activate()
-        self._restore_visible_dock_extents(dock_extents)
-        current = central.size()
-        dx = int(target_canvas_size.width()) - int(current.width())
-        dy = int(target_canvas_size.height()) - int(current.height())
-        print(
-            "[ArrayScope preserve-canvas] correct "
-            f"generation={generation} attempts={attempts} current_canvas={current.width()}x{current.height()} "
-            f"target_canvas={target_canvas_size.width()}x{target_canvas_size.height()} "
-            f"delta={dx}x{dy} window={win.width()}x{win.height()}",
-            flush=True,
+        self.canvas_preserver.run(
+            transition,
+            preserve_canvas=preserve_canvas,
+            allow_strong=strong_preserve,
+            transition_name=transition_name,
         )
-        if abs(dx) <= _CANVAS_PRESERVE_TOLERANCE_PX and abs(dy) <= _CANVAS_PRESERVE_TOLERANCE_PX:
-            self.refresh_view_geometry()
-            if strong_preserve and start_window_size is not None and win.size() != start_window_size:
-                self._poke_window_resize_commit(generation, size_constraints=size_constraints)
-            self._schedule_strong_preserve_release(generation)
-            return
-        minimum = win.minimumSize()
-        new_width = max(int(minimum.width()), int(win.width()) + dx)
-        new_height = max(int(minimum.height()), int(win.height()) + dy)
-        if new_width != win.width() or new_height != win.height():
-            use_strong = strong_preserve and attempts == 1 and not strong_used
-            if use_strong:
-                self._apply_strong_preserve_constraints(
-                    Qt.QtCore.QSize(new_width, new_height),
-                    generation,
-                    restore_constraints=size_constraints,
-                )
-            win.resize(new_width, new_height)
-            self._restore_visible_dock_extents(dock_extents)
-        next_attempts = attempts if attempts == 1 and not strong_used else attempts - 1
-        Qt.QtCore.QTimer.singleShot(
-            _CANVAS_PRESERVE_RETRY_MS,
-            lambda: self._correct_canvas_size(
-                target_canvas_size,
-                attempts=next_attempts,
-                generation=generation,
-                dock_extents=dock_extents,
-                size_constraints=size_constraints,
-                strong_used=strong_used or attempts == 1,
-                start_window_size=start_window_size,
-                strong_preserve=strong_preserve,
-            ),
-        )
-
-    def _poke_window_resize_commit(
-        self,
-        generation: int,
-        *,
-        size_constraints: _WindowSizeConstraints | None = None,
-    ) -> None:
-        if generation != self._canvas_preserve_generation:
-            return
-        current_size = Qt.QtCore.QSize(self.window.size())
-        print(
-            "[ArrayScope preserve-canvas] commit-poke "
-            f"generation={generation} window={current_size.width()}x{current_size.height()}",
-            flush=True,
-        )
-        self._apply_strong_preserve_constraints(
-            current_size,
-            generation,
-            restore_constraints=size_constraints,
-            reason="commit-poke",
-        )
-        self.window.resize(current_size)
-        self.window.updateGeometry()
-        self.window.update()
-        handle = self.window.windowHandle()
-        if handle is not None:
-            handle.resize(current_size)
-            handle.requestUpdate()
-        Qt.QtCore.QTimer.singleShot(
-            _CANVAS_STRONG_PRESERVE_NUDGE_MS,
-            lambda: self._nudge_window_resize_commit(generation, target_size=current_size),
-        )
-
-    def _nudge_window_resize_commit(self, generation: int, *, target_size: Qt.QtCore.QSize) -> None:
-        if generation != self._canvas_preserve_generation or self._strong_preserve_constraints is None:
-            return
-        nudge_size = Qt.QtCore.QSize(target_size.width() + 1, target_size.height())
-        print(
-            "[ArrayScope preserve-canvas] commit-nudge "
-            f"generation={generation} nudge_window={nudge_size.width()}x{nudge_size.height()} "
-            f"target_window={target_size.width()}x{target_size.height()}",
-            flush=True,
-        )
-        self.window.setMinimumSize(nudge_size)
-        self.window.setMaximumSize(nudge_size)
-        handle = self.window.windowHandle()
-        if handle is not None:
-            handle.setMinimumSize(nudge_size)
-            handle.setMaximumSize(nudge_size)
-        self.window.resize(nudge_size)
-        if handle is not None:
-            handle.resize(nudge_size)
-            handle.requestUpdate()
-        Qt.QtCore.QTimer.singleShot(
-            _CANVAS_STRONG_PRESERVE_NUDGE_MS,
-            lambda: self._finish_window_resize_commit_nudge(generation, target_size=target_size),
-        )
-
-    def _finish_window_resize_commit_nudge(self, generation: int, *, target_size: Qt.QtCore.QSize) -> None:
-        if generation != self._canvas_preserve_generation or self._strong_preserve_constraints is None:
-            return
-        print(
-            "[ArrayScope preserve-canvas] commit-nudge-finish "
-            f"generation={generation} target_window={target_size.width()}x{target_size.height()}",
-            flush=True,
-        )
-        self.window.setMinimumSize(target_size)
-        self.window.setMaximumSize(target_size)
-        handle = self.window.windowHandle()
-        if handle is not None:
-            handle.setMinimumSize(target_size)
-            handle.setMaximumSize(target_size)
-        self.window.resize(target_size)
-        self.window.updateGeometry()
-        self.window.update()
-        if handle is not None:
-            handle.resize(target_size)
-            handle.requestUpdate()
-
-    def _default_window_size_constraints(self) -> _WindowSizeConstraints:
-        return _WindowSizeConstraints(
-            minimum=Qt.QtCore.QSize(0, 0),
-            maximum=Qt.QtCore.QSize(_QT_WIDGET_SIZE_MAX, _QT_WIDGET_SIZE_MAX),
-        )
-
-    def _apply_strong_preserve_constraints(
-        self,
-        target_size: Qt.QtCore.QSize,
-        generation: int,
-        *,
-        restore_constraints: _WindowSizeConstraints | None = None,
-        reason: str = "final-retry",
-    ) -> None:
-        if generation != self._canvas_preserve_generation:
-            return
-        win = self.window
-        if self._strong_preserve_constraints is None:
-            handle = win.windowHandle()
-            self._strong_preserve_constraints = restore_constraints or _WindowSizeConstraints(
-                minimum=Qt.QtCore.QSize(0, 0),
-                maximum=Qt.QtCore.QSize(_QT_WIDGET_SIZE_MAX, _QT_WIDGET_SIZE_MAX),
-                window_minimum=Qt.QtCore.QSize(handle.minimumSize()) if handle is not None else None,
-                window_maximum=Qt.QtCore.QSize(handle.maximumSize()) if handle is not None else None,
-            )
-        print(
-            "[ArrayScope preserve-canvas] strong-apply "
-            f"generation={generation} reason={reason} fixed_window={target_size.width()}x{target_size.height()}",
-            flush=True,
-        )
-        win.setMinimumSize(target_size)
-        win.setMaximumSize(target_size)
-        handle = win.windowHandle()
-        if handle is not None:
-            handle.setMinimumSize(target_size)
-            handle.setMaximumSize(target_size)
-
-    def _schedule_strong_preserve_release(self, generation: int) -> None:
-        if self._strong_preserve_constraints is None:
-            return
-        Qt.QtCore.QTimer.singleShot(
-            _CANVAS_STRONG_PRESERVE_HOLD_MS,
-            lambda: self._release_strong_preserve_constraints(generation),
-        )
-
-    def _release_strong_preserve_constraints(self, generation: int | None = None, *, force: bool = False) -> None:
-        if not force and generation != self._canvas_preserve_generation:
-            return
-        constraints = self._strong_preserve_constraints
-        if constraints is None:
-            return
-        self._strong_preserve_constraints = None
-        print(
-            "[ArrayScope preserve-canvas] strong-release "
-            f"generation={self._canvas_preserve_generation} restore_min={constraints.minimum.width()}x{constraints.minimum.height()} "
-            f"restore_max={constraints.maximum.width()}x{constraints.maximum.height()}",
-            flush=True,
-        )
-        self.window.setMinimumSize(constraints.minimum)
-        self.window.setMaximumSize(constraints.maximum)
-        handle = self.window.windowHandle()
-        if handle is not None:
-            if constraints.window_minimum is not None:
-                handle.setMinimumSize(constraints.window_minimum)
-            if constraints.window_maximum is not None:
-                handle.setMaximumSize(constraints.window_maximum)
 
     def _visible_managed_dock_extents(self):
         extents = []

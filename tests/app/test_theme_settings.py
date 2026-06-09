@@ -118,3 +118,10 @@ def test_performance_settings_normalize_unknowns_and_clamp_budget():
     assert settings_state.settings_from_mapping({"render_memory_budget_mb": "bad"}).render_memory_budget_mb == 512
     assert settings_state.settings_from_mapping({"render_memory_budget_mb": 64}).render_memory_budget_mb == 128
     assert settings_state.settings_from_mapping({"render_memory_budget_mb": 9000}).render_memory_budget_mb == 8192
+
+
+def test_panel_resize_behavior_accepts_strong_wayland():
+    settings = settings_state.settings_from_mapping({"panel_resize_behavior": "strong_wayland"})
+
+    assert settings.panel_resize_behavior == settings_state.PanelResizeBehavior.STRONG_WAYLAND
+    assert settings_state.settings_to_mapping(settings)["panel_resize_behavior"] == "strong_wayland"

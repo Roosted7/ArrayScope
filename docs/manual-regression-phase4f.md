@@ -38,3 +38,17 @@
 14. Enable prefetch and confirm Diagnostics shows prefetch scheduling/blocking counters.
 15. Close Diagnostics and confirm its timer stops and the main window remains usable.
 16. Confirm Diagnostics does not resize or disturb the main window canvas.
+
+## Canvas Preserve Cleanup
+
+1. Open Developer -> Diagnostics and select the Canvas Preserve details tab.
+2. Set View -> Panel Resize Behavior -> Best effort.
+3. Toggle Inspection, Profile, and Operations.
+4. Confirm the central canvas size is restored within tolerance and diagnostics events update.
+5. Set View -> Panel Resize Behavior -> Off.
+6. Toggle panels again and confirm the main window does not intentionally resize for panel transitions.
+7. Set View -> Panel Resize Behavior -> Strong Wayland.
+8. On Wayland, confirm strong preserve can settle transitions that best effort fails to settle.
+9. On non-Wayland, confirm diagnostics reports the strong path was skipped due to platform.
+10. Confirm Developer Diagnostics shows preserve mode, platform, last transition, result, attempts, and recent events.
+11. Confirm no `[ArrayScope preserve-canvas]` stdout output appears.

@@ -37,6 +37,20 @@ def test_dock_show_hide_preserves_image_view_size(qtbot):
         win.close()
 
 
+def _view_submenu_action(win, submenu_text, action_text):
+    for action in win.menuBar().actions():
+        if action.text() != "View":
+            continue
+        for child in action.menu().actions():
+            if child.text() != submenu_text:
+                continue
+            submenu = child.menu()
+            for grandchild in submenu.actions():
+                if grandchild.text() == action_text:
+                    return grandchild
+    raise AssertionError(f"View submenu action not found: {submenu_text}/{action_text}")
+
+
 def test_panel_open_hide_preserves_central_widget_size_with_resize_transaction(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
@@ -56,6 +70,30 @@ def test_panel_open_hide_preserves_central_widget_size_with_resize_transaction(q
         win._set_inspection_dock_visible_from_user(False)
         _wait_for_panel_preserve(qtbot)
         _assert_size_close(win.centralWidget().size(), target)
+    finally:
+        win.close()
+
+
+def test_canvas_preserve_controller_records_diagnostics(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        win.resize(900, 620)
+        _process_events(qtbot, count=20)
+
+        win._show_inspection_dock()
+        _wait_for_panel_preserve(qtbot)
+
+        diagnostics = win.layout_manager.canvas_preserver.diagnostics()
+        assert diagnostics.generation > 0
+        assert diagnostics.mode == "best_effort"
+        assert diagnostics.last_transition == "show-docked"
+        assert diagnostics.target_canvas_size is not None
+        assert diagnostics.final_canvas_size is not None
+        assert diagnostics.events
     finally:
         win.close()
 
@@ -102,49 +140,53 @@ def test_panel_resize_behavior_off_does_not_resize_main_window(qtbot):
             panel_resize_behavior=PanelResizeBehavior.OFF,
         )
         before_central_size = win.centralWidget().size()
-        before_generation = win.layout_manager._canvas_preserve_generation
+        before_generation = win.layout_manager.canvas_preserver.generation
 
         win._show_inspection_dock()
         _wait_for_panel_preserve(qtbot)
 
-        assert win.layout_manager._canvas_preserve_generation == before_generation
+        assert win.layout_manager.canvas_preserver.generation == before_generation
         assert win.centralWidget().size().width() < before_central_size.width()
     finally:
         win.close()
 
 
-def test_panel_strong_preserve_temporarily_constrains_final_retry(qtbot):
+def test_canvas_preserve_strong_wayland_applies_and_releases_constraints(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+    from arrayscope.app.settings_state import AppSettingsState, PanelResizeBehavior
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
-        default_minimum = QtCore.QSize(0, 0)
-        default_maximum = QtCore.QSize(16_777_215, 16_777_215)
-        current = win.centralWidget().size()
-        target = QtCore.QSize(current.width() + 24, current.height())
-
-        win.layout_manager._canvas_preserve_generation += 1
-        generation = win.layout_manager._canvas_preserve_generation
-        win.layout_manager._correct_canvas_size(
-            target,
-            attempts=1,
-            generation=generation,
-            dock_extents=(),
-            size_constraints=None,
-            strong_used=False,
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme,
+            prefetch_nearby_slices=win.app_settings.prefetch_nearby_slices,
+            panel_resize_behavior=PanelResizeBehavior.STRONG_WAYLAND,
+            fft_backend=win.app_settings.fft_backend,
+            fft_workers=win.app_settings.fft_workers,
+            memory_profile=win.app_settings.memory_profile,
+            render_memory_budget_mb=win.app_settings.render_memory_budget_mb,
         )
-        _process_events(qtbot, count=2)
+        preserver = win.layout_manager.canvas_preserver
+        preserver._qt_platform_name = lambda: "wayland"
+        target = QtCore.QSize(win.size().width() + 12, win.size().height())
+        preserver._generation += 1
+        generation = preserver.generation
 
-        assert win.layout_manager._strong_preserve_constraints is not None
+        preserver._apply_strong_preserve_constraints(target, generation)
+
+        assert preserver.constraints_active
         assert win.minimumSize() == win.maximumSize()
 
+        preserver._release_strong_preserve_constraints(generation)
         _process_events(qtbot, count=35)
-        assert win.minimumSize() == default_minimum
-        assert win.maximumSize() == default_maximum
+        assert not preserver.constraints_active
+        assert win.minimumSize() != target
+        assert win.maximumSize() != target
+        assert preserver.diagnostics().strong_used
     finally:
         win.close()
 
@@ -159,26 +201,73 @@ def test_panel_strong_preserve_release_ignores_stale_generation(qtbot):
     try:
         _process_events(qtbot, count=20)
         target = QtCore.QSize(win.size().width() + 12, win.size().height())
-        win.layout_manager._canvas_preserve_generation += 1
-        generation = win.layout_manager._canvas_preserve_generation
+        preserver = win.layout_manager.canvas_preserver
+        preserver._generation += 1
+        generation = preserver.generation
 
-        win.layout_manager._apply_strong_preserve_constraints(target, generation)
+        preserver._apply_strong_preserve_constraints(target, generation)
         assert win.minimumSize() == target
         assert win.maximumSize() == target
 
-        win.layout_manager._canvas_preserve_generation += 1
-        win.layout_manager._release_strong_preserve_constraints(generation)
+        preserver._generation += 1
+        preserver._release_strong_preserve_constraints(generation)
         assert win.minimumSize() == target
         assert win.maximumSize() == target
 
-        win.layout_manager._release_strong_preserve_constraints(win.layout_manager._canvas_preserve_generation)
+        preserver._release_strong_preserve_constraints(preserver.generation)
         assert win.minimumSize() != target
         assert win.maximumSize() != target
     finally:
         win.close()
 
 
-def test_view_menu_preserve_canvas_setting_persists(qtbot):
+def test_strong_wayland_skips_strong_path_off_wayland(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.app.settings_state import AppSettingsState, PanelResizeBehavior
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme,
+            prefetch_nearby_slices=win.app_settings.prefetch_nearby_slices,
+            panel_resize_behavior=PanelResizeBehavior.STRONG_WAYLAND,
+            fft_backend=win.app_settings.fft_backend,
+            fft_workers=win.app_settings.fft_workers,
+            memory_profile=win.app_settings.memory_profile,
+            render_memory_budget_mb=win.app_settings.render_memory_budget_mb,
+        )
+        preserver = win.layout_manager.canvas_preserver
+        preserver._qt_platform_name = lambda: "offscreen"
+        preserver._platform = "offscreen"
+        preserver._generation += 1
+        generation = preserver.generation
+        current = win.centralWidget().size()
+        target = QtCore.QSize(current.width() + 30, current.height())
+
+        preserver._correct_canvas_size(
+            target,
+            attempts=1,
+            generation=generation,
+            dock_extents=(),
+            size_constraints=preserver._capture_window_size_constraints(),
+            strong_used=False,
+            allow_strong=True,
+        )
+        _process_events(qtbot, count=5)
+
+        diagnostics = preserver.diagnostics()
+        assert not preserver.constraints_active
+        assert not diagnostics.strong_used
+        assert any("strong_skipped" in event for event in diagnostics.events)
+    finally:
+        win.close()
+
+
+def test_view_menu_panel_resize_behavior_persists(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import PanelResizeBehavior
     from arrayscope.window import ArrayScopeWindow
@@ -187,12 +276,18 @@ def test_view_menu_preserve_canvas_setting_persists(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
-        action = _view_action(win, "Preserve Canvas Size on Panel Changes")
-        assert action.isChecked()
-        action.trigger()
+        off_action = _view_submenu_action(win, "Panel Resize Behavior", "Off")
+        strong_action = _view_submenu_action(win, "Panel Resize Behavior", "Strong Wayland")
+        best_action = _view_submenu_action(win, "Panel Resize Behavior", "Best effort")
+        assert best_action.isChecked()
+        off_action.trigger()
         _process_events(qtbot, count=5)
-        assert not action.isChecked()
+        assert off_action.isChecked()
         assert win.app_settings.panel_resize_behavior == PanelResizeBehavior.OFF
+        strong_action.trigger()
+        _process_events(qtbot, count=5)
+        assert strong_action.isChecked()
+        assert win.app_settings.panel_resize_behavior == PanelResizeBehavior.STRONG_WAYLAND
     finally:
         win.close()
 
@@ -200,9 +295,9 @@ def test_view_menu_preserve_canvas_setting_persists(qtbot):
     qtbot.addWidget(second)
     try:
         _process_events(qtbot, count=20)
-        action = _view_action(second, "Preserve Canvas Size on Panel Changes")
-        assert not action.isChecked()
-        assert second.app_settings.panel_resize_behavior == PanelResizeBehavior.OFF
+        action = _view_submenu_action(second, "Panel Resize Behavior", "Strong Wayland")
+        assert action.isChecked()
+        assert second.app_settings.panel_resize_behavior == PanelResizeBehavior.STRONG_WAYLAND
     finally:
         second.close()
 
