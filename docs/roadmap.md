@@ -285,6 +285,120 @@ Main goal: Visible work always wins.
 * [~] Add adaptive prefetch only after measurement (diagnostics and conservative cost gates exist; predictive/adaptive expansion remains future).
 * [x] Add cooperative cancellation points for chunked operations.
 
+## Phase 4f — finish bounded interactive rendering
+
+Main goal: Montage, panels, and visible rendering are stable, bounded, and predictable.
+
+### P0 — fix current montage correctness
+
+* [ ] Remove loaded_rect intersection from make_montage_viewport_canvas().
+* [ ] Canvas rect must be stable and based on requested viewport.
+* [ ] Add unloaded/loading/skipped tile states.
+* [ ] Make hover/profile distinguish gap vs loading vs skipped vs loaded.
+* [ ] Ensure stale montage results do not clear current overlays.
+
+Required tests:
+
+- viewport canvas shape does not shrink when only one tile is loaded
+- canvas origin stays stable while tiles load
+- hover over unloaded tile reports loading, not NaN
+- hover over gap reports empty
+- live profile works on loaded tile and reports loading on unloaded tile
+- stale montage tile result does not mutate current UI state
+
+### P1 — progressive tile rendering
+
+* [ ] Add MontageRenderSession.
+* [ ] Commit cached tiles immediately.
+* [ ] Schedule missing visible tiles individually or in small batches.
+* [ ] Copy each finished tile into the current canvas.
+* [ ] Throttle image updates to ~30 Hz.
+* [ ] Show per-tile loading overlays.
+
+### P2 — memory policy unification
+
+* [ ] Replace static constants with MemoryPolicy.
+* [ ] Use psutil for total/available/RSS.
+* [ ] Tie visible, montage, tile, stage, and prefetch budgets together.
+* [ ] Add user profiles: conservative / balanced / aggressive / custom.
+* [ ] Remove duplicate hidden limits from operations panel.
+
+### P3 — debug diagnostics window
+
+* [ ] Add simple floating QDialog.
+* [ ] Show memory, cache, scheduler, render-plan, montage, FFT stats.
+* [ ] Update on timer.
+* [ ] Open only from Developer menu or env flag.
+
+### P4 — clean Wayland preserve-canvas code
+
+* [ ] Encapsulate current trick in CanvasPreserveTransaction.
+* [ ] Gate strong nudge path to Wayland or fallback mode.
+* [ ] Capture/restore actual size constraints.
+* [ ] Replace print() with logging/debug diagnostics.
+* [ ] Add manual Wayland regression doc.
+
+## Phase 4g — operation planner and stage cache
+
+Main goal: Expensive operation results are computed at the right granularity once, cached intelligently, and reused across slices, montage, profiles, and ROI.
+
+### P0 — operation capabilities
+
+Each operation declares and handles:
+
+* [ ] output shape
+* [ ] output dtype
+* [ ] blocking axes
+* [ ] chunkable axes
+* [ ] request expansion behavior
+* [ ] temp multiplier
+* [ ] cache-stage preference
+* [ ] fusion eligibility
+
+### P1 — region planner
+
+Render requests become:
+
+* [ ] requested final region
+* [ ] required input region
+* [ ] expanded intermediate regions
+* [ ] candidate stage-cache points
+* [ ] estimated peak memory
+
+### P2 — stage cache
+
+Add:
+
+* [ ] in-memory stage cache
+* [ ] byte budget
+* [ ] cache priority
+* [ ] document/operation-prefix/region keys
+* [ ] stage invalidation on operation edits
+
+### P3 — transform-aware caching
+
+For FFT/IFFT (and similar operations) over a sliced axis:
+
+* [ ] compute expanded full-axis result once
+* [ ] cache final expanded stage
+* [ ] serve future slices from cached stage
+
+### P4 — optional disk-backed cache
+
+* [ ] Use numpy.memmap for large derived stages. 
+* [ ] Consider Joblib as inspiration
+* [ ] Add joblib for a optional opt-in persistent cache, not as the primary evaluator cache.
+
+### P5 — operation simplifier
+
+Add algebraic simplifications:
+
+* [ ] FFT followed by matching IFFT → identity or near-identity stage
+* [ ] Reverse twice → identity
+* [ ] Conjugate twice → identity
+* [ ] Crop composition
+* [ ] Adjacent elementwise operation fusion
+
 ## Phase 5 — Multi-window and sessions
 
 Goal: make repeated inspection work reproducible and efficient.
