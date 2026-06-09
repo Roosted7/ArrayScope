@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 
 import numpy as np
+import pytest
 from hypothesis import given, settings, strategies as st
 
 from arrayscope.core.view_state import ChannelMode, ViewState
@@ -17,13 +18,18 @@ from arrayscope.display.slice_engine import (
 from arrayscope.operations.pipeline import (
     ArrayDocument,
     CenteredFFT,
+    CenteredIFFT,
     CombineRealImagAxis,
+    Conjugate,
     Crop,
     FFTShift,
+    Maximum,
     Mean,
+    Minimum,
     ReverseAxis,
     RootSumSquares,
     SplitComplexAxis,
+    Sum,
     OperationStep,
 )
 from arrayscope.operations.regions import AxisRegionKind
@@ -60,6 +66,30 @@ def test_lazy_slab_matches_materialized_image_and_line_for_existing_operations()
         (Crop(axis=1, start=1, stop=4), ReverseAxis(axis=0), CenteredFFT(axis=2)),
     ):
         _assert_image_and_line_match(data, operations)
+
+
+@pytest.mark.parametrize(
+    "operations",
+    (
+        (Crop(axis=1, start=1, stop=4),),
+        (ReverseAxis(axis=0),),
+        (FFTShift(axis=2),),
+        (Conjugate(),),
+        (Mean(axis=1),),
+        (Sum(axis=1),),
+        (Maximum(axis=1),),
+        (Minimum(axis=1),),
+        (RootSumSquares(axis=1),),
+        (CenteredFFT(axis=2),),
+        (CenteredIFFT(axis=2),),
+        (Crop(axis=1, start=1, stop=4), ReverseAxis(axis=0), CenteredFFT(axis=2)),
+        (CenteredFFT(axis=2), Mean(axis=1)),
+        (CenteredFFT(axis=2), CenteredIFFT(axis=2)),
+    ),
+)
+def test_planner_backed_slab_matches_materialized_for_registered_operations(operations):
+    data = (np.arange(4 * 5 * 6).reshape(4, 5, 6).astype(float) + 1j).astype(np.complex64)
+    _assert_image_and_line_match(data, operations)
 
 
 def test_slab_matches_materialized_after_crop_reverse_same_axis():

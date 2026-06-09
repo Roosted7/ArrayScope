@@ -25,9 +25,10 @@ source of array-view state.
 - `arrayscope.operations.cost`: Qt-free operation kind, output dtype, output shape, and conservative
   memory-cost estimates for operation stacks. These estimates are derived from operation-declared
   capabilities and feed warnings, diagnostics, visible render decisions, and cost-aware prefetch gates.
-- `arrayscope.operations.regions` / `arrayscope.operations.planner`: Qt-free region and stage-planning
-  contracts for Phase 4g. They expose final/required regions and candidate stage-cache points, but the
-  current runtime still does not allocate a StageCache.
+- `arrayscope.operations.regions` / `arrayscope.operations.planner`: Qt-free runtime region and
+  stage-planning infrastructure. Display/profile/scalar/export slab evaluation uses `RegionPlan`
+  transitions; the same plans expose final/required regions and candidate stage-cache points. Runtime
+  StageCache allocation remains future work.
 - `arrayscope.core.memory_policy`: Qt-free runtime memory policy. It samples system total,
   available memory, and process RSS through psutil with a deterministic fallback, then derives visible
   render, montage canvas/tile, image cache, montage tile cache, profile cache, future stage-cache, and
@@ -40,8 +41,9 @@ source of array-view state.
   `auto` resolves to SciPy when available, with NumPy fallback and an optional pyFFTW backend when
   explicitly selected and importable. The centered FFT/IFFT naming follows ArrayScope's MRI/k-space
   convention: centered FFT uses an inverse FFT internally, and centered IFFT uses a forward FFT.
-- `arrayscope.operations.slabs`: plans and evaluates the smallest exact base-data slab needed
-  for image, profile, scalar hover, and export-frame requests.
+- `arrayscope.operations.slabs`: builds planner-backed slab requests and executes `RegionPlan`
+  transitions for image, profile, scalar hover, and export-frame requests. Registered operation region
+  expansion belongs to operation-owned region methods, not ad hoc slab branches.
 - `arrayscope.operations.cache`: bounded LRU caches and cache diagnostics for evaluated display
   results. Image views/export frames, montage tile payloads, and profile/scalar results use separate
   budgets supplied by `MemoryPolicy`.
@@ -186,8 +188,8 @@ not show cache summaries; cache detail lives in Diagnostics.
 App settings include theme, nearby-slice prefetch, panel resize behavior, FFT backend, FFT worker count,
 memory profile, and render memory budget. The render memory budget is a per-render hard cap for
 visible image and interactive montage tile/canvas guardrails. Cache and prefetch budgets adapt from
-the selected memory profile and sampled system memory. A stage-cache budget and planner candidate
-metadata are exposed for Phase 4g, but no StageCache allocation is implemented yet.
+the selected memory profile and sampled system memory. A stage-cache budget and runtime planner
+candidate metadata are exposed, but no StageCache allocation is implemented yet.
 
 Channel mode tracks automatic versus user-selected intent. Invalid channels are
 coerced when dtype changes, for example complex-only channels fall back to real
