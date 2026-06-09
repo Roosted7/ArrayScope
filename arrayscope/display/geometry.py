@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Iterable
+from typing import Iterable, Literal
 
 from arrayscope.core.view_state import ViewState
 
@@ -74,12 +74,24 @@ class DisplayPointContext:
 
 
 @dataclass(frozen=True)
+class MontagePointStatus:
+    kind: Literal["loaded", "loading", "skipped", "unloaded", "gap", "outside"]
+    tile_number: int | None = None
+    montage_index: int | None = None
+    source_index: int | None = None
+    local_x: int | None = None
+    local_y: int | None = None
+    message: str = ""
+
+
+@dataclass(frozen=True)
 class DisplayGeometry:
     view_state: ViewState
     display_shape: tuple[int, int]
     montage: MontageGeometry | None = None
     montage_origin_x: int = 0
     montage_origin_y: int = 0
+    montage_tile_states: tuple[object, ...] = ()
 
     def __post_init__(self):
         shape = tuple(int(size) for size in self.display_shape)
@@ -90,6 +102,7 @@ class DisplayGeometry:
         object.__setattr__(self, "display_shape", shape)
         object.__setattr__(self, "montage_origin_x", int(self.montage_origin_x))
         object.__setattr__(self, "montage_origin_y", int(self.montage_origin_y))
+        object.__setattr__(self, "montage_tile_states", tuple(self.montage_tile_states or ()))
 
     def display_point_to_array_index(self, x: float, y: float) -> DisplayPointMapping | None:
         if self.view_state.image_axes is None:
@@ -103,10 +116,13 @@ class DisplayGeometry:
         view_state = self.view_state
 
         if self.montage is not None:
-            mapped = self._map_montage_point(display_x + self.montage_origin_x, display_y + self.montage_origin_y)
-            if mapped is None:
+            status = self.montage_status_for_display_point(display_x, display_y)
+            if status is None or status.kind != "loaded":
                 return None
-            tile_number, montage_index, local_x, local_y = mapped
+            tile_number = status.tile_number
+            montage_index = status.source_index
+            local_x = status.local_x
+            local_y = status.local_y
             if view_state.montage_axis is None:
                 return None
             view_state = view_state.with_slice(view_state.montage_axis, montage_index)
@@ -183,6 +199,44 @@ class DisplayGeometry:
             context_text=" ".join(parts),
         )
 
+    def montage_status_for_display_point(self, x: float, y: float) -> MontagePointStatus | None:
+        if self.montage is None:
+            return None
+        display_x = int(math.floor(float(x)))
+        display_y = int(math.floor(float(y)))
+        if display_x < 0 or display_y < 0 or display_x >= self.display_shape[1] or display_y >= self.display_shape[0]:
+            return MontagePointStatus("outside", message="outside montage viewport")
+        global_x = display_x + self.montage_origin_x
+        global_y = display_y + self.montage_origin_y
+        mapped = self._map_montage_point(global_x, global_y)
+        if mapped is None:
+            if self._point_inside_montage_bounds(global_x, global_y):
+                return MontagePointStatus("gap", message="empty montage gap")
+            return MontagePointStatus("outside", message="outside montage")
+        tile_number, montage_index, local_x, local_y = mapped
+        kind = "unloaded"
+        if not self.montage_tile_states:
+            kind = "loaded"
+        elif tile_number < len(self.montage_tile_states):
+            kind = _state_value(self.montage_tile_states[tile_number])
+        if kind not in {"loaded", "loading", "skipped", "unloaded"}:
+            kind = "unloaded"
+        messages = {
+            "loaded": "",
+            "loading": "tile loading...",
+            "unloaded": "tile loading...",
+            "skipped": "tile skipped by memory budget",
+        }
+        return MontagePointStatus(
+            kind=kind,
+            tile_number=tile_number,
+            montage_index=tile_number,
+            source_index=montage_index,
+            local_x=local_x,
+            local_y=local_y,
+            message=messages[kind],
+        )
+
     def _map_montage_point(self, x: int, y: int):
         geometry = self.montage
         if geometry is None:
@@ -201,6 +255,14 @@ class DisplayGeometry:
         if tile_number >= len(geometry.indices):
             return None
         return tile_number, geometry.indices[tile_number], local_x, local_y
+
+    def _point_inside_montage_bounds(self, x: int, y: int) -> bool:
+        geometry = self.montage
+        if geometry is None:
+            return False
+        full_width = geometry.columns * geometry.tile_width + max(0, geometry.columns - 1) * geometry.gap
+        full_height = geometry.rows * geometry.tile_height + max(0, geometry.rows - 1) * geometry.gap
+        return 0 <= int(x) < full_width and 0 <= int(y) < full_height
 
     def _clamp_to_montage_tile(self, x: int, y: int) -> tuple[int, int] | None:
         geometry = self.montage
@@ -248,3 +310,8 @@ class DisplayGeometry:
         if display_index < 0 or display_index >= len(indices):
             return None
         return int(indices[display_index])
+
+
+def _state_value(state: object) -> str:
+    value = getattr(state, "value", state)
+    return str(value)

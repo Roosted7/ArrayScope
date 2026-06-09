@@ -105,7 +105,7 @@ Then:
 1. Build stable viewport canvas rect.
 2. Commit cached tiles immediately.
 3. Mark missing tile regions as loading.
-4. Schedule tile jobs individually or in small batches.
+4. Schedule tile jobs individually through the one-worker visible controller.
 5. When each tile finishes:
    - check generation
    - store tile in cache

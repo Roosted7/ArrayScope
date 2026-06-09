@@ -324,7 +324,11 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
         win.img_view.setProfileMarker(second_tile_x, 1, visible=True)
         win._on_profile_marker_moved(second_tile_x, 1)
         win._update_live_profile_from_pending_pos()
-        _process_events(qt_app, count=80)
+        for _ in range(40):
+            _process_events(qt_app, count=4)
+            if win.profile_dock.line_plot.curves:
+                break
+            QtCore.QThread.msleep(20)
         assert win.profile_dock.line_plot.curves
         assert win.profile_dock.line_plot.curves[0].name().endswith("d2=1")
 

@@ -3,6 +3,7 @@ from hypothesis import given, strategies as st
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+from arrayscope.display.montage import MontageTileState
 
 
 def state_for(shape, image_axes=(0, 1), line_axis=2, slices=None):
@@ -122,6 +123,67 @@ def test_montage_canvas_origin_maps_hover_to_global_source_index():
 
     assert mapping.montage_index == 10
     assert mapping.array_index == (1, 1, 10)
+
+
+def test_montage_status_for_loaded_tile_allows_mapping():
+    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=3, rows=1, gap=1)
+    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_tile_states=(MontageTileState.LOADED,) * 3)
+
+    status = geometry.montage_status_for_display_point(1, 1)
+    mapping = geometry.display_point_to_array_index(1, 1)
+
+    assert status.kind == "loaded"
+    assert mapping.array_index == (1, 1, 0)
+
+
+def test_montage_status_for_loading_tile_blocks_array_mapping():
+    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=3, rows=1, gap=1)
+    geometry = DisplayGeometry(
+        state,
+        (2, 11),
+        montage=montage,
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADING, MontageTileState.LOADED),
+    )
+
+    assert geometry.montage_status_for_display_point(4, 1).kind == "loading"
+    assert geometry.display_point_to_array_index(4, 1) is None
+
+
+def test_montage_status_for_skipped_tile_blocks_array_mapping():
+    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=3, rows=1, gap=1)
+    geometry = DisplayGeometry(
+        state,
+        (2, 11),
+        montage=montage,
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.SKIPPED, MontageTileState.LOADED),
+    )
+
+    assert geometry.montage_status_for_display_point(4, 1).kind == "skipped"
+    assert geometry.display_point_to_array_index(4, 1) is None
+
+
+def test_montage_status_for_gap_reports_gap():
+    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=3, rows=1, gap=1)
+    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_tile_states=(MontageTileState.LOADED,) * 3)
+
+    assert geometry.montage_status_for_display_point(3, 1).kind == "gap"
+    assert geometry.display_point_to_array_index(3, 1) is None
+
+
+def test_montage_canvas_origin_applies_to_tile_status():
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
+    states = tuple(MontageTileState.UNLOADED for _ in range(10)) + (MontageTileState.LOADING,) + tuple(MontageTileState.LOADED for _ in range(9))
+    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6, montage_tile_states=states)
+
+    status = geometry.montage_status_for_display_point(1, 1)
+
+    assert status.kind == "loading"
+    assert status.source_index == 10
 
 
 def test_montage_canvas_origin_gap_returns_none():

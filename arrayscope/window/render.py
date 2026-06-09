@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import monotonic
 
 import numpy as np
 
@@ -10,7 +11,14 @@ from arrayscope.app.errors import handle_ui_exception
 from arrayscope.display.colormaps import gray_colormap, phase_colormap
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.levels import finite_bounds
-from arrayscope.display.montage import make_montage_plan, make_montage_viewport_canvas, optimal_montage_columns
+from arrayscope.display.imageview2d import MontageTileOverlay
+from arrayscope.display.montage import (
+    MontageTileState,
+    make_montage_plan,
+    make_montage_viewport_canvas,
+    montage_rect_for_viewport,
+    optimal_montage_columns,
+)
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportIntent, ViewportPolicy
 from arrayscope.core.memory_budget import (
@@ -41,6 +49,10 @@ from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
+from arrayscope.window.montage_session import MontageRenderSession
+
+
+MONTAGE_COMMIT_INTERVAL_MS = 33
 
 
 @dataclass(frozen=True)
@@ -75,6 +87,27 @@ class RenderMixin:
         container = self.img_view.getView()
         mousePoint = container.mapSceneToView(pos)
         geometry = getattr(self, "display_geometry", None)
+        status = None if geometry is None else geometry.montage_status_for_display_point(mousePoint.x(), mousePoint.y())
+        if status is not None and status.kind != "loaded":
+            text_pair = self._montage_status_value_text(status)
+            if text_pair is None:
+                if hasattr(self, "img_view"):
+                    self.img_view.hideHud()
+                label = self.widgets['labels']['pixelValue']
+                if hasattr(label, "set_pixel_status"):
+                    label.set_pixel_status("", self._slice_context_text())
+                else:
+                    label.setText("")
+                return
+            value_text, context = text_pair
+            label = self.widgets['labels']['pixelValue']
+            if hasattr(label, "set_pixel_status"):
+                label.set_pixel_status(value_text, context)
+            else:
+                label.setText(value_text if not context else f"{value_text} | {context}")
+            if hasattr(self, "img_view"):
+                self.img_view.showHudText(value_text if not context else f"{value_text} | {context}", pos)
+            return
         point_context = None if geometry is None else geometry.context_for_display_point(mousePoint.x(), mousePoint.y())
         if point_context is not None:
             mapping = point_context.mapping
@@ -86,6 +119,17 @@ class RenderMixin:
             return
         if hasattr(self, "img_view"):
             self.img_view.hideHud()
+
+    def _montage_status_value_text(self, status):
+        if status.kind in {"gap", "outside"}:
+            return None
+        context = ""
+        axis = self.view_state.montage_axis
+        if axis is not None and status.source_index is not None:
+            context = f"d{axis}={status.source_index}"
+        if status.kind == "skipped":
+            return "tile skipped by memory budget", context
+        return "tile loading...", context
 
     def _hover_value_from_display(self, mapping):
         if hasattr(self.img_view, "valueAtDisplayMapping"):
@@ -234,6 +278,21 @@ class RenderMixin:
         clamped = self._clamp_profile_marker_point(point[0], point[1])
         if clamped is None:
             self._clear_live_profile_marker()
+            return
+        geometry = getattr(self, "display_geometry", None)
+        status = None if geometry is None else geometry.montage_status_for_display_point(clamped[0], clamped[1])
+        if status is not None and status.kind != "loaded":
+            if status.kind in {"loading", "unloaded"}:
+                self.profile_dock.update_line_results((), y_range=None)
+                self.img_view.setProfileMarker(round(clamped[0]), round(clamped[1]), visible=True)
+                show_status_message(self, "Montage tile loading; profile available when tile finishes.", timeout=2000)
+                self._schedule_loading_montage_profile_retry(float(clamped[0]), float(clamped[1]))
+            elif status.kind == "skipped":
+                self.profile_dock.update_line_results((), y_range=None)
+                self._clear_live_profile_marker()
+                show_status_message(self, "Montage tile skipped by memory budget; zoom in or increase render budget.", timeout=3000)
+            else:
+                self._clear_live_profile_marker()
             return
         profile_states, profile_label_suffix = self._profile_states_for_display_point(view_state, clamped[0], clamped[1], profile_axes)
         if not profile_states:
@@ -408,9 +467,13 @@ class RenderMixin:
             return
         if self.view_state.montage_axis is not None:
             return self.update_montage_view(force_autolevel=force_autolevel)
+        self._montage_session = None
+        self._stop_montage_session_slow_overlay()
         self._current_montage_geometry = None
         self._current_montage_plan = None
         self._current_montage_canvas = None
+        if hasattr(self.img_view, "clearMontageTileOverlays"):
+            self.img_view.clearMontageTileOverlays()
             
         al = True
         force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
@@ -533,8 +596,6 @@ class RenderMixin:
 
         def done(result):
             if request_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut):
-                self.img_view.setImageStale(False)
-                self.img_view.setEvaluationOverlay(False)
                 return
             self._last_render_was_degraded = False
             self._degraded_rendered_view = None
@@ -621,22 +682,24 @@ class RenderMixin:
             viewport_shape=viewport_shape,
         )
         current_range = self._current_montage_global_view_range() if getattr(self.img_view, "image", None) is not None else None
-        visible_tiles = plan.tiles_intersecting(current_range, margin_tiles=1)
+        canvas_rect = montage_rect_for_viewport(plan, view_range=current_range, viewport_shape=viewport_shape)
+        candidate_tiles = plan.tiles_intersecting(((canvas_rect[0], canvas_rect[2]), (canvas_rect[1], canvas_rect[3])), margin_tiles=0)
         output_dtype = np.uint8 if view_state.channel == ChannelMode.COMPLEX else getattr(document.base_data, "dtype", np.dtype(float))
-        visible_tiles, _estimated_visible_bytes, skipped_count = self._select_visible_montage_tiles_by_budget(
-            visible_tiles,
-            tile_shape=tile_shape,
-            output_dtype=output_dtype,
+        single_estimate = estimate_display_image_bytes(
+            tile_shape,
+            output_dtype,
             rgb=view_state.channel == ChannelMode.COMPLEX,
-            budget_bytes=self._visible_render_budget_bytes(),
+            histogram=True,
         )
-        if not visible_tiles:
-            single_estimate = estimate_display_image_bytes(
-                tile_shape,
-                output_dtype,
-                rgb=view_state.channel == ChannelMode.COMPLEX,
-                histogram=True,
-            )
+        if single_estimate > self._visible_render_budget_bytes():
+            visible_tiles = ()
+            skipped_tiles = tuple(candidate_tiles)
+            skipped_count = len(skipped_tiles)
+        else:
+            visible_tiles = tuple(candidate_tiles)
+            skipped_tiles = ()
+            skipped_count = 0
+        if not visible_tiles and not skipped_tiles:
             show_status_message(
                 self,
                 f"Montage tile would allocate {format_bytes(single_estimate)}. Zoom out less or reduce tile size/range.",
@@ -644,11 +707,11 @@ class RenderMixin:
             )
             return
         if skipped_count:
-            show_status_message(
-                self,
-                f"Montage loaded {len(visible_tiles)} visible tiles within {format_bytes(self._visible_render_budget_bytes())}; "
-                f"skipped {skipped_count} tiles. Zoom in for detail.",
-                timeout=5000,
+            self._warn_montage_tiles_skipped(
+                skipped_count=skipped_count,
+                tile_bytes=single_estimate,
+                budget_bytes=self._visible_render_budget_bytes(),
+                tile_shape=tile_shape,
             )
         cached_tiles = []
         missing_tiles = []
@@ -662,60 +725,249 @@ class RenderMixin:
             if cached is None:
                 missing_tiles.append(tile)
             else:
-                cached_tiles.append(cached)
-        generation_key = (
+                cached_tiles.append(cached.bind(tile) if hasattr(cached, "bind") else cached.payload().bind(tile))
+        session_key = (
             "montage_tiles",
             _document_key(document),
             view_state,
-            tuple(tile.source_index for tile in visible_tiles),
+            tuple(tile.source_index for tile in candidate_tiles),
             colormap_lut.tobytes() if colormap_lut is not None else None,
             viewport_shape if view_state.montage_columns is None else None,
         )
+        session_id = int(getattr(self, "_montage_session_id", 0)) + 1
+        self._montage_session_id = session_id
+        session = MontageRenderSession(
+            session_id=session_id,
+            key=session_key,
+            plan=plan,
+            view_state=view_state,
+            document=document,
+            montage_axis=axis,
+            colormap_lut=colormap_lut,
+            viewport_shape=viewport_shape,
+            view_range=current_range,
+            output_dtype=np.dtype(output_dtype),
+            rgb=view_state.channel == ChannelMode.COMPLEX,
+            window_mode=window_mode,
+            previous_levels=previous_levels,
+            previous_bounds=previous_bounds,
+            force_auto=force_auto,
+            visible_tiles=tuple(visible_tiles),
+            rendered_tiles={int(rendered.tile.montage_index): rendered for rendered in cached_tiles},
+            loading_tiles={int(tile.montage_index) for tile in missing_tiles},
+            skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
+            pending_tiles=list(missing_tiles),
+        )
+        self._montage_session = session
+        try:
+            self._commit_montage_session_canvas(session, force=True)
+        except MemoryError as exc:
+            show_status_message(self, str(exc), timeout=6000)
+            return
+        if not session.pending_tiles and not session.loading_tiles:
+            self._stop_montage_session_slow_overlay()
+            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
+            self.img_view.setImageStale(False)
+            self.img_view.setEvaluationOverlay(False)
+            self._update_operation_dock()
+            return
+        self.prefetch_evaluation_controller.cancel_prefetch()
+        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
+        self._update_operation_dock()
+        self._schedule_montage_session_slow_overlay(session)
+        self._schedule_next_montage_tile(session)
+
+    def _warn_montage_tiles_skipped(self, *, skipped_count: int, tile_bytes: int, budget_bytes: int, tile_shape) -> None:
+        message = (
+            f"Montage skipped {int(skipped_count)} tile(s) because each tile would allocate "
+            f"{format_bytes(int(tile_bytes))}, over the visible render budget of {format_bytes(int(budget_bytes))}. "
+            f"Tile shape is {tuple(int(size) for size in tile_shape)}. Zoom in, crop/range the image axes, "
+            "or increase Performance > Render Memory Budget."
+        )
+        show_status_message(self, message, timeout=8000)
+        warning_key = (int(skipped_count), int(tile_bytes), int(budget_bytes), tuple(int(size) for size in tile_shape))
+        if getattr(self, "_last_montage_skip_warning_key", None) == warning_key:
+            return
+        self._last_montage_skip_warning_key = warning_key
+        try:
+            Qt.QtWidgets.QMessageBox.warning(self, "Montage tiles skipped", message)
+        except Exception as exc:
+            handle_ui_exception("montage skipped warning", exc)
+
+    def _schedule_next_montage_tile(self, session: MontageRenderSession) -> None:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return
+        tile = session.next_tile()
+        if tile is None:
+            self._schedule_montage_canvas_commit(session, force=True)
+            if session.pending_tiles:
+                self._schedule_next_montage_tile(session)
+                return
+            if self._is_current_montage_session(session.session_id, session.key):
+                self._stop_montage_session_slow_overlay()
+                self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
+                self.img_view.setImageStale(False)
+                self.img_view.setEvaluationOverlay(False)
+                self._update_operation_dock()
+            return
 
         def evaluate():
-            return tuple((tile, evaluate_image_snapshot(document, tile.view_state, colormap_lut=colormap_lut)) for tile in missing_tiles)
+            return self._evaluate_montage_tile_snapshot(session, tile)
 
-        def slow():
-            self.img_view.setImageStale(True)
-            self.img_view.setEvaluationOverlay(True, "Updating montage...")
-            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
-            self._update_operation_dock()
+        self.visible_evaluation_controller.start_latest(
+            evaluate,
+            key=("montage_tile", session.key, int(tile.montage_index)),
+            priority=EvalPriority.VISIBLE_IMAGE,
+            replace_group="visible-montage",
+            on_done=lambda result, session_id=session.session_id, tile=tile: self._on_montage_tile_done(session_id, tile, result),
+            on_error=lambda exc, session_id=session.session_id, tile=tile: self._on_montage_tile_error(session_id, tile, exc),
+            on_stale=lambda: None,
+            on_slow=lambda: self._on_montage_tile_slow(session.session_id),
+            slow_ms=100,
+        )
 
-        def apply_tiles(rendered_tiles):
-            rendered_tiles = tuple(sorted(rendered_tiles, key=lambda rendered: rendered.tile.montage_index))
-            if not rendered_tiles:
-                return
-            previous_canvas = getattr(self, "_current_montage_canvas", None)
-            previous_global_range = self._current_montage_global_view_range()
-            canvas = make_montage_viewport_canvas(
-                plan,
-                rendered_tiles,
-                view_range=current_range,
-                viewport_shape=viewport_shape,
-                budget_bytes=self._visible_render_budget_bytes(),
-                dtype=output_dtype,
-                rgb=view_state.channel == ChannelMode.COMPLEX,
-                include_histogram=True,
-            )
-            rendered_geometry = DisplayGeometry(
-                view_state=view_state,
-                display_shape=canvas.data.shape[:2],
-                montage=plan.geometry,
-                montage_origin_x=canvas.origin_x,
-                montage_origin_y=canvas.origin_y,
-            )
-            self._current_montage_geometry = plan.geometry
-            self._current_montage_plan = plan
-            self._current_montage_canvas = canvas
-            self._next_viewport_policy = ViewportPolicy.PRESERVE
+    def _evaluate_montage_tile_snapshot(self, session, tile):
+        return evaluate_image_snapshot(session.document, tile.view_state, colormap_lut=session.colormap_lut)
+
+    def _on_montage_tile_slow(self, session_id):
+        session = getattr(self, "_montage_session", None)
+        if session is None or int(session.session_id) != int(session_id):
+            return
+        self._show_montage_session_loading_overlay(session)
+
+    def _schedule_montage_session_slow_overlay(self, session):
+        timer = self._ensure_montage_session_slow_timer()
+        self._montage_session_slow_key = (int(session.session_id), session.key)
+        timer.start(100)
+
+    def _ensure_montage_session_slow_timer(self):
+        timer = getattr(self, "_montage_session_slow_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._on_montage_session_slow_timer)
+            self._montage_session_slow_timer = timer
+        return timer
+
+    def _stop_montage_session_slow_overlay(self):
+        timer = getattr(self, "_montage_session_slow_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._montage_session_slow_key = None
+
+    def _on_montage_session_slow_timer(self):
+        key = getattr(self, "_montage_session_slow_key", None)
+        if key is None:
+            return
+        session_id, session_key = key
+        self._show_montage_session_loading_overlay_if_current(session_id, session_key)
+
+    def _show_montage_session_loading_overlay_if_current(self, session_id, key):
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session_id, key):
+            return
+        if not session.pending_tiles and not session.loading_tiles:
+            return
+        self._show_montage_session_loading_overlay(session)
+
+    def _show_montage_session_loading_overlay(self, session):
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return
+        session.show_loading_overlays = True
+        self._schedule_montage_canvas_commit(session, force=True)
+        self.img_view.setImageStale(True)
+        self.img_view.setEvaluationOverlay(True, "Updating montage...")
+        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
+        self._update_operation_dock()
+
+    def _on_montage_tile_done(self, session_id, tile, result) -> None:
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session_id, session.key):
+            return
+        rendered = self.operation_evaluator.store_montage_tile_result(
+            tile,
+            montage_axis=session.montage_axis,
+            colormap_lut=session.colormap_lut,
+            result=result,
+        )
+        session.mark_loaded(rendered)
+        self._schedule_montage_canvas_commit(session, force=not session.pending_tiles)
+        self._schedule_next_montage_tile(session)
+
+    def _on_montage_tile_error(self, session_id, tile, exc) -> None:
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session_id, session.key):
+            return
+        session.mark_skipped(tile)
+        show_status_message(self, f"Montage tile update failed: {exc}", timeout=4000)
+        self._schedule_montage_canvas_commit(session, force=True)
+        self._schedule_next_montage_tile(session)
+
+    def _schedule_montage_canvas_commit(self, session, *, force=False) -> None:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return
+        elapsed_ms = (monotonic() - float(session.last_commit_monotonic or 0.0)) * 1000.0
+        if force or session.canvas is None or elapsed_ms >= MONTAGE_COMMIT_INTERVAL_MS:
+            self._commit_montage_session_canvas(session, force=force)
+            return
+        session.final_commit_pending = True
+        timer = getattr(self, "_montage_commit_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._flush_montage_canvas_commit)
+            self._montage_commit_timer = timer
+        if not timer.isActive():
+            timer.start(max(1, int(MONTAGE_COMMIT_INTERVAL_MS - elapsed_ms)))
+
+    def _flush_montage_canvas_commit(self):
+        session = getattr(self, "_montage_session", None)
+        if session is None or not session.final_commit_pending:
+            return
+        self._commit_montage_session_canvas(session, force=False)
+
+    def _commit_montage_session_canvas(self, session, *, force=False) -> None:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return
+        self._classify_canvas_tiles(session)
+        previous_canvas = getattr(self, "_current_montage_canvas", None)
+        previous_global_range = self._current_montage_global_view_range()
+        canvas = make_montage_viewport_canvas(
+            session.plan,
+            session.rendered_tuple(),
+            view_range=session.view_range,
+            viewport_shape=session.viewport_shape,
+            budget_bytes=self._visible_render_budget_bytes(),
+            dtype=session.output_dtype,
+            rgb=session.rgb,
+            include_histogram=True,
+            loading_tiles=session.loading_tile_tuple(),
+            skipped_tiles=session.skipped_tile_tuple(),
+        )
+        session.canvas = canvas
+        rendered_geometry = DisplayGeometry(
+            view_state=session.view_state,
+            display_shape=canvas.data.shape[:2],
+            montage=session.plan.geometry,
+            montage_origin_x=canvas.origin_x,
+            montage_origin_y=canvas.origin_y,
+            montage_tile_states=canvas.tile_states,
+        )
+        self._current_montage_geometry = session.plan.geometry
+        self._current_montage_plan = session.plan
+        self._current_montage_canvas = canvas
+        self._next_viewport_policy = ViewportPolicy.PRESERVE
+        self._montage_canvas_commit_active = True
+        try:
             self._apply_display_image(
                 DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data),
                 geometry=rendered_geometry,
-                window_mode=window_mode,
-                previous_levels=previous_levels,
-                previous_bounds=previous_bounds,
-                force_auto=force_auto,
+                window_mode=session.window_mode,
+                previous_levels=session.previous_levels,
+                previous_bounds=session.previous_bounds,
+                force_auto=session.force_auto,
             )
+            self._update_montage_tile_overlays(canvas)
             if previous_canvas is not None and previous_global_range is not None:
                 local_range = (
                     (
@@ -728,56 +980,111 @@ class RenderMixin:
                     ),
                 )
                 self.img_view.getView().setRange(xRange=local_range[0], yRange=local_range[1], padding=0)
+        finally:
+            self._montage_canvas_commit_active = False
+        session.note_committed()
+        self._retry_live_profile_after_montage_tile()
 
-        def done(results):
-            current_indices = tuple(self.view_state.montage_indices or tuple(range(int(self.view_state.shape[axis])))) if self.view_state.montage_axis == axis else ()
-            current_key = (
-                "montage_tiles",
-                _document_key(self.document),
-                self.view_state,
-                tuple(tile.source_index for tile in visible_tiles) if current_indices == all_indices else (),
-                colormap_lut.tobytes() if colormap_lut is not None else None,
-                viewport_shape if self.view_state.montage_columns is None else None,
-            )
-            if generation_key != current_key:
-                self.img_view.setImageStale(False)
-                self.img_view.setEvaluationOverlay(False)
-                return
-            rendered_tiles = list(cached_tiles)
-            for tile, result in results:
-                rendered_tiles.append(self.operation_evaluator.store_montage_tile_result(tile, montage_axis=axis, colormap_lut=colormap_lut, result=result))
-            try:
-                apply_tiles(tuple(rendered_tiles))
-            except MemoryError as exc:
-                show_status_message(self, str(exc), timeout=6000)
-            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
-            self._update_operation_dock()
+    def _classify_canvas_tiles(self, session) -> None:
+        rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
+        pending = {int(tile.montage_index) for tile in session.pending_tiles}
+        for tile in session.plan.tiles:
+            index = int(tile.montage_index)
+            intersects = tile.x0 < rect[2] and tile.x0 + tile.width > rect[0] and tile.y0 < rect[3] and tile.y0 + tile.height > rect[1]
+            if not intersects:
+                continue
+            if index in session.rendered_tiles or index in session.loading_tiles or index in session.skipped_tiles:
+                continue
+            if index in pending:
+                session.mark_loading(tile)
+            else:
+                session.pending_tiles.append(tile)
+                session.mark_loading(tile)
 
-        def error(exc):
-            self.img_view.setImageStale(False)
-            self.img_view.setEvaluationOverlay(False)
-            show_status_message(self, f"Montage update failed: {exc}")
-
-        if cached_tiles:
-            try:
-                apply_tiles(tuple(cached_tiles))
-            except MemoryError as exc:
-                show_status_message(self, str(exc), timeout=6000)
-        if not missing_tiles:
-            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
-            self._update_operation_dock()
+    def _update_montage_tile_overlays(self, canvas) -> None:
+        if not hasattr(self.img_view, "setMontageTileOverlays"):
             return
+        overlays = []
+        for tile in canvas.full_plan.tiles:
+            state = canvas.tile_states[int(tile.montage_index)] if int(tile.montage_index) < len(canvas.tile_states) else MontageTileState.UNLOADED
+            if state == MontageTileState.LOADING and not bool(getattr(getattr(self, "_montage_session", None), "show_loading_overlays", False)):
+                continue
+            if state not in {MontageTileState.LOADING, MontageTileState.SKIPPED}:
+                continue
+            x = int(tile.x0) - int(canvas.origin_x)
+            y = int(tile.y0) - int(canvas.origin_y)
+            if x + int(tile.width) <= 0 or y + int(tile.height) <= 0 or x >= canvas.display_shape[1] or y >= canvas.display_shape[0]:
+                continue
+            overlays.append(
+                MontageTileOverlay(
+                    x=max(0, x),
+                    y=max(0, y),
+                    width=max(1, min(int(tile.width), canvas.display_shape[1] - max(0, x))),
+                    height=max(1, min(int(tile.height), canvas.display_shape[0] - max(0, y))),
+                    state=state.value,
+                    text="Skipped" if state == MontageTileState.SKIPPED else "Loading",
+                )
+            )
+        self.img_view.setMontageTileOverlays(tuple(overlays))
 
-        self.prefetch_evaluation_controller.cancel_prefetch()
-        self.visible_evaluation_controller.start_latest(
-            evaluate,
-            key=generation_key,
-            priority=EvalPriority.VISIBLE_IMAGE,
-            replace_group="visible-montage",
-            on_done=done,
-            on_error=error,
-            on_slow=slow,
-        )
+    def _is_current_montage_session(self, session_id, key) -> bool:
+        session = getattr(self, "_montage_session", None)
+        if session is None:
+            return False
+        return int(session.session_id) == int(session_id) and session.key == key and self.view_state.montage_axis is not None
+
+    def _retry_live_profile_after_montage_tile(self) -> None:
+        try:
+            if not self.widgets['buttons']['display']['live_profile'].isChecked():
+                return
+            position = self.img_view.profileMarkerPosition()
+            if position is None:
+                return
+            self._on_profile_marker_moved(*position)
+            self._update_live_profile_from_pending_pos()
+        except Exception as exc:
+            handle_ui_exception("montage live profile retry", exc)
+
+    def _schedule_loading_montage_profile_retry(self, x, y) -> None:
+        timer = getattr(self, "_montage_profile_retry_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._retry_loading_montage_profile)
+            self._montage_profile_retry_timer = timer
+        self._pending_montage_profile_retry = (float(x), float(y))
+        if not timer.isActive():
+            timer.start(80)
+
+    def _retry_loading_montage_profile(self) -> None:
+        point = getattr(self, "_pending_montage_profile_retry", None)
+        self._pending_montage_profile_retry = None
+        if point is None or self.view_state.montage_axis is None:
+            return
+        if not self.widgets['buttons']['display']['live_profile'].isChecked():
+            return
+        if not self.profile_dock.isVisible():
+            self._schedule_loading_montage_profile_retry(float(point[0]), float(point[1]))
+            return
+        self._pending_profile_point = (float(point[0]), float(point[1]))
+        self._pending_profile_pos = None
+        self._update_live_profile_from_pending_pos()
+
+    def _schedule_montage_viewport_update(self) -> None:
+        timer = getattr(self, "_montage_viewport_update_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._run_montage_viewport_update)
+            self._montage_viewport_update_timer = timer
+        timer.start(60)
+
+    def _run_montage_viewport_update(self) -> None:
+        if getattr(self, "_closing", False):
+            return
+        if self.view_state.montage_axis is None:
+            return
+        self.update_montage_view()
 
     def _montage_tile_shape(self, view_state):
         primary_axis, secondary_axis = view_state.image_axes
@@ -1241,6 +1548,8 @@ class RenderMixin:
     def _on_view_range_changed(self):
         """Update display group title when view range changes (for fit mode)."""
         self._update_display_group_title()
+        if self.view_state.montage_axis is not None and not getattr(self, "_montage_canvas_commit_active", False):
+            self._schedule_montage_viewport_update()
 
     def on_tab_changed(self, index):
         """Handle central image tab changes."""

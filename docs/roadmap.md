@@ -291,11 +291,11 @@ Main goal: Montage, panels, and visible rendering are stable, bounded, and predi
 
 ### P0 — fix current montage correctness
 
-* [ ] Remove loaded_rect intersection from make_montage_viewport_canvas().
-* [ ] Canvas rect must be stable and based on requested viewport.
-* [ ] Add unloaded/loading/skipped tile states.
-* [ ] Make hover/profile distinguish gap vs loading vs skipped vs loaded.
-* [ ] Ensure stale montage results do not clear current overlays.
+* [x] Remove loaded_rect intersection from make_montage_viewport_canvas().
+* [x] Canvas rect must be stable and based on requested viewport.
+* [x] Add unloaded/loading/skipped tile states, with skipped reserved for exceptional over-budget tiles.
+* [x] Make hover/profile distinguish gap vs loading vs skipped vs loaded.
+* [x] Ensure stale montage results do not clear current overlays.
 
 Required tests:
 
@@ -308,12 +308,12 @@ Required tests:
 
 ### P1 — progressive tile rendering
 
-* [ ] Add MontageRenderSession.
-* [ ] Commit cached tiles immediately.
-* [ ] Schedule missing visible tiles individually or in small batches.
-* [ ] Copy each finished tile into the current canvas.
-* [ ] Throttle image updates to ~30 Hz.
-* [ ] Show per-tile loading overlays.
+* [x] Add MontageRenderSession.
+* [x] Commit cached tiles immediately.
+* [x] Schedule missing visible tiles individually.
+* [x] Copy each finished tile into the current canvas.
+* [x] Throttle image updates to ~30 Hz.
+* [x] Show per-tile loading overlays.
 
 ### P2 — memory policy unification
 

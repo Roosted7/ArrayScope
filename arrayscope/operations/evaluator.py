@@ -26,7 +26,7 @@ from arrayscope.core.cache_status import (
     cache_status_ready,
     CacheStatus,
 )
-from arrayscope.display.montage import RenderedTile
+from arrayscope.display.montage import RenderedTilePayload
 from arrayscope.display.slice_engine import make_image, make_image_from_slab, make_line, make_line_from_slab, make_scalar_from_slab
 
 
@@ -286,8 +286,7 @@ class OperationEvaluator:
 
     def store_montage_tile_result(self, tile, *, montage_axis, colormap_lut, result: EvaluationResult):
         key = self.montage_tile_key(tile.view_state, montage_axis=montage_axis, source_index=tile.source_index, colormap_lut=colormap_lut)
-        value = RenderedTile(
-            tile=tile,
+        value = RenderedTilePayload(
             image=result.value.data,
             histogram_data=result.value.histogram_data,
             eval_ms=result.eval_ms,
@@ -299,7 +298,7 @@ class OperationEvaluator:
         self.image_evaluations += 1
         self.last_status = cache_status_ready("Montage tile cached")
         self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.READY, _request_message("Montage tile cached", result))
-        return value
+        return value.bind(tile)
 
     def prefetch_image_snapshot(self, document, view_state, colormap_lut=None):
         key = self.image_key(view_state, colormap_lut=colormap_lut, document=document)

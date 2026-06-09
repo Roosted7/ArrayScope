@@ -157,6 +157,134 @@ def test_montage_viewport_canvas_preserves_global_tile_positions():
         np.testing.assert_array_equal(canvas.data[y0 : y0 + 2, x0 : x0 + 3], np.full((2, 3), rendered_tile.tile.source_index))
 
 
+def test_montage_viewport_canvas_shape_does_not_shrink_to_loaded_tiles():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 3, 9)).with_montage_axis(2, indices=tuple(range(9)), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(9)), tile_shape=(2, 3), columns=3, gap=1)
+    rendered = (
+        montage.RenderedTile(
+            tile=plan.tiles[4],
+            image=np.full((2, 3), 4, dtype=np.float32),
+            histogram_data=np.full((2, 3), 4, dtype=np.float32),
+            eval_ms=0.0,
+            slab_shape=(2, 3),
+            slab_nbytes=24,
+        ),
+    )
+
+    canvas = montage.make_montage_viewport_canvas(
+        plan,
+        rendered,
+        view_range=((0, 11), (0, 8)),
+        viewport_shape=(8, 11),
+        budget_bytes=1024 * 1024,
+    )
+
+    assert canvas.data.shape == (8, 11)
+    assert canvas.canvas_rect == (0, 0, 11, 8)
+
+
+def test_montage_viewport_canvas_origin_stays_stable_while_tiles_load():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 3, 20)).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(20)), tile_shape=(2, 3), columns=5, gap=1)
+
+    def rendered(index):
+        return montage.RenderedTile(
+            tile=plan.tiles[index],
+            image=np.full((2, 3), index, dtype=np.float32),
+            histogram_data=np.full((2, 3), index, dtype=np.float32),
+            eval_ms=0.0,
+            slab_shape=(2, 3),
+            slab_nbytes=24,
+        )
+
+    first = montage.make_montage_viewport_canvas(plan, (rendered(10),), view_range=((0, 12), (6, 8)), budget_bytes=1024 * 1024)
+    second = montage.make_montage_viewport_canvas(plan, (rendered(12),), view_range=((0, 12), (6, 8)), budget_bytes=1024 * 1024)
+
+    assert (first.origin_x, first.origin_y, first.data.shape) == (second.origin_x, second.origin_y, second.data.shape)
+
+
+def test_montage_viewport_canvas_expands_to_complete_intersecting_tiles():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 3, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 3), columns=3, gap=1)
+    rendered = (
+        montage.RenderedTile(plan.tiles[1], np.ones((2, 3), dtype=np.float32), np.ones((2, 3), dtype=np.float32), 0.0, (2, 3), 24),
+    )
+
+    canvas = montage.make_montage_viewport_canvas(plan, rendered, view_range=((5, 6), (0, 1)), viewport_shape=(2, 3), budget_bytes=1024 * 1024)
+
+    assert canvas.canvas_rect[0] <= plan.tiles[1].x0
+    assert canvas.canvas_rect[2] >= plan.tiles[1].x0 + plan.tiles[1].width
+    assert canvas.canvas_rect[1] <= plan.tiles[1].y0
+    assert canvas.canvas_rect[3] >= plan.tiles[1].y0 + plan.tiles[1].height
+
+
+def test_montage_viewport_canvas_marks_loaded_loading_skipped_unloaded_tiles():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, gap=1)
+    rendered = (
+        montage.RenderedTile(plan.tiles[0], np.ones((2, 2), dtype=np.float32), np.ones((2, 2), dtype=np.float32), 0.0, (2, 2), 16),
+    )
+
+    canvas = montage.make_montage_viewport_canvas(
+        plan,
+        rendered,
+        view_range=((0, 11), (0, 2)),
+        budget_bytes=1024 * 1024,
+        loading_tiles=(plan.tiles[1],),
+        skipped_tiles=(plan.tiles[2],),
+    )
+
+    assert canvas.tile_states == (
+        montage.MontageTileState.LOADED,
+        montage.MontageTileState.LOADING,
+        montage.MontageTileState.SKIPPED,
+        montage.MontageTileState.UNLOADED,
+    )
+
+
+def test_montage_viewport_canvas_histogram_keeps_unloaded_loading_skipped_as_nan():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, gap=1)
+    rendered = (
+        montage.RenderedTile(plan.tiles[0], np.ones((2, 2), dtype=np.float32), np.ones((2, 2), dtype=np.float32), 0.0, (2, 2), 16),
+    )
+
+    canvas = montage.make_montage_viewport_canvas(
+        plan,
+        rendered,
+        view_range=((0, 11), (0, 2)),
+        budget_bytes=1024 * 1024,
+        loading_tiles=(plan.tiles[1],),
+        skipped_tiles=(plan.tiles[2],),
+    )
+
+    assert np.isfinite(canvas.histogram_data[:, 0:2]).all()
+    assert np.isnan(canvas.histogram_data[:, 3:]).all()
+
+
+def test_montage_tile_status_at_global_point_distinguishes_tile_and_gap():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 2, 3)).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=3, gap=1)
+    states = (montage.MontageTileState.LOADED, montage.MontageTileState.LOADING, montage.MontageTileState.SKIPPED)
+
+    assert montage.tile_status_at_global_point(plan, states, 1, 1).state == montage.MontageTileState.LOADED
+    assert montage.tile_status_at_global_point(plan, states, 4, 1).state == montage.MontageTileState.LOADING
+    assert montage.tile_status_at_global_point(plan, states, 7, 1).state == montage.MontageTileState.SKIPPED
+    assert montage.tile_status_at_global_point(plan, states, 2, 1) is None
+
+
 def test_montage_viewport_canvas_histogram_marks_gaps_and_unloaded_as_nan():
     from arrayscope.core.view_state import ViewState
 
