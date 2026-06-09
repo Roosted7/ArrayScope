@@ -35,12 +35,21 @@ class CacheDiagnosticsSnapshot:
     misses: int = 0
     evictions: int = 0
     last_eval_ms: float | None = None
+    hit_rate: float | None = None
     prefetch_scheduled: int = 0
     prefetch_deduped: int = 0
     prefetch_limited: int = 0
     prefetch_skipped: int = 0
     prefetch_stored: int = 0
     prefetch_stale: int = 0
+    degraded_evaluations: int = 0
+    refused_evaluations: int = 0
+    chunked_evaluations: int = 0
+    cancelled_evaluations: int = 0
+    scheduler_pending: int = 0
+    scheduler_running: int = 0
+    scheduler_cancelled: int = 0
+    scheduler_stale: int = 0
 
 
 def cache_status_for_hit(hit: bool, has_error: bool = False) -> CacheStatusSnapshot:

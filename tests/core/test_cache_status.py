@@ -32,9 +32,28 @@ def test_cache_diagnostics_snapshot_defaults_and_values():
         misses=4,
         evictions=1,
         last_eval_ms=12.5,
+        hit_rate=0.42,
+        degraded_evaluations=1,
+        refused_evaluations=2,
+        chunked_evaluations=3,
+        cancelled_evaluations=4,
     )
 
     assert snapshot.status == cache_status.CacheStatus.READY
     assert snapshot.entries == 2
     assert snapshot.bytes_used == 128
     assert snapshot.last_eval_ms == 12.5
+    assert snapshot.hit_rate == 0.42
+    assert snapshot.degraded_evaluations == 1
+    assert snapshot.refused_evaluations == 2
+    assert snapshot.chunked_evaluations == 3
+    assert snapshot.cancelled_evaluations == 4
+
+
+def test_scheduler_fields_default_to_zero():
+    snapshot = cache_status.CacheDiagnosticsSnapshot(cache_status.CacheStatus.COLD)
+
+    assert snapshot.scheduler_pending == 0
+    assert snapshot.scheduler_running == 0
+    assert snapshot.scheduler_cancelled == 0
+    assert snapshot.scheduler_stale == 0

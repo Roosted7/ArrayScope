@@ -23,6 +23,8 @@ class OperationCost:
     estimated_peak_bytes: int | None = None
     temp_multiplier: float = 1.0
     can_chunk: bool = False
+    chunkable_axes: tuple[int, ...] = ()
+    blocking_axes: tuple[int, ...] = ()
     notes: tuple[str, ...] = ()
 
 
@@ -33,6 +35,8 @@ class PipelineCost:
     output_dtype: np.dtype | None
     estimated_peak_bytes: int | None
     estimated_output_bytes: int | None
+    chunkable_axes: tuple[int, ...] = ()
+    blocking_axes: tuple[int, ...] = ()
     warnings: tuple[str, ...] = ()
 
 
@@ -102,6 +106,7 @@ def estimate_operation_cost(input_shape, input_dtype, operation) -> OperationCos
             output_bytes,
             _sum_known(input_bytes, output_bytes),
             requires_full_axis=(axis,),
+            blocking_axes=(axis,),
             notes=(f"Requires full axis {axis}.",),
         )
     if name == "RootSumSquares":
@@ -116,6 +121,7 @@ def estimate_operation_cost(input_shape, input_dtype, operation) -> OperationCos
             output_bytes,
             peak,
             requires_full_axis=(axis,),
+            blocking_axes=(axis,),
             temp_multiplier=3.0,
             notes=(f"Requires full axis {axis}; includes abs/square temporaries.",),
         )
@@ -132,7 +138,9 @@ def estimate_operation_cost(input_shape, input_dtype, operation) -> OperationCos
             peak,
             requires_full_axis=(axis,),
             temp_multiplier=6.0,
-            can_chunk=False,
+            can_chunk=True,
+            chunkable_axes=tuple(index for index in range(len(output_shape)) if index != axis),
+            blocking_axes=(axis,),
             notes=(f"Requires full transform axis {axis}; centered FFT uses backend temporaries.",),
         )
     return _cost("elementwise", input_shape, output_shape, input_dtype, output_dtype, input_bytes, output_bytes, _sum_known(input_bytes, output_bytes))
@@ -144,9 +152,15 @@ def estimate_pipeline_cost(base_shape, base_dtype, operations) -> PipelineCost:
     costs = []
     warnings = []
     peak = None
+    axis_labels = tuple(range(len(shape)))
+    blocking_labels = set()
     for operation in tuple(operations):
         cost = estimate_operation_cost(shape, dtype, operation)
         costs.append(cost)
+        for axis in cost.blocking_axes:
+            if 0 <= int(axis) < len(axis_labels):
+                blocking_labels.add(axis_labels[int(axis)])
+        axis_labels = _output_axis_labels(axis_labels, operation)
         shape = cost.output_shape
         dtype = cost.output_dtype
         if cost.estimated_peak_bytes is not None:
@@ -154,12 +168,16 @@ def estimate_pipeline_cost(base_shape, base_dtype, operations) -> PipelineCost:
         if cost.requires_full_axis:
             warnings.append(f"{type(operation).__name__} requires full axis {cost.requires_full_axis[0]}.")
     output_bytes = _array_bytes(shape, dtype)
+    final_blocking_axes = tuple(index for index, label in enumerate(axis_labels) if label in blocking_labels)
+    chunkable_axes = tuple(index for index in range(len(shape)) if index not in set(final_blocking_axes))
     return PipelineCost(
         operation_costs=tuple(costs),
         output_shape=shape,
         output_dtype=dtype,
         estimated_peak_bytes=peak,
         estimated_output_bytes=output_bytes,
+        chunkable_axes=chunkable_axes,
+        blocking_axes=final_blocking_axes,
         warnings=tuple(warnings),
     )
 
@@ -183,8 +201,12 @@ def _cost(
     requires_full_axis=(),
     temp_multiplier=1.0,
     can_chunk=False,
+    chunkable_axes=None,
+    blocking_axes=(),
     notes=(),
 ):
+    if chunkable_axes is None:
+        chunkable_axes = tuple(range(len(output_shape))) if can_chunk or kind in {"view", "elementwise", "reshape", "reduction"} else ()
     return OperationCost(
         kind=kind,
         input_shape=input_shape,
@@ -196,9 +218,21 @@ def _cost(
         estimated_output_bytes=output_bytes,
         estimated_peak_bytes=peak_bytes,
         temp_multiplier=float(temp_multiplier),
-        can_chunk=bool(can_chunk),
+        can_chunk=bool(can_chunk or chunkable_axes),
+        chunkable_axes=tuple(chunkable_axes),
+        blocking_axes=tuple(blocking_axes),
         notes=tuple(notes),
     )
+
+
+def _output_axis_labels(axis_labels, operation):
+    labels = list(axis_labels)
+    name = type(operation).__name__
+    if name in {"Mean", "Sum", "Maximum", "Minimum", "RootSumSquares"}:
+        axis = int(getattr(operation, "axis"))
+        if 0 <= axis < len(labels):
+            labels.pop(axis)
+    return tuple(labels)
 
 
 def _array_bytes(shape, dtype) -> int | None:

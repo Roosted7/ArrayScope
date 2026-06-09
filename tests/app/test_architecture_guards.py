@@ -155,3 +155,32 @@ def test_operation_cost_module_is_qt_free():
     text = (ROOT / "arrayscope" / "operations" / "cost.py").read_text()
     assert "Qt" not in text
     assert "pyqtgraph" not in text
+
+
+def test_scheduler_v2_pure_modules_are_qt_free():
+    for rel in (
+        Path("arrayscope/operations/render_plan.py"),
+        Path("arrayscope/operations/chunked.py"),
+    ):
+        text = (ROOT / rel).read_text()
+        assert "Qt" not in text
+        assert "pyqtgraph" not in text
+
+
+def test_window_render_uses_render_decision_helper():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    assert "choose_visible_render_decision" in text
+    assert "estimate_visible_render_context" in text
+
+
+def test_visible_controller_remains_single_worker():
+    text = (ROOT / "arrayscope" / "window" / "main.py").read_text()
+    assert 'EvaluationController(self, max_workers=1, name="visible")' in text
+
+
+def test_degraded_preview_is_not_stored_in_exact_image_cache():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    marker = "if decision.kind == RenderDecisionKind.DEGRADED_PREVIEW:"
+    assert marker in text
+    degraded_block = text.split(marker, 1)[1].split("def evaluate(token):", 1)[0]
+    assert "store_image_result" not in degraded_block

@@ -278,12 +278,12 @@ Main goal: Slow operations become predictable, measurable, and configurable.
 
 Main goal: Visible work always wins.
 
-* [ ] Keep visible render max_workers=1 and latest-only.
-* [ ] Add cost-aware decision: sync/cached, async, refuse, degraded preview.
-* [ ] Add idle-only prefetch.
-* [ ] Add cache hit-rate diagnostics.
-* [ ] Add adaptive prefetch only after measurement.
-* [ ] Add cooperative cancellation points for chunked operations.
+* [x] Keep visible render max_workers=1 and latest-only.
+* [x] Add cost-aware decision: sync/cached, async, refuse, degraded preview.
+* [x] Add idle-only prefetch.
+* [x] Add cache hit-rate diagnostics.
+* [~] Add adaptive prefetch only after measurement (diagnostics and conservative cost gates exist; predictive/adaptive expansion remains future).
+* [x] Add cooperative cancellation points for chunked operations.
 
 ## Phase 5 — Multi-window and sessions
 

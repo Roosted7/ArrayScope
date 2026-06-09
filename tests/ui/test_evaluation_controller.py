@@ -104,3 +104,120 @@ def test_shutdown_ignores_late_results(qt_app):
     qt_app.processEvents()
 
     assert done == []
+
+
+def test_start_latest_can_pass_cancellation_token(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    seen = []
+
+    controller.start_latest(
+        lambda token: seen.append(hasattr(token, "cancelled")) or "ok",
+        key="token",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=lambda _value: None,
+        pass_token=True,
+    )
+
+    QtTest.QTest.qWait(80)
+    qt_app.processEvents()
+
+    assert seen == [True]
+
+
+def test_cancelled_evaluation_does_not_call_error(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.operations.cancellation import EvaluationCancelled
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    errors = []
+    stale = []
+
+    controller.start_latest(
+        lambda token: (_ for _ in ()).throw(EvaluationCancelled()),
+        key="cancel",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=lambda _value: None,
+        on_error=errors.append,
+        on_stale=lambda: stale.append(True),
+        pass_token=True,
+    )
+
+    QtTest.QTest.qWait(80)
+    qt_app.processEvents()
+
+    assert errors == []
+    assert stale == [True]
+
+
+def test_controller_diagnostics_counts_completed_cancelled_stale(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.operations.cancellation import EvaluationCancelled
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    controller.start_latest(
+        lambda: "done",
+        key="done",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=lambda _value: None,
+    )
+    QtTest.QTest.qWait(60)
+    qt_app.processEvents()
+    controller.start_latest(
+        lambda token: (_ for _ in ()).throw(EvaluationCancelled()),
+        key="cancel",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=lambda _value: None,
+        on_stale=lambda: None,
+        pass_token=True,
+    )
+    QtTest.QTest.qWait(60)
+    qt_app.processEvents()
+
+    diagnostics = controller.diagnostics()
+    assert diagnostics.completed == 1
+    assert diagnostics.cancelled == 1
+    assert diagnostics.stale >= 1
+
+
+def test_prefetch_can_be_cancelled_separately(qt_app):
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    started = controller.start_prefetch(lambda: "prefetch", key="prefetch")
+
+    controller.cancel_prefetch()
+
+    assert started.scheduled
+    assert not controller._prefetch_keys
+
+
+def test_is_busy_reflects_pending_or_running_work(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    controller.start_latest(
+        lambda: (time.sleep(0.05), "done")[1],
+        key="busy",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=lambda _value: None,
+    )
+
+    assert controller.is_busy()
+    QtTest.QTest.qWait(100)
+    qt_app.processEvents()
+    assert not controller.is_busy()

@@ -73,15 +73,16 @@ def make_image(data, state, colormap_lut=None):
     image_data = _reorder_present_axes(image_data, present_axes, state.image_axes)
     image_data = _ensure_image_rank(image_data)
 
-    if state.channel == ChannelMode.COMPLEX:
+    channel = _channel_mode(state.channel)
+    if channel == ChannelMode.COMPLEX:
         rgb_data, magnitude_data = complex_to_rgb(image_data, colormap_lut=colormap_lut)
         return DisplayImage(data=rgb_data, histogram_data=magnitude_data)
 
     default_levels = None
-    if state.channel == ChannelMode.ANGLE:
+    if channel == ChannelMode.ANGLE:
         default_levels = (-np.pi, np.pi)
 
-    image_data = apply_channel(image_data, state.channel)
+    image_data = apply_channel(image_data, channel)
     image_data = _apply_scale(image_data, state.scale)
     image_data = np.nan_to_num(image_data)
     return DisplayImage(data=image_data, default_levels=default_levels)
@@ -99,15 +100,16 @@ def make_image_from_slab(slab, request, colormap_lut=None):
     image_data = _reorder_present_axes(image_data, present_axes, state.image_axes)
     image_data = _ensure_image_rank(image_data)
 
-    if state.channel == ChannelMode.COMPLEX:
+    channel = _channel_mode(state.channel)
+    if channel == ChannelMode.COMPLEX:
         rgb_data, magnitude_data = complex_to_rgb(image_data, colormap_lut=colormap_lut)
         return DisplayImage(data=rgb_data, histogram_data=magnitude_data)
 
     default_levels = None
-    if state.channel == ChannelMode.ANGLE:
+    if channel == ChannelMode.ANGLE:
         default_levels = (-np.pi, np.pi)
 
-    image_data = apply_channel(image_data, state.channel)
+    image_data = apply_channel(image_data, channel)
     image_data = _apply_scale(image_data, state.scale)
     image_data = np.nan_to_num(image_data)
     return DisplayImage(data=image_data, default_levels=default_levels)
@@ -130,8 +132,9 @@ def make_line(data, state):
 
     line_data, present_axes = _extract_display_axes(data, state, (state.line_axis,))
     line_data = _apply_display_axis_ranges(line_data, state, present_axes)
-    if state.channel != ChannelMode.COMPLEX:
-        line_data = apply_channel(line_data, state.channel)
+    channel = _channel_mode(state.channel)
+    if channel != ChannelMode.COMPLEX:
+        line_data = apply_channel(line_data, channel)
         line_data = _apply_scale(line_data, state.scale)
     line_data = _ensure_line_rank(line_data)
     return DisplayLine(data=line_data, axis=state.line_axis)
@@ -145,8 +148,9 @@ def make_line_from_slab(slab, request):
     line_data = np.asarray(slab)
     present_axes = _present_axes_for_slab(state, (state.line_axis,))
     line_data = _apply_display_axis_ranges(line_data, state, present_axes, applied_axes=getattr(request, "ranged_axes", ()))
-    if state.channel != ChannelMode.COMPLEX:
-        line_data = apply_channel(line_data, state.channel)
+    channel = _channel_mode(state.channel)
+    if channel != ChannelMode.COMPLEX:
+        line_data = apply_channel(line_data, channel)
         line_data = _apply_scale(line_data, state.scale)
     line_data = _ensure_line_rank(line_data)
     return DisplayLine(data=line_data, axis=state.line_axis)
@@ -185,6 +189,12 @@ def _apply_scale(data, scale):
     if scale == ScaleMode.SYMLOG:
         return symlog(data)
     return data
+
+
+def _channel_mode(channel):
+    if hasattr(channel, "value"):
+        channel = channel.value
+    return ChannelMode(channel)
 
 
 def _apply_display_axis_ranges(data, state, present_axes, *, applied_axes=()):
