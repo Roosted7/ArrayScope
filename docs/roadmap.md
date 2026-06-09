@@ -332,11 +332,11 @@ Required tests:
 
 ### P4 — clean Wayland preserve-canvas code
 
-* [ ] Encapsulate current trick in CanvasPreserveTransaction.
-* [ ] Gate strong nudge path to Wayland or fallback mode.
-* [ ] Capture/restore actual size constraints.
-* [ ] Replace print() with logging/debug diagnostics.
-* [ ] Add manual Wayland regression doc.
+* [x] Encapsulate current trick in CanvasPreserveTransaction.
+* [x] Gate strong nudge path to Wayland or fallback mode.
+* [x] Capture/restore actual size constraints.
+* [x] Replace print() with logging/debug diagnostics.
+* [x] Add manual Wayland regression doc.
 
 ## Phase 4g — operation planner and stage cache
 

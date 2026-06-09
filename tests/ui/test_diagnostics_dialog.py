@@ -34,9 +34,24 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
         dialog = getattr(win, "_diagnostics_dialog", None)
         assert isinstance(dialog, DiagnosticsDialog)
         assert dialog.isVisible()
+        assert dialog.tabs.tabText(0) == "Memory"
+        assert {dialog.tabs.tabText(index) for index in range(dialog.tabs.count())} == {
+            "Memory",
+            "Caches",
+            "Schedulers",
+            "Render",
+            "Canvas Preserve",
+            "Montage",
+            "FFT",
+            "Operations",
+            "All",
+        }
+        dialog.tabs.setCurrentWidget(dialog._section_edits["All"])
         text = dialog.text_edit.toPlainText()
-        for heading in ("Memory", "Caches", "Schedulers", "Render", "Montage", "FFT", "Operations"):
+        for heading in ("Memory", "Caches", "Schedulers", "Render", "Canvas Preserve", "Montage", "FFT", "Operations"):
             assert heading in text
+        assert dialog.refresh_button.isCheckable()
+        assert dialog.refresh_button.isChecked()
     finally:
         win.close()
 
@@ -68,14 +83,42 @@ def test_diagnostics_refresh_updates_cache_text(qtbot):
     try:
         _process_events(qtbot)
         win.open_diagnostics_dialog()
-        before = win._diagnostics_dialog.text_edit.toPlainText()
+        dialog = win._diagnostics_dialog
+        dialog.tabs.setCurrentWidget(dialog._section_edits["All"])
+        before = dialog.text_edit.toPlainText()
         win.operation_evaluator.image(win.view_state)
-        win._diagnostics_dialog.refresh()
-        after = win._diagnostics_dialog.text_edit.toPlainText()
+        dialog.refresh()
+        after = dialog.text_edit.toPlainText()
 
         assert before != after
         assert "Image:" in after
         assert "entries=1" in after
+    finally:
+        win.close()
+
+
+def test_diagnostics_auto_text_toggle_pauses_text_but_not_bars(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.open_diagnostics_dialog()
+        dialog = win._diagnostics_dialog
+        dialog.tabs.setCurrentWidget(dialog._section_edits["All"])
+        before = dialog.text_edit.toPlainText()
+
+        dialog.refresh_button.setChecked(False)
+        win.operation_evaluator.image(win.view_state)
+        dialog.refresh()
+
+        assert dialog.text_edit.toPlainText() == before
+        assert "entries=1" in dialog._bars["image"].text()
+
+        dialog.refresh_button.setChecked(True)
+        assert "entries=1" in dialog.text_edit.toPlainText()
     finally:
         win.close()
 

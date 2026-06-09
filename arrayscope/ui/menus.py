@@ -14,6 +14,7 @@ from arrayscope.app.settings_state import (
 )
 from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.runtime_diagnostics import (
+    CanvasPreserveRuntimeDiagnostics,
     MontageRuntimeDiagnostics,
     RenderRuntimeDiagnostics,
     WindowRuntimeDiagnostics,
@@ -85,11 +86,23 @@ class WindowMenuMixin:
         command_palette_action.triggered.connect(self.open_command_palette)
         view_menu.addAction(command_palette_action)
         view_menu.addSeparator()
-        preserve_canvas_action = QtGui.QAction("Preserve Canvas Size on Panel Changes", self, checkable=True)
-        preserve_canvas_action.setChecked(self.app_settings.panel_resize_behavior == PanelResizeBehavior.BEST_EFFORT)
-        preserve_canvas_action.triggered.connect(self._set_preserve_canvas_enabled)
-        view_menu.addAction(preserve_canvas_action)
-        self._preserve_canvas_action = preserve_canvas_action
+        panel_resize_menu = QtWidgets.QMenu("Panel Resize Behavior", self)
+        view_menu.addMenu(panel_resize_menu)
+        self._panel_resize_actions = {}
+        self._panel_resize_action_group = QtGui.QActionGroup(self)
+        self._panel_resize_action_group.setExclusive(True)
+        for behavior, label in (
+            (PanelResizeBehavior.BEST_EFFORT, "Best effort"),
+            (PanelResizeBehavior.STRONG_WAYLAND, "Strong Wayland"),
+            (PanelResizeBehavior.OFF, "Off"),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            self._panel_resize_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, behavior=behavior: self._set_panel_resize_behavior(behavior))
+            panel_resize_menu.addAction(action)
+            self._panel_resize_actions[behavior] = action
+        self._panel_resize_menu = panel_resize_menu
+        self._sync_panel_resize_actions()
         reset_layout_action = QtGui.QAction("Reset layout", self)
         set_action_icon(reset_layout_action, "reset_wrench")
         reset_layout_action.triggered.connect(self.reset_layout)
@@ -315,6 +328,9 @@ class WindowMenuMixin:
 
     def _set_preserve_canvas_enabled(self, enabled):
         behavior = PanelResizeBehavior.BEST_EFFORT if enabled else PanelResizeBehavior.OFF
+        self._set_panel_resize_behavior(behavior)
+
+    def _set_panel_resize_behavior(self, behavior):
         self.app_settings = AppSettingsState(
             theme=self.app_settings.theme,
             prefetch_nearby_slices=self.app_settings.prefetch_nearby_slices,
@@ -325,6 +341,16 @@ class WindowMenuMixin:
             render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
         )
         self._save_app_settings()
+        self._sync_panel_resize_actions()
+        show_status_message(self, f"Panel resize: {_panel_resize_behavior_label(behavior)}", timeout=2500)
+
+    def _sync_panel_resize_actions(self):
+        if not hasattr(self, "_panel_resize_actions"):
+            return
+        for behavior, action in self._panel_resize_actions.items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.panel_resize_behavior == behavior)
+            action.blockSignals(False)
 
     def collect_runtime_diagnostics(self):
         policy = self._refresh_memory_policy(active_render=getattr(self, "visible_evaluation_controller", None).is_busy() if hasattr(self, "visible_evaluation_controller") else False)
@@ -386,6 +412,11 @@ class WindowMenuMixin:
             schedulers=tuple(schedulers),
             render=render,
             montage=montage,
+            canvas_preserve=(
+                self.layout_manager.canvas_preserver.diagnostics()
+                if hasattr(getattr(self, "layout_manager", None), "canvas_preserver")
+                else CanvasPreserveRuntimeDiagnostics()
+            ),
             fft_backend_choice=backend_choice.value,
             fft_backend_resolved=resolved.name,
             fft_workers_choice=workers_choice.value,
@@ -499,3 +530,12 @@ class WindowMenuMixin:
         ]
         if not visible_arrayscope:
             app.quit()
+
+
+def _panel_resize_behavior_label(behavior):
+    labels = {
+        PanelResizeBehavior.BEST_EFFORT: "Best effort",
+        PanelResizeBehavior.STRONG_WAYLAND: "Strong Wayland",
+        PanelResizeBehavior.OFF: "Off",
+    }
+    return labels.get(behavior, str(getattr(behavior, "value", behavior)))

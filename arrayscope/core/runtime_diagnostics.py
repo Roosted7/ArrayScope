@@ -36,6 +36,25 @@ class RenderRuntimeDiagnostics:
 
 
 @dataclass(frozen=True)
+class CanvasPreserveRuntimeDiagnostics:
+    active: bool = False
+    generation: int = 0
+    mode: str = "best_effort"
+    platform: str = ""
+    last_transition: str = ""
+    last_result: str = "none"
+    target_canvas_size: tuple[int, int] | None = None
+    final_canvas_size: tuple[int, int] | None = None
+    final_window_size: tuple[int, int] | None = None
+    last_delta: tuple[int, int] | None = None
+    attempts_used: int = 0
+    strong_used: bool = False
+    strong_available: bool = False
+    constraints_active: bool = False
+    events: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class WindowRuntimeDiagnostics:
     memory_policy: MemoryPolicy
     image_cache: CacheDiagnosticsSnapshot
@@ -44,6 +63,7 @@ class WindowRuntimeDiagnostics:
     schedulers: tuple[object, ...]
     render: RenderRuntimeDiagnostics
     montage: MontageRuntimeDiagnostics
+    canvas_preserve: CanvasPreserveRuntimeDiagnostics
     fft_backend_choice: str
     fft_backend_resolved: str
     fft_workers_choice: str
@@ -56,50 +76,80 @@ class WindowRuntimeDiagnostics:
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
-    sections = [
-        "Memory",
-        format_memory_policy(snapshot.memory_policy),
-        "",
-        "Caches",
-        _cache_line("Image", snapshot.image_cache),
-        _cache_line("Montage tiles", snapshot.tile_cache),
-        _cache_line("Profiles/scalars", snapshot.profile_cache),
-        "",
-        "Schedulers",
-        *(_scheduler_line(scheduler) for scheduler in snapshot.schedulers),
-        "",
-        "Render",
-        f"Decision: {snapshot.render.last_decision_kind or 'n/a'}",
-        f"Reason: {snapshot.render.last_decision_reason or 'n/a'}",
-        f"Context: {snapshot.render.last_context_summary or 'n/a'}",
-        f"Request: {snapshot.render.last_request_key or 'n/a'}",
-        f"Error: {snapshot.render.last_error or 'n/a'}",
-        "",
-        "Montage",
-        f"Active: {snapshot.montage.active}",
-        f"Session: {snapshot.montage.session_id if snapshot.montage.session_id is not None else 'n/a'}",
-        f"Canvas rect: {snapshot.montage.canvas_rect if snapshot.montage.canvas_rect is not None else 'n/a'}",
-        f"Canvas shape: {snapshot.montage.canvas_shape if snapshot.montage.canvas_shape is not None else 'n/a'}",
-        f"Canvas bytes: {'n/a' if snapshot.montage.canvas_bytes is None else format_bytes(snapshot.montage.canvas_bytes)}",
-        (
-            "Tiles: "
-            f"visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
-            f"loading={snapshot.montage.loading_tiles} pending={snapshot.montage.pending_tiles} "
-            f"skipped={snapshot.montage.skipped_tiles}"
+    return "\n\n".join(f"{title}\n{text}" for title, text in format_runtime_diagnostics_sections(snapshot).items())
+
+
+def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> dict[str, str]:
+    sections = {
+        "Memory": format_memory_policy(snapshot.memory_policy),
+        "Caches": "\n".join(
+            (
+                _cache_line("Image", snapshot.image_cache),
+                _cache_line("Montage tiles", snapshot.tile_cache),
+                _cache_line("Profiles/scalars", snapshot.profile_cache),
+            )
         ),
-        f"Loading overlays: {snapshot.montage.show_loading_overlays}",
-        "",
-        "FFT",
-        f"Backend: {snapshot.fft_backend_choice} -> {snapshot.fft_backend_resolved}",
-        f"Workers: {snapshot.fft_workers_choice} -> {snapshot.fft_workers_resolved}",
-        "",
-        "Operations",
-        f"Count: {snapshot.operation_count}",
-        f"Derived: {snapshot.derived_shape} {snapshot.derived_dtype}",
-        f"Pipeline peak: {'n/a' if snapshot.pipeline_peak_bytes is None else format_bytes(snapshot.pipeline_peak_bytes)}",
-    ]
-    sections.extend(f"Warning: {warning}" for warning in snapshot.pipeline_warnings)
-    return "\n".join(str(line) for line in sections)
+        "Schedulers": "\n".join(_scheduler_line(scheduler) for scheduler in snapshot.schedulers),
+        "Render": "\n".join(
+            (
+                f"Decision: {snapshot.render.last_decision_kind or 'n/a'}",
+                f"Reason: {snapshot.render.last_decision_reason or 'n/a'}",
+                f"Context: {snapshot.render.last_context_summary or 'n/a'}",
+                f"Request: {snapshot.render.last_request_key or 'n/a'}",
+                f"Error: {snapshot.render.last_error or 'n/a'}",
+            )
+        ),
+        "Canvas Preserve": "\n".join(
+            (
+                f"Mode: {snapshot.canvas_preserve.mode}",
+                f"Platform: {snapshot.canvas_preserve.platform or 'n/a'}",
+                f"Active: {snapshot.canvas_preserve.active}",
+                f"Last transition: {snapshot.canvas_preserve.last_transition or 'n/a'}",
+                f"Last result: {snapshot.canvas_preserve.last_result or 'n/a'}",
+                f"Target canvas: {_size_text(snapshot.canvas_preserve.target_canvas_size)}",
+                f"Final canvas: {_size_text(snapshot.canvas_preserve.final_canvas_size)}",
+                f"Final window: {_size_text(snapshot.canvas_preserve.final_window_size)}",
+                f"Last delta: {_size_text(snapshot.canvas_preserve.last_delta)}",
+                f"Attempts used: {snapshot.canvas_preserve.attempts_used}",
+                f"Strong used: {snapshot.canvas_preserve.strong_used}",
+                f"Strong available: {snapshot.canvas_preserve.strong_available}",
+                f"Constraints active: {snapshot.canvas_preserve.constraints_active}",
+                "Recent events:",
+                *(f"  {event}" for event in snapshot.canvas_preserve.events),
+            )
+        ),
+        "Montage": "\n".join(
+            (
+                f"Active: {snapshot.montage.active}",
+                f"Session: {snapshot.montage.session_id if snapshot.montage.session_id is not None else 'n/a'}",
+                f"Canvas rect: {snapshot.montage.canvas_rect if snapshot.montage.canvas_rect is not None else 'n/a'}",
+                f"Canvas shape: {snapshot.montage.canvas_shape if snapshot.montage.canvas_shape is not None else 'n/a'}",
+                f"Canvas bytes: {'n/a' if snapshot.montage.canvas_bytes is None else format_bytes(snapshot.montage.canvas_bytes)}",
+                (
+                    "Tiles: "
+                    f"visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
+                    f"loading={snapshot.montage.loading_tiles} pending={snapshot.montage.pending_tiles} "
+                    f"skipped={snapshot.montage.skipped_tiles}"
+                ),
+                f"Loading overlays: {snapshot.montage.show_loading_overlays}",
+            )
+        ),
+        "FFT": "\n".join(
+            (
+                f"Backend: {snapshot.fft_backend_choice} -> {snapshot.fft_backend_resolved}",
+                f"Workers: {snapshot.fft_workers_choice} -> {snapshot.fft_workers_resolved}",
+            )
+        ),
+        "Operations": "\n".join(
+            (
+                f"Count: {snapshot.operation_count}",
+                f"Derived: {snapshot.derived_shape} {snapshot.derived_dtype}",
+                f"Pipeline peak: {'n/a' if snapshot.pipeline_peak_bytes is None else format_bytes(snapshot.pipeline_peak_bytes)}",
+                *(f"Warning: {warning}" for warning in snapshot.pipeline_warnings),
+            )
+        ),
+    }
+    return sections
 
 
 def _cache_line(name: str, cache: CacheDiagnosticsSnapshot) -> str:
@@ -111,7 +161,13 @@ def _cache_line(name: str, cache: CacheDiagnosticsSnapshot) -> str:
     )
 
 
-def _scheduler_line(scheduler: SchedulerDiagnostics) -> str:
+def _size_text(size: tuple[int, int] | None) -> str:
+    if size is None:
+        return "n/a"
+    return f"{int(size[0])}x{int(size[1])}"
+
+
+def _scheduler_line(scheduler) -> str:
     return (
         f"{scheduler.name}: pending={scheduler.pending}, running={scheduler.running}, queued={scheduler.queued}, "
         f"completed={scheduler.completed}, cancelled={scheduler.cancelled}, stale={scheduler.stale}, failed={scheduler.failed}, "

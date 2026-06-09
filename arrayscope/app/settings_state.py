@@ -11,6 +11,7 @@ from arrayscope.core.memory_policy import MemoryProfileChoice, normalize_memory_
 
 class PanelResizeBehavior(Enum):
     BEST_EFFORT = "best_effort"
+    STRONG_WAYLAND = "strong_wayland"
     OFF = "off"
 
 

@@ -426,7 +426,10 @@ But make it less invasive:
      best effort
      strong Wayland
 
-The current debug prints like: `print("[ArrayScope preserve-canvas] ...", flush=True)` should not stay in production. They belong behind a debug flag or in a developer diagnostics panel.
+Implemented note: Phase 4f P4 moved this behavior into `CanvasPreserveController`, added explicit
+Off / Best effort / Strong Wayland modes, removed the preserve-canvas stdout prints, and surfaced
+preserve state in Developer -> Diagnostics. StageCache remains future Phase 4g work despite the memory
+policy already exposing a placeholder budget.
 
 Also, do not use direct window-manager tricks beyond Qt. Under Wayland, the compositor owns top-level window management; Qt’s startSystemMove() and startSystemResize() are the supported native interactive hooks.
 
