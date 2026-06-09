@@ -24,6 +24,8 @@ from arrayscope.operations.pipeline import (
     SplitComplexAxis,
     Sum,
 )
+from arrayscope.operations.planner import build_region_plan
+from arrayscope.operations.regions import region_from_index_spec
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class SlabPlan:
     output_shape: tuple[int, ...]
     estimated_nbytes: int | None = None
     requires_full_materialization: bool = False
+    region_plan: object | None = None
 
 
 def request_for_image(view_state) -> SlabRequest:
@@ -86,12 +89,22 @@ def plan_slab(document: ArrayDocument, request: SlabRequest) -> SlabPlan:
     dtype = getattr(document.base_data, "dtype", None)
     estimated = None if dtype is None else int(np.prod(base_shape, dtype=np.int64)) * np.dtype(dtype).itemsize
     output_shape = _shape_after_index(document.current_shape, spec)
+    final_region = region_from_index_spec(document.current_shape, spec)
+    required_input_region = region_from_index_spec(np.shape(document.base_data), base_spec)
     return SlabPlan(
         base_index=tuple(base_spec),
         base_shape=tuple(int(v) for v in base_shape),
         slab_ops=tuple(document.enabled_operations),
         output_shape=tuple(int(v) for v in output_shape),
         estimated_nbytes=estimated,
+        region_plan=build_region_plan(
+            request_kind=request.kind,
+            base_shape=np.shape(document.base_data),
+            base_dtype=dtype,
+            operations=document.enabled_operations,
+            final_region=final_region,
+            required_input_region=required_input_region,
+        ),
     )
 
 
@@ -134,6 +147,9 @@ def _axis_item_for_keep_axis(view_state, axis):
 
 
 def _evaluate_ops(data, operations, desired_spec):
+    # Keep this proven execution path while RegionPlan metadata is introduced.
+    # A later planner integration will move operation-specific region transitions
+    # behind planner-owned contracts.
     if not operations:
         return _apply_index(data, tuple(desired_spec))
 

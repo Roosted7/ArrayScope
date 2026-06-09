@@ -166,6 +166,36 @@ def test_operation_cost_module_is_qt_free():
     assert "pyqtgraph" not in text
 
 
+def test_operation_planner_contract_modules_are_qt_free():
+    for rel in (
+        Path("arrayscope/operations/capabilities.py"),
+        Path("arrayscope/operations/regions.py"),
+        Path("arrayscope/operations/planner.py"),
+    ):
+        text = (ROOT / rel).read_text()
+        assert "Qt" not in text
+        assert "pyqtgraph" not in text
+
+
+def test_operation_cost_uses_operation_declarations_not_registered_type_switches():
+    text = (ROOT / "arrayscope" / "operations" / "cost.py").read_text()
+    for token in (
+        "CenteredFFT",
+        "CenteredIFFT",
+        "RootSumSquares",
+        "CombineRealImagAxis",
+        "SplitComplexAxis",
+    ):
+        assert token not in text
+
+
+def test_runtime_stage_cache_is_not_allocated_before_stage_cache_increment():
+    assert not (ROOT / "arrayscope" / "operations" / "stage_cache.py").exists()
+    text = (ROOT / "arrayscope" / "operations" / "evaluator.py").read_text()
+    assert "StageCache(" not in text
+    assert "self._stage_cache" not in text
+
+
 def test_memory_policy_and_runtime_diagnostics_are_qt_free():
     for rel in (
         Path("arrayscope/core/memory_policy.py"),

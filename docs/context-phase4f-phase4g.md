@@ -2,6 +2,11 @@
 
 Implemented note: Phase 4f P2/P3 now provide a psutil-backed `MemoryPolicy`, split image/tile/profile cache budgets, policy-driven render and prefetch gates, and Developer -> Diagnostics with visual usage bars plus text sections. The policy exposes a stage-cache budget for Phase 4g planning, but StageCache itself remains future work.
 
+Implemented note: Phase 4g P0 added operation-declared capabilities plus pure region/planner
+contracts. Cost estimates now consume the operation declarations, and slab plans expose final/required
+regions and candidate stage-cache metadata for diagnostics. Runtime region execution and StageCache
+allocation remain future Phase 4g steps.
+
 ## P0: viewport montage currently shrinks/crops to loaded tiles
 
 This likely explains several of our montage symptoms:
