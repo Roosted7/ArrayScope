@@ -1,6 +1,6 @@
 # Context for phase 4f and phase 4g (and fully completing other phase 4's)
 
-Implemented note: Phase 4f P2/P3 now provide a psutil-backed `MemoryPolicy`, split image/tile/profile cache budgets, policy-driven render and prefetch gates, and Developer -> Diagnostics with visual usage bars plus text sections. The policy exposes a stage-cache budget for Phase 4g planning, but StageCache itself remains future work.
+Implemented note: Phase 4f P2/P3 now provide a psutil-backed `MemoryPolicy`, split image/tile/profile cache budgets, policy-driven render and prefetch gates, and Developer -> Diagnostics with visual usage bars plus text sections. The policy exposes a stage-cache budget that Phase 4g now uses for the in-memory StageCache.
 
 Implemented note: Phase 4g P0 added operation-declared capabilities plus pure region/planner
 contracts. Cost estimates now consume the operation declarations, and slab plans expose final/required
@@ -12,6 +12,12 @@ operations now own their region mapping and regional application, and `operation
 planner output instead of carrying operation-specific request-expansion branches. Developer Diagnostics
 shows final/required regions, expanded axes, transitions, candidates, and peak estimates. StageCache
 allocation remains future work.
+
+Implemented note: Phase 4g P2/P3 added an in-memory, policy-budgeted StageCache owned by
+`OperationEvaluator`. Planner candidates are used as cache lookup/store boundaries, so expanded
+FFT/IFFT stages can be reused across slices, montage tiles, profiles, scalar reads, prefetch, and
+evaluator-backed export. Disk-backed cache moved back to ideas, and operation simplification remains
+future work.
 
 ## P0: viewport montage currently shrinks/crops to loaded tiles
 
@@ -238,7 +244,7 @@ class StageKey:
     shape: tuple[int, ...]
 @dataclass
 class StageValue:
-    data: np.ndarray | np.memmap
+    data: object
     region: RegionSpec
     nbytes: int
     stage_index: int
@@ -593,7 +599,8 @@ if "pyfftw" not in available_fft_backends():
 
 Do not require it in the base test suite.
 
-For large intermediate/stage caches, numpy.memmap is worth using sooner. NumPy documents memmap as array-like access to small segments of large disk-backed arrays without reading the whole file into memory. Joblib’s Memory is useful inspiration for disk caching and memmapped reloads, but I would not wrap ArrayScope’s evaluator in Joblib directly because you need custom request keys, cache priorities, invalidation, and memory budgets. Joblib also warns about cache behavior and uses pickle-based storage, so treat it as a tool, not the core architecture.
+Disk-backed stage caching is now explicitly future work in `docs/ideas.md`. The in-memory planner/cache
+path should collect real usage data before adding memmap or Joblib-inspired persistence.
 
 Dask and Zarr are still future backend ideas, not immediate fixes. Dask Array is built around blocked algorithms over chunks and can work larger-than-memory, while Zarr is a chunked N-dimensional storage format; both are relevant later, but neither replaces the need for your viewer-specific render planner, stage cache, and scheduler.
 

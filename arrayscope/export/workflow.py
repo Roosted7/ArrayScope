@@ -110,7 +110,8 @@ class ExportWorkflowMixin:
             pixel_ratio_mode=settings.get('pixel_ratio', 'square_pixels'),
             display_mode=display_mode,
             widget_ratio=widget_ratio,
-            colormap_lut=lut
+            colormap_lut=lut,
+            evaluator=self.operation_evaluator,
         )
         
         # Show progress dialog

@@ -98,11 +98,12 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             "image": _UsageBar("Image cache"),
             "tile": _UsageBar("Tile cache"),
             "profile": _UsageBar("Profile cache"),
+            "stage": _UsageBar("Stage cache"),
             "render": _UsageBar("Last render"),
             "canvas": _UsageBar("Montage canvas"),
             "prefetch": _UsageBar("Prefetch"),
         }
-        for row, key in enumerate(("system", "rss", "image", "tile", "profile", "render", "canvas", "prefetch")):
+        for row, key in enumerate(("system", "rss", "image", "tile", "profile", "stage", "render", "canvas", "prefetch")):
             bars.addWidget(self._bars[key], row // 2, row % 2)
         overview_layout.addLayout(bars)
 
@@ -197,6 +198,16 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             used=snapshot.profile_cache.bytes_used,
             total=snapshot.profile_cache.max_bytes,
             detail=f"entries={snapshot.profile_cache.entries}, {format_bytes(snapshot.profile_cache.bytes_used)} / {format_bytes(snapshot.profile_cache.max_bytes)}",
+        )
+        stage_hit_rate = "n/a" if snapshot.stage_cache.hit_rate is None else f"{snapshot.stage_cache.hit_rate:.0%}"
+        self._bars["stage"].set_usage(
+            used=snapshot.stage_cache.bytes_used,
+            total=snapshot.stage_cache.max_bytes,
+            detail=(
+                f"entries={snapshot.stage_cache.entries}, "
+                f"{format_bytes(snapshot.stage_cache.bytes_used)} / {format_bytes(snapshot.stage_cache.max_bytes)}, "
+                f"hit-rate={stage_hit_rate}"
+            ),
         )
         render_used = snapshot.render.estimated_display_bytes
         render_budget = snapshot.render.render_budget_bytes or policy.visible_render_budget_bytes

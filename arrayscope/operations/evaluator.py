@@ -10,6 +10,7 @@ import numpy as np
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.cache import BoundedArrayCache
+from arrayscope.operations.stage_cache import StageCache
 from arrayscope.operations.slabs import (
     evaluate_slab,
     plan_slab,
@@ -33,6 +34,8 @@ from arrayscope.display.slice_engine import make_image, make_image_from_slab, ma
 DEFAULT_IMAGE_CACHE_BYTES = 256 * 1024 * 1024
 DEFAULT_TILE_CACHE_BYTES = 512 * 1024 * 1024
 DEFAULT_PROFILE_CACHE_BYTES = 64 * 1024 * 1024
+DEFAULT_STAGE_CACHE_BYTES = 512 * 1024 * 1024
+DEFAULT_STAGE_CACHE_ENTRIES = 64
 LARGE_MATERIALIZE_BYTES = 512 * 1024 * 1024
 
 
@@ -80,6 +83,7 @@ class OperationEvaluator:
         self._image_cache = BoundedArrayCache(DEFAULT_IMAGE_CACHE_BYTES, 96)
         self._tile_cache = BoundedArrayCache(DEFAULT_TILE_CACHE_BYTES, 512)
         self._profile_cache = BoundedArrayCache(DEFAULT_PROFILE_CACHE_BYTES, 256)
+        self._stage_cache = StageCache(max_bytes=DEFAULT_STAGE_CACHE_BYTES, max_entries=DEFAULT_STAGE_CACHE_ENTRIES)
 
     def set_document(self, document: ArrayDocument):
         if (
@@ -105,6 +109,8 @@ class OperationEvaluator:
             self._tile_cache.clear()
         if hasattr(self, "_profile_cache"):
             self._profile_cache.clear()
+        if hasattr(self, "_stage_cache"):
+            self._stage_cache.clear()
         self.display_generation += 1
         self.last_status = CacheStatusSnapshot(CacheStatus.STALE, "Cache cleared")
 
@@ -136,7 +142,13 @@ class OperationEvaluator:
 
         self.last_status = cache_status_computing("Evaluating image slab")
         try:
-            result = evaluate_image_snapshot(self.document, view_state, colormap_lut=colormap_lut)
+            result = evaluate_image_snapshot(
+                self.document,
+                view_state,
+                colormap_lut=colormap_lut,
+                stage_cache=self._stage_cache,
+                stage_document_key=stage_document_key(self.document),
+            )
             return self.store_image_result(view_state, colormap_lut, result)
         except Exception as exc:
             self.last_status = cache_status_error(exc)
@@ -153,7 +165,12 @@ class OperationEvaluator:
 
         self.last_status = cache_status_computing("Evaluating profile slab")
         try:
-            result = evaluate_line_snapshot(self.document, view_state)
+            result = evaluate_line_snapshot(
+                self.document,
+                view_state,
+                stage_cache=self._stage_cache,
+                stage_document_key=stage_document_key(self.document),
+            )
             return self.store_line_result(view_state, result)
         except Exception as exc:
             self.last_status = cache_status_error(exc)
@@ -170,7 +187,13 @@ class OperationEvaluator:
 
         self.last_status = cache_status_computing("Evaluating pixel value")
         try:
-            result = evaluate_scalar_snapshot(self.document, view_state, index)
+            result = evaluate_scalar_snapshot(
+                self.document,
+                view_state,
+                index,
+                stage_cache=self._stage_cache,
+                stage_document_key=stage_document_key(self.document),
+            )
             return self.store_scalar_result(view_state, index, result)
         except Exception as exc:
             self.last_status = cache_status_error(exc)
@@ -187,7 +210,15 @@ class OperationEvaluator:
 
         self.last_status = cache_status_computing("Evaluating export frame")
         try:
-            result = evaluate_export_frame_snapshot(self.document, view_state, frame_axis, frame_index, colormap_lut=colormap_lut)
+            result = evaluate_export_frame_snapshot(
+                self.document,
+                view_state,
+                frame_axis,
+                frame_index,
+                colormap_lut=colormap_lut,
+                stage_cache=self._stage_cache,
+                stage_document_key=stage_document_key(self.document),
+            )
             return self.store_export_frame_result(view_state, frame_axis, frame_index, colormap_lut, result)
         except Exception as exc:
             self.last_status = cache_status_error(exc)
@@ -319,7 +350,13 @@ class OperationEvaluator:
         if self._image_cache.bytes_used > int(self._image_cache.max_bytes * 0.8):
             self.prefetch_skipped += 1
             return None
-        return evaluate_image_snapshot(document, view_state, colormap_lut=colormap_lut)
+        return evaluate_image_snapshot(
+            document,
+            view_state,
+            colormap_lut=colormap_lut,
+            stage_cache=self._stage_cache,
+            stage_document_key=stage_document_key(document),
+        )
 
     def store_prefetch_image_result(self, document, view_state, colormap_lut, result):
         if result is None:
@@ -339,7 +376,12 @@ class OperationEvaluator:
         if self._profile_cache.bytes_used > int(self._profile_cache.max_bytes * 0.8):
             self.prefetch_skipped += 1
             return None
-        return evaluate_line_snapshot(document, view_state)
+        return evaluate_line_snapshot(
+            document,
+            view_state,
+            stage_cache=self._stage_cache,
+            stage_document_key=stage_document_key(document),
+        )
 
     def store_prefetch_line_result(self, document, view_state, result):
         if result is None:
@@ -388,6 +430,7 @@ class OperationEvaluator:
         self._image_cache.resize(max_bytes=int(policy.image_cache_budget_bytes))
         self._tile_cache.resize(max_bytes=int(policy.tile_cache_budget_bytes))
         self._profile_cache.resize(max_bytes=int(policy.profile_cache_budget_bytes))
+        self._stage_cache.resize(max_bytes=int(policy.stage_cache_budget_bytes))
 
     def image_cache_diagnostics(self):
         return self._image_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())
@@ -397,6 +440,13 @@ class OperationEvaluator:
 
     def profile_cache_diagnostics(self):
         return self._profile_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())
+
+    @property
+    def stage_cache(self):
+        return self._stage_cache
+
+    def stage_cache_diagnostics(self):
+        return self._stage_cache.diagnostics()
 
     def derived_estimate(self):
         dtype = _estimated_dtype(self.document)
@@ -427,6 +477,12 @@ def _document_key(document: ArrayDocument):
     return (id(document.base_data), tuple(np.shape(document.base_data)), dtype_key, int(document.revision), document.steps)
 
 
+def stage_document_key(document: ArrayDocument):
+    dtype = getattr(document.base_data, "dtype", None)
+    dtype_key = None if dtype is None else str(np.dtype(dtype))
+    return (id(document.base_data), tuple(np.shape(document.base_data)), dtype_key, int(document.revision))
+
+
 def _lut_key(colormap_lut):
     if colormap_lut is None:
         return None
@@ -437,7 +493,7 @@ def _lut_key(colormap_lut):
 def _request_key(request):
     return (
         request.kind,
-        request.view_state,
+        _view_state_key(request.view_state),
         tuple(request.keep_axes),
         tuple(request.slice_indices),
         request.frame_axis,
@@ -445,12 +501,51 @@ def _request_key(request):
     )
 
 
-def evaluate_image_snapshot(document, view_state, colormap_lut=None, cancellation_token=None, *, degraded=False) -> EvaluationResult:
+def _view_state_key(view_state):
+    if view_state is None:
+        return None
+    return (
+        int(getattr(view_state, "ndim", 0)),
+        tuple(int(size) for size in getattr(view_state, "shape", ())),
+        _optional_int_tuple(getattr(view_state, "image_axes", None)),
+        None if getattr(view_state, "line_axis", None) is None else int(view_state.line_axis),
+        tuple(int(index) for index in getattr(view_state, "slice_indices", ())),
+        getattr(getattr(view_state, "channel", None), "value", getattr(view_state, "channel", None)),
+        getattr(getattr(view_state, "scale", None), "value", getattr(view_state, "scale", None)),
+        tuple(bool(value) for value in getattr(view_state, "axis_flipped", ())),
+        tuple(bool(value) for value in getattr(view_state, "axis_fftshifted", ())),
+        None if getattr(view_state, "montage_axis", None) is None else int(view_state.montage_axis),
+        None if getattr(view_state, "montage_columns", None) is None else int(view_state.montage_columns),
+        _optional_int_tuple(getattr(view_state, "montage_indices", None)),
+        _range_key(getattr(view_state, "axis_range_indices", ())),
+    )
+
+
+def _optional_int_tuple(values):
+    if values is None:
+        return None
+    return tuple(int(value) for value in values)
+
+
+def _range_key(values):
+    return tuple(None if value is None else tuple(int(index) for index in value) for value in values)
+
+
+def evaluate_image_snapshot(
+    document,
+    view_state,
+    colormap_lut=None,
+    cancellation_token=None,
+    *,
+    degraded=False,
+    stage_cache=None,
+    stage_document_key=None,
+) -> EvaluationResult:
     request = request_for_image(view_state)
     plan = plan_slab(document, request)
     start = perf_counter()
     _check_cancelled(cancellation_token)
-    slab = evaluate_slab(document, request)
+    slab = evaluate_slab(document, request, stage_cache=stage_cache, document_key=stage_document_key)
     _check_cancelled(cancellation_token)
     value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
     _check_cancelled(cancellation_token)
@@ -464,11 +559,11 @@ def evaluate_image_snapshot(document, view_state, colormap_lut=None, cancellatio
     )
 
 
-def evaluate_line_snapshot(document, view_state) -> EvaluationResult:
+def evaluate_line_snapshot(document, view_state, *, stage_cache=None, stage_document_key=None) -> EvaluationResult:
     request = request_for_line(view_state)
     plan = plan_slab(document, request)
     start = perf_counter()
-    slab = evaluate_slab(document, request)
+    slab = evaluate_slab(document, request, stage_cache=stage_cache, document_key=stage_document_key)
     value = make_line_from_slab(slab, request)
     return EvaluationResult(
         value=value,
@@ -479,11 +574,11 @@ def evaluate_line_snapshot(document, view_state) -> EvaluationResult:
     )
 
 
-def evaluate_scalar_snapshot(document, view_state, index) -> EvaluationResult:
+def evaluate_scalar_snapshot(document, view_state, index, *, stage_cache=None, stage_document_key=None) -> EvaluationResult:
     request = request_for_scalar(view_state, index)
     plan = plan_slab(document, request)
     start = perf_counter()
-    slab = evaluate_slab(document, request)
+    slab = evaluate_slab(document, request, stage_cache=stage_cache, document_key=stage_document_key)
     value = make_scalar_from_slab(slab, request)
     return EvaluationResult(
         value=value,
@@ -494,11 +589,20 @@ def evaluate_scalar_snapshot(document, view_state, index) -> EvaluationResult:
     )
 
 
-def evaluate_export_frame_snapshot(document, view_state, frame_axis, frame_index, colormap_lut=None) -> EvaluationResult:
+def evaluate_export_frame_snapshot(
+    document,
+    view_state,
+    frame_axis,
+    frame_index,
+    colormap_lut=None,
+    *,
+    stage_cache=None,
+    stage_document_key=None,
+) -> EvaluationResult:
     request = request_for_export_frame(view_state, frame_axis, frame_index)
     plan = plan_slab(document, request)
     start = perf_counter()
-    slab = evaluate_slab(document, request)
+    slab = evaluate_slab(document, request, stage_cache=stage_cache, document_key=stage_document_key)
     value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
     return EvaluationResult(
         value=value,

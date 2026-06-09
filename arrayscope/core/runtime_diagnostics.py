@@ -60,6 +60,7 @@ class WindowRuntimeDiagnostics:
     image_cache: CacheDiagnosticsSnapshot
     tile_cache: CacheDiagnosticsSnapshot
     profile_cache: CacheDiagnosticsSnapshot
+    stage_cache: object
     schedulers: tuple[object, ...]
     render: RenderRuntimeDiagnostics
     montage: MontageRuntimeDiagnostics
@@ -94,6 +95,7 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 _cache_line("Image", snapshot.image_cache),
                 _cache_line("Montage tiles", snapshot.tile_cache),
                 _cache_line("Profiles/scalars", snapshot.profile_cache),
+                _stage_cache_line("Stage cache", snapshot.stage_cache),
             )
         ),
         "Schedulers": "\n".join(_scheduler_line(scheduler) for scheduler in snapshot.schedulers),
@@ -160,6 +162,7 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 f"Capability stages: {'n/a' if snapshot.capability_stage_count is None else snapshot.capability_stage_count}",
                 f"Stage cache candidates: {'n/a' if snapshot.stage_cache_candidate_count is None else snapshot.stage_cache_candidate_count}",
                 *(f"Candidate: {candidate}" for candidate in snapshot.stage_cache_candidate_summaries),
+                *_stage_cache_operation_lines(snapshot.stage_cache),
                 *(f"Warning: {warning}" for warning in snapshot.pipeline_warnings),
             )
         ),
@@ -174,6 +177,29 @@ def _cache_line(name: str, cache: CacheDiagnosticsSnapshot) -> str:
         f"bytes={format_bytes(cache.bytes_used)} / {format_bytes(cache.max_bytes)}, "
         f"hits={cache.hits}, misses={cache.misses}, evictions={cache.evictions}, hit-rate={hit_rate}"
     )
+
+
+def _stage_cache_line(name: str, cache) -> str:
+    hit_rate = "n/a" if cache.hit_rate is None else f"{cache.hit_rate:.0%}"
+    return (
+        f"{name}: entries={cache.entries}, "
+        f"bytes={format_bytes(cache.bytes_used)} / {format_bytes(cache.max_bytes)}, "
+        f"hits={cache.hits}, misses={cache.misses}, evictions={cache.evictions}, hit-rate={hit_rate}, "
+        f"candidates={cache.candidates_seen}, stores={cache.stores}, refused={cache.refused_over_budget}"
+    )
+
+
+def _stage_cache_operation_lines(cache) -> tuple[str, ...]:
+    lines = []
+    for label, value in (
+        ("Stage cache last hit", getattr(cache, "last_hit", "")),
+        ("Stage cache last miss", getattr(cache, "last_miss", "")),
+        ("Stage cache last store", getattr(cache, "last_store", "")),
+        ("Stage cache last refused", getattr(cache, "last_refused", "")),
+    ):
+        if value:
+            lines.append(f"{label}: {value}")
+    return tuple(lines)
 
 
 def _size_text(size: tuple[int, int] | None) -> str:

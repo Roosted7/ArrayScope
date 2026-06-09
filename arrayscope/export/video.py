@@ -64,7 +64,14 @@ class VideoExportWorker(QtCore.QThread):
                     self.export_finished.emit(False, "Export cancelled")
                     return
                 
-                if self.document is not None:
+                if self.evaluator is not None:
+                    display_frame = self.evaluator.export_frame(
+                        self.view_state,
+                        self.export_dim,
+                        frame_idx,
+                        colormap_lut=self.colormap_lut,
+                    )
+                elif self.document is not None:
                     display_frame = evaluate_export_frame_snapshot(
                         self.document,
                         self.view_state,
@@ -72,13 +79,6 @@ class VideoExportWorker(QtCore.QThread):
                         frame_idx,
                         colormap_lut=self.colormap_lut,
                     ).value
-                elif self.evaluator is not None:
-                    display_frame = self.evaluator.export_frame(
-                        self.view_state,
-                        self.export_dim,
-                        frame_idx,
-                        colormap_lut=self.colormap_lut,
-                    )
                 else:
                     display_frame = make_export_frame(
                         self.data,

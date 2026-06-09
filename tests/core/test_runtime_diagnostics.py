@@ -7,6 +7,7 @@ from arrayscope.core.runtime_diagnostics import (
     WindowRuntimeDiagnostics,
     format_runtime_diagnostics,
 )
+from arrayscope.operations.stage_cache import StageCacheDiagnostics
 from arrayscope.window.evaluation_controller import SchedulerDiagnostics
 
 
@@ -22,6 +23,21 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
         image_cache=_cache(),
         tile_cache=_cache(),
         profile_cache=_cache(),
+        stage_cache=StageCacheDiagnostics(
+            entries=0,
+            bytes_used=0,
+            max_bytes=1024,
+            hits=0,
+            misses=0,
+            evictions=0,
+            hit_rate=None,
+            candidates_seen=0,
+            stores=0,
+            refused_over_budget=0,
+            last_hit="",
+            last_miss="stage=1",
+            last_store="stage=1",
+        ),
         schedulers=(scheduler,),
         render=RenderRuntimeDiagnostics(),
         montage=MontageRuntimeDiagnostics(active=False),
@@ -50,3 +66,6 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Required input: [:, :, :]" in text
     assert "Expanded axes: 2" in text
     assert "stage 1 CenteredFFT" in text
+    assert "Stage cache:" in text
+    assert "Stage cache last miss: stage=1" in text
+    assert "Stage cache last store: stage=1" in text

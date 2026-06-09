@@ -27,8 +27,10 @@ source of array-view state.
   capabilities and feed warnings, diagnostics, visible render decisions, and cost-aware prefetch gates.
 - `arrayscope.operations.regions` / `arrayscope.operations.planner`: Qt-free runtime region and
   stage-planning infrastructure. Display/profile/scalar/export slab evaluation uses `RegionPlan`
-  transitions; the same plans expose final/required regions and candidate stage-cache points. Runtime
-  StageCache allocation remains future work.
+  transitions; the same plans expose final/required regions and candidate stage-cache points.
+- `arrayscope.operations.stage_cache`: Qt-free in-memory cache for expanded operation-stage arrays.
+  It is owned by `OperationEvaluator`, keyed by document identity/revision, operation prefix, region,
+  dtype, and shape, and budgeted by `MemoryPolicy.stage_cache_budget_bytes`.
 - `arrayscope.core.memory_policy`: Qt-free runtime memory policy. It samples system total,
   available memory, and process RSS through psutil with a deterministic fallback, then derives visible
   render, montage canvas/tile, image cache, montage tile cache, profile cache, future stage-cache, and
@@ -42,8 +44,9 @@ source of array-view state.
   explicitly selected and importable. The centered FFT/IFFT naming follows ArrayScope's MRI/k-space
   convention: centered FFT uses an inverse FFT internally, and centered IFFT uses a forward FFT.
 - `arrayscope.operations.slabs`: builds planner-backed slab requests and executes `RegionPlan`
-  transitions for image, profile, scalar hover, and export-frame requests. Registered operation region
-  expansion belongs to operation-owned region methods, not ad hoc slab branches.
+  transitions for image, profile, scalar hover, and export-frame requests. It can look up and store
+  StageCache entries at planner candidate boundaries. Registered operation region expansion belongs to
+  operation-owned region methods, not ad hoc slab branches.
 - `arrayscope.operations.cache`: bounded LRU caches and cache diagnostics for evaluated display
   results. Image views/export frames, montage tile payloads, and profile/scalar results use separate
   budgets supplied by `MemoryPolicy`.
@@ -188,8 +191,8 @@ not show cache summaries; cache detail lives in Diagnostics.
 App settings include theme, nearby-slice prefetch, panel resize behavior, FFT backend, FFT worker count,
 memory profile, and render memory budget. The render memory budget is a per-render hard cap for
 visible image and interactive montage tile/canvas guardrails. Cache and prefetch budgets adapt from
-the selected memory profile and sampled system memory. A stage-cache budget and runtime planner
-candidate metadata are exposed, but no StageCache allocation is implemented yet.
+the selected memory profile and sampled system memory. StageCache is in-memory only; disk/memmap
+cache is not implemented.
 
 Channel mode tracks automatic versus user-selected intent. Invalid channels are
 coerced when dtype changes, for example complex-only channels fall back to real

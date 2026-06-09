@@ -9,7 +9,17 @@ from typing import Optional, Tuple
 from arrayscope.core.axis_utils import clamp_index, non_singleton_axes, validate_axis, validate_distinct_axes
 
 
-class ChannelMode(Enum):
+class _ValueEnum(Enum):
+    def __eq__(self, other):
+        if isinstance(other, Enum):
+            return self.value == getattr(other, "value", object())
+        return self.value == other
+
+    def __hash__(self):
+        return hash(self.value)
+
+
+class ChannelMode(_ValueEnum):
     COMPLEX = "complex"
     REAL = "real"
     IMAG = "imag"
@@ -17,7 +27,7 @@ class ChannelMode(Enum):
     ANGLE = "angle"
 
 
-class ScaleMode(Enum):
+class ScaleMode(_ValueEnum):
     LINEAR = "linear"
     SYMLOG = "symlog"
 

@@ -118,7 +118,7 @@ def candidate_stage_cache_points(base_shape, base_dtype, operations, final_regio
 
 def candidate_stage_cache_points_from_transitions(stages, operations, transitions) -> tuple[StageCacheCandidate, ...]:
     stage_by_index = {stage.stage_index: stage for stage in stages}
-    candidates = []
+    raw = []
     for transition in transitions:
         stage = stage_by_index.get(transition.stage_index)
         capabilities = None if stage is None else stage.capabilities
@@ -126,6 +126,18 @@ def candidate_stage_cache_points_from_transitions(stages, operations, transition
             continue
         dtype_text = "unknown" if stage.output_dtype is None else str(np.dtype(stage.output_dtype))
         candidate_region = expand_region_axes(transition.output_region, transition.expanded_axes)
+        raw.append(
+            (
+                transition,
+                capabilities,
+                dtype_text,
+                candidate_region,
+                region_nbytes(transition.output_shape, stage.output_dtype, candidate_region),
+            )
+        )
+    candidates = []
+    for index, (transition, capabilities, dtype_text, candidate_region, nbytes) in enumerate(raw):
+        priority = "highest" if index == len(raw) - 1 else _candidate_priority(capabilities)
         candidates.append(
             StageCacheCandidate(
                 stage_index=transition.stage_index,
@@ -133,8 +145,8 @@ def candidate_stage_cache_points_from_transitions(stages, operations, transition
                 region=candidate_region,
                 shape=transition.output_shape,
                 dtype=dtype_text,
-                estimated_nbytes=region_nbytes(transition.output_shape, stage.output_dtype, candidate_region),
-                priority=_candidate_priority(capabilities),
+                estimated_nbytes=nbytes,
+                priority=priority,
                 reason=f"{type(transition.operation).__name__} declares cache_stage",
             )
         )

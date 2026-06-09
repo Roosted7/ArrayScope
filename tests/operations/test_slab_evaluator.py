@@ -32,8 +32,9 @@ from arrayscope.operations.pipeline import (
     Sum,
     OperationStep,
 )
-from arrayscope.operations.regions import AxisRegionKind
+from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec, apply_subregion
 from arrayscope.operations.slabs import evaluate_slab, plan_slab, request_for_export_frame, request_for_image, request_for_line, request_for_scalar
+from arrayscope.operations.stage_cache import StageCache
 
 
 def _assert_image_and_line_match(data, operations):
@@ -66,6 +67,38 @@ def test_lazy_slab_matches_materialized_image_and_line_for_existing_operations()
         (Crop(axis=1, start=1, stop=4), ReverseAxis(axis=0), CenteredFFT(axis=2)),
     ):
         _assert_image_and_line_match(data, operations)
+
+
+def test_stage_cache_backed_slab_matches_uncached_and_reuses_stage():
+    data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    state = ViewState.from_shape(document.current_shape)
+    cache = StageCache(max_bytes=1024 * 1024, max_entries=8)
+
+    request0 = request_for_image(state.with_slice(2, 0))
+    uncached = evaluate_slab(document, request0)
+    cached = evaluate_slab(document, request0, stage_cache=cache, document_key=("doc",))
+    np.testing.assert_allclose(cached, uncached)
+    assert cache.diagnostics().stores == 1
+
+    request1 = request_for_image(state.with_slice(2, 1))
+    cached_next = evaluate_slab(document, request1, stage_cache=cache, document_key=("doc",))
+    np.testing.assert_allclose(cached_next, evaluate_slab(document, request1))
+    assert cache.diagnostics().hits >= 1
+
+
+def test_apply_subregion_extracts_from_slice_and_indices_sources():
+    data = np.arange(10)
+    source_slice = RegionSpec((AxisRegion(AxisRegionKind.SLICE, (2, 9, 2)),))
+    target_point = RegionSpec((AxisRegion(AxisRegionKind.POINT, 6),))
+    np.testing.assert_array_equal(apply_subregion(data[2:9:2], source_region=source_slice, target_region=target_point, shape=(10,)), 6)
+
+    source_indices = RegionSpec((AxisRegion(AxisRegionKind.INDICES, (1, 3, 7)),))
+    target_indices = RegionSpec((AxisRegion(AxisRegionKind.INDICES, (7, 1)),))
+    np.testing.assert_array_equal(
+        apply_subregion(data[[1, 3, 7]], source_region=source_indices, target_region=target_indices, shape=(10,)),
+        np.asarray([7, 1]),
+    )
 
 
 @pytest.mark.parametrize(
