@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from arrayscope.core.cache_status import CacheDiagnosticsSnapshot
 from arrayscope.core.memory_budget import format_bytes
@@ -33,6 +33,30 @@ class RenderRuntimeDiagnostics:
     last_error: str = ""
     estimated_display_bytes: int | None = None
     render_budget_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class RenderTimingDiagnostics:
+    last_render_sync_ms: float | None = None
+    last_control_sync_ms: float | None = None
+    last_planning_ms: float | None = None
+    last_worker_queue_wait_ms: float | None = None
+    last_evaluation_ms: float | None = None
+    last_display_commit_ms: float | None = None
+    last_set_image_ms: float | None = None
+    last_levels_histogram_ms: float | None = None
+    last_operation_dock_ms: float | None = None
+    last_inspection_refresh_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class MontageTimingDiagnostics:
+    last_tile_eval_ms: float | None = None
+    last_canvas_compose_ms: float | None = None
+    last_canvas_commit_ms: float | None = None
+    last_overlay_update_ms: float | None = None
+    cached_tiles_last_session: int = 0
+    missing_tiles_last_session: int = 0
 
 
 @dataclass(frozen=True)
@@ -83,6 +107,8 @@ class WindowRuntimeDiagnostics:
     operation_required_input_region: str = ""
     operation_expanded_axes: tuple[int, ...] = ()
     operation_transition_summaries: tuple[str, ...] = ()
+    render_timing: RenderTimingDiagnostics = field(default_factory=RenderTimingDiagnostics)
+    montage_timing: MontageTimingDiagnostics = field(default_factory=MontageTimingDiagnostics)
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
@@ -108,6 +134,16 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 f"Context: {snapshot.render.last_context_summary or 'n/a'}",
                 f"Request: {snapshot.render.last_request_key or 'n/a'}",
                 f"Error: {snapshot.render.last_error or 'n/a'}",
+                f"Timing render sync: {_ms_text(snapshot.render_timing.last_render_sync_ms)}",
+                f"Timing control sync: {_ms_text(snapshot.render_timing.last_control_sync_ms)}",
+                f"Timing planning: {_ms_text(snapshot.render_timing.last_planning_ms)}",
+                f"Timing worker queue wait: {_ms_text(snapshot.render_timing.last_worker_queue_wait_ms)}",
+                f"Timing evaluation: {_ms_text(snapshot.render_timing.last_evaluation_ms)}",
+                f"Timing display commit: {_ms_text(snapshot.render_timing.last_display_commit_ms)}",
+                f"Timing set image: {_ms_text(snapshot.render_timing.last_set_image_ms)}",
+                f"Timing levels/histogram: {_ms_text(snapshot.render_timing.last_levels_histogram_ms)}",
+                f"Timing operation dock: {_ms_text(snapshot.render_timing.last_operation_dock_ms)}",
+                f"Timing inspection refresh: {_ms_text(snapshot.render_timing.last_inspection_refresh_ms)}",
             )
         ),
         "Canvas Preserve": "\n".join(
@@ -143,6 +179,11 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                     f"skipped={snapshot.montage.skipped_tiles}"
                 ),
                 f"Loading overlays: {snapshot.montage.show_loading_overlays}",
+                f"Timing tile eval: {_ms_text(snapshot.montage_timing.last_tile_eval_ms)}",
+                f"Timing canvas compose: {_ms_text(snapshot.montage_timing.last_canvas_compose_ms)}",
+                f"Timing canvas commit: {_ms_text(snapshot.montage_timing.last_canvas_commit_ms)}",
+                f"Timing overlay update: {_ms_text(snapshot.montage_timing.last_overlay_update_ms)}",
+                f"Tile cache last session: cached={snapshot.montage_timing.cached_tiles_last_session} missing={snapshot.montage_timing.missing_tiles_last_session}",
             )
         ),
         "FFT": "\n".join(
@@ -215,6 +256,10 @@ def _size_text(size: tuple[int, int] | None) -> str:
 
 def _axes_text(axes: tuple[int, ...]) -> str:
     return "n/a" if not axes else ",".join(str(int(axis)) for axis in axes)
+
+
+def _ms_text(value: float | None) -> str:
+    return "n/a" if value is None else f"{float(value):.2f} ms"
 
 
 def _scheduler_line(scheduler) -> str:

@@ -53,6 +53,8 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
         assert dialog.refresh_button.isCheckable()
         assert dialog.refresh_button.isChecked()
         assert "stage" in dialog._bars
+        assert dialog._render_timing_bar._summary.startswith("total ")
+        assert "tiles cached" in dialog._montage_timing_bar._summary
     finally:
         win.close()
 

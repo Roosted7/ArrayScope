@@ -76,6 +76,32 @@ def test_start_latest_clears_queued_work_and_only_commits_newest(qt_app):
     assert "old" in stale
 
 
+def test_clear_group_preserves_unrelated_prefetch_bookkeeping(qt_app):
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    controller.start_latest(
+        lambda: (time.sleep(0.12), "old")[1],
+        key="old",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=lambda _value: None,
+    )
+    prefetch = controller.start_prefetch(lambda: "prefetch", key=("prefetch", 1))
+    controller.start_latest(
+        lambda: "visible",
+        key="visible",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=lambda _value: None,
+    )
+
+    assert prefetch.scheduled
+    assert ("prefetch", 1) in controller._prefetch_keys
+    assert ("prefetch", 1) in controller._runnables
+    controller.shutdown_for_close()
+
+
 def test_visible_pool_max_thread_count_is_one(qt_app):
     from arrayscope.window.evaluation_controller import EvaluationController
 

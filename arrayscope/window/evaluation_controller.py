@@ -166,7 +166,6 @@ class EvaluationController(Qt.QtCore.QObject):
 
     def clear_group(self, replace_group: str):
         replace_group = str(replace_group)
-        self.pool.clear()
         for generation, request in tuple(self._requests.items()):
             if request.replace_group != replace_group:
                 continue

@@ -106,7 +106,11 @@ class InspectionWorkflowMixin:
             self._refresh_inspection_dock_now()
 
     def _refresh_inspection_dock(self):
+        from time import perf_counter
+
+        start = perf_counter()
         self._schedule_refresh_inspection_dock("refresh")
+        self._last_inspection_refresh_ms = (perf_counter() - start) * 1000.0
 
     def _schedule_refresh_inspection_dock(self, reason):
         if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
@@ -129,32 +133,38 @@ class InspectionWorkflowMixin:
         self._roi_refresh_timer.start()
 
     def _refresh_inspection_dock_now(self):
-        if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
-            return
-        if not self.inspection_dock.isVisible():
-            self._inspection_stale = True
-            return
-        self._inspection_stale = False
-        self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
-        selections = self.roi_store.selections
-        self.inspection_dock.set_rois(selections)
-        image = self._roi_source_image()
-        layers = self._compatible_compare_layers(image) if image is not None else ()
-        key = self._roi_inspection_key(image, selections, layers)
-        self._roi_inspection_request_key = key
-        work_size = 0 if image is None else int(np.size(image)) * max(1, sum(1 for selection in selections if selection.enabled))
-        if work_size <= 250_000:
-            self._apply_roi_inspection_snapshot_if_current(key, self._compute_roi_inspection_snapshot(key, image, selections, layers))
-            return
-        self.roi_evaluation_controller.start_latest(
-            lambda key=key, image=image, selections=selections, layers=layers: self._compute_roi_inspection_snapshot(key, image, selections, layers),
-            key=key,
-            priority=EvalPriority.SELECTED_ROI,
-            replace_group="roi-inspection",
-            on_done=lambda snapshot, key=key: self._apply_roi_inspection_snapshot_if_current(key, snapshot),
-            on_error=lambda exc: None,
-            slow_ms=0,
-        )
+        from time import perf_counter
+
+        start = perf_counter()
+        try:
+            if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
+                return
+            if not self.inspection_dock.isVisible():
+                self._inspection_stale = True
+                return
+            self._inspection_stale = False
+            self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
+            selections = self.roi_store.selections
+            self.inspection_dock.set_rois(selections)
+            image = self._roi_source_image()
+            layers = self._compatible_compare_layers(image) if image is not None else ()
+            key = self._roi_inspection_key(image, selections, layers)
+            self._roi_inspection_request_key = key
+            work_size = 0 if image is None else int(np.size(image)) * max(1, sum(1 for selection in selections if selection.enabled))
+            if work_size <= 250_000:
+                self._apply_roi_inspection_snapshot_if_current(key, self._compute_roi_inspection_snapshot(key, image, selections, layers))
+                return
+            self.roi_evaluation_controller.start_latest(
+                lambda key=key, image=image, selections=selections, layers=layers: self._compute_roi_inspection_snapshot(key, image, selections, layers),
+                key=key,
+                priority=EvalPriority.SELECTED_ROI,
+                replace_group="roi-inspection",
+                on_done=lambda snapshot, key=key: self._apply_roi_inspection_snapshot_if_current(key, snapshot),
+                on_error=lambda exc: None,
+                slow_ms=0,
+            )
+        finally:
+            self._last_inspection_refresh_ms = (perf_counter() - start) * 1000.0
 
     def _roi_inspection_key(self, image, selections, layers):
         image_key = None if image is None else (id(image), tuple(np.shape(image)), str(getattr(image, "dtype", None)))

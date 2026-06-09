@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from time import monotonic
+from time import monotonic, perf_counter
 
 import numpy as np
 
@@ -530,6 +530,7 @@ class RenderMixin:
                 force_auto=force_auto,
             )
             return
+        planning_start = perf_counter()
         estimated_bytes = self._estimated_image_display_bytes(view_state)
         context = estimate_visible_render_context(
             document,
@@ -537,6 +538,7 @@ class RenderMixin:
             display_bytes=estimated_bytes,
             render_budget_bytes=self._visible_render_budget_bytes(),
         )
+        self._last_planning_ms = (perf_counter() - planning_start) * 1000.0
         decision = choose_visible_render_decision(context)
         self._last_render_context = context
         self._last_render_decision = decision
@@ -563,8 +565,10 @@ class RenderMixin:
         if decision.kind == RenderDecisionKind.DEGRADED_PREVIEW:
             preview_state = degraded_view_state(view_state, factor=decision.degraded_factor)
             preview_key = ("degraded_preview", request_key, decision.degraded_factor)
+            submitted_at = perf_counter()
 
             def evaluate_preview(token):
+                self._last_worker_queue_wait_ms = (perf_counter() - submitted_at) * 1000.0
                 return evaluate_image_snapshot(
                     document,
                     preview_state,
@@ -609,6 +613,7 @@ class RenderMixin:
             return
 
         def evaluate(token):
+            self._last_worker_queue_wait_ms = (perf_counter() - submitted_at) * 1000.0
             if decision.kind == RenderDecisionKind.ASYNC_CHUNKED:
                 return evaluate_image_snapshot_chunked(
                     document,
@@ -660,6 +665,7 @@ class RenderMixin:
             self.img_view.setEvaluationOverlay(False)
             show_status_message(self, f"Image update failed: {exc}")
 
+        submitted_at = perf_counter()
         self.visible_evaluation_controller.start_latest(
             evaluate,
             key=request_key,
@@ -771,6 +777,8 @@ class RenderMixin:
                 missing_tiles.append(tile)
             else:
                 cached_tiles.append(cached.bind(tile) if hasattr(cached, "bind") else cached.payload().bind(tile))
+        self._montage_cached_tiles_last_session = len(cached_tiles)
+        self._montage_missing_tiles_last_session = len(missing_tiles)
         session_key = (
             "montage_tiles",
             _document_key(document),
@@ -872,13 +880,17 @@ class RenderMixin:
         )
 
     def _evaluate_montage_tile_snapshot(self, session, tile):
-        return evaluate_image_snapshot(
-            session.document,
-            tile.view_state,
-            colormap_lut=session.colormap_lut,
-            stage_cache=self.operation_evaluator.stage_cache,
-            stage_document_key=stage_document_key(session.document),
-        )
+        start = perf_counter()
+        try:
+            return evaluate_image_snapshot(
+                session.document,
+                tile.view_state,
+                colormap_lut=session.colormap_lut,
+                stage_cache=self.operation_evaluator.stage_cache,
+                stage_document_key=stage_document_key(session.document),
+            )
+        finally:
+            self._last_montage_tile_eval_ms = (perf_counter() - start) * 1000.0
 
     def _on_montage_tile_slow(self, session_id):
         session = getattr(self, "_montage_session", None)
@@ -980,9 +992,11 @@ class RenderMixin:
     def _commit_montage_session_canvas(self, session, *, force=False) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
+        commit_start = perf_counter()
         self._classify_canvas_tiles(session)
         previous_canvas = getattr(self, "_current_montage_canvas", None)
         previous_global_range = self._current_montage_global_view_range()
+        compose_start = perf_counter()
         canvas = make_montage_viewport_canvas(
             session.plan,
             session.rendered_tuple(),
@@ -995,6 +1009,7 @@ class RenderMixin:
             loading_tiles=session.loading_tile_tuple(),
             skipped_tiles=session.skipped_tile_tuple(),
         )
+        self._last_montage_canvas_compose_ms = (perf_counter() - compose_start) * 1000.0
         session.canvas = canvas
         rendered_geometry = DisplayGeometry(
             view_state=session.view_state,
@@ -1018,7 +1033,9 @@ class RenderMixin:
                 previous_bounds=session.previous_bounds,
                 force_auto=session.force_auto,
             )
+            overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
+            self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
             if previous_canvas is not None and previous_global_range is not None:
                 local_range = (
                     (
@@ -1033,6 +1050,7 @@ class RenderMixin:
                 self.img_view.getView().setRange(xRange=local_range[0], yRange=local_range[1], padding=0)
         finally:
             self._montage_canvas_commit_active = False
+            self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
         session.note_committed()
         self._retry_live_profile_after_montage_tile()
 
@@ -1160,8 +1178,10 @@ class RenderMixin:
         )
 
     def _apply_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto):
+        commit_start = perf_counter()
         try:
             viewport_policy = self._viewport_policy_for_display_shape(display_image.data.shape[:2])
+            levels_start = perf_counter()
             current_bounds = self._display_histogram_bounds(display_image)
             level_decision = choose_window_levels(
                 mode=window_mode,
@@ -1173,7 +1193,9 @@ class RenderMixin:
             )
             al = level_decision.auto_levels
             levels = level_decision.levels
+            self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
 
+            set_image_start = perf_counter()
             if display_image.histogram_data is not None:
                 self.img_view.setImage(
                     display_image.data,
@@ -1184,6 +1206,7 @@ class RenderMixin:
                 )
             else:
                 self.img_view.setImage(display_image.data, autoLevels=al, levels=levels, viewport_policy=viewport_policy)
+            self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
             self._update_operation_dock()
             
@@ -1196,6 +1219,8 @@ class RenderMixin:
         except Exception as e:
             handle_ui_exception("image update", e)
             show_status_message(self, f"Image update failed: {e}")
+        finally:
+            self._last_display_commit_ms = (perf_counter() - commit_start) * 1000.0
 
     def _viewport_policy_for_display_shape(self, display_shape):
         display_shape = tuple(int(size) for size in display_shape)
@@ -1359,7 +1384,7 @@ class RenderMixin:
                 if profile_state is None:
                     continue
                 request_key_cache[profile_state] = self.operation_evaluator.line_key(profile_state, document=document)
-                started = self.profile_evaluation_controller.start_prefetch(
+                started = self.prefetch_evaluation_controller.start_prefetch(
                     lambda profile_state=profile_state, document=document: self.operation_evaluator.prefetch_line_snapshot(document, profile_state),
                     on_done=lambda result, profile_state=profile_state, document=document, key=request_key_cache[profile_state]: self._store_prefetch_profile_if_current(
                         document,
@@ -1640,8 +1665,10 @@ class RenderMixin:
         return False
 
     def render(self, *, reason: str = "state", force_autolevel: bool = False):
+        render_start = perf_counter()
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._coerce_channel_for_current_dtype()
+        control_start = perf_counter()
         self._sync_controls_from_view_state()
         if hasattr(self, "tab_widget"):
             self.tab_widget.setVisible(self.data.ndim >= 2)
@@ -1649,8 +1676,10 @@ class RenderMixin:
         self.update_dimension_controls()
         self.update_complex_indicators()
         self.update_shift_indicators()
+        self._last_control_sync_ms = (perf_counter() - control_start) * 1000.0
         self.update_image_view(force_autolevel=force_autolevel)
         if self.profile_dock.isVisible() or self.widgets['buttons']['display']['live_profile'].isChecked():
             self.update_line_plot()
         self._update_operation_dock()
         self._sync_progressive_docks()
+        self._last_render_sync_ms = (perf_counter() - render_start) * 1000.0

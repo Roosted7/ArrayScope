@@ -2,8 +2,10 @@ from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
 from arrayscope.core.memory_policy import MemoryProfileChoice, compute_memory_policy
 from arrayscope.core.runtime_diagnostics import (
     CanvasPreserveRuntimeDiagnostics,
+    MontageTimingDiagnostics,
     MontageRuntimeDiagnostics,
     RenderRuntimeDiagnostics,
+    RenderTimingDiagnostics,
     WindowRuntimeDiagnostics,
     format_runtime_diagnostics,
 )
@@ -42,6 +44,8 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
         render=RenderRuntimeDiagnostics(),
         montage=MontageRuntimeDiagnostics(active=False),
         canvas_preserve=CanvasPreserveRuntimeDiagnostics(events=("start gen=1",)),
+        render_timing=RenderTimingDiagnostics(last_render_sync_ms=1.25),
+        montage_timing=MontageTimingDiagnostics(last_canvas_compose_ms=2.5, cached_tiles_last_session=3, missing_tiles_last_session=4),
         fft_backend_choice="auto",
         fft_backend_resolved="numpy",
         fft_workers_choice="auto",
@@ -73,3 +77,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Stage cache:" in text
     assert "Stage cache last miss: stage=1" in text
     assert "Stage cache last store: stage=1" in text
+    assert "Timing render sync: 1.25 ms" in text
+    assert "Timing worker queue wait: n/a" in text
+    assert "Timing canvas compose: 2.50 ms" in text
+    assert "Tile cache last session: cached=3 missing=4" in text

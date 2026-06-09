@@ -13,6 +13,7 @@ from arrayscope.operations.cache import BoundedArrayCache
 from arrayscope.operations.stage_cache import StageCache
 from arrayscope.operations.slabs import (
     evaluate_slab,
+    evaluate_slab_from_plan,
     plan_slab,
     request_for_export_frame,
     request_for_image,
@@ -545,7 +546,7 @@ def evaluate_image_snapshot(
     plan = plan_slab(document, request)
     start = perf_counter()
     _check_cancelled(cancellation_token)
-    slab = evaluate_slab(document, request, stage_cache=stage_cache, document_key=stage_document_key)
+    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key)
     _check_cancelled(cancellation_token)
     value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
     _check_cancelled(cancellation_token)
@@ -563,7 +564,7 @@ def evaluate_line_snapshot(document, view_state, *, stage_cache=None, stage_docu
     request = request_for_line(view_state)
     plan = plan_slab(document, request)
     start = perf_counter()
-    slab = evaluate_slab(document, request, stage_cache=stage_cache, document_key=stage_document_key)
+    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key)
     value = make_line_from_slab(slab, request)
     return EvaluationResult(
         value=value,
@@ -578,7 +579,7 @@ def evaluate_scalar_snapshot(document, view_state, index, *, stage_cache=None, s
     request = request_for_scalar(view_state, index)
     plan = plan_slab(document, request)
     start = perf_counter()
-    slab = evaluate_slab(document, request, stage_cache=stage_cache, document_key=stage_document_key)
+    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key)
     value = make_scalar_from_slab(slab, request)
     return EvaluationResult(
         value=value,
@@ -602,7 +603,7 @@ def evaluate_export_frame_snapshot(
     request = request_for_export_frame(view_state, frame_axis, frame_index)
     plan = plan_slab(document, request)
     start = perf_counter()
-    slab = evaluate_slab(document, request, stage_cache=stage_cache, document_key=stage_document_key)
+    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key)
     value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
     return EvaluationResult(
         value=value,

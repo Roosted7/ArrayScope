@@ -94,6 +94,11 @@ def plan_slab(document: ArrayDocument, request: SlabRequest) -> SlabPlan:
 
 def evaluate_slab(document: ArrayDocument, request: SlabRequest, *, stage_cache=None, document_key=None):
     plan = plan_slab(document, request)
+    return evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=document_key)
+
+
+def evaluate_slab_from_plan(document: ArrayDocument, request: SlabRequest, plan: SlabPlan, *, stage_cache=None, document_key=None):
+    del request
     region_plan = plan.region_plan
     if stage_cache is not None and region_plan.cache_candidates:
         return _evaluate_slab_with_stage_cache(document, region_plan, stage_cache, document_key)

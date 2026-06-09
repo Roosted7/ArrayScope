@@ -109,13 +109,21 @@ class DiagnosticsDialog(QtWidgets.QDialog):
 
         scheduler_layout = QtWidgets.QVBoxLayout()
         scheduler_layout.setSpacing(4)
+        scheduler_grid = QtWidgets.QGridLayout()
+        scheduler_grid.setHorizontalSpacing(8)
+        scheduler_grid.setVerticalSpacing(4)
         self._scheduler_bars = {}
-        for name in ("visible", "pixel", "profile", "roi", "prefetch"):
+        for index, name in enumerate(("visible", "pixel", "profile", "roi", "prefetch")):
             bar = _SegmentBar(name)
             self._scheduler_bars[name] = bar
-            scheduler_layout.addWidget(bar)
+            scheduler_grid.addWidget(bar, index // 2, index % 2)
+        scheduler_layout.addLayout(scheduler_grid)
         self._canvas_preserve_bar = _SegmentBar("Canvas preserve")
         scheduler_layout.addWidget(self._canvas_preserve_bar)
+        self._render_timing_bar = _SegmentBar("Render timing")
+        self._montage_timing_bar = _SegmentBar("Montage timing")
+        scheduler_layout.addWidget(self._render_timing_bar)
+        scheduler_layout.addWidget(self._montage_timing_bar)
         overview_layout.addLayout(scheduler_layout)
         layout.addWidget(overview, 0)
 
@@ -267,6 +275,45 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             f"strong {'yes' if preserve.strong_used else 'no'}"
         )
         self._canvas_preserve_bar.set_segments((("state", 1, color),), summary=summary)
+        self._render_timing_bar.set_segments(
+            _timing_segments(
+                (
+                    ("control", snapshot.render_timing.last_control_sync_ms, "#2563eb"),
+                    ("planning", snapshot.render_timing.last_planning_ms, "#7c3aed"),
+                    ("queue", snapshot.render_timing.last_worker_queue_wait_ms, "#ca8a04"),
+                    ("eval", snapshot.render_timing.last_evaluation_ms, "#c2410c"),
+                    ("commit", snapshot.render_timing.last_display_commit_ms, "#15803d"),
+                    ("dock", snapshot.render_timing.last_operation_dock_ms, "#0891b2"),
+                    ("inspect", snapshot.render_timing.last_inspection_refresh_ms, "#6b7280"),
+                )
+            ),
+            summary=_timing_summary(
+                "total",
+                (
+                    snapshot.render_timing.last_control_sync_ms,
+                    snapshot.render_timing.last_planning_ms,
+                    snapshot.render_timing.last_worker_queue_wait_ms,
+                    snapshot.render_timing.last_evaluation_ms,
+                    snapshot.render_timing.last_display_commit_ms,
+                    snapshot.render_timing.last_operation_dock_ms,
+                    snapshot.render_timing.last_inspection_refresh_ms,
+                ),
+            ),
+        )
+        self._montage_timing_bar.set_segments(
+            _timing_segments(
+                (
+                    ("tile", snapshot.montage_timing.last_tile_eval_ms, "#c2410c"),
+                    ("compose", snapshot.montage_timing.last_canvas_compose_ms, "#7c3aed"),
+                    ("commit", snapshot.montage_timing.last_canvas_commit_ms, "#15803d"),
+                    ("overlay", snapshot.montage_timing.last_overlay_update_ms, "#0891b2"),
+                )
+            ),
+            summary=(
+                f"{_timing_summary('total', (snapshot.montage_timing.last_tile_eval_ms, snapshot.montage_timing.last_canvas_compose_ms, snapshot.montage_timing.last_canvas_commit_ms, snapshot.montage_timing.last_overlay_update_ms))}, "
+                f"tiles cached {snapshot.montage_timing.cached_tiles_last_session}, missing {snapshot.montage_timing.missing_tiles_last_session}"
+            ),
+        )
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -302,6 +349,23 @@ def _bar_style(fraction: float, *, color_mode: str = "usage") -> str:
         "}"
         f"QProgressBar::chunk {{ background-color: {color}; border-radius: 2px; }}"
     )
+
+
+def _timing_segments(items):
+    segments = []
+    for label, value, color in items:
+        if value is None:
+            continue
+        scaled = max(1, int(round(float(value) * 1000.0)))
+        segments.append((label, scaled, color))
+    return tuple(segments)
+
+
+def _timing_summary(label: str, values) -> str:
+    present = [float(value) for value in values if value is not None]
+    if not present:
+        return "n/a"
+    return f"{label} {sum(present):.2f} ms"
 
 
 def _preserve_color(result: str, active: bool, strong_used: bool) -> str:
