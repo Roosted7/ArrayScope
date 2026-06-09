@@ -92,9 +92,6 @@ class OperationStackDock(StandardDockWidget):
         self._operation_shapes = ()
         self._operation_dtypes = ()
         self._output_shape = None
-        self._cache_status = None
-        self._image_cache_status = None
-        self._profile_cache_status = None
         self._derived_estimate = None
 
         body = QtWidgets.QWidget()
@@ -123,12 +120,8 @@ class OperationStackDock(StandardDockWidget):
         layout.addWidget(self.operation_list, 1)
 
         self.shape_label = QtWidgets.QLabel("Output shape: -")
-        self.cache_status_label = QtWidgets.QLabel("View cache: Cold")
-        self.profile_cache_status_label = QtWidgets.QLabel("Profile/pixel cache: Cold")
         self.derived_estimate_label = QtWidgets.QLabel("Full derived: -")
         layout.addWidget(self.shape_label)
-        layout.addWidget(self.cache_status_label)
-        layout.addWidget(self.profile_cache_status_label)
         layout.addWidget(self.derived_estimate_label)
 
         button_layout = QtWidgets.QGridLayout()
@@ -207,9 +200,7 @@ class OperationStackDock(StandardDockWidget):
         self._operation_shapes = tuple(operation_shapes or ())
         self._operation_dtypes = tuple(operation_dtypes or ())
         self._output_shape = output_shape
-        self._cache_status = cache_status
-        self._image_cache_status = image_cache_status
-        self._profile_cache_status = profile_cache_status
+        del cache_status, image_cache_status, profile_cache_status
         self._derived_estimate = derived_estimate
         previous_row = self.operation_list.currentRow()
         self.operation_list.clear()
@@ -239,16 +230,6 @@ class OperationStackDock(StandardDockWidget):
         self.export_button.setEnabled(True)
         self.save_view_button.setEnabled(True)
         self.shape_label.setText(f"Output shape: {tuple(output_shape) if output_shape is not None else '-'}")
-        if image_cache_status is None:
-            image_cache_status = cache_status
-        if image_cache_status is not None:
-            self.cache_status_label.setText(f"View cache: {_cache_status_summary(image_cache_status)}")
-            self.cache_status_label.setToolTip(_cache_status_tooltip(image_cache_status))
-            self.cache_status_label.setStyleSheet(_cache_status_style(image_cache_status.status.value))
-        if profile_cache_status is not None:
-            self.profile_cache_status_label.setText(f"Profile/pixel cache: {_cache_status_summary(profile_cache_status)}")
-            self.profile_cache_status_label.setToolTip(_cache_status_tooltip(profile_cache_status))
-            self.profile_cache_status_label.setStyleSheet(_cache_status_style(profile_cache_status.status.value))
         if derived_estimate is not None:
             shape, dtype, nbytes = derived_estimate
             self.derived_estimate_label.setText(f"Full derived: {tuple(shape)} {dtype} {_format_nbytes(nbytes)}")
@@ -356,9 +337,6 @@ class OperationStackDock(StandardDockWidget):
             self.set_operations(
                 self._operations,
                 output_shape=self._output_shape,
-                cache_status=self._cache_status,
-                image_cache_status=self._image_cache_status,
-                profile_cache_status=self._profile_cache_status,
                 derived_estimate=self._derived_estimate,
                 operation_shapes=self._operation_shapes,
             )
@@ -368,9 +346,6 @@ class OperationStackDock(StandardDockWidget):
             self.set_operations(
                 self._operations,
                 output_shape=self._output_shape,
-                cache_status=self._cache_status,
-                image_cache_status=self._image_cache_status,
-                profile_cache_status=self._profile_cache_status,
                 derived_estimate=self._derived_estimate,
                 operation_shapes=self._operation_shapes,
             )

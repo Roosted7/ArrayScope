@@ -21,6 +21,14 @@ source of array-view state.
 - `arrayscope.operations.cost`: Qt-free operation kind, output dtype, output shape, and conservative
   memory-cost estimates for operation stacks. These estimates feed warnings, diagnostics, visible
   render decisions, and cost-aware prefetch gates.
+- `arrayscope.core.memory_policy`: Qt-free runtime memory policy. It samples system total,
+  available memory, and process RSS through psutil with a deterministic fallback, then derives visible
+  render, montage canvas/tile, image cache, montage tile cache, profile cache, future stage-cache, and
+  prefetch budgets from the selected profile plus the per-render hard cap.
+- `arrayscope.core.memory_budget`: byte-estimation and formatting helpers only. Runtime budgets are
+  owned by `MemoryPolicy`, not static constants.
+- `arrayscope.core.runtime_diagnostics`: Qt-free diagnostics snapshots and plain-text formatting for
+  memory policy, caches, schedulers, render decisions, montage state, FFT, and operation state.
 - `arrayscope.operations.fft_backend`: FFT backend abstraction and worker-count runtime settings.
   `auto` resolves to SciPy when available, with NumPy fallback and an optional pyFFTW backend when
   explicitly selected and importable. The centered FFT/IFFT naming follows ArrayScope's MRI/k-space
@@ -28,7 +36,8 @@ source of array-view state.
 - `arrayscope.operations.slabs`: plans and evaluates the smallest exact base-data slab needed
   for image, profile, scalar hover, and export-frame requests.
 - `arrayscope.operations.cache`: bounded LRU caches and cache diagnostics for evaluated display
-  results.
+  results. Image views/export frames, montage tile payloads, and profile/scalar results use separate
+  budgets supplied by `MemoryPolicy`.
 - `arrayscope.operations.pipeline.OperationStep`: ordered operation rows with enable/disable
   state. `ArrayDocument.operations` is the active enabled operation sequence; `steps` is the
   pipeline UI/document sequence.
@@ -49,8 +58,8 @@ source of array-view state.
 - `arrayscope.core.window_levels`: decides image window/level reuse or auto-level behavior.
 - `arrayscope.display.ImageView2D`, `arrayscope.ui`, and `arrayscope.ui.docks`: Qt display and controls only.
 - `arrayscope.ui.dimension_strip`, `arrayscope.ui.display_toolbar`, `arrayscope.ui.command_palette`,
-  `arrayscope.ui.docks.inspection`, and `arrayscope.ui.hud`: compact viewer controls, operation discovery,
-  ROI inspection controls, and on-canvas pixel
+  `arrayscope.ui.diagnostics`, `arrayscope.ui.docks.inspection`, and `arrayscope.ui.hud`: compact
+  viewer controls, operation discovery, developer diagnostics, ROI inspection controls, and on-canvas pixel
   feedback. They emit user intent and do not own view state.
 - `arrayscope.core.view_recipe`: serializes operations, `ViewState`, and display settings for
   full-view restore. It is pure and does not contain dock geometry.
@@ -161,10 +170,16 @@ cancellable mid-call. Prefetch requests are keyed, deduped, bounded, off by defa
 while visible work is busy, skipped for montage, and allowed for operation-backed views only when cost
 estimates are below conservative thresholds. Cache diagnostics include hit rate, prefetch outcomes,
 render refusal/degraded/chunk counters, and scheduler pending/running/stale/cancelled counters.
+The Developer -> Diagnostics dialog is a plain `QDialog`, not a managed dock, so it does not
+participate in panel layout or canvas-preservation transactions. It shows color-coded filling bars
+for memory/cache budget usage and compact text sections for deeper state. The Operations panel does
+not show cache summaries; cache detail lives in Diagnostics.
 
 App settings include theme, nearby-slice prefetch, panel resize behavior, FFT backend, FFT worker count,
-and render memory budget. The render memory budget controls visible image and interactive montage
-tile/canvas guardrails; hard constants remain defaults/fallbacks.
+memory profile, and render memory budget. The render memory budget is a per-render hard cap for
+visible image and interactive montage tile/canvas guardrails. Cache and prefetch budgets adapt from
+the selected memory profile and sampled system memory. A stage-cache budget is exposed in the policy
+and diagnostics for Phase 4g, but no StageCache allocation is implemented yet.
 
 Channel mode tracks automatic versus user-selected intent. Invalid channels are
 coerced when dtype changes, for example complex-only channels fall back to real

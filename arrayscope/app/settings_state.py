@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from arrayscope.app.theme import ThemeChoice, normalize_theme_choice
+from arrayscope.core.memory_policy import MemoryProfileChoice, normalize_memory_profile_choice
 
 
 class PanelResizeBehavior(Enum):
@@ -35,6 +36,7 @@ class AppSettingsState:
     panel_resize_behavior: PanelResizeBehavior = PanelResizeBehavior.BEST_EFFORT
     fft_backend: FFTBackendChoice = FFTBackendChoice.AUTO
     fft_workers: FFTWorkersChoice = FFTWorkersChoice.AUTO
+    memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
 
 
@@ -46,6 +48,7 @@ def settings_from_mapping(values) -> AppSettingsState:
         panel_resize_behavior=normalize_panel_resize_behavior(values.get("panel_resize_behavior")),
         fft_backend=normalize_fft_backend_choice(values.get("fft_backend")),
         fft_workers=normalize_fft_workers_choice(values.get("fft_workers")),
+        memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(values.get("render_memory_budget_mb", 512)),
     )
 
@@ -57,6 +60,7 @@ def settings_to_mapping(settings: AppSettingsState):
         "panel_resize_behavior": settings.panel_resize_behavior.value,
         "fft_backend": settings.fft_backend.value,
         "fft_workers": settings.fft_workers.value,
+        "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
     }
 

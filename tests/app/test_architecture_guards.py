@@ -151,6 +151,47 @@ def test_operation_cost_module_is_qt_free():
     assert "pyqtgraph" not in text
 
 
+def test_memory_policy_and_runtime_diagnostics_are_qt_free():
+    for rel in (
+        Path("arrayscope/core/memory_policy.py"),
+        Path("arrayscope/core/runtime_diagnostics.py"),
+    ):
+        text = (ROOT / rel).read_text()
+        assert "Qt" not in text
+        assert "pyqtgraph" not in text
+
+
+def test_diagnostics_qt_imports_stay_in_ui_module():
+    text = (ROOT / "arrayscope" / "ui" / "diagnostics.py").read_text()
+    assert "Qt" in text
+    assert "pyqtgraph" in text
+    for rel in (
+        Path("arrayscope/core/runtime_diagnostics.py"),
+        Path("arrayscope/core/memory_policy.py"),
+    ):
+        pure_text = (ROOT / rel).read_text()
+        assert "pyqtgraph" not in pure_text
+
+
+def test_window_render_uses_memory_policy_not_static_budget_constants():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    forbidden = (
+        "VISIBLE_RENDER_BUDGET_BYTES",
+        "MONTAGE_BUDGET_BYTES",
+        "PREFETCH_BUDGET_BYTES",
+        "_select_visible_montage_tiles_by_budget",
+    )
+    for token in forbidden:
+        assert token not in text
+
+
+def test_operation_evaluator_owns_separate_display_caches():
+    text = (ROOT / "arrayscope" / "operations" / "evaluator.py").read_text()
+    assert "self._image_cache = BoundedArrayCache" in text
+    assert "self._tile_cache = BoundedArrayCache" in text
+    assert "self._profile_cache = BoundedArrayCache" in text
+
+
 def test_scheduler_v2_pure_modules_are_qt_free():
     for rel in (
         Path("arrayscope/operations/render_plan.py"),

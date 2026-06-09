@@ -31,6 +31,7 @@ from arrayscope.display.slice_engine import make_image, make_image_from_slab, ma
 
 
 DEFAULT_IMAGE_CACHE_BYTES = 256 * 1024 * 1024
+DEFAULT_TILE_CACHE_BYTES = 512 * 1024 * 1024
 DEFAULT_PROFILE_CACHE_BYTES = 64 * 1024 * 1024
 LARGE_MATERIALIZE_BYTES = 512 * 1024 * 1024
 
@@ -75,6 +76,7 @@ class OperationEvaluator:
 
     def __post_init__(self):
         self._image_cache = BoundedArrayCache(DEFAULT_IMAGE_CACHE_BYTES, 96)
+        self._tile_cache = BoundedArrayCache(DEFAULT_TILE_CACHE_BYTES, 512)
         self._profile_cache = BoundedArrayCache(DEFAULT_PROFILE_CACHE_BYTES, 256)
 
     def set_document(self, document: ArrayDocument):
@@ -97,6 +99,8 @@ class OperationEvaluator:
         self._line_result = None
         if hasattr(self, "_image_cache"):
             self._image_cache.clear()
+        if hasattr(self, "_tile_cache"):
+            self._tile_cache.clear()
         if hasattr(self, "_profile_cache"):
             self._profile_cache.clear()
         self.display_generation += 1
@@ -222,12 +226,12 @@ class OperationEvaluator:
         return cached
 
     def cached_montage_tile(self, tile_state, *, montage_axis, source_index, colormap_lut=None):
-        cached = self._image_cache.get(
+        cached = self._tile_cache.get(
             self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut)
         )
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
-            self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.CACHED, "Using cached montage tile")
+            self.last_diagnostics = self._tile_cache.diagnostics(CacheStatus.CACHED, "Using cached montage tile")
         return cached
 
     def cached_line(self, view_state):
@@ -293,11 +297,11 @@ class OperationEvaluator:
             slab_shape=result.slab_shape,
             slab_nbytes=result.slab_nbytes,
         )
-        self._image_cache.last_eval_ms = result.eval_ms
-        self._image_cache.put(key, value)
+        self._tile_cache.last_eval_ms = result.eval_ms
+        self._tile_cache.put(key, value)
         self.image_evaluations += 1
         self.last_status = cache_status_ready("Montage tile cached")
-        self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.READY, _request_message("Montage tile cached", result))
+        self.last_diagnostics = self._tile_cache.diagnostics(CacheStatus.READY, _request_message("Montage tile cached", result))
         return value.bind(tile)
 
     def prefetch_image_snapshot(self, document, view_state, colormap_lut=None):
@@ -373,8 +377,16 @@ class OperationEvaluator:
             return self.last_diagnostics
         return self._image_cache.diagnostics(self.last_status.status, self.last_status.message)
 
+    def apply_memory_policy(self, policy) -> None:
+        self._image_cache.resize(max_bytes=int(policy.image_cache_budget_bytes))
+        self._tile_cache.resize(max_bytes=int(policy.tile_cache_budget_bytes))
+        self._profile_cache.resize(max_bytes=int(policy.profile_cache_budget_bytes))
+
     def image_cache_diagnostics(self):
         return self._image_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())
+
+    def tile_cache_diagnostics(self):
+        return self._tile_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())
 
     def profile_cache_diagnostics(self):
         return self._profile_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())

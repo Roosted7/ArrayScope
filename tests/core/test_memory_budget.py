@@ -1,7 +1,7 @@
 import numpy as np
 
 from arrayscope.core.memory_budget import (
-    MONTAGE_BUDGET_BYTES,
+    DEFAULT_MONTAGE_CANVAS_BUDGET_BYTES,
     estimate_array_bytes,
     estimate_display_image_bytes,
     estimate_montage_bytes,
@@ -22,7 +22,7 @@ def test_estimate_display_image_bytes_includes_rgb_and_histogram():
 def test_montage_memory_estimate_rejects_huge_collage():
     nbytes = estimate_montage_bytes((4096, 4096), 256, np.float32, histogram=True, columns=16)
 
-    assert nbytes > MONTAGE_BUDGET_BYTES
+    assert nbytes > DEFAULT_MONTAGE_CANVAS_BUDGET_BYTES
 
 
 def test_format_bytes_uses_binary_units():

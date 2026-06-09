@@ -67,9 +67,8 @@ Rules:
 ## Performance ideas
 
 * Support lazy/view-like ops for crop, reverse, conjugate, and simple slicing.
-* Add cache memory budget, e.g. max frames or max MB.
-* Add performance HUD/debug panel showing cache hits/misses, materialized shape, and evaluation time.
 * Add a user-facing cache budget setting with presets for laptop, workstation, and memory-constrained sessions.
+* Add richer diagnostics graphs/timelines for cache growth, scheduler activity, and prefetch usefulness.
 * Add explicit export progress for derived-array `.npy/.npz` saves after materialization is complete.
 * Add benchmark fixtures for representative MRI stacks so cache and slab changes can be compared over time.
 * Keep montage and future stage-cache entries layout-independent: reusable cached data should not carry
