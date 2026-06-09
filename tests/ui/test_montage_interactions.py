@@ -122,3 +122,13 @@ def test_montage_byte_budget_limits_visible_tiles():
     assert tuple(tile.source_index for tile in selected) == (0,)
     assert used == 10 * 10 * 8
     assert skipped == 9
+
+
+def test_visible_render_budget_uses_app_setting():
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.window.render import RenderMixin
+
+    mixin = RenderMixin()
+    mixin.app_settings = AppSettingsState(render_memory_budget_mb=256)
+
+    assert mixin._visible_render_budget_bytes() == 256 * 1024 * 1024

@@ -72,6 +72,8 @@ Rules:
 * Add a user-facing cache budget setting with presets for laptop, workstation, and memory-constrained sessions.
 * Add explicit export progress for derived-array `.npy/.npz` saves after materialization is complete.
 * Add benchmark fixtures for representative MRI stacks so cache and slab changes can be compared over time.
+* Add chunked/cancellable FFT and reduction execution so expensive transforms can be interrupted rather
+  than only estimated and warned about.
 * Add optional memory-mapped array support for large `.npy` files.
 * Measure prefetch usefulness on representative 3D/4D datasets before adding predictive cache heuristics
   beyond nearby-slice/profile prefetch.

@@ -73,13 +73,40 @@ def test_theme_backend_keeps_builtin_palette_even_when_optional_backend_availabl
 
 def test_settings_round_trip_defaults_and_values():
     settings = settings_state.settings_from_mapping(
-        {"theme": "dark", "prefetch_nearby_slices": "true", "panel_resize_behavior": "off"}
+        {
+            "theme": "dark",
+            "prefetch_nearby_slices": "true",
+            "panel_resize_behavior": "off",
+            "fft_backend": "pyfftw",
+            "fft_workers": "2",
+            "render_memory_budget_mb": "1024",
+        }
     )
     values = settings_state.settings_to_mapping(settings)
 
-    assert values == {"theme": "dark", "prefetch_nearby_slices": True, "panel_resize_behavior": "off"}
+    assert values == {
+        "theme": "dark",
+        "prefetch_nearby_slices": True,
+        "panel_resize_behavior": "off",
+        "fft_backend": "pyfftw",
+        "fft_workers": "2",
+        "render_memory_budget_mb": 1024,
+    }
     defaults = settings_state.settings_from_mapping({})
     assert defaults.theme == theme.ThemeChoice.SYSTEM
     assert defaults.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
+    assert defaults.fft_backend == settings_state.FFTBackendChoice.AUTO
+    assert defaults.fft_workers == settings_state.FFTWorkersChoice.AUTO
+    assert defaults.render_memory_budget_mb == 512
     unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})
     assert unknown.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
+
+
+def test_performance_settings_normalize_unknowns_and_clamp_budget():
+    unknown = settings_state.settings_from_mapping({"fft_backend": "unknown", "fft_workers": "many"})
+    assert unknown.fft_backend == settings_state.FFTBackendChoice.AUTO
+    assert unknown.fft_workers == settings_state.FFTWorkersChoice.AUTO
+
+    assert settings_state.settings_from_mapping({"render_memory_budget_mb": "bad"}).render_memory_budget_mb == 512
+    assert settings_state.settings_from_mapping({"render_memory_budget_mb": 64}).render_memory_budget_mb == 128
+    assert settings_state.settings_from_mapping({"render_memory_budget_mb": 9000}).render_memory_budget_mb == 8192

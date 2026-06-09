@@ -21,6 +21,21 @@ For Wayland-specific managed-panel checks, also run `docs/manual-regression-wayl
 - Confirm the UI remains responsive.
 - Pan through several later montage rows and confirm process memory does not visibly climb after each
   render.
+- In Performance, set Render Memory Budget to a low value and confirm an oversized visible image or
+  montage tile selection shows a memory guard/status message rather than allocating beyond the budget.
+- Set Render Memory Budget back to a higher value and confirm the same view can render when it is under
+  the selected budget.
+
+## Operation Cost / FFT Backend
+
+- In Performance, change FFT Workers to `1`, `2`, and `Auto`, then render an FFT-backed slice and
+  confirm no crash or stale overlay remains.
+- Select SciPy and pyFFTW FFT backends, render the same FFT-backed slice, and confirm the view updates
+  without changing the operation stack recipe.
+- Materialize or export a large FFT-backed derived array and confirm the confirmation dialog includes
+  output size, estimated peak memory, and the FFT axis/worker setting.
+- Materialize or export a reduction/RSS-backed derived array and confirm the warning is based on the
+  operation cost model rather than the old large-FFT axis heuristic.
 
 ## Montage
 

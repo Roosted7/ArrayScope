@@ -16,7 +16,6 @@ from arrayscope.display.viewport import ViewportIntent, ViewportPolicy
 from arrayscope.core.memory_budget import (
     MONTAGE_BUDGET_BYTES,
     PREFETCH_BUDGET_BYTES,
-    VISIBLE_RENDER_BUDGET_BYTES,
     estimate_display_image_bytes,
     estimate_montage_bytes,
     format_bytes,
@@ -437,7 +436,7 @@ class RenderMixin:
             )
             return
         estimated_bytes = self._estimated_image_display_bytes(view_state)
-        if estimated_bytes > VISIBLE_RENDER_BUDGET_BYTES:
+        if estimated_bytes > self._visible_render_budget_bytes():
             show_status_message(
                 self,
                 f"Image view would allocate {format_bytes(estimated_bytes)}. Reduce image-axis ranges or switch axes.",
@@ -550,7 +549,7 @@ class RenderMixin:
             tile_shape=tile_shape,
             output_dtype=output_dtype,
             rgb=view_state.channel == ChannelMode.COMPLEX,
-            budget_bytes=VISIBLE_RENDER_BUDGET_BYTES,
+            budget_bytes=self._visible_render_budget_bytes(),
         )
         if not visible_tiles:
             single_estimate = estimate_display_image_bytes(
@@ -568,7 +567,7 @@ class RenderMixin:
         if skipped_count:
             show_status_message(
                 self,
-                f"Montage loaded {len(visible_tiles)} visible tiles within {format_bytes(VISIBLE_RENDER_BUDGET_BYTES)}; "
+                f"Montage loaded {len(visible_tiles)} visible tiles within {format_bytes(self._visible_render_budget_bytes())}; "
                 f"skipped {skipped_count} tiles. Zoom in for detail.",
                 timeout=5000,
             )
@@ -614,7 +613,7 @@ class RenderMixin:
                 rendered_tiles,
                 view_range=current_range,
                 viewport_shape=viewport_shape,
-                budget_bytes=VISIBLE_RENDER_BUDGET_BYTES,
+                budget_bytes=self._visible_render_budget_bytes(),
                 dtype=output_dtype,
                 rgb=view_state.channel == ChannelMode.COMPLEX,
                 include_histogram=True,
@@ -946,6 +945,14 @@ class RenderMixin:
         dtype = getattr(self.document.base_data, "dtype", np.dtype(float))
         rgb = view_state.channel == ChannelMode.COMPLEX
         return estimate_display_image_bytes(tuple(shape), dtype, rgb=rgb, histogram=rgb)
+
+    def _visible_render_budget_bytes(self) -> int:
+        mb = getattr(getattr(self, "app_settings", None), "render_memory_budget_mb", 512)
+        try:
+            mb = int(mb)
+        except Exception:
+            mb = 512
+        return int(mb) * 1024 * 1024
     
     def update_display_mode(self):
         """Update the display mode for the image view"""

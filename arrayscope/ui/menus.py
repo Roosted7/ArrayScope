@@ -3,8 +3,16 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
-from arrayscope.app.settings_state import AppSettingsState, PanelResizeBehavior, settings_from_mapping, settings_to_mapping
+from arrayscope.app.settings_state import (
+    AppSettingsState,
+    FFTBackendChoice,
+    FFTWorkersChoice,
+    PanelResizeBehavior,
+    settings_from_mapping,
+    settings_to_mapping,
+)
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
+from arrayscope.operations import fft_backend
 from arrayscope.operations.registry import operation_entries
 from arrayscope.ui.icons import set_action_icon, verify_icon_names
 from arrayscope.ui.toasts import show_status_message
@@ -17,6 +25,9 @@ class WindowMenuMixin:
                 "theme": self._settings.value("theme", ThemeChoice.SYSTEM.value),
                 "prefetch_nearby_slices": self._settings.value("prefetch_nearby_slices", False),
                 "panel_resize_behavior": self._settings.value("panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value),
+                "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
+                "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
+                "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
             }
         )
 
@@ -78,6 +89,60 @@ class WindowMenuMixin:
         verify_icons_action.triggered.connect(self.verify_icons)
         view_menu.addAction(verify_icons_action)
 
+        performance_menu = QtWidgets.QMenu("Performance", self)
+        self.menuBar().addMenu(performance_menu)
+        self._performance_menu = performance_menu
+        self._fft_backend_actions = {}
+        self._fft_backend_action_group = QtGui.QActionGroup(self)
+        self._fft_backend_action_group.setExclusive(True)
+        backend_menu = QtWidgets.QMenu("FFT Backend", self)
+        performance_menu.addMenu(backend_menu)
+        self._fft_backend_menu = backend_menu
+        for choice, label in (
+            (FFTBackendChoice.AUTO, "Auto"),
+            (FFTBackendChoice.SCIPY, "SciPy"),
+            (FFTBackendChoice.PYFFTW, "pyFFTW"),
+            (FFTBackendChoice.NUMPY, "NumPy"),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            self._fft_backend_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, choice=choice: self._set_fft_backend_choice(choice))
+            backend_menu.addAction(action)
+            self._fft_backend_actions[choice] = action
+
+        self._fft_workers_actions = {}
+        self._fft_workers_action_group = QtGui.QActionGroup(self)
+        self._fft_workers_action_group.setExclusive(True)
+        workers_menu = QtWidgets.QMenu("FFT Workers", self)
+        performance_menu.addMenu(workers_menu)
+        self._fft_workers_menu = workers_menu
+        for choice, label in (
+            (FFTWorkersChoice.AUTO, "Auto"),
+            (FFTWorkersChoice.ONE, "1"),
+            (FFTWorkersChoice.TWO, "2"),
+            (FFTWorkersChoice.FOUR, "4"),
+            (FFTWorkersChoice.ALL_MINUS_ONE, "All minus one"),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            self._fft_workers_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, choice=choice: self._set_fft_workers_choice(choice))
+            workers_menu.addAction(action)
+            self._fft_workers_actions[choice] = action
+
+        self._render_budget_actions = {}
+        self._render_budget_action_group = QtGui.QActionGroup(self)
+        self._render_budget_action_group.setExclusive(True)
+        budget_menu = QtWidgets.QMenu("Render Memory Budget", self)
+        performance_menu.addMenu(budget_menu)
+        self._render_budget_menu = budget_menu
+        for mb in (256, 512, 1024, 2048):
+            action = QtGui.QAction(f"{mb} MiB", self, checkable=True)
+            self._render_budget_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, mb=mb: self._set_render_memory_budget_mb(mb))
+            budget_menu.addAction(action)
+            self._render_budget_actions[mb] = action
+        self._sync_performance_actions()
+
         theme_menu = self.menuBar().addMenu("Theme")
         self._theme_actions = {}
         self._theme_action_group = QtGui.QActionGroup(self)
@@ -94,6 +159,57 @@ class WindowMenuMixin:
             theme_menu.addAction(action)
             self._theme_actions[choice] = action
         self._sync_theme_actions()
+
+    def _sync_performance_actions(self):
+        if not hasattr(self, "_fft_backend_actions"):
+            return
+        for choice, action in self._fft_backend_actions.items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.fft_backend == choice)
+            action.blockSignals(False)
+        for choice, action in self._fft_workers_actions.items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.fft_workers == choice)
+            action.blockSignals(False)
+        for mb, action in self._render_budget_actions.items():
+            action.blockSignals(True)
+            action.setChecked(int(self.app_settings.render_memory_budget_mb) == int(mb))
+            action.blockSignals(False)
+
+    def _apply_performance_settings(self, persist=True):
+        current = getattr(self, "app_settings", AppSettingsState())
+        fft_backend.set_fft_runtime_options(backend=current.fft_backend.value, workers=current.fft_workers.value)
+        resolved = fft_backend.resolve_fft_backend(current.fft_backend.value)
+        if current.fft_backend == FFTBackendChoice.PYFFTW and resolved.name != "pyfftw":
+            show_status_message(self, "pyFFTW is not installed; using SciPy FFT")
+        if persist:
+            self._save_app_settings()
+        self._sync_performance_actions()
+
+    def _set_fft_backend_choice(self, choice):
+        self.app_settings = self._updated_app_settings(fft_backend=choice)
+        self._apply_performance_settings(persist=True)
+
+    def _set_fft_workers_choice(self, choice):
+        self.app_settings = self._updated_app_settings(fft_workers=choice)
+        self._apply_performance_settings(persist=True)
+
+    def _set_render_memory_budget_mb(self, mb):
+        self.app_settings = self._updated_app_settings(render_memory_budget_mb=int(mb))
+        self._apply_performance_settings(persist=True)
+
+    def _updated_app_settings(self, **changes):
+        current = getattr(self, "app_settings", AppSettingsState())
+        values = {
+            "theme": current.theme,
+            "prefetch_nearby_slices": current.prefetch_nearby_slices,
+            "panel_resize_behavior": current.panel_resize_behavior,
+            "fft_backend": current.fft_backend,
+            "fft_workers": current.fft_workers,
+            "render_memory_budget_mb": current.render_memory_budget_mb,
+        }
+        values.update(changes)
+        return AppSettingsState(**values)
 
     def _sync_theme_actions(self):
         if not hasattr(self, "_theme_actions"):
@@ -117,6 +233,9 @@ class WindowMenuMixin:
             theme=theme_to_store,
             prefetch_nearby_slices=current.prefetch_nearby_slices,
             panel_resize_behavior=current.panel_resize_behavior,
+            fft_backend=current.fft_backend,
+            fft_workers=current.fft_workers,
+            render_memory_budget_mb=current.render_memory_budget_mb,
         )
         if persist:
             self._save_app_settings()
@@ -127,6 +246,9 @@ class WindowMenuMixin:
             theme=self.app_settings.theme,
             prefetch_nearby_slices=bool(enabled),
             panel_resize_behavior=self.app_settings.panel_resize_behavior,
+            fft_backend=self.app_settings.fft_backend,
+            fft_workers=self.app_settings.fft_workers,
+            render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
         )
         self._save_app_settings()
 
@@ -136,6 +258,9 @@ class WindowMenuMixin:
             theme=self.app_settings.theme,
             prefetch_nearby_slices=self.app_settings.prefetch_nearby_slices,
             panel_resize_behavior=behavior,
+            fft_backend=self.app_settings.fft_backend,
+            fft_workers=self.app_settings.fft_workers,
+            render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
         )
         self._save_app_settings()
 

@@ -6,7 +6,10 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.core.view_recipe import DisplaySettings, ViewRecipe, load_view_recipe as load_view_recipe_file, save_view_recipe as save_view_recipe_file
-from arrayscope.io.numpy_save import estimate_nbytes, save_derived_array
+from arrayscope.core.memory_budget import format_bytes
+from arrayscope.io.numpy_save import save_derived_array
+from arrayscope.operations import fft_backend
+from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import LARGE_MATERIALIZE_BYTES
 from arrayscope.operations.recipes import dumps_recipe, load_recipe_steps, save_recipe
 from arrayscope.operations.registry import get_operation_entry, operation_entries
@@ -484,17 +487,38 @@ class OperationActionsMixin:
         return None
 
     def _confirm_expensive_full_array(self, action, shape, dtype):
-        nbytes = estimate_nbytes(shape, dtype)
-        expensive_fft = any(
-            type(step.operation).__name__ in {"CenteredFFT", "CenteredIFFT"}
-            and getattr(step.operation, "axis", 0) < len(self.base_data.shape)
-            and self.base_data.shape[getattr(step.operation, "axis")] > 4096
-            for step in self.document.steps
-            if step.enabled
+        del shape, dtype
+        enabled_operations = tuple(self.document.enabled_operations)
+        cost = estimate_pipeline_cost(
+            self.base_data.shape,
+            getattr(self.base_data, "dtype", None),
+            enabled_operations,
         )
-        if nbytes <= LARGE_MATERIALIZE_BYTES and not expensive_fft:
+        output_bytes = cost.estimated_output_bytes or 0
+        peak_bytes = cost.estimated_peak_bytes or output_bytes
+        budget_bytes = self._visible_render_budget_bytes() if hasattr(self, "_visible_render_budget_bytes") else 512 * 1024 * 1024
+        should_warn = (
+            output_bytes > LARGE_MATERIALIZE_BYTES
+            or peak_bytes > budget_bytes
+            or bool(cost.warnings)
+        )
+        if not should_warn:
             return True
-        message = f"{action} will evaluate the full derived array ({_format_nbytes(nbytes)}). Continue?"
+        expensive_text = ""
+        if cost.operation_costs and enabled_operations:
+            paired = tuple(zip(enabled_operations, cost.operation_costs))
+            operation, operation_cost = max(paired, key=lambda item: item[1].estimated_peak_bytes or 0)
+            axis_text = "" if not operation_cost.requires_full_axis else f" axis {operation_cost.requires_full_axis[0]}"
+            expensive_text = f" due to {type(operation).__name__}{axis_text}"
+        worker_text = ""
+        if any(type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in enabled_operations):
+            _backend_choice, workers_choice = fft_backend.get_fft_runtime_options()
+            worker_text = f" FFT workers: {workers_choice.value}."
+        message = (
+            f"{action} will evaluate the full derived array "
+            f"(output {format_bytes(output_bytes)}, estimated peak {format_bytes(peak_bytes)}{expensive_text})."
+            f"{worker_text} Continue?"
+        )
         result = QtWidgets.QMessageBox.warning(
             self,
             f"Large {action}",
@@ -595,11 +619,3 @@ def _operation_icon_name(operation_id):
         "combine_real_imag": "join_inner",
         "split_complex": "call_split",
     }.get(operation_id, "data_array")
-
-
-def _format_nbytes(nbytes):
-    nbytes = int(nbytes)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if nbytes < 1024 or unit == "GiB":
-            return f"{nbytes:.0f} {unit}" if unit == "B" else f"{nbytes:.1f} {unit}"
-        nbytes /= 1024

@@ -5,18 +5,23 @@ from __future__ import annotations
 import numpy as np
 
 from arrayscope.core.axis_utils import validate_axis
+from arrayscope.operations import fft_backend
 
 
-def centered_fft(data, axis):
+def centered_fft(data, axis, *, backend=None, workers=None):
     """Apply the viewer's centered forward FFT transform along one axis."""
     axis = _validate_axis(data, axis)
-    return np.fft.ifftshift(np.fft.ifft(np.fft.fftshift(data), axis=axis, norm="ortho"))
+    backend = fft_backend.runtime_fft_backend() if backend is None else backend
+    workers = fft_backend.runtime_fft_workers() if workers is None else int(workers)
+    return backend.centered_fft(data, axis, workers=workers)
 
 
-def centered_ifft(data, axis):
+def centered_ifft(data, axis, *, backend=None, workers=None):
     """Apply the viewer's centered inverse FFT transform along one axis."""
     axis = _validate_axis(data, axis)
-    return np.fft.ifftshift(np.fft.fft(np.fft.fftshift(data), axis=axis, norm="ortho"))
+    backend = fft_backend.runtime_fft_backend() if backend is None else backend
+    workers = fft_backend.runtime_fft_workers() if workers is None else int(workers)
+    return backend.centered_ifft(data, axis, workers=workers)
 
 
 def apply_fftshift(data, axis):

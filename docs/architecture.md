@@ -18,6 +18,13 @@ source of array-view state.
 - `arrayscope.display.viewport`: explicit viewport update policy and `ViewportController` for
   preserving, fitting, resetting, and true 1:1 2D ViewBox ranges.
 - `arrayscope.operations.pipeline`: immutable NumPy operations plus shape prediction.
+- `arrayscope.operations.cost`: Qt-free operation kind, output dtype, output shape, and conservative
+  memory-cost estimates for operation stacks. These estimates feed warnings and diagnostics; they are
+  not a scheduling/refusal policy yet.
+- `arrayscope.operations.fft_backend`: FFT backend abstraction and worker-count runtime settings.
+  `auto` resolves to SciPy when available, with NumPy fallback and an optional pyFFTW backend when
+  explicitly selected and importable. The centered FFT/IFFT naming follows ArrayScope's MRI/k-space
+  convention: centered FFT uses an inverse FFT internally, and centered IFFT uses a forward FFT.
 - `arrayscope.operations.slabs`: plans and evaluates the smallest exact base-data slab needed
   for image, profile, scalar hover, and export-frame requests.
 - `arrayscope.operations.cache`: bounded LRU caches and cache diagnostics for evaluated display
@@ -147,6 +154,13 @@ one worker and `start_latest()` replacement groups so newer requests clear queue
 window clears queued work, increments generations, stops polling, and ignores late results. Prefetch
 requests are keyed, deduped, bounded, off by default, skipped for operation-backed and montage views,
 and counted in cache diagnostics.
+Operation cost estimates are intentionally advisory in this phase. The evaluator/scheduler remains
+latest-only rather than cost-aware: it does not refuse, degrade, or chunk expensive transforms based on
+the new metadata. Cost-aware scheduling and cooperative cancellation remain future scheduler work.
+
+App settings include theme, nearby-slice prefetch, panel resize behavior, FFT backend, FFT worker count,
+and render memory budget. The render memory budget controls visible image and interactive montage
+tile/canvas guardrails; hard constants remain defaults/fallbacks.
 
 Channel mode tracks automatic versus user-selected intent. Invalid channels are
 coerced when dtype changes, for example complex-only channels fall back to real

@@ -61,6 +61,7 @@ class ArrayScopeWindow(
         self._settings = Qt.QtCore.QSettings("ArrayScope", "ArrayScope")
         self.app_settings = self._load_app_settings()
         self._apply_theme_choice(self.app_settings.theme, persist=False)
+        self._apply_performance_settings(persist=False)
 
         self.operation_coordinator = OperationCoordinator(data)
         self.profile_coordinator = ProfileCoordinator()

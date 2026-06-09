@@ -4,23 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from arrayscope.operations.cost import OperationCost, PipelineCost, estimate_pipeline_cost, operation_output_dtype
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import ArrayDocument, evaluate_shape
-from arrayscope.operations.pipeline import (
-    CenteredFFT,
-    CenteredIFFT,
-    CombineRealImagAxis,
-    Conjugate,
-    Crop,
-    FFTShift,
-    Maximum,
-    Mean,
-    Minimum,
-    ReverseAxis,
-    RootSumSquares,
-    SplitComplexAxis,
-    Sum,
-)
 from arrayscope.operations.registry import create_operation
 from arrayscope.operations.stack import delete_step, move_step, reorder_steps, replace_step_operation, set_step_enabled
 
@@ -117,6 +103,26 @@ class OperationCoordinator:
             dtypes.append(dtype)
         return tuple(dtypes)
 
+    def operation_cost_estimates(self) -> tuple[OperationCost, ...]:
+        costs = []
+        shape = tuple(self.base_data.shape)
+        dtype = getattr(self.base_data, "dtype", None)
+        for step in self.document.steps:
+            if step.enabled:
+                pipeline_cost = estimate_pipeline_cost(shape, dtype, (step.operation,))
+                cost = pipeline_cost.operation_costs[0]
+                shape = cost.output_shape
+                dtype = cost.output_dtype
+                costs.append(cost)
+        return tuple(costs)
+
+    def pipeline_cost_estimate(self) -> PipelineCost:
+        return estimate_pipeline_cost(
+            self.base_data.shape,
+            getattr(self.base_data, "dtype", None),
+            self.document.enabled_operations,
+        )
+
     def _reject_scalar(self, document):
         if len(document.current_shape) < 1:
             raise ValueError("operation would produce a scalar, which this viewer cannot display yet")
@@ -126,19 +132,4 @@ class OperationCoordinator:
 
 
 def _operation_output_dtype(dtype, operation):
-    if dtype is None:
-        return None
-    dtype = np.dtype(dtype)
-    if isinstance(operation, (Crop, ReverseAxis, FFTShift, Conjugate, Maximum, Minimum)):
-        return dtype
-    if isinstance(operation, Mean):
-        return np.mean(np.empty((1,), dtype=dtype)).dtype
-    if isinstance(operation, Sum):
-        return np.sum(np.empty((1,), dtype=dtype)).dtype
-    if isinstance(operation, RootSumSquares):
-        return np.asarray(np.abs(np.empty((1,), dtype=dtype))).dtype
-    if isinstance(operation, (CenteredFFT, CenteredIFFT, CombineRealImagAxis)):
-        return np.result_type(dtype, np.complex64)
-    if isinstance(operation, SplitComplexAxis):
-        return np.asarray(np.real(np.empty((1,), dtype=dtype))).dtype
-    return dtype
+    return operation_output_dtype(dtype, operation)

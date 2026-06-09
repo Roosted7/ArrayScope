@@ -8,6 +8,7 @@ dependencies:
   - pyqtgraph>=0.14
   - h5py>=3.0
   - scipy>=1.7
+  - pyfftw
   - pydicom>=2.4
   - nibabel>=4.0
   - imageio>=2.9
