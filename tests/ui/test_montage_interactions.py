@@ -116,27 +116,6 @@ def test_montage_does_not_call_make_montage_for_interactive_render(qtbot, monkey
         win.close()
 
 
-def test_montage_byte_budget_limits_visible_tiles():
-    from arrayscope.core.view_state import ViewState
-    from arrayscope.display.montage import make_montage_plan
-    from arrayscope.window.render import RenderMixin
-
-    state = ViewState.from_shape((10, 10, 10)).with_montage_axis(2, indices=tuple(range(10)), text=":")
-    plan = make_montage_plan(state, axis=2, indices=tuple(range(10)), tile_shape=(10, 10), columns=5, gap=1)
-
-    selected, used, skipped = RenderMixin()._select_visible_montage_tiles_by_budget(
-        plan.tiles,
-        tile_shape=(10, 10),
-        output_dtype=np.float32,
-        rgb=False,
-        budget_bytes=10 * 10 * 4 * 2,
-    )
-
-    assert tuple(tile.source_index for tile in selected) == (0,)
-    assert used == 10 * 10 * 8
-    assert skipped == 9
-
-
 def test_montage_commits_cached_tiles_immediately_with_loading_placeholders(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.display.montage import MontageTileState, make_montage_plan

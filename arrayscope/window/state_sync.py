@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import numpy as np
 
 from arrayscope.core.array_metadata import derived_info_for
@@ -132,6 +130,8 @@ class StateSyncMixin:
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document
         self.operation_evaluator = self.operation_coordinator.evaluator
+        if hasattr(self, "_refresh_memory_policy"):
+            self._refresh_memory_policy(active_render=False)
         self.data = self._derived_info()
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._coerce_channel_for_current_dtype()
@@ -191,22 +191,9 @@ class StateSyncMixin:
 
     def _update_operation_dock(self):
         if hasattr(self, "operation_dock"):
-            image_status = self.operation_evaluator.image_cache_diagnostics()
-            scheduler = self.visible_evaluation_controller.diagnostics() if hasattr(self, "visible_evaluation_controller") else None
-            if scheduler is not None:
-                image_status = replace(
-                    image_status,
-                    scheduler_pending=scheduler.pending,
-                    scheduler_running=scheduler.running,
-                    scheduler_cancelled=scheduler.cancelled,
-                    scheduler_stale=scheduler.stale,
-                )
             self.operation_dock.set_operations(
                 self.document.operations,
                 output_shape=self.document.current_shape,
-                cache_status=self.operation_evaluator.cache_diagnostics(),
-                image_cache_status=image_status,
-                profile_cache_status=self.operation_evaluator.profile_cache_diagnostics(),
                 derived_estimate=self.operation_evaluator.derived_estimate(),
                 operation_shapes=self._operation_shapes(),
                 steps=self.document.steps,

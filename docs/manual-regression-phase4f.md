@@ -19,3 +19,22 @@
 15. Move the live-profile marker to a loading tile; confirm loading status appears and no stale profile is scheduled.
 16. Rapidly change montage slice/range while tiles are loading; confirm stale tile results do not clear the current overlay or replace the current canvas.
 17. Confirm the final montage overlay clears only for the current session.
+
+## Memory Policy and Diagnostics
+
+1. Open a small 3D array.
+2. Open Developer -> Diagnostics.
+3. Confirm memory profile, system total/available, process RSS, and policy budgets are visible.
+4. Confirm the filling bars show system, RSS, image cache, tile cache, profile cache, render, canvas, and prefetch usage with readable values in the bars.
+5. Confirm scheduler bars show completed, planned, cancelled, stale, and failed work for visible/pixel/profile/ROI/prefetch schedulers.
+6. Switch memory profile between Conservative, Balanced, Aggressive, and Custom.
+7. Confirm Diagnostics budget values and bars update without disturbing the image view.
+8. Lower render cap to 128 or 256 MiB.
+9. Confirm visible render/montage warnings use the lowered cap.
+10. Confirm cache budgets shrink/evict without crashing.
+11. Open a montage with many tiles.
+12. Confirm tiles load progressively and are not skipped due to aggregate tile count.
+13. Force a single tile over budget and confirm the detailed skipped warning appears.
+14. Enable prefetch and confirm Diagnostics shows prefetch scheduling/blocking counters.
+15. Close Diagnostics and confirm its timer stops and the main window remains usable.
+16. Confirm Diagnostics does not resize or disturb the main window canvas.

@@ -7,13 +7,22 @@ from arrayscope.app.settings_state import (
     AppSettingsState,
     FFTBackendChoice,
     FFTWorkersChoice,
+    MemoryProfileChoice,
     PanelResizeBehavior,
     settings_from_mapping,
     settings_to_mapping,
 )
+from arrayscope.core.memory_budget import format_bytes
+from arrayscope.core.runtime_diagnostics import (
+    MontageRuntimeDiagnostics,
+    RenderRuntimeDiagnostics,
+    WindowRuntimeDiagnostics,
+)
+from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
 from arrayscope.operations import fft_backend
 from arrayscope.operations.registry import operation_entries
+from arrayscope.ui.diagnostics import DiagnosticsDialog
 from arrayscope.ui.icons import set_action_icon, verify_icon_names
 from arrayscope.ui.toasts import show_status_message
 
@@ -27,6 +36,7 @@ class WindowMenuMixin:
                 "panel_resize_behavior": self._settings.value("panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value),
                 "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
                 "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
+                "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
             }
         )
@@ -84,14 +94,27 @@ class WindowMenuMixin:
         set_action_icon(reset_layout_action, "reset_wrench")
         reset_layout_action.triggered.connect(self.reset_layout)
         view_menu.addAction(reset_layout_action)
-        verify_icons_action = QtGui.QAction("Verify icons", self)
-        set_action_icon(verify_icons_action, "warning")
-        verify_icons_action.triggered.connect(self.verify_icons)
-        view_menu.addAction(verify_icons_action)
-
         performance_menu = QtWidgets.QMenu("Performance", self)
         self.menuBar().addMenu(performance_menu)
         self._performance_menu = performance_menu
+        self._memory_profile_actions = {}
+        self._memory_profile_action_group = QtGui.QActionGroup(self)
+        self._memory_profile_action_group.setExclusive(True)
+        profile_menu = QtWidgets.QMenu("Memory Profile", self)
+        performance_menu.addMenu(profile_menu)
+        self._memory_profile_menu = profile_menu
+        for choice, label in (
+            (MemoryProfileChoice.CONSERVATIVE, "Conservative"),
+            (MemoryProfileChoice.BALANCED, "Balanced"),
+            (MemoryProfileChoice.AGGRESSIVE, "Aggressive"),
+            (MemoryProfileChoice.CUSTOM, "Custom"),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            self._memory_profile_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, choice=choice: self._set_memory_profile_choice(choice))
+            profile_menu.addAction(action)
+            self._memory_profile_actions[choice] = action
+
         self._fft_backend_actions = {}
         self._fft_backend_action_group = QtGui.QActionGroup(self)
         self._fft_backend_action_group.setExclusive(True)
@@ -133,15 +156,30 @@ class WindowMenuMixin:
         self._render_budget_action_group = QtGui.QActionGroup(self)
         self._render_budget_action_group.setExclusive(True)
         budget_menu = QtWidgets.QMenu("Render Memory Budget", self)
+        budget_menu.setToolTipsVisible(True)
         performance_menu.addMenu(budget_menu)
         self._render_budget_menu = budget_menu
-        for mb in (256, 512, 1024, 2048):
+        for mb in (256, 512, 1024, 2048, 4096, 8192):
             action = QtGui.QAction(f"{mb} MiB", self, checkable=True)
+            action.setToolTip("Per-render hard cap for visible images and montage canvas/tile allocation.")
             self._render_budget_action_group.addAction(action)
             action.triggered.connect(lambda checked=False, mb=mb: self._set_render_memory_budget_mb(mb))
             budget_menu.addAction(action)
             self._render_budget_actions[mb] = action
         self._sync_performance_actions()
+
+        developer_menu = QtWidgets.QMenu("Developer", self)
+        self.menuBar().addMenu(developer_menu)
+        diagnostics_action = QtGui.QAction("Diagnostics", self)
+        set_action_icon(diagnostics_action, "monitor_heart")
+        diagnostics_action.triggered.connect(self.open_diagnostics_dialog)
+        developer_menu.addAction(diagnostics_action)
+        verify_icons_action = QtGui.QAction("Verify icons", self)
+        set_action_icon(verify_icons_action, "warning")
+        verify_icons_action.triggered.connect(self.verify_icons)
+        developer_menu.addAction(verify_icons_action)
+        self._developer_menu = developer_menu
+        self._diagnostics_action = diagnostics_action
 
         theme_menu = self.menuBar().addMenu("Theme")
         self._theme_actions = {}
@@ -171,6 +209,10 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(self.app_settings.fft_workers == choice)
             action.blockSignals(False)
+        for choice, action in self._memory_profile_actions.items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.memory_profile == choice)
+            action.blockSignals(False)
         for mb, action in self._render_budget_actions.items():
             action.blockSignals(True)
             action.setChecked(int(self.app_settings.render_memory_budget_mb) == int(mb))
@@ -184,6 +226,18 @@ class WindowMenuMixin:
             show_status_message(self, "pyFFTW is not installed; using SciPy FFT")
         if persist:
             self._save_app_settings()
+        if hasattr(self, "_refresh_memory_policy"):
+            policy = self._refresh_memory_policy(active_render=False)
+            if persist:
+                show_status_message(
+                    self,
+                    (
+                        f"Memory profile: {policy.profile.value.title()}, "
+                        f"visible budget {format_bytes(policy.visible_render_budget_bytes)}, "
+                        f"tile cache {format_bytes(policy.tile_cache_budget_bytes)}"
+                    ),
+                    timeout=3000,
+                )
         self._sync_performance_actions()
 
     def _set_fft_backend_choice(self, choice):
@@ -192,6 +246,10 @@ class WindowMenuMixin:
 
     def _set_fft_workers_choice(self, choice):
         self.app_settings = self._updated_app_settings(fft_workers=choice)
+        self._apply_performance_settings(persist=True)
+
+    def _set_memory_profile_choice(self, choice):
+        self.app_settings = self._updated_app_settings(memory_profile=choice)
         self._apply_performance_settings(persist=True)
 
     def _set_render_memory_budget_mb(self, mb):
@@ -206,6 +264,7 @@ class WindowMenuMixin:
             "panel_resize_behavior": current.panel_resize_behavior,
             "fft_backend": current.fft_backend,
             "fft_workers": current.fft_workers,
+            "memory_profile": current.memory_profile,
             "render_memory_budget_mb": current.render_memory_budget_mb,
         }
         values.update(changes)
@@ -235,6 +294,7 @@ class WindowMenuMixin:
             panel_resize_behavior=current.panel_resize_behavior,
             fft_backend=current.fft_backend,
             fft_workers=current.fft_workers,
+            memory_profile=current.memory_profile,
             render_memory_budget_mb=current.render_memory_budget_mb,
         )
         if persist:
@@ -248,6 +308,7 @@ class WindowMenuMixin:
             panel_resize_behavior=self.app_settings.panel_resize_behavior,
             fft_backend=self.app_settings.fft_backend,
             fft_workers=self.app_settings.fft_workers,
+            memory_profile=self.app_settings.memory_profile,
             render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
         )
         self._save_app_settings()
@@ -260,9 +321,92 @@ class WindowMenuMixin:
             panel_resize_behavior=behavior,
             fft_backend=self.app_settings.fft_backend,
             fft_workers=self.app_settings.fft_workers,
+            memory_profile=self.app_settings.memory_profile,
             render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
         )
         self._save_app_settings()
+
+    def collect_runtime_diagnostics(self):
+        policy = self._refresh_memory_policy(active_render=getattr(self, "visible_evaluation_controller", None).is_busy() if hasattr(self, "visible_evaluation_controller") else False)
+        schedulers = []
+        for name in (
+            "visible_evaluation_controller",
+            "pixel_evaluation_controller",
+            "profile_evaluation_controller",
+            "roi_evaluation_controller",
+            "prefetch_evaluation_controller",
+        ):
+            controller = getattr(self, name, None)
+            if controller is not None:
+                schedulers.append(controller.diagnostics())
+        session = getattr(self, "_montage_session", None)
+        canvas = getattr(self, "_current_montage_canvas", None)
+        canvas_bytes = None
+        if canvas is not None:
+            canvas_bytes = int(getattr(canvas.data, "nbytes", 0))
+            histogram = getattr(canvas, "histogram_data", None)
+            if histogram is not None:
+                canvas_bytes += int(getattr(histogram, "nbytes", 0))
+        montage = MontageRuntimeDiagnostics(
+            active=session is not None,
+            session_id=None if session is None else int(session.session_id),
+            canvas_rect=None if canvas is None else (int(canvas.origin_x), int(canvas.origin_y), int(canvas.origin_x + canvas.display_shape[1]), int(canvas.origin_y + canvas.display_shape[0])),
+            canvas_shape=None if canvas is None else tuple(int(size) for size in canvas.display_shape),
+            canvas_bytes=canvas_bytes,
+            loaded_tiles=0 if session is None else len(session.rendered_tiles),
+            loading_tiles=0 if session is None else len(session.loading_tiles),
+            pending_tiles=0 if session is None else len(session.pending_tiles),
+            skipped_tiles=0 if session is None else len(session.skipped_tiles),
+            visible_tiles=0 if session is None else len(session.visible_tiles),
+            show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
+        )
+        decision = getattr(self, "_last_render_decision", None)
+        context = getattr(self, "_last_render_context", None)
+        render = RenderRuntimeDiagnostics(
+            last_decision_kind="" if decision is None else str(getattr(decision.kind, "value", decision.kind)),
+            last_decision_reason="" if decision is None else str(getattr(decision, "reason", "")),
+            last_context_summary="" if context is None else str(context),
+            last_request_key=str(getattr(self, "_last_render_request_key", "") or ""),
+            last_error=str(getattr(self, "_last_render_error", "") or ""),
+            estimated_display_bytes=None if context is None else int(getattr(context, "estimated_display_bytes", 0)),
+            render_budget_bytes=None if context is None else int(getattr(context, "render_budget_bytes", 0)),
+        )
+        backend_choice, workers_choice = fft_backend.get_fft_runtime_options()
+        resolved = fft_backend.resolve_fft_backend(backend_choice.value)
+        cost = estimate_pipeline_cost(
+            self.base_data.shape,
+            getattr(self.base_data, "dtype", None),
+            tuple(self.document.enabled_operations),
+        )
+        return WindowRuntimeDiagnostics(
+            memory_policy=policy,
+            image_cache=self.operation_evaluator.image_cache_diagnostics(),
+            tile_cache=self.operation_evaluator.tile_cache_diagnostics(),
+            profile_cache=self.operation_evaluator.profile_cache_diagnostics(),
+            schedulers=tuple(schedulers),
+            render=render,
+            montage=montage,
+            fft_backend_choice=backend_choice.value,
+            fft_backend_resolved=resolved.name,
+            fft_workers_choice=workers_choice.value,
+            fft_workers_resolved=int(fft_backend.runtime_fft_workers()),
+            operation_count=len(tuple(self.document.enabled_operations)),
+            derived_shape=tuple(int(size) for size in self.document.current_shape),
+            derived_dtype=str(self.data.dtype),
+            pipeline_peak_bytes=cost.estimated_peak_bytes,
+            pipeline_warnings=tuple(cost.warnings),
+        )
+
+    def open_diagnostics_dialog(self):
+        dialog = getattr(self, "_diagnostics_dialog", None)
+        if dialog is None:
+            dialog = DiagnosticsDialog(self, self.collect_runtime_diagnostics, interval_ms=500)
+            dialog.destroyed.connect(lambda _obj=None: setattr(self, "_diagnostics_dialog", None))
+            self._diagnostics_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog.refresh()
 
     def verify_icons(self):
         names = {

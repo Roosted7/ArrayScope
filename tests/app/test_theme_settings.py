@@ -16,6 +16,8 @@ MODULE_PATHS = {
     "dimension_roles": ("arrayscope.core.dimension_roles", ROOT / "arrayscope" / "core" / "dimension_roles.py"),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
     "window_levels": ("arrayscope.core.window_levels", ROOT / "arrayscope" / "core" / "window_levels.py"),
+    "memory_budget": ("arrayscope.core.memory_budget", ROOT / "arrayscope" / "core" / "memory_budget.py"),
+    "memory_policy": ("arrayscope.core.memory_policy", ROOT / "arrayscope" / "core" / "memory_policy.py"),
     "dim_ops": ("arrayscope.operations.dim_ops", ROOT / "arrayscope" / "operations" / "dim_ops.py"),
     "operation_pipeline": ("arrayscope.operations.pipeline", ROOT / "arrayscope" / "operations" / "pipeline.py"),
     "operation_stack": ("arrayscope.operations.stack", ROOT / "arrayscope" / "operations" / "stack.py"),
@@ -41,6 +43,8 @@ def load_module(name):
 
 
 theme = load_module("theme")
+load_module("memory_budget")
+load_module("memory_policy")
 settings_state = load_module("settings_state")
 
 
@@ -79,6 +83,7 @@ def test_settings_round_trip_defaults_and_values():
             "panel_resize_behavior": "off",
             "fft_backend": "pyfftw",
             "fft_workers": "2",
+            "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
         }
     )
@@ -90,6 +95,7 @@ def test_settings_round_trip_defaults_and_values():
         "panel_resize_behavior": "off",
         "fft_backend": "pyfftw",
         "fft_workers": "2",
+        "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
     }
     defaults = settings_state.settings_from_mapping({})
@@ -97,6 +103,7 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
     assert defaults.fft_backend == settings_state.FFTBackendChoice.AUTO
     assert defaults.fft_workers == settings_state.FFTWorkersChoice.AUTO
+    assert defaults.memory_profile == settings_state.MemoryProfileChoice.BALANCED
     assert defaults.render_memory_budget_mb == 512
     unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})
     assert unknown.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
@@ -106,6 +113,7 @@ def test_performance_settings_normalize_unknowns_and_clamp_budget():
     unknown = settings_state.settings_from_mapping({"fft_backend": "unknown", "fft_workers": "many"})
     assert unknown.fft_backend == settings_state.FFTBackendChoice.AUTO
     assert unknown.fft_workers == settings_state.FFTWorkersChoice.AUTO
+    assert settings_state.settings_from_mapping({"memory_profile": "bad"}).memory_profile == settings_state.MemoryProfileChoice.BALANCED
 
     assert settings_state.settings_from_mapping({"render_memory_budget_mb": "bad"}).render_memory_budget_mb == 512
     assert settings_state.settings_from_mapping({"render_memory_budget_mb": 64}).render_memory_budget_mb == 128

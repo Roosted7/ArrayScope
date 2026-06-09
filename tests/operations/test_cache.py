@@ -3,6 +3,7 @@ import numpy as np
 from arrayscope.core.cache_status import CacheStatus
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.montage import MontageTile, RenderedTile
+from arrayscope.core.memory_policy import MemoryProfileChoice, compute_memory_policy, SystemMemorySnapshot
 from arrayscope.operations.cache import BoundedArrayCache, _nbytes
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.coordinator import OperationCoordinator
@@ -25,6 +26,28 @@ def test_bounded_array_cache_tracks_hits_misses_and_evictions():
     assert diagnostics.hit_rate == 0.5
     assert diagnostics.evictions >= 1
     assert diagnostics.bytes_used <= diagnostics.max_bytes
+
+
+def test_bounded_array_cache_resize_evicts_to_new_byte_limit():
+    cache = BoundedArrayCache(max_bytes=128, max_entries=10)
+    cache.put("a", np.zeros(16, dtype=np.float32))
+    cache.put("b", np.zeros(16, dtype=np.float32))
+
+    cache.resize(max_bytes=64)
+
+    assert cache.bytes_used <= 64
+    assert len(cache._items) == 1
+    assert cache.evictions == 1
+
+
+def test_bounded_array_cache_resize_growing_preserves_entries():
+    cache = BoundedArrayCache(max_bytes=64, max_entries=10)
+    value = np.zeros(8, dtype=np.float32)
+    cache.put("a", value)
+
+    cache.resize(max_bytes=128)
+
+    assert cache.get("a") is value
 
 
 def test_bounded_cache_counts_rendered_tile_bytes():
@@ -61,6 +84,39 @@ def test_bounded_cache_counts_rendered_tile_bytes():
     assert small_cache.bytes_used == 0
     assert len(small_cache._items) == 0
     assert small_cache.evictions == 1
+
+
+def test_montage_tile_cache_diagnostics_are_separate_from_image_cache():
+    data = np.arange(2 * 2 * 2, dtype=np.float32).reshape(2, 2, 2)
+    evaluator = OperationEvaluator(ArrayDocument(data))
+    state = ViewState.from_shape(data.shape).with_montage_axis(2, columns=2, indices=(0, 1), text=":")
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.display.slice_engine import DisplayImage
+    from arrayscope.operations.evaluator import EvaluationResult
+
+    plan = make_montage_plan(state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
+    image = np.zeros((2, 2), dtype=np.float32)
+    evaluator.store_montage_tile_result(
+        plan.tiles[0],
+        montage_axis=2,
+        colormap_lut=None,
+        result=EvaluationResult(DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes)),
+    )
+
+    assert evaluator.tile_cache_diagnostics().entries == 1
+    assert evaluator.image_cache_diagnostics().entries == 0
+
+
+def test_apply_memory_policy_resizes_image_tile_and_profile_caches():
+    evaluator = OperationEvaluator(ArrayDocument(np.zeros((2, 3), dtype=np.float32)))
+    system = SystemMemorySnapshot(total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, process_rss_bytes=0)
+    policy = compute_memory_policy(profile=MemoryProfileChoice.CONSERVATIVE, render_cap_mb=512, input_nbytes=1024, system=system)
+
+    evaluator.apply_memory_policy(policy)
+
+    assert evaluator.image_cache_diagnostics().max_bytes == policy.image_cache_budget_bytes
+    assert evaluator.tile_cache_diagnostics().max_bytes == policy.tile_cache_budget_bytes
+    assert evaluator.profile_cache_diagnostics().max_bytes == policy.profile_cache_budget_bytes
 
 
 def test_bounded_cache_uses_nbytes_protocol_before_fallbacks():

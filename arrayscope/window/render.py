@@ -22,11 +22,14 @@ from arrayscope.display.montage import (
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportIntent, ViewportPolicy
 from arrayscope.core.memory_budget import (
-    MONTAGE_BUDGET_BYTES,
-    PREFETCH_BUDGET_BYTES,
     estimate_display_image_bytes,
     estimate_montage_bytes,
     format_bytes,
+)
+from arrayscope.core.memory_policy import (
+    apply_policy_hysteresis,
+    compute_memory_policy,
+    input_nbytes_for,
 )
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
@@ -36,8 +39,6 @@ from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.operations.evaluator import evaluate_image_snapshot, evaluate_line_snapshot, evaluate_scalar_snapshot
 from arrayscope.operations.render_plan import (
-    CACHE_PREFETCH_SKIP_FRACTION,
-    FFT_PREFETCH_PEAK_BYTES,
     MAX_IDLE_PREFETCH_SLICES,
     PREFETCH_IDLE_DELAY_MS,
     RenderDecisionKind,
@@ -465,6 +466,7 @@ class RenderMixin:
     def update_image_view(self, *, force_autolevel: bool = False):
         if self.view_state.image_axes is None: # No image view for 1D data
             return
+        self._refresh_memory_policy(active_render=self.visible_evaluation_controller.is_busy())
         if self.view_state.montage_axis is not None:
             return self.update_montage_view(force_autolevel=force_autolevel)
         self._montage_session = None
@@ -519,6 +521,11 @@ class RenderMixin:
             render_budget_bytes=self._visible_render_budget_bytes(),
         )
         decision = choose_visible_render_decision(context)
+        self._last_render_context = context
+        self._last_render_decision = decision
+        self._last_render_request_key = None
+        self._last_render_error = ""
+        self._last_render_completed_ms = None
         if decision.kind == RenderDecisionKind.REFUSE:
             self.operation_evaluator.note_render_refused(decision.reason)
             show_status_message(
@@ -533,6 +540,7 @@ class RenderMixin:
             return
 
         request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)
+        self._last_render_request_key = str(request_key)
         self.prefetch_evaluation_controller.cancel_prefetch()
 
         if decision.kind == RenderDecisionKind.DEGRADED_PREVIEW:
@@ -597,6 +605,7 @@ class RenderMixin:
         def done(result):
             if request_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut):
                 return
+            self._last_render_completed_ms = float(getattr(result, "eval_ms", 0.0) or 0.0)
             self._last_render_was_degraded = False
             self._degraded_rendered_view = None
             display_image = self.operation_evaluator.store_image_result(view_state, colormap_lut, result)
@@ -612,6 +621,7 @@ class RenderMixin:
             self._schedule_prefetch_nearby_slices(view_state, colormap_lut)
 
         def error(exc):
+            self._last_render_error = str(exc)
             self.img_view.setImageStale(False)
             self.img_view.setEvaluationOverlay(False)
             show_status_message(self, f"Image update failed: {exc}")
@@ -632,6 +642,7 @@ class RenderMixin:
         axis = self.view_state.montage_axis
         if axis is None or self.view_state.image_axes is None or axis in self.view_state.image_axes:
             return
+        policy = self._refresh_memory_policy(active_render=self._montage_render_active())
         force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
         if getattr(self, '_force_autolevel', False):
             self._force_autolevel = False
@@ -667,7 +678,7 @@ class RenderMixin:
             histogram=True,
             columns=columns,
         )
-        if estimate > MONTAGE_BUDGET_BYTES:
+        if estimate > policy.montage_canvas_budget_bytes:
             show_status_message(
                 self,
                 f"Montage would allocate {format_bytes(estimate)}. Showing visible tiles only; reduce tile count or zoom in for detail.",
@@ -691,7 +702,7 @@ class RenderMixin:
             rgb=view_state.channel == ChannelMode.COMPLEX,
             histogram=True,
         )
-        if single_estimate > self._visible_render_budget_bytes():
+        if single_estimate > policy.single_tile_budget_bytes:
             visible_tiles = ()
             skipped_tiles = tuple(candidate_tiles)
             skipped_count = len(skipped_tiles)
@@ -710,7 +721,7 @@ class RenderMixin:
             self._warn_montage_tiles_skipped(
                 skipped_count=skipped_count,
                 tile_bytes=single_estimate,
-                budget_bytes=self._visible_render_budget_bytes(),
+                budget_bytes=policy.single_tile_budget_bytes,
                 tile_shape=tile_shape,
             )
         cached_tiles = []
@@ -937,7 +948,7 @@ class RenderMixin:
             session.rendered_tuple(),
             view_range=session.view_range,
             viewport_shape=session.viewport_shape,
-            budget_bytes=self._visible_render_budget_bytes(),
+            budget_bytes=self._montage_canvas_budget_bytes(),
             dtype=session.output_dtype,
             rgb=session.rgb,
             include_histogram=True,
@@ -1095,29 +1106,6 @@ class RenderMixin:
             len(secondary_indices) if secondary_indices is not None else int(view_state.shape[secondary_axis]),
         )
 
-    def _select_visible_montage_tiles_by_budget(
-        self,
-        tiles,
-        *,
-        tile_shape,
-        output_dtype,
-        rgb,
-        budget_bytes,
-    ):
-        selected = []
-        used = 0
-        tiles = tuple(tiles)
-        tile_bytes = estimate_display_image_bytes(tile_shape, output_dtype, rgb=rgb, histogram=True)
-        for tile in tiles:
-            if used + tile_bytes > int(budget_bytes):
-                if selected:
-                    break
-                return (), 0, len(tiles)
-            selected.append(tile)
-            used += tile_bytes
-        skipped = max(0, len(tiles) - len(selected))
-        return tuple(selected), int(used), int(skipped)
-
     def _current_montage_global_view_range(self):
         try:
             local_range = self.img_view.getView().viewRange()
@@ -1206,6 +1194,7 @@ class RenderMixin:
         if request is None:
             return
         view_state, colormap_lut = request
+        self._refresh_memory_policy(active_render=self.visible_evaluation_controller.is_busy())
         if self.visible_evaluation_controller.is_busy():
             self.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
             self.operation_evaluator.note_prefetch_skipped()
@@ -1223,10 +1212,11 @@ class RenderMixin:
             self.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
             self.operation_evaluator.note_prefetch_skipped()
             return
-        if self.operation_evaluator._image_cache.bytes_used > int(self.operation_evaluator._image_cache.max_bytes * CACHE_PREFETCH_SKIP_FRACTION):
+        policy = self._memory_policy()
+        if self.operation_evaluator._image_cache.bytes_used > int(self.operation_evaluator._image_cache.max_bytes * policy.cache_prefetch_skip_fraction):
             self.operation_evaluator.note_prefetch_skipped()
             return
-        if self._estimated_image_display_bytes(view_state) > PREFETCH_BUDGET_BYTES:
+        if self._estimated_image_display_bytes(view_state) > policy.prefetch_budget_bytes:
             self.operation_evaluator.note_prefetch_skipped()
             return
         if not self._prefetch_cost_allowed(view_state):
@@ -1270,6 +1260,7 @@ class RenderMixin:
                         result,
                     ),
                     key=prefetch_key,
+                    memory_budget_bytes=policy.prefetch_budget_bytes,
                 )
                 self._note_prefetch_start(started)
                 if started.scheduled:
@@ -1285,10 +1276,10 @@ class RenderMixin:
                 return False
         cost = estimate_pipeline_cost(self.base_data.shape, getattr(self.base_data, "dtype", None), operations)
         peak = cost.estimated_peak_bytes or 0
-        threshold = min(64 * 1024 * 1024, max(1, self._visible_render_budget_bytes() // 8))
-        if peak > threshold:
+        policy = self._memory_policy()
+        if peak > policy.operation_prefetch_peak_budget_bytes:
             return False
-        if any(type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in operations) and peak > FFT_PREFETCH_PEAK_BYTES:
+        if any(type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in operations) and peak > policy.fft_prefetch_peak_budget_bytes:
             return False
         return True
 
@@ -1337,6 +1328,7 @@ class RenderMixin:
                         result,
                     ),
                     key=request_key_cache[profile_state],
+                    memory_budget_bytes=self._prefetch_budget_bytes(),
                 )
                 self._note_prefetch_start(started)
                 if started.scheduled:
@@ -1390,12 +1382,46 @@ class RenderMixin:
         return estimate_display_image_bytes(tuple(shape), dtype, rgb=rgb, histogram=rgb)
 
     def _visible_render_budget_bytes(self) -> int:
-        mb = getattr(getattr(self, "app_settings", None), "render_memory_budget_mb", 512)
-        try:
-            mb = int(mb)
-        except Exception:
-            mb = 512
-        return int(mb) * 1024 * 1024
+        return int(self._memory_policy().visible_render_budget_bytes)
+
+    def _montage_canvas_budget_bytes(self) -> int:
+        return int(self._memory_policy().montage_canvas_budget_bytes)
+
+    def _single_montage_tile_budget_bytes(self) -> int:
+        return int(self._memory_policy().single_tile_budget_bytes)
+
+    def _prefetch_budget_bytes(self) -> int:
+        return int(self._memory_policy().prefetch_budget_bytes)
+
+    def _memory_policy(self):
+        policy = getattr(self, "_current_memory_policy", None)
+        if policy is None:
+            policy = self._refresh_memory_policy()
+        return policy
+
+    def _refresh_memory_policy(self, *, active_render: bool = False):
+        current = compute_memory_policy(
+            profile=getattr(getattr(self, "app_settings", None), "memory_profile", "balanced"),
+            render_cap_mb=getattr(getattr(self, "app_settings", None), "render_memory_budget_mb", 512),
+            input_nbytes=input_nbytes_for(getattr(self, "base_data", None)),
+        )
+        policy = apply_policy_hysteresis(
+            getattr(self, "_current_memory_policy", None),
+            current,
+            active_render=bool(active_render),
+        )
+        self._current_memory_policy = policy
+        self._apply_memory_policy_to_caches(policy)
+        return policy
+
+    def _apply_memory_policy_to_caches(self, policy) -> None:
+        evaluator = getattr(self, "operation_evaluator", None)
+        if evaluator is not None and hasattr(evaluator, "apply_memory_policy"):
+            evaluator.apply_memory_policy(policy)
+
+    def _montage_render_active(self) -> bool:
+        session = getattr(self, "_montage_session", None)
+        return bool(session is not None and (session.pending_tiles or session.loading_tiles))
     
     def update_display_mode(self):
         """Update the display mode for the image view"""

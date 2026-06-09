@@ -68,6 +68,7 @@ class ArrayScopeWindow(
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document
         self.operation_evaluator = self.operation_coordinator.evaluator
+        self._refresh_memory_policy(active_render=False)
         self._init_compare_document(data)
         self.visible_evaluation_controller = EvaluationController(self, max_workers=1, name="visible")
         self.evaluation_controller = self.visible_evaluation_controller

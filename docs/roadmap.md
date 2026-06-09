@@ -317,18 +317,18 @@ Required tests:
 
 ### P2 — memory policy unification
 
-* [ ] Replace static constants with MemoryPolicy.
-* [ ] Use psutil for total/available/RSS.
-* [ ] Tie visible, montage, tile, stage, and prefetch budgets together.
-* [ ] Add user profiles: conservative / balanced / aggressive / custom.
-* [ ] Remove duplicate hidden limits from operations panel.
+* [x] Replace static constants with MemoryPolicy.
+* [x] Use psutil for total/available/RSS.
+* [x] Tie visible, montage, tile, stage, and prefetch budgets together.
+* [x] Add user profiles: conservative / balanced / aggressive / custom.
+* [x] Remove duplicate hidden limits from operations panel.
 
 ### P3 — debug diagnostics window
 
-* [ ] Add simple floating QDialog.
-* [ ] Show memory, cache, scheduler, render-plan, montage, FFT stats.
-* [ ] Update on timer.
-* [ ] Open only from Developer menu or env flag.
+* [x] Add simple floating QDialog.
+* [x] Show memory, cache, scheduler, render-plan, montage, FFT stats.
+* [x] Update on timer.
+* [x] Open only from Developer menu or env flag.
 
 ### P4 — clean Wayland preserve-canvas code
 

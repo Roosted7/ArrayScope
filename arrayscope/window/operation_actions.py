@@ -6,7 +6,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.core.view_recipe import DisplaySettings, ViewRecipe, load_view_recipe as load_view_recipe_file, save_view_recipe as save_view_recipe_file
-from arrayscope.core.memory_budget import format_bytes
+from arrayscope.core.memory_budget import DEFAULT_VISIBLE_RENDER_BUDGET_BYTES, format_bytes
 from arrayscope.io.numpy_save import save_derived_array
 from arrayscope.operations import fft_backend
 from arrayscope.operations.cost import estimate_pipeline_cost
@@ -496,7 +496,7 @@ class OperationActionsMixin:
         )
         output_bytes = cost.estimated_output_bytes or 0
         peak_bytes = cost.estimated_peak_bytes or output_bytes
-        budget_bytes = self._visible_render_budget_bytes() if hasattr(self, "_visible_render_budget_bytes") else 512 * 1024 * 1024
+        budget_bytes = self._visible_render_budget_bytes() if hasattr(self, "_visible_render_budget_bytes") else DEFAULT_VISIBLE_RENDER_BUDGET_BYTES
         should_warn = (
             output_bytes > LARGE_MATERIALIZE_BYTES
             or peak_bytes > budget_bytes

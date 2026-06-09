@@ -1,14 +1,14 @@
 import numpy as np
 import pytest
 
-from arrayscope.core.memory_budget import MONTAGE_BUDGET_BYTES, estimate_montage_bytes
+from arrayscope.core.memory_budget import DEFAULT_MONTAGE_CANVAS_BUDGET_BYTES, estimate_montage_bytes
 from arrayscope.display.levels import finite_bounds
 
 
 def test_memory_estimate_blocks_large_montage_without_allocation():
     nbytes = estimate_montage_bytes((8192, 8192), 128, np.float32, histogram=True, columns=16)
 
-    assert nbytes > MONTAGE_BUDGET_BYTES
+    assert nbytes > DEFAULT_MONTAGE_CANVAS_BUDGET_BYTES
 
 
 def test_large_level_bounds_uses_sampling():
@@ -39,6 +39,7 @@ def test_montage_viewport_canvas_rss_stays_bounded(qtbot, monkeypatch):
         panel_resize_behavior=win.app_settings.panel_resize_behavior,
         fft_backend=win.app_settings.fft_backend,
         fft_workers=win.app_settings.fft_workers,
+        memory_profile=win.app_settings.memory_profile,
         render_memory_budget_mb=8,
     )
     qtbot.addWidget(win)

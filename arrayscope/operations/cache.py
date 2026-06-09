@@ -30,6 +30,18 @@ class BoundedArrayCache:
         self._items.clear()
         self.bytes_used = 0
 
+    def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
+        if max_bytes is not None:
+            self.max_bytes = int(max_bytes)
+        if max_entries is not None:
+            self.max_entries = int(max_entries)
+        self._evict()
+
+    def clear_counters(self) -> None:
+        self.hits = 0
+        self.misses = 0
+        self.evictions = 0
+
     def get(self, key):
         if key not in self._items:
             self.misses += 1
