@@ -25,7 +25,9 @@ def test_fft_cost_requires_full_axis_and_has_conservative_peak():
     assert cost.kind == "transform"
     assert cost.requires_full_axis == (1,)
     assert cost.estimated_peak_bytes >= cost.estimated_output_bytes * 3
-    assert not cost.can_chunk
+    assert cost.can_chunk
+    assert cost.blocking_axes == (1,)
+    assert 1 not in cost.chunkable_axes
 
 
 def test_reduction_cost_removes_axis_and_requires_full_axis():

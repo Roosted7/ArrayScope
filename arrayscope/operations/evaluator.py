@@ -7,6 +7,7 @@ from time import perf_counter
 
 import numpy as np
 
+from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.cache import BoundedArrayCache
 from arrayscope.operations.slabs import (
@@ -41,6 +42,8 @@ class EvaluationResult:
     slab_shape: tuple[int, ...]
     slab_nbytes: int | None
     mode: str = "lazy"
+    chunk_count: int = 1
+    degraded: bool = False
 
 
 @dataclass
@@ -62,6 +65,10 @@ class OperationEvaluator:
     prefetch_skipped: int = 0
     prefetch_stored: int = 0
     prefetch_stale: int = 0
+    degraded_evaluations: int = 0
+    refused_evaluations: int = 0
+    chunked_evaluations: int = 0
+    cancelled_evaluations: int = 0
     display_generation: int = 0
     last_status: CacheStatusSnapshot = CacheStatusSnapshot(CacheStatus.COLD, "No evaluation yet")
     last_diagnostics: object | None = None
@@ -243,6 +250,8 @@ class OperationEvaluator:
         self._image_result = result.value
         self._image_cache.put(key, result.value)
         self.image_evaluations += 1
+        if result.mode == "chunked" or result.chunk_count > 1:
+            self.note_chunked_evaluation()
         self.last_status = cache_status_ready("Image view cached")
         self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.READY, _request_message("Image view cached", result))
         return result.value
@@ -347,6 +356,19 @@ class OperationEvaluator:
     def note_prefetch_skipped(self):
         self.prefetch_skipped += 1
 
+    def note_render_refused(self, reason: str = ""):
+        self.refused_evaluations += 1
+        self.last_status = CacheStatusSnapshot(CacheStatus.STALE, str(reason or "Render refused"))
+
+    def note_render_degraded(self):
+        self.degraded_evaluations += 1
+
+    def note_render_cancelled(self):
+        self.cancelled_evaluations += 1
+
+    def note_chunked_evaluation(self):
+        self.chunked_evaluations += 1
+
     def cache_diagnostics(self):
         if self.last_diagnostics is not None:
             return self.last_diagnostics
@@ -371,6 +393,10 @@ class OperationEvaluator:
             "prefetch_skipped": int(self.prefetch_skipped),
             "prefetch_stored": int(self.prefetch_stored),
             "prefetch_stale": int(self.prefetch_stale),
+            "degraded_evaluations": int(self.degraded_evaluations),
+            "refused_evaluations": int(self.refused_evaluations),
+            "chunked_evaluations": int(self.chunked_evaluations),
+            "cancelled_evaluations": int(self.cancelled_evaluations),
         }
 
 
@@ -398,17 +424,21 @@ def _request_key(request):
     )
 
 
-def evaluate_image_snapshot(document, view_state, colormap_lut=None) -> EvaluationResult:
+def evaluate_image_snapshot(document, view_state, colormap_lut=None, cancellation_token=None, *, degraded=False) -> EvaluationResult:
     request = request_for_image(view_state)
     plan = plan_slab(document, request)
     start = perf_counter()
+    _check_cancelled(cancellation_token)
     slab = evaluate_slab(document, request)
+    _check_cancelled(cancellation_token)
     value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
+    _check_cancelled(cancellation_token)
     return EvaluationResult(
         value=value,
         eval_ms=(perf_counter() - start) * 1000.0,
         slab_shape=tuple(np.shape(slab)),
         slab_nbytes=int(getattr(slab, "nbytes", plan.estimated_nbytes or 0)),
+        degraded=bool(degraded),
     )
 
 
@@ -458,7 +488,14 @@ def _request_message(prefix, result: EvaluationResult):
     nbytes = "unknown"
     if result.slab_nbytes is not None:
         nbytes = _format_nbytes(result.slab_nbytes)
-    return f"{prefix}; last request {result.mode}, slab {result.slab_shape}, {nbytes}"
+    chunks = "" if result.chunk_count <= 1 else f", {result.chunk_count} chunks"
+    degraded = ", degraded preview" if result.degraded else ""
+    return f"{prefix}; last request {result.mode}{chunks}{degraded}, slab {result.slab_shape}, {nbytes}"
+
+
+def _check_cancelled(token):
+    if token is not None and getattr(token, "cancelled", False):
+        raise EvaluationCancelled()
 
 
 def _format_nbytes(nbytes):

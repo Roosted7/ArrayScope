@@ -26,9 +26,9 @@ def test_visible_render_controller_uses_latest_only_group(qtbot, monkeypatch):
     def recording_start_latest(fn, **kwargs):
         calls.append(kwargs.get("replace_group"))
 
-        def slow_fn():
+        def slow_fn(*args):
             time.sleep(0.02)
-            return fn()
+            return fn(*args)
 
         return original_start_latest(slow_fn, **kwargs)
 
@@ -43,6 +43,149 @@ def test_visible_render_controller_uses_latest_only_group(qtbot, monkeypatch):
 
         assert "visible-image" in calls
         assert win.visible_evaluation_controller.pool.maxThreadCount() == 1
+    finally:
+        win.close()
+
+
+def test_visible_render_uses_cost_decision_refuse_without_clearing_previous_image(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    import arrayscope.window.render as render_module
+    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        previous = win.img_view.image.copy()
+        win.operation_evaluator.clear_cache()
+        monkeypatch.setattr(
+            render_module,
+            "choose_visible_render_decision",
+            lambda _context: RenderDecision(
+                RenderDecisionKind.REFUSE,
+                "test refuse",
+                should_show_overlay=True,
+                overlay_text="Exact view over budget",
+                status_text="refused",
+            ),
+        )
+
+        win.update_image_view()
+        _process_events(qtbot, count=5)
+
+        np.testing.assert_array_equal(win.img_view.image, previous)
+        assert win.operation_evaluator.image_cache_diagnostics().refused_evaluations == 1
+    finally:
+        win.close()
+
+
+def test_degraded_preview_commits_with_overlay_and_not_exact_cache(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    import arrayscope.window.render as render_module
+    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(16 * 16, dtype=float).reshape(16, 16))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.operation_evaluator.clear_cache()
+        monkeypatch.setattr(
+            render_module,
+            "choose_visible_render_decision",
+            lambda _context: RenderDecision(
+                RenderDecisionKind.DEGRADED_PREVIEW,
+                "preview",
+                should_show_overlay=True,
+                overlay_text="Preview only: exact view exceeds budget",
+                status_text="preview",
+                degraded_factor=2,
+            ),
+        )
+
+        win.update_image_view()
+        qtbot.waitUntil(lambda: getattr(win, "_last_render_was_degraded", False), timeout=3000)
+
+        assert win.img_view._evaluation_overlay.isVisible()
+        assert win.operation_evaluator.cached_image(win.view_state) is None
+    finally:
+        win.close()
+
+
+def test_next_exact_render_clears_degraded_overlay(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    import arrayscope.window.render as render_module
+    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(16 * 16, dtype=float).reshape(16, 16))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.operation_evaluator.clear_cache()
+        monkeypatch.setattr(
+            render_module,
+            "choose_visible_render_decision",
+            lambda _context: RenderDecision(RenderDecisionKind.DEGRADED_PREVIEW, "preview", overlay_text="Preview only", degraded_factor=2),
+        )
+        win.update_image_view()
+        qtbot.waitUntil(lambda: getattr(win, "_last_render_was_degraded", False), timeout=3000)
+        win.operation_evaluator.clear_cache()
+        monkeypatch.setattr(
+            render_module,
+            "choose_visible_render_decision",
+            lambda _context: RenderDecision(RenderDecisionKind.ASYNC_EXACT, "exact"),
+        )
+
+        win.update_image_view()
+        qtbot.waitUntil(lambda: not getattr(win, "_last_render_was_degraded", False), timeout=3000)
+
+        assert not win.img_view._evaluation_overlay.isVisible()
+    finally:
+        win.close()
+
+
+def test_chunked_visible_render_commits_exact_result(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    import arrayscope.window.render as render_module
+    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(16 * 16, dtype=float).reshape(16, 16))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.operation_evaluator.clear_cache()
+        monkeypatch.setattr(
+            render_module,
+            "choose_visible_render_decision",
+            lambda _context: RenderDecision(RenderDecisionKind.ASYNC_CHUNKED, "chunk", chunk_axis=0, chunk_size=4),
+        )
+
+        win.update_image_view()
+        qtbot.waitUntil(lambda: win.operation_evaluator.cached_image(win.view_state) is not None, timeout=3000)
+
+        assert win.operation_evaluator.image_cache_diagnostics().chunked_evaluations >= 1
+    finally:
+        win.close()
+
+
+def test_visible_render_cancels_prefetch_queue(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(16 * 16 * 3, dtype=float).reshape(16, 16, 3))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        started = win.prefetch_evaluation_controller.start_prefetch(lambda: time.sleep(0.05), key="prefetch")
+        assert started.scheduled
+        win.operation_evaluator.clear_cache()
+        win.update_image_view()
+        _process_events(qtbot, count=5)
+
+        assert not win.prefetch_evaluation_controller._prefetch_keys
     finally:
         win.close()
 

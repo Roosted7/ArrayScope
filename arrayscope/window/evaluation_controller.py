@@ -8,6 +8,7 @@ from queue import SimpleQueue
 
 from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.app.errors import handle_ui_exception, traceback_text
+from arrayscope.operations.cancellation import EvaluationCancelled
 
 prefer_pyside6()
 
@@ -37,6 +38,26 @@ class PrefetchStart:
     reason: str = "scheduled"
 
 
+@dataclass(frozen=True)
+class SchedulerDiagnostics:
+    name: str
+    max_workers: int
+    pending: int
+    running: int
+    queued: int
+    started: int
+    cancelled: int
+    stale: int
+    completed: int
+    failed: int
+    prefetch_scheduled: int
+    prefetch_deduped: int
+    prefetch_limited: int
+    prefetch_idle_blocked: int
+    prefetch_visible_busy_blocked: int
+    prefetch_cost_blocked: int
+
+
 class CancellationToken:
     def __init__(self):
         self._cancelled = False
@@ -50,12 +71,13 @@ class CancellationToken:
 
 
 class _EvaluationRunnable(Qt.QtCore.QRunnable):
-    def __init__(self, request, fn, queue, token):
+    def __init__(self, request, fn, queue, token, *, pass_token=False):
         super().__init__()
         self.request = request
         self.fn = fn
         self.queue = queue
         self.token = token
+        self.pass_token = bool(pass_token)
         self.started = False
 
     def run(self):
@@ -65,7 +87,10 @@ class _EvaluationRunnable(Qt.QtCore.QRunnable):
             self.queue.put(("cancelled", self.request.generation, None))
             return
         try:
-            self.queue.put(("finished", self.request.generation, self.fn()))
+            value = self.fn(self.token) if self.pass_token else self.fn()
+            self.queue.put(("finished", self.request.generation, value))
+        except EvaluationCancelled:
+            self.queue.put(("cancelled", self.request.generation, None))
         except Exception as exc:
             exc.arrayscope_traceback = traceback_text(exc)
             self.queue.put(("failed", self.request.generation, exc))
@@ -103,6 +128,17 @@ class EvaluationController(Qt.QtCore.QObject):
         self._group_generations = {}
         self._prefetch_keys = set()
         self._max_prefetch = 32
+        self._shutting_down = False
+        self._completed_count = 0
+        self._cancelled_count = 0
+        self._stale_count = 0
+        self._failed_count = 0
+        self._prefetch_scheduled_count = 0
+        self._prefetch_deduped_count = 0
+        self._prefetch_limited_count = 0
+        self._prefetch_idle_blocked_count = 0
+        self._prefetch_visible_busy_blocked_count = 0
+        self._prefetch_cost_blocked_count = 0
         self._queue = SimpleQueue()
         self._poll_timer = Qt.QtCore.QTimer(self)
         self._poll_timer.setInterval(10)
@@ -144,6 +180,7 @@ class EvaluationController(Qt.QtCore.QObject):
             self._poll_timer.stop()
 
     def shutdown_for_close(self):
+        self._shutting_down = True
         return self.clear_queued()
 
     def start(self, fn, *, on_done, on_error=None, on_stale=None, on_slow=None, slow_ms=100):
@@ -172,6 +209,7 @@ class EvaluationController(Qt.QtCore.QObject):
         on_slow=None,
         slow_ms=100,
         memory_budget_bytes=None,
+        pass_token=False,
     ):
         replace_group = str(replace_group)
         self.clear_group(replace_group)
@@ -193,20 +231,29 @@ class EvaluationController(Qt.QtCore.QObject):
         if on_slow is not None:
             Qt.QtCore.QTimer.singleShot(int(slow_ms), lambda generation=generation: self._emit_slow(generation, on_slow))
 
-        runnable = _EvaluationRunnable(request, fn, self._queue, token)
+        runnable = _EvaluationRunnable(request, fn, self._queue, token, pass_token=pass_token)
         self._runnables[generation] = runnable
         self.pool.start(runnable)
         self._ensure_polling()
         return generation
 
-    def start_prefetch(self, fn, on_done=None, *, key=None, memory_budget_bytes=None):
+    def start_prefetch(self, fn, on_done=None, *, key=None, memory_budget_bytes=None, idle_deadline_ms=None, blocked_reason=None):
         del memory_budget_bytes
+        del idle_deadline_ms
+        if self._shutting_down:
+            return PrefetchStart(False, "closed")
+        if blocked_reason:
+            self._note_prefetch_blocked(blocked_reason)
+            return PrefetchStart(False, blocked_reason)
         key = ("prefetch", id(fn), len(self._runnables)) if key is None else key
         if key in self._prefetch_keys:
+            self._prefetch_deduped_count += 1
             return PrefetchStart(False, "deduped")
         if len(self._prefetch_keys) >= self._max_prefetch:
+            self._prefetch_limited_count += 1
             return PrefetchStart(False, "limited")
         self._prefetch_keys.add(key)
+        self._prefetch_scheduled_count += 1
         runnable = _PrefetchRunnable(fn, self._queue, key)
         self._runnables[key] = runnable
         if on_done is not None:
@@ -214,6 +261,42 @@ class EvaluationController(Qt.QtCore.QObject):
         self.pool.start(runnable)
         self._ensure_polling()
         return PrefetchStart(True)
+
+    def cancel_prefetch(self) -> None:
+        for key in tuple(self._prefetch_keys):
+            self._prefetch_keys.discard(key)
+            self._runnables.pop(key, None)
+            self._handlers.pop(key, None)
+        self.pool.clear()
+
+    def is_busy(self) -> bool:
+        return self.has_running_or_pending()
+
+    def has_running_or_pending(self) -> bool:
+        return bool(self._pending or self._started or self._runnables)
+
+    def diagnostics(self) -> SchedulerDiagnostics:
+        running = len(self._started)
+        pending = len(self._pending)
+        queued = max(0, len(self._runnables) - running)
+        return SchedulerDiagnostics(
+            name=self.name,
+            max_workers=int(self.pool.maxThreadCount()),
+            pending=pending,
+            running=running,
+            queued=queued,
+            started=running,
+            cancelled=int(self._cancelled_count),
+            stale=int(self._stale_count),
+            completed=int(self._completed_count),
+            failed=int(self._failed_count),
+            prefetch_scheduled=int(self._prefetch_scheduled_count),
+            prefetch_deduped=int(self._prefetch_deduped_count),
+            prefetch_limited=int(self._prefetch_limited_count),
+            prefetch_idle_blocked=int(self._prefetch_idle_blocked_count),
+            prefetch_visible_busy_blocked=int(self._prefetch_visible_busy_blocked_count),
+            prefetch_cost_blocked=int(self._prefetch_cost_blocked_count),
+        )
 
     def _emit_slow(self, generation, callback):
         if generation in self._pending and generation == self.generation:
@@ -230,6 +313,7 @@ class EvaluationController(Qt.QtCore.QObject):
                 self._started.add(key)
                 continue
             if kind == "cancelled":
+                self._cancelled_count += 1
                 self._discard_generation(key, stale=True)
                 continue
             if kind == "prefetch_done":
@@ -261,9 +345,11 @@ class EvaluationController(Qt.QtCore.QObject):
         if on_done is None:
             return
         if request is None or generation != self._group_generations.get(request.replace_group):
+            self._stale_count += 1
             if on_stale is not None:
                 on_stale()
             return
+        self._completed_count += 1
         on_done(value)
 
     def _fail(self, generation, exc):
@@ -271,9 +357,11 @@ class EvaluationController(Qt.QtCore.QObject):
         self._cleanup_generation(generation)
         _on_done, on_error, on_stale = self._handlers.pop(generation, (None, None, None))
         if request is None or generation != self._group_generations.get(request.replace_group):
+            self._stale_count += 1
             if on_stale is not None:
                 on_stale()
             return
+        self._failed_count += 1
         if on_error is not None:
             on_error(exc)
         else:
@@ -283,6 +371,7 @@ class EvaluationController(Qt.QtCore.QObject):
         _on_done, _on_error, on_stale = self._handlers.pop(generation, (None, None, None))
         self._cleanup_generation(generation)
         if stale and on_stale is not None:
+            self._stale_count += 1
             on_stale()
 
     def _cleanup_generation(self, generation):
@@ -296,3 +385,11 @@ class EvaluationController(Qt.QtCore.QObject):
         for key, runnable in tuple(self._runnables.items()):
             if isinstance(key, int) and not getattr(runnable, "started", False):
                 self._discard_generation(key, stale=True)
+
+    def _note_prefetch_blocked(self, reason):
+        if reason == "idle":
+            self._prefetch_idle_blocked_count += 1
+        elif reason == "visible_busy":
+            self._prefetch_visible_busy_blocked_count += 1
+        elif reason == "cost":
+            self._prefetch_cost_blocked_count += 1

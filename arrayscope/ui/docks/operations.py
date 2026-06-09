@@ -406,10 +406,22 @@ def _cache_status_tooltip(cache_status):
         ("Entries", "entries"),
         ("Hits", "hits"),
         ("Misses", "misses"),
+        ("Hit rate", "hit_rate"),
         ("Evictions", "evictions"),
+        ("Chunked renders", "chunked_evaluations"),
+        ("Degraded previews", "degraded_evaluations"),
+        ("Refused renders", "refused_evaluations"),
+        ("Cancelled renders", "cancelled_evaluations"),
+        ("Scheduler pending", "scheduler_pending"),
+        ("Scheduler running", "scheduler_running"),
+        ("Scheduler cancelled", "scheduler_cancelled"),
+        ("Scheduler stale", "scheduler_stale"),
     ):
         if hasattr(cache_status, attr):
-            parts.append(f"{label}: {getattr(cache_status, attr)}")
+            value = getattr(cache_status, attr)
+            if attr == "hit_rate" and value is not None:
+                value = f"{100.0 * float(value):.1f}%"
+            parts.append(f"{label}: {value}")
     if getattr(cache_status, "last_eval_ms", None) is not None:
         parts.append(f"Last evaluation: {cache_status.last_eval_ms:.1f} ms")
     if hasattr(cache_status, "bytes_used"):

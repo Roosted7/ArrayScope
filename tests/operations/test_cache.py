@@ -22,6 +22,7 @@ def test_bounded_array_cache_tracks_hits_misses_and_evictions():
     diagnostics = cache.diagnostics(CacheStatus.READY, "ready")
     assert diagnostics.hits == 1
     assert diagnostics.misses == 1
+    assert diagnostics.hit_rate == 0.5
     assert diagnostics.evictions >= 1
     assert diagnostics.bytes_used <= diagnostics.max_bytes
 
@@ -140,6 +141,21 @@ def test_prefetch_diagnostics_track_scheduling_outcomes():
     assert diagnostics.prefetch_deduped == 1
     assert diagnostics.prefetch_limited == 1
     assert diagnostics.prefetch_stale == 1
+
+
+def test_evaluator_diagnostics_counts_degraded_refused_chunked_cancelled():
+    evaluator = OperationEvaluator(ArrayDocument(np.arange(6).reshape(2, 3)))
+
+    evaluator.note_render_degraded()
+    evaluator.note_render_refused("too large")
+    evaluator.note_chunked_evaluation()
+    evaluator.note_render_cancelled()
+
+    diagnostics = evaluator.image_cache_diagnostics()
+    assert diagnostics.degraded_evaluations == 1
+    assert diagnostics.refused_evaluations == 1
+    assert diagnostics.chunked_evaluations == 1
+    assert diagnostics.cancelled_evaluations == 1
 
 
 def test_cache_invalidates_when_document_revision_changes_for_same_array_object():

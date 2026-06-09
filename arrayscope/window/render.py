@@ -21,11 +21,23 @@ from arrayscope.core.memory_budget import (
     format_bytes,
 )
 from arrayscope.operations.evaluator import _document_key
+from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.operations.evaluator import evaluate_image_snapshot, evaluate_line_snapshot, evaluate_scalar_snapshot
+from arrayscope.operations.render_plan import (
+    CACHE_PREFETCH_SKIP_FRACTION,
+    FFT_PREFETCH_PEAK_BYTES,
+    MAX_IDLE_PREFETCH_SLICES,
+    PREFETCH_IDLE_DELAY_MS,
+    RenderDecisionKind,
+    choose_visible_render_decision,
+    degraded_view_state,
+    estimate_visible_render_context,
+)
+from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
@@ -425,6 +437,7 @@ class RenderMixin:
         document = self.document
         cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut)
         if cached is not None:
+            self._last_render_was_degraded = False
             geometry = DisplayGeometry(view_state=view_state, display_shape=cached.data.shape[:2])
             self._apply_display_image(
                 cached,
@@ -436,30 +449,95 @@ class RenderMixin:
             )
             return
         estimated_bytes = self._estimated_image_display_bytes(view_state)
-        if estimated_bytes > self._visible_render_budget_bytes():
+        context = estimate_visible_render_context(
+            document,
+            view_state,
+            display_bytes=estimated_bytes,
+            render_budget_bytes=self._visible_render_budget_bytes(),
+        )
+        decision = choose_visible_render_decision(context)
+        if decision.kind == RenderDecisionKind.REFUSE:
+            self.operation_evaluator.note_render_refused(decision.reason)
             show_status_message(
                 self,
-                f"Image view would allocate {format_bytes(estimated_bytes)}. Reduce image-axis ranges or switch axes.",
+                decision.status_text or f"Image view would allocate {format_bytes(estimated_bytes)}. Reduce image-axis ranges or switch axes.",
                 timeout=6000,
+            )
+            if getattr(self.img_view, "image", None) is not None:
+                self.img_view.setImageStale(True)
+                self.img_view.setEvaluationOverlay(True, decision.overlay_text or "Exact view over budget")
+            self._update_operation_dock()
+            return
+
+        request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)
+        self.prefetch_evaluation_controller.cancel_prefetch()
+
+        if decision.kind == RenderDecisionKind.DEGRADED_PREVIEW:
+            preview_state = degraded_view_state(view_state, factor=decision.degraded_factor)
+            preview_key = ("degraded_preview", request_key, decision.degraded_factor)
+
+            def evaluate_preview(token):
+                return evaluate_image_snapshot(document, preview_state, colormap_lut=colormap_lut, cancellation_token=token, degraded=True)
+
+            def done_preview(result):
+                if request_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut):
+                    return
+                self.operation_evaluator.note_render_degraded()
+                display_image = result.value
+                self._degraded_rendered_view = display_image
+                self._last_render_was_degraded = True
+                geometry = DisplayGeometry(view_state=preview_state, display_shape=display_image.data.shape[:2])
+                self._apply_display_image(
+                    display_image,
+                    geometry=geometry,
+                    window_mode=window_mode,
+                    previous_levels=previous_levels,
+                    previous_bounds=previous_bounds,
+                    force_auto=force_auto,
+                )
+                self.img_view.setImageStale(True)
+                self.img_view.setEvaluationOverlay(True, decision.overlay_text)
+                show_status_message(self, decision.status_text, timeout=6000)
+
+            self.visible_evaluation_controller.start_latest(
+                evaluate_preview,
+                key=preview_key,
+                priority=EvalPriority.VISIBLE_IMAGE,
+                replace_group="visible-image",
+                on_done=done_preview,
+                on_error=lambda exc: show_status_message(self, f"Preview update failed: {exc}"),
+                on_stale=lambda: None,
+                on_slow=lambda: self.img_view.setEvaluationOverlay(True, "Updating preview..."),
+                pass_token=True,
             )
             return
 
-        def evaluate():
-            return evaluate_image_snapshot(document, view_state, colormap_lut=colormap_lut)
+        def evaluate(token):
+            if decision.kind == RenderDecisionKind.ASYNC_CHUNKED:
+                return evaluate_image_snapshot_chunked(
+                    document,
+                    view_state,
+                    chunk_axis=decision.chunk_axis,
+                    chunk_size=decision.chunk_size,
+                    colormap_lut=colormap_lut,
+                    cancellation_token=token,
+                )
+            return evaluate_image_snapshot(document, view_state, colormap_lut=colormap_lut, cancellation_token=token)
 
         def slow():
             self.img_view.setImageStale(True)
-            self.img_view.setEvaluationOverlay(True, "Updating view...")
+            text = "Updating view in chunks..." if decision.kind == RenderDecisionKind.ASYNC_CHUNKED else "Updating view..."
+            self.img_view.setEvaluationOverlay(True, text)
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image view")
             self._update_operation_dock()
-
-        request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)
 
         def done(result):
             if request_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut):
                 self.img_view.setImageStale(False)
                 self.img_view.setEvaluationOverlay(False)
                 return
+            self._last_render_was_degraded = False
+            self._degraded_rendered_view = None
             display_image = self.operation_evaluator.store_image_result(view_state, colormap_lut, result)
             geometry = DisplayGeometry(view_state=view_state, display_shape=display_image.data.shape[:2])
             self._apply_display_image(
@@ -470,7 +548,7 @@ class RenderMixin:
                 previous_bounds=previous_bounds,
                 force_auto=force_auto,
             )
-            self._prefetch_nearby_slices(view_state, colormap_lut)
+            self._schedule_prefetch_nearby_slices(view_state, colormap_lut)
 
         def error(exc):
             self.img_view.setImageStale(False)
@@ -484,8 +562,9 @@ class RenderMixin:
             replace_group="visible-image",
             on_done=done,
             on_error=error,
-            on_stale=lambda: None,
+            on_stale=lambda: self.operation_evaluator.note_render_cancelled(),
             on_slow=slow,
+            pass_token=True,
         )
 
     def update_montage_view(self, *, force_autolevel: bool = False):
@@ -689,6 +768,7 @@ class RenderMixin:
             self._update_operation_dock()
             return
 
+        self.prefetch_evaluation_controller.cancel_prefetch()
         self.visible_evaluation_controller.start_latest(
             evaluate,
             key=generation_key,
@@ -795,17 +875,55 @@ class RenderMixin:
             return ViewportPolicy.RESET_FOR_NEW_SHAPE
         return ViewportPolicy.PRESERVE
 
-    def _prefetch_nearby_slices(self, view_state, colormap_lut):
+    def _ensure_prefetch_idle_timer(self):
+        timer = getattr(self, "_prefetch_idle_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(PREFETCH_IDLE_DELAY_MS)
+            timer.timeout.connect(self._run_pending_prefetch)
+            self._prefetch_idle_timer = timer
+        return timer
+
+    def _schedule_prefetch_nearby_slices(self, view_state, colormap_lut):
         if not getattr(self.app_settings, "prefetch_nearby_slices", False):
             self.operation_evaluator.note_prefetch_skipped()
             return
-        if self.document.steps:
+        self._pending_prefetch_request = (view_state, colormap_lut)
+        timer = self._ensure_prefetch_idle_timer()
+        timer.start(PREFETCH_IDLE_DELAY_MS)
+
+    def _run_pending_prefetch(self):
+        request = getattr(self, "_pending_prefetch_request", None)
+        self._pending_prefetch_request = None
+        if request is None:
+            return
+        view_state, colormap_lut = request
+        if self.visible_evaluation_controller.is_busy():
+            self.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
+            self.operation_evaluator.note_prefetch_skipped()
+            return
+        self._prefetch_nearby_slices(view_state, colormap_lut)
+
+    def _prefetch_nearby_slices(self, view_state, colormap_lut):
+        if not getattr(self.app_settings, "prefetch_nearby_slices", False):
             self.operation_evaluator.note_prefetch_skipped()
             return
         if view_state.montage_axis is not None:
             self.operation_evaluator.note_prefetch_skipped()
             return
+        if self.visible_evaluation_controller.is_busy():
+            self.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
+            self.operation_evaluator.note_prefetch_skipped()
+            return
+        if self.operation_evaluator._image_cache.bytes_used > int(self.operation_evaluator._image_cache.max_bytes * CACHE_PREFETCH_SKIP_FRACTION):
+            self.operation_evaluator.note_prefetch_skipped()
+            return
         if self._estimated_image_display_bytes(view_state) > PREFETCH_BUDGET_BYTES:
+            self.operation_evaluator.note_prefetch_skipped()
+            return
+        if not self._prefetch_cost_allowed(view_state):
+            self.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="cost")
             self.operation_evaluator.note_prefetch_skipped()
             return
         axis = getattr(self, "_active_slice_axis", None)
@@ -817,10 +935,11 @@ class RenderMixin:
         last = getattr(self, "_last_prefetch_slice_index", None)
         direction = 0 if last is None else (1 if current >= last else -1)
         self._last_prefetch_slice_index = current
-        deltas = self._prefetch_deltas(direction, max_radius=min(12, max(2, size - 1)))
+        deltas = self._prefetch_deltas(direction, max_radius=min(2, max(1, size - 1)))
         scheduled = 0
         for delta in deltas:
-            if scheduled >= 8:
+            limit = MAX_IDLE_PREFETCH_SLICES if direction != 0 else 1
+            if scheduled >= limit:
                 break
             index = current + delta
             if 0 <= index < size:
@@ -848,6 +967,23 @@ class RenderMixin:
                 self._note_prefetch_start(started)
                 if started.scheduled:
                     scheduled += 1
+
+    def _prefetch_cost_allowed(self, view_state):
+        operations = tuple(self.document.enabled_operations)
+        if not operations:
+            return True
+        image_axes = set(view_state.image_axes or ())
+        for operation in operations:
+            if type(operation).__name__ in {"Mean", "Sum", "Maximum", "Minimum", "RootSumSquares"} and int(operation.axis) in image_axes:
+                return False
+        cost = estimate_pipeline_cost(self.base_data.shape, getattr(self.base_data, "dtype", None), operations)
+        peak = cost.estimated_peak_bytes or 0
+        threshold = min(64 * 1024 * 1024, max(1, self._visible_render_budget_bytes() // 8))
+        if peak > threshold:
+            return False
+        if any(type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in operations) and peak > FFT_PREFETCH_PEAK_BYTES:
+            return False
+        return True
 
     def _prefetch_deltas(self, direction, *, max_radius):
         radii = range(1, int(max_radius) + 1)

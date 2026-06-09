@@ -151,12 +151,16 @@ stacks. Explicit replacement/materialization uses
 Background evaluation uses categorized local per-window `QThreadPool` instances. Visible rendering,
 profile updates, ROI inspection, and prefetch have separate controllers. Visible/profile/ROI pools use
 one worker and `start_latest()` replacement groups so newer requests clear queued stale work. Closing a
-window clears queued work, increments generations, stops polling, and ignores late results. Prefetch
-requests are keyed, deduped, bounded, off by default, skipped for operation-backed and montage views,
-and counted in cache diagnostics.
-Operation cost estimates are intentionally advisory in this phase. The evaluator/scheduler remains
-latest-only rather than cost-aware: it does not refuse, degrade, or chunk expensive transforms based on
-the new metadata. Cost-aware scheduling and cooperative cancellation remain future scheduler work.
+window clears queued work, increments generations, stops polling, and ignores late results.
+Cancellation tokens are checked before/after major evaluation steps and between chunks. Visible image
+rendering uses a cost-aware decision before work is submitted: use cache, run exact async, run exact in
+cooperative chunks, show a marked degraded preview, or refuse while keeping the previous image visible.
+Degraded previews are not stored in the exact image cache. Chunking is only across independent
+output/display axes; a single FFT axis is not split, so one SciPy/pyFFTW FFT call is still not
+cancellable mid-call. Prefetch requests are keyed, deduped, bounded, off by default, idle-only, skipped
+while visible work is busy, skipped for montage, and allowed for operation-backed views only when cost
+estimates are below conservative thresholds. Cache diagnostics include hit rate, prefetch outcomes,
+render refusal/degraded/chunk counters, and scheduler pending/running/stale/cancelled counters.
 
 App settings include theme, nearby-slice prefetch, panel resize behavior, FFT backend, FFT worker count,
 and render memory budget. The render memory budget controls visible image and interactive montage

@@ -60,6 +60,8 @@ class BoundedArrayCache:
         return value, False
 
     def diagnostics(self, status=CacheStatus.READY, message="", **extra):
+        total = int(self.hits) + int(self.misses)
+        hit_rate = None if total == 0 else float(self.hits) / float(total)
         return CacheDiagnosticsSnapshot(
             status=status,
             message=message,
@@ -70,6 +72,7 @@ class BoundedArrayCache:
             misses=int(self.misses),
             evictions=int(self.evictions),
             last_eval_ms=self.last_eval_ms,
+            hit_rate=hit_rate,
             **extra,
         )
 
