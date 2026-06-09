@@ -48,15 +48,40 @@ class StateSyncMixin:
                 live_profile=self.widgets['buttons']['display']['live_profile'].isChecked(),
             )
 
+    def _sync_slice_controls_immediately(self, axis: int) -> None:
+        axis = int(axis)
+        if hasattr(self, "widgets") and axis < len(self.widgets["spins"]["slice_indices"]):
+            spinbox = self.widgets["spins"]["slice_indices"][axis]
+            spinbox.blockSignals(True)
+            try:
+                spinbox.setMaximum(self.data.shape[axis] - 1)
+                spinbox.setValue(self.view_state.slice_indices[axis])
+            finally:
+                spinbox.blockSignals(False)
+        if hasattr(self, "dimension_strip"):
+            self.dimension_strip.update_axis_state(axis, self.data.shape, self.view_state, self.profile_axes)
+
+    def _apply_slice_state(self, axis: int, state, *, reason: str, interactive: bool, immediate_axis_only: bool) -> None:
+        axis = int(axis)
+        self._active_slice_axis = axis
+        self._set_view_state(state)
+        if immediate_axis_only:
+            self._sync_slice_controls_immediately(axis)
+        else:
+            self._sync_controls_from_view_state()
+            self.update_dimension_controls()
+            self.update_complex_indicators()
+            self.update_shift_indicators()
+        self.request_render(reason=reason, interactive=interactive)
+
     def _on_slice_index_changed(self, axis, value):
+        axis = int(axis)
         if axis >= self.view_state.ndim:
             return
-        self._active_slice_axis = int(axis)
         state = self.view_state.with_slice(axis, value).with_axis_range(axis, None)
-        if state.montage_axis == int(axis):
+        if state.montage_axis == axis:
             state = state.with_montage_axis(None)
-        self._set_view_state(state)
-        self.render(reason="slice")
+        self._apply_slice_state(axis, state, reason="slice", interactive=True, immediate_axis_only=True)
 
     def _on_slice_text_changed(self, axis, text):
         axis = int(axis)
@@ -68,13 +93,14 @@ class StateSyncMixin:
             state = self.view_state.with_slice(axis, midpoint).with_axis_range(axis, None)
             if state.montage_axis == axis:
                 state = state.with_montage_axis(None)
-            self._active_slice_axis = axis
-            self._set_view_state(state)
-            self.render(reason="slice-empty-midpoint")
+            self._apply_slice_state(axis, state, reason="slice-empty-midpoint", interactive=True, immediate_axis_only=False)
             return
         if ":" not in text:
             try:
-                self._on_slice_index_changed(axis, int(text))
+                state = self.view_state.with_slice(axis, int(text)).with_axis_range(axis, None)
+                if state.montage_axis == axis:
+                    state = state.with_montage_axis(None)
+                self._apply_slice_state(axis, state, reason="slice", interactive=True, immediate_axis_only=True)
             except ValueError:
                 self._sync_controls_from_view_state()
             return
@@ -86,12 +112,11 @@ class StateSyncMixin:
         if not indices:
             self._sync_controls_from_view_state()
             return
-        self._active_slice_axis = axis
         if self.view_state.image_axes is not None and axis in self.view_state.image_axes:
-            self._set_view_state(self.view_state.with_axis_range(axis, indices=indices, text=text))
+            state = self.view_state.with_axis_range(axis, indices=indices, text=text)
         else:
-            self._set_view_state(self.view_state.with_montage_axis(axis, indices=indices, text=text))
-        self.render(reason="slice-range")
+            state = self.view_state.with_montage_axis(axis, indices=indices, text=text)
+        self._apply_slice_state(axis, state, reason="slice-range", interactive=True, immediate_axis_only=False)
 
     def _on_channel_clicked(self, name):
         self._set_channel(name, user_selected=True)

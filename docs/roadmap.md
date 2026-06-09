@@ -412,14 +412,14 @@ Goal: Keep UI interaction responsive while exact rendering catches up, and make 
 
 ### P1 — render coalescer and fast interactive slice path
 
-* [ ] Add a render request coalescer owned by the window/render coordinator.
-* [ ] Add an interactive slice path that updates `ViewState` and slice controls immediately, then schedules rendering through the coalescer.
-* [ ] Ensure rapid scroll/slice bursts render only the latest state.
-* [ ] Clear/cancel stale visible work when a newer interactive render supersedes it.
-* [ ] Defer operation dock, profile, ROI, and inspection refreshes during interactive bursts unless their state is immediately visible and cheap.
-* [ ] Preserve correctness for normal exact render, degraded preview, chunked render, montage, profile, ROI, export frame, and cache-hit paths.
-* [ ] Add interaction tests proving slice text updates immediately while rendering is coalesced.
-* [ ] Add latency-oriented tests or benchmark assertions for rapid slice changes.
+* [x] Add a render request coalescer owned by the window/render coordinator.
+* [x] Add an interactive slice path that updates `ViewState` and slice controls immediately, then schedules rendering through the coalescer.
+* [x] Ensure rapid scroll/slice bursts render only the latest state.
+* [x] Clear/cancel stale visible work when a newer interactive render supersedes it.
+* [x] Defer operation dock, profile, ROI, and inspection refreshes during interactive bursts unless their state is immediately visible and cheap.
+* [x] Preserve correctness for normal exact render, degraded preview, chunked render, montage, profile, ROI, export frame, and cache-hit paths.
+* [x] Add interaction tests proving slice text updates immediately while rendering is coalesced.
+* [~] Add latency-oriented tests or benchmark assertions for rapid slice changes.
 
 ### P2 — progressive montage and worker/cache policy
 

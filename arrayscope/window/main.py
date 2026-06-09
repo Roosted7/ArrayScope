@@ -23,6 +23,7 @@ from arrayscope.window.inspection import InspectionWorkflowMixin
 from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.operation_actions import OperationActionsMixin
 from arrayscope.window.render import RenderMixin
+from arrayscope.window.render_coordinator import RenderCoordinator
 from arrayscope.window.state_sync import StateSyncMixin
 
 
@@ -76,6 +77,8 @@ class ArrayScopeWindow(
         self.profile_evaluation_controller = EvaluationController(self, max_workers=1, name="profile")
         self.roi_evaluation_controller = EvaluationController(self, max_workers=1, name="roi")
         self.prefetch_evaluation_controller = EvaluationController(self, max_workers=1, name="prefetch")
+        self.render_coordinator = RenderCoordinator(self)
+        self._deferred_side_panel_refresh_pending = False
         self.data = derived_info_for(self.document)
         self.singleton = [e == 1 for e in list(self.data.shape)]
         initial_channel = ChannelMode.COMPLEX if np.issubdtype(self.data.dtype, np.complexfloating) else ChannelMode.REAL
