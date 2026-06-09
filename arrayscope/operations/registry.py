@@ -158,6 +158,12 @@ def operation_id_for(operation) -> str:
     for entry in OPERATION_REGISTRY.values():
         if entry.operation_type is operation_type:
             return entry.id
+    operation_module = getattr(operation_type, "__module__", "")
+    operation_name = getattr(operation_type, "__name__", "")
+    for entry in OPERATION_REGISTRY.values():
+        entry_type = entry.operation_type
+        if getattr(entry_type, "__module__", "") == operation_module and getattr(entry_type, "__name__", "") == operation_name:
+            return entry.id
     raise ValueError(f"operation type is not registered: {operation_type.__name__}")
 
 

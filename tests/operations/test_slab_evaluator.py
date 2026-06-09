@@ -87,6 +87,33 @@ def test_stage_cache_backed_slab_matches_uncached_and_reuses_stage():
     assert cache.diagnostics().hits >= 1
 
 
+def test_simplified_fft_ifft_slab_uses_dtype_preserving_identity_with_and_without_cache():
+    data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=2), CenteredIFFT(axis=2)))
+    state = ViewState.from_shape(document.current_shape)
+    request = request_for_image(state.with_slice(2, 1))
+    cache = StageCache(max_bytes=1024 * 1024, max_entries=8)
+
+    uncached = evaluate_slab(document, request)
+    cached = evaluate_slab(document, request, stage_cache=cache, document_key=("doc",))
+
+    assert uncached.dtype == np.dtype(np.complex64)
+    np.testing.assert_array_equal(uncached.real, data[:, :, 1])
+    np.testing.assert_array_equal(uncached.imag, np.zeros_like(data[:, :, 1]))
+    np.testing.assert_array_equal(cached, uncached)
+    assert cache.diagnostics().stores == 0
+
+
+def test_simplified_reverse_conjugate_and_crop_composition_match_materialized():
+    data = (np.arange(4 * 10 * 6, dtype=np.float32).reshape(4, 10, 6) + 1j).astype(np.complex64)
+    for operations in (
+        (ReverseAxis(axis=1), ReverseAxis(axis=1)),
+        (Conjugate(), Conjugate()),
+        (Crop(axis=1, start=2, stop=9), Crop(axis=1, start=3, stop=5)),
+    ):
+        _assert_image_and_line_match(data, operations)
+
+
 def test_apply_subregion_extracts_from_slice_and_indices_sources():
     data = np.arange(10)
     source_slice = RegionSpec((AxisRegion(AxisRegionKind.SLICE, (2, 9, 2)),))

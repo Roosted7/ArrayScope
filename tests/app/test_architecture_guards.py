@@ -1,6 +1,8 @@
 import ast
 from pathlib import Path
 
+import numpy as np
+
 
 ROOT = Path(__file__).parents[2]
 
@@ -175,6 +177,34 @@ def test_operation_planner_contract_modules_are_qt_free():
         text = (ROOT / rel).read_text()
         assert "Qt" not in text
         assert "pyqtgraph" not in text
+
+
+def test_operation_optimizer_is_qt_free_and_not_ui_coupled():
+    text = (ROOT / "arrayscope" / "operations" / "optimizer.py").read_text()
+    assert "Qt" not in text
+    assert "pyqtgraph" not in text
+    assert "arrayscope.ui" not in text
+    assert "arrayscope.window" not in text
+
+
+def test_operation_simplification_does_not_mutate_document_steps():
+    from arrayscope.operations.optimizer import optimize_operations
+    from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, CenteredIFFT
+
+    data = np.zeros((2, 3, 4), dtype=np.float32)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=2), CenteredIFFT(axis=2)))
+    steps = document.steps
+
+    optimize_operations(data.shape, data.dtype, document.enabled_operations)
+
+    assert document.steps == steps
+    assert [type(step.operation).__name__ for step in document.steps] == ["CenteredFFT", "CenteredIFFT"]
+
+
+def test_window_render_does_not_contain_operation_simplification_type_checks():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    assert "optimize_operations" not in text
+    assert "CastDType" not in text
 
 
 def test_operation_cost_uses_operation_declarations_not_registered_type_switches():

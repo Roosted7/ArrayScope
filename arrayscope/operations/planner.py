@@ -7,7 +7,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from arrayscope.operations.capabilities import OperationCapabilities, OperationKind
-from arrayscope.operations.cost import OperationCost, estimate_operation_cost, estimate_pipeline_cost
+from arrayscope.operations.cost import OperationCost, estimate_operation_cost, estimate_pipeline_cost, operation_output_dtype
+from arrayscope.operations.optimizer import format_optimization_steps, optimize_operations
 from arrayscope.operations.regions import (
     AxisRegionKind,
     RegionSpec,
@@ -53,6 +54,9 @@ class RegionPlan:
     cache_candidates: tuple[StageCacheCandidate, ...]
     estimated_peak_bytes: int | None
     warnings: tuple[str, ...] = ()
+    optimization_steps: tuple[str, ...] = ()
+    original_operation_count: int = 0
+    optimized_operation_count: int = 0
 
 
 def build_operation_stages(base_shape, base_dtype, operations) -> tuple[OperationStageInfo, ...]:
@@ -110,10 +114,28 @@ def candidate_stage_cache_points(base_shape, base_dtype, operations, final_regio
                     estimated_nbytes=region_nbytes(stage.output_shape, stage.output_dtype, candidate_region),
                     priority=_candidate_priority(capabilities),
                     reason=f"{type(stage.operation).__name__} declares cache_stage",
+                    retain=True,
+                    retain_reason="cacheable stage",
                 )
             )
         current_region = candidate_region
-    return tuple(reversed(candidates))
+    ordered = list(reversed(candidates))
+    if ordered:
+        for index, candidate in enumerate(tuple(ordered)):
+            is_last = index == len(ordered) - 1
+            ordered[index] = StageCacheCandidate(
+                stage_index=candidate.stage_index,
+                operation_prefix=candidate.operation_prefix,
+                region=candidate.region,
+                shape=candidate.shape,
+                dtype=candidate.dtype,
+                estimated_nbytes=candidate.estimated_nbytes,
+                priority="highest" if is_last else candidate.priority,
+                reason=candidate.reason,
+                retain=is_last,
+                retain_reason="latest reusable cacheable stage" if is_last else "superseded by later retained cacheable stage",
+            )
+    return tuple(ordered)
 
 
 def candidate_stage_cache_points_from_transitions(stages, operations, transitions) -> tuple[StageCacheCandidate, ...]:
@@ -137,7 +159,8 @@ def candidate_stage_cache_points_from_transitions(stages, operations, transition
         )
     candidates = []
     for index, (transition, capabilities, dtype_text, candidate_region, nbytes) in enumerate(raw):
-        priority = "highest" if index == len(raw) - 1 else _candidate_priority(capabilities)
+        is_last = index == len(raw) - 1
+        priority = "highest" if is_last else _candidate_priority(capabilities)
         candidates.append(
             StageCacheCandidate(
                 stage_index=transition.stage_index,
@@ -148,17 +171,25 @@ def candidate_stage_cache_points_from_transitions(stages, operations, transition
                 estimated_nbytes=nbytes,
                 priority=priority,
                 reason=f"{type(transition.operation).__name__} declares cache_stage",
+                retain=is_last,
+                retain_reason="latest reusable cacheable stage" if is_last else "superseded by later retained cacheable stage",
             )
         )
     return tuple(candidates)
 
 
 def plan_region_request(document, request) -> RegionPlan:
-    operations = tuple(document.enabled_operations)
+    original_operations = tuple(document.enabled_operations)
     base_shape = tuple(int(size) for size in np.shape(document.base_data))
     base_dtype = getattr(document.base_data, "dtype", None)
+    optimized = optimize_operations(base_shape, base_dtype, original_operations)
+    if tuple(optimized.output_shape) != tuple(document.current_shape):
+        raise ValueError(
+            f"optimized output shape {optimized.output_shape} does not match document shape {document.current_shape}"
+        )
+    operations = optimized.operations
     stages = build_operation_stages(base_shape, base_dtype, operations)
-    pipeline = estimate_pipeline_cost(base_shape, base_dtype, operations)
+    pipeline = estimate_pipeline_cost(base_shape, base_dtype, operations, optimize=False)
     current_region = final_region_for_request(document.current_shape, request)
     transitions = []
     warnings = list(pipeline.warnings)
@@ -182,6 +213,7 @@ def plan_region_request(document, request) -> RegionPlan:
         transitions.append(transition)
         current_region = required
     transitions = tuple(reversed(transitions))
+    region_peak = estimate_region_plan_peak(base_shape, base_dtype, transitions, current_region)
     return RegionPlan(
         request_kind=str(request.kind),
         final_region=final_region_for_request(document.current_shape, request),
@@ -189,9 +221,36 @@ def plan_region_request(document, request) -> RegionPlan:
         stages=stages,
         transitions=transitions,
         cache_candidates=candidate_stage_cache_points_from_transitions(stages, operations, transitions),
-        estimated_peak_bytes=pipeline.estimated_peak_bytes,
+        estimated_peak_bytes=region_peak,
         warnings=tuple(warnings),
+        optimization_steps=format_optimization_steps(optimized.steps),
+        original_operation_count=len(original_operations),
+        optimized_operation_count=len(operations),
     )
+
+
+def estimate_region_plan_peak(base_shape, base_dtype, transitions, required_input_region) -> int | None:
+    peak = region_nbytes(tuple(int(size) for size in base_shape), base_dtype, required_input_region)
+    dtype = None if base_dtype is None else np.dtype(base_dtype)
+    for transition in tuple(transitions):
+        input_dtype = dtype
+        output_dtype = _operation_output_dtype(transition.operation, input_dtype)
+        input_bytes = region_nbytes(transition.input_shape, input_dtype, transition.required_input_region)
+        output_bytes = region_nbytes(transition.output_shape, output_dtype, transition.output_region)
+        capabilities = _operation_capabilities(transition.operation, transition.input_shape, input_dtype)
+        if capabilities is None:
+            stage_peak = _sum_known(input_bytes, output_bytes)
+        elif capabilities.kind == OperationKind.VIEW:
+            stage_peak = output_bytes
+        elif capabilities.kind == OperationKind.TRANSFORM:
+            stage_peak = None if output_bytes is None else int(output_bytes * capabilities.temp_multiplier)
+        elif capabilities.kind == OperationKind.REDUCTION and capabilities.temp_multiplier > 1.0:
+            stage_peak = None if input_bytes is None or output_bytes is None else int(input_bytes * capabilities.temp_multiplier + output_bytes)
+        else:
+            stage_peak = _sum_known(input_bytes, output_bytes)
+        peak = _max_known(peak, stage_peak)
+        dtype = output_dtype
+    return peak
 
 
 def final_region_for_request(shape, request) -> RegionSpec:
@@ -229,6 +288,22 @@ def _operation_capabilities(operation, shape, dtype) -> OperationCapabilities | 
     if not hasattr(operation, "capabilities"):
         return None
     return operation.capabilities(shape, dtype)
+
+
+def _operation_output_dtype(operation, input_dtype):
+    return operation_output_dtype(input_dtype, operation)
+
+
+def _sum_known(*values) -> int | None:
+    if any(value is None for value in values):
+        return None
+    return int(sum(int(value) for value in values))
+
+
+def _max_known(left, right) -> int | None:
+    if left is None or right is None:
+        return None
+    return max(int(left), int(right))
 
 
 def _candidate_priority(capabilities: OperationCapabilities) -> str:

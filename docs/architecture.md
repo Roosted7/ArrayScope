@@ -20,17 +20,24 @@ source of array-view state.
 - `arrayscope.operations.pipeline`: immutable NumPy operations plus shape, dtype, and capability
   declarations. Each operation owns its blocking axes, chunkable axes, request expansion behavior,
   temporary multiplier, stage-cache preference, and fusion eligibility.
+- `arrayscope.operations.optimizer`: Qt-free internal runtime operation simplifier. It produces an
+  optimized execution plan for enabled operations without mutating `ArrayDocument.steps`, recipes, row
+  IDs, undo/redo history, or operation-dock display. It preserves derived shape and dtype, including
+  dtype adapters for optimized FFT/IFFT pairs.
 - `arrayscope.operations.capabilities`: Qt-free operation capability vocabulary consumed by cost and
   planner code.
 - `arrayscope.operations.cost`: Qt-free operation kind, output dtype, output shape, and conservative
   memory-cost estimates for operation stacks. These estimates are derived from operation-declared
   capabilities and feed warnings, diagnostics, visible render decisions, and cost-aware prefetch gates.
 - `arrayscope.operations.regions` / `arrayscope.operations.planner`: Qt-free runtime region and
-  stage-planning infrastructure. Display/profile/scalar/export slab evaluation uses `RegionPlan`
-  transitions; the same plans expose final/required regions and candidate stage-cache points.
+  stage-planning infrastructure. Display/profile/scalar/export slab evaluation uses optimized
+  `RegionPlan` transitions; the same plans expose final/required regions, optimization summaries, and
+  candidate stage-cache points.
 - `arrayscope.operations.stage_cache`: Qt-free in-memory cache for expanded operation-stage arrays.
   It is owned by `OperationEvaluator`, keyed by document identity/revision, operation prefix, region,
-  dtype, and shape, and budgeted by `MemoryPolicy.stage_cache_budget_bytes`.
+  dtype, and shape, and budgeted by `MemoryPolicy.stage_cache_budget_bytes`. Planner candidates carry
+  a retained/skipped flag: slab execution stores retained useful candidates by default and falls back
+  to an earlier fitting candidate when the preferred retained stage is oversized.
 - `arrayscope.core.memory_policy`: Qt-free runtime memory policy. It samples system total,
   available memory, and process RSS through psutil with a deterministic fallback, then derives visible
   render, montage canvas/tile, image cache, montage tile cache, profile cache, future stage-cache, and
@@ -192,7 +199,8 @@ App settings include theme, nearby-slice prefetch, panel resize behavior, FFT ba
 memory profile, and render memory budget. The render memory budget is a per-render hard cap for
 visible image and interactive montage tile/canvas guardrails. Cache and prefetch budgets adapt from
 the selected memory profile and sampled system memory. StageCache is in-memory only; disk/memmap
-cache is not implemented.
+cache is not implemented. Operation simplification is a runtime/internal execution optimization, not a
+recipe rewrite or user-facing stack transformation.
 
 Channel mode tracks automatic versus user-selected intent. Invalid channels are
 coerced when dtype changes, for example complex-only channels fall back to real

@@ -50,6 +50,8 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
         derived_shape=(4, 5),
         derived_dtype="float32",
         pipeline_peak_bytes=None,
+        optimized_operation_count=0,
+        operation_optimization_summaries=("removed Conjugate pair",),
         operation_final_region="[:, :, 3]",
         operation_required_input_region="[:, :, :]",
         operation_expanded_axes=(2,),
@@ -65,6 +67,8 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Final region: [:, :, 3]" in text
     assert "Required input: [:, :, :]" in text
     assert "Expanded axes: 2" in text
+    assert "Optimized count: 0" in text
+    assert "removed Conjugate pair" in text
     assert "stage 1 CenteredFFT" in text
     assert "Stage cache:" in text
     assert "Stage cache last miss: stage=1" in text

@@ -123,6 +123,32 @@ def test_diagnostics_operations_tab_shows_region_planner_details(qtbot):
         win.close()
 
 
+def test_diagnostics_operations_tab_shows_optimizer_summaries(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5, 6), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.operation_coordinator.load_operations((CenteredFFT(axis=2), CenteredIFFT(axis=2)))
+        win._set_document(win.operation_coordinator.document)
+        win.operation_evaluator.image(win.view_state.with_slice(2, 2))
+        win.open_diagnostics_dialog()
+        dialog = win._diagnostics_dialog
+        dialog.tabs.setCurrentWidget(dialog._section_edits["Operations"])
+        dialog.refresh(force_text=True)
+        text = dialog.current_text_edit().toPlainText()
+
+        assert "Count: 2" in text
+        assert "Optimized count: 1" in text
+        assert "Optimizations:" in text
+        assert "removed CenteredFFT/CenteredIFFT axis 2" in text
+    finally:
+        win.close()
+
+
 def test_diagnostics_stage_cache_bar_and_cache_text_update(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.operations.pipeline import CenteredFFT

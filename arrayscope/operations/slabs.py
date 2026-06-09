@@ -84,7 +84,7 @@ def plan_slab(document: ArrayDocument, request: SlabRequest) -> SlabPlan:
     return SlabPlan(
         base_index=index_spec_from_region(region_plan.required_input_region),
         base_shape=tuple(int(v) for v in base_shape),
-        slab_ops=tuple(document.enabled_operations),
+        slab_ops=tuple(transition.operation for transition in region_plan.transitions),
         output_shape=tuple(int(v) for v in output_shape),
         estimated_nbytes=estimated,
         requires_full_materialization=False,
@@ -127,10 +127,11 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
     for candidate in candidates:
         stage_cache.note_candidate(_candidate_summary(candidate))
 
+    store_stage_indices = _store_stage_indices(candidates, stage_cache)
     hit_stage = None
     data = None
     current_region = None
-    for candidate in reversed(candidates):
+    for candidate in _lookup_candidates(candidates):
         key = stage_key_for_candidate(document_key, candidate)
         value = stage_cache.get_containing(key) if hasattr(stage_cache, "get_containing") else stage_cache.get(key)
         if value is None:
@@ -152,7 +153,11 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
         if int(transition.stage_index) <= int(hit_stage):
             continue
         candidate = candidate_by_stage.get(int(transition.stage_index))
-        output_region = transition.output_region if candidate is None else candidate.region
+        output_region = (
+            candidate.region
+            if candidate is not None and int(candidate.stage_index) in store_stage_indices
+            else transition.output_region
+        )
         input_region = transition.operation.required_input_region(transition.input_shape, output_region)
         operation_input = apply_subregion(
             data,
@@ -167,7 +172,7 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
             output_region=output_region,
         )
         current_region = output_region
-        if candidate is not None:
+        if candidate is not None and int(candidate.stage_index) in store_stage_indices:
             nbytes = _stage_nbytes(data, candidate)
             stage_cache.put(
                 stage_key_for_candidate(document_key, candidate),
@@ -209,7 +214,44 @@ def _stage_nbytes(data, candidate: StageCacheCandidate) -> int:
 
 
 def _candidate_summary(candidate: StageCacheCandidate) -> str:
-    return f"stage={candidate.stage_index}, priority={candidate.priority}, bytes={candidate.estimated_nbytes}"
+    retain = "yes" if getattr(candidate, "retain", True) else "no"
+    reason = getattr(candidate, "retain_reason", "")
+    return f"stage={candidate.stage_index}, priority={candidate.priority}, bytes={candidate.estimated_nbytes}, retain={retain}, {reason}"
+
+
+def _lookup_candidates(candidates):
+    retained = [candidate for candidate in tuple(candidates) if getattr(candidate, "retain", True)]
+    non_retained = [candidate for candidate in tuple(candidates) if not getattr(candidate, "retain", True)]
+    return tuple(reversed(retained)) + tuple(reversed(non_retained))
+
+
+def _store_stage_indices(candidates, stage_cache) -> set[int]:
+    candidates = tuple(candidates)
+    max_bytes = int(getattr(stage_cache, "max_bytes", 0))
+    retained = tuple(candidate for candidate in candidates if getattr(candidate, "retain", True))
+    result = set()
+    refused_retained = False
+    for candidate in retained:
+        if _candidate_fits(candidate, max_bytes):
+            result.add(int(candidate.stage_index))
+        else:
+            refused_retained = True
+            if hasattr(stage_cache, "note_refused"):
+                stage_cache.note_refused(_candidate_summary(candidate))
+    if result or not refused_retained:
+        return result
+    for candidate in reversed(tuple(candidate for candidate in candidates if not getattr(candidate, "retain", True))):
+        if _candidate_fits(candidate, max_bytes):
+            result.add(int(candidate.stage_index))
+            break
+        if hasattr(stage_cache, "note_refused"):
+            stage_cache.note_refused(_candidate_summary(candidate))
+    return result
+
+
+def _candidate_fits(candidate: StageCacheCandidate, max_bytes: int) -> bool:
+    estimated = candidate.estimated_nbytes
+    return estimated is None or int(estimated) <= int(max_bytes)
 
 
 def _ranged_keep_axes(view_state, keep_axes):

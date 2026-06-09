@@ -21,6 +21,14 @@ def _submenu_action(win, menu_text, submenu_text, action_text):
     raise AssertionError(f"action not found: {menu_text}/{submenu_text}/{action_text}")
 
 
+def _menu_action(win, menu_text, action_text):
+    menu = _menu(win, menu_text)
+    for action in menu.actions():
+        if action.text() == action_text:
+            return action
+    raise AssertionError(f"action not found: {menu_text}/{action_text}")
+
+
 def test_performance_menu_exists(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -31,6 +39,9 @@ def test_performance_menu_exists(qtbot):
         _process_events(qtbot)
         assert _menu(win, "Performance") is not None
         assert _submenu_action(win, "Performance", "Memory Profile", "Balanced") is not None
+        assert _submenu_action(win, "Performance", "Render Memory Budget", "128 MiB") is not None
+        assert _menu_action(win, "Performance", "Use Less Memory") is not None
+        assert _menu_action(win, "Performance", "Use More Memory") is not None
     finally:
         win.close()
 
@@ -109,5 +120,39 @@ def test_selecting_memory_profile_recomputes_policy(qtbot):
 
         assert win.app_settings.memory_profile == MemoryProfileChoice.CONSERVATIVE
         assert win._memory_policy().profile == MemoryProfileChoice.CONSERVATIVE
+    finally:
+        win.close()
+
+
+def test_memory_stress_actions_adjust_profile_budget_and_policy(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import MemoryProfileChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        assert win.app_settings.render_memory_budget_mb == 512
+
+        _menu_action(win, "Performance", "Use Less Memory").trigger()
+        _process_events(qtbot)
+        assert win.app_settings.memory_profile == MemoryProfileChoice.CONSERVATIVE
+        assert win.app_settings.render_memory_budget_mb == 256
+        assert win._memory_policy().profile == MemoryProfileChoice.CONSERVATIVE
+
+        _menu_action(win, "Performance", "Decrease Render Budget").trigger()
+        _process_events(qtbot)
+        assert win.app_settings.render_memory_budget_mb == 128
+        assert win._visible_render_budget_bytes() == 128 * 1024 * 1024
+
+        _menu_action(win, "Performance", "Use More Memory").trigger()
+        _process_events(qtbot)
+        assert win.app_settings.memory_profile == MemoryProfileChoice.AGGRESSIVE
+        assert win.app_settings.render_memory_budget_mb == 256
+
+        _menu_action(win, "Performance", "Increase Render Budget").trigger()
+        _process_events(qtbot)
+        assert win.app_settings.render_memory_budget_mb == 512
     finally:
         win.close()

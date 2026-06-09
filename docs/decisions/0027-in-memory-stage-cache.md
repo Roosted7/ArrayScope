@@ -16,15 +16,20 @@ candidates as lookup/store boundaries and can reuse broader cached regions for n
 cache is priority-aware LRU, uses `MemoryPolicy.stage_cache_budget_bytes`, and is visible in Developer
 Diagnostics through an overview bar and detailed text.
 
-The cache is intentionally in-memory only. Disk-backed cache, memmap, Joblib-inspired persistence, and
-operation algebraic simplification remain future work.
+The cache is intentionally in-memory only. Disk-backed cache, memmap, and Joblib-inspired persistence
+remain future work.
+
+Amendment: the final Phase 4g runtime optimizer can eliminate some candidate stages before StageCache
+sees them. Candidate planning now marks the useful retained stage in the optimized linear pipeline;
+slab execution stores retained candidates rather than every cacheable transition, with an earlier
+candidate used only as fallback when the preferred retained stage is oversized.
 
 ## Consequences
 
-Repeated sliced transform requests become cheap after the first expanded compute. FFT followed by IFFT
-keeps the final expanded post-IFFT stage ahead of the intermediate transform stage under memory
-pressure. Memory use is visible and policy-controlled, while invalidation remains conservative:
-operation edits, base replacement, or base revision changes clear the StageCache.
+Repeated sliced transform requests become cheap after the first expanded compute. Simplified operation
+pairs, such as same-axis FFT/IFFT, avoid both transform work and stage-cache allocation. For
+non-simplified stacks, memory use is visible and policy-controlled, while invalidation remains
+conservative: operation edits, base replacement, or base revision changes clear the StageCache.
 
 No persistence or larger-than-memory behavior is provided.
 

@@ -383,15 +383,15 @@ For FFT/IFFT (and similar operations) over a sliced axis:
 * [x] cache final expanded stage
 * [x] serve future slices from cached stage
 
-### P5 — operation simplifier
+### P4 — operation simplifier
 
 Add algebraic simplifications:
 
-* [ ] FFT followed by matching IFFT → identity or near-identity stage
-* [ ] Reverse twice → identity
-* [ ] Conjugate twice → identity
-* [ ] Crop composition
-* [ ] Adjacent elementwise operation fusion
+* [x] FFT followed by matching IFFT → dtype-preserving runtime identity/cast
+* [x] Reverse twice → identity
+* [x] Conjugate twice → identity
+* [x] Crop composition
+* [x] Adjacent elementwise operation fusion, scoped to current conjugate cancellation and dtype-cast coalescing
 
 ## Phase 5 — Multi-window and sessions
 

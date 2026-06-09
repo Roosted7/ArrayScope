@@ -4,6 +4,7 @@ from arrayscope.operations.capabilities import OperationCapabilities, OperationK
 from arrayscope.operations.cost import estimate_operation_cost, estimate_pipeline_cost, operation_output_dtype
 from arrayscope.operations.pipeline import (
     CenteredFFT,
+    CenteredIFFT,
     CombineRealImagAxis,
     Crop,
     Mean,
@@ -97,3 +98,23 @@ def test_crop_cost_reports_fusion_capability():
 
     assert cost.kind == "view"
     assert cost.can_fuse is True
+
+
+def test_pipeline_cost_optimizes_fft_ifft_pair_by_default():
+    cost = estimate_pipeline_cost((4, 8, 16), np.float32, (CenteredFFT(axis=1), CenteredIFFT(axis=1)))
+
+    assert cost.warnings == ()
+    assert cost.original_operation_count == 2
+    assert cost.optimized_operation_count == 1
+    assert len(cost.operation_costs) == 1
+    assert cost.output_dtype == np.dtype(np.complex64)
+    assert cost.optimization_steps
+
+
+def test_pipeline_cost_can_report_unsimplified_transform_warnings():
+    cost = estimate_pipeline_cost((4, 8, 16), np.float32, (CenteredFFT(axis=1), CenteredIFFT(axis=1)), optimize=False)
+
+    assert len(cost.operation_costs) == 2
+    assert cost.warnings == ("CenteredFFT requires full axis 1.", "CenteredIFFT requires full axis 1.")
+    assert cost.original_operation_count == 2
+    assert cost.optimized_operation_count == 2
