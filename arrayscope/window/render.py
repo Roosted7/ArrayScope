@@ -480,12 +480,12 @@ class RenderMixin:
         else:
             self.img_view.setColorMap(gray_colormap())
 
-    def update_image_view(self, *, force_autolevel: bool = False):
+    def update_image_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         if self.view_state.image_axes is None: # No image view for 1D data
             return
         self._refresh_memory_policy(active_render=self.visible_evaluation_controller.is_busy())
         if self.view_state.montage_axis is not None:
-            return self.update_montage_view(force_autolevel=force_autolevel)
+            return self.update_montage_view(force_autolevel=force_autolevel, defer_side_panels=defer_side_panels)
         self._montage_session = None
         self._stop_montage_session_slow_overlay()
         self._current_montage_geometry = None
@@ -528,6 +528,7 @@ class RenderMixin:
                 previous_levels=previous_levels,
                 previous_bounds=previous_bounds,
                 force_auto=force_auto,
+                defer_side_panels=defer_side_panels,
             )
             return
         planning_start = perf_counter()
@@ -555,7 +556,10 @@ class RenderMixin:
             if getattr(self.img_view, "image", None) is not None:
                 self.img_view.setImageStale(True)
                 self.img_view.setEvaluationOverlay(True, decision.overlay_text or "Exact view over budget")
-            self._update_operation_dock()
+            if defer_side_panels:
+                self._deferred_side_panel_refresh_pending = True
+            else:
+                self._update_operation_dock()
             return
 
         request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)
@@ -594,6 +598,7 @@ class RenderMixin:
                     previous_levels=previous_levels,
                     previous_bounds=previous_bounds,
                     force_auto=force_auto,
+                    defer_side_panels=defer_side_panels,
                 )
                 self.img_view.setImageStale(True)
                 self.img_view.setEvaluationOverlay(True, decision.overlay_text)
@@ -639,7 +644,10 @@ class RenderMixin:
             text = "Updating view in chunks..." if decision.kind == RenderDecisionKind.ASYNC_CHUNKED else "Updating view..."
             self.img_view.setEvaluationOverlay(True, text)
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image view")
-            self._update_operation_dock()
+            if defer_side_panels:
+                self._deferred_side_panel_refresh_pending = True
+            else:
+                self._update_operation_dock()
 
         def done(result):
             if request_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut):
@@ -656,6 +664,7 @@ class RenderMixin:
                 previous_levels=previous_levels,
                 previous_bounds=previous_bounds,
                 force_auto=force_auto,
+                defer_side_panels=defer_side_panels,
             )
             self._schedule_prefetch_nearby_slices(view_state, colormap_lut)
 
@@ -678,7 +687,7 @@ class RenderMixin:
             pass_token=True,
         )
 
-    def update_montage_view(self, *, force_autolevel: bool = False):
+    def update_montage_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         axis = self.view_state.montage_axis
         if axis is None or self.view_state.image_axes is None or axis in self.view_state.image_axes:
             return
@@ -810,6 +819,7 @@ class RenderMixin:
             loading_tiles={int(tile.montage_index) for tile in missing_tiles},
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
             pending_tiles=list(missing_tiles),
+            defer_side_panels=bool(defer_side_panels),
         )
         self._montage_session = session
         try:
@@ -822,11 +832,17 @@ class RenderMixin:
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
             self.img_view.setImageStale(False)
             self.img_view.setEvaluationOverlay(False)
-            self._update_operation_dock()
+            if defer_side_panels:
+                self._deferred_side_panel_refresh_pending = True
+            else:
+                self._update_operation_dock()
             return
         self.prefetch_evaluation_controller.cancel_prefetch()
         self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
-        self._update_operation_dock()
+        if defer_side_panels:
+            self._deferred_side_panel_refresh_pending = True
+        else:
+            self._update_operation_dock()
         self._schedule_montage_session_slow_overlay(session)
         self._schedule_next_montage_tile(session)
 
@@ -861,7 +877,10 @@ class RenderMixin:
                 self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
                 self.img_view.setImageStale(False)
                 self.img_view.setEvaluationOverlay(False)
-                self._update_operation_dock()
+                if getattr(session, "defer_side_panels", False):
+                    self._deferred_side_panel_refresh_pending = True
+                else:
+                    self._update_operation_dock()
             return
 
         def evaluate():
@@ -941,7 +960,10 @@ class RenderMixin:
         self.img_view.setImageStale(True)
         self.img_view.setEvaluationOverlay(True, "Updating montage...")
         self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
-        self._update_operation_dock()
+        if getattr(session, "defer_side_panels", False):
+            self._deferred_side_panel_refresh_pending = True
+        else:
+            self._update_operation_dock()
 
     def _on_montage_tile_done(self, session_id, tile, result) -> None:
         session = getattr(self, "_montage_session", None)
@@ -1032,6 +1054,7 @@ class RenderMixin:
                 previous_levels=session.previous_levels,
                 previous_bounds=session.previous_bounds,
                 force_auto=session.force_auto,
+                defer_side_panels=getattr(session, "defer_side_panels", False),
             )
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
@@ -1177,7 +1200,7 @@ class RenderMixin:
             (float(local_range[1][0]) + origin_y, float(local_range[1][1]) + origin_y),
         )
 
-    def _apply_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto):
+    def _apply_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto, defer_side_panels: bool = False):
         commit_start = perf_counter()
         try:
             viewport_policy = self._viewport_policy_for_display_shape(display_image.data.shape[:2])
@@ -1208,13 +1231,19 @@ class RenderMixin:
                 self.img_view.setImage(display_image.data, autoLevels=al, levels=levels, viewport_policy=viewport_policy)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
-            self._update_operation_dock()
+            if defer_side_panels:
+                self._deferred_side_panel_refresh_pending = True
+            else:
+                self._update_operation_dock()
             
             # Apply axis flips after setting the image
             self.apply_axis_flips()
             self.img_view.setImageStale(False)
             self.img_view.setEvaluationOverlay(False)
-            self._refresh_inspection_dock()
+            if defer_side_panels:
+                self._deferred_side_panel_refresh_pending = True
+            else:
+                self._refresh_inspection_dock()
             
         except Exception as e:
             handle_ui_exception("image update", e)
@@ -1664,7 +1693,43 @@ class RenderMixin:
         """The historical line-plot tab is no longer the primary plot surface."""
         return False
 
-    def render(self, *, reason: str = "state", force_autolevel: bool = False):
+    def request_render(self, *, reason: str, force_autolevel: bool = False, interactive: bool = False) -> None:
+        coordinator = getattr(self, "render_coordinator", None)
+        if coordinator is None:
+            self.render(reason=reason, force_autolevel=force_autolevel)
+            return
+        coordinator.request(reason=reason, force_autolevel=force_autolevel, interactive=interactive)
+
+    def _cancel_render_dependent_work_for_interactive_change(self) -> None:
+        for controller_name, groups in (
+            ("visible_evaluation_controller", ("visible-image", "visible-montage")),
+            ("profile_evaluation_controller", ("profile-plot", "live-profile")),
+            ("roi_evaluation_controller", ("roi-inspection",)),
+            ("pixel_evaluation_controller", ("pixel",)),
+        ):
+            controller = getattr(self, controller_name, None)
+            if controller is None:
+                continue
+            for group in groups:
+                controller.clear_group(group)
+        prefetch = getattr(self, "prefetch_evaluation_controller", None)
+        if prefetch is not None:
+            prefetch.cancel_prefetch()
+
+    def _run_deferred_side_panel_refresh(self, *, reason: str) -> None:
+        del reason
+        if getattr(self, "_closing", False) or not hasattr(self, "widgets"):
+            return
+        try:
+            if self.profile_dock.isVisible() or self.widgets['buttons']['display']['live_profile'].isChecked():
+                self.update_line_plot()
+            self._update_operation_dock()
+            self._sync_progressive_docks()
+            self._refresh_inspection_dock()
+        finally:
+            self._deferred_side_panel_refresh_pending = False
+
+    def render(self, *, reason: str = "state", force_autolevel: bool = False, defer_side_panels: bool = False):
         render_start = perf_counter()
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._coerce_channel_for_current_dtype()
@@ -1677,9 +1742,13 @@ class RenderMixin:
         self.update_complex_indicators()
         self.update_shift_indicators()
         self._last_control_sync_ms = (perf_counter() - control_start) * 1000.0
-        self.update_image_view(force_autolevel=force_autolevel)
-        if self.profile_dock.isVisible() or self.widgets['buttons']['display']['live_profile'].isChecked():
-            self.update_line_plot()
-        self._update_operation_dock()
-        self._sync_progressive_docks()
+        self.update_image_view(force_autolevel=force_autolevel, defer_side_panels=defer_side_panels)
+        if defer_side_panels:
+            self._deferred_side_panel_refresh_pending = True
+        else:
+            if self.profile_dock.isVisible() or self.widgets['buttons']['display']['live_profile'].isChecked():
+                self.update_line_plot()
+            self._update_operation_dock()
+            self._sync_progressive_docks()
+            self._deferred_side_panel_refresh_pending = False
         self._last_render_sync_ms = (perf_counter() - render_start) * 1000.0

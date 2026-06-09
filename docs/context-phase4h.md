@@ -522,6 +522,15 @@ During rapid scrolling:
 
 This is probably the highest-impact responsiveness fix.
 
+P1 implementation status:
+
+- `RenderCoordinator` now owns interactive render coalescing at 16 ms and interaction quiet detection.
+- Scalar slice changes update `ViewState`, the active dimension chip, and the legacy spinbox immediately.
+- Interactive bursts cancel stale visible/profile/ROI/pixel work and prefetch bookkeeping.
+- Operation, profile, ROI, and inspection refreshes are deferred until interaction is quiet.
+- Direct `render()` remains the immediate execution primitive for initial render, data/operation changes, tests, and non-high-frequency workflows.
+- P2 still owns progressive montage commit splitting, mutable canvas patching, persistent overlays, dedicated tile workers, and StageCache policy work.
+
 ### split full display commit from progress commit
 
 Create two paths:

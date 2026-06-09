@@ -82,7 +82,12 @@ source of array-view state.
   feedback. They emit user intent and do not own view state.
 - `arrayscope.core.view_recipe`: serializes operations, `ViewState`, and display settings for
   full-view restore. It is pure and does not contain dock geometry.
-- `arrayscope.window.main.ArrayScopeWindow`: wires Qt signals to state changes, then calls `render()`.
+- `arrayscope.window.main.ArrayScopeWindow`: wires Qt signals to state changes, then either calls
+  `render()` directly for immediate/full render workflows or requests an interactive render through
+  the render coordinator.
+- `arrayscope.window.render_coordinator.RenderCoordinator`: owns high-frequency render request
+  coalescing, latest-state flushing, interaction quiet detection, cancellation of stale
+  render-dependent work, and deferred side-panel refresh after interactive bursts.
 - `arrayscope.window.evaluation_controller`: owns categorized background display/profile/ROI/prefetch
   dispatch, latest-only replacement groups, local thread pools, queue clearing, cancellation tokens,
   and stale-result ignoring.
@@ -114,7 +119,15 @@ concrete submodules rather than relying on package-root re-exports.
 
 ## Render Flow
 
-User actions update `ViewState` or the operation coordinator. `render()` then:
+User actions update `ViewState` or the operation coordinator. `render()` is the immediate render
+execution primitive for initial render, operation/data changes, channel/scale changes, tests, and
+other non-high-frequency workflows. High-frequency slice interaction updates `ViewState` and visible
+slice controls immediately, then calls `request_render(..., interactive=True)`. The
+`RenderCoordinator` coalesces those requests at a short frame cadence, renders only the latest state,
+cancels stale visible/profile/ROI/pixel/prefetch work, and refreshes side panels once the interaction
+burst is quiet.
+
+`render()` then:
 
 1. migrates `ViewState` to the current derived shape;
 2. syncs controls from `ViewState`;
@@ -140,7 +153,8 @@ directly. It does not schedule scalar evaluation or show an intermediate
 
 Do not read widget values to reconstruct `ViewState`. Widget state is an output
 of render, except transient UI-only state such as dock visibility and histogram
-interaction.
+interaction. The fast slice path is still a projection of `ViewState`: it updates only the active
+axis controls immediately after mutating `ViewState`, before the coalesced render catches up.
 
 Managed panel visibility uses supported ArrayScope paths only: the managed title-bar Hide button,
 View menu actions, or `WindowLayoutManager` programmatic methods. Native `QDockWidget.closeEvent`
@@ -194,6 +208,8 @@ Phase 4h timing diagnostics are internal developer diagnostics only. They sample
 orchestration, planning, worker queue wait, evaluation, display commit, image setting, levels/histogram
 work, operation-dock refresh, inspection refresh, montage tile evaluation, montage canvas composition,
 and montage overlay updates; they do not define public API or user-facing behavior.
+Render coalescer diagnostics are likewise internal and report pending/interacting request state plus
+requested/flushed/coalesced/deferred-refresh counters.
 The Developer -> Diagnostics dialog is a plain `QDialog`, not a managed dock, so it does not
 participate in panel layout or canvas-preservation transactions. It shows color-coded filling bars
 for memory/cache budget usage and compact text sections for deeper state. The Operations panel does

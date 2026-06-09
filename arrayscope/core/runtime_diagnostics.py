@@ -36,6 +36,16 @@ class RenderRuntimeDiagnostics:
 
 
 @dataclass(frozen=True)
+class RenderCoalescerDiagnostics:
+    pending: bool = False
+    interactive_active: bool = False
+    requested: int = 0
+    flushed: int = 0
+    coalesced: int = 0
+    deferred_side_panel_refreshes: int = 0
+
+
+@dataclass(frozen=True)
 class RenderTimingDiagnostics:
     last_render_sync_ms: float | None = None
     last_control_sync_ms: float | None = None
@@ -109,6 +119,7 @@ class WindowRuntimeDiagnostics:
     operation_transition_summaries: tuple[str, ...] = ()
     render_timing: RenderTimingDiagnostics = field(default_factory=RenderTimingDiagnostics)
     montage_timing: MontageTimingDiagnostics = field(default_factory=MontageTimingDiagnostics)
+    render_coalescer: RenderCoalescerDiagnostics = field(default_factory=RenderCoalescerDiagnostics)
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
@@ -134,6 +145,15 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 f"Context: {snapshot.render.last_context_summary or 'n/a'}",
                 f"Request: {snapshot.render.last_request_key or 'n/a'}",
                 f"Error: {snapshot.render.last_error or 'n/a'}",
+                (
+                    "Coalescer: "
+                    f"pending={snapshot.render_coalescer.pending}, "
+                    f"interactive={snapshot.render_coalescer.interactive_active}, "
+                    f"requested={snapshot.render_coalescer.requested}, "
+                    f"flushed={snapshot.render_coalescer.flushed}, "
+                    f"coalesced={snapshot.render_coalescer.coalesced}, "
+                    f"deferred refreshes={snapshot.render_coalescer.deferred_side_panel_refreshes}"
+                ),
                 f"Timing render sync: {_ms_text(snapshot.render_timing.last_render_sync_ms)}",
                 f"Timing control sync: {_ms_text(snapshot.render_timing.last_control_sync_ms)}",
                 f"Timing planning: {_ms_text(snapshot.render_timing.last_planning_ms)}",

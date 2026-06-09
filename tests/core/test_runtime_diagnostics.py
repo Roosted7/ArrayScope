@@ -77,6 +77,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Stage cache:" in text
     assert "Stage cache last miss: stage=1" in text
     assert "Stage cache last store: stage=1" in text
+    assert "Coalescer: pending=False, interactive=False" in text
     assert "Timing render sync: 1.25 ms" in text
     assert "Timing worker queue wait: n/a" in text
     assert "Timing canvas compose: 2.50 ms" in text

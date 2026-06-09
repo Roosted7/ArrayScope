@@ -207,6 +207,9 @@ class DimensionStrip(QtWidgets.QWidget):
             if axis < len(shape):
                 chip.update_state(shape, view_state, profile_axes)
 
+    def update_axis_state(self, axis: int, shape, view_state, profile_axes=()) -> None:
+        self.chip(axis).update_state(shape, view_state, profile_axes)
+
     def chip(self, axis):
         return self.chips[int(axis)]
 

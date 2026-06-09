@@ -36,6 +36,7 @@ class MontageRenderSession:
     last_commit_monotonic: float = 0.0
     final_commit_pending: bool = False
     show_loading_overlays: bool = False
+    defer_side_panels: bool = False
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles

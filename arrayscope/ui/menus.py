@@ -17,6 +17,7 @@ from arrayscope.core.runtime_diagnostics import (
     CanvasPreserveRuntimeDiagnostics,
     MontageTimingDiagnostics,
     MontageRuntimeDiagnostics,
+    RenderCoalescerDiagnostics,
     RenderRuntimeDiagnostics,
     RenderTimingDiagnostics,
     WindowRuntimeDiagnostics,
@@ -445,6 +446,7 @@ class WindowMenuMixin:
             estimated_display_bytes=None if context is None else int(getattr(context, "estimated_display_bytes", 0)),
             render_budget_bytes=None if context is None else int(getattr(context, "render_budget_bytes", 0)),
         )
+        coalescer = getattr(self, "render_coordinator", None)
         backend_choice, workers_choice = fft_backend.get_fft_runtime_options()
         resolved = fft_backend.resolve_fft_backend(backend_choice.value)
         cost = estimate_pipeline_cost(
@@ -492,6 +494,14 @@ class WindowMenuMixin:
                 last_overlay_update_ms=getattr(self, "_last_montage_overlay_update_ms", None),
                 cached_tiles_last_session=int(getattr(self, "_montage_cached_tiles_last_session", 0) or 0),
                 missing_tiles_last_session=int(getattr(self, "_montage_missing_tiles_last_session", 0) or 0),
+            ),
+            render_coalescer=RenderCoalescerDiagnostics(
+                pending=False if coalescer is None else bool(coalescer.has_pending_render),
+                interactive_active=False if coalescer is None else bool(coalescer.interactive_active),
+                requested=0 if coalescer is None else int(coalescer.requested),
+                flushed=0 if coalescer is None else int(coalescer.flushed),
+                coalesced=0 if coalescer is None else int(coalescer.coalesced),
+                deferred_side_panel_refreshes=0 if coalescer is None else int(coalescer.deferred_side_panel_refreshes),
             ),
             fft_backend_choice=backend_choice.value,
             fft_backend_resolved=resolved.name,
@@ -594,6 +604,9 @@ class WindowMenuMixin:
         if watcher is not None:
             watcher.deleteLater()
             self._file_watcher = None
+        coordinator = getattr(self, "render_coordinator", None)
+        if coordinator is not None:
+            coordinator.cancel_pending()
         for controller_name in (
             "evaluation_controller",
             "visible_evaluation_controller",
