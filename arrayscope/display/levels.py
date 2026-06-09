@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import numpy as np
 
@@ -17,8 +18,10 @@ def finite_bounds(data, *, exact_limit=4_000_000, max_samples=1_000_000):
     else:
         sample = array
     try:
-        minimum = np.nanmin(sample)
-        maximum = np.nanmax(sample)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            minimum = np.nanmin(sample)
+            maximum = np.nanmax(sample)
     except (TypeError, ValueError, FloatingPointError):
         return None
     if not np.isfinite(minimum) or not np.isfinite(maximum):

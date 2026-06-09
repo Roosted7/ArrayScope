@@ -138,6 +138,8 @@ class WindowLayoutManager:
 
     def apply_queued_dock_visibility(self, dock, visible, *, preserve_canvas=True):
         win = self.window
+        if not self._window_alive():
+            return
         if not visible:
             if dock is getattr(win, "operation_dock", None) and win.document.steps:
                 if getattr(win, "_operation_dock_user_visible", None) is not False:
@@ -157,6 +159,8 @@ class WindowLayoutManager:
 
     def set_managed_dock_visible(self, dock, visible, *, reason, preserve_canvas=True, raise_dock=True):
         win = self.window
+        if not self._window_alive():
+            return
         panel_manager = getattr(win, "panel_manager", None)
         panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
         if panel is not None and panel.location == PanelLocation.DETACHED:
@@ -202,6 +206,16 @@ class WindowLayoutManager:
 
         self.run_panel_transition_preserving_canvas(transition, preserve_canvas=preserve_canvas)
         self.schedule_view_geometry_refresh()
+
+    def _window_alive(self) -> bool:
+        win = self.window
+        if getattr(win, "_closing", False):
+            return False
+        try:
+            win.isVisible()
+            return True
+        except RuntimeError:
+            return False
 
     def make_managed_dock_action(self, text, dock, setter):
         action = Qt.QtGui.QAction(text, self.window)

@@ -237,14 +237,18 @@ class EvaluationController(Qt.QtCore.QObject):
         self._ensure_polling()
         return generation
 
-    def start_prefetch(self, fn, on_done=None, *, key=None, memory_budget_bytes=None, idle_deadline_ms=None, blocked_reason=None):
-        del memory_budget_bytes
-        del idle_deadline_ms
+    def start_prefetch(self, fn, on_done=None, *, key=None, memory_budget_bytes=None, idle_elapsed=None, blocked_reason=None):
         if self._shutting_down:
             return PrefetchStart(False, "closed")
         if blocked_reason:
             self._note_prefetch_blocked(blocked_reason)
             return PrefetchStart(False, blocked_reason)
+        if idle_elapsed is False:
+            self._note_prefetch_blocked("idle")
+            return PrefetchStart(False, "idle")
+        if memory_budget_bytes is not None and int(memory_budget_bytes) <= 0:
+            self._note_prefetch_blocked("cost")
+            return PrefetchStart(False, "cost")
         key = ("prefetch", id(fn), len(self._runnables)) if key is None else key
         if key in self._prefetch_keys:
             self._prefetch_deduped_count += 1

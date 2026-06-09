@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Sequence
+from enum import Enum
 
 import numpy as np
 
@@ -38,6 +39,21 @@ class MontageTile:
     width: int
     height: int
     view_state: object
+
+
+class MontageTileState(Enum):
+    LOADED = "loaded"
+    LOADING = "loading"
+    SKIPPED = "skipped"
+    UNLOADED = "unloaded"
+
+
+@dataclass(frozen=True)
+class MontageTileStatus:
+    tile_number: int
+    montage_index: int
+    source_index: int
+    state: MontageTileState
 
 
 @dataclass(frozen=True)
@@ -163,6 +179,31 @@ def make_montage_plan(view_state, *, axis, indices, tile_shape, columns=None, vi
 
 
 @dataclass(frozen=True)
+class RenderedTilePayload:
+    image: np.ndarray
+    histogram_data: np.ndarray | None
+    eval_ms: float
+    slab_shape: tuple[int, ...]
+    slab_nbytes: int | None
+
+    def nbytes(self) -> int:
+        total = int(self.image.nbytes)
+        if isinstance(self.histogram_data, np.ndarray):
+            total += int(self.histogram_data.nbytes)
+        return total
+
+    def bind(self, tile: MontageTile) -> "RenderedTile":
+        return RenderedTile(
+            tile=tile,
+            image=self.image,
+            histogram_data=self.histogram_data,
+            eval_ms=self.eval_ms,
+            slab_shape=self.slab_shape,
+            slab_nbytes=self.slab_nbytes,
+        )
+
+
+@dataclass(frozen=True)
 class RenderedTile:
     tile: MontageTile
     image: np.ndarray
@@ -177,6 +218,15 @@ class RenderedTile:
             total += int(self.histogram_data.nbytes)
         return total
 
+    def payload(self) -> RenderedTilePayload:
+        return RenderedTilePayload(
+            image=self.image,
+            histogram_data=self.histogram_data,
+            eval_ms=self.eval_ms,
+            slab_shape=self.slab_shape,
+            slab_nbytes=self.slab_nbytes,
+        )
+
 
 @dataclass(frozen=True)
 class MontageViewportCanvas:
@@ -185,6 +235,8 @@ class MontageViewportCanvas:
     origin_x: int
     origin_y: int
     full_plan: MontagePlan
+    tile_states: tuple[MontageTileState, ...] = ()
+    canvas_rect: tuple[int, int, int, int] = (0, 0, 1, 1)
 
     @property
     def display_shape(self) -> tuple[int, int]:
@@ -236,45 +288,133 @@ def make_montage_viewport_canvas(
     dtype=None,
     rgb: bool = False,
     include_histogram: bool = True,
+    loading_tiles: Sequence[MontageTile] = (),
+    skipped_tiles: Sequence[MontageTile] = (),
 ) -> MontageViewportCanvas:
     rendered_tiles = tuple(rendered_tiles)
-    if not rendered_tiles:
-        data_dtype = np.dtype(dtype if dtype is not None else float)
-        data = np.zeros((1, 1, 4), dtype=np.uint8) if rgb else np.zeros((1, 1), dtype=data_dtype)
-        histogram_data = np.full((1, 1), np.nan, dtype=np.float32) if include_histogram else None
-        return MontageViewportCanvas(data, histogram_data, 0, 0, plan)
-
     tile_by_index = {int(rendered.tile.montage_index): rendered for rendered in rendered_tiles}
-    loaded_tiles = tuple(rendered.tile for rendered in rendered_tiles)
-    loaded_rect = plan.display_rect_for_tiles(loaded_tiles)
-    if loaded_rect is None:
-        raise ValueError("rendered_tiles must contain at least one tile")
-    full_height, full_width = plan.display_shape
-    if view_range is None:
-        rect = loaded_rect
-    else:
-        rect = _rect_for_view_range(view_range, plan, viewport_shape)
-        rect = _intersect_rect(rect, (0, 0, full_width, full_height))
-        rect = _intersect_rect(rect, loaded_rect) or loaded_rect
+    rect = montage_rect_for_viewport(plan, view_range=view_range, viewport_shape=viewport_shape)
     x0, y0, x1, y1 = rect
     width = max(1, int(x1) - int(x0))
     height = max(1, int(y1) - int(y0))
-    sample = np.asarray(rendered_tiles[0].image)
+    sample = np.asarray(rendered_tiles[0].image) if rendered_tiles else None
     if dtype is None:
-        dtype = sample.dtype
-    canvas_shape = (height, width) + sample.shape[2:]
-    estimated = estimate_viewport_canvas_bytes((height, width), dtype, rgb=rgb or sample.ndim == 3, histogram=include_histogram)
+        dtype = sample.dtype if sample is not None else float
+    data_dtype = np.dtype(dtype)
+    is_rgb = bool(rgb or (sample is not None and sample.ndim == 3))
+    trailing_shape = (sample.shape[2:] if sample is not None and sample.ndim == 3 else ((4,) if is_rgb else ()))
+    canvas_shape = (height, width) + tuple(trailing_shape)
+    estimated = estimate_viewport_canvas_bytes((height, width), dtype, rgb=is_rgb, histogram=include_histogram)
     if estimated > int(budget_bytes):
         raise MemoryError(
             f"Montage viewport canvas would allocate {format_bytes(estimated)} "
             f"over budget {format_bytes(int(budget_bytes))}."
         )
-    data = np.zeros(canvas_shape, dtype=sample.dtype)
+    if is_rgb:
+        data = np.full(canvas_shape, 42, dtype=np.uint8)
+    else:
+        # Keep visual placeholders finite. Tile state, not display pixel value,
+        # distinguishes loading/skipped/unloaded regions; histogram_data remains
+        # NaN so ROI/statistics ignore non-loaded regions.
+        data = np.zeros(canvas_shape, dtype=data_dtype)
     histogram_data = np.full((height, width), np.nan, dtype=np.float32) if include_histogram else None
     canvas_rect = (int(x0), int(y0), int(x0) + width, int(y0) + height)
+    tile_states = _tile_states_for_plan(
+        plan,
+        loaded_indices=tile_by_index.keys(),
+        loading_tiles=loading_tiles,
+        skipped_tiles=skipped_tiles,
+    )
     for rendered in sorted(tile_by_index.values(), key=lambda item: item.tile.montage_index):
         _copy_rendered_tile_into_canvas(rendered, data, histogram_data, canvas_rect)
-    return MontageViewportCanvas(data, histogram_data, int(x0), int(y0), plan)
+    return MontageViewportCanvas(data, histogram_data, int(x0), int(y0), plan, tile_states, canvas_rect)
+
+
+def montage_rect_for_viewport(plan: MontagePlan, *, view_range=None, viewport_shape=None) -> tuple[int, int, int, int]:
+    full_height, full_width = plan.display_shape
+    if full_height <= 0 or full_width <= 0:
+        return (0, 0, 1, 1)
+    if view_range is None:
+        if viewport_shape is None:
+            width = full_width
+            height = full_height
+        else:
+            height = min(full_height, max(1, int(viewport_shape[0])))
+            width = min(full_width, max(1, int(viewport_shape[1])))
+        rect = (0, 0, max(1, int(width)), max(1, int(height)))
+        return _expand_rect_to_tile_bounds(plan, rect)
+    rect = _rect_for_view_range(view_range, plan, viewport_shape)
+    rect = _intersect_rect(rect, (0, 0, full_width, full_height)) or (0, 0, min(1, full_width), min(1, full_height))
+    return _expand_rect_to_tile_bounds(plan, rect)
+
+
+def _expand_rect_to_tile_bounds(plan: MontagePlan, rect) -> tuple[int, int, int, int]:
+    full_height, full_width = plan.display_shape
+    selected = []
+    for tile in plan.tiles:
+        tile_rect = (int(tile.x0), int(tile.y0), int(tile.x0 + tile.width), int(tile.y0 + tile.height))
+        if _intersect_rect(tile_rect, rect) is not None:
+            selected.append(tile_rect)
+    if not selected:
+        return rect
+    x0 = min(tile_rect[0] for tile_rect in selected)
+    y0 = min(tile_rect[1] for tile_rect in selected)
+    x1 = max(tile_rect[2] for tile_rect in selected)
+    y1 = max(tile_rect[3] for tile_rect in selected)
+    return _intersect_rect((x0, y0, x1, y1), (0, 0, full_width, full_height)) or rect
+
+
+def tile_status_at_global_point(
+    plan: MontagePlan,
+    tile_states: Sequence[MontageTileState],
+    x: int,
+    y: int,
+) -> MontageTileStatus | None:
+    tile = plan.tile_at(int(x), int(y))
+    if tile is None:
+        return None
+    state = MontageTileState.UNLOADED
+    if int(tile.montage_index) < len(tile_states):
+        state = MontageTileState(tile_states[int(tile.montage_index)])
+    return MontageTileStatus(
+        tile_number=int(tile.montage_index),
+        montage_index=int(tile.montage_index),
+        source_index=int(tile.source_index),
+        state=state,
+    )
+
+
+def copy_rendered_tile_into_canvas(rendered: RenderedTile, canvas: MontageViewportCanvas) -> MontageViewportCanvas:
+    data = np.array(canvas.data, copy=True)
+    histogram_data = None if canvas.histogram_data is None else np.array(canvas.histogram_data, copy=True)
+    _copy_rendered_tile_into_canvas(rendered, data, histogram_data, canvas.canvas_rect)
+    states = list(canvas.tile_states or _tile_states_for_plan(canvas.full_plan))
+    if int(rendered.tile.montage_index) < len(states):
+        states[int(rendered.tile.montage_index)] = MontageTileState.LOADED
+    return replace(canvas, data=data, histogram_data=histogram_data, tile_states=tuple(states))
+
+
+def _tile_states_for_plan(
+    plan: MontagePlan,
+    *,
+    loaded_indices=(),
+    loading_tiles: Sequence[MontageTile] = (),
+    skipped_tiles: Sequence[MontageTile] = (),
+) -> tuple[MontageTileState, ...]:
+    states = [MontageTileState.UNLOADED for _tile in plan.tiles]
+    for tile in skipped_tiles:
+        index = int(tile.montage_index)
+        if 0 <= index < len(states):
+            states[index] = MontageTileState.SKIPPED
+    for tile in loading_tiles:
+        index = int(tile.montage_index)
+        if 0 <= index < len(states) and states[index] != MontageTileState.SKIPPED:
+            states[index] = MontageTileState.LOADING
+    for index in loaded_indices:
+        index = int(index)
+        if 0 <= index < len(states):
+            states[index] = MontageTileState.LOADED
+    return tuple(states)
 
 
 def _rect_for_view_range(view_range, plan: MontagePlan, viewport_shape) -> tuple[int, int, int, int]:

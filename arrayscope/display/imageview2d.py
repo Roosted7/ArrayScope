@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import numpy as np
 from arrayscope.app.qt_binding import prefer_pyside6
 
@@ -21,6 +23,16 @@ from arrayscope.core.roi import (
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
 from arrayscope.display.levels import finite_bounds
 from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
+
+
+@dataclass(frozen=True)
+class MontageTileOverlay:
+    x: int
+    y: int
+    width: int
+    height: int
+    state: str
+    text: str
 
 
 class ImageView2D(QtWidgets.QWidget):
@@ -70,6 +82,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._roi_info_panel = None
         self._inspection_tool = "cursor"
         self._roi_items = {}
+        self._montage_tile_overlay_items = []
         self._roi_counter = 0
         self._drawing_points = []
         self._pending_roi_draw_tool = None
@@ -242,7 +255,10 @@ class ImageView2D(QtWidgets.QWidget):
             self._rgbBaseImage = self.imageDisp[..., :3].astype(float)
             self.imageDisp = self._rgb_display_for_levels(histogram_levels)
             self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=(0, 255))
-            self.histogramImageItem.setImage(histogram_data, autoLevels=False, levels=histogram_levels)
+            histogram_display = histogram_data
+            if finite_bounds(histogram_display) is None:
+                histogram_display = np.zeros_like(np.asarray(histogram_data), dtype=float)
+            self.histogramImageItem.setImage(histogram_display, autoLevels=False, levels=histogram_levels)
         else:
             self.histogram.setImageItem(self.imageItem)
             self.imageItem.setImage(self.imageDisp, autoLevels=False)
@@ -567,6 +583,32 @@ class ImageView2D(QtWidgets.QWidget):
         self._evaluation_overlay.setVisible(bool(visible))
         if visible:
             self._evaluation_overlay.raise_()
+
+    def setMontageTileOverlays(self, overlays):
+        self.clearMontageTileOverlays()
+        for overlay in tuple(overlays or ()):
+            rect = QtWidgets.QGraphicsRectItem(float(overlay.x), float(overlay.y), float(overlay.width), float(overlay.height))
+            if str(overlay.state) == "skipped":
+                rect.setBrush(pg.mkBrush(130, 70, 20, 95))
+                rect.setPen(pg.mkPen(210, 130, 60, 180))
+            else:
+                rect.setBrush(pg.mkBrush(35, 35, 35, 95))
+                rect.setPen(pg.mkPen(170, 170, 170, 140))
+            text = pg.TextItem(str(overlay.text), color=(245, 245, 245), anchor=(0.5, 0.5))
+            text.setPos(float(overlay.x) + float(overlay.width) / 2.0, float(overlay.y) + float(overlay.height) / 2.0)
+            rect.setZValue(20)
+            text.setZValue(21)
+            self.view.addItem(rect)
+            self.view.addItem(text)
+            self._montage_tile_overlay_items.extend((rect, text))
+
+    def clearMontageTileOverlays(self):
+        for item in list(getattr(self, "_montage_tile_overlay_items", ())):
+            try:
+                self.view.removeItem(item)
+            except Exception:
+                pass
+        self._montage_tile_overlay_items = []
 
     def setRoiInfoText(self, text):
         text = str(text or "")
@@ -911,4 +953,3 @@ class _MovableInfoPanel(QtWidgets.QLabel):
     def mouseReleaseEvent(self, event):
         self._drag_offset = None
         event.accept()
-

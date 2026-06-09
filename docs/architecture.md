@@ -19,8 +19,8 @@ source of array-view state.
   preserving, fitting, resetting, and true 1:1 2D ViewBox ranges.
 - `arrayscope.operations.pipeline`: immutable NumPy operations plus shape prediction.
 - `arrayscope.operations.cost`: Qt-free operation kind, output dtype, output shape, and conservative
-  memory-cost estimates for operation stacks. These estimates feed warnings and diagnostics; they are
-  not a scheduling/refusal policy yet.
+  memory-cost estimates for operation stacks. These estimates feed warnings, diagnostics, visible
+  render decisions, and cost-aware prefetch gates.
 - `arrayscope.operations.fft_backend`: FFT backend abstraction and worker-count runtime settings.
   `auto` resolves to SciPy when available, with NumPy fallback and an optional pyFFTW backend when
   explicitly selected and importable. The centered FFT/IFFT naming follows ArrayScope's MRI/k-space
@@ -243,13 +243,26 @@ choose magnitude, phase, real, imaginary, or magnitude plus phase strip.
 Montage is a display mode driven by range text in a non-image dimension slice field, stored on
 `ViewState.montage_axis`. The current image axes remain the tile Y/X axes. Range text on image axes is
 stored as per-axis display ranges, allowing image-axis subsetting such as `0:2:100`. Montage uses
-`MontagePlan` to derive full grid geometry and visible tiles. Visible tiles are evaluated through the
-same image snapshot path as normal views, cached individually, and composed into one bounded
-`MontageViewportCanvas` with `origin_x`/`origin_y` in full montage coordinates. Interactive montage
-display keeps a single `ImageItem`; `DisplayGeometry` maps canvas-local display points through the
-canvas origin into the full montage grid before resolving source tile indices. Histogram/ROI sources
-are canvas-sized and contain `NaN` for gaps and unloaded regions. Full giant montage allocation is
-blocked by render memory estimates and byte-budgeted visible tile selection.
+`MontagePlan` to derive full grid geometry and visible tiles. The interactive canvas rectangle is based
+on the requested viewport clipped to full montage bounds; it is never shrunk to the loaded tiles.
+Visible tiles are evaluated through the same image snapshot path as normal views, cached individually,
+and composed into one bounded `MontageViewportCanvas` with `origin_x`/`origin_y` in full montage
+coordinates. The canvas carries per-tile states (`loaded`, `loading`, `skipped`, `unloaded`) so hover
+and live profile can distinguish real data from loading placeholders, hard budget-skipped tiles, and
+inter-tile gaps. Interactive montage display keeps a single `ImageItem` plus lightweight tile-state
+overlays; `DisplayGeometry` maps canvas-local display points through the canvas origin into the full
+montage grid before resolving source tile indices, and only loaded tiles produce array/profile
+mappings. Missing visible tiles are scheduled sequentially through the one-worker visible controller,
+and each completed tile can update the current canvas with visual commits throttled to roughly 30 Hz.
+Visible tiles are not skipped merely because there are many of them; progressive rendering evaluates
+them one at a time. A tile is skipped only when an individual tile would exceed the visible render
+budget, and that path shows a detailed warning with the estimate, budget, tile shape, and recovery
+options. Montage tile cache entries store only layout-independent image payloads; the current
+`MontagePlan` supplies placement when composing the canvas, so cached pixels cannot carry stale grid
+coordinates. Stale tile callbacks are ignored without mutating overlays, geometry, or the current
+canvas. Histogram/ROI sources are canvas-sized and contain `NaN` for gaps and non-loaded regions.
+Full giant montage allocation is blocked by render memory estimates and bounded viewport canvas
+allocation.
 
 Operation creation is intentionally available from three places:
 

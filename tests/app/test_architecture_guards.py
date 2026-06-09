@@ -112,14 +112,8 @@ def test_layout_controller_preserves_canvas_without_set_geometry_or_clamping():
 
 def test_window_render_montage_view_does_not_call_make_montage():
     text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
-    tree = ast.parse(text)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "update_montage_view":
-            segment = ast.get_source_segment(text, node) or ""
-            assert "make_montage(" not in segment
-            assert "make_montage_viewport_canvas(" in segment
-            return
-    raise AssertionError("update_montage_view not found")
+    assert "make_montage(" not in text
+    assert "make_montage_viewport_canvas(" in text
 
 
 def test_imageview2d_has_no_multi_imageitem_tile_display_path():
@@ -165,6 +159,42 @@ def test_scheduler_v2_pure_modules_are_qt_free():
         text = (ROOT / rel).read_text()
         assert "Qt" not in text
         assert "pyqtgraph" not in text
+
+
+def test_montage_state_modules_are_qt_free():
+    for rel in (
+        Path("arrayscope/display/montage.py"),
+        Path("arrayscope/display/geometry.py"),
+        Path("arrayscope/window/montage_session.py"),
+    ):
+        text = (ROOT / rel).read_text()
+        assert "pyqtgraph" not in text
+        if rel != Path("arrayscope/window/montage_session.py"):
+            assert "Qt" not in text
+
+
+def test_update_montage_view_does_not_batch_missing_tiles():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "update_montage_view":
+            segment = ast.get_source_segment(text, node) or ""
+            assert "tuple((tile, evaluate_image_snapshot" not in segment
+            assert "for tile in missing_tiles)" not in segment
+            assert "_schedule_next_montage_tile" in segment
+            return
+    raise AssertionError("update_montage_view not found")
+
+
+def test_stale_montage_callbacks_do_not_clear_current_overlay():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    for name in ("_on_montage_tile_done", "_on_montage_tile_error"):
+        marker = f"def {name}"
+        assert marker in text
+        segment = text.split(marker, 1)[1].split("\n    def ", 1)[0]
+        stale_prefix = segment.split("return", 1)[0]
+        assert "setEvaluationOverlay(False)" not in stale_prefix
+        assert "setImageStale(False)" not in stale_prefix
 
 
 def test_window_render_uses_render_decision_helper():

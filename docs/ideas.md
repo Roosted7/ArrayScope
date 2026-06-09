@@ -72,6 +72,10 @@ Rules:
 * Add a user-facing cache budget setting with presets for laptop, workstation, and memory-constrained sessions.
 * Add explicit export progress for derived-array `.npy/.npz` saves after materialization is complete.
 * Add benchmark fixtures for representative MRI stacks so cache and slab changes can be compared over time.
+* Keep montage and future stage-cache entries layout-independent: reusable cached data should not carry
+  viewport placement, tile grid origin, or canvas-local coordinates.
+* Consider a dedicated viewport-tile planner that owns montage canvas rect, tile coverage, and scheduling
+  decisions so the window render path can stay thin as Phase 4g stage caching evolves.
 * Add chunked/cancellable FFT and reduction execution so expensive transforms can be interrupted rather
   than only estimated and warned about.
 * True cancellation inside one FFT call remains unsolved; current chunking cancels only between
@@ -104,9 +108,6 @@ Rules:
 ## Technical debt
 
 * Replace print-based warnings with logging or user-facing status messages.
-* Revisit multi-`ImageItem` tiled montage display after isolating the PySide/PyQtGraph offscreen paint
-  instability; the Phase 4d plan/cache contract is ready, but the current commit path uses a bounded
-  loaded-tile collage for stability.
 * Add first-class scalar display support for operation stacks that reduce all dimensions.
 * Clarify FFT naming: current centered FFT/IFFT follow viewer convention but may surprise users expecting NumPy direction.
 * Add public data-mutation ergonomics beyond `notify_data_changed()`, such as context managers or observable data sources.

@@ -1,4 +1,5 @@
 import os
+import inspect
 import time
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
@@ -201,6 +202,36 @@ def test_prefetch_can_be_cancelled_separately(qt_app):
 
     assert started.scheduled
     assert not controller._prefetch_keys
+
+
+def test_start_prefetch_idle_elapsed_false_blocks_with_idle_reason(qt_app):
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    started = controller.start_prefetch(lambda: "prefetch", key="prefetch", idle_elapsed=False)
+
+    assert not started.scheduled
+    assert started.reason == "idle"
+    assert controller.diagnostics().prefetch_idle_blocked == 1
+
+
+def test_start_prefetch_zero_memory_budget_blocks_with_cost_reason(qt_app):
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    started = controller.start_prefetch(lambda: "prefetch", key="prefetch", memory_budget_bytes=0)
+
+    assert not started.scheduled
+    assert started.reason == "cost"
+    assert controller.diagnostics().prefetch_cost_blocked == 1
+
+
+def test_start_prefetch_no_longer_accepts_idle_deadline_ms(qt_app):
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    signature = inspect.signature(EvaluationController.start_prefetch)
+
+    assert "idle_deadline_ms" not in signature.parameters
 
 
 def test_is_busy_reflects_pending_or_running_work(qt_app):
