@@ -24,16 +24,23 @@ def test_large_level_bounds_uses_sampling():
 def test_montage_viewport_canvas_rss_stays_bounded(qtbot, monkeypatch):
     psutil = pytest.importorskip("psutil")
     from tests.ui.helpers import clear_arrayscope_settings, process_events
-    import arrayscope.window.render as render_module
+    from arrayscope.app.settings_state import AppSettingsState
     from arrayscope.window import ArrayScopeWindow
 
     budget = 8 * 1024 * 1024
-    monkeypatch.setattr(render_module, "VISIBLE_RENDER_BUDGET_BYTES", budget)
     clear_arrayscope_settings()
     data = np.zeros((256, 256, 64), dtype=np.float32)
     process = psutil.Process()
     before = process.memory_info().rss
     win = ArrayScopeWindow(data)
+    win.app_settings = AppSettingsState(
+        theme=win.app_settings.theme,
+        prefetch_nearby_slices=win.app_settings.prefetch_nearby_slices,
+        panel_resize_behavior=win.app_settings.panel_resize_behavior,
+        fft_backend=win.app_settings.fft_backend,
+        fft_workers=win.app_settings.fft_workers,
+        render_memory_budget_mb=8,
+    )
     qtbot.addWidget(win)
     rss_samples = []
     try:

@@ -267,12 +267,12 @@ Main goal: Montage never allocates based on total stack size during interaction.
 
 Main goal: Slow operations become predictable, measurable, and configurable.
 
-* [ ] Add OperationCapabilities / OperationCost metadata.
-* [ ] Add peak-memory estimates for reductions, RSS, complex conversion, FFT.
-* [ ] Add scipy.fft backend with worker control.
-* [ ] Add optional pyFFTW backend later.
-* [ ] Add app settings for FFT workers and render memory budget.
-* [ ] Add benchmarks for raw slicing, FFT slicing, montage, ROI stats.
+* [x] Add OperationCapabilities / OperationCost metadata.
+* [x] Add peak-memory estimates for reductions, RSS, complex conversion, FFT.
+* [x] Add scipy.fft backend with worker control.
+* [x] Add optional pyFFTW backend, import-guarded at runtime and included in the conda dev/test env.
+* [x] Add app settings for FFT workers and render memory budget.
+* [x] Add benchmarks for raw slicing, FFT slicing, montage, ROI stats.
 
 ### P4 — scheduler v2
 

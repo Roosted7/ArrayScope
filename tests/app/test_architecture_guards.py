@@ -127,3 +127,31 @@ def test_imageview2d_has_no_multi_imageitem_tile_display_path():
     forbidden = ("setImageTiles", "clearTiles", "_tile_items", "_tile_histogram_sources", "_tile_mode")
     for token in forbidden:
         assert token not in text
+
+
+def test_direct_numpy_fft_calls_are_confined_to_fft_backend_and_tests():
+    offenders = []
+    allowed = {
+        Path("arrayscope/operations/fft_backend.py"),
+    }
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        rel = path.relative_to(ROOT)
+        if rel in allowed:
+            continue
+        text = path.read_text()
+        if "np.fft.fft(" in text or "np.fft.ifft(" in text:
+            offenders.append(str(rel))
+    assert offenders == []
+
+
+def test_operation_coordinator_dtype_estimates_delegate_to_cost_model():
+    text = (ROOT / "arrayscope" / "operations" / "coordinator.py").read_text()
+    assert "operation_output_dtype" in text
+    assert "np.result_type" not in text
+    assert "RootSumSquares" not in text
+
+
+def test_operation_cost_module_is_qt_free():
+    text = (ROOT / "arrayscope" / "operations" / "cost.py").read_text()
+    assert "Qt" not in text
+    assert "pyqtgraph" not in text

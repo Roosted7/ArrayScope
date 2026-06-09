@@ -45,7 +45,7 @@ def load_module(name):
 
 load_module("axis_utils")
 load_module("dim_ops")
-load_module("operation_pipeline")
+operation_pipeline = load_module("operation_pipeline")
 load_module("operation_stack")
 load_module("cache_status")
 load_module("slice_engine")
@@ -54,6 +54,9 @@ load_module("operation_registry")
 operation_coordinator = load_module("operation_coordinator")
 
 OperationCoordinator = operation_coordinator.OperationCoordinator
+CenteredFFT = operation_pipeline.CenteredFFT
+OperationStep = operation_pipeline.OperationStep
+ReverseAxis = operation_pipeline.ReverseAxis
 
 
 def test_operation_coordinator_appends_reorders_and_materializes():
@@ -87,3 +90,32 @@ def test_operation_coordinator_delete_and_move_validate_against_base_shape():
 
     coordinator.delete(0)
     assert coordinator.shape == (3, 4)
+
+
+def test_operation_coordinator_pipeline_cost_estimate_uses_enabled_steps_only():
+    data = np.zeros((8, 16), dtype=np.float32)
+    coordinator = OperationCoordinator(data)
+    coordinator.load_steps((OperationStep(CenteredFFT(axis=0), enabled=False), OperationStep(ReverseAxis(axis=1), enabled=True)))
+
+    cost = coordinator.pipeline_cost_estimate()
+
+    assert len(cost.operation_costs) == 1
+    assert cost.operation_costs[0].kind == "view"
+
+
+def test_operation_dtype_estimates_delegate_to_cost_model():
+    coordinator = OperationCoordinator(np.zeros((8, 16), dtype=np.float32))
+    coordinator.append_operation("centered_fft", axis=0)
+
+    assert coordinator.operation_dtype_estimates() == (np.dtype(np.complex64),)
+
+
+def test_disabled_expensive_fft_not_in_pipeline_peak():
+    data = np.zeros((8, 16), dtype=np.float32)
+    coordinator = OperationCoordinator(data)
+    coordinator.load_steps((OperationStep(CenteredFFT(axis=0), enabled=False), OperationStep(ReverseAxis(axis=1), enabled=True)))
+
+    costs = coordinator.operation_cost_estimates()
+
+    assert len(costs) == 1
+    assert costs[0].kind == "view"
