@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal
 
 import numpy as np
+
+from arrayscope.operations.capabilities import OperationCapabilities, OperationKind as DeclaredOperationKind, normalize_capabilities
 
 OperationKind = Literal["view", "elementwise", "reduction", "transform", "reshape"]
 
@@ -25,6 +27,9 @@ class OperationCost:
     can_chunk: bool = False
     chunkable_axes: tuple[int, ...] = ()
     blocking_axes: tuple[int, ...] = ()
+    expands_request_axes: tuple[int, ...] = ()
+    cache_stage: bool = False
+    can_fuse: bool = False
     notes: tuple[str, ...] = ()
 
 
@@ -40,28 +45,13 @@ class PipelineCost:
     warnings: tuple[str, ...] = ()
 
 
-class OperationCapabilities(Protocol):
-    def output_shape(self, shape: tuple[int, ...]) -> tuple[int, ...]: ...
-
-
 def operation_output_dtype(input_dtype, operation) -> np.dtype | None:
     if input_dtype is None:
         return None
-    dtype = np.dtype(input_dtype)
-    name = type(operation).__name__
-    if name in {"Crop", "ReverseAxis", "FFTShift", "Conjugate", "Maximum", "Minimum"}:
-        return dtype
-    if name == "Mean":
-        return np.mean(np.empty((1,), dtype=dtype)).dtype
-    if name == "Sum":
-        return np.sum(np.empty((1,), dtype=dtype)).dtype
-    if name == "RootSumSquares":
-        return np.asarray(np.abs(np.empty((1,), dtype=dtype))).dtype
-    if name in {"CenteredFFT", "CenteredIFFT", "CombineRealImagAxis"}:
-        return np.result_type(dtype, np.complex64)
-    if name == "SplitComplexAxis":
-        return np.asarray(np.real(np.empty((1,), dtype=dtype))).dtype
-    return dtype
+    if hasattr(operation, "output_dtype"):
+        output = operation.output_dtype(np.dtype(input_dtype))
+        return None if output is None else np.dtype(output)
+    return np.dtype(input_dtype)
 
 
 def estimate_operation_cost(input_shape, input_dtype, operation) -> OperationCost:
@@ -71,79 +61,31 @@ def estimate_operation_cost(input_shape, input_dtype, operation) -> OperationCos
     output_dtype = operation_output_dtype(input_dtype, operation)
     input_bytes = _array_bytes(input_shape, input_dtype)
     output_bytes = _array_bytes(output_shape, output_dtype)
-    name = type(operation).__name__
-    axis = int(getattr(operation, "axis", 0)) if hasattr(operation, "axis") else None
-
-    if name == "Crop":
-        return _cost("view", input_shape, output_shape, input_dtype, output_dtype, input_bytes, output_bytes, output_bytes, can_chunk=True)
-    if name == "ReverseAxis":
-        return _cost("view", input_shape, output_shape, input_dtype, output_dtype, input_bytes, output_bytes, output_bytes, can_chunk=True)
-    if name == "FFTShift":
-        return _cost(
-            "view",
-            input_shape,
-            output_shape,
-            input_dtype,
-            output_dtype,
-            input_bytes,
-            output_bytes,
-            output_bytes,
-            can_chunk=True,
-            notes=("Current NumPy fftshift implementation may allocate.",),
-        )
-    if name == "Conjugate":
-        return _cost("elementwise", input_shape, output_shape, input_dtype, output_dtype, input_bytes, output_bytes, _sum_known(input_bytes, output_bytes))
-    if name in {"CombineRealImagAxis", "SplitComplexAxis"}:
-        return _cost("reshape", input_shape, output_shape, input_dtype, output_dtype, input_bytes, output_bytes, _sum_known(input_bytes, output_bytes))
-    if name in {"Mean", "Sum", "Maximum", "Minimum"}:
-        return _cost(
-            "reduction",
-            input_shape,
-            output_shape,
-            input_dtype,
-            output_dtype,
-            input_bytes,
-            output_bytes,
-            _sum_known(input_bytes, output_bytes),
-            requires_full_axis=(axis,),
-            blocking_axes=(axis,),
-            notes=(f"Requires full axis {axis}.",),
-        )
-    if name == "RootSumSquares":
-        peak = None if input_bytes is None or output_bytes is None else int(input_bytes * 3.0 + output_bytes)
-        return _cost(
-            "reduction",
-            input_shape,
-            output_shape,
-            input_dtype,
-            output_dtype,
-            input_bytes,
-            output_bytes,
-            peak,
-            requires_full_axis=(axis,),
-            blocking_axes=(axis,),
-            temp_multiplier=3.0,
-            notes=(f"Requires full axis {axis}; includes abs/square temporaries.",),
-        )
-    if name in {"CenteredFFT", "CenteredIFFT"}:
-        peak = None if output_bytes is None else int(output_bytes * 6.0)
-        return _cost(
-            "transform",
-            input_shape,
-            output_shape,
-            input_dtype,
-            output_dtype,
-            input_bytes,
-            output_bytes,
-            peak,
-            requires_full_axis=(axis,),
-            temp_multiplier=6.0,
-            can_chunk=True,
-            chunkable_axes=tuple(index for index in range(len(output_shape)) if index != axis),
-            blocking_axes=(axis,),
-            notes=(f"Requires full transform axis {axis}; centered FFT uses backend temporaries.",),
-        )
-    return _cost("elementwise", input_shape, output_shape, input_dtype, output_dtype, input_bytes, output_bytes, _sum_known(input_bytes, output_bytes))
+    capabilities = _operation_capabilities(operation, input_shape, input_dtype, output_shape=output_shape)
+    peak = _estimate_peak_bytes(capabilities, input_bytes=input_bytes, output_bytes=output_bytes)
+    notes = tuple(capabilities.notes)
+    for axis in capabilities.expands_request_axes:
+        label = "transform axis" if capabilities.kind == DeclaredOperationKind.TRANSFORM else "axis"
+        notes += (f"Requires full {label} {axis}.",)
+    return _cost(
+        capabilities.kind.value,
+        input_shape,
+        output_shape,
+        input_dtype,
+        output_dtype,
+        input_bytes,
+        output_bytes,
+        peak,
+        requires_full_axis=capabilities.expands_request_axes,
+        temp_multiplier=capabilities.temp_multiplier,
+        can_chunk=bool(capabilities.chunkable_axes),
+        chunkable_axes=capabilities.chunkable_axes,
+        blocking_axes=capabilities.blocking_axes,
+        expands_request_axes=capabilities.expands_request_axes,
+        cache_stage=capabilities.cache_stage,
+        can_fuse=capabilities.can_fuse,
+        notes=notes,
+    )
 
 
 def estimate_pipeline_cost(base_shape, base_dtype, operations) -> PipelineCost:
@@ -160,7 +102,7 @@ def estimate_pipeline_cost(base_shape, base_dtype, operations) -> PipelineCost:
         for axis in cost.blocking_axes:
             if 0 <= int(axis) < len(axis_labels):
                 blocking_labels.add(axis_labels[int(axis)])
-        axis_labels = _output_axis_labels(axis_labels, operation)
+        axis_labels = _output_axis_labels(axis_labels, operation, cost)
         shape = cost.output_shape
         dtype = cost.output_dtype
         if cost.estimated_peak_bytes is not None:
@@ -203,6 +145,9 @@ def _cost(
     can_chunk=False,
     chunkable_axes=None,
     blocking_axes=(),
+    expands_request_axes=(),
+    cache_stage=False,
+    can_fuse=False,
     notes=(),
 ):
     if chunkable_axes is None:
@@ -221,15 +166,39 @@ def _cost(
         can_chunk=bool(can_chunk or chunkable_axes),
         chunkable_axes=tuple(chunkable_axes),
         blocking_axes=tuple(blocking_axes),
+        expands_request_axes=tuple(expands_request_axes),
+        cache_stage=bool(cache_stage),
+        can_fuse=bool(can_fuse),
         notes=tuple(notes),
     )
 
 
-def _output_axis_labels(axis_labels, operation):
+def _operation_capabilities(operation, input_shape, input_dtype, *, output_shape) -> OperationCapabilities:
+    if hasattr(operation, "capabilities"):
+        return normalize_capabilities(operation.capabilities(input_shape, input_dtype), ndim=len(input_shape))
+    return OperationCapabilities(
+        kind=DeclaredOperationKind.ELEMENTWISE,
+        chunkable_axes=tuple(range(len(output_shape))),
+        can_fuse=True,
+    )
+
+
+def _estimate_peak_bytes(capabilities: OperationCapabilities, *, input_bytes, output_bytes) -> int | None:
+    kind = capabilities.kind
+    if kind == DeclaredOperationKind.VIEW:
+        return output_bytes
+    if kind == DeclaredOperationKind.TRANSFORM:
+        return None if output_bytes is None else int(output_bytes * capabilities.temp_multiplier)
+    if kind == DeclaredOperationKind.REDUCTION and capabilities.temp_multiplier > 1.0:
+        return None if input_bytes is None or output_bytes is None else int(input_bytes * capabilities.temp_multiplier + output_bytes)
+    return _sum_known(input_bytes, output_bytes)
+
+
+def _output_axis_labels(axis_labels, operation, cost: OperationCost):
     labels = list(axis_labels)
-    name = type(operation).__name__
-    if name in {"Mean", "Sum", "Maximum", "Minimum", "RootSumSquares"}:
-        axis = int(getattr(operation, "axis"))
+    removed = len(cost.input_shape) - len(cost.output_shape)
+    if removed == 1 and cost.blocking_axes:
+        axis = int(cost.blocking_axes[0])
         if 0 <= axis < len(labels):
             labels.pop(axis)
     return tuple(labels)

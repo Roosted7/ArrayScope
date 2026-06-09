@@ -26,6 +26,7 @@ from arrayscope.operations.pipeline import (
     SplitComplexAxis,
     OperationStep,
 )
+from arrayscope.operations.regions import AxisRegionKind
 from arrayscope.operations.slabs import evaluate_slab, plan_slab, request_for_export_frame, request_for_image, request_for_line, request_for_scalar
 
 
@@ -147,6 +148,23 @@ def test_lazy_scalar_matches_materialized_value_after_fft_axis_expansion():
     np.testing.assert_allclose(lazy_value, full_value)
     plan = plan_slab(document, request)
     assert plan.base_shape == (6,)
+    assert plan.region_plan is not None
+    assert plan.region_plan.final_region.axes[2].kind == AxisRegionKind.POINT
+    assert plan.region_plan.required_input_region.axes[2].kind == AxisRegionKind.ALL
+    assert len(plan.region_plan.cache_candidates) == 1
+
+
+def test_plan_slab_includes_region_plan_for_fft_image_request():
+    data = np.arange(4 * 5 * 6).reshape(4, 5, 6).astype(float)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    state = ViewState.from_shape(document.current_shape).with_image_axes(0, 1).with_slice(2, 3)
+
+    plan = plan_slab(document, request_for_image(state))
+
+    assert plan.region_plan is not None
+    assert plan.region_plan.request_kind == "image"
+    assert plan.region_plan.final_region.axes[2].kind == AxisRegionKind.POINT
+    assert plan.region_plan.required_input_region.axes[2].kind == AxisRegionKind.ALL
 
 
 def test_simple_slice_only_operations_return_views_and_do_not_modify_base():

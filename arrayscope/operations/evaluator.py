@@ -45,6 +45,7 @@ class EvaluationResult:
     mode: str = "lazy"
     chunk_count: int = 1
     degraded: bool = False
+    region_plan: object | None = None
 
 
 @dataclass
@@ -73,6 +74,7 @@ class OperationEvaluator:
     display_generation: int = 0
     last_status: CacheStatusSnapshot = CacheStatusSnapshot(CacheStatus.COLD, "No evaluation yet")
     last_diagnostics: object | None = None
+    last_region_plan: object | None = None
 
     def __post_init__(self):
         self._image_cache = BoundedArrayCache(DEFAULT_IMAGE_CACHE_BYTES, 96)
@@ -252,6 +254,7 @@ class OperationEvaluator:
         key = self.image_key(view_state, colormap_lut=colormap_lut)
         self._image_cache.last_eval_ms = result.eval_ms
         self._image_result = result.value
+        self.last_region_plan = result.region_plan
         self._image_cache.put(key, result.value)
         self.image_evaluations += 1
         if result.mode == "chunked" or result.chunk_count > 1:
@@ -264,6 +267,7 @@ class OperationEvaluator:
         key = self.line_key(view_state)
         self._profile_cache.last_eval_ms = result.eval_ms
         self._line_result = result.value
+        self.last_region_plan = result.region_plan
         self._profile_cache.put(key, result.value)
         self.line_evaluations += 1
         self.last_status = cache_status_ready("Profile cached")
@@ -273,6 +277,7 @@ class OperationEvaluator:
     def store_scalar_result(self, view_state, index, result: EvaluationResult):
         key = self.scalar_key(view_state, index)
         self._profile_cache.last_eval_ms = result.eval_ms
+        self.last_region_plan = result.region_plan
         self._profile_cache.put(key, result.value)
         self.scalar_evaluations += 1
         self.last_status = cache_status_ready("Pixel value cached")
@@ -282,6 +287,7 @@ class OperationEvaluator:
     def store_export_frame_result(self, view_state, frame_axis, frame_index, colormap_lut, result: EvaluationResult):
         key = self.export_frame_key(view_state, frame_axis, frame_index, colormap_lut=colormap_lut)
         self._image_cache.last_eval_ms = result.eval_ms
+        self.last_region_plan = result.region_plan
         self._image_cache.put(key, result.value)
         self.image_evaluations += 1
         self.last_status = cache_status_ready("Export frame cached")
@@ -298,6 +304,7 @@ class OperationEvaluator:
             slab_nbytes=result.slab_nbytes,
         )
         self._tile_cache.last_eval_ms = result.eval_ms
+        self.last_region_plan = result.region_plan
         self._tile_cache.put(key, value)
         self.image_evaluations += 1
         self.last_status = cache_status_ready("Montage tile cached")
@@ -396,6 +403,9 @@ class OperationEvaluator:
         nbytes = int(np.prod(self.document.current_shape, dtype=np.int64)) * np.dtype(dtype).itemsize
         return tuple(self.document.current_shape), np.dtype(dtype), nbytes
 
+    def planner_diagnostics(self):
+        return self.last_region_plan
+
     def _prefetch_diagnostics(self):
         return {
             "prefetch_scheduled": int(self.prefetch_scheduled),
@@ -450,6 +460,7 @@ def evaluate_image_snapshot(document, view_state, colormap_lut=None, cancellatio
         slab_shape=tuple(np.shape(slab)),
         slab_nbytes=int(getattr(slab, "nbytes", plan.estimated_nbytes or 0)),
         degraded=bool(degraded),
+        region_plan=plan.region_plan,
     )
 
 
@@ -464,6 +475,7 @@ def evaluate_line_snapshot(document, view_state) -> EvaluationResult:
         eval_ms=(perf_counter() - start) * 1000.0,
         slab_shape=tuple(np.shape(slab)),
         slab_nbytes=int(getattr(slab, "nbytes", plan.estimated_nbytes or 0)),
+        region_plan=plan.region_plan,
     )
 
 
@@ -478,6 +490,7 @@ def evaluate_scalar_snapshot(document, view_state, index) -> EvaluationResult:
         eval_ms=(perf_counter() - start) * 1000.0,
         slab_shape=tuple(np.shape(slab)),
         slab_nbytes=int(getattr(slab, "nbytes", plan.estimated_nbytes or 0)),
+        region_plan=plan.region_plan,
     )
 
 
@@ -492,6 +505,7 @@ def evaluate_export_frame_snapshot(document, view_state, frame_axis, frame_index
         eval_ms=(perf_counter() - start) * 1000.0,
         slab_shape=tuple(np.shape(slab)),
         slab_nbytes=int(getattr(slab, "nbytes", plan.estimated_nbytes or 0)),
+        region_plan=plan.region_plan,
     )
 
 
@@ -520,10 +534,10 @@ def _format_nbytes(nbytes):
 def _estimated_dtype(document):
     dtype = getattr(document.base_data, "dtype", np.dtype(float))
     try:
-        from arrayscope.operations.coordinator import _operation_output_dtype
+        from arrayscope.operations.cost import operation_output_dtype
 
         for operation in document.enabled_operations:
-            dtype = _operation_output_dtype(dtype, operation)
+            dtype = operation_output_dtype(dtype, operation)
     except Exception:
         pass
     return np.dtype(dtype)

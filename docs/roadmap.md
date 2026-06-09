@@ -346,14 +346,14 @@ Main goal: Expensive operation results are computed at the right granularity onc
 
 Each operation declares and handles:
 
-* [ ] output shape
-* [ ] output dtype
-* [ ] blocking axes
-* [ ] chunkable axes
-* [ ] request expansion behavior
-* [ ] temp multiplier
-* [ ] cache-stage preference
-* [ ] fusion eligibility
+* [x] output shape
+* [x] output dtype
+* [x] blocking axes
+* [x] chunkable axes
+* [x] request expansion behavior
+* [x] temp multiplier
+* [x] cache-stage preference
+* [x] fusion eligibility
 
 ### P1 — region planner
 

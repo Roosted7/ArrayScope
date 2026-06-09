@@ -73,6 +73,9 @@ class WindowRuntimeDiagnostics:
     derived_dtype: str
     pipeline_peak_bytes: int | None
     pipeline_warnings: tuple[str, ...] = ()
+    capability_stage_count: int | None = None
+    stage_cache_candidate_count: int | None = None
+    stage_cache_candidate_summaries: tuple[str, ...] = ()
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
@@ -145,6 +148,9 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 f"Count: {snapshot.operation_count}",
                 f"Derived: {snapshot.derived_shape} {snapshot.derived_dtype}",
                 f"Pipeline peak: {'n/a' if snapshot.pipeline_peak_bytes is None else format_bytes(snapshot.pipeline_peak_bytes)}",
+                f"Capability stages: {'n/a' if snapshot.capability_stage_count is None else snapshot.capability_stage_count}",
+                f"Stage cache candidates: {'n/a' if snapshot.stage_cache_candidate_count is None else snapshot.stage_cache_candidate_count}",
+                *(f"Candidate: {candidate}" for candidate in snapshot.stage_cache_candidate_summaries),
                 *(f"Warning: {warning}" for warning in snapshot.pipeline_warnings),
             )
         ),

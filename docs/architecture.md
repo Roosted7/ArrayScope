@@ -17,10 +17,17 @@ source of array-view state.
   the current image.
 - `arrayscope.display.viewport`: explicit viewport update policy and `ViewportController` for
   preserving, fitting, resetting, and true 1:1 2D ViewBox ranges.
-- `arrayscope.operations.pipeline`: immutable NumPy operations plus shape prediction.
+- `arrayscope.operations.pipeline`: immutable NumPy operations plus shape, dtype, and capability
+  declarations. Each operation owns its blocking axes, chunkable axes, request expansion behavior,
+  temporary multiplier, stage-cache preference, and fusion eligibility.
+- `arrayscope.operations.capabilities`: Qt-free operation capability vocabulary consumed by cost and
+  planner code.
 - `arrayscope.operations.cost`: Qt-free operation kind, output dtype, output shape, and conservative
-  memory-cost estimates for operation stacks. These estimates feed warnings, diagnostics, visible
-  render decisions, and cost-aware prefetch gates.
+  memory-cost estimates for operation stacks. These estimates are derived from operation-declared
+  capabilities and feed warnings, diagnostics, visible render decisions, and cost-aware prefetch gates.
+- `arrayscope.operations.regions` / `arrayscope.operations.planner`: Qt-free region and stage-planning
+  contracts for Phase 4g. They expose final/required regions and candidate stage-cache points, but the
+  current runtime still does not allocate a StageCache.
 - `arrayscope.core.memory_policy`: Qt-free runtime memory policy. It samples system total,
   available memory, and process RSS through psutil with a deterministic fallback, then derives visible
   render, montage canvas/tile, image cache, montage tile cache, profile cache, future stage-cache, and
@@ -179,8 +186,8 @@ not show cache summaries; cache detail lives in Diagnostics.
 App settings include theme, nearby-slice prefetch, panel resize behavior, FFT backend, FFT worker count,
 memory profile, and render memory budget. The render memory budget is a per-render hard cap for
 visible image and interactive montage tile/canvas guardrails. Cache and prefetch budgets adapt from
-the selected memory profile and sampled system memory. A stage-cache budget is exposed in the policy
-and diagnostics for Phase 4g, but no StageCache allocation is implemented yet.
+the selected memory profile and sampled system memory. A stage-cache budget and planner candidate
+metadata are exposed for Phase 4g, but no StageCache allocation is implemented yet.
 
 Channel mode tracks automatic versus user-selected intent. Invalid channels are
 coerced when dtype changes, for example complex-only channels fall back to real

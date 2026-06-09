@@ -404,6 +404,9 @@ class WindowMenuMixin:
             getattr(self.base_data, "dtype", None),
             tuple(self.document.enabled_operations),
         )
+        region_plan = self.operation_evaluator.planner_diagnostics()
+        capability_stage_count = None if region_plan is None else len(tuple(getattr(region_plan, "stages", ())))
+        candidates = () if region_plan is None else tuple(getattr(region_plan, "cache_candidates", ()))
         return WindowRuntimeDiagnostics(
             memory_policy=policy,
             image_cache=self.operation_evaluator.image_cache_diagnostics(),
@@ -426,6 +429,9 @@ class WindowMenuMixin:
             derived_dtype=str(self.data.dtype),
             pipeline_peak_bytes=cost.estimated_peak_bytes,
             pipeline_warnings=tuple(cost.warnings),
+            capability_stage_count=capability_stage_count,
+            stage_cache_candidate_count=None if region_plan is None else len(candidates),
+            stage_cache_candidate_summaries=tuple(_stage_cache_candidate_summary(candidate) for candidate in candidates),
         )
 
     def open_diagnostics_dialog(self):
@@ -539,3 +545,15 @@ def _panel_resize_behavior_label(behavior):
         PanelResizeBehavior.OFF: "Off",
     }
     return labels.get(behavior, str(getattr(behavior, "value", behavior)))
+
+
+def _stage_cache_candidate_summary(candidate):
+    region = getattr(candidate, "region", None)
+    axes = "n/a" if region is None else ",".join(str(getattr(axis.kind, "value", axis.kind)) for axis in region.axes)
+    nbytes = getattr(candidate, "estimated_nbytes", None)
+    size = "unknown" if nbytes is None else format_bytes(int(nbytes))
+    return (
+        f"stage {getattr(candidate, 'stage_index', '?')} "
+        f"{getattr(candidate, 'priority', 'n/a')} {size}, axes={axes}, "
+        f"{getattr(candidate, 'reason', '')}"
+    )

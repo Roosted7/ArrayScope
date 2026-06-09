@@ -1,5 +1,6 @@
 import numpy as np
 
+from arrayscope.operations.capabilities import OperationCapabilities, OperationKind
 from arrayscope.operations.cost import estimate_operation_cost, estimate_pipeline_cost, operation_output_dtype
 from arrayscope.operations.pipeline import (
     CenteredFFT,
@@ -24,6 +25,8 @@ def test_fft_cost_requires_full_axis_and_has_conservative_peak():
 
     assert cost.kind == "transform"
     assert cost.requires_full_axis == (1,)
+    assert cost.expands_request_axes == (1,)
+    assert cost.cache_stage is True
     assert cost.estimated_peak_bytes >= cost.estimated_output_bytes * 3
     assert cost.can_chunk
     assert cost.blocking_axes == (1,)
@@ -65,3 +68,32 @@ def test_pipeline_cost_tracks_peak_across_operations():
     assert cost.output_shape == (8, 8)
     assert cost.output_dtype == np.dtype(np.float32)
     assert cost.estimated_peak_bytes >= fft_cost.estimated_peak_bytes
+
+
+def test_cost_uses_operation_declared_dtype_and_capabilities():
+    class CustomOperation:
+        def output_shape(self, shape):
+            return tuple(shape)
+
+        def output_dtype(self, input_dtype):
+            return np.dtype(np.float64)
+
+        def capabilities(self, input_shape, input_dtype=None):
+            return OperationCapabilities(
+                kind=OperationKind.ELEMENTWISE,
+                chunkable_axes=tuple(range(len(input_shape))),
+                can_fuse=True,
+            )
+
+    cost = estimate_operation_cost((4, 5), np.float32, CustomOperation())
+
+    assert cost.kind == "elementwise"
+    assert cost.output_dtype == np.dtype(np.float64)
+    assert cost.can_fuse is True
+
+
+def test_crop_cost_reports_fusion_capability():
+    cost = estimate_operation_cost((4, 8, 16), np.float32, Crop(axis=1, start=2, stop=6))
+
+    assert cost.kind == "view"
+    assert cost.can_fuse is True

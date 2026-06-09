@@ -11,6 +11,7 @@ import numpy as np
 from arrayscope.core.axis_info import axes_for_shape, output_axes_for_operations
 from arrayscope.core.axis_utils import validate_axis
 from arrayscope.operations import dim_ops
+from arrayscope.operations.capabilities import OperationCapabilities, OperationKind, default_chunkable_axes
 
 
 Shape = Tuple[int, ...]
@@ -44,6 +45,13 @@ class Crop:
         start, stop = _validate_crop_bounds(shape[axis], self.start, self.stop)
         return _replace_axis(shape, axis, stop - start)
 
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        output_shape = self.output_shape(input_shape)
+        return _capabilities(OperationKind.VIEW, ndim=len(output_shape), can_fuse=True)
+
 
 @dataclass(frozen=True)
 class ReverseAxis:
@@ -57,6 +65,13 @@ class ReverseAxis:
         _validate_axis(shape, self.axis)
         return tuple(shape)
 
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        _validate_axis(input_shape, self.axis)
+        return _capabilities(OperationKind.VIEW, ndim=len(input_shape), can_fuse=True)
+
 
 @dataclass(frozen=True)
 class Conjugate:
@@ -65,6 +80,12 @@ class Conjugate:
 
     def output_shape(self, shape: Shape) -> Shape:
         return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _capabilities(OperationKind.ELEMENTWISE, ndim=len(input_shape), can_fuse=True)
 
 
 @dataclass(frozen=True)
@@ -79,6 +100,20 @@ class Mean:
         axis = _validate_axis(shape, self.axis)
         return _remove_axis(shape, axis)
 
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        return np.mean(np.empty((1,), dtype=np.dtype(input_dtype))).dtype
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _capabilities(
+            OperationKind.REDUCTION,
+            ndim=len(input_shape),
+            blocking_axes=(axis,),
+            expands_request_axes=(axis,),
+        )
+
 
 @dataclass(frozen=True)
 class RootSumSquares:
@@ -91,6 +126,21 @@ class RootSumSquares:
     def output_shape(self, shape: Shape) -> Shape:
         axis = _validate_axis(shape, self.axis)
         return _remove_axis(shape, axis)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        return np.asarray(np.abs(np.empty((1,), dtype=np.dtype(input_dtype)))).dtype
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _capabilities(
+            OperationKind.REDUCTION,
+            ndim=len(input_shape),
+            blocking_axes=(axis,),
+            expands_request_axes=(axis,),
+            temp_multiplier=3.0,
+        )
 
 
 @dataclass(frozen=True)
@@ -105,6 +155,20 @@ class Sum:
         axis = _validate_axis(shape, self.axis)
         return _remove_axis(shape, axis)
 
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        return np.sum(np.empty((1,), dtype=np.dtype(input_dtype))).dtype
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _capabilities(
+            OperationKind.REDUCTION,
+            ndim=len(input_shape),
+            blocking_axes=(axis,),
+            expands_request_axes=(axis,),
+        )
+
 
 @dataclass(frozen=True)
 class Maximum:
@@ -117,6 +181,18 @@ class Maximum:
     def output_shape(self, shape: Shape) -> Shape:
         axis = _validate_axis(shape, self.axis)
         return _remove_axis(shape, axis)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _capabilities(
+            OperationKind.REDUCTION,
+            ndim=len(input_shape),
+            blocking_axes=(axis,),
+            expands_request_axes=(axis,),
+        )
 
 
 @dataclass(frozen=True)
@@ -131,6 +207,18 @@ class Minimum:
         axis = _validate_axis(shape, self.axis)
         return _remove_axis(shape, axis)
 
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _capabilities(
+            OperationKind.REDUCTION,
+            ndim=len(input_shape),
+            blocking_axes=(axis,),
+            expands_request_axes=(axis,),
+        )
+
 
 @dataclass(frozen=True)
 class CenteredFFT:
@@ -142,6 +230,22 @@ class CenteredFFT:
     def output_shape(self, shape: Shape) -> Shape:
         _validate_axis(shape, self.axis)
         return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        return np.result_type(np.dtype(input_dtype), np.complex64)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _capabilities(
+            OperationKind.TRANSFORM,
+            ndim=len(input_shape),
+            blocking_axes=(axis,),
+            expands_request_axes=(axis,),
+            temp_multiplier=6.0,
+            cache_stage=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -155,6 +259,22 @@ class CenteredIFFT:
         _validate_axis(shape, self.axis)
         return tuple(shape)
 
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        return np.result_type(np.dtype(input_dtype), np.complex64)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _capabilities(
+            OperationKind.TRANSFORM,
+            ndim=len(input_shape),
+            blocking_axes=(axis,),
+            expands_request_axes=(axis,),
+            temp_multiplier=6.0,
+            cache_stage=True,
+        )
+
 
 @dataclass(frozen=True)
 class FFTShift:
@@ -166,6 +286,18 @@ class FFTShift:
     def output_shape(self, shape: Shape) -> Shape:
         _validate_axis(shape, self.axis)
         return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        _validate_axis(input_shape, self.axis)
+        return _capabilities(
+            OperationKind.VIEW,
+            ndim=len(input_shape),
+            can_fuse=True,
+            notes=("Current NumPy fftshift implementation may allocate.",),
+        )
 
 
 @dataclass(frozen=True)
@@ -181,6 +313,15 @@ class CombineRealImagAxis:
             raise ValueError(f"axis {axis} must have size 2 to combine as complex")
         return _replace_axis(shape, axis, 1)
 
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        return np.result_type(np.dtype(input_dtype), np.complex64)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        output_shape = self.output_shape(input_shape)
+        return _capabilities(OperationKind.RESHAPE, ndim=len(output_shape))
+
 
 @dataclass(frozen=True)
 class SplitComplexAxis:
@@ -194,6 +335,15 @@ class SplitComplexAxis:
         if shape[axis] != 1:
             raise ValueError(f"axis {axis} must have size 1 to split to real/imag")
         return _replace_axis(shape, axis, 2)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        return np.asarray(np.real(np.empty((1,), dtype=np.dtype(input_dtype)))).dtype
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        output_shape = self.output_shape(input_shape)
+        return _capabilities(OperationKind.RESHAPE, ndim=len(output_shape))
 
 
 @dataclass(frozen=True)
@@ -331,3 +481,31 @@ def _replace_axis(shape: Shape, axis: int, size: int) -> Shape:
 
 def _remove_axis(shape: Shape, axis: int) -> Shape:
     return tuple(size for index, size in enumerate(shape) if index != axis)
+
+
+def _same_dtype(input_dtype):
+    return None if input_dtype is None else np.dtype(input_dtype)
+
+
+def _capabilities(
+    kind: OperationKind,
+    *,
+    ndim: int,
+    blocking_axes=(),
+    expands_request_axes=(),
+    temp_multiplier: float = 1.0,
+    cache_stage: bool = False,
+    can_fuse: bool = False,
+    notes=(),
+) -> OperationCapabilities:
+    chunkable_axes = default_chunkable_axes(kind, ndim=ndim, blocking_axes=blocking_axes)
+    return OperationCapabilities(
+        kind=kind,
+        blocking_axes=tuple(int(axis) for axis in blocking_axes),
+        chunkable_axes=tuple(int(axis) for axis in chunkable_axes),
+        expands_request_axes=tuple(int(axis) for axis in expands_request_axes),
+        cache_stage=bool(cache_stage),
+        temp_multiplier=float(temp_multiplier),
+        can_fuse=bool(can_fuse),
+        notes=tuple(notes),
+    )
