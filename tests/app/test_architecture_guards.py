@@ -189,11 +189,25 @@ def test_operation_cost_uses_operation_declarations_not_registered_type_switches
         assert token not in text
 
 
-def test_runtime_stage_cache_is_not_allocated_before_stage_cache_increment():
-    assert not (ROOT / "arrayscope" / "operations" / "stage_cache.py").exists()
-    text = (ROOT / "arrayscope" / "operations" / "evaluator.py").read_text()
-    assert "StageCache(" not in text
-    assert "self._stage_cache" not in text
+def test_stage_cache_is_qt_free_and_owned_by_operation_evaluator():
+    stage_cache_text = (ROOT / "arrayscope" / "operations" / "stage_cache.py").read_text()
+    assert "Qt" not in stage_cache_text
+    assert "pyqtgraph" not in stage_cache_text
+    assert "StageKey" in stage_cache_text
+
+    evaluator_text = (ROOT / "arrayscope" / "operations" / "evaluator.py").read_text()
+    assert "self._stage_cache = StageCache" in evaluator_text
+    assert "stage_cache_budget_bytes" in evaluator_text
+
+    render_text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    assert "StageCache(" not in render_text
+
+
+def test_optional_disk_stage_cache_is_not_in_roadmap_or_runtime():
+    roadmap = (ROOT / "docs" / "roadmap.md").read_text()
+    assert "disk-backed cache" not in roadmap
+    assert "memmap" not in roadmap
+    assert not (ROOT / "arrayscope" / "operations" / "disk_stage_cache.py").exists()
 
 
 def test_slabs_do_not_branch_on_registered_operation_types():

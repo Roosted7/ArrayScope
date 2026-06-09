@@ -369,25 +369,19 @@ Render requests become:
 
 Add:
 
-* [ ] in-memory stage cache
-* [ ] byte budget
-* [ ] cache priority
-* [ ] document/operation-prefix/region keys
-* [ ] stage invalidation on operation edits
+* [x] in-memory stage cache
+* [x] byte budget
+* [x] cache priority
+* [x] document/operation-prefix/region keys
+* [x] stage invalidation on operation edits
 
 ### P3 — transform-aware caching
 
 For FFT/IFFT (and similar operations) over a sliced axis:
 
-* [ ] compute expanded full-axis result once
-* [ ] cache final expanded stage
-* [ ] serve future slices from cached stage
-
-### P4 — optional disk-backed cache
-
-* [ ] Use numpy.memmap for large derived stages. 
-* [ ] Consider Joblib as inspiration
-* [ ] Add joblib for a optional opt-in persistent cache, not as the primary evaluator cache.
+* [x] compute expanded full-axis result once
+* [x] cache final expanded stage
+* [x] serve future slices from cached stage
 
 ### P5 — operation simplifier
 

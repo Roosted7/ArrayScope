@@ -31,7 +31,7 @@ from arrayscope.core.memory_policy import (
     compute_memory_policy,
     input_nbytes_for,
 )
-from arrayscope.operations.evaluator import _document_key
+from arrayscope.operations.evaluator import _document_key, stage_document_key
 from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
@@ -181,7 +181,13 @@ class RenderMixin:
             return
 
         def evaluate():
-            return evaluate_scalar_snapshot(document, view_state, index)
+            return evaluate_scalar_snapshot(
+                document,
+                view_state,
+                index,
+                stage_cache=self.operation_evaluator.stage_cache,
+                stage_document_key=stage_document_key(document),
+            )
 
         request_key = self.operation_evaluator.scalar_key(view_state, index, document=document)
 
@@ -316,7 +322,18 @@ class RenderMixin:
             return
 
         def evaluate():
-            return tuple((profile_state, evaluate_line_snapshot(document, profile_state)) for profile_state in profile_states)
+            return tuple(
+                (
+                    profile_state,
+                    evaluate_line_snapshot(
+                        document,
+                        profile_state,
+                        stage_cache=self.operation_evaluator.stage_cache,
+                        stage_document_key=stage_document_key(document),
+                    ),
+                )
+                for profile_state in profile_states
+            )
 
         request_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
 
@@ -548,7 +565,15 @@ class RenderMixin:
             preview_key = ("degraded_preview", request_key, decision.degraded_factor)
 
             def evaluate_preview(token):
-                return evaluate_image_snapshot(document, preview_state, colormap_lut=colormap_lut, cancellation_token=token, degraded=True)
+                return evaluate_image_snapshot(
+                    document,
+                    preview_state,
+                    colormap_lut=colormap_lut,
+                    cancellation_token=token,
+                    degraded=True,
+                    stage_cache=self.operation_evaluator.stage_cache,
+                    stage_document_key=stage_document_key(document),
+                )
 
             def done_preview(result):
                 if request_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut):
@@ -592,8 +617,17 @@ class RenderMixin:
                     chunk_size=decision.chunk_size,
                     colormap_lut=colormap_lut,
                     cancellation_token=token,
+                    stage_cache=self.operation_evaluator.stage_cache,
+                    stage_document_key=stage_document_key(document),
                 )
-            return evaluate_image_snapshot(document, view_state, colormap_lut=colormap_lut, cancellation_token=token)
+            return evaluate_image_snapshot(
+                document,
+                view_state,
+                colormap_lut=colormap_lut,
+                cancellation_token=token,
+                stage_cache=self.operation_evaluator.stage_cache,
+                stage_document_key=stage_document_key(document),
+            )
 
         def slow():
             self.img_view.setImageStale(True)
@@ -838,7 +872,13 @@ class RenderMixin:
         )
 
     def _evaluate_montage_tile_snapshot(self, session, tile):
-        return evaluate_image_snapshot(session.document, tile.view_state, colormap_lut=session.colormap_lut)
+        return evaluate_image_snapshot(
+            session.document,
+            tile.view_state,
+            colormap_lut=session.colormap_lut,
+            stage_cache=self.operation_evaluator.stage_cache,
+            stage_document_key=stage_document_key(session.document),
+        )
 
     def _on_montage_tile_slow(self, session_id):
         session = getattr(self, "_montage_session", None)
@@ -1548,7 +1588,18 @@ class RenderMixin:
             return
 
         def evaluate():
-            return tuple((profile_state, evaluate_line_snapshot(document, profile_state)) for profile_state in profile_states)
+            return tuple(
+                (
+                    profile_state,
+                    evaluate_line_snapshot(
+                        document,
+                        profile_state,
+                        stage_cache=self.operation_evaluator.stage_cache,
+                        stage_document_key=stage_document_key(document),
+                    ),
+                )
+                for profile_state in profile_states
+            )
 
         request_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
 

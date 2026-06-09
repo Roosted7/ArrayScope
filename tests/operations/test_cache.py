@@ -117,6 +117,7 @@ def test_apply_memory_policy_resizes_image_tile_and_profile_caches():
     assert evaluator.image_cache_diagnostics().max_bytes == policy.image_cache_budget_bytes
     assert evaluator.tile_cache_diagnostics().max_bytes == policy.tile_cache_budget_bytes
     assert evaluator.profile_cache_diagnostics().max_bytes == policy.profile_cache_budget_bytes
+    assert evaluator.stage_cache_diagnostics().max_bytes == policy.stage_cache_budget_bytes
 
 
 def test_bounded_cache_uses_nbytes_protocol_before_fallbacks():
@@ -154,6 +155,19 @@ def test_operation_evaluator_uses_bounded_display_cache_and_invalidates_by_docum
     evaluator.image(state)
     assert evaluator.image_evaluations == 2
     assert evaluator.derived_evaluations == 0
+
+
+def test_operation_evaluator_clear_cache_clears_stage_cache():
+    from arrayscope.operations.pipeline import CenteredFFT
+
+    data = np.arange(3 * 4 * 5, dtype=np.float32).reshape(3, 4, 5)
+    evaluator = OperationEvaluator(ArrayDocument(data, operations=(CenteredFFT(axis=2),)))
+    evaluator.image(ViewState.from_shape(evaluator.document.current_shape).with_slice(2, 0))
+    assert evaluator.stage_cache_diagnostics().entries == 1
+
+    evaluator.clear_cache()
+
+    assert evaluator.stage_cache_diagnostics().entries == 0
 
 
 def test_prefetch_fills_cache_without_incrementing_visible_evaluation_count():

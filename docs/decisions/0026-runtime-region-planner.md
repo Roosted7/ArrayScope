@@ -45,4 +45,4 @@ registered-operation branching out of `operations.slabs`.
 
 Open an operation-backed 3D array, render a sliced FFT view, inspect Developer -> Diagnostics ->
 Operations, and confirm final/required regions, expanded axes, transitions, and cache candidates update
-while the image remains correct. Confirm no StageCache UI appears yet.
+while the image remains correct. For StageCache runtime behavior and UI, see decision 0027.

@@ -51,5 +51,7 @@ candidates when relevant.
 
 The follow-up runtime planner increment moved slab execution onto `RegionPlan` transitions. Registered
 operations now own both backward region mapping and regional application. `operations.slabs` executes
-planner transitions and no longer contains registered-operation request expansion branches. Runtime
-StageCache allocation remains deferred.
+planner transitions and no longer contains registered-operation request expansion branches.
+
+Phase 4g later added the in-memory StageCache described in decision 0027. Disk-backed caching and
+operation simplification remain out of scope for that cache increment.

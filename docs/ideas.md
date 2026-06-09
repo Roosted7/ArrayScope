@@ -71,14 +71,14 @@ Rules:
 * Add richer diagnostics graphs/timelines for cache growth, scheduler activity, and prefetch usefulness.
 * Add explicit export progress for derived-array `.npy/.npz` saves after materialization is complete.
 * Add benchmark fixtures for representative MRI stacks so cache and slab changes can be compared over time.
-* Keep future stage-cache entries tied to planner regions, operation prefixes, and document revisions;
-  reusable cached data should not carry viewport placement, tile grid origin, or canvas-local coordinates.
 * Consider a dedicated viewport-tile planner that owns montage canvas rect, tile coverage, and scheduling
   decisions so the window render path can stay thin as Phase 4g stage caching evolves.
 * Add chunked/cancellable FFT and reduction execution so expensive transforms can be interrupted rather
   than only estimated and warned about.
 * True cancellation inside one FFT call remains unsolved; current chunking cancels only between
   independent output chunks and major evaluation steps.
+* Consider optional disk-backed StageCache later with `numpy.memmap` or Joblib-inspired storage, but
+  only after the in-memory planner/cache path has real usage data.
 * Add optional memory-mapped array support for large `.npy` files.
 * Measure prefetch usefulness on representative 3D/4D datasets before adding predictive cache heuristics
   beyond nearby-slice/profile prefetch.

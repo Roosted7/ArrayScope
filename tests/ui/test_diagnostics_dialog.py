@@ -52,6 +52,7 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
             assert heading in text
         assert dialog.refresh_button.isCheckable()
         assert dialog.refresh_button.isChecked()
+        assert "stage" in dialog._bars
     finally:
         win.close()
 
@@ -122,6 +123,30 @@ def test_diagnostics_operations_tab_shows_region_planner_details(qtbot):
         win.close()
 
 
+def test_diagnostics_stage_cache_bar_and_cache_text_update(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.operations.pipeline import CenteredFFT
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5, 6), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
+        win._set_document(win.operation_coordinator.document)
+        win.operation_evaluator.image(win.view_state.with_slice(2, 0))
+        win.open_diagnostics_dialog()
+        dialog = win._diagnostics_dialog
+        dialog.refresh(force_text=True)
+
+        assert "entries=1" in dialog._bars["stage"].text()
+        dialog.tabs.setCurrentWidget(dialog._section_edits["Caches"])
+        dialog.refresh(force_text=True)
+        assert "Stage cache:" in dialog.current_text_edit().toPlainText()
+    finally:
+        win.close()
+
+
 def test_diagnostics_auto_text_toggle_pauses_text_but_not_bars(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -141,6 +166,7 @@ def test_diagnostics_auto_text_toggle_pauses_text_but_not_bars(qtbot):
 
         assert dialog.text_edit.toPlainText() == before
         assert "entries=1" in dialog._bars["image"].text()
+        assert "Stage cache" in dialog._bars["stage"].text()
 
         dialog.refresh_button.setChecked(True)
         assert "entries=1" in dialog.text_edit.toPlainText()

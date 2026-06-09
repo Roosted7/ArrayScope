@@ -41,7 +41,17 @@ class MontageTile:
     view_state: object
 
 
-class MontageTileState(Enum):
+class _ValueEnum(Enum):
+    def __eq__(self, other):
+        if isinstance(other, Enum):
+            return self.value == getattr(other, "value", object())
+        return self.value == other
+
+    def __hash__(self):
+        return hash(self.value)
+
+
+class MontageTileState(_ValueEnum):
     LOADED = "loaded"
     LOADING = "loading"
     SKIPPED = "skipped"

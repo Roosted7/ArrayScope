@@ -417,6 +417,7 @@ class WindowMenuMixin:
             image_cache=self.operation_evaluator.image_cache_diagnostics(),
             tile_cache=self.operation_evaluator.tile_cache_diagnostics(),
             profile_cache=self.operation_evaluator.profile_cache_diagnostics(),
+            stage_cache=self.operation_evaluator.stage_cache_diagnostics(),
             schedulers=tuple(schedulers),
             render=render,
             montage=montage,
