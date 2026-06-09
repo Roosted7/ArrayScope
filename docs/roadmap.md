@@ -393,6 +393,51 @@ Add algebraic simplifications:
 * [x] Crop composition
 * [x] Adjacent elementwise operation fusion, scoped to current conjugate cancellation and dtype-cast coalescing
 
+## Phase 4h — interaction latency and progressive-render performance
+
+Goal: Keep UI interaction responsive while exact rendering catches up, and make cached/progressive montage updates cheap enough to feel immediate.
+
+### P0 — stabilize and instrument hot paths
+
+* [ ] Fix optional `pyfftw` tests so the base suite does not require optional backends.
+* [ ] Add/reset fixtures for FFT runtime options and scheduler globals that can leak across broad test runs.
+* [ ] Investigate and fix the chunked cancellation broad-run flake.
+* [ ] Fix `EvaluationController.clear_group()` so queued prefetch bookkeeping cannot be orphaned by `QThreadPool.clear()`.
+* [ ] Route profile prefetch away from exact live-profile work so exact profile updates and prefetch cannot corrupt each other’s scheduler state.
+* [ ] Avoid duplicate slab planning in image/line/scalar/export snapshot evaluation.
+* [ ] Add render timing diagnostics for synchronous render orchestration, planning, queue wait, evaluation, display commit, levels/histogram, operation dock refresh, inspection refresh, montage canvas work, and overlay work.
+* [ ] Add montage timing diagnostics for tile cache hits/misses, stage cache hits/misses, last tile eval, canvas compose/patch, `ImageItem.setImage`, and overlay update.
+* [ ] Show Phase 4h timing diagnostics in Developer -> Diagnostics.
+* [ ] Add baseline tests for timing diagnostic presence and scheduler bookkeeping.
+
+### P1 — render coalescer and fast interactive slice path
+
+* [ ] Add a render request coalescer owned by the window/render coordinator.
+* [ ] Add an interactive slice path that updates `ViewState` and slice controls immediately, then schedules rendering through the coalescer.
+* [ ] Ensure rapid scroll/slice bursts render only the latest state.
+* [ ] Clear/cancel stale visible work when a newer interactive render supersedes it.
+* [ ] Defer operation dock, profile, ROI, and inspection refreshes during interactive bursts unless their state is immediately visible and cheap.
+* [ ] Preserve correctness for normal exact render, degraded preview, chunked render, montage, profile, ROI, export frame, and cache-hit paths.
+* [ ] Add interaction tests proving slice text updates immediately while rendering is coalesced.
+* [ ] Add latency-oriented tests or benchmark assertions for rapid slice changes.
+
+### P2 — progressive montage and worker/cache policy
+
+* [ ] Split full display commit from progressive display commit.
+* [ ] Ensure progressive montage commits do not refresh side panels, operation dock, histogram/levels, or stale/evaluation overlays unnecessarily.
+* [ ] Make `MontageRenderSession` own mutable canvas buffers, histogram buffers, tile states, and dirty rects.
+* [ ] Patch completed tiles into the existing montage canvas instead of rebuilding the canvas from all loaded tiles.
+* [ ] Throttle montage screen flushes so many tile completions produce one UI update per frame interval.
+* [ ] Replace per-commit montage overlay item recreation with one persistent/custom overlay item.
+* [ ] Add a dedicated montage tile evaluation controller, initially max 2 workers.
+* [ ] Keep visible image rendering latest-only on its own max-1 lane.
+* [ ] Keep prefetch idle-only and separate from exact visible/profile/ROI lanes.
+* [ ] Verify tile cache keys are independent of layout-only montage choices such as column count.
+* [ ] Improve StageCache retention scoring using estimated bytes, recompute cost, hit count, visible reuse, and prefetch-only penalties.
+* [ ] Add StageCache key tests proving viewport position, montage columns, and progress/loading state do not affect stage identity.
+* [ ] Add benchmark thresholds for hot cached tile display and cold cheap tile latency.
+
+
 ## Phase 5 — Multi-window and sessions
 
 Goal: make repeated inspection work reproducible and efficient.
