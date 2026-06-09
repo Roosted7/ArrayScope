@@ -43,6 +43,9 @@ class PipelineCost:
     chunkable_axes: tuple[int, ...] = ()
     blocking_axes: tuple[int, ...] = ()
     warnings: tuple[str, ...] = ()
+    optimization_steps: tuple[str, ...] = ()
+    original_operation_count: int = 0
+    optimized_operation_count: int = 0
 
 
 def operation_output_dtype(input_dtype, operation) -> np.dtype | None:
@@ -88,7 +91,17 @@ def estimate_operation_cost(input_shape, input_dtype, operation) -> OperationCos
     )
 
 
-def estimate_pipeline_cost(base_shape, base_dtype, operations) -> PipelineCost:
+def estimate_pipeline_cost(base_shape, base_dtype, operations, *, optimize: bool = True) -> PipelineCost:
+    original_operations = tuple(operations)
+    optimization_steps = ()
+    if optimize:
+        from arrayscope.operations.optimizer import format_optimization_steps, optimize_operations
+
+        optimized = optimize_operations(base_shape, base_dtype, original_operations)
+        operations = optimized.operations
+        optimization_steps = format_optimization_steps(optimized.steps)
+    else:
+        operations = original_operations
     shape = tuple(int(size) for size in base_shape)
     dtype = None if base_dtype is None else np.dtype(base_dtype)
     costs = []
@@ -121,6 +134,9 @@ def estimate_pipeline_cost(base_shape, base_dtype, operations) -> PipelineCost:
         chunkable_axes=chunkable_axes,
         blocking_axes=final_blocking_axes,
         warnings=tuple(warnings),
+        optimization_steps=tuple(optimization_steps),
+        original_operation_count=len(original_operations),
+        optimized_operation_count=len(tuple(operations)),
     )
 
 

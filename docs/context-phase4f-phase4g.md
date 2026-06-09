@@ -16,8 +16,15 @@ allocation remains future work.
 Implemented note: Phase 4g P2/P3 added an in-memory, policy-budgeted StageCache owned by
 `OperationEvaluator`. Planner candidates are used as cache lookup/store boundaries, so expanded
 FFT/IFFT stages can be reused across slices, montage tiles, profiles, scalar reads, prefetch, and
-evaluator-backed export. Disk-backed cache moved back to ideas, and operation simplification remains
-future work.
+evaluator-backed export. Disk-backed cache moved back to ideas. The later P4 optimizer handles safe
+runtime operation simplification without rewriting user recipes.
+
+Implemented note: Phase 4g P4 added a Qt-free internal runtime optimizer. It preserves the user-authored
+operation stack while simplifying same-axis FFT/IFFT pairs with dtype preservation, reverse pairs,
+conjugate pairs, adjacent same-axis crops, and adjacent dtype casts. StageCache now retains only useful
+planner candidates by default, with fallback to an earlier fitting candidate when the preferred retained
+stage is oversized. Disk-backed cache remains an idea; broader future work is chunked/cancellable long
+operations and optional backends.
 
 ## P0: viewport montage currently shrinks/crops to loaded tiles
 

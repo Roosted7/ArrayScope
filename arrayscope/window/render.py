@@ -1417,7 +1417,8 @@ class RenderMixin:
         for axis in view_state.image_axes:
             indices = view_state.axis_range_indices[axis]
             shape.append(len(indices) if indices is not None else view_state.shape[axis])
-        dtype = getattr(self.document.base_data, "dtype", np.dtype(float))
+        dtypes = self.operation_coordinator.operation_dtype_estimates()
+        dtype = dtypes[-1] if dtypes else getattr(self.document.base_data, "dtype", np.dtype(float))
         rgb = view_state.channel == ChannelMode.COMPLEX
         return estimate_display_image_bytes(tuple(shape), dtype, rgb=rgb, histogram=rgb)
 

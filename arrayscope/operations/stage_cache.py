@@ -82,6 +82,12 @@ class StageCache:
             if summary:
                 self.last_miss = str(summary)
 
+    def note_refused(self, summary: str = "") -> None:
+        with self._lock:
+            self.refused_over_budget += 1
+            if summary:
+                self.last_refused = str(summary)
+
     def get(self, key: StageKey) -> StageValue | None:
         with self._lock:
             value = self._items.pop(key, None)

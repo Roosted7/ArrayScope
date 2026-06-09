@@ -1,7 +1,7 @@
 import numpy as np
 
 from arrayscope.core.view_state import ViewState
-from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
+from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, CenteredIFFT
 from arrayscope.operations.render_plan import (
     RenderCostContext,
     RenderDecisionKind,
@@ -32,6 +32,12 @@ def _context(**overrides):
     )
     values.update(overrides)
     return RenderCostContext(**values)
+
+
+class _ArrayMetadata:
+    def __init__(self, shape, dtype):
+        self.shape = tuple(int(size) for size in shape)
+        self.dtype = np.dtype(dtype)
 
 
 def test_exact_render_under_budget_chooses_async_exact():
@@ -107,6 +113,49 @@ def test_chunk_axis_never_uses_fft_axis():
     axis, _size = choose_chunk_axis_and_size(state, context)
 
     assert axis != 0
+
+
+def test_simplified_fft_ifft_pair_uses_region_peak_for_render_budget():
+    data = _ArrayMetadata((2048, 2048, 128), np.float32)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=2), CenteredIFFT(axis=2)))
+    state = ViewState.from_shape(document.current_shape).with_image_axes(0, 1).with_slice(2, 0)
+
+    context = estimate_visible_render_context(
+        document,
+        state,
+        display_bytes=2048 * 2048 * np.dtype(np.complex64).itemsize,
+        render_budget_bytes=64 * 1024 * 1024,
+    )
+    decision = choose_visible_render_decision(context)
+
+    assert context.has_transform is False
+    assert context.estimated_pipeline_peak_bytes <= 64 * 1024 * 1024
+    assert decision.kind == RenderDecisionKind.ASYNC_EXACT
+
+
+def test_simplified_fft_ifft_pair_uses_odd_index_region_peak_for_large_2d_matrix():
+    data = _ArrayMetadata((10000, 12000), np.float32)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=1), CenteredIFFT(axis=1)))
+    rows = tuple(range(1, 10000, 3))
+    cols = tuple(range(2, 12000, 5))
+    state = (
+        ViewState.from_shape(document.current_shape)
+        .with_image_axes(0, 1)
+        .with_axis_range(0, rows, "odd rows")
+        .with_axis_range(1, cols, "odd cols")
+    )
+    display_bytes = len(rows) * len(cols) * np.dtype(np.complex64).itemsize
+
+    context = estimate_visible_render_context(
+        document,
+        state,
+        display_bytes=display_bytes,
+        render_budget_bytes=128 * 1024 * 1024,
+    )
+    decision = choose_visible_render_decision(context)
+
+    assert context.estimated_pipeline_peak_bytes <= 128 * 1024 * 1024
+    assert decision.kind == RenderDecisionKind.ASYNC_EXACT
 
 
 def test_chunk_axis_prefers_y_then_x():

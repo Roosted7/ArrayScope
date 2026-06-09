@@ -74,6 +74,8 @@ class WindowRuntimeDiagnostics:
     derived_dtype: str
     pipeline_peak_bytes: int | None
     pipeline_warnings: tuple[str, ...] = ()
+    optimized_operation_count: int | None = None
+    operation_optimization_summaries: tuple[str, ...] = ()
     capability_stage_count: int | None = None
     stage_cache_candidate_count: int | None = None
     stage_cache_candidate_summaries: tuple[str, ...] = ()
@@ -152,8 +154,11 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
         "Operations": "\n".join(
             (
                 f"Count: {snapshot.operation_count}",
+                f"Optimized count: {'n/a' if snapshot.optimized_operation_count is None else snapshot.optimized_operation_count}",
                 f"Derived: {snapshot.derived_shape} {snapshot.derived_dtype}",
                 f"Pipeline peak: {'n/a' if snapshot.pipeline_peak_bytes is None else format_bytes(snapshot.pipeline_peak_bytes)}",
+                "Optimizations:",
+                *(f"  {summary}" for summary in snapshot.operation_optimization_summaries),
                 f"Final region: {snapshot.operation_final_region or 'n/a'}",
                 f"Required input: {snapshot.operation_required_input_region or 'n/a'}",
                 f"Expanded axes: {_axes_text(snapshot.operation_expanded_axes)}",

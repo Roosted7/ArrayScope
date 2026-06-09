@@ -173,13 +173,34 @@ class WindowMenuMixin:
         budget_menu.setToolTipsVisible(True)
         performance_menu.addMenu(budget_menu)
         self._render_budget_menu = budget_menu
-        for mb in (256, 512, 1024, 2048, 4096, 8192):
+        for mb in (128, 256, 512, 1024, 2048, 4096, 8192):
             action = QtGui.QAction(f"{mb} MiB", self, checkable=True)
             action.setToolTip("Per-render hard cap for visible images and montage canvas/tile allocation.")
             self._render_budget_action_group.addAction(action)
             action.triggered.connect(lambda checked=False, mb=mb: self._set_render_memory_budget_mb(mb))
             budget_menu.addAction(action)
             self._render_budget_actions[mb] = action
+        performance_menu.addSeparator()
+        less_memory_action = QtGui.QAction("Use Less Memory", self)
+        less_memory_action.setToolTip("Switch to Conservative profile and lower the per-render memory budget one step.")
+        less_memory_action.triggered.connect(self._use_less_memory)
+        performance_menu.addAction(less_memory_action)
+        more_memory_action = QtGui.QAction("Use More Memory", self)
+        more_memory_action.setToolTip("Switch to Aggressive profile and raise the per-render memory budget one step.")
+        more_memory_action.triggered.connect(self._use_more_memory)
+        performance_menu.addAction(more_memory_action)
+        decrease_budget_action = QtGui.QAction("Decrease Render Budget", self)
+        decrease_budget_action.setToolTip("Lower the per-render memory budget one preset step.")
+        decrease_budget_action.triggered.connect(lambda checked=False: self._adjust_render_memory_budget(-1))
+        performance_menu.addAction(decrease_budget_action)
+        increase_budget_action = QtGui.QAction("Increase Render Budget", self)
+        increase_budget_action.setToolTip("Raise the per-render memory budget one preset step.")
+        increase_budget_action.triggered.connect(lambda checked=False: self._adjust_render_memory_budget(1))
+        performance_menu.addAction(increase_budget_action)
+        self._less_memory_action = less_memory_action
+        self._more_memory_action = more_memory_action
+        self._decrease_render_budget_action = decrease_budget_action
+        self._increase_render_budget_action = increase_budget_action
         self._sync_performance_actions()
 
         developer_menu = QtWidgets.QMenu("Developer", self)
@@ -231,6 +252,11 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(int(self.app_settings.render_memory_budget_mb) == int(mb))
             action.blockSignals(False)
+        budgets = sorted(int(mb) for mb in self._render_budget_actions)
+        current_budget = int(self.app_settings.render_memory_budget_mb)
+        if hasattr(self, "_decrease_render_budget_action"):
+            self._decrease_render_budget_action.setEnabled(current_budget > budgets[0])
+            self._increase_render_budget_action.setEnabled(current_budget < budgets[-1])
 
     def _apply_performance_settings(self, persist=True):
         current = getattr(self, "app_settings", AppSettingsState())
@@ -269,6 +295,25 @@ class WindowMenuMixin:
     def _set_render_memory_budget_mb(self, mb):
         self.app_settings = self._updated_app_settings(render_memory_budget_mb=int(mb))
         self._apply_performance_settings(persist=True)
+
+    def _adjust_render_memory_budget(self, direction: int):
+        budgets = sorted(int(mb) for mb in self._render_budget_actions)
+        current = int(getattr(self.app_settings, "render_memory_budget_mb", 512))
+        if int(direction) < 0:
+            candidates = [mb for mb in budgets if mb < current]
+            target = candidates[-1] if candidates else budgets[0]
+        else:
+            candidates = [mb for mb in budgets if mb > current]
+            target = candidates[0] if candidates else budgets[-1]
+        self._set_render_memory_budget_mb(target)
+
+    def _use_less_memory(self):
+        self.app_settings = self._updated_app_settings(memory_profile=MemoryProfileChoice.CONSERVATIVE)
+        self._adjust_render_memory_budget(-1)
+
+    def _use_more_memory(self):
+        self.app_settings = self._updated_app_settings(memory_profile=MemoryProfileChoice.AGGRESSIVE)
+        self._adjust_render_memory_budget(1)
 
     def _updated_app_settings(self, **changes):
         current = getattr(self, "app_settings", AppSettingsState())
@@ -435,6 +480,16 @@ class WindowMenuMixin:
             derived_dtype=str(self.data.dtype),
             pipeline_peak_bytes=cost.estimated_peak_bytes,
             pipeline_warnings=tuple(cost.warnings),
+            optimized_operation_count=(
+                getattr(region_plan, "optimized_operation_count", None)
+                if region_plan is not None
+                else cost.optimized_operation_count
+            ),
+            operation_optimization_summaries=(
+                tuple(getattr(region_plan, "optimization_steps", ()))
+                if region_plan is not None
+                else tuple(cost.optimization_steps)
+            ),
             capability_stage_count=capability_stage_count,
             stage_cache_candidate_count=None if region_plan is None else len(candidates),
             stage_cache_candidate_summaries=tuple(_stage_cache_candidate_summary(candidate) for candidate in candidates),
@@ -565,6 +620,8 @@ def _stage_cache_candidate_summary(candidate):
     return (
         f"stage {getattr(candidate, 'stage_index', '?')} "
         f"{getattr(candidate, 'priority', 'n/a')} {size}, axes={axes}, "
+        f"retain={'yes' if getattr(candidate, 'retain', True) else 'no'} "
+        f"{getattr(candidate, 'retain_reason', '')}, "
         f"{getattr(candidate, 'reason', '')}"
     )
 

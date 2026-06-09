@@ -32,7 +32,7 @@ def test_fft_over_sliced_axis_stores_and_reuses_expanded_stage(monkeypatch):
     assert diagnostics.hits >= 1
 
 
-def test_fft_ifft_reuses_final_expanded_stage(monkeypatch):
+def test_fft_ifft_pair_is_simplified_without_transform_or_stage_cache(monkeypatch):
     calls = {"fft": 0, "ifft": 0}
     original_fft = dim_ops.centered_fft
     original_ifft = dim_ops.centered_ifft
@@ -53,15 +53,14 @@ def test_fft_ifft_reuses_final_expanded_stage(monkeypatch):
 
     evaluator.image(state.with_slice(2, 0))
     diagnostics = evaluator.stage_cache_diagnostics()
-    assert diagnostics.stores == 2
-    assert "stage=2" in diagnostics.last_store
-    assert calls == {"fft": 1, "ifft": 1}
+    assert diagnostics.stores == 0
+    assert diagnostics.entries == 0
+    assert calls == {"fft": 0, "ifft": 0}
 
     evaluator.image(state.with_slice(2, 1))
     diagnostics = evaluator.stage_cache_diagnostics()
-    assert calls == {"fft": 1, "ifft": 1}
-    assert diagnostics.hits >= 1
-    assert "stage=2" in diagnostics.last_hit
+    assert calls == {"fft": 0, "ifft": 0}
+    assert diagnostics.entries == 0
 
 
 def test_stage_cache_invalidates_on_operation_and_revision_changes():

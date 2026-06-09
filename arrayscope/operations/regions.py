@@ -53,6 +53,8 @@ class StageCacheCandidate:
     estimated_nbytes: int | None
     priority: str
     reason: str
+    retain: bool = True
+    retain_reason: str = ""
 
 
 def region_from_index_spec(shape, spec) -> RegionSpec:

@@ -56,7 +56,8 @@ def test_fft_over_sliced_axis_produces_expanded_cache_candidate():
     assert len(candidates) == 1
     assert candidates[0].stage_index == 1
     assert candidates[0].region.axes[2].kind == AxisRegionKind.ALL
-    assert candidates[0].priority == "high"
+    assert candidates[0].priority == "highest"
+    assert candidates[0].retain is True
 
 
 def test_fft_then_ifft_produces_two_ordered_candidates():
@@ -64,7 +65,9 @@ def test_fft_then_ifft_produces_two_ordered_candidates():
     candidates = candidate_stage_cache_points((4, 5, 6), np.float32, (CenteredFFT(axis=2), CenteredIFFT(axis=2)), final_region)
 
     assert [candidate.stage_index for candidate in candidates] == [1, 2]
-    assert candidates[1].priority == candidates[0].priority
+    assert candidates[0].retain is False
+    assert candidates[1].retain is True
+    assert candidates[1].priority == "highest"
 
 
 def test_final_region_for_requests_matches_view_state():
@@ -140,3 +143,35 @@ def test_disabled_operation_steps_are_ignored_by_region_plan():
     plan = plan_region_request(document, request_for_image(state))
 
     assert [type(transition.operation).__name__ for transition in plan.transitions] == ["CenteredFFT"]
+
+
+def test_region_plan_uses_optimized_fft_ifft_pair():
+    data = np.zeros((4, 5, 6), dtype=np.float32)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=2), CenteredIFFT(axis=2)))
+    state = ViewState.from_shape(document.current_shape).with_image_axes(0, 1).with_slice(2, 3)
+
+    plan = plan_region_request(document, request_for_image(state))
+
+    assert [type(transition.operation).__name__ for transition in plan.transitions] == ["CastDType"]
+    assert plan.required_input_region == plan.final_region
+    assert plan.cache_candidates == ()
+    assert plan.original_operation_count == 2
+    assert plan.optimized_operation_count == 1
+    assert plan.optimization_steps
+
+
+def test_region_plan_uses_composed_crop_and_removed_reverse_pair():
+    data = np.zeros((4, 10, 6), dtype=np.float32)
+    crop_doc = ArrayDocument(data, operations=(Crop(axis=1, start=2, stop=9), Crop(axis=1, start=3, stop=5)))
+    crop_state = ViewState.from_shape(crop_doc.current_shape)
+    crop_plan = plan_region_request(crop_doc, request_for_image(crop_state))
+
+    assert [type(transition.operation).__name__ for transition in crop_plan.transitions] == ["Crop"]
+    assert crop_plan.optimized_operation_count == 1
+
+    reverse_doc = ArrayDocument(data, operations=(ReverseAxis(axis=1), ReverseAxis(axis=1)))
+    reverse_state = ViewState.from_shape(reverse_doc.current_shape)
+    reverse_plan = plan_region_request(reverse_doc, request_for_image(reverse_state))
+
+    assert reverse_plan.transitions == ()
+    assert reverse_plan.optimized_operation_count == 0

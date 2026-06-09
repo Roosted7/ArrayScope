@@ -564,8 +564,11 @@ class ArrayDocument:
 
 
 def evaluate(base_data, operations):
+    from arrayscope.operations.optimizer import optimize_operations
+
+    optimized = optimize_operations(np.shape(base_data), getattr(base_data, "dtype", None), operations)
     data = base_data
-    for operation in operations:
+    for operation in optimized.operations:
         data = operation.apply(data)
     return data
 
