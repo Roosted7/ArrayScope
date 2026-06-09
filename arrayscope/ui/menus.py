@@ -15,8 +15,10 @@ from arrayscope.app.settings_state import (
 from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.runtime_diagnostics import (
     CanvasPreserveRuntimeDiagnostics,
+    MontageTimingDiagnostics,
     MontageRuntimeDiagnostics,
     RenderRuntimeDiagnostics,
+    RenderTimingDiagnostics,
     WindowRuntimeDiagnostics,
 )
 from arrayscope.operations.cost import estimate_pipeline_cost
@@ -470,6 +472,26 @@ class WindowMenuMixin:
                 self.layout_manager.canvas_preserver.diagnostics()
                 if hasattr(getattr(self, "layout_manager", None), "canvas_preserver")
                 else CanvasPreserveRuntimeDiagnostics()
+            ),
+            render_timing=RenderTimingDiagnostics(
+                last_render_sync_ms=getattr(self, "_last_render_sync_ms", None),
+                last_control_sync_ms=getattr(self, "_last_control_sync_ms", None),
+                last_planning_ms=getattr(self, "_last_planning_ms", None),
+                last_worker_queue_wait_ms=getattr(self, "_last_worker_queue_wait_ms", None),
+                last_evaluation_ms=getattr(self, "_last_render_completed_ms", None),
+                last_display_commit_ms=getattr(self, "_last_display_commit_ms", None),
+                last_set_image_ms=getattr(self, "_last_set_image_ms", None),
+                last_levels_histogram_ms=getattr(self, "_last_levels_histogram_ms", None),
+                last_operation_dock_ms=getattr(self, "_last_operation_dock_ms", None),
+                last_inspection_refresh_ms=getattr(self, "_last_inspection_refresh_ms", None),
+            ),
+            montage_timing=MontageTimingDiagnostics(
+                last_tile_eval_ms=getattr(self, "_last_montage_tile_eval_ms", None),
+                last_canvas_compose_ms=getattr(self, "_last_montage_canvas_compose_ms", None),
+                last_canvas_commit_ms=getattr(self, "_last_montage_canvas_commit_ms", None),
+                last_overlay_update_ms=getattr(self, "_last_montage_overlay_update_ms", None),
+                cached_tiles_last_session=int(getattr(self, "_montage_cached_tiles_last_session", 0) or 0),
+                missing_tiles_last_session=int(getattr(self, "_montage_missing_tiles_last_session", 0) or 0),
             ),
             fft_backend_choice=backend_choice.value,
             fft_backend_resolved=resolved.name,

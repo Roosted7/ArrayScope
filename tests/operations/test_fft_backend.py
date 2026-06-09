@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from arrayscope.operations import dim_ops, fft_backend
 from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT
@@ -42,6 +43,7 @@ def test_pyfftw_backend_unavailable_does_not_require_dependency(monkeypatch):
 
 
 def test_pyfftw_backend_available_in_conda_environment():
+    pytest.importorskip("pyfftw")
     assert "pyfftw" in fft_backend.available_fft_backends()
     data = np.arange(4 * 4, dtype=np.float32).reshape(4, 4)
     backend = fft_backend.resolve_fft_backend("pyfftw")
@@ -50,10 +52,6 @@ def test_pyfftw_backend_available_in_conda_environment():
 
 
 def test_dim_ops_uses_runtime_options():
-    previous = fft_backend.get_fft_runtime_options()
-    try:
-        fft_backend.set_fft_runtime_options(backend="numpy", workers="1")
-        data = np.arange(3 * 4, dtype=np.float32).reshape(3, 4)
-        np.testing.assert_allclose(dim_ops.centered_fft(data, 0), fft_backend.NumpyFFTBackend().centered_fft(data, 0))
-    finally:
-        fft_backend.set_fft_runtime_options(backend=previous[0], workers=previous[1])
+    fft_backend.set_fft_runtime_options(backend="numpy", workers="1")
+    data = np.arange(3 * 4, dtype=np.float32).reshape(3, 4)
+    np.testing.assert_allclose(dim_ops.centered_fft(data, 0), fft_backend.NumpyFFTBackend().centered_fft(data, 0))

@@ -190,6 +190,10 @@ cancellable mid-call. Prefetch requests are keyed, deduped, bounded, off by defa
 while visible work is busy, skipped for montage, and allowed for operation-backed views only when cost
 estimates are below conservative thresholds. Cache diagnostics include hit rate, prefetch outcomes,
 render refusal/degraded/chunk counters, and scheduler pending/running/stale/cancelled counters.
+Phase 4h timing diagnostics are internal developer diagnostics only. They sample synchronous render
+orchestration, planning, worker queue wait, evaluation, display commit, image setting, levels/histogram
+work, operation-dock refresh, inspection refresh, montage tile evaluation, montage canvas composition,
+and montage overlay updates; they do not define public API or user-facing behavior.
 The Developer -> Diagnostics dialog is a plain `QDialog`, not a managed dock, so it does not
 participate in panel layout or canvas-preservation transactions. It shows color-coded filling bars
 for memory/cache budget usage and compact text sections for deeper state. The Operations panel does
@@ -201,6 +205,11 @@ visible image and interactive montage tile/canvas guardrails. Cache and prefetch
 the selected memory profile and sampled system memory. StageCache is in-memory only; disk/memmap
 cache is not implemented. Operation simplification is a runtime/internal execution optimization, not a
 recipe rewrite or user-facing stack transformation.
+
+Exact profile work and profile prefetch must not share cleanup-sensitive scheduler bookkeeping.
+Live/visible profile requests use the profile evaluation controller; profile prefetch uses the
+prefetch controller so `start_latest()` replacement for exact profile work cannot clear unrelated
+queued prefetch keys.
 
 Channel mode tracks automatic versus user-selected intent. Invalid channels are
 coerced when dtype changes, for example complex-only channels fall back to real

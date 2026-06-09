@@ -37,6 +37,25 @@ from arrayscope.operations.slabs import evaluate_slab, plan_slab, request_for_ex
 from arrayscope.operations.stage_cache import StageCache
 
 
+def test_image_snapshot_plans_slab_once(monkeypatch):
+    import arrayscope.operations.evaluator as evaluator_module
+
+    calls = []
+    original = evaluator_module.plan_slab
+
+    def wrapped(document, request):
+        calls.append(request)
+        return original(document, request)
+
+    monkeypatch.setattr(evaluator_module, "plan_slab", wrapped)
+    document = ArrayDocument(np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6))
+    state = ViewState.from_shape(document.current_shape)
+
+    evaluator_module.evaluate_image_snapshot(document, state)
+
+    assert len(calls) == 1
+
+
 def _assert_image_and_line_match(data, operations):
     document = ArrayDocument(data, operations=operations)
     state = ViewState.from_shape(document.current_shape)

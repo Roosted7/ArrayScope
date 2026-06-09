@@ -399,16 +399,16 @@ Goal: Keep UI interaction responsive while exact rendering catches up, and make 
 
 ### P0 — stabilize and instrument hot paths
 
-* [ ] Fix optional `pyfftw` tests so the base suite does not require optional backends.
-* [ ] Add/reset fixtures for FFT runtime options and scheduler globals that can leak across broad test runs.
-* [ ] Investigate and fix the chunked cancellation broad-run flake.
-* [ ] Fix `EvaluationController.clear_group()` so queued prefetch bookkeeping cannot be orphaned by `QThreadPool.clear()`.
-* [ ] Route profile prefetch away from exact live-profile work so exact profile updates and prefetch cannot corrupt each other’s scheduler state.
-* [ ] Avoid duplicate slab planning in image/line/scalar/export snapshot evaluation.
-* [ ] Add render timing diagnostics for synchronous render orchestration, planning, queue wait, evaluation, display commit, levels/histogram, operation dock refresh, inspection refresh, montage canvas work, and overlay work.
-* [ ] Add montage timing diagnostics for tile cache hits/misses, stage cache hits/misses, last tile eval, canvas compose/patch, `ImageItem.setImage`, and overlay update.
-* [ ] Show Phase 4h timing diagnostics in Developer -> Diagnostics.
-* [ ] Add baseline tests for timing diagnostic presence and scheduler bookkeeping.
+* [x] Fix optional `pyfftw` tests so the base suite does not require optional backends.
+* [x] Add/reset fixtures for FFT runtime options and scheduler globals that can leak across broad test runs.
+* [x] Investigate and fix the chunked cancellation broad-run flake.
+* [x] Fix `EvaluationController.clear_group()` so queued prefetch bookkeeping cannot be orphaned by `QThreadPool.clear()`.
+* [x] Route profile prefetch away from exact live-profile work so exact profile updates and prefetch cannot corrupt each other’s scheduler state.
+* [x] Avoid duplicate slab planning in image/line/scalar/export snapshot evaluation.
+* [x] Add render timing diagnostics for synchronous render orchestration, planning, queue wait, evaluation, display commit, levels/histogram, operation dock refresh, inspection refresh, montage canvas work, and overlay work.
+* [~] Add montage timing diagnostics for tile cache hits/misses, stage cache hits/misses, last tile eval, canvas compose/patch, `ImageItem.setImage`, and overlay update.
+* [x] Show Phase 4h timing diagnostics in Developer -> Diagnostics.
+* [x] Add baseline tests for timing diagnostic presence and scheduler bookkeeping.
 
 ### P1 — render coalescer and fast interactive slice path
 

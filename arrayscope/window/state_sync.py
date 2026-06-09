@@ -190,6 +190,9 @@ class StateSyncMixin:
         self._sync_controls_from_view_state()
 
     def _update_operation_dock(self):
+        from time import perf_counter
+
+        start = perf_counter()
         if hasattr(self, "operation_dock"):
             self.operation_dock.set_operations(
                 self.document.operations,
@@ -200,6 +203,7 @@ class StateSyncMixin:
                 operation_dtypes=self._operation_dtypes(),
             )
             self._sync_progressive_docks()
+        self._last_operation_dock_ms = (perf_counter() - start) * 1000.0
 
     def _operation_shapes(self):
         return self.operation_coordinator.operation_shapes()
