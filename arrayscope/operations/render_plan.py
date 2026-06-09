@@ -69,8 +69,12 @@ def estimate_visible_render_context(document, view_state, *, display_bytes, rend
         document.enabled_operations,
     )
     slab_bytes = None
+    region_peak = None
     try:
-        slab_bytes = plan_slab(document, request_for_image(view_state)).estimated_nbytes
+        slab_plan = plan_slab(document, request_for_image(view_state))
+        slab_bytes = slab_plan.estimated_nbytes
+        if slab_plan.region_plan is not None:
+            region_peak = slab_plan.region_plan.estimated_peak_bytes
     except Exception:
         slab_bytes = None
     kinds = {cost.kind for cost in pipeline.operation_costs}
@@ -81,7 +85,7 @@ def estimate_visible_render_context(document, view_state, *, display_bytes, rend
         image_axes=None if view_state.image_axes is None else tuple(int(axis) for axis in view_state.image_axes),
         estimated_display_bytes=int(display_bytes),
         estimated_slab_bytes=slab_bytes,
-        estimated_pipeline_peak_bytes=pipeline.estimated_peak_bytes,
+        estimated_pipeline_peak_bytes=region_peak if region_peak is not None else pipeline.estimated_peak_bytes,
         render_budget_bytes=int(render_budget_bytes),
         has_operations=bool(document.enabled_operations),
         has_transform="transform" in kinds,

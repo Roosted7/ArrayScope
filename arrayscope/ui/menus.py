@@ -20,6 +20,7 @@ from arrayscope.core.runtime_diagnostics import (
     WindowRuntimeDiagnostics,
 )
 from arrayscope.operations.cost import estimate_pipeline_cost
+from arrayscope.operations.regions import region_text
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
 from arrayscope.operations import fft_backend
 from arrayscope.operations.registry import operation_entries
@@ -407,6 +408,10 @@ class WindowMenuMixin:
         region_plan = self.operation_evaluator.planner_diagnostics()
         capability_stage_count = None if region_plan is None else len(tuple(getattr(region_plan, "stages", ())))
         candidates = () if region_plan is None else tuple(getattr(region_plan, "cache_candidates", ()))
+        transitions = () if region_plan is None else tuple(getattr(region_plan, "transitions", ()))
+        expanded_axes = tuple(
+            sorted({int(axis) for transition in transitions for axis in getattr(transition, "expanded_axes", ())})
+        )
         return WindowRuntimeDiagnostics(
             memory_policy=policy,
             image_cache=self.operation_evaluator.image_cache_diagnostics(),
@@ -432,6 +437,10 @@ class WindowMenuMixin:
             capability_stage_count=capability_stage_count,
             stage_cache_candidate_count=None if region_plan is None else len(candidates),
             stage_cache_candidate_summaries=tuple(_stage_cache_candidate_summary(candidate) for candidate in candidates),
+            operation_final_region="" if region_plan is None else region_text(region_plan.final_region),
+            operation_required_input_region="" if region_plan is None else region_text(region_plan.required_input_region),
+            operation_expanded_axes=expanded_axes,
+            operation_transition_summaries=tuple(_region_transition_summary(transition) for transition in transitions),
         )
 
     def open_diagnostics_dialog(self):
@@ -556,4 +565,15 @@ def _stage_cache_candidate_summary(candidate):
         f"stage {getattr(candidate, 'stage_index', '?')} "
         f"{getattr(candidate, 'priority', 'n/a')} {size}, axes={axes}, "
         f"{getattr(candidate, 'reason', '')}"
+    )
+
+
+def _region_transition_summary(transition):
+    expanded = tuple(getattr(transition, "expanded_axes", ()))
+    expanded_text = "n/a" if not expanded else ",".join(str(int(axis)) for axis in expanded)
+    return (
+        f"stage {getattr(transition, 'stage_index', '?')} {type(getattr(transition, 'operation', object())).__name__} "
+        f"output={region_text(transition.output_region)} "
+        f"input={region_text(transition.required_input_region)} "
+        f"expanded={expanded_text}"
     )

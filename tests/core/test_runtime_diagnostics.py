@@ -34,6 +34,10 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
         derived_shape=(4, 5),
         derived_dtype="float32",
         pipeline_peak_bytes=None,
+        operation_final_region="[:, :, 3]",
+        operation_required_input_region="[:, :, :]",
+        operation_expanded_axes=(2,),
+        operation_transition_summaries=("stage 1 CenteredFFT output=[:, :, 3] input=[:, :, :] expanded=2",),
     )
 
     text = format_runtime_diagnostics(snapshot)
@@ -42,3 +46,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
         assert heading in text
     assert "hit-rate=n/a" in text
     assert "start gen=1" in text
+    assert "Final region: [:, :, 3]" in text
+    assert "Required input: [:, :, :]" in text
+    assert "Expanded axes: 2" in text
+    assert "stage 1 CenteredFFT" in text

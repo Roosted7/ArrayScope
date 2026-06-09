@@ -7,6 +7,12 @@ contracts. Cost estimates now consume the operation declarations, and slab plans
 regions and candidate stage-cache metadata for diagnostics. Runtime region execution and StageCache
 allocation remain future Phase 4g steps.
 
+Implemented note: Phase 4g P1 moved runtime slab evaluation onto `RegionPlan` transitions. Registered
+operations now own their region mapping and regional application, and `operations.slabs` executes the
+planner output instead of carrying operation-specific request-expansion branches. Developer Diagnostics
+shows final/required regions, expanded axes, transitions, candidates, and peak estimates. StageCache
+allocation remains future work.
+
 ## P0: viewport montage currently shrinks/crops to loaded tiles
 
 This likely explains several of our montage symptoms:

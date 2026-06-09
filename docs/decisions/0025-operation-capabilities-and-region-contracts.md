@@ -46,3 +46,10 @@ StageCache allocation.
 No new manual behavior is expected from this increment. Use Developer -> Diagnostics after rendering an
 operation-backed view to confirm the Operations details show capability stages and stage-cache
 candidates when relevant.
+
+## Amendment
+
+The follow-up runtime planner increment moved slab execution onto `RegionPlan` transitions. Registered
+operations now own both backward region mapping and regional application. `operations.slabs` executes
+planner transitions and no longer contains registered-operation request expansion branches. Runtime
+StageCache allocation remains deferred.

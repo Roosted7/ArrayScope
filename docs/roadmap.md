@@ -359,11 +359,11 @@ Each operation declares and handles:
 
 Render requests become:
 
-* [ ] requested final region
-* [ ] required input region
-* [ ] expanded intermediate regions
-* [ ] candidate stage-cache points
-* [ ] estimated peak memory
+* [x] requested final region
+* [x] required input region
+* [x] expanded intermediate regions
+* [x] candidate stage-cache points
+* [x] estimated peak memory
 
 ### P2 — stage cache
 

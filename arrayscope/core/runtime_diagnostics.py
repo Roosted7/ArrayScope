@@ -76,6 +76,10 @@ class WindowRuntimeDiagnostics:
     capability_stage_count: int | None = None
     stage_cache_candidate_count: int | None = None
     stage_cache_candidate_summaries: tuple[str, ...] = ()
+    operation_final_region: str = ""
+    operation_required_input_region: str = ""
+    operation_expanded_axes: tuple[int, ...] = ()
+    operation_transition_summaries: tuple[str, ...] = ()
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
@@ -148,6 +152,11 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 f"Count: {snapshot.operation_count}",
                 f"Derived: {snapshot.derived_shape} {snapshot.derived_dtype}",
                 f"Pipeline peak: {'n/a' if snapshot.pipeline_peak_bytes is None else format_bytes(snapshot.pipeline_peak_bytes)}",
+                f"Final region: {snapshot.operation_final_region or 'n/a'}",
+                f"Required input: {snapshot.operation_required_input_region or 'n/a'}",
+                f"Expanded axes: {_axes_text(snapshot.operation_expanded_axes)}",
+                "Transitions:",
+                *(f"  {transition}" for transition in snapshot.operation_transition_summaries),
                 f"Capability stages: {'n/a' if snapshot.capability_stage_count is None else snapshot.capability_stage_count}",
                 f"Stage cache candidates: {'n/a' if snapshot.stage_cache_candidate_count is None else snapshot.stage_cache_candidate_count}",
                 *(f"Candidate: {candidate}" for candidate in snapshot.stage_cache_candidate_summaries),
@@ -171,6 +180,10 @@ def _size_text(size: tuple[int, int] | None) -> str:
     if size is None:
         return "n/a"
     return f"{int(size[0])}x{int(size[1])}"
+
+
+def _axes_text(axes: tuple[int, ...]) -> str:
+    return "n/a" if not axes else ",".join(str(int(axis)) for axis in axes)
 
 
 def _scheduler_line(scheduler) -> str:

@@ -12,6 +12,16 @@ from arrayscope.core.axis_info import axes_for_shape, output_axes_for_operations
 from arrayscope.core.axis_utils import validate_axis
 from arrayscope.operations import dim_ops
 from arrayscope.operations.capabilities import OperationCapabilities, OperationKind, default_chunkable_axes
+from arrayscope.operations.regions import (
+    AxisRegion,
+    AxisRegionKind,
+    RegionSpec,
+    axis_region_kind,
+    axis_in_region_result,
+    replace_region_axis,
+    insert_region_axis,
+    take_axis_region,
+)
 
 
 Shape = Tuple[int, ...]
@@ -52,6 +62,15 @@ class Crop:
         output_shape = self.output_shape(input_shape)
         return _capabilities(OperationKind.VIEW, ndim=len(output_shape), can_fuse=True)
 
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        start, stop = _validate_crop_bounds(input_shape[axis], self.start, self.stop)
+        return replace_region_axis(output_region, axis, _crop_axis_region(output_region.axes[axis], start, stop))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        del input_region, output_region
+        return data
+
 
 @dataclass(frozen=True)
 class ReverseAxis:
@@ -72,6 +91,14 @@ class ReverseAxis:
         _validate_axis(input_shape, self.axis)
         return _capabilities(OperationKind.VIEW, ndim=len(input_shape), can_fuse=True)
 
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, _reverse_axis_region(output_region.axes[axis], input_shape[axis]))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        del input_region, output_region
+        return data
+
 
 @dataclass(frozen=True)
 class Conjugate:
@@ -86,6 +113,14 @@ class Conjugate:
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         return _capabilities(OperationKind.ELEMENTWISE, ndim=len(input_shape), can_fuse=True)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        del input_region, output_region
+        return np.conjugate(data)
 
 
 @dataclass(frozen=True)
@@ -113,6 +148,14 @@ class Mean:
             blocking_axes=(axis,),
             expands_request_axes=(axis,),
         )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        del output_region
+        return np.mean(data, axis=axis_in_region_result(input_region, self.axis))
 
 
 @dataclass(frozen=True)
@@ -142,6 +185,14 @@ class RootSumSquares:
             temp_multiplier=3.0,
         )
 
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        del output_region
+        return np.sqrt(np.sum(np.abs(data) ** 2, axis=axis_in_region_result(input_region, self.axis)))
+
 
 @dataclass(frozen=True)
 class Sum:
@@ -169,6 +220,14 @@ class Sum:
             expands_request_axes=(axis,),
         )
 
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        del output_region
+        return np.sum(data, axis=axis_in_region_result(input_region, self.axis))
+
 
 @dataclass(frozen=True)
 class Maximum:
@@ -194,6 +253,14 @@ class Maximum:
             expands_request_axes=(axis,),
         )
 
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        del output_region
+        return np.max(data, axis=axis_in_region_result(input_region, self.axis))
+
 
 @dataclass(frozen=True)
 class Minimum:
@@ -218,6 +285,14 @@ class Minimum:
             blocking_axes=(axis,),
             expands_request_axes=(axis,),
         )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        del output_region
+        return np.min(data, axis=axis_in_region_result(input_region, self.axis))
 
 
 @dataclass(frozen=True)
@@ -247,6 +322,16 @@ class CenteredFFT:
             cache_stage=True,
         )
 
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        transformed = dim_ops.centered_fft(data, slab_axis)
+        return take_axis_region(transformed, output_region.axes[axis], transformed.shape[slab_axis], axis=slab_axis)
+
 
 @dataclass(frozen=True)
 class CenteredIFFT:
@@ -275,6 +360,16 @@ class CenteredIFFT:
             cache_stage=True,
         )
 
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        transformed = dim_ops.centered_ifft(data, slab_axis)
+        return take_axis_region(transformed, output_region.axes[axis], transformed.shape[slab_axis], axis=slab_axis)
+
 
 @dataclass(frozen=True)
 class FFTShift:
@@ -299,6 +394,14 @@ class FFTShift:
             notes=("Current NumPy fftshift implementation may allocate.",),
         )
 
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, _fftshift_axis_region(output_region.axes[axis], input_shape[axis]))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        del input_region, output_region
+        return data
+
 
 @dataclass(frozen=True)
 class CombineRealImagAxis:
@@ -322,6 +425,18 @@ class CombineRealImagAxis:
         output_shape = self.output_shape(input_shape)
         return _capabilities(OperationKind.RESHAPE, ndim=len(output_shape))
 
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        combined = dim_ops.combine_real_imag_axis(data, slab_axis)
+        if axis_region_kind(output_region.axes[axis].kind) == AxisRegionKind.POINT:
+            return np.take(combined, 0, axis=slab_axis)
+        return take_axis_region(combined, output_region.axes[axis], 1, axis=slab_axis)
+
 
 @dataclass(frozen=True)
 class SplitComplexAxis:
@@ -344,6 +459,20 @@ class SplitComplexAxis:
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         output_shape = self.output_shape(input_shape)
         return _capabilities(OperationKind.RESHAPE, ndim=len(output_shape))
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.POINT, 0))
+
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+        axis = _validate_axis(output_region.axes, self.axis)
+        requested = output_region.axes[axis]
+        if axis_region_kind(requested.kind) == AxisRegionKind.POINT:
+            return np.real(data) if int(requested.value) == 0 else np.imag(data)
+        slab_axis = axis_in_region_result(output_region, axis)
+        expanded = np.expand_dims(data, axis=slab_axis)
+        split = dim_ops.split_complex_axis(expanded, slab_axis)
+        return take_axis_region(split, requested, 2, axis=slab_axis)
 
 
 @dataclass(frozen=True)
@@ -451,6 +580,8 @@ def evaluate_shape(base_shape, operations) -> Shape:
 def _coerce_step(step) -> OperationStep:
     if isinstance(step, OperationStep):
         return step
+    if hasattr(step, "operation") and hasattr(step, "enabled"):
+        return OperationStep(step.operation, enabled=bool(step.enabled), step_id=str(getattr(step, "step_id", uuid4().hex)))
     return OperationStep(step)
 
 
@@ -481,6 +612,72 @@ def _replace_axis(shape: Shape, axis: int, size: int) -> Shape:
 
 def _remove_axis(shape: Shape, axis: int) -> Shape:
     return tuple(size for index, size in enumerate(shape) if index != axis)
+
+
+def _axis_region_indices(axis_region: AxisRegion, size: int):
+    kind = axis_region_kind(axis_region.kind)
+    size = int(size)
+    if kind == AxisRegionKind.ALL:
+        return np.arange(size, dtype=np.int64)
+    if kind == AxisRegionKind.POINT:
+        index = int(axis_region.value)
+        if index < 0:
+            index += size
+        return index
+    if kind == AxisRegionKind.INDICES:
+        indices = np.asarray(axis_region.value, dtype=np.int64)
+        return np.where(indices < 0, indices + size, indices)
+    start, stop, step = axis_region.value
+    return np.arange(size, dtype=np.int64)[slice(int(start), None if stop is None else int(stop), int(step))]
+
+
+def _axis_region_from_indices(indices) -> AxisRegion:
+    if isinstance(indices, (int, np.integer)):
+        return AxisRegion(AxisRegionKind.POINT, int(indices))
+    indices = np.asarray(indices, dtype=np.int64)
+    if indices.size == 0:
+        return AxisRegion(AxisRegionKind.SLICE, (0, 0, 1))
+    if indices.size == 1:
+        start = int(indices[0])
+        return AxisRegion(AxisRegionKind.SLICE, (start, start + 1, 1))
+    step = int(indices[1] - indices[0])
+    if step > 0 and np.array_equal(indices, indices[0] + step * np.arange(indices.size)):
+        start = int(indices[0])
+        stop = int(indices[-1] + step)
+        return AxisRegion(AxisRegionKind.SLICE, (start, stop, step))
+    if step < 0 and np.array_equal(indices, indices[0] + step * np.arange(indices.size)):
+        start = int(indices[0])
+        stop = int(indices[-1] + step)
+        return AxisRegion(AxisRegionKind.SLICE, (start, None if stop < 0 else stop, step))
+    return AxisRegion(AxisRegionKind.INDICES, tuple(int(index) for index in indices))
+
+
+def _crop_axis_region(axis_region: AxisRegion, start: int, stop: int) -> AxisRegion:
+    kind = axis_region_kind(axis_region.kind)
+    start = int(start)
+    stop = int(stop)
+    output_size = stop - start
+    if kind == AxisRegionKind.ALL:
+        return AxisRegion(AxisRegionKind.SLICE, (start, stop, 1))
+    indices = _axis_region_indices(axis_region, output_size)
+    if isinstance(indices, (int, np.integer)):
+        return AxisRegion(AxisRegionKind.POINT, start + int(indices))
+    return _axis_region_from_indices(np.asarray(indices, dtype=np.int64) + start)
+
+
+def _reverse_axis_region(axis_region: AxisRegion, size: int) -> AxisRegion:
+    indices = _axis_region_indices(axis_region, int(size))
+    if isinstance(indices, (int, np.integer)):
+        return AxisRegion(AxisRegionKind.POINT, int(size) - 1 - int(indices))
+    return _axis_region_from_indices(int(size) - 1 - np.asarray(indices, dtype=np.int64))
+
+
+def _fftshift_axis_region(axis_region: AxisRegion, size: int) -> AxisRegion:
+    indices = _axis_region_indices(axis_region, int(size))
+    offset = int(np.ceil(int(size) / 2.0))
+    if isinstance(indices, (int, np.integer)):
+        return AxisRegion(AxisRegionKind.POINT, (int(indices) + offset) % int(size))
+    return _axis_region_from_indices((np.asarray(indices, dtype=np.int64) + offset) % int(size))
 
 
 def _same_dtype(input_dtype):

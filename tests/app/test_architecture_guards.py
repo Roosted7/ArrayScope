@@ -196,6 +196,29 @@ def test_runtime_stage_cache_is_not_allocated_before_stage_cache_increment():
     assert "self._stage_cache" not in text
 
 
+def test_slabs_do_not_branch_on_registered_operation_types():
+    text = (ROOT / "arrayscope" / "operations" / "slabs.py").read_text()
+    for token in (
+        "CenteredFFT",
+        "CenteredIFFT",
+        "Crop",
+        "ReverseAxis",
+        "FFTShift",
+        "RootSumSquares",
+        "CombineRealImagAxis",
+        "SplitComplexAxis",
+    ):
+        assert token not in text
+
+
+def test_registered_operations_define_region_contract_methods():
+    from arrayscope.operations.registry import operation_entries
+
+    for entry in operation_entries():
+        assert hasattr(entry.operation_type, "required_input_region"), entry.id
+        assert hasattr(entry.operation_type, "apply_to_region"), entry.id
+
+
 def test_memory_policy_and_runtime_diagnostics_are_qt_free():
     for rel in (
         Path("arrayscope/core/memory_policy.py"),
