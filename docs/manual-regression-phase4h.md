@@ -33,6 +33,26 @@ Useful commands:
 
 ```bash
 PATH=~/miniconda3/bin:$PATH direnv exec . pytest tests/ui/test_interactive_render_coalescing.py -q
+PATH=~/miniconda3/bin:$PATH direnv exec . pytest tests/ui/test_interaction_latency.py -q
 PATH=~/miniconda3/bin:$PATH direnv exec . pytest tests/ui/test_render_scheduler.py tests/ui/test_dimension_control_interactions.py tests/ui/test_viewport_interactions.py tests/ui/test_roi_inspection_interactions.py -q
 PATH=~/miniconda3/bin:$PATH direnv exec . env ARRAYSCOPE_STRICT_UI=1 pytest tests/ui -q
+```
+
+## P2 - Progressive montage and worker/cache policy
+
+1. Open a large 3D or 4D array and enter montage mode with a range that includes more tiles than are immediately cached.
+2. Confirm cached tiles appear immediately and missing tiles fill progressively.
+3. Confirm the Operations, Profile, ROI, and Inspection panels do not churn while progressive tiles are filling.
+4. Pan the montage and confirm the viewport canvas rebuilds for the new viewport, then tile completions patch that viewport progressively.
+5. Change slices rapidly while montage work is pending and confirm stale tile work does not commit into the new view.
+6. Open Developer -> Diagnostics and confirm the scheduler section includes `visible`, `montage`, `profile`, `roi`, `pixel`, and `prefetch`.
+7. Confirm the montage timing bar/text updates tile cache lookup, stage cache lookup, tile eval, compose/patch/commit, set image, and overlay timings.
+8. Enable live profile, interact with montage, stop interaction, and confirm profile refresh resumes after quiet.
+
+Useful commands:
+
+```bash
+PATH=~/miniconda3/bin:$PATH direnv exec . pytest tests/display/test_montage.py tests/display/test_imageview2d.py -q
+PATH=~/miniconda3/bin:$PATH direnv exec . pytest tests/ui/test_montage_session.py tests/ui/test_montage_interactions.py -q
+PATH=~/miniconda3/bin:$PATH direnv exec . pytest tests/operations/test_stage_cache.py tests/operations/test_slab_evaluator.py tests/operations/test_region_planner.py -q
 ```

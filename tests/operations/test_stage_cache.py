@@ -100,3 +100,33 @@ def test_stage_cache_get_containing_returns_broader_region():
 
     assert cache.get_containing(key_point) is value
     assert cache.diagnostics().hits == 1
+
+
+def test_stage_cache_retention_score_prefers_hot_visible_expensive_stage():
+    cache = StageCache(max_bytes=40, max_entries=4)
+    cheap_prefetch = StageValue(
+        data=np.arange(4, dtype=np.float32),
+        region=RegionSpec((AxisRegion(AxisRegionKind.ALL),)),
+        stage_index=1,
+        nbytes=16,
+        priority="high",
+        recompute_cost=0.0,
+        prefetch_only=True,
+    )
+    expensive_visible = StageValue(
+        data=np.arange(4, dtype=np.float32),
+        region=RegionSpec((AxisRegion(AxisRegionKind.ALL),)),
+        stage_index=1,
+        nbytes=16,
+        priority="high",
+        recompute_cost=500.0,
+        visible_reuse=True,
+    )
+    cache.put(_key("prefetch"), cheap_prefetch)
+    cache.put(_key("visible"), expensive_visible)
+    assert cache.get(_key("visible")) is expensive_visible
+
+    cache.put(_key("new"), _value(np.arange(4), priority="high"))
+
+    assert cache.get(_key("prefetch")) is None
+    assert cache.get(_key("visible")) is expensive_visible

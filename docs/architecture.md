@@ -127,6 +127,15 @@ slice controls immediately, then calls `request_render(..., interactive=True)`. 
 cancels stale visible/profile/ROI/pixel/prefetch work, and refreshes side panels once the interaction
 burst is quiet.
 
+Progressive montage rendering has a narrower commit path than full image rendering. The initial
+montage viewport composes a bounded canvas, then completed tiles patch that session-owned canvas in
+place and flush to screen at a frame cadence. Progressive commits update pixels, display geometry,
+axis flips, viewport preservation, and montage loading/skipped overlays; side panels and expensive
+dock/profile/ROI refreshes run only on full commits or after the interaction burst is quiet. Montage
+tile evaluation uses a dedicated `montage` scheduler lane with two workers, while visible exact image
+rendering remains latest-only on the max-1 `visible` lane and prefetch remains idle-only on the
+separate `prefetch` lane.
+
 `render()` then:
 
 1. migrates `ViewState` to the current derived shape;
@@ -206,8 +215,9 @@ estimates are below conservative thresholds. Cache diagnostics include hit rate,
 render refusal/degraded/chunk counters, and scheduler pending/running/stale/cancelled counters.
 Phase 4h timing diagnostics are internal developer diagnostics only. They sample synchronous render
 orchestration, planning, worker queue wait, evaluation, display commit, image setting, levels/histogram
-work, operation-dock refresh, inspection refresh, montage tile evaluation, montage canvas composition,
-and montage overlay updates; they do not define public API or user-facing behavior.
+work, operation-dock refresh, inspection refresh, montage tile evaluation, tile and stage cache lookup,
+montage canvas composition/patch/commit, and montage overlay updates; they do not define public API or
+user-facing behavior.
 Render coalescer diagnostics are likewise internal and report pending/interacting request state plus
 requested/flushed/coalesced/deferred-refresh counters.
 The Developer -> Diagnostics dialog is a plain `QDialog`, not a managed dock, so it does not
@@ -218,9 +228,11 @@ not show cache summaries; cache detail lives in Diagnostics.
 App settings include theme, nearby-slice prefetch, panel resize behavior, FFT backend, FFT worker count,
 memory profile, and render memory budget. The render memory budget is a per-render hard cap for
 visible image and interactive montage tile/canvas guardrails. Cache and prefetch budgets adapt from
-the selected memory profile and sampled system memory. StageCache is in-memory only; disk/memmap
-cache is not implemented. Operation simplification is a runtime/internal execution optimization, not a
-recipe rewrite or user-facing stack transformation.
+the selected memory profile and sampled system memory. StageCache is in-memory only and uses a
+score-based retention policy that favors reusable visible, high-cost, frequently hit stages while
+penalizing large and prefetch-only entries; disk/memmap cache is not implemented. Operation
+simplification is a runtime/internal execution optimization, not a recipe rewrite or user-facing stack
+transformation.
 
 Exact profile work and profile prefetch must not share cleanup-sensitive scheduler bookkeeping.
 Live/visible profile requests use the profile evaluation controller; profile prefetch uses the

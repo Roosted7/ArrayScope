@@ -35,6 +35,65 @@ class MontageTileOverlay:
     text: str
 
 
+class _MontageTileOverlayItem(QtWidgets.QGraphicsItem):
+    def __init__(self):
+        super().__init__()
+        self._overlays = ()
+        self.setZValue(20)
+
+    @property
+    def overlay_count(self) -> int:
+        return len(self._overlays)
+
+    def setOverlays(self, overlays: tuple[MontageTileOverlay, ...]) -> None:
+        self.prepareGeometryChange()
+        self._overlays = tuple(overlays or ())
+        self.setVisible(bool(self._overlays))
+        self.update()
+
+    def boundingRect(self):
+        if not self._overlays:
+            return QtCore.QRectF()
+        x0 = min(float(overlay.x) for overlay in self._overlays)
+        y0 = min(float(overlay.y) for overlay in self._overlays)
+        x1 = max(float(overlay.x + overlay.width) for overlay in self._overlays)
+        y1 = max(float(overlay.y + overlay.height) for overlay in self._overlays)
+        return QtCore.QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0))
+
+    def paint(self, painter, option, widget=None):
+        del option, widget
+        for overlay in self._overlays:
+            rect = QtCore.QRectF(float(overlay.x), float(overlay.y), float(overlay.width), float(overlay.height))
+            if str(overlay.state) == "skipped":
+                brush = QtGui.QColor(130, 70, 20, 95)
+                pen = QtGui.QColor(210, 130, 60, 180)
+            else:
+                brush = QtGui.QColor(35, 35, 35, 95)
+                pen = QtGui.QColor(170, 170, 170, 140)
+            painter.setBrush(QtGui.QBrush(brush))
+            painter.setPen(QtGui.QPen(pen))
+            painter.drawRect(rect)
+            self._paint_status_mark(painter, rect, str(overlay.state))
+
+    def _paint_status_mark(self, painter, rect, state: str) -> None:
+        tile_extent = min(float(rect.width()), float(rect.height()))
+        size = max(tile_extent * 0.08, min(tile_extent * 0.18, 0.35))
+        cx = float(rect.center().x())
+        cy = float(rect.center().y())
+        icon_rect = QtCore.QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
+        pen = QtGui.QPen(QtGui.QColor(245, 245, 245, 230))
+        pen.setWidthF(max(tile_extent * 0.006, size * 0.12))
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        if state == "skipped":
+            painter.drawLine(icon_rect.topLeft(), icon_rect.bottomRight())
+            painter.drawLine(icon_rect.bottomLeft(), icon_rect.topRight())
+            return
+        painter.drawEllipse(icon_rect)
+        painter.drawLine(QtCore.QPointF(cx, cy), QtCore.QPointF(cx, cy - size * 0.32))
+        painter.drawLine(QtCore.QPointF(cx, cy), QtCore.QPointF(cx + size * 0.28, cy))
+
+
 class ImageView2D(QtWidgets.QWidget):
     """
     Simplified widget for displaying 2D image data.
@@ -82,6 +141,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._roi_info_panel = None
         self._inspection_tool = "cursor"
         self._roi_items = {}
+        self._montage_tile_overlay_item = None
         self._montage_tile_overlay_items = []
         self._roi_counter = 0
         self._drawing_points = []
@@ -585,30 +645,22 @@ class ImageView2D(QtWidgets.QWidget):
             self._evaluation_overlay.raise_()
 
     def setMontageTileOverlays(self, overlays):
-        self.clearMontageTileOverlays()
-        for overlay in tuple(overlays or ()):
-            rect = QtWidgets.QGraphicsRectItem(float(overlay.x), float(overlay.y), float(overlay.width), float(overlay.height))
-            if str(overlay.state) == "skipped":
-                rect.setBrush(pg.mkBrush(130, 70, 20, 95))
-                rect.setPen(pg.mkPen(210, 130, 60, 180))
-            else:
-                rect.setBrush(pg.mkBrush(35, 35, 35, 95))
-                rect.setPen(pg.mkPen(170, 170, 170, 140))
-            text = pg.TextItem(str(overlay.text), color=(245, 245, 245), anchor=(0.5, 0.5))
-            text.setPos(float(overlay.x) + float(overlay.width) / 2.0, float(overlay.y) + float(overlay.height) / 2.0)
-            rect.setZValue(20)
-            text.setZValue(21)
-            self.view.addItem(rect)
-            self.view.addItem(text)
-            self._montage_tile_overlay_items.extend((rect, text))
+        overlays = tuple(overlays or ())
+        if self._montage_tile_overlay_item is None:
+            self._montage_tile_overlay_item = _MontageTileOverlayItem()
+            self.view.addItem(self._montage_tile_overlay_item)
+        self._montage_tile_overlay_item.setOverlays(overlays)
+        self._montage_tile_overlay_items = [self._montage_tile_overlay_item] if overlays else []
 
     def clearMontageTileOverlays(self):
-        for item in list(getattr(self, "_montage_tile_overlay_items", ())):
-            try:
-                self.view.removeItem(item)
-            except Exception:
-                pass
+        item = getattr(self, "_montage_tile_overlay_item", None)
+        if item is not None:
+            item.setOverlays(())
         self._montage_tile_overlay_items = []
+
+    def montageTileOverlayCount(self) -> int:
+        item = getattr(self, "_montage_tile_overlay_item", None)
+        return 0 if item is None else int(item.overlay_count)
 
     def setRoiInfoText(self, text):
         text = str(text or "")

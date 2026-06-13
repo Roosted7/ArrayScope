@@ -62,11 +62,18 @@ class RenderTimingDiagnostics:
 @dataclass(frozen=True)
 class MontageTimingDiagnostics:
     last_tile_eval_ms: float | None = None
+    last_tile_cache_lookup_ms: float | None = None
+    last_tile_cache_hit: bool | None = None
+    last_stage_cache_lookup_ms: float | None = None
+    last_stage_cache_hit: bool | None = None
     last_canvas_compose_ms: float | None = None
+    last_canvas_patch_ms: float | None = None
     last_canvas_commit_ms: float | None = None
+    last_set_image_ms: float | None = None
     last_overlay_update_ms: float | None = None
     cached_tiles_last_session: int = 0
     missing_tiles_last_session: int = 0
+    patched_tiles_last_flush: int = 0
 
 
 @dataclass(frozen=True)
@@ -200,10 +207,17 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 ),
                 f"Loading overlays: {snapshot.montage.show_loading_overlays}",
                 f"Timing tile eval: {_ms_text(snapshot.montage_timing.last_tile_eval_ms)}",
+                f"Timing tile cache lookup: {_ms_text(snapshot.montage_timing.last_tile_cache_lookup_ms)}",
+                f"Tile cache hit: {_bool_text(snapshot.montage_timing.last_tile_cache_hit)}",
+                f"Timing stage cache lookup: {_ms_text(snapshot.montage_timing.last_stage_cache_lookup_ms)}",
+                f"Stage cache hit: {_bool_text(snapshot.montage_timing.last_stage_cache_hit)}",
                 f"Timing canvas compose: {_ms_text(snapshot.montage_timing.last_canvas_compose_ms)}",
+                f"Timing canvas patch: {_ms_text(snapshot.montage_timing.last_canvas_patch_ms)}",
                 f"Timing canvas commit: {_ms_text(snapshot.montage_timing.last_canvas_commit_ms)}",
+                f"Timing montage set image: {_ms_text(snapshot.montage_timing.last_set_image_ms)}",
                 f"Timing overlay update: {_ms_text(snapshot.montage_timing.last_overlay_update_ms)}",
                 f"Tile cache last session: cached={snapshot.montage_timing.cached_tiles_last_session} missing={snapshot.montage_timing.missing_tiles_last_session}",
+                f"Patched tiles last flush: {snapshot.montage_timing.patched_tiles_last_flush}",
             )
         ),
         "FFT": "\n".join(
@@ -280,6 +294,12 @@ def _axes_text(axes: tuple[int, ...]) -> str:
 
 def _ms_text(value: float | None) -> str:
     return "n/a" if value is None else f"{float(value):.2f} ms"
+
+
+def _bool_text(value: bool | None) -> str:
+    if value is None:
+        return "n/a"
+    return "yes" if bool(value) else "no"
 
 
 def _scheduler_line(scheduler) -> str:

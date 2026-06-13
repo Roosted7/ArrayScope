@@ -334,7 +334,7 @@ def test_update_montage_view_does_not_batch_missing_tiles():
             segment = ast.get_source_segment(text, node) or ""
             assert "tuple((tile, evaluate_image_snapshot" not in segment
             assert "for tile in missing_tiles)" not in segment
-            assert "_schedule_next_montage_tile" in segment
+            assert "_schedule_montage_tiles" in segment
             return
     raise AssertionError("update_montage_view not found")
 

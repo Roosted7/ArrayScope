@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from math import log2
 from threading import RLock
+from time import perf_counter
 
 from arrayscope.operations.regions import RegionSpec, StageKey, region_contains, region_text
 
@@ -34,6 +36,8 @@ class StageCacheDiagnostics:
     last_miss: str = ""
     last_store: str = ""
     last_refused: str = ""
+    last_lookup_ms: float | None = None
+    last_lookup_hit: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,10 @@ class StageValue:
     nbytes: int
     priority: str
     recompute_cost: float = 0.0
+    hit_count: int = 0
+    last_access_counter: int = 0
+    visible_reuse: bool = False
+    prefetch_only: bool = False
 
 
 class StageCache:
@@ -63,6 +71,9 @@ class StageCache:
         self.last_miss = ""
         self.last_store = ""
         self.last_refused = ""
+        self.last_lookup_ms = None
+        self.last_lookup_hit = None
+        self._access_counter = 0
 
     @property
     def max_bytes(self) -> int:
@@ -89,18 +100,25 @@ class StageCache:
                 self.last_refused = str(summary)
 
     def get(self, key: StageKey) -> StageValue | None:
+        start = perf_counter()
         with self._lock:
             value = self._items.pop(key, None)
             if value is None:
                 self.misses += 1
                 self.last_miss = _key_summary(key)
+                self.last_lookup_hit = False
+                self.last_lookup_ms = (perf_counter() - start) * 1000.0
                 return None
+            value = self._touch_value(value)
             self._items[key] = value
             self.hits += 1
             self.last_hit = _key_summary(key)
+            self.last_lookup_hit = True
+            self.last_lookup_ms = (perf_counter() - start) * 1000.0
             return value
 
     def get_containing(self, key: StageKey) -> StageValue | None:
+        start = perf_counter()
         with self._lock:
             for candidate_key, value in list(self._items.items()):
                 if (
@@ -111,12 +129,17 @@ class StageCache:
                     and region_contains(value.region, key.region, key.shape)
                 ):
                     self._items.pop(candidate_key)
+                    value = self._touch_value(value)
                     self._items[candidate_key] = value
                     self.hits += 1
                     self.last_hit = _key_summary(candidate_key)
+                    self.last_lookup_hit = True
+                    self.last_lookup_ms = (perf_counter() - start) * 1000.0
                     return value
             self.misses += 1
             self.last_miss = _key_summary(key)
+            self.last_lookup_hit = False
+            self.last_lookup_ms = (perf_counter() - start) * 1000.0
             return None
 
     def put(self, key: StageKey, value: StageValue) -> bool:
@@ -129,6 +152,8 @@ class StageCache:
             if key in self._items:
                 old = self._items.pop(key)
                 self._bytes_used -= int(old.nbytes)
+            self._access_counter += 1
+            object.__setattr__(value, "last_access_counter", self._access_counter)
             self._items[key] = value
             self._bytes_used += nbytes
             self.stores += 1
@@ -161,6 +186,8 @@ class StageCache:
             self.last_miss = ""
             self.last_store = ""
             self.last_refused = ""
+            self.last_lookup_ms = None
+            self.last_lookup_hit = None
 
     def diagnostics(self) -> StageCacheDiagnostics:
         with self._lock:
@@ -181,6 +208,8 @@ class StageCache:
                 last_miss=self.last_miss,
                 last_store=self.last_store,
                 last_refused=self.last_refused,
+                last_lookup_ms=self.last_lookup_ms,
+                last_lookup_hit=self.last_lookup_hit,
             )
 
     def _evict(self) -> None:
@@ -191,11 +220,27 @@ class StageCache:
             self.evictions += 1
 
     def _eviction_key(self):
-        lowest_rank = min(_priority_rank(value.priority) for value in self._items.values())
-        for key, value in self._items.items():
-            if _priority_rank(value.priority) == lowest_rank:
-                return key
-        return next(iter(self._items))
+        return min(
+            self._items.items(),
+            key=lambda item: (self.retention_score(item[0], item[1]), int(item[1].last_access_counter)),
+        )[0]
+
+    def retention_score(self, key: StageKey, value: StageValue) -> float:
+        del key
+        priority = _priority_rank(value.priority) * 1000.0
+        recompute = min(float(value.recompute_cost or 0.0), 10_000.0)
+        hits = min(int(value.hit_count), 100) * 25.0
+        visible = 500.0 if value.visible_reuse else 0.0
+        prefetch_penalty = 600.0 if value.prefetch_only else 0.0
+        byte_penalty = log2(max(int(value.nbytes), 1)) * 8.0
+        age_penalty = max(0, int(self._access_counter) - int(value.last_access_counter)) * 0.01
+        return priority + recompute + hits + visible - prefetch_penalty - byte_penalty - age_penalty
+
+    def _touch_value(self, value: StageValue) -> StageValue:
+        self._access_counter += 1
+        object.__setattr__(value, "hit_count", int(value.hit_count) + 1)
+        object.__setattr__(value, "last_access_counter", self._access_counter)
+        return value
 
 
 def _priority_rank(priority: str) -> int:

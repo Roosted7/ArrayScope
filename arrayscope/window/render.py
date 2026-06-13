@@ -53,7 +53,7 @@ from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.montage_session import MontageRenderSession
 
 
-MONTAGE_COMMIT_INTERVAL_MS = 33
+MONTAGE_COMMIT_INTERVAL_MS = 16
 
 
 @dataclass(frozen=True)
@@ -776,12 +776,15 @@ class RenderMixin:
         cached_tiles = []
         missing_tiles = []
         for tile in visible_tiles:
+            tile_cache_start = perf_counter()
             cached = self.operation_evaluator.cached_montage_tile(
                 tile.view_state,
                 montage_axis=axis,
                 source_index=tile.source_index,
                 colormap_lut=colormap_lut,
             )
+            self._last_montage_tile_cache_lookup_ms = (perf_counter() - tile_cache_start) * 1000.0
+            self._last_montage_tile_cache_hit = cached is not None
             if cached is None:
                 missing_tiles.append(tile)
             else:
@@ -844,7 +847,7 @@ class RenderMixin:
         else:
             self._update_operation_dock()
         self._schedule_montage_session_slow_overlay(session)
-        self._schedule_next_montage_tile(session)
+        self._schedule_montage_tiles(session)
 
     def _warn_montage_tiles_skipped(self, *, skipped_count: int, tile_bytes: int, budget_bytes: int, tile_shape) -> None:
         message = (
@@ -863,15 +866,23 @@ class RenderMixin:
         except Exception as exc:
             handle_ui_exception("montage skipped warning", exc)
 
-    def _schedule_next_montage_tile(self, session: MontageRenderSession) -> None:
+    def _schedule_montage_tiles(self, session: MontageRenderSession) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
+        controller = getattr(self, "montage_tile_evaluation_controller", self.visible_evaluation_controller)
+        max_workers = max(1, int(controller.pool.maxThreadCount()))
+        while len(session.active_tile_requests) < max_workers:
+            if not self._schedule_next_montage_tile(session):
+                break
+
+    def _schedule_next_montage_tile(self, session: MontageRenderSession) -> bool:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return False
         tile = session.next_tile()
         if tile is None:
             self._schedule_montage_canvas_commit(session, force=True)
             if session.pending_tiles:
-                self._schedule_next_montage_tile(session)
-                return
+                return self._schedule_next_montage_tile(session)
             if self._is_current_montage_session(session.session_id, session.key):
                 self._stop_montage_session_slow_overlay()
                 self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
@@ -881,22 +892,24 @@ class RenderMixin:
                     self._deferred_side_panel_refresh_pending = True
                 else:
                     self._update_operation_dock()
-            return
+            return False
 
         def evaluate():
             return self._evaluate_montage_tile_snapshot(session, tile)
 
-        self.visible_evaluation_controller.start_latest(
+        controller = getattr(self, "montage_tile_evaluation_controller", self.visible_evaluation_controller)
+        controller.start_latest(
             evaluate,
             key=("montage_tile", session.key, int(tile.montage_index)),
             priority=EvalPriority.VISIBLE_IMAGE,
-            replace_group="visible-montage",
+            replace_group=f"montage-tile:{int(session.session_id)}:{int(tile.montage_index)}",
             on_done=lambda result, session_id=session.session_id, tile=tile: self._on_montage_tile_done(session_id, tile, result),
             on_error=lambda exc, session_id=session.session_id, tile=tile: self._on_montage_tile_error(session_id, tile, exc),
             on_stale=lambda: None,
             on_slow=lambda: self._on_montage_tile_slow(session.session_id),
             slow_ms=100,
         )
+        return True
 
     def _evaluate_montage_tile_snapshot(self, session, tile):
         start = perf_counter()
@@ -976,8 +989,12 @@ class RenderMixin:
             result=result,
         )
         session.mark_loaded(rendered)
+        patch_start = perf_counter()
+        if session.has_canvas():
+            session.patch_rendered_tile(rendered)
+            self._last_montage_canvas_patch_ms = (perf_counter() - patch_start) * 1000.0
         self._schedule_montage_canvas_commit(session, force=not session.pending_tiles)
-        self._schedule_next_montage_tile(session)
+        self._schedule_montage_tiles(session)
 
     def _on_montage_tile_error(self, session_id, tile, exc) -> None:
         session = getattr(self, "_montage_session", None)
@@ -986,16 +1003,17 @@ class RenderMixin:
         session.mark_skipped(tile)
         show_status_message(self, f"Montage tile update failed: {exc}", timeout=4000)
         self._schedule_montage_canvas_commit(session, force=True)
-        self._schedule_next_montage_tile(session)
+        self._schedule_montage_tiles(session)
 
     def _schedule_montage_canvas_commit(self, session, *, force=False) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
         elapsed_ms = (monotonic() - float(session.last_commit_monotonic or 0.0)) * 1000.0
-        if force or session.canvas is None or elapsed_ms >= MONTAGE_COMMIT_INTERVAL_MS:
+        if session.canvas is None or force and not session.flush_pending or elapsed_ms >= MONTAGE_COMMIT_INTERVAL_MS:
             self._commit_montage_session_canvas(session, force=force)
             return
         session.final_commit_pending = True
+        session.flush_pending = True
         timer = getattr(self, "_montage_commit_timer", None)
         if timer is None:
             timer = Qt.QtCore.QTimer(self)
@@ -1018,21 +1036,29 @@ class RenderMixin:
         self._classify_canvas_tiles(session)
         previous_canvas = getattr(self, "_current_montage_canvas", None)
         previous_global_range = self._current_montage_global_view_range()
-        compose_start = perf_counter()
-        canvas = make_montage_viewport_canvas(
-            session.plan,
-            session.rendered_tuple(),
-            view_range=session.view_range,
-            viewport_shape=session.viewport_shape,
-            budget_bytes=self._montage_canvas_budget_bytes(),
-            dtype=session.output_dtype,
-            rgb=session.rgb,
-            include_histogram=True,
-            loading_tiles=session.loading_tile_tuple(),
-            skipped_tiles=session.skipped_tile_tuple(),
-        )
-        self._last_montage_canvas_compose_ms = (perf_counter() - compose_start) * 1000.0
-        session.canvas = canvas
+        newly_composed = session.canvas is None
+        if newly_composed:
+            compose_start = perf_counter()
+            canvas = make_montage_viewport_canvas(
+                session.plan,
+                session.rendered_tuple(),
+                view_range=session.view_range,
+                viewport_shape=session.viewport_shape,
+                budget_bytes=self._montage_canvas_budget_bytes(),
+                dtype=session.output_dtype,
+                rgb=session.rgb,
+                include_histogram=True,
+                loading_tiles=session.loading_tile_tuple(),
+                skipped_tiles=session.skipped_tile_tuple(),
+            )
+            self._last_montage_canvas_compose_ms = (perf_counter() - compose_start) * 1000.0
+            session.initialize_canvas(canvas)
+        else:
+            canvas = session.current_canvas()
+            object.__setattr__(canvas, "tile_states", tuple(session.tile_states))
+            self._last_montage_canvas_compose_ms = 0.0
+        dirty_rects = session.consume_dirty_rects()
+        self._montage_patched_tiles_last_flush = len(dirty_rects)
         rendered_geometry = DisplayGeometry(
             view_state=session.view_state,
             display_shape=canvas.data.shape[:2],
@@ -1047,15 +1073,27 @@ class RenderMixin:
         self._next_viewport_policy = ViewportPolicy.PRESERVE
         self._montage_canvas_commit_active = True
         try:
-            self._apply_display_image(
-                DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data),
-                geometry=rendered_geometry,
-                window_mode=session.window_mode,
-                previous_levels=session.previous_levels,
-                previous_bounds=session.previous_bounds,
-                force_auto=session.force_auto,
-                defer_side_panels=getattr(session, "defer_side_panels", False),
-            )
+            display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
+            if newly_composed:
+                self._apply_full_display_image(
+                    display_image,
+                    geometry=rendered_geometry,
+                    window_mode=session.window_mode,
+                    previous_levels=session.previous_levels,
+                    previous_bounds=session.previous_bounds,
+                    force_auto=session.force_auto,
+                    defer_side_panels=getattr(session, "defer_side_panels", False),
+                )
+            else:
+                self._apply_progressive_display_image(
+                    display_image,
+                    geometry=rendered_geometry,
+                    window_mode=session.window_mode,
+                    previous_levels=session.previous_levels,
+                    previous_bounds=session.previous_bounds,
+                    force_auto=session.force_auto,
+                    viewport_policy=ViewportPolicy.PRESERVE,
+                )
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
@@ -1201,6 +1239,17 @@ class RenderMixin:
         )
 
     def _apply_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto, defer_side_panels: bool = False):
+        self._apply_full_display_image(
+            display_image,
+            geometry=geometry,
+            window_mode=window_mode,
+            previous_levels=previous_levels,
+            previous_bounds=previous_bounds,
+            force_auto=force_auto,
+            defer_side_panels=defer_side_panels,
+        )
+
+    def _apply_full_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto, defer_side_panels: bool = False):
         commit_start = perf_counter()
         try:
             viewport_policy = self._viewport_policy_for_display_shape(display_image.data.shape[:2])
@@ -1250,6 +1299,73 @@ class RenderMixin:
             show_status_message(self, f"Image update failed: {e}")
         finally:
             self._last_display_commit_ms = (perf_counter() - commit_start) * 1000.0
+
+    def _apply_progressive_display_image(
+        self,
+        display_image,
+        *,
+        geometry,
+        window_mode,
+        previous_levels,
+        previous_bounds,
+        force_auto,
+        viewport_policy,
+    ):
+        del previous_levels, previous_bounds
+        commit_start = perf_counter()
+        try:
+            levels_start = perf_counter()
+            levels = None
+            if not force_auto and window_mode == "absolute":
+                try:
+                    levels = self.img_view.getLevels()
+                except Exception:
+                    levels = None
+            else:
+                levels = self._sampled_display_bounds(display_image)
+            al = levels is None
+            self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
+            set_image_start = perf_counter()
+            if display_image.histogram_data is not None:
+                self.img_view.setImage(
+                    display_image.data,
+                    autoLevels=al,
+                    levels=levels,
+                    histogramData=display_image.histogram_data,
+                    viewport_policy=viewport_policy,
+                )
+            else:
+                self.img_view.setImage(display_image.data, autoLevels=al, levels=levels, viewport_policy=viewport_policy)
+            self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
+            self.display_geometry = geometry
+            self.apply_axis_flips()
+            self.img_view.setImageStale(False)
+        except Exception as e:
+            handle_ui_exception("progressive image update", e)
+            show_status_message(self, f"Image update failed: {e}")
+        finally:
+            self._last_progressive_commit_ms = (perf_counter() - commit_start) * 1000.0
+            self._last_display_commit_ms = self._last_progressive_commit_ms
+
+    def _sampled_display_bounds(self, display_image, *, max_samples: int = 65536):
+        source = display_image.histogram_data
+        if source is None:
+            source = display_image.data
+        array = np.asarray(source)
+        if array.ndim == 3:
+            array = 0.2126 * array[..., 0].astype(float) + 0.7152 * array[..., 1].astype(float) + 0.0722 * array[..., 2].astype(float)
+        flat = np.ravel(array)
+        if flat.size > int(max_samples):
+            stride = max(1, int(np.ceil(flat.size / int(max_samples))))
+            flat = flat[::stride]
+        bounds = finite_bounds(flat)
+        if bounds is None:
+            return None
+        low, high = bounds
+        if float(low) == float(high):
+            delta = max(abs(float(low)) * 0.01, 0.5)
+            return (float(low) - delta, float(high) + delta)
+        return bounds
 
     def _viewport_policy_for_display_shape(self, display_shape):
         display_shape = tuple(int(size) for size in display_shape)
@@ -1703,6 +1819,7 @@ class RenderMixin:
     def _cancel_render_dependent_work_for_interactive_change(self) -> None:
         for controller_name, groups in (
             ("visible_evaluation_controller", ("visible-image", "visible-montage")),
+            ("montage_tile_evaluation_controller", ("montage-tile",)),
             ("profile_evaluation_controller", ("profile-plot", "live-profile")),
             ("roi_evaluation_controller", ("roi-inspection",)),
             ("pixel_evaluation_controller", ("pixel",)),

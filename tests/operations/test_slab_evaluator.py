@@ -33,7 +33,7 @@ from arrayscope.operations.pipeline import (
     OperationStep,
 )
 from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec, apply_subregion
-from arrayscope.operations.slabs import evaluate_slab, plan_slab, request_for_export_frame, request_for_image, request_for_line, request_for_scalar
+from arrayscope.operations.slabs import evaluate_slab, plan_slab, request_for_export_frame, request_for_image, request_for_line, request_for_scalar, stage_key_for_candidate
 from arrayscope.operations.stage_cache import StageCache
 
 
@@ -54,6 +54,20 @@ def test_image_snapshot_plans_slab_once(monkeypatch):
     evaluator_module.evaluate_image_snapshot(document, state)
 
     assert len(calls) == 1
+
+
+def test_stage_key_ignores_viewport_and_montage_layout_only_state():
+    document = ArrayDocument(np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6), operations=(CenteredFFT(axis=2),))
+    base = ViewState.from_shape(document.current_shape)
+    state_a = base.with_montage_axis(2, columns=1, indices=(0, 1, 2), text=":")
+    state_b = base.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
+    tile_state_a = state_a.with_slice(2, 1).with_montage_axis(None)
+    tile_state_b = state_b.with_slice(2, 1).with_montage_axis(None)
+
+    candidate_a = plan_slab(document, request_for_image(tile_state_a)).region_plan.cache_candidates[0]
+    candidate_b = plan_slab(document, request_for_image(tile_state_b)).region_plan.cache_candidates[0]
+
+    assert stage_key_for_candidate(("doc",), candidate_a) == stage_key_for_candidate(("doc",), candidate_b)
 
 
 def _assert_image_and_line_match(data, operations):
