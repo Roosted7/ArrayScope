@@ -97,6 +97,43 @@ def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbo
         win.close()
 
 
+def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((2, 3, 20), dtype=np.float32)
+    for index in range(data.shape[2]):
+        data[:, :, index] = index
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
+        win.render(reason="test-montage")
+        _process_events(qtbot, count=50)
+        win.img_view.getView().setRange(xRange=(0, 2), yRange=(7, 8), padding=0)
+        win.update_montage_view()
+        qtbot.waitUntil(lambda: win._current_montage_canvas is not None and win._current_montage_canvas.origin_y != 0, timeout=3000)
+
+        canvas = win._current_montage_canvas
+        tile_10 = canvas.full_plan.tiles[10]
+        qtbot.waitUntil(
+            lambda: win.display_geometry.context_for_display_point(tile_10.x0 - win._current_montage_canvas.origin_x + 1, tile_10.y0 - win._current_montage_canvas.origin_y + 1)
+            is not None,
+            timeout=3000,
+        )
+        canvas = win._current_montage_canvas
+        context = win.display_geometry.context_for_display_point(tile_10.x0 - canvas.origin_x + 1, tile_10.y0 - canvas.origin_y + 1)
+
+        assert context is not None
+        assert context.mapping.local_x == 1
+        assert context.mapping.local_y == 1
+        assert context.mapping.display_y != context.mapping.local_y
+        assert win._hover_value_from_display(context.mapping) == pytest.approx(10.0)
+    finally:
+        win.close()
+
+
 def test_montage_does_not_call_make_montage_for_interactive_render(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     import arrayscope.window.render as render_module
@@ -162,7 +199,7 @@ def test_montage_loading_overlays_wait_for_slow_callback(qtbot, monkeypatch):
 
         calls[0]["on_slow"]()
 
-        assert getattr(win.img_view, "_montage_tile_overlay_items", [])
+        assert getattr(win.img_view, "_montage_tile_overlay_items", []) == []
         assert win.img_view._evaluation_overlay.isVisible()
     finally:
         win.close()
@@ -185,7 +222,7 @@ def test_montage_loading_overlay_is_session_delayed(qtbot, monkeypatch):
 
         qtbot.waitUntil(lambda: win.img_view._evaluation_overlay is not None and win.img_view._evaluation_overlay.isVisible(), timeout=500)
 
-        assert getattr(win.img_view, "_montage_tile_overlay_items", [])
+        assert getattr(win.img_view, "_montage_tile_overlay_items", []) == []
     finally:
         win.close()
 
@@ -407,7 +444,42 @@ def test_montage_progressive_tile_commit_preserves_current_levels(qtbot, monkeyp
         win.close()
 
 
-def test_montage_progressive_tile_commit_updates_auto_levels_from_loaded_tiles(qtbot, monkeypatch):
+def test_montage_loading_canvas_preserves_levels_until_first_real_tile(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
+    qtbot.addWidget(win)
+    calls = []
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
+    try:
+        _process_events(qtbot)
+        win.img_view.setLevels(2.0, 8.0)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
+        win.update_montage_view()
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (2.0, 8.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (0.0, 9.0)
+        assert tuple(win.img_view.image.shape[:2]) != tuple(win._current_montage_canvas.data.shape[:2])
+
+        tile = win._montage_session.plan.tiles[0]
+        calls[0]["on_done"](_tile_result(tile, 100))
+        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 100, dtype=np.float32)), timeout=1000)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (2.0, 8.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (0.0, 9.0)
+
+        tile1 = win._montage_session.visible_tiles[1]
+        calls[1]["on_done"](_tile_result(tile1, 200))
+        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 3:5], np.full((2, 2), 200, dtype=np.float32)), timeout=1000)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (2.0, 8.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (0.0, 9.0)
+    finally:
+        win.close()
+
+
+def test_montage_visible_tiles_do_not_define_relative_levels(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -420,13 +492,42 @@ def test_montage_progressive_tile_commit_updates_auto_levels_from_loaded_tiles(q
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_montage_view()
 
-        tile = win._montage_session.plan.tiles[0]
-        calls[0]["on_done"](_tile_result(tile, 100))
+        tile0 = win._montage_session.plan.tiles[0]
+        calls[0]["on_done"](_tile_result(tile0, 100))
         qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 100, dtype=np.float32)), timeout=1000)
+        first_levels = tuple(float(value) for value in win.img_view.getLevels())
 
-        low, high = win.img_view.getLevels()
-        assert float(low) < 100.0
-        assert float(high) > 100.0
+        tile1 = win._montage_session.plan.tiles[1]
+        calls[1]["on_done"](_tile_result(tile1, 1000))
+        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 3:5], np.full((2, 2), 1000, dtype=np.float32)), timeout=1000)
+
+        assert tuple(float(value) for value in win.img_view.getLevels()) == first_levels
+    finally:
+        win.close()
+
+
+def test_fft_montage_schedules_shared_stage_before_tile_workers(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.operations.pipeline import CenteredFFT
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4))
+    qtbot.addWidget(win)
+    stage_calls = []
+    tile_calls = []
+    monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: tile_calls.append(kwargs) or len(tile_calls))
+    try:
+        _process_events(qtbot)
+        win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
+        win._set_document(win.operation_coordinator.document)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
+
+        win.update_montage_view()
+
+        assert len(stage_calls) == 1
+        assert tile_calls == []
+        assert win._montage_session.stage_waiting_tiles
     finally:
         win.close()
 

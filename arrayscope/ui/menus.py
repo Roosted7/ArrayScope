@@ -407,6 +407,7 @@ class WindowMenuMixin:
         for name in (
             "visible_evaluation_controller",
             "montage_tile_evaluation_controller",
+            "stage_evaluation_controller",
             "pixel_evaluation_controller",
             "profile_evaluation_controller",
             "roi_evaluation_controller",
@@ -463,12 +464,14 @@ class WindowMenuMixin:
             sorted({int(axis) for transition in transitions for axis in getattr(transition, "expanded_axes", ())})
         )
         stage_cache_diagnostics = self.operation_evaluator.stage_cache_diagnostics()
+        stage_materialization_diagnostics = self.operation_evaluator.stage_materialization_diagnostics()
         return WindowRuntimeDiagnostics(
             memory_policy=policy,
             image_cache=self.operation_evaluator.image_cache_diagnostics(),
             tile_cache=self.operation_evaluator.tile_cache_diagnostics(),
             profile_cache=self.operation_evaluator.profile_cache_diagnostics(),
             stage_cache=stage_cache_diagnostics,
+            stage_materialization=stage_materialization_diagnostics,
             schedulers=tuple(schedulers),
             render=render,
             montage=montage,

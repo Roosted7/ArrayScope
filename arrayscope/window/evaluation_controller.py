@@ -29,6 +29,7 @@ class EvalRequest:
     priority: EvalPriority
     generation: int
     replace_group: str
+    group_generation: int
     memory_budget_bytes: int | None = None
 
 
@@ -126,6 +127,7 @@ class EvaluationController(Qt.QtCore.QObject):
         self._handlers = {}
         self._tokens = {}
         self._group_generations = {}
+        self._group_epoch = 0
         self._prefetch_keys = set()
         self._max_prefetch = 32
         self._shutting_down = False
@@ -166,9 +168,11 @@ class EvaluationController(Qt.QtCore.QObject):
 
     def clear_group(self, replace_group: str):
         replace_group = str(replace_group)
+        self.advance_group(replace_group)
         for generation, request in tuple(self._requests.items()):
             if request.replace_group != replace_group and not request.replace_group.startswith(f"{replace_group}:"):
                 continue
+            self.advance_group(request.replace_group)
             token = self._tokens.get(generation)
             if token is not None:
                 token.cancel()
@@ -177,6 +181,19 @@ class EvaluationController(Qt.QtCore.QObject):
                 self._discard_generation(generation, stale=True)
         if not self._runnables:
             self._poll_timer.stop()
+
+    def advance_group(self, replace_group: str) -> int:
+        replace_group = str(replace_group)
+        self._group_epoch += 1
+        self._group_generations[replace_group] = self._group_epoch
+        for group in tuple(self._group_generations):
+            if group.startswith(f"{replace_group}:"):
+                self._group_epoch += 1
+                self._group_generations[group] = self._group_epoch
+        return self._group_generations[replace_group]
+
+    def group_generation(self, replace_group: str) -> int:
+        return int(self._group_generations.get(str(replace_group), 0))
 
     def shutdown_for_close(self):
         self._shutting_down = True
@@ -214,18 +231,19 @@ class EvaluationController(Qt.QtCore.QObject):
         self.clear_group(replace_group)
         self.generation += 1
         generation = self.generation
+        group_generation = self.advance_group(replace_group)
         request = EvalRequest(
             key=key,
             priority=EvalPriority(priority),
             generation=generation,
             replace_group=replace_group,
+            group_generation=group_generation,
             memory_budget_bytes=memory_budget_bytes,
         )
         token = CancellationToken()
         self._pending.add(generation)
         self._requests[generation] = request
         self._tokens[generation] = token
-        self._group_generations[replace_group] = generation
         self._handlers[generation] = (on_done, on_error, on_stale)
         if on_slow is not None:
             Qt.QtCore.QTimer.singleShot(int(slow_ms), lambda generation=generation: self._emit_slow(generation, on_slow))
@@ -302,7 +320,8 @@ class EvaluationController(Qt.QtCore.QObject):
         )
 
     def _emit_slow(self, generation, callback):
-        if generation in self._pending and generation == self.generation:
+        request = self._requests.get(generation)
+        if request is not None and generation in self._pending and request.group_generation == self.group_generation(request.replace_group):
             callback()
 
     def _ensure_polling(self):
@@ -347,7 +366,7 @@ class EvaluationController(Qt.QtCore.QObject):
         on_done, _on_error, on_stale = self._handlers.pop(generation, (None, None, None))
         if on_done is None:
             return
-        if request is None or generation != self._group_generations.get(request.replace_group):
+        if request is None or request.group_generation != self.group_generation(request.replace_group) or self._shutting_down:
             self._stale_count += 1
             if on_stale is not None:
                 on_stale()
@@ -359,7 +378,7 @@ class EvaluationController(Qt.QtCore.QObject):
         request = self._requests.get(generation)
         self._cleanup_generation(generation)
         _on_done, on_error, on_stale = self._handlers.pop(generation, (None, None, None))
-        if request is None or generation != self._group_generations.get(request.replace_group):
+        if request is None or request.group_generation != self.group_generation(request.replace_group) or self._shutting_down:
             self._stale_count += 1
             if on_stale is not None:
                 on_stale()

@@ -24,6 +24,7 @@ from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.operation_actions import OperationActionsMixin
 from arrayscope.window.render import RenderMixin
 from arrayscope.window.render_coordinator import RenderCoordinator
+from arrayscope.window.render_generation import RenderGeneration
 from arrayscope.window.state_sync import StateSyncMixin
 
 
@@ -71,9 +72,11 @@ class ArrayScopeWindow(
         self.operation_evaluator = self.operation_coordinator.evaluator
         self._refresh_memory_policy(active_render=False)
         self._init_compare_document(data)
+        self._render_generation = RenderGeneration()
         self.visible_evaluation_controller = EvaluationController(self, max_workers=1, name="visible")
         self.evaluation_controller = self.visible_evaluation_controller
         self.montage_tile_evaluation_controller = EvaluationController(self, max_workers=2, name="montage")
+        self.stage_evaluation_controller = EvaluationController(self, max_workers=1, name="stage")
         self.pixel_evaluation_controller = EvaluationController(self, max_workers=1, name="pixel")
         self.profile_evaluation_controller = EvaluationController(self, max_workers=1, name="profile")
         self.roi_evaluation_controller = EvaluationController(self, max_workers=1, name="roi")
@@ -151,6 +154,7 @@ class ArrayScopeWindow(
         for name in (
             "visible_evaluation_controller",
             "montage_tile_evaluation_controller",
+            "stage_evaluation_controller",
             "pixel_evaluation_controller",
             "profile_evaluation_controller",
             "roi_evaluation_controller",

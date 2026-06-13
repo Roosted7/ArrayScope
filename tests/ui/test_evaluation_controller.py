@@ -102,6 +102,36 @@ def test_clear_group_preserves_unrelated_prefetch_bookkeeping(qt_app):
     controller.shutdown_for_close()
 
 
+def test_clear_group_invalidates_even_without_active_runnable(qt_app):
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    before = controller.group_generation("visible")
+
+    controller.clear_group("visible")
+
+    assert controller.group_generation("visible") > before
+
+
+def test_clear_group_prefix_invalidates_child_group(qt_app):
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    controller.start_latest(
+        lambda: "tile",
+        key="tile",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="montage-tile:1:2",
+        on_done=lambda _value: None,
+    )
+    before = controller.group_generation("montage-tile:1:2")
+
+    controller.clear_group("montage-tile")
+
+    assert controller.group_generation("montage-tile:1:2") > before
+    controller.shutdown_for_close()
+
+
 def test_visible_pool_max_thread_count_is_one(qt_app):
     from arrayscope.window.evaluation_controller import EvaluationController
 
