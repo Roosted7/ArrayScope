@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import log2
 from typing import Literal
 
 import numpy as np
@@ -187,6 +188,9 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
                     stage_index=int(candidate.stage_index),
                     nbytes=nbytes,
                     priority=str(candidate.priority),
+                    recompute_cost=_candidate_recompute_cost(candidate),
+                    visible_reuse=bool(getattr(candidate, "visible_reuse", True)),
+                    prefetch_only=bool(getattr(candidate, "prefetch_only", False)),
                 ),
             )
 
@@ -233,30 +237,48 @@ def _lookup_candidates(candidates):
 def _store_stage_indices(candidates, stage_cache) -> set[int]:
     candidates = tuple(candidates)
     max_bytes = int(getattr(stage_cache, "max_bytes", 0))
-    retained = tuple(candidate for candidate in candidates if getattr(candidate, "retain", True))
-    result = set()
-    refused_retained = False
-    for candidate in retained:
+    fitting = []
+    for candidate in candidates:
         if _candidate_fits(candidate, max_bytes):
-            result.add(int(candidate.stage_index))
-        else:
-            refused_retained = True
-            if hasattr(stage_cache, "note_refused"):
-                stage_cache.note_refused(_candidate_summary(candidate))
-    if result or not refused_retained:
-        return result
-    for candidate in reversed(tuple(candidate for candidate in candidates if not getattr(candidate, "retain", True))):
-        if _candidate_fits(candidate, max_bytes):
-            result.add(int(candidate.stage_index))
-            break
-        if hasattr(stage_cache, "note_refused"):
+            fitting.append(candidate)
+        elif hasattr(stage_cache, "note_refused"):
             stage_cache.note_refused(_candidate_summary(candidate))
-    return result
+    if not fitting:
+        return set()
+    scored = sorted(fitting, key=_candidate_retention_score, reverse=True)
+    selected = scored[0]
+    return {int(selected.stage_index)}
 
 
 def _candidate_fits(candidate: StageCacheCandidate, max_bytes: int) -> bool:
     estimated = candidate.estimated_nbytes
     return estimated is None or int(estimated) <= int(max_bytes)
+
+
+def _candidate_retention_score(candidate: StageCacheCandidate) -> float:
+    priority = {
+        "lowest": 0.0,
+        "low": 1000.0,
+        "medium": 2000.0,
+        "high": 3000.0,
+        "highest": 4000.0,
+    }.get(str(candidate.priority), 1000.0)
+    estimated = candidate.estimated_nbytes
+    byte_penalty = 0.0 if estimated is None else log2(max(int(estimated), 1)) * 8.0
+    retain_bonus = 750.0 if getattr(candidate, "retain", True) else 0.0
+    visible_bonus = 500.0 if getattr(candidate, "visible_reuse", True) else 0.0
+    prefetch_penalty = 600.0 if getattr(candidate, "prefetch_only", False) else 0.0
+    return priority + retain_bonus + visible_bonus + _candidate_recompute_cost(candidate) - prefetch_penalty - byte_penalty
+
+
+def _candidate_recompute_cost(candidate: StageCacheCandidate) -> float:
+    value = float(getattr(candidate, "estimated_recompute_cost", 0.0) or 0.0)
+    if value > 0.0:
+        return value
+    estimated = getattr(candidate, "estimated_nbytes", None)
+    if estimated is None:
+        return 0.0
+    return min(float(max(0, int(estimated))) / (1024.0 * 1024.0), 10_000.0)
 
 
 def _ranged_keep_axes(view_state, keep_axes):

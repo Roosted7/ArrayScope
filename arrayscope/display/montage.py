@@ -312,7 +312,7 @@ def make_montage_viewport_canvas(
         dtype = sample.dtype if sample is not None else float
     data_dtype = np.dtype(dtype)
     is_rgb = bool(rgb or (sample is not None and sample.ndim == 3))
-    trailing_shape = (sample.shape[2:] if sample is not None and sample.ndim == 3 else ((4,) if is_rgb else ()))
+    trailing_shape = (sample.shape[2:] if sample is not None and sample.ndim == 3 else ((3,) if is_rgb else ()))
     canvas_shape = (height, width) + tuple(trailing_shape)
     estimated = estimate_viewport_canvas_bytes((height, width), dtype, rgb=is_rgb, histogram=include_histogram)
     if estimated > int(budget_bytes):
@@ -404,6 +404,22 @@ def copy_rendered_tile_into_canvas(rendered: RenderedTile, canvas: MontageViewpo
     return replace(canvas, data=data, histogram_data=histogram_data, tile_states=tuple(states))
 
 
+def patch_rendered_tile_into_canvas(rendered: RenderedTile, canvas: MontageViewportCanvas) -> tuple[int, int, int, int] | None:
+    """Patch one rendered tile into an existing viewport canvas.
+
+    Returns the dirty rect in canvas-local coordinates, or None when the tile
+    does not intersect the current viewport canvas.
+    """
+    dirty = _copy_rendered_tile_into_canvas(rendered, canvas.data, canvas.histogram_data, canvas.canvas_rect)
+    if dirty is None:
+        return None
+    states = list(canvas.tile_states or _tile_states_for_plan(canvas.full_plan))
+    if int(rendered.tile.montage_index) < len(states):
+        states[int(rendered.tile.montage_index)] = MontageTileState.LOADED
+        object.__setattr__(canvas, "tile_states", tuple(states))
+    return dirty
+
+
 def _tile_states_for_plan(
     plan: MontagePlan,
     *,
@@ -458,12 +474,12 @@ def _intersect_rect(a, b) -> tuple[int, int, int, int] | None:
     return x0, y0, x1, y1
 
 
-def _copy_rendered_tile_into_canvas(rendered: RenderedTile, data, histogram_data, canvas_rect) -> None:
+def _copy_rendered_tile_into_canvas(rendered: RenderedTile, data, histogram_data, canvas_rect) -> tuple[int, int, int, int] | None:
     tile = rendered.tile
     tile_rect = (int(tile.x0), int(tile.y0), int(tile.x0 + tile.width), int(tile.y0 + tile.height))
     clipped = _intersect_rect(tile_rect, canvas_rect)
     if clipped is None:
-        return
+        return None
     x0, y0, x1, y1 = clipped
     source_x0 = x0 - tile_rect[0]
     source_y0 = y0 - tile_rect[1]
@@ -477,16 +493,17 @@ def _copy_rendered_tile_into_canvas(rendered: RenderedTile, data, histogram_data
         ...,
     ]
     if histogram_data is None:
-        return
+        return dest_x0, dest_y0, dest_x0 + width, dest_y0 + height
     source = rendered.histogram_data
     if source is None:
         source = rendered.image
         if np.asarray(source).ndim == 3:
-            return
+            return dest_x0, dest_y0, dest_x0 + width, dest_y0 + height
     histogram_data[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width] = np.asarray(source)[
         source_y0 : source_y0 + height,
         source_x0 : source_x0 + width,
     ]
+    return dest_x0, dest_y0, dest_x0 + width, dest_y0 + height
 
 
 def optimal_montage_columns(count, tile_shape, viewport_shape, gap=1):

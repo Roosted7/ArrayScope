@@ -55,6 +55,9 @@ class StageCacheCandidate:
     reason: str
     retain: bool = True
     retain_reason: str = ""
+    estimated_recompute_cost: float = 0.0
+    visible_reuse: bool = True
+    prefetch_only: bool = False
 
 
 def region_from_index_spec(shape, spec) -> RegionSpec:

@@ -167,7 +167,7 @@ class EvaluationController(Qt.QtCore.QObject):
     def clear_group(self, replace_group: str):
         replace_group = str(replace_group)
         for generation, request in tuple(self._requests.items()):
-            if request.replace_group != replace_group:
+            if request.replace_group != replace_group and not request.replace_group.startswith(f"{replace_group}:"):
                 continue
             token = self._tokens.get(generation)
             if token is not None:

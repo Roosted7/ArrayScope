@@ -406,6 +406,7 @@ class WindowMenuMixin:
         schedulers = []
         for name in (
             "visible_evaluation_controller",
+            "montage_tile_evaluation_controller",
             "pixel_evaluation_controller",
             "profile_evaluation_controller",
             "roi_evaluation_controller",
@@ -461,12 +462,13 @@ class WindowMenuMixin:
         expanded_axes = tuple(
             sorted({int(axis) for transition in transitions for axis in getattr(transition, "expanded_axes", ())})
         )
+        stage_cache_diagnostics = self.operation_evaluator.stage_cache_diagnostics()
         return WindowRuntimeDiagnostics(
             memory_policy=policy,
             image_cache=self.operation_evaluator.image_cache_diagnostics(),
             tile_cache=self.operation_evaluator.tile_cache_diagnostics(),
             profile_cache=self.operation_evaluator.profile_cache_diagnostics(),
-            stage_cache=self.operation_evaluator.stage_cache_diagnostics(),
+            stage_cache=stage_cache_diagnostics,
             schedulers=tuple(schedulers),
             render=render,
             montage=montage,
@@ -489,11 +491,18 @@ class WindowMenuMixin:
             ),
             montage_timing=MontageTimingDiagnostics(
                 last_tile_eval_ms=getattr(self, "_last_montage_tile_eval_ms", None),
+                last_tile_cache_lookup_ms=getattr(self, "_last_montage_tile_cache_lookup_ms", None),
+                last_tile_cache_hit=getattr(self, "_last_montage_tile_cache_hit", None),
+                last_stage_cache_lookup_ms=getattr(stage_cache_diagnostics, "last_lookup_ms", None),
+                last_stage_cache_hit=getattr(stage_cache_diagnostics, "last_lookup_hit", None),
                 last_canvas_compose_ms=getattr(self, "_last_montage_canvas_compose_ms", None),
+                last_canvas_patch_ms=getattr(self, "_last_montage_canvas_patch_ms", None),
                 last_canvas_commit_ms=getattr(self, "_last_montage_canvas_commit_ms", None),
+                last_set_image_ms=getattr(self, "_last_set_image_ms", None),
                 last_overlay_update_ms=getattr(self, "_last_montage_overlay_update_ms", None),
                 cached_tiles_last_session=int(getattr(self, "_montage_cached_tiles_last_session", 0) or 0),
                 missing_tiles_last_session=int(getattr(self, "_montage_missing_tiles_last_session", 0) or 0),
+                patched_tiles_last_flush=int(getattr(self, "_montage_patched_tiles_last_flush", 0) or 0),
             ),
             render_coalescer=RenderCoalescerDiagnostics(
                 pending=False if coalescer is None else bool(coalescer.has_pending_render),

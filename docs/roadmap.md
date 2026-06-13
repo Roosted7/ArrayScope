@@ -406,7 +406,7 @@ Goal: Keep UI interaction responsive while exact rendering catches up, and make 
 * [x] Route profile prefetch away from exact live-profile work so exact profile updates and prefetch cannot corrupt each other’s scheduler state.
 * [x] Avoid duplicate slab planning in image/line/scalar/export snapshot evaluation.
 * [x] Add render timing diagnostics for synchronous render orchestration, planning, queue wait, evaluation, display commit, levels/histogram, operation dock refresh, inspection refresh, montage canvas work, and overlay work.
-* [~] Add montage timing diagnostics for tile cache hits/misses, stage cache hits/misses, last tile eval, canvas compose/patch, `ImageItem.setImage`, and overlay update.
+* [x] Add montage timing diagnostics for tile cache hits/misses, stage cache hits/misses, last tile eval, canvas compose/patch, `ImageItem.setImage`, and overlay update.
 * [x] Show Phase 4h timing diagnostics in Developer -> Diagnostics.
 * [x] Add baseline tests for timing diagnostic presence and scheduler bookkeeping.
 
@@ -419,23 +419,23 @@ Goal: Keep UI interaction responsive while exact rendering catches up, and make 
 * [x] Defer operation dock, profile, ROI, and inspection refreshes during interactive bursts unless their state is immediately visible and cheap.
 * [x] Preserve correctness for normal exact render, degraded preview, chunked render, montage, profile, ROI, export frame, and cache-hit paths.
 * [x] Add interaction tests proving slice text updates immediately while rendering is coalesced.
-* [~] Add latency-oriented tests or benchmark assertions for rapid slice changes.
+* [x] Add latency-oriented tests or benchmark assertions for rapid slice changes.
 
 ### P2 — progressive montage and worker/cache policy
 
-* [ ] Split full display commit from progressive display commit.
-* [ ] Ensure progressive montage commits do not refresh side panels, operation dock, histogram/levels, or stale/evaluation overlays unnecessarily.
-* [ ] Make `MontageRenderSession` own mutable canvas buffers, histogram buffers, tile states, and dirty rects.
-* [ ] Patch completed tiles into the existing montage canvas instead of rebuilding the canvas from all loaded tiles.
-* [ ] Throttle montage screen flushes so many tile completions produce one UI update per frame interval.
-* [ ] Replace per-commit montage overlay item recreation with one persistent/custom overlay item.
-* [ ] Add a dedicated montage tile evaluation controller, initially max 2 workers.
-* [ ] Keep visible image rendering latest-only on its own max-1 lane.
-* [ ] Keep prefetch idle-only and separate from exact visible/profile/ROI lanes.
-* [ ] Verify tile cache keys are independent of layout-only montage choices such as column count.
-* [ ] Improve StageCache retention scoring using estimated bytes, recompute cost, hit count, visible reuse, and prefetch-only penalties.
-* [ ] Add StageCache key tests proving viewport position, montage columns, and progress/loading state do not affect stage identity.
-* [ ] Add benchmark thresholds for hot cached tile display and cold cheap tile latency.
+* [x] Split full display commit from progressive display commit.
+* [x] Ensure progressive montage commits do not refresh side panels, operation dock, histogram/levels, or stale/evaluation overlays unnecessarily.
+* [x] Make `MontageRenderSession` own mutable canvas buffers, histogram buffers, tile states, and dirty rects.
+* [x] Patch completed tiles into the existing montage canvas instead of rebuilding the canvas from all loaded tiles.
+* [x] Throttle montage screen flushes so many tile completions produce one UI update per frame interval.
+* [x] Replace per-commit montage overlay item recreation with one persistent/custom overlay item.
+* [x] Add a dedicated montage tile evaluation controller, initially max 2 workers.
+* [x] Keep visible image rendering latest-only on its own max-1 lane.
+* [x] Keep prefetch idle-only and separate from exact visible/profile/ROI lanes.
+* [x] Verify tile cache keys are independent of layout-only montage choices such as column count.
+* [x] Improve StageCache retention scoring using estimated bytes, recompute cost, hit count, visible reuse, and prefetch-only penalties.
+* [x] Add StageCache key tests proving viewport position, montage columns, and progress/loading state do not affect stage identity.
+* [x] Add benchmark thresholds for hot cached tile display and cold cheap tile latency.
 
 
 ## Phase 5 — Multi-window and sessions

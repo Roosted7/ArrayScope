@@ -50,6 +50,31 @@ def test_evaluation_overlay_and_stale_opacity(qt_app):
     view.close()
 
 
+def test_montage_tile_overlays_reuse_single_graphics_item(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D, MontageTileOverlay
+
+    view = ImageView2D()
+    view.setImage(np.zeros((8, 8), dtype=float))
+    first = (MontageTileOverlay(0, 0, 4, 4, "loading", "Loading"),)
+    second = (
+        MontageTileOverlay(0, 0, 4, 4, "loading", "Loading"),
+        MontageTileOverlay(4, 0, 4, 4, "skipped", "Skipped"),
+    )
+
+    view.setMontageTileOverlays(first)
+    item = view._montage_tile_overlay_item
+    view.setMontageTileOverlays(second)
+
+    assert view._montage_tile_overlay_item is item
+    assert view.montageTileOverlayCount() == 2
+    assert len(view._montage_tile_overlay_items) == 1
+
+    view.clearMontageTileOverlays()
+    assert view.montageTileOverlayCount() == 0
+    assert view._montage_tile_overlay_items == []
+    view.close()
+
+
 def test_profile_marker_bounds_update_when_image_shape_changes(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 

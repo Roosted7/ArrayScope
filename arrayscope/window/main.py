@@ -73,6 +73,7 @@ class ArrayScopeWindow(
         self._init_compare_document(data)
         self.visible_evaluation_controller = EvaluationController(self, max_workers=1, name="visible")
         self.evaluation_controller = self.visible_evaluation_controller
+        self.montage_tile_evaluation_controller = EvaluationController(self, max_workers=2, name="montage")
         self.pixel_evaluation_controller = EvaluationController(self, max_workers=1, name="pixel")
         self.profile_evaluation_controller = EvaluationController(self, max_workers=1, name="profile")
         self.roi_evaluation_controller = EvaluationController(self, max_workers=1, name="roi")
@@ -141,3 +142,21 @@ class ArrayScopeWindow(
         super().resizeEvent(event)
         if hasattr(self, "dimension_strip"):
             self.dimension_strip._schedule_relayout()
+
+    def closeEvent(self, event):
+        self._closing = True
+        coordinator = getattr(self, "render_coordinator", None)
+        if coordinator is not None:
+            coordinator.cancel_pending()
+        for name in (
+            "visible_evaluation_controller",
+            "montage_tile_evaluation_controller",
+            "pixel_evaluation_controller",
+            "profile_evaluation_controller",
+            "roi_evaluation_controller",
+            "prefetch_evaluation_controller",
+        ):
+            controller = getattr(self, name, None)
+            if controller is not None:
+                controller.shutdown_for_close()
+        super().closeEvent(event)

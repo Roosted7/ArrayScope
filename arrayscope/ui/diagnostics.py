@@ -304,14 +304,18 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             _timing_segments(
                 (
                     ("tile", snapshot.montage_timing.last_tile_eval_ms, "#c2410c"),
+                    ("tile cache", snapshot.montage_timing.last_tile_cache_lookup_ms, "#2563eb"),
+                    ("stage cache", snapshot.montage_timing.last_stage_cache_lookup_ms, "#0f766e"),
                     ("compose", snapshot.montage_timing.last_canvas_compose_ms, "#7c3aed"),
+                    ("patch", snapshot.montage_timing.last_canvas_patch_ms, "#9333ea"),
+                    ("set", snapshot.montage_timing.last_set_image_ms, "#15803d"),
                     ("commit", snapshot.montage_timing.last_canvas_commit_ms, "#15803d"),
                     ("overlay", snapshot.montage_timing.last_overlay_update_ms, "#0891b2"),
                 )
             ),
             summary=(
-                f"{_timing_summary('total', (snapshot.montage_timing.last_tile_eval_ms, snapshot.montage_timing.last_canvas_compose_ms, snapshot.montage_timing.last_canvas_commit_ms, snapshot.montage_timing.last_overlay_update_ms))}, "
-                f"tiles cached {snapshot.montage_timing.cached_tiles_last_session}, missing {snapshot.montage_timing.missing_tiles_last_session}"
+                f"{_timing_summary('total', (snapshot.montage_timing.last_tile_eval_ms, snapshot.montage_timing.last_tile_cache_lookup_ms, snapshot.montage_timing.last_stage_cache_lookup_ms, snapshot.montage_timing.last_canvas_compose_ms, snapshot.montage_timing.last_canvas_patch_ms, snapshot.montage_timing.last_set_image_ms, snapshot.montage_timing.last_canvas_commit_ms, snapshot.montage_timing.last_overlay_update_ms))}, "
+                f"tiles cached {snapshot.montage_timing.cached_tiles_last_session}, missing {snapshot.montage_timing.missing_tiles_last_session}, patched {snapshot.montage_timing.patched_tiles_last_flush}"
             ),
         )
 

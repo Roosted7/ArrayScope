@@ -529,7 +529,15 @@ P1 implementation status:
 - Interactive bursts cancel stale visible/profile/ROI/pixel work and prefetch bookkeeping.
 - Operation, profile, ROI, and inspection refreshes are deferred until interaction is quiet.
 - Direct `render()` remains the immediate execution primitive for initial render, data/operation changes, tests, and non-high-frequency workflows.
-- P2 still owns progressive montage commit splitting, mutable canvas patching, persistent overlays, dedicated tile workers, and StageCache policy work.
+- P2 implementation status:
+  - Full display commits and progressive montage commits are split internally.
+  - `MontageRenderSession` owns the mutable viewport canvas, histogram data, tile states, dirty rects, and flush bookkeeping.
+  - Completed montage tiles patch the existing canvas in place; viewport changes still build a new bounded initial canvas.
+  - Montage screen flushes are throttled to a frame cadence.
+  - Montage loading/skipped overlays use one persistent graphics item instead of per-update item recreation.
+  - Montage tile work runs on a dedicated max-2 scheduler lane; visible image rendering remains latest-only max-1 and prefetch remains idle-only/separate.
+  - StageCache retention is score-based using priority, recompute cost, hit count, visible reuse, bytes, age, and prefetch-only penalty.
+  - P2 latency coverage uses deterministic operation-count and relaxed Qt timeout assertions rather than machine-specific throughput benchmarks.
 
 ### split full display commit from progress commit
 
