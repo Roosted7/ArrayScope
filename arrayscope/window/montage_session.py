@@ -21,6 +21,8 @@ from arrayscope.display.montage import (
 class MontageRenderSession:
     session_id: int
     key: object
+    render_generation: int
+    level_key: object
     plan: MontagePlan
     view_state: object
     document: object
@@ -40,6 +42,10 @@ class MontageRenderSession:
     skipped_tiles: set[int]
     pending_tiles: list[MontageTile]
     active_tile_requests: set[int] = field(default_factory=set)
+    tile_stage_keys: dict[int, object] = field(default_factory=dict)
+    stage_waiting_tiles: dict[object, list[MontageTile]] = field(default_factory=dict)
+    active_stage_requests: set[object] = field(default_factory=set)
+    stage_values: dict[object, object] = field(default_factory=dict)
     canvas: MontageViewportCanvas | None = None
     canvas_data: np.ndarray | None = None
     canvas_histogram_data: np.ndarray | None = None
@@ -51,6 +57,11 @@ class MontageRenderSession:
     final_commit_pending: bool = False
     show_loading_overlays: bool = False
     defer_side_panels: bool = False
+    defer_autolevel_until_tile_loaded: bool = False
+    final_autolevel_pending: bool = False
+    display_committed: bool = False
+    applied_level_coverage_rank: int = 0
+    applied_level_source_count: int = 0
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles

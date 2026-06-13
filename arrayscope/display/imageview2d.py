@@ -258,9 +258,16 @@ class ImageView2D(QtWidgets.QWidget):
         self.image = img
         self.imageDisp = None
         self.histogramSource = histogramData
+        display_levels = None
+        if levels is not None:
+            if isinstance(levels, (list, tuple)) and len(levels) == 2:
+                display_levels = (float(levels[0]), float(levels[1]))
+            else:
+                low, high = levels
+                display_levels = (float(low), float(high))
         
         # Update the image display
-        self.updateImage(autoHistogramRange=autoHistogramRange)
+        self.updateImage(autoHistogramRange=autoHistogramRange, displayLevels=display_levels)
         self._update_profile_line_bounds()
         
         # Set levels
@@ -291,8 +298,61 @@ class ImageView2D(QtWidgets.QWidget):
         self._updateAspectRatio()
 
         self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy)
+
+    def updateImageDataFast(
+        self,
+        img: np.ndarray,
+        *,
+        histogramData: np.ndarray | None = None,
+        levels: tuple[float, float] | None = None,
+        rgb_already_windowed: bool = False,
+    ) -> None:
+        """Replace same-shape pixel data without recomputing levels or viewport."""
+        if not isinstance(img, np.ndarray):
+            raise TypeError("Image must be a numpy array")
+        if self.image is None:
+            raise RuntimeError("fast image update requires an existing image")
+        if tuple(img.shape[:2]) != tuple(self.image.shape[:2]):
+            raise ValueError("fast image update requires the same display shape")
+        is_rgb = self._is_rgb_image(img)
+        if img.ndim != 2 and not is_rgb:
+            raise ValueError("ImageView2D only supports 2D scalar or RGB images")
+
+        self.image = img
+        self.histogramSource = histogramData
+        if levels is not None:
+            self.levelMin = float(levels[0])
+            self.levelMax = float(levels[1])
+
+        if is_rgb:
+            self.histogram.setImageItem(self.histogramImageItem)
+            if rgb_already_windowed:
+                self._rgbBaseImage = None
+                self.imageDisp = img[..., :3]
+            else:
+                self._rgbBaseImage = img[..., :3].astype(float)
+                self.imageDisp = self._rgb_display_for_levels(levels)
+            self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=(0, 255))
+            if histogramData is not None:
+                histogram_display = histogramData
+                if finite_bounds(histogram_display) is None:
+                    histogram_display = np.zeros_like(np.asarray(histogramData), dtype=float)
+                self.histogramImageItem.setImage(
+                    histogram_display,
+                    autoLevels=False,
+                    levels=(self.levelMin, self.levelMax),
+                )
+        else:
+            self._rgbBaseImage = None
+            self.imageDisp = img
+            self.histogram.setImageItem(self.imageItem)
+            image_levels = (self.levelMin, self.levelMax)
+            self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=image_levels)
+        if levels is not None:
+            self.histogram.setLevels(float(levels[0]), float(levels[1]))
+        self._update_profile_line_bounds()
             
-    def updateImage(self, autoHistogramRange=True):
+    def updateImage(self, autoHistogramRange=True, displayLevels=None):
         """Update the displayed image"""
         if self.image is None:
             return
@@ -307,7 +367,7 @@ class ImageView2D(QtWidgets.QWidget):
 
         # Calculate min/max levels from the image data for histogram
         self._updateImageLevels(histogram_data)
-        histogram_levels = (self.levelMin, self.levelMax)
+        histogram_levels = (self.levelMin, self.levelMax) if displayLevels is None else (float(displayLevels[0]), float(displayLevels[1]))
         
         # Set the image data
         if is_rgb:
@@ -321,7 +381,7 @@ class ImageView2D(QtWidgets.QWidget):
             self.histogramImageItem.setImage(histogram_display, autoLevels=False, levels=histogram_levels)
         else:
             self.histogram.setImageItem(self.imageItem)
-            self.imageItem.setImage(self.imageDisp, autoLevels=False)
+            self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=histogram_levels)
         
         # Update histogram range if requested
         if autoHistogramRange:
@@ -573,8 +633,10 @@ class ImageView2D(QtWidgets.QWidget):
         if source is None:
             return None
         data = np.asarray(source)
-        y_i = int(mapping.local_y)
-        x_i = int(mapping.local_x)
+        if self.image is None or tuple(data.shape[:2]) != tuple(self.image.shape[:2]):
+            return None
+        y_i = int(mapping.display_y)
+        x_i = int(mapping.display_x)
         if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
             return None
         return data[y_i, x_i]

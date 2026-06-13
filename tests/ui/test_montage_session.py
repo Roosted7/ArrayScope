@@ -11,6 +11,8 @@ def _session():
     return MontageRenderSession(
         session_id=1,
         key="key",
+        render_generation=1,
+        level_key="levels",
         plan=plan,
         view_state=state,
         document=None,

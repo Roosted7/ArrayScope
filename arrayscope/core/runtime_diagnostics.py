@@ -127,6 +127,7 @@ class WindowRuntimeDiagnostics:
     render_timing: RenderTimingDiagnostics = field(default_factory=RenderTimingDiagnostics)
     montage_timing: MontageTimingDiagnostics = field(default_factory=MontageTimingDiagnostics)
     render_coalescer: RenderCoalescerDiagnostics = field(default_factory=RenderCoalescerDiagnostics)
+    stage_materialization: object | None = None
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
@@ -142,6 +143,7 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 _cache_line("Montage tiles", snapshot.tile_cache),
                 _cache_line("Profiles/scalars", snapshot.profile_cache),
                 _stage_cache_line("Stage cache", snapshot.stage_cache),
+                _stage_materialization_line("Stage materialization", snapshot.stage_materialization),
             )
         ),
         "Schedulers": "\n".join(_scheduler_line(scheduler) for scheduler in snapshot.schedulers),
@@ -266,6 +268,20 @@ def _stage_cache_line(name: str, cache) -> str:
         f"bytes={format_bytes(cache.bytes_used)} / {format_bytes(cache.max_bytes)}, "
         f"hits={cache.hits}, misses={cache.misses}, evictions={cache.evictions}, hit-rate={hit_rate}, "
         f"candidates={cache.candidates_seen}, stores={cache.stores}, refused={cache.refused_over_budget}"
+    )
+
+
+def _stage_materialization_line(name: str, diagnostics) -> str:
+    if diagnostics is None:
+        return f"{name}: n/a"
+    candidate = getattr(diagnostics, "candidate_bytes", None)
+    candidate_text = "unknown" if candidate is None else format_bytes(int(candidate))
+    return (
+        f"{name}: decision={getattr(diagnostics, 'decision', '') or 'n/a'}, "
+        f"candidate={candidate_text}, budget={format_bytes(int(getattr(diagnostics, 'budget_bytes', 0)))}, "
+        f"in-flight={getattr(diagnostics, 'in_flight', 0)}, scheduled={getattr(diagnostics, 'scheduled', 0)}, "
+        f"attached={getattr(diagnostics, 'attached', 0)}, completed={getattr(diagnostics, 'completed', 0)}, "
+        f"refused={getattr(diagnostics, 'refused', 0)}, consequence={getattr(diagnostics, 'consequence', '') or 'n/a'}"
     )
 
 

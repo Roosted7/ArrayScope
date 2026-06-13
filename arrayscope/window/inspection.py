@@ -222,6 +222,9 @@ class InspectionWorkflowMixin:
             source = getattr(self.img_view, "image", None)
         if source is None:
             return None
+        image = getattr(self.img_view, "image", None)
+        if image is None or tuple(np.shape(source)[:2]) != tuple(np.shape(image)[:2]):
+            return None
         return np.asarray(source)
 
     def _set_inspection_dock_visible_from_user(self, visible):

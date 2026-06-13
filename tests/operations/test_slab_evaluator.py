@@ -33,7 +33,17 @@ from arrayscope.operations.pipeline import (
     OperationStep,
 )
 from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec, apply_subregion
-from arrayscope.operations.slabs import evaluate_slab, plan_slab, request_for_export_frame, request_for_image, request_for_line, request_for_scalar, stage_key_for_candidate
+from arrayscope.operations.slabs import (
+    evaluate_slab,
+    evaluate_slab_from_stage,
+    materialize_stage_candidate,
+    plan_slab,
+    request_for_export_frame,
+    request_for_image,
+    request_for_line,
+    request_for_scalar,
+    stage_key_for_candidate,
+)
 from arrayscope.operations.stage_cache import StageCache
 
 
@@ -118,6 +128,44 @@ def test_stage_cache_backed_slab_matches_uncached_and_reuses_stage():
     cached_next = evaluate_slab(document, request1, stage_cache=cache, document_key=("doc",))
     np.testing.assert_allclose(cached_next, evaluate_slab(document, request1))
     assert cache.diagnostics().hits >= 1
+
+
+def test_materialized_stage_then_slab_matches_uncached():
+    data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    state = ViewState.from_shape(document.current_shape).with_slice(2, 1)
+    request = request_for_image(state)
+    plan = plan_slab(document, request)
+    candidate = plan.region_plan.cache_candidates[0]
+
+    stage = materialize_stage_candidate(document, plan.region_plan, candidate, document_key=("doc",))
+    staged = evaluate_slab_from_stage(document, request, plan, stage, candidate)
+
+    np.testing.assert_allclose(staged, evaluate_slab(document, request))
+
+
+def test_materialized_stage_respects_cancellation_before_cache_put():
+    class Token:
+        cancelled = True
+
+    data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    request = request_for_image(ViewState.from_shape(document.current_shape).with_slice(2, 1))
+    plan = plan_slab(document, request)
+    cache = StageCache(max_bytes=1024 * 1024, max_entries=8)
+
+    with pytest.raises(Exception) as exc_info:
+        materialize_stage_candidate(
+            document,
+            plan.region_plan,
+            plan.region_plan.cache_candidates[0],
+            stage_cache=cache,
+            document_key=("doc",),
+            cancellation_token=Token(),
+        )
+
+    assert type(exc_info.value).__name__ == "EvaluationCancelled"
+    assert cache.diagnostics().stores == 0
 
 
 def test_simplified_fft_ifft_slab_uses_dtype_preserving_identity_with_and_without_cache():

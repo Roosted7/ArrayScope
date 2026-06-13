@@ -19,7 +19,7 @@ from arrayscope.display.montage import (
     montage_rect_for_viewport,
     optimal_montage_columns,
 )
-from arrayscope.display.slice_engine import DisplayImage
+from arrayscope.display.slice_engine import DisplayImage, make_image_from_slab
 from arrayscope.display.viewport import ViewportIntent, ViewportPolicy
 from arrayscope.core.memory_budget import (
     estimate_display_image_bytes,
@@ -38,6 +38,13 @@ from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.operations.evaluator import evaluate_image_snapshot, evaluate_line_snapshot, evaluate_scalar_snapshot
+from arrayscope.operations.evaluator import EvaluationResult
+from arrayscope.operations.slabs import (
+    evaluate_slab_from_stage,
+    materialize_stage_candidate,
+    plan_slab,
+    request_for_image,
+)
 from arrayscope.operations.render_plan import (
     MAX_IDLE_PREFETCH_SLICES,
     PREFETCH_IDLE_DELAY_MS,
@@ -62,6 +69,26 @@ class RenderedView:
     document_key: tuple
     display_image: DisplayImage
     geometry: DisplayGeometry
+
+
+@dataclass(frozen=True)
+class CommittedDisplayFrame:
+    data: np.ndarray
+    histogram_data: np.ndarray | None
+    geometry: DisplayGeometry
+    levels: tuple[float, float] | None
+    document_key: object
+    request_key: object
+    render_generation: int
+    montage_level_key: object | None = None
+
+
+@dataclass(frozen=True)
+class MontageLevelStats:
+    bounds: tuple[float, float] | None
+    source_indices: frozenset[int]
+    expected_indices: frozenset[int]
+    coverage_rank: int
 
 
 def getNumberOfDecimalPlaces(number):
@@ -133,25 +160,19 @@ class RenderMixin:
         return "tile loading...", context
 
     def _hover_value_from_display(self, mapping):
-        if hasattr(self.img_view, "valueAtDisplayMapping"):
-            value = self.img_view.valueAtDisplayMapping(mapping)
-            if value is not None:
-                if isinstance(value, np.ndarray):
-                    return tuple(value.tolist())
-                if np.isscalar(value):
-                    try:
-                        return value.item()
-                    except AttributeError:
-                        return value
-                return value
-        source = getattr(self.img_view, "histogramSource", None)
+        frame = getattr(self, "_committed_display_frame", None)
+        if frame is None or not self._is_committed_display_frame_current(frame):
+            return None
+        source = frame.histogram_data
         if source is None:
-            source = getattr(self.img_view, "image", None)
+            source = frame.data
         if source is None:
             return None
         data = np.asarray(source)
-        y_i = int(mapping.local_y)
-        x_i = int(mapping.local_x)
+        if tuple(data.shape[:2]) != tuple(frame.geometry.display_shape):
+            return None
+        y_i = int(mapping.display_y)
+        x_i = int(mapping.display_x)
         if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
             return None
         value = data[y_i, x_i]
@@ -163,6 +184,21 @@ class RenderMixin:
             except AttributeError:
                 return value
         return value
+
+    def _is_committed_display_frame_current(self, frame: CommittedDisplayFrame) -> bool:
+        if not self._is_current_render_generation(int(frame.render_generation)):
+            return False
+        if frame.document_key != _document_key(self.document):
+            return False
+        if frame.geometry != getattr(self, "display_geometry", None):
+            return False
+        if tuple(np.shape(frame.data)[:2]) != tuple(frame.geometry.display_shape):
+            return False
+        if frame.histogram_data is not None and tuple(np.shape(frame.histogram_data)[:2]) != tuple(frame.geometry.display_shape):
+            return False
+        if frame.request_key != getattr(self, "_committed_display_request_key", None):
+            return False
+        return True
 
     def _request_pixel_value(self, index, x_i, y_i, context, pos):
         view_state = self.view_state
@@ -491,6 +527,8 @@ class RenderMixin:
         self._current_montage_geometry = None
         self._current_montage_plan = None
         self._current_montage_canvas = None
+        self._committed_display_frame = None
+        self._committed_display_request_key = None
         if hasattr(self.img_view, "clearMontageTileOverlays"):
             self.img_view.clearMontageTileOverlays()
             
@@ -517,6 +555,8 @@ class RenderMixin:
             colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         view_state = self.view_state
         document = self.document
+        request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)
+        render_generation = self._capture_render_generation()
         cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut)
         if cached is not None:
             self._last_render_was_degraded = False
@@ -529,6 +569,9 @@ class RenderMixin:
                 previous_bounds=previous_bounds,
                 force_auto=force_auto,
                 defer_side_panels=defer_side_panels,
+                document_key=_document_key(document),
+                request_key=request_key,
+                render_generation=render_generation,
             )
             return
         planning_start = perf_counter()
@@ -562,7 +605,6 @@ class RenderMixin:
                 self._update_operation_dock()
             return
 
-        request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)
         self._last_render_request_key = str(request_key)
         self.prefetch_evaluation_controller.cancel_prefetch()
 
@@ -584,7 +626,9 @@ class RenderMixin:
                 )
 
             def done_preview(result):
-                if request_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut):
+                if not self._is_current_render_generation(render_generation):
+                    return
+                if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut):
                     return
                 self.operation_evaluator.note_render_degraded()
                 display_image = result.value
@@ -599,6 +643,9 @@ class RenderMixin:
                     previous_bounds=previous_bounds,
                     force_auto=force_auto,
                     defer_side_panels=defer_side_panels,
+                    document_key=_document_key(document),
+                    request_key=preview_key,
+                    render_generation=render_generation,
                 )
                 self.img_view.setImageStale(True)
                 self.img_view.setEvaluationOverlay(True, decision.overlay_text)
@@ -650,7 +697,9 @@ class RenderMixin:
                 self._update_operation_dock()
 
         def done(result):
-            if request_key != self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut):
+            if not self._is_current_render_generation(render_generation):
+                return
+            if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut):
                 return
             self._last_render_completed_ms = float(getattr(result, "eval_ms", 0.0) or 0.0)
             self._last_render_was_degraded = False
@@ -665,6 +714,9 @@ class RenderMixin:
                 previous_bounds=previous_bounds,
                 force_auto=force_auto,
                 defer_side_panels=defer_side_panels,
+                document_key=_document_key(document),
+                request_key=request_key,
+                render_generation=render_generation,
             )
             self._schedule_prefetch_nearby_slices(view_state, colormap_lut)
 
@@ -791,6 +843,9 @@ class RenderMixin:
                 cached_tiles.append(cached.bind(tile) if hasattr(cached, "bind") else cached.payload().bind(tile))
         self._montage_cached_tiles_last_session = len(cached_tiles)
         self._montage_missing_tiles_last_session = len(missing_tiles)
+        render_generation = self._capture_render_generation()
+        stage_plan = self._plan_montage_stages(document, missing_tiles)
+        pending_tiles = [tile for tile in missing_tiles if int(tile.montage_index) not in stage_plan["waiting_indices"]]
         session_key = (
             "montage_tiles",
             _document_key(document),
@@ -799,11 +854,14 @@ class RenderMixin:
             colormap_lut.tobytes() if colormap_lut is not None else None,
             viewport_shape if view_state.montage_columns is None else None,
         )
+        level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
         session_id = int(getattr(self, "_montage_session_id", 0)) + 1
         self._montage_session_id = session_id
         session = MontageRenderSession(
             session_id=session_id,
             key=session_key,
+            render_generation=render_generation,
+            level_key=level_key,
             plan=plan,
             view_state=view_state,
             document=document,
@@ -821,10 +879,18 @@ class RenderMixin:
             rendered_tiles={int(rendered.tile.montage_index): rendered for rendered in cached_tiles},
             loading_tiles={int(tile.montage_index) for tile in missing_tiles},
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
-            pending_tiles=list(missing_tiles),
+            pending_tiles=list(pending_tiles),
+            tile_stage_keys=stage_plan["tile_stage_keys"],
+            stage_waiting_tiles=stage_plan["stage_waiting_tiles"],
+            stage_values=stage_plan["stage_values"],
             defer_side_panels=bool(defer_side_panels),
+            defer_autolevel_until_tile_loaded=not bool(cached_tiles),
+            final_autolevel_pending=not bool(cached_tiles) and window_mode != "absolute",
         )
         self._montage_session = session
+        self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
+        for rendered in cached_tiles:
+            self._update_montage_level_bounds_from_rendered(level_key, rendered, expected_indices=all_indices)
         try:
             self._commit_montage_session_canvas(session, force=True)
         except MemoryError as exc:
@@ -847,6 +913,211 @@ class RenderMixin:
         else:
             self._update_operation_dock()
         self._schedule_montage_session_slow_overlay(session)
+        self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
+        self._schedule_montage_tiles(session)
+
+    def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
+        return (
+            "montage_levels",
+            _document_key(document),
+            view_state.with_montage_axis(view_state.montage_axis, columns=view_state.montage_columns, indices=tuple(all_indices), text=getattr(view_state, "montage_text", "")),
+            tuple(int(index) for index in all_indices),
+            None if colormap_lut is None else colormap_lut.tobytes(),
+        )
+
+    def _empty_montage_level_stats(self, expected_indices) -> MontageLevelStats:
+        return MontageLevelStats(
+            bounds=None,
+            source_indices=frozenset(),
+            expected_indices=frozenset(int(index) for index in expected_indices),
+            coverage_rank=0,
+        )
+
+    def _ensure_montage_level_stats(self, level_key, *, expected_indices) -> MontageLevelStats:
+        store = getattr(self, "_montage_level_stats", None)
+        if store is None:
+            store = {}
+            self._montage_level_stats = store
+        expected = frozenset(int(index) for index in expected_indices)
+        stats = store.get(level_key)
+        if stats is None:
+            stats = self._empty_montage_level_stats(expected)
+            store[level_key] = stats
+        elif stats.expected_indices != expected:
+            stats = MontageLevelStats(
+                bounds=stats.bounds,
+                source_indices=stats.source_indices,
+                expected_indices=expected,
+                coverage_rank=self._montage_coverage_rank(stats.source_indices, expected),
+            )
+            store[level_key] = stats
+        return stats
+
+    def _montage_coverage_rank(self, source_indices, expected_indices) -> int:
+        sources = frozenset(int(index) for index in source_indices)
+        expected = frozenset(int(index) for index in expected_indices)
+        if not sources:
+            return 0
+        if expected and expected.issubset(sources):
+            return 2
+        return 1
+
+    def _update_montage_level_bounds_from_rendered(self, level_key, rendered, *, expected_indices=None) -> None:
+        source = rendered.histogram_data if rendered.histogram_data is not None else rendered.image
+        bounds = finite_bounds(source)
+        if bounds is None:
+            return
+        low, high = bounds
+        store = getattr(self, "_montage_level_stats", None)
+        if store is None:
+            store = {}
+            self._montage_level_stats = store
+        if expected_indices is None:
+            previous_stats = store.get(level_key)
+            expected_indices = () if previous_stats is None else previous_stats.expected_indices
+        previous = store.get(level_key, self._empty_montage_level_stats(expected_indices))
+        expected = frozenset(int(index) for index in (expected_indices or previous.expected_indices))
+        source_indices = frozenset(set(previous.source_indices) | {int(rendered.tile.source_index)})
+        previous_bounds = previous.bounds
+        merged_bounds = (
+            (float(low), float(high))
+            if previous_bounds is None
+            else (min(float(previous_bounds[0]), float(low)), max(float(previous_bounds[1]), float(high)))
+        )
+        store[level_key] = MontageLevelStats(
+            bounds=merged_bounds,
+            source_indices=source_indices,
+            expected_indices=expected,
+            coverage_rank=self._montage_coverage_rank(source_indices, expected),
+        )
+
+    def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
+        expected = tuple(tile.source_index for tile in session.plan.tiles)
+        return self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
+
+    def _montage_level_bounds_for_session(self, session, *, allow_partial: bool = False):
+        stats = self._montage_level_stats_for_session(session)
+        if stats.bounds is None:
+            return None
+        if allow_partial or int(stats.coverage_rank) >= 2:
+            return stats.bounds
+        return None
+
+    def _plan_montage_stages(self, document, missing_tiles):
+        document_key = stage_document_key(document)
+        groups = {}
+        tile_candidates = {}
+        for tile in tuple(missing_tiles):
+            try:
+                request = request_for_image(tile.view_state)
+                plan = plan_slab(document, request)
+            except Exception as exc:
+                handle_ui_exception("montage stage planning", exc)
+                continue
+            candidates = tuple(getattr(plan.region_plan, "cache_candidates", ()))
+            retained = tuple(candidate for candidate in candidates if getattr(candidate, "retain", True))
+            if not retained:
+                continue
+            candidate = retained[-1]
+            key = self.operation_evaluator.stage_materializer.key_for_candidate(document_key, candidate)
+            groups.setdefault(key, {"candidate": candidate, "tiles": [], "plan": plan, "request": request})
+            groups[key]["tiles"].append(tile)
+            tile_candidates[int(tile.montage_index)] = key
+
+        tile_stage_keys = {}
+        stage_waiting_tiles = {}
+        stage_values = {}
+        stage_requests = []
+        waiting_indices = set()
+        for key, group in groups.items():
+            tiles = tuple(group["tiles"])
+            candidate = group["candidate"]
+            estimated = int(getattr(candidate, "estimated_nbytes", 0) or 0)
+            if len(tiles) < 2 and estimated < 16 * 1024 * 1024:
+                continue
+            result = self.operation_evaluator.stage_materializer.request_stage(document_key, candidate)
+            if result.decision == "hit":
+                stage_values[key] = result.value
+                for tile in tiles:
+                    tile_stage_keys[int(tile.montage_index)] = key
+                continue
+            if result.decision == "scheduled":
+                stage_waiting_tiles[key] = list(tiles)
+                for tile in tiles:
+                    tile_stage_keys[int(tile.montage_index)] = key
+                    waiting_indices.add(int(tile.montage_index))
+                stage_requests.append((result.request, group["plan"]))
+                continue
+            for tile in tiles:
+                tile_stage_keys.pop(int(tile.montage_index), None)
+        return {
+            "tile_stage_keys": tile_stage_keys,
+            "stage_waiting_tiles": stage_waiting_tiles,
+            "stage_values": stage_values,
+            "stage_requests": stage_requests,
+            "waiting_indices": waiting_indices,
+        }
+
+    def _schedule_montage_stage_jobs(self, session, stage_requests) -> None:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return
+        controller = getattr(self, "stage_evaluation_controller", self.visible_evaluation_controller)
+        for request, plan in tuple(stage_requests):
+            if request is None or request.key in session.active_stage_requests:
+                continue
+            session.active_stage_requests.add(request.key)
+
+            def evaluate(token, request=request, plan=plan):
+                return materialize_stage_candidate(
+                    session.document,
+                    plan.region_plan,
+                    request.candidate,
+                    stage_cache=self.operation_evaluator.stage_cache,
+                    document_key=request.document_key,
+                    cancellation_token=token,
+                )
+
+            controller.start_latest(
+                evaluate,
+                key=("stage", request.key),
+                priority=EvalPriority.VISIBLE_IMAGE,
+                replace_group=f"montage-stage:{int(session.session_id)}:{hash(request.key)}",
+                on_done=lambda value, session_id=session.session_id, key=request.key: self._on_montage_stage_done(session_id, key, value),
+                on_error=lambda exc, session_id=session.session_id, key=request.key: self._on_montage_stage_error(session_id, key, exc),
+                on_stale=lambda key=request.key: self.operation_evaluator.stage_materializer.cancel(key),
+                on_slow=lambda: self._on_montage_tile_slow(session.session_id),
+                slow_ms=100,
+                pass_token=True,
+            )
+
+    def _on_montage_stage_done(self, session_id, key, value) -> None:
+        session = getattr(self, "_montage_session", None)
+        self.operation_evaluator.stage_materializer.complete(key, value)
+        if session is None or not self._is_current_montage_session(session_id, session.key):
+            return
+        if not self._is_current_render_generation(session.render_generation):
+            return
+        session.active_stage_requests.discard(key)
+        session.stage_values[key] = value
+        waiting = list(session.stage_waiting_tiles.pop(key, ()))
+        for tile in waiting:
+            index = int(tile.montage_index)
+            if index not in session.rendered_tiles and index not in session.skipped_tiles:
+                session.pending_tiles.append(tile)
+                session.mark_loading(tile)
+        self._schedule_montage_tiles(session)
+
+    def _on_montage_stage_error(self, session_id, key, exc) -> None:
+        session = getattr(self, "_montage_session", None)
+        self.operation_evaluator.stage_materializer.fail(key, exc)
+        if session is None or not self._is_current_montage_session(session_id, session.key):
+            return
+        session.active_stage_requests.discard(key)
+        waiting = list(session.stage_waiting_tiles.pop(key, ()))
+        for tile in waiting:
+            session.mark_skipped(tile)
+        show_status_message(self, f"Montage stage update failed: {exc}", timeout=4000)
+        self._schedule_montage_canvas_commit(session, force=True)
         self._schedule_montage_tiles(session)
 
     def _warn_montage_tiles_skipped(self, *, skipped_count: int, tile_bytes: int, budget_bytes: int, tile_shape) -> None:
@@ -881,6 +1152,8 @@ class RenderMixin:
         tile = session.next_tile()
         if tile is None:
             self._schedule_montage_canvas_commit(session, force=True)
+            if session.active_stage_requests or session.stage_waiting_tiles:
+                return False
             if session.pending_tiles:
                 return self._schedule_next_montage_tile(session)
             if self._is_current_montage_session(session.session_id, session.key):
@@ -894,8 +1167,8 @@ class RenderMixin:
                     self._update_operation_dock()
             return False
 
-        def evaluate():
-            return self._evaluate_montage_tile_snapshot(session, tile)
+        def evaluate(token):
+            return self._evaluate_montage_tile_snapshot(session, tile, token)
 
         controller = getattr(self, "montage_tile_evaluation_controller", self.visible_evaluation_controller)
         controller.start_latest(
@@ -908,16 +1181,49 @@ class RenderMixin:
             on_stale=lambda: None,
             on_slow=lambda: self._on_montage_tile_slow(session.session_id),
             slow_ms=100,
+            pass_token=True,
         )
         return True
 
-    def _evaluate_montage_tile_snapshot(self, session, tile):
+    def _evaluate_montage_tile_snapshot(self, session, tile, token=None):
         start = perf_counter()
         try:
+            stage_key = getattr(session, "tile_stage_keys", {}).get(int(tile.montage_index))
+            stage_value = None if stage_key is None else getattr(session, "stage_values", {}).get(stage_key)
+            if stage_value is not None:
+                request = request_for_image(tile.view_state)
+                plan = plan_slab(session.document, request)
+                candidates = tuple(getattr(plan.region_plan, "cache_candidates", ()))
+                candidate = next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if self.operation_evaluator.stage_materializer.key_for_candidate(stage_document_key(session.document), candidate) == stage_key
+                    ),
+                    None,
+                )
+                if candidate is not None:
+                    slab = evaluate_slab_from_stage(
+                        session.document,
+                        request,
+                        plan,
+                        stage_value,
+                        candidate,
+                        cancellation_token=token,
+                    )
+                    display_image = make_image_from_slab(slab, request, colormap_lut=session.colormap_lut)
+                    return EvaluationResult(
+                        value=display_image,
+                        eval_ms=(perf_counter() - start) * 1000.0,
+                        slab_shape=tuple(np.shape(slab)),
+                        slab_nbytes=int(getattr(slab, "nbytes", 0)),
+                        region_plan=plan.region_plan,
+                    )
             return evaluate_image_snapshot(
                 session.document,
                 tile.view_state,
                 colormap_lut=session.colormap_lut,
+                cancellation_token=token,
                 stage_cache=self.operation_evaluator.stage_cache,
                 stage_document_key=stage_document_key(session.document),
             )
@@ -982,11 +1288,18 @@ class RenderMixin:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, session.key):
             return
+        if not self._is_current_render_generation(session.render_generation):
+            return
         rendered = self.operation_evaluator.store_montage_tile_result(
             tile,
             montage_axis=session.montage_axis,
             colormap_lut=session.colormap_lut,
             result=result,
+        )
+        self._update_montage_level_bounds_from_rendered(
+            session.level_key,
+            rendered,
+            expected_indices=tuple(tile.source_index for tile in session.plan.tiles),
         )
         session.mark_loaded(rendered)
         patch_start = perf_counter()
@@ -999,6 +1312,8 @@ class RenderMixin:
     def _on_montage_tile_error(self, session_id, tile, exc) -> None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, session.key):
+            return
+        if not self._is_current_render_generation(session.render_generation):
             return
         session.mark_skipped(tile)
         show_status_message(self, f"Montage tile update failed: {exc}", timeout=4000)
@@ -1070,30 +1385,78 @@ class RenderMixin:
         self._current_montage_geometry = session.plan.geometry
         self._current_montage_plan = session.plan
         self._current_montage_canvas = canvas
+        if not session.rendered_tiles:
+            self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
+            return
         self._next_viewport_policy = ViewportPolicy.PRESERVE
         self._montage_canvas_commit_active = True
         try:
             display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
-            if newly_composed:
+            level_stats = self._montage_level_stats_for_session(session)
+            explicit_auto = bool(getattr(session, "force_auto", False))
+            montage_level_bounds = self._montage_level_bounds_for_session(session, allow_partial=explicit_auto)
+            first_display_commit = not bool(session.display_committed)
+            if newly_composed or first_display_commit:
+                initial_previous_levels = session.previous_levels
+                initial_force_auto = session.force_auto
+                initial_window_mode = session.window_mode
+                if first_display_commit:
+                    try:
+                        initial_previous_levels = self.img_view.getLevels()
+                    except Exception:
+                        initial_previous_levels = session.previous_levels
+                if first_display_commit and session.window_mode != "absolute":
+                    bounds = montage_level_bounds
+                    initial_force_auto = bounds is not None and float(bounds[1]) > float(bounds[0])
+                    if not initial_force_auto and initial_previous_levels is not None:
+                        initial_window_mode = "absolute"
+                    elif not initial_force_auto:
+                        initial_window_mode = "absolute"
                 self._apply_full_display_image(
                     display_image,
                     geometry=rendered_geometry,
-                    window_mode=session.window_mode,
-                    previous_levels=session.previous_levels,
+                    window_mode=initial_window_mode,
+                    previous_levels=initial_previous_levels,
                     previous_bounds=session.previous_bounds,
-                    force_auto=session.force_auto,
+                    force_auto=initial_force_auto,
                     defer_side_panels=getattr(session, "defer_side_panels", False),
+                    level_bounds=montage_level_bounds,
+                    document_key=_document_key(session.document),
+                    request_key=session.key,
+                    render_generation=session.render_generation,
+                    montage_level_key=session.level_key,
                 )
+                session.display_committed = True
+                self._note_montage_level_source_applied(session, level_stats, force_auto=initial_force_auto)
             else:
+                complete = (
+                    not session.pending_tiles
+                    and not session.loading_tiles
+                    and not session.active_stage_requests
+                    and not session.stage_waiting_tiles
+                )
+                force_auto = self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
+                if force_auto:
+                    montage_level_bounds = level_stats.bounds
                 self._apply_progressive_display_image(
                     display_image,
                     geometry=rendered_geometry,
                     window_mode=session.window_mode,
                     previous_levels=session.previous_levels,
                     previous_bounds=session.previous_bounds,
-                    force_auto=session.force_auto,
+                    force_auto=force_auto,
                     viewport_policy=ViewportPolicy.PRESERVE,
+                    level_bounds=montage_level_bounds,
+                    document_key=_document_key(session.document),
+                    request_key=session.key,
+                    render_generation=session.render_generation,
+                    montage_level_key=session.level_key,
                 )
+                if force_auto:
+                    self._note_montage_level_source_applied(session, level_stats, force_auto=True)
+                    session.defer_autolevel_until_tile_loaded = False
+                    if complete:
+                        session.final_autolevel_pending = False
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
@@ -1114,6 +1477,31 @@ class RenderMixin:
             self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
         session.note_committed()
         self._retry_live_profile_after_montage_tile()
+
+    def _should_autolevel_progressive_montage(self, session, stats: MontageLevelStats, *, complete: bool) -> bool:
+        if session.window_mode == "absolute" or not session.rendered_tiles:
+            return False
+        if not (session.defer_autolevel_until_tile_loaded or (complete and session.final_autolevel_pending)):
+            return False
+        bounds = stats.bounds
+        if bounds is None:
+            return False
+        if int(stats.coverage_rank) < 2 and not bool(getattr(session, "force_auto", False)):
+            return False
+        if int(stats.coverage_rank) < int(getattr(session, "applied_level_coverage_rank", 0)):
+            return False
+        if len(stats.source_indices) < int(getattr(session, "applied_level_source_count", 0)):
+            return False
+        low, high = bounds
+        if float(high) <= float(low):
+            return False
+        return True
+
+    def _note_montage_level_source_applied(self, session, stats: MontageLevelStats, *, force_auto: bool) -> None:
+        if not force_auto or stats.bounds is None:
+            return
+        session.applied_level_coverage_rank = int(stats.coverage_rank)
+        session.applied_level_source_count = len(stats.source_indices)
 
     def _classify_canvas_tiles(self, session) -> None:
         rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
@@ -1238,7 +1626,21 @@ class RenderMixin:
             (float(local_range[1][0]) + origin_y, float(local_range[1][1]) + origin_y),
         )
 
-    def _apply_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto, defer_side_panels: bool = False):
+    def _apply_display_image(
+        self,
+        display_image,
+        *,
+        geometry,
+        window_mode,
+        previous_levels,
+        previous_bounds,
+        force_auto,
+        defer_side_panels: bool = False,
+        document_key=None,
+        request_key=None,
+        render_generation=None,
+        montage_level_key=None,
+    ):
         self._apply_full_display_image(
             display_image,
             geometry=geometry,
@@ -1247,20 +1649,43 @@ class RenderMixin:
             previous_bounds=previous_bounds,
             force_auto=force_auto,
             defer_side_panels=defer_side_panels,
+            document_key=document_key,
+            request_key=request_key,
+            render_generation=render_generation,
+            montage_level_key=montage_level_key,
         )
 
-    def _apply_full_display_image(self, display_image, *, geometry, window_mode, previous_levels, previous_bounds, force_auto, defer_side_panels: bool = False):
+    def _apply_full_display_image(
+        self,
+        display_image,
+        *,
+        geometry,
+        window_mode,
+        previous_levels,
+        previous_bounds,
+        force_auto,
+        defer_side_panels: bool = False,
+        level_bounds=None,
+        document_key=None,
+        request_key=None,
+        render_generation=None,
+        montage_level_key=None,
+    ):
         commit_start = perf_counter()
         try:
+            preserved_histogram_bounds = self._histogram_bounds_to_preserve_for_commit(
+                geometry,
+                level_bounds=level_bounds,
+            )
             viewport_policy = self._viewport_policy_for_display_shape(display_image.data.shape[:2])
             levels_start = perf_counter()
-            current_bounds = self._display_histogram_bounds(display_image)
+            current_bounds = level_bounds if level_bounds is not None else self._display_histogram_bounds(display_image)
             level_decision = choose_window_levels(
                 mode=window_mode,
                 previous_levels=previous_levels,
                 previous_bounds=previous_bounds,
                 current_bounds=current_bounds,
-                default_levels=display_image.default_levels,
+                default_levels=level_bounds if level_bounds is not None else display_image.default_levels,
                 force_auto=force_auto,
             )
             al = level_decision.auto_levels
@@ -1274,12 +1699,29 @@ class RenderMixin:
                     autoLevels=al,
                     levels=levels,
                     histogramData=display_image.histogram_data,
+                    autoHistogramRange=preserved_histogram_bounds is None,
                     viewport_policy=viewport_policy,
                 )
             else:
-                self.img_view.setImage(display_image.data, autoLevels=al, levels=levels, viewport_policy=viewport_policy)
+                self.img_view.setImage(
+                    display_image.data,
+                    autoLevels=al,
+                    levels=levels,
+                    autoHistogramRange=preserved_histogram_bounds is None,
+                    viewport_policy=viewport_policy,
+                )
+            if preserved_histogram_bounds is not None:
+                self._apply_histogram_data_bounds(preserved_histogram_bounds)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
+            self._commit_display_frame(
+                display_image,
+                geometry=geometry,
+                document_key=document_key,
+                request_key=request_key,
+                render_generation=render_generation,
+                montage_level_key=montage_level_key,
+            )
             if defer_side_panels:
                 self._deferred_side_panel_refresh_pending = True
             else:
@@ -1310,34 +1752,76 @@ class RenderMixin:
         previous_bounds,
         force_auto,
         viewport_policy,
+        level_bounds=None,
+        document_key=None,
+        request_key=None,
+        render_generation=None,
+        montage_level_key=None,
     ):
-        del previous_levels, previous_bounds
+        del previous_levels
         commit_start = perf_counter()
         try:
+            preserved_histogram_bounds = self._histogram_bounds_to_preserve_for_commit(
+                geometry,
+                level_bounds=level_bounds,
+                previous_bounds=previous_bounds,
+            )
             levels_start = perf_counter()
             levels = None
-            if not force_auto and window_mode == "absolute":
+            if not force_auto:
                 try:
                     levels = self.img_view.getLevels()
                 except Exception:
                     levels = None
             else:
-                levels = self._sampled_display_bounds(display_image)
+                levels = level_bounds if level_bounds is not None else self._sampled_display_bounds(display_image)
             al = levels is None
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
             set_image_start = perf_counter()
-            if display_image.histogram_data is not None:
-                self.img_view.setImage(
+            can_fast = (
+                not al
+                and viewport_policy == ViewportPolicy.PRESERVE
+                and getattr(self.img_view, "image", None) is not None
+                and tuple(getattr(self.img_view.image, "shape", ())[:2]) == tuple(display_image.data.shape[:2])
+                and hasattr(self.img_view, "updateImageDataFast")
+            )
+            if can_fast:
+                self.img_view.updateImageDataFast(
                     display_image.data,
-                    autoLevels=al,
-                    levels=levels,
                     histogramData=display_image.histogram_data,
-                    viewport_policy=viewport_policy,
+                    levels=levels,
+                    rgb_already_windowed=display_image.data.ndim == 3,
                 )
             else:
-                self.img_view.setImage(display_image.data, autoLevels=al, levels=levels, viewport_policy=viewport_policy)
+                if display_image.histogram_data is not None:
+                    self.img_view.setImage(
+                        display_image.data,
+                        autoLevels=al,
+                        levels=levels,
+                        histogramData=display_image.histogram_data,
+                        autoHistogramRange=preserved_histogram_bounds is None,
+                        viewport_policy=viewport_policy,
+                    )
+                else:
+                    self.img_view.setImage(
+                        display_image.data,
+                        autoLevels=al,
+                        levels=levels,
+                        autoHistogramRange=preserved_histogram_bounds is None,
+                        viewport_policy=viewport_policy,
+                    )
+            if preserved_histogram_bounds is not None:
+                self._apply_histogram_data_bounds(preserved_histogram_bounds)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
+            self._commit_display_frame(
+                display_image,
+                geometry=geometry,
+                document_key=document_key,
+                request_key=request_key,
+                render_generation=render_generation,
+                montage_level_key=montage_level_key,
+            )
             self.apply_axis_flips()
             self.img_view.setImageStale(False)
         except Exception as e:
@@ -1346,6 +1830,69 @@ class RenderMixin:
         finally:
             self._last_progressive_commit_ms = (perf_counter() - commit_start) * 1000.0
             self._last_display_commit_ms = self._last_progressive_commit_ms
+
+    def _histogram_bounds_to_preserve_for_commit(self, geometry, *, level_bounds=None, previous_bounds=None):
+        if level_bounds is not None:
+            return (float(level_bounds[0]), float(level_bounds[1]))
+        if getattr(geometry, "montage", None) is None:
+            return None
+        if previous_bounds is not None:
+            return (float(previous_bounds[0]), float(previous_bounds[1]))
+        try:
+            current = self.img_view.getHistogramDataBounds()
+        except Exception:
+            current = None
+        if current is None:
+            return None
+        return (float(current[0]), float(current[1]))
+
+    def _apply_histogram_data_bounds(self, bounds) -> None:
+        low, high = float(bounds[0]), float(bounds[1])
+        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+            return
+        self.img_view.levelMin = low
+        self.img_view.levelMax = high
+        if hasattr(self.img_view, "setHistogramRange"):
+            self.img_view.setHistogramRange(low, high)
+
+    def _commit_display_frame(
+        self,
+        display_image,
+        *,
+        geometry,
+        document_key=None,
+        request_key=None,
+        render_generation=None,
+        montage_level_key=None,
+    ) -> None:
+        if tuple(display_image.data.shape[:2]) != tuple(geometry.display_shape):
+            self._committed_display_frame = None
+            self._committed_display_request_key = None
+            return
+        if document_key is None:
+            document_key = _document_key(self.document)
+        if request_key is None:
+            request_key = ("display", document_key, geometry.view_state)
+        if render_generation is None:
+            render_generation = self._capture_render_generation()
+        levels = None
+        try:
+            current_levels = self.img_view.getLevels()
+            if current_levels is not None:
+                levels = (float(current_levels[0]), float(current_levels[1]))
+        except Exception:
+            levels = None
+        self._committed_display_request_key = request_key
+        self._committed_display_frame = CommittedDisplayFrame(
+            data=display_image.data,
+            histogram_data=display_image.histogram_data,
+            geometry=geometry,
+            levels=levels,
+            document_key=document_key,
+            request_key=request_key,
+            render_generation=int(render_generation),
+            montage_level_key=montage_level_key,
+        )
 
     def _sampled_display_bounds(self, display_image, *, max_samples: int = 65536):
         source = display_image.histogram_data
@@ -1366,6 +1913,19 @@ class RenderMixin:
             delta = max(abs(float(low)) * 0.01, 0.5)
             return (float(low) - delta, float(high) + delta)
         return bounds
+
+    def _raw_display_bounds(self, display_image, *, max_samples: int = 65536):
+        source = display_image.histogram_data
+        if source is None:
+            source = display_image.data
+        array = np.asarray(source)
+        if array.ndim == 3:
+            array = 0.2126 * array[..., 0].astype(float) + 0.7152 * array[..., 1].astype(float) + 0.0722 * array[..., 2].astype(float)
+        flat = np.ravel(array)
+        if flat.size > int(max_samples):
+            stride = max(1, int(np.ceil(flat.size / int(max_samples))))
+            flat = flat[::stride]
+        return finite_bounds(flat)
 
     def _viewport_policy_for_display_shape(self, display_shape):
         display_shape = tuple(int(size) for size in display_shape)
@@ -1810,11 +2370,26 @@ class RenderMixin:
         return False
 
     def request_render(self, *, reason: str, force_autolevel: bool = False, interactive: bool = False) -> None:
+        self._advance_render_generation(f"request:{reason}")
         coordinator = getattr(self, "render_coordinator", None)
         if coordinator is None:
             self.render(reason=reason, force_autolevel=force_autolevel)
             return
         coordinator.request(reason=reason, force_autolevel=force_autolevel, interactive=interactive)
+
+    def _advance_render_generation(self, reason: str) -> int:
+        generation = getattr(self, "_render_generation", None)
+        if generation is None:
+            return 0
+        return generation.advance(reason)
+
+    def _capture_render_generation(self) -> int:
+        generation = getattr(self, "_render_generation", None)
+        return 0 if generation is None else generation.capture()
+
+    def _is_current_render_generation(self, generation: int) -> bool:
+        guard = getattr(self, "_render_generation", None)
+        return (guard is None or guard.is_current(generation)) and not getattr(self, "_closing", False)
 
     def _cancel_render_dependent_work_for_interactive_change(self) -> None:
         for controller_name, groups in (
@@ -1848,6 +2423,7 @@ class RenderMixin:
 
     def render(self, *, reason: str = "state", force_autolevel: bool = False, defer_side_panels: bool = False):
         render_start = perf_counter()
+        self._advance_render_generation(f"render:{reason}")
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._coerce_channel_for_current_dtype()
         control_start = perf_counter()

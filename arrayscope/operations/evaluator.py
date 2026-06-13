@@ -11,6 +11,7 @@ from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.cache import BoundedArrayCache
 from arrayscope.operations.stage_cache import StageCache
+from arrayscope.operations.stage_materialization import StageMaterializationManager
 from arrayscope.operations.slabs import (
     evaluate_slab,
     evaluate_slab_from_plan,
@@ -85,6 +86,7 @@ class OperationEvaluator:
         self._tile_cache = BoundedArrayCache(DEFAULT_TILE_CACHE_BYTES, 512)
         self._profile_cache = BoundedArrayCache(DEFAULT_PROFILE_CACHE_BYTES, 256)
         self._stage_cache = StageCache(max_bytes=DEFAULT_STAGE_CACHE_BYTES, max_entries=DEFAULT_STAGE_CACHE_ENTRIES)
+        self._stage_materializer = StageMaterializationManager(self._stage_cache)
 
     def set_document(self, document: ArrayDocument):
         if (
@@ -112,6 +114,8 @@ class OperationEvaluator:
             self._profile_cache.clear()
         if hasattr(self, "_stage_cache"):
             self._stage_cache.clear()
+        if hasattr(self, "_stage_materializer"):
+            self._stage_materializer.clear()
         self.display_generation += 1
         self.last_status = CacheStatusSnapshot(CacheStatus.STALE, "Cache cleared")
 
@@ -446,8 +450,15 @@ class OperationEvaluator:
     def stage_cache(self):
         return self._stage_cache
 
+    @property
+    def stage_materializer(self):
+        return self._stage_materializer
+
     def stage_cache_diagnostics(self):
         return self._stage_cache.diagnostics()
+
+    def stage_materialization_diagnostics(self):
+        return self._stage_materializer.diagnostics()
 
     def derived_estimate(self):
         dtype = _estimated_dtype(self.document)
@@ -546,7 +557,7 @@ def evaluate_image_snapshot(
     plan = plan_slab(document, request)
     start = perf_counter()
     _check_cancelled(cancellation_token)
-    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key)
+    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key, cancellation_token=cancellation_token)
     _check_cancelled(cancellation_token)
     value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
     _check_cancelled(cancellation_token)
@@ -560,11 +571,13 @@ def evaluate_image_snapshot(
     )
 
 
-def evaluate_line_snapshot(document, view_state, *, stage_cache=None, stage_document_key=None) -> EvaluationResult:
+def evaluate_line_snapshot(document, view_state, *, stage_cache=None, stage_document_key=None, cancellation_token=None) -> EvaluationResult:
     request = request_for_line(view_state)
     plan = plan_slab(document, request)
     start = perf_counter()
-    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key)
+    _check_cancelled(cancellation_token)
+    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key, cancellation_token=cancellation_token)
+    _check_cancelled(cancellation_token)
     value = make_line_from_slab(slab, request)
     return EvaluationResult(
         value=value,
@@ -575,11 +588,13 @@ def evaluate_line_snapshot(document, view_state, *, stage_cache=None, stage_docu
     )
 
 
-def evaluate_scalar_snapshot(document, view_state, index, *, stage_cache=None, stage_document_key=None) -> EvaluationResult:
+def evaluate_scalar_snapshot(document, view_state, index, *, stage_cache=None, stage_document_key=None, cancellation_token=None) -> EvaluationResult:
     request = request_for_scalar(view_state, index)
     plan = plan_slab(document, request)
     start = perf_counter()
-    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key)
+    _check_cancelled(cancellation_token)
+    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key, cancellation_token=cancellation_token)
+    _check_cancelled(cancellation_token)
     value = make_scalar_from_slab(slab, request)
     return EvaluationResult(
         value=value,
@@ -599,11 +614,14 @@ def evaluate_export_frame_snapshot(
     *,
     stage_cache=None,
     stage_document_key=None,
+    cancellation_token=None,
 ) -> EvaluationResult:
     request = request_for_export_frame(view_state, frame_axis, frame_index)
     plan = plan_slab(document, request)
     start = perf_counter()
-    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key)
+    _check_cancelled(cancellation_token)
+    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key, cancellation_token=cancellation_token)
+    _check_cancelled(cancellation_token)
     value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
     return EvaluationResult(
         value=value,

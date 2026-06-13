@@ -38,6 +38,10 @@ source of array-view state.
   dtype, and shape, and budgeted by `MemoryPolicy.stage_cache_budget_bytes`. Planner candidates carry
   a retained/skipped flag: slab execution stores retained useful candidates by default and falls back
   to an earlier fitting candidate when the preferred retained stage is oversized.
+- `arrayscope.operations.stage_materialization`: Qt-free singleflight coordinator for explicit
+  reusable stage materialization. It is owned by `OperationEvaluator`, deduplicates in-flight
+  expanded stage requests by `StageKey`, records stage decision diagnostics, and refuses oversized
+  candidates without forcing them into `StageCache`.
 - `arrayscope.core.memory_policy`: Qt-free runtime memory policy. It samples system total,
   available memory, and process RSS through psutil with a deterministic fallback, then derives visible
   render, montage canvas/tile, image cache, montage tile cache, profile cache, future stage-cache, and
@@ -66,8 +70,8 @@ source of array-view state.
 - `arrayscope.operations.coordinator`: owns the operation document, evaluator, stack edits,
   and materialization.
 - `arrayscope.operations.evaluator.OperationEvaluator`: UI-thread owner of display/profile caches,
-  evaluation status, and diagnostics. Background workers use immutable document snapshots and pure
-  evaluation helpers; they must not mutate the live evaluator directly.
+  stage cache/materialization, evaluation status, and diagnostics. Background workers use immutable
+  document snapshots and pure evaluation helpers; they must not mutate the live evaluator directly.
 - `arrayscope.profiles.model` / `arrayscope.profiles.coordinator`: profile display policy and line
   result orchestration. Display-point to profile-state mapping belongs to `arrayscope.display.geometry`.
 - `arrayscope.core.roi`: Qt-free ROI geometry, line/polyline/freehand sampling, masks, and finite-value
@@ -76,6 +80,9 @@ source of array-view state.
 - `arrayscope.core.compare`: minimal compatible-layer model used by ROI histogram comparisons.
 - `arrayscope.core.window_levels`: decides image window/level reuse or auto-level behavior.
 - `arrayscope.display.ImageView2D`, `arrayscope.ui`, and `arrayscope.ui.docks`: Qt display and controls only.
+  Progressive montage uses `ImageView2D.updateImageDataFast()` for same-shape pixel updates that
+  preserve levels, histogram range, transform, and viewport instead of running the full `setImage()`
+  path on every tile flush.
 - `arrayscope.ui.dimension_strip`, `arrayscope.ui.display_toolbar`, `arrayscope.ui.command_palette`,
   `arrayscope.ui.diagnostics`, `arrayscope.ui.docks.inspection`, and `arrayscope.ui.hud`: compact
   viewer controls, operation discovery, developer diagnostics, ROI inspection controls, and on-canvas pixel
@@ -84,10 +91,15 @@ source of array-view state.
   full-view restore. It is pure and does not contain dock geometry.
 - `arrayscope.window.main.ArrayScopeWindow`: wires Qt signals to state changes, then either calls
   `render()` directly for immediate/full render workflows or requests an interactive render through
-  the render coordinator.
+  the render coordinator. It owns the committed display frame used for pixel hover/status values:
+  displayed data, optional histogram source, display geometry, window levels, document key, request
+  key, render generation, and optional montage level key.
 - `arrayscope.window.render_coordinator.RenderCoordinator`: owns high-frequency render request
   coalescing, latest-state flushing, interaction quiet detection, cancellation of stale
   render-dependent work, and deferred side-panel refresh after interactive bursts.
+- `arrayscope.window.render_generation.RenderGeneration`: per-window visible-output generation guard.
+  Render requests and visible-output state changes advance the generation; async callbacks commit only
+  when their captured generation and current evaluator/session key still match current viewer state.
 - `arrayscope.window.evaluation_controller`: owns categorized background display/profile/ROI/prefetch
   dispatch, latest-only replacement groups, local thread pools, queue clearing, cancellation tokens,
   and stale-result ignoring.
@@ -129,12 +141,15 @@ burst is quiet.
 
 Progressive montage rendering has a narrower commit path than full image rendering. The initial
 montage viewport composes a bounded canvas, then completed tiles patch that session-owned canvas in
-place and flush to screen at a frame cadence. Progressive commits update pixels, display geometry,
-axis flips, viewport preservation, and montage loading/skipped overlays; side panels and expensive
-dock/profile/ROI refreshes run only on full commits or after the interaction burst is quiet. Montage
-tile evaluation uses a dedicated `montage` scheduler lane with two workers, while visible exact image
-rendering remains latest-only on the max-1 `visible` lane and prefetch remains idle-only on the
-separate `prefetch` lane.
+place and flush to screen at a frame cadence. The session canvas is render-session state only; it is
+not the hover/status value source until a successful display commit records a committed display frame.
+Progressive commits update pixels, display geometry, axis flips, viewport preservation, the committed
+display frame, and montage loading/skipped overlays; side panels and expensive dock/profile/ROI
+refreshes run only on full commits or after the interaction burst is quiet. Montage tile evaluation
+uses a dedicated `montage` scheduler lane with two workers. Shared expanded operation stages use a
+separate max-1 `stage` lane and are materialized before cold dependent tiles are rendered. Visible
+exact image rendering remains latest-only on the max-1 `visible` lane and prefetch remains idle-only
+on the separate `prefetch` lane.
 
 `render()` then:
 
@@ -157,8 +172,22 @@ from widget state. Display point mapping uses pixel cells: `[x, x+1)` maps to
 column `x`, and `[y, y+1)` maps to row `y`. Hover/status context text also
 comes from `DisplayGeometry` so montage axes are labelled once.
 Pixel hover reads the committed displayed scalar image or histogram source
-directly. It does not schedule scalar evaluation or show an intermediate
-“updating” value during normal mouse movement.
+directly from the window-owned committed display frame. For montage, the
+committed frame is indexed by display canvas coordinates while tile-local
+coordinates remain status/context text. A committed frame is usable only when
+its document key, request key, render generation, geometry, and display shape
+still match current visible state. Pixel hover does not schedule scalar
+evaluation or show an intermediate “updating” value during normal mouse
+movement.
+
+Montage window/level state is tracked separately from both the rendered pixel canvas and the
+committed value source. The window maintains per-montage-level histogram stats with finite bounds,
+source indices, expected indices, and a coverage rank: none, visible subset, or all planned montage
+indices. Viewport culling may reduce rendered pixel work only. It must not make hover semantics stale
+and must not replace broader semantic window/level bounds with a narrower visible subset. Partial
+tiles may display immediately, but implicit relative auto-windowing only uses a semantic source that
+is at least as complete as the previously applied source; explicit Auto Window uses the best semantic
+bounds currently available.
 
 Do not read widget values to reconstruct `ViewState`. Widget state is an output
 of render, except transient UI-only state such as dock visibility and histogram
@@ -201,9 +230,11 @@ stacks. Explicit replacement/materialization uses
 `replace_base_and_clear_steps()`.
 
 Background evaluation uses categorized local per-window `QThreadPool` instances. Visible rendering,
-profile updates, ROI inspection, and prefetch have separate controllers. Visible/profile/ROI pools use
-one worker and `start_latest()` replacement groups so newer requests clear queued stale work. Closing a
-window clears queued work, increments generations, stops polling, and ignores late results.
+profile updates, stage materialization, montage tiles, ROI inspection, and prefetch have separate
+controllers. Visible/profile/ROI/stage pools use one worker and `start_latest()` replacement groups so
+newer requests clear queued stale work. Clearing a replacement group advances that group's generation
+even if no replacement job is submitted. Closing a window clears queued work, increments generations,
+stops polling, and ignores late results.
 Cancellation tokens are checked before/after major evaluation steps and between chunks. Visible image
 rendering uses a cost-aware decision before work is submitted: use cache, run exact async, run exact in
 cooperative chunks, show a marked degraded preview, or refuse while keeping the previous image visible.

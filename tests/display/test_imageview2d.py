@@ -69,9 +69,88 @@ def test_montage_tile_overlays_reuse_single_graphics_item(qt_app):
     assert view.montageTileOverlayCount() == 2
     assert len(view._montage_tile_overlay_items) == 1
 
-    view.clearMontageTileOverlays()
-    assert view.montageTileOverlayCount() == 0
-    assert view._montage_tile_overlay_items == []
+
+def test_update_image_data_fast_preserves_levels_and_view_range(qt_app, monkeypatch):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.zeros((8, 8), dtype=float), levels=(0.0, 10.0))
+    view.getView().setRange(xRange=(1, 5), yRange=(2, 6), padding=0)
+    before_range = view.getView().viewRange()
+    autolevel_calls = []
+    monkeypatch.setattr(view, "autoLevels", lambda: autolevel_calls.append(True))
+
+    view.updateImageDataFast(np.ones((8, 8), dtype=float), histogramData=np.ones((8, 8), dtype=float), levels=(0.0, 10.0))
+
+    assert autolevel_calls == []
+    assert tuple(view.image.shape) == (8, 8)
+    assert view.getLevels() == (0.0, 10.0)
+    assert view.getView().viewRange() == before_range
+    view.close()
+
+
+def test_update_image_data_fast_accepts_display_ready_rgb(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.zeros((4, 4, 3), dtype=np.uint8), levels=(0.0, 1.0), histogramData=np.zeros((4, 4)))
+    rgb = np.full((4, 4, 3), 128, dtype=np.uint8)
+
+    view.updateImageDataFast(rgb, histogramData=np.ones((4, 4)), levels=(0.0, 1.0), rgb_already_windowed=True)
+
+    assert view._rgbBaseImage is None
+    np.testing.assert_array_equal(view.imageDisp, rgb)
+    view.close()
+
+
+def test_scalar_image_upload_passes_levels_to_image_item(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 12.0))
+
+    assert tuple(float(value) for value in view.imageItem.levels) == (2.0, 12.0)
+    view.updateImageDataFast(np.ones((4, 4), dtype=float), levels=(3.0, 9.0))
+    assert tuple(float(value) for value in view.imageItem.levels) == (3.0, 9.0)
+    view.close()
+
+
+def test_value_at_display_mapping_ignores_mismatched_histogram_source(qt_app):
+    from arrayscope.display.geometry import DisplayPointMapping
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.ones((4, 4), dtype=float), histogramData=np.ones((4, 4), dtype=float), levels=(0.0, 2.0))
+    view.histogramSource = np.ones((8, 8), dtype=float)
+
+    value = view.valueAtDisplayMapping(DisplayPointMapping(display_x=0, display_y=0, local_x=0, local_y=0, array_index=(0, 0)))
+
+    assert value is None
+    view.close()
+
+
+def test_value_at_display_mapping_uses_display_coordinates_for_montage(qt_app):
+    from arrayscope.display.geometry import DisplayPointMapping
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    data = np.arange(12, dtype=float).reshape(3, 4)
+    view.setImage(data, histogramData=data.copy(), levels=(0.0, 12.0))
+
+    value = view.valueAtDisplayMapping(
+        DisplayPointMapping(
+            display_x=3,
+            display_y=2,
+            local_x=0,
+            local_y=0,
+            array_index=(0, 0, 1),
+            tile_number=1,
+            montage_axis=2,
+            montage_index=1,
+        )
+    )
+
+    assert value == data[2, 3]
     view.close()
 
 

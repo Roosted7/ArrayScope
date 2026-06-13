@@ -443,36 +443,36 @@ Goal: finish the remaining interaction-latency work by making expensive reusable
 
 ### P0 — stale-work correctness and pure imports
 
-* [ ] Add render-generation guards advanced by every visible-output render request or state mutation.
-* [ ] Compare async callback generation and current evaluator keys before image, preview, montage, profile, ROI, or pixel commits.
-* [ ] Make `EvaluationController.clear_group()` invalidate group generations even when no replacement job is submitted.
-* [ ] Pass cancellation tokens into montage tile evaluation and stage-cache slab execution.
-* [ ] Remove the eager `ArrayScopeWindow` import from `arrayscope.window.__init__` and lazy-load it through `__getattr__`.
+* [x] Add render-generation guards advanced by every visible-output render request or state mutation.
+* [~] Compare async callback generation and current evaluator keys before image, preview, montage, profile, ROI, or pixel commits.
+* [x] Make `EvaluationController.clear_group()` invalidate group generations even when no replacement job is submitted.
+* [x] Pass cancellation tokens into montage tile evaluation and stage-cache slab execution.
+* [x] Remove the eager `ArrayScopeWindow` import from `arrayscope.window.__init__` and lazy-load it through `__getattr__`.
 * [ ] Fix broad-run chunked cancellation flakes.
-* [ ] Add stale-commit, group-invalidation, montage-cancellation, and pure-import regression tests.
+* [~] Add stale-commit, group-invalidation, montage-cancellation, and pure-import regression tests.
 
 ### P1 — stage-first rendering and singleflight
 
-* [ ] Add `StageMaterializationManager` owned by `OperationEvaluator`.
-* [ ] Add in-flight singleflight for expanded stage keys.
-* [ ] Route duplicate stage requests to the in-flight job instead of recomputing.
+* [x] Add `StageMaterializationManager` owned by `OperationEvaluator`.
+* [x] Add in-flight singleflight for expanded stage keys.
+* [~] Route duplicate stage requests to the in-flight job instead of recomputing.
 * [ ] Add a dedicated stage materialization lane with controlled FFT worker settings.
-* [ ] Surface stage candidate bytes, budget, decision, and recompute consequence in diagnostics.
-* [ ] Detect common cacheable expanded stages during montage session planning.
-* [ ] Materialize missing fitting stages before scheduling cold tile renders.
-* [ ] Attach loading tiles to in-flight stage work.
-* [ ] Render cached-stage tiles through rendered tile cache and patch the montage session canvas.
+* [x] Surface stage candidate bytes, budget, decision, and recompute consequence in diagnostics.
+* [x] Detect common cacheable expanded stages during montage session planning.
+* [x] Materialize missing fitting stages before scheduling cold tile renders.
+* [x] Attach loading tiles to in-flight stage work.
+* [x] Render cached-stage tiles through rendered tile cache and patch the montage session canvas.
 * [ ] Keep visible image, montage tile, stage materialization, and prefetch work on separate lanes.
-* [ ] Add concurrent cold-stage, cancellation/error cleanup, revision invalidation, refusal-diagnostics, and FFT-over-montage-axis tests.
+* [~] Add concurrent cold-stage, cancellation/error cleanup, revision invalidation, refusal-diagnostics, and FFT-over-montage-axis tests.
 
 ### P2 — true progressive image update path
 
-* [ ] Add an `ImageView2D` fast pixel-update API for same-shape progressive commits.
-* [ ] Split full display commits from progressive pixel commits at the window/render boundary.
-* [ ] Freeze levels during progressive montage except at explicit recompute boundaries.
-* [ ] Skip histogram, side-panel, operation dock, ROI, and profile refreshes during tile patch commits.
+* [x] Add an `ImageView2D` fast pixel-update API for same-shape progressive commits.
+* [x] Split full display commits from progressive pixel commits at the window/render boundary.
+* [x] Freeze levels during progressive montage except at explicit recompute boundaries.
+* [x] Skip histogram, side-panel, operation dock, ROI, and profile refreshes during tile patch commits.
 * [ ] Patch display-ready dirty tile regions for complex/RGB progressive montage.
-* [ ] Add tests proving progressive tile patches avoid level scans, histogram refreshes, and unrelated dock refreshes.
+* [~] Add tests proving progressive tile patches avoid level scans, histogram refreshes, and unrelated dock refreshes.
 
 ### P3 — stage-aware predictive cache and compute policy
 
