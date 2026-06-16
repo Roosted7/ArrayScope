@@ -45,3 +45,16 @@ def test_viewport_controller_one_to_one_uses_viewport_pixels():
     assert controller.mode == ViewportMode.ONE_TO_ONE
     assert view.viewRange()[0] == pytest.approx([-1, 11])
     assert view.viewRange()[1] == pytest.approx([0, 8])
+
+
+def test_viewport_controller_preserve_ignores_origin_only_changes():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(view, (8, 10), _size(100, 80), policy=ViewportPolicy.PRESERVE, display_rect=(0, 0, 9, 7))
+    view.setRange(xRange=(20, 30), yRange=(40, 50), padding=0)
+    controller.note_user_range_changed()
+
+    controller.apply_after_image(view, (8, 10), _size(100, 80), policy=ViewportPolicy.PRESERVE, display_rect=(0, 100, 9, 107))
+
+    assert view.fit_count == 1
+    assert view.viewRange() == [[20, 30], [40, 50]]

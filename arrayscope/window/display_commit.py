@@ -22,7 +22,9 @@ class DisplayCommitter:
             histogramRange=presentation.histogram_range,
             viewport_policy=presentation.viewport_policy,
             rgb_already_windowed=presentation.rgb_already_windowed,
+            image_origin=_image_origin(presentation.geometry),
         )
+        self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)
 
     def commit_fast(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
@@ -37,7 +39,9 @@ class DisplayCommitter:
             levels=presentation.levels,
             histogramRange=presentation.histogram_range,
             rgb_already_windowed=presentation.rgb_already_windowed,
+            image_origin=_image_origin(presentation.geometry),
         )
+        self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)
 
     def commit_tile_layer(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
@@ -54,6 +58,7 @@ class DisplayCommitter:
             montage_dirty_tiles=presentation.montage_dirty_tiles,
             montage_tile_source_ids=presentation.montage_tile_source_ids,
         )
+        self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)
 
     def _frame_for(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
@@ -86,3 +91,19 @@ class DisplayCommitter:
             raise ValueError(f"{label} must be a pair of finite floats") from exc
         if not np.isfinite(low) or not np.isfinite(high) or high <= low:
             raise ValueError(f"{label} must be finite increasing bounds")
+
+
+def _image_origin(geometry) -> tuple[float, float]:
+    if getattr(geometry, "montage", None) is None:
+        return (0.0, 0.0)
+    return (float(getattr(geometry, "montage_origin_x", 0)), float(getattr(geometry, "montage_origin_y", 0)))
+
+
+def _geometry_bounds(geometry) -> tuple[float, float, float, float]:
+    montage = getattr(geometry, "montage", None)
+    if montage is None:
+        height, width = geometry.display_shape
+        return (0.0, 0.0, float(max(0, int(width) - 1)), float(max(0, int(height) - 1)))
+    full_width = montage.columns * montage.tile_width + max(0, montage.columns - 1) * montage.gap
+    full_height = montage.rows * montage.tile_height + max(0, montage.rows - 1) * montage.gap
+    return (0.0, 0.0, float(max(0, int(full_width) - 1)), float(max(0, int(full_height) - 1)))

@@ -20,14 +20,14 @@ class ProfileCoordinator:
     def clamp_marker(self, view_state, image_x, image_y):
         if view_state.image_axes is None:
             return None
-        return DisplayGeometry(view_state, _display_shape_for_state(view_state)).clamp_display_point(image_x, image_y)
+        return DisplayGeometry(view_state, _display_shape_for_state(view_state)).clamp_view_point(image_x, image_y)
 
     def state_from_marker(self, view_state, image_x, image_y, line_axis=None):
         if line_axis is None:
             line_axis = view_state.line_axis
         if line_axis is None:
             return None
-        states = DisplayGeometry(view_state, _display_shape_for_state(view_state)).display_point_to_profile_states(image_x, image_y, (line_axis,))
+        states = DisplayGeometry(view_state, _display_shape_for_state(view_state)).view_point_to_profile_states(image_x, image_y, (line_axis,))
         return states[0] if states else None
 
     def render_from_marker(self, evaluator, view_state, image_x, image_y, *, line_axis=None, y_range_mode="match_image", image_levels=None):

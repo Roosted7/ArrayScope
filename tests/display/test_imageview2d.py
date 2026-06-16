@@ -131,7 +131,7 @@ def test_update_image_data_fast_accepts_display_ready_rgb(qt_app):
 
 
 def test_separate_histogram_plot_source_drives_histogram_without_replacing_value_source(qt_app):
-    from arrayscope.display.geometry import DisplayPointMapping
+    from arrayscope.display.geometry import ViewPointMapping
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
@@ -147,7 +147,7 @@ def test_separate_histogram_plot_source_drives_histogram_without_replacing_value
 
     assert view.histogramPlotSource is not None
     assert view.histogramImageItem.image.shape == (5, 5)
-    assert view.valueAtDisplayMapping(DisplayPointMapping(3, 2, 3, 2, (2, 3))) == local[2, 3]
+    assert view.valueAtDisplayMapping(ViewPointMapping(view_x=3, view_y=2, canvas_x=3, canvas_y=2, local_x=3, local_y=2, array_index=(2, 3))) == local[2, 3]
     assert tuple(float(value) for value in view.imageItem.levels) == (110.0, 190.0)
     view.histogram.setLevels(120.0, 180.0)
     view._on_histogram_levels_changed()
@@ -255,6 +255,128 @@ def test_tile_layer_presentation_creates_positioned_tile_items_and_syncs_levels(
     view.clearMontageTileLayer()
     assert view.montageDisplayMode() == "canvas"
     assert view.imageItem.isVisible()
+    view.close()
+
+
+def test_montage_canvas_presentation_sets_image_item_world_origin(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=1),
+        montage_origin_x=0,
+        montage_origin_y=3,
+    )
+
+    view.setImagePresentation(
+        np.zeros((2, 5), dtype=float),
+        histogramData=np.zeros((2, 5), dtype=float),
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        image_origin=(geometry.montage_origin_x, geometry.montage_origin_y),
+    )
+
+    assert view.imageItem.pos().x() == 0.0
+    assert view.imageItem.pos().y() == 3.0
+    view.close()
+
+
+def test_tile_layer_items_use_world_positions_when_canvas_origin_shifted(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=1),
+        montage_origin_x=0,
+        montage_origin_y=3,
+        montage_tile_states=(MontageTileState.UNLOADED, MontageTileState.UNLOADED, MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.arange(10, dtype=float).reshape(2, 5)
+
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=canvas.copy(),
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 9.0),
+        histogramRange=(0.0, 9.0),
+    )
+
+    states = view._montage_tile_layer.states
+    assert set(states) == {2, 3}
+    assert states[2].item.pos().y() == 3.0
+    assert states[3].item.pos().x() == 3.0
+    assert states[3].item.pos().y() == 3.0
+    view.close()
+
+
+def test_graphics_layer_z_order_places_tools_above_tiles(qt_app):
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D, MontageTileOverlay
+    from arrayscope.display.layers import Z_MONTAGE_LOADING_OVERLAY, Z_PROFILE_MARKER, Z_ROI, Z_TILE_IMAGE
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":"),
+        display_shape=(2, 2),
+        montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,),
+    )
+    canvas = np.zeros((2, 2), dtype=float)
+    view.setMontageTileLayerPresentation(canvas, histogramData=canvas, histogramPlotData=None, geometry=geometry, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    roi = view.createRoi(RoiKind.RECTANGLE, rect=(0, 0, 1, 1))
+    view.setProfileMarker(0, 0, visible=True)
+    view.setMontageTileOverlays((MontageTileOverlay(0, 0, 1, 1, "loading", "Loading"),))
+
+    tile_z = view._montage_tile_layer.states[0].item.zValue()
+    roi_z = view._roi_items[roi.id][0].zValue()
+    assert tile_z == Z_TILE_IMAGE
+    assert roi_z == Z_ROI
+    assert view._profile_handle.zValue() == Z_PROFILE_MARKER
+    assert view._montage_tile_overlay_item.zValue() == Z_MONTAGE_LOADING_OVERLAY
+    assert tile_z < roi_z < view._profile_handle.zValue() < view._montage_tile_overlay_item.zValue()
+    view.close()
+
+
+def test_inactive_tile_layer_items_are_removed_from_scene(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry_loaded = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.zeros((2, 5), dtype=float)
+    view.setMontageTileLayerPresentation(canvas, histogramData=canvas, histogramPlotData=None, geometry=geometry_loaded, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    removed_item = view._montage_tile_layer.states[1].item
+    geometry_one = DisplayGeometry(
+        view_state=geometry_loaded.view_state,
+        display_shape=(2, 5),
+        montage=geometry_loaded.montage,
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.UNLOADED),
+    )
+
+    view.setMontageTileLayerPresentation(canvas, histogramData=canvas, histogramPlotData=None, geometry=geometry_one, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+
+    assert 1 not in view._montage_tile_layer.states
+    assert removed_item.scene() is None
     view.close()
 
 
@@ -466,7 +588,7 @@ def test_rgb_tile_layer_pruned_source_cache_rewindows_from_canvas(qt_app):
     view.close()
 
 
-def test_tile_layer_hidden_tile_drops_cached_arrays_and_is_removed_after_grace(qt_app):
+def test_tile_layer_inactive_tile_is_removed_immediately(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
@@ -483,6 +605,7 @@ def test_tile_layer_hidden_tile_drops_cached_arrays_and_is_removed_after_grace(q
     hist = np.linspace(0.0, 1.0, 10, dtype=np.float32).reshape(2, 5)
     view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=loaded, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
     assert view._montage_tile_layer.states[1].rgb_base is not None
+    removed_item = view._montage_tile_layer.states[1].item
 
     hidden = DisplayGeometry(
         view_state=loaded.view_state,
@@ -491,15 +614,8 @@ def test_tile_layer_hidden_tile_drops_cached_arrays_and_is_removed_after_grace(q
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.UNLOADED),
     )
     view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=hidden, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), montage_dirty_tiles=())
-    state = view._montage_tile_layer.states[1]
-    assert not state.visible
-    assert state.rgb_base is None
-    assert state.hist_source is None
-    assert state.display_cache is None
-
-    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=hidden, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), montage_dirty_tiles=())
-    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=hidden, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), montage_dirty_tiles=())
     assert 1 not in view._montage_tile_layer.states
+    assert removed_item.scene() is None
     view.close()
 
 
@@ -615,21 +731,21 @@ def test_scalar_histogram_level_drag_updates_display_item(qt_app):
 
 
 def test_value_at_display_mapping_ignores_mismatched_histogram_source(qt_app):
-    from arrayscope.display.geometry import DisplayPointMapping
+    from arrayscope.display.geometry import ViewPointMapping
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     view.setImage(np.ones((4, 4), dtype=float), histogramData=np.ones((4, 4), dtype=float), levels=(0.0, 2.0))
     view.histogramSource = np.ones((8, 8), dtype=float)
 
-    value = view.valueAtDisplayMapping(DisplayPointMapping(display_x=0, display_y=0, local_x=0, local_y=0, array_index=(0, 0)))
+    value = view.valueAtDisplayMapping(ViewPointMapping(view_x=0, view_y=0, canvas_x=0, canvas_y=0, local_x=0, local_y=0, array_index=(0, 0)))
 
     assert value is None
     view.close()
 
 
 def test_value_at_display_mapping_uses_display_coordinates_for_montage(qt_app):
-    from arrayscope.display.geometry import DisplayPointMapping
+    from arrayscope.display.geometry import ViewPointMapping
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
@@ -637,9 +753,11 @@ def test_value_at_display_mapping_uses_display_coordinates_for_montage(qt_app):
     view.setImage(data, histogramData=data.copy(), levels=(0.0, 12.0))
 
     value = view.valueAtDisplayMapping(
-        DisplayPointMapping(
-            display_x=3,
-            display_y=2,
+        ViewPointMapping(
+            view_x=3,
+            view_y=2,
+            canvas_x=3,
+            canvas_y=2,
             local_x=0,
             local_y=0,
             array_index=(0, 0, 1),
@@ -666,6 +784,27 @@ def test_profile_marker_bounds_update_when_image_shape_changes(qt_app):
     assert view._profile_vline.maxRange == (0, 4)
     assert view._profile_hline.maxRange == (0, 3)
     assert view.profileMarkerPosition() == (4.0, 3.0)
+    view.close()
+
+
+def test_profile_marker_lines_hide_when_marker_center_leaves_view(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.zeros((20, 20), dtype=float))
+    view.getView().setRange(xRange=(0, 10), yRange=(0, 10), padding=0)
+    view.setProfileMarker(5, 5, visible=True)
+
+    assert view._profile_handle.isVisible()
+    assert view._profile_vline.isVisible()
+    assert view._profile_hline.isVisible()
+
+    view.getView().setRange(xRange=(10, 19), yRange=(10, 19), padding=0)
+
+    assert not view._profile_handle.isVisible()
+    assert not view._profile_vline.isVisible()
+    assert not view._profile_hline.isVisible()
+    assert view.profileMarkerPosition() == (5.0, 5.0)
     view.close()
 
 

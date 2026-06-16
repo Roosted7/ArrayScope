@@ -85,6 +85,7 @@ class OperationEvaluator:
         self._image_cache = BoundedArrayCache(DEFAULT_IMAGE_CACHE_BYTES, 96)
         self._tile_cache = BoundedArrayCache(DEFAULT_TILE_CACHE_BYTES, 512)
         self._profile_cache = BoundedArrayCache(DEFAULT_PROFILE_CACHE_BYTES, 256)
+        self._region_cache = BoundedArrayCache(DEFAULT_TILE_CACHE_BYTES, 512)
         self._stage_cache = StageCache(max_bytes=DEFAULT_STAGE_CACHE_BYTES, max_entries=DEFAULT_STAGE_CACHE_ENTRIES)
         self._stage_materializer = StageMaterializationManager(self._stage_cache)
 
@@ -112,6 +113,8 @@ class OperationEvaluator:
             self._tile_cache.clear()
         if hasattr(self, "_profile_cache"):
             self._profile_cache.clear()
+        if hasattr(self, "_region_cache"):
+            self._region_cache.clear()
         if hasattr(self, "_stage_cache"):
             self._stage_cache.clear()
         if hasattr(self, "_stage_materializer"):
@@ -286,6 +289,32 @@ class OperationEvaluator:
             self.last_diagnostics = self._profile_cache.diagnostics(CacheStatus.CACHED, "Using cached scalar")
         return cached
 
+    def tile_region_key(self, request, *, document=None):
+        document = self.document if document is None else document
+        region = getattr(request, "tile_local_region", None)
+        return (
+            "tile_region",
+            _document_key(document),
+            _request_key(request_for_image(request.view_state)),
+            None if request.montage_axis is None else int(request.montage_axis),
+            None if request.source_index is None else int(request.source_index),
+            None if request.tile_number is None else int(request.tile_number),
+            _slice_key(region),
+        )
+
+    def cached_tile_region(self, request):
+        cached = self._region_cache.get(self.tile_region_key(request))
+        if cached is not None:
+            self.last_status = cache_status_for_hit(True)
+            self.last_diagnostics = self._region_cache.diagnostics(CacheStatus.CACHED, "Using cached tile region")
+        return cached
+
+    def store_tile_region_result(self, request, result):
+        self._region_cache.put(self.tile_region_key(request), result)
+        self.last_status = cache_status_ready("Tile region cached")
+        self.last_diagnostics = self._region_cache.diagnostics(CacheStatus.READY, "Tile region cached")
+        return result
+
     def store_image_result(self, view_state, colormap_lut, result: EvaluationResult):
         key = self.image_key(view_state, colormap_lut=colormap_lut)
         self._image_cache.last_eval_ms = result.eval_ms
@@ -436,6 +465,7 @@ class OperationEvaluator:
     def apply_memory_policy(self, policy) -> None:
         self._image_cache.resize(max_bytes=int(policy.image_cache_budget_bytes))
         self._tile_cache.resize(max_bytes=int(policy.tile_cache_budget_bytes))
+        self._region_cache.resize(max_bytes=int(policy.tile_cache_budget_bytes))
         self._profile_cache.resize(max_bytes=int(policy.profile_cache_budget_bytes))
         self._stage_cache.resize(max_bytes=int(policy.stage_cache_budget_bytes))
 
@@ -543,6 +573,15 @@ def _optional_int_tuple(values):
 
 def _range_key(values):
     return tuple(None if value is None else tuple(int(index) for index in value) for value in values)
+
+
+def _slice_key(region):
+    if region is None:
+        return None
+    key = []
+    for slc in region:
+        key.append((None if slc.start is None else int(slc.start), None if slc.stop is None else int(slc.stop), None if slc.step is None else int(slc.step)))
+    return tuple(key)
 
 
 def evaluate_image_snapshot(

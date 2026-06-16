@@ -81,15 +81,15 @@ def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbo
         assert canvas.origin_y != 0
         tile_10 = canvas.full_plan.tiles[10]
         qtbot.waitUntil(
-            lambda: win.display_geometry.context_for_display_point(
-                tile_10.x0 - win._current_montage_canvas.origin_x + 1,
-                tile_10.y0 - win._current_montage_canvas.origin_y + 1,
+            lambda: win.display_geometry.context_for_view_point(
+                tile_10.x0 + 1,
+                tile_10.y0 + 1,
             )
             is not None,
             timeout=3000,
         )
         canvas = win._current_montage_canvas
-        context = win.display_geometry.context_for_display_point(tile_10.x0 - canvas.origin_x + 1, tile_10.y0 - canvas.origin_y + 1)
+        context = win.display_geometry.context_for_view_point(tile_10.x0 + 1, tile_10.y0 + 1)
 
         assert context is not None
         assert context.context_text.endswith("d2=10")
@@ -118,18 +118,53 @@ def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
         canvas = win._current_montage_canvas
         tile_10 = canvas.full_plan.tiles[10]
         qtbot.waitUntil(
-            lambda: win.display_geometry.context_for_display_point(tile_10.x0 - win._current_montage_canvas.origin_x + 1, tile_10.y0 - win._current_montage_canvas.origin_y + 1)
+            lambda: win.display_geometry.context_for_view_point(tile_10.x0 + 1, tile_10.y0 + 1)
             is not None,
             timeout=3000,
         )
         canvas = win._current_montage_canvas
-        context = win.display_geometry.context_for_display_point(tile_10.x0 - canvas.origin_x + 1, tile_10.y0 - canvas.origin_y + 1)
+        context = win.display_geometry.context_for_view_point(tile_10.x0 + 1, tile_10.y0 + 1)
 
         assert context is not None
         assert context.mapping.local_x == 1
         assert context.mapping.local_y == 1
-        assert context.mapping.display_y != context.mapping.local_y
+        assert context.mapping.canvas_y != context.mapping.local_y
         assert win._hover_value_from_display(context.mapping) == pytest.approx(10.0)
+    finally:
+        win.close()
+
+
+def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((2, 3, 20), dtype=np.float32)
+    for index in range(data.shape[2]):
+        data[:, :, index] = index
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
+        win.render(reason="test-montage")
+        _process_events(qtbot, count=50)
+
+        # Tile 10 starts at full montage world y=6. Once the canvas origin is
+        # nonzero, a second update must not add/subtract that origin again.
+        win.img_view.getView().setRange(xRange=(0, 2), yRange=(6, 8), padding=0)
+        win.update_montage_view()
+        qtbot.waitUntil(lambda: win._current_montage_canvas is not None and win._current_montage_canvas.origin_y != 0, timeout=3000)
+        before = win.img_view.getView().viewRange()
+
+        win.update_montage_view()
+        _process_events(qtbot, count=20)
+
+        after = win.img_view.getView().viewRange()
+        canvas = win._current_montage_canvas
+        tile_10 = canvas.full_plan.tiles[10]
+        assert after[0] == pytest.approx(before[0])
+        assert after[1] == pytest.approx(before[1])
+        assert canvas.canvas_rect[1] <= tile_10.y0 < canvas.canvas_rect[3]
     finally:
         win.close()
 

@@ -73,6 +73,62 @@ def test_roi_statistics_for_all_roi_kinds():
         assert stats.rss is not None
 
 
+def test_roi_stats_accumulator_matches_exact_small_statistics():
+    values = np.array([1.0, 2.0, np.nan, 4.0, 8.0])
+    accumulator = roi.RoiStatsAccumulator()
+
+    accumulator.add_values(values[:2])
+    accumulator.add_values(values[2:])
+
+    expected = roi.roi_statistics(values)
+    actual = accumulator.result()
+    assert actual.count == expected.count
+    assert actual.finite_count == expected.finite_count
+    assert actual.minimum == expected.minimum
+    assert actual.maximum == expected.maximum
+    assert actual.mean == expected.mean
+    assert actual.median == expected.median
+    assert actual.p05 == expected.p05
+    assert actual.p95 == expected.p95
+    assert actual.rss == expected.rss
+
+
+def test_roi_stats_accumulator_drops_exact_percentiles_above_limit():
+    accumulator = roi.RoiStatsAccumulator(exact_limit=3)
+
+    accumulator.add_values(np.arange(5, dtype=float))
+
+    result = accumulator.result()
+    assert result.finite_count == 5
+    assert result.mean == 2.0
+    assert result.median is None
+    assert result.p05 is None
+    assert result.p95 is None
+
+
+def test_region_offset_roi_values_match_whole_image_for_all_roi_kinds():
+    image = np.arange(8 * 8, dtype=float).reshape(8, 8)
+    geometries = (
+        roi.RoiGeometry(roi.RoiKind.RECTANGLE, rect=(2, 2, 3, 3)),
+        roi.RoiGeometry(roi.RoiKind.LINE, points=((2, 2), (5, 2))),
+        roi.RoiGeometry(roi.RoiKind.POLYLINE, points=((2, 2), (5, 2), (5, 5))),
+        roi.RoiGeometry(roi.RoiKind.FREEHAND_POLYGON, points=((2, 2), (6, 2), (6, 6), (2, 6))),
+    )
+
+    for geometry in geometries:
+        if geometry.kind == roi.RoiKind.RECTANGLE:
+            region = image[2:5, 2:5]
+            tiled_values = roi.roi_values_for_region(region, geometry, offset=(2, 2))
+            whole_values = roi.roi_values(image, geometry)
+            np.testing.assert_allclose(np.sort(tiled_values), np.sort(whole_values))
+        else:
+            # Non-rectangular demand samples full touched tiles to avoid edge
+            # artifacts from interpolation/masking at clipped region borders.
+            tiled_values = roi.roi_values_for_region(image, geometry, offset=(0, 0))
+            whole_values = roi.roi_values(image, geometry)
+            np.testing.assert_allclose(tiled_values, whole_values)
+
+
 def test_roi_module_has_no_qt_or_pyqtgraph_imports():
     tree = ast.parse(ROI_PATH.read_text())
 

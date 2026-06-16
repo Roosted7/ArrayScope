@@ -107,3 +107,67 @@ def test_render_refreshes_inspection_once_on_image_commit(qtbot, monkeypatch):
         assert len(calls) == 1
     finally:
         win.close()
+
+
+def test_montage_viewport_updates_do_not_recompute_same_roi_stats(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((4, 4, 8), dtype=np.float32)
+    for index in range(data.shape[2]):
+        data[:, :, index] = index
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    calls = []
+    original = win._compute_roi_inspection_snapshot
+    monkeypatch.setattr(win, "_compute_roi_inspection_snapshot", lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1])
+    try:
+        _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
+        win.render(reason="test-montage")
+        _process_events(qtbot, count=40)
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        win.img_view.createRoi("rectangle", rect=(1, 1, 2, 2))
+        qtbot.waitUntil(lambda: len(calls) == 1, timeout=3000)
+        _process_events(qtbot, count=10)
+
+        win.img_view.getView().setRange(xRange=(0, 3), yRange=(3, 6), padding=0)
+        win.update_montage_view()
+        _process_events(qtbot, count=40)
+        win.update_montage_view()
+        _process_events(qtbot, count=40)
+
+        assert len(calls) == 1
+    finally:
+        win.close()
+
+
+def test_empty_inspection_dock_does_not_rewrite_table_on_montage_viewport_updates(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((4, 4, 8), dtype=np.float32)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    table_updates = []
+    original_set_statistics = win.inspection_dock.set_statistics
+    monkeypatch.setattr(win.inspection_dock, "set_statistics", lambda stats: (table_updates.append(dict(stats)), original_set_statistics(stats))[1])
+    try:
+        _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
+        win.render(reason="test-montage")
+        _process_events(qtbot, count=40)
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=20)
+        table_updates.clear()
+
+        win.img_view.getView().setRange(xRange=(0, 3), yRange=(3, 6), padding=0)
+        win.update_montage_view()
+        _process_events(qtbot, count=40)
+        win.update_montage_view()
+        _process_events(qtbot, count=40)
+
+        assert table_updates == []
+        assert win.inspection_dock.roi_model.rowCount() == 0
+    finally:
+        win.close()

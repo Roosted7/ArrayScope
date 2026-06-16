@@ -52,7 +52,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         container = self.img_view.getView()
         mousePoint = container.mapSceneToView(pos)
         geometry = getattr(self, "display_geometry", None)
-        status = None if geometry is None else geometry.montage_status_for_display_point(mousePoint.x(), mousePoint.y())
+        status = None if geometry is None else geometry.view_point_to_tile_point(mousePoint.x(), mousePoint.y(), require_loaded=True)
         if status is not None and status.kind != "loaded":
             text_pair = self._montage_status_value_text(status)
             if text_pair is None:
@@ -73,7 +73,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             if hasattr(self, "img_view"):
                 self.img_view.showHudText(value_text if not context else f"{value_text} | {context}", pos)
             return
-        point_context = None if geometry is None else geometry.context_for_display_point(mousePoint.x(), mousePoint.y())
+        point_context = None if geometry is None else geometry.context_for_view_point(mousePoint.x(), mousePoint.y())
         if point_context is not None:
             mapping = point_context.mapping
             x_i, y_i = mapping.local_x, mapping.local_y
@@ -108,8 +108,8 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         data = np.asarray(source)
         if tuple(data.shape[:2]) != tuple(frame.geometry.display_shape):
             return None
-        y_i = int(mapping.display_y)
-        x_i = int(mapping.display_x)
+        y_i = int(mapping.canvas_y)
+        x_i = int(mapping.canvas_x)
         if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
             return None
         value = data[y_i, x_i]
@@ -262,19 +262,9 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             self._clear_live_profile_marker()
             return
         geometry = getattr(self, "display_geometry", None)
-        status = None if geometry is None else geometry.montage_status_for_display_point(clamped[0], clamped[1])
-        if status is not None and status.kind != "loaded":
-            if status.kind in {"loading", "unloaded"}:
-                self.profile_dock.update_line_results((), y_range=None)
-                self.img_view.setProfileMarker(round(clamped[0]), round(clamped[1]), visible=True)
-                show_status_message(self, "Montage tile loading; profile available when tile finishes.", timeout=2000)
-                self._schedule_loading_montage_profile_retry(float(clamped[0]), float(clamped[1]))
-            elif status.kind == "skipped":
-                self.profile_dock.update_line_results((), y_range=None)
-                self._clear_live_profile_marker()
-                show_status_message(self, "Montage tile skipped by memory budget; zoom in or increase render budget.", timeout=3000)
-            else:
-                self._clear_live_profile_marker()
+        status = None if geometry is None else geometry.view_point_to_tile_point(clamped[0], clamped[1], require_loaded=False)
+        if status is not None and status.kind in {"gap", "outside"}:
+            self._clear_live_profile_marker()
             return
         profile_states, profile_label_suffix = self._profile_states_for_display_point(view_state, clamped[0], clamped[1], profile_axes)
         if not profile_states:
@@ -347,16 +337,16 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         geometry = getattr(self, "display_geometry", None)
         if geometry is None:
             return None
-        return geometry.clamp_display_point(image_x, image_y)
+        return geometry.clamp_view_point(image_x, image_y)
 
     def _profile_states_for_display_point(self, view_state, image_x, image_y, profile_axes):
         geometry = getattr(self, "display_geometry", None)
         if geometry is None:
             return (), ""
-        mapping = geometry.display_point_to_array_index(image_x, image_y)
+        mapping = geometry.view_point_to_array_index(image_x, image_y, require_loaded=False)
         if mapping is None:
             return (), ""
-        states = geometry.display_point_to_profile_states(image_x, image_y, profile_axes)
+        states = geometry.view_point_to_profile_states(image_x, image_y, profile_axes, require_loaded=False)
         suffix = "" if mapping.montage_axis is None or mapping.montage_index is None else f" d{mapping.montage_axis}={mapping.montage_index}"
         return states, suffix
 

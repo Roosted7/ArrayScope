@@ -70,6 +70,73 @@ class RoiStatistics:
     p95: float | None
 
 
+class RoiStatsAccumulator:
+    def __init__(self, *, exact_limit: int = 250_000):
+        self.exact_limit = int(exact_limit)
+        self.count = 0
+        self.finite_count = 0
+        self.minimum = None
+        self.maximum = None
+        self.sum = 0.0
+        self.sumsq = 0.0
+        self._exact_values: list[np.ndarray] | None = []
+
+    def add_values(self, values) -> None:
+        flat = np.asarray(values).ravel()
+        self.count += int(flat.size)
+        finite = flat[np.isfinite(flat)]
+        if finite.size == 0:
+            return
+        finite = finite.astype(float, copy=False)
+        self.finite_count += int(finite.size)
+        chunk_min = float(np.min(finite))
+        chunk_max = float(np.max(finite))
+        self.minimum = chunk_min if self.minimum is None else min(float(self.minimum), chunk_min)
+        self.maximum = chunk_max if self.maximum is None else max(float(self.maximum), chunk_max)
+        self.sum += float(np.sum(finite))
+        self.sumsq += float(np.sum(np.abs(finite) ** 2))
+        if self._exact_values is not None:
+            retained = sum(int(chunk.size) for chunk in self._exact_values)
+            if retained + int(finite.size) <= self.exact_limit:
+                self._exact_values.append(finite.copy())
+            else:
+                self._exact_values = None
+
+    def result(self) -> RoiStatistics:
+        if self.finite_count == 0:
+            return RoiStatistics(
+                count=int(self.count),
+                finite_count=0,
+                minimum=None,
+                maximum=None,
+                mean=None,
+                median=None,
+                std=None,
+                sum=None,
+                rss=None,
+                p05=None,
+                p95=None,
+            )
+        mean = float(self.sum / self.finite_count)
+        variance = max(0.0, float(self.sumsq / self.finite_count) - mean**2)
+        exact = None
+        if self._exact_values is not None and self._exact_values:
+            exact = np.concatenate(self._exact_values)
+        return RoiStatistics(
+            count=int(self.count),
+            finite_count=int(self.finite_count),
+            minimum=None if self.minimum is None else float(self.minimum),
+            maximum=None if self.maximum is None else float(self.maximum),
+            mean=mean,
+            median=None if exact is None else float(np.median(exact)),
+            std=float(np.sqrt(variance)),
+            sum=float(self.sum),
+            rss=float(np.sqrt(self.sumsq)),
+            p05=None if exact is None else float(np.percentile(exact, 5)),
+            p95=None if exact is None else float(np.percentile(exact, 95)),
+        )
+
+
 def close_polygon(points):
     points = tuple((float(x), float(y)) for x, y in points)
     if not points:
@@ -159,6 +226,36 @@ def roi_values(image_2d, geometry: RoiGeometry):
     if geometry.kind == RoiKind.FREEHAND_POLYGON:
         return freehand_roi_values(image_2d, close_polygon(geometry.points))
     raise ValueError(f"unsupported ROI kind: {geometry.kind}")
+
+
+def roi_values_for_region(image_2d, geometry: RoiGeometry, *, offset: tuple[float, float] = (0.0, 0.0)):
+    return roi_values(image_2d, translate_roi_geometry(geometry, -float(offset[0]), -float(offset[1])))
+
+
+def translate_roi_geometry(geometry: RoiGeometry, dx: float, dy: float) -> RoiGeometry:
+    geometry = geometry if isinstance(geometry, RoiGeometry) else RoiGeometry(**geometry)
+    dx = float(dx)
+    dy = float(dy)
+    points = tuple((x + dx, y + dy) for x, y in geometry.points)
+    rect = None
+    if geometry.rect is not None:
+        x, y, width, height = geometry.rect
+        rect = (x + dx, y + dy, width, height)
+    return replace(geometry, points=points, rect=rect)
+
+
+def roi_bounding_rect(geometry: RoiGeometry) -> tuple[float, float, float, float] | None:
+    geometry = geometry if isinstance(geometry, RoiGeometry) else RoiGeometry(**geometry)
+    if geometry.kind == RoiKind.RECTANGLE and geometry.rect is not None:
+        x, y, width, height = geometry.rect
+        return (min(x, x + width), min(y, y + height), max(x, x + width), max(y, y + height))
+    points = tuple(geometry.points)
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    pad = max(0.0, float(geometry.line_width) * 0.5) if geometry.kind in (RoiKind.LINE, RoiKind.POLYLINE) else 0.0
+    return (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
 
 
 def roi_statistics(values):

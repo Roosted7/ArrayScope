@@ -55,9 +55,11 @@ class MontageGeometry:
 
 
 @dataclass(frozen=True)
-class DisplayPointMapping:
-    display_x: int
-    display_y: int
+class ViewPointMapping:
+    view_x: int
+    view_y: int
+    canvas_x: int
+    canvas_y: int
     local_x: int
     local_y: int
     array_index: tuple[int, ...]
@@ -68,7 +70,7 @@ class DisplayPointMapping:
 
 @dataclass(frozen=True)
 class DisplayPointContext:
-    mapping: DisplayPointMapping
+    mapping: ViewPointMapping
     value_prefix: str
     context_text: str
 
@@ -104,20 +106,74 @@ class DisplayGeometry:
         object.__setattr__(self, "montage_origin_y", int(self.montage_origin_y))
         object.__setattr__(self, "montage_tile_states", tuple(self.montage_tile_states or ()))
 
-    def display_point_to_array_index(self, x: float, y: float) -> DisplayPointMapping | None:
+    def view_point_to_canvas_point(self, x: float, y: float) -> tuple[int, int] | None:
+        view_x = int(math.floor(float(x)))
+        view_y = int(math.floor(float(y)))
+        canvas_x = view_x - (self.montage_origin_x if self.montage is not None else 0)
+        canvas_y = view_y - (self.montage_origin_y if self.montage is not None else 0)
+        if canvas_x < 0 or canvas_y < 0 or canvas_x >= self.display_shape[1] or canvas_y >= self.display_shape[0]:
+            return None
+        return canvas_x, canvas_y
+
+    def view_point_to_tile_point(self, x: float, y: float, *, require_loaded: bool = True) -> MontagePointStatus | None:
+        if self.montage is None:
+            return None
+        view_x = int(math.floor(float(x)))
+        view_y = int(math.floor(float(y)))
+        mapped = self._map_montage_point(view_x, view_y)
+        if mapped is None:
+            if self._point_inside_montage_bounds(view_x, view_y):
+                return MontagePointStatus("gap", message="empty montage gap")
+            return MontagePointStatus("outside", message="outside montage")
+        tile_number, montage_index, local_x, local_y = mapped
+        kind = "unloaded"
+        if not self.montage_tile_states:
+            kind = "loaded"
+        elif tile_number < len(self.montage_tile_states):
+            kind = _state_value(self.montage_tile_states[tile_number])
+        if kind not in {"loaded", "loading", "skipped", "unloaded"}:
+            kind = "unloaded"
+        if require_loaded and kind != "loaded":
+            messages = {
+                "loading": "tile loading...",
+                "unloaded": "tile loading...",
+                "skipped": "tile skipped by memory budget",
+            }
+            return MontagePointStatus(
+                kind=kind,
+                tile_number=tile_number,
+                montage_index=tile_number,
+                source_index=montage_index,
+                local_x=local_x,
+                local_y=local_y,
+                message=messages.get(kind, ""),
+            )
+        return MontagePointStatus(
+            kind=kind,
+            tile_number=tile_number,
+            montage_index=tile_number,
+            source_index=montage_index,
+            local_x=local_x,
+            local_y=local_y,
+            message="" if kind == "loaded" else "tile loading..." if kind in {"loading", "unloaded"} else "tile skipped by memory budget",
+        )
+
+    def view_point_to_array_index(self, x: float, y: float, *, require_loaded: bool = True) -> ViewPointMapping | None:
         if self.view_state.image_axes is None:
             return None
-        display_x = int(math.floor(float(x)))
-        display_y = int(math.floor(float(y)))
-        local_x = display_x
-        local_y = display_y
+        view_x = int(math.floor(float(x)))
+        view_y = int(math.floor(float(y)))
+        canvas_x = view_x - (self.montage_origin_x if self.montage is not None else 0)
+        canvas_y = view_y - (self.montage_origin_y if self.montage is not None else 0)
+        local_x = view_x
+        local_y = view_y
         tile_number = None
         montage_index = None
         view_state = self.view_state
 
         if self.montage is not None:
-            status = self.montage_status_for_display_point(display_x, display_y)
-            if status is None or status.kind != "loaded":
+            status = self.view_point_to_tile_point(view_x, view_y, require_loaded=require_loaded)
+            if status is None or status.kind in {"gap", "outside"} or (require_loaded and status.kind != "loaded"):
                 return None
             tile_number = status.tile_number
             montage_index = status.source_index
@@ -135,9 +191,11 @@ class DisplayGeometry:
         index = list(view_state.slice_indices)
         index[primary_axis] = primary_value
         index[secondary_axis] = secondary_value
-        return DisplayPointMapping(
-            display_x=display_x,
-            display_y=display_y,
+        return ViewPointMapping(
+            view_x=view_x,
+            view_y=view_y,
+            canvas_x=canvas_x,
+            canvas_y=canvas_y,
             local_x=local_x,
             local_y=local_y,
             array_index=tuple(index),
@@ -146,8 +204,8 @@ class DisplayGeometry:
             montage_index=montage_index,
         )
 
-    def display_point_to_profile_states(self, x: float, y: float, profile_axes: Iterable[int]) -> tuple[ViewState, ...]:
-        mapping = self.display_point_to_array_index(x, y)
+    def view_point_to_profile_states(self, x: float, y: float, profile_axes: Iterable[int], *, require_loaded: bool = False) -> tuple[ViewState, ...]:
+        mapping = self.view_point_to_array_index(x, y, require_loaded=require_loaded)
         if mapping is None or self.view_state.image_axes is None:
             return ()
         view_state = self.view_state
@@ -167,23 +225,20 @@ class DisplayGeometry:
             states.append(profile_state)
         return tuple(states)
 
-    def clamp_display_point(self, x: float, y: float) -> tuple[int, int] | None:
+    def clamp_view_point(self, x: float, y: float) -> tuple[int, int] | None:
         if self.view_state.image_axes is None:
             return None
         point_x = int(math.floor(float(x)))
         point_y = int(math.floor(float(y)))
         if self.montage is not None:
-            global_point = self._clamp_to_montage_tile(point_x + self.montage_origin_x, point_y + self.montage_origin_y)
-            if global_point is None:
-                return None
-            return (global_point[0] - self.montage_origin_x, global_point[1] - self.montage_origin_y)
+            return self._clamp_to_montage_tile(point_x, point_y)
         primary_axis, secondary_axis = self.view_state.image_axes
         width = self._display_axis_size(self.view_state, secondary_axis)
         height = self._display_axis_size(self.view_state, primary_axis)
         return (max(0, min(point_x, width - 1)), max(0, min(point_y, height - 1)))
 
-    def context_for_display_point(self, x: float, y: float) -> DisplayPointContext | None:
-        mapping = self.display_point_to_array_index(x, y)
+    def context_for_view_point(self, x: float, y: float, *, require_loaded: bool = True) -> DisplayPointContext | None:
+        mapping = self.view_point_to_array_index(x, y, require_loaded=require_loaded)
         if mapping is None:
             return None
         context_axes = self.view_state.non_display_axes()
@@ -197,44 +252,6 @@ class DisplayGeometry:
             mapping=mapping,
             value_prefix=f"({mapping.local_x}, {mapping.local_y})",
             context_text=" ".join(parts),
-        )
-
-    def montage_status_for_display_point(self, x: float, y: float) -> MontagePointStatus | None:
-        if self.montage is None:
-            return None
-        display_x = int(math.floor(float(x)))
-        display_y = int(math.floor(float(y)))
-        if display_x < 0 or display_y < 0 or display_x >= self.display_shape[1] or display_y >= self.display_shape[0]:
-            return MontagePointStatus("outside", message="outside montage viewport")
-        global_x = display_x + self.montage_origin_x
-        global_y = display_y + self.montage_origin_y
-        mapped = self._map_montage_point(global_x, global_y)
-        if mapped is None:
-            if self._point_inside_montage_bounds(global_x, global_y):
-                return MontagePointStatus("gap", message="empty montage gap")
-            return MontagePointStatus("outside", message="outside montage")
-        tile_number, montage_index, local_x, local_y = mapped
-        kind = "unloaded"
-        if not self.montage_tile_states:
-            kind = "loaded"
-        elif tile_number < len(self.montage_tile_states):
-            kind = _state_value(self.montage_tile_states[tile_number])
-        if kind not in {"loaded", "loading", "skipped", "unloaded"}:
-            kind = "unloaded"
-        messages = {
-            "loaded": "",
-            "loading": "tile loading...",
-            "unloaded": "tile loading...",
-            "skipped": "tile skipped by memory budget",
-        }
-        return MontagePointStatus(
-            kind=kind,
-            tile_number=tile_number,
-            montage_index=tile_number,
-            source_index=montage_index,
-            local_x=local_x,
-            local_y=local_y,
-            message=messages[kind],
         )
 
     def _map_montage_point(self, x: int, y: int):

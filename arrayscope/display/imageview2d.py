@@ -25,6 +25,7 @@ from arrayscope.core.roi import (
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.levels import finite_bounds
+from arrayscope.display.layers import ViewLayerOwner
 from arrayscope.display.montage_tile_layer import MontageTileLayer, TileLayerUpdateStats
 from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
 from arrayscope.display.profile_marker import ProfileMarkerOwner
@@ -94,6 +95,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._profile_marker = ProfileMarkerOwner()
         self._profile_marker_callback = None
         self._profile_marker_updating = False
+        self._profile_marker_requested_visible = False
         self._hud_widget = None
         self._evaluation_overlay = None
         self._roi_info_panel = None
@@ -121,15 +123,16 @@ class ImageView2D(QtWidgets.QWidget):
         self.graphicsView.setCentralItem(self.view)
         self.view.setAspectLocked(True)
         self.view.invertY(True)
+        self._layer_owner = ViewLayerOwner(self.view)
         
         # Create image item if not provided
         if imageItem is None:
             self.imageItem = ImageItem(axisOrder="row-major")
         else:
             self.imageItem = imageItem
-        self.view.addItem(self.imageItem)
+        self._layer_owner.add_image_item(self.imageItem)
         self._montage_tile_layer = MontageTileLayer(
-            self.view,
+            self._layer_owner,
             set_image_item_data=self._set_image_item_data,
             record_upload_timing=self._record_upload_timing,
             histogram_levels_for_display=self._histogram_levels_for_display,
@@ -171,9 +174,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._profile_vline.sigPositionChanged.connect(self._on_profile_marker_changed)
         self._profile_hline.sigPositionChanged.connect(self._on_profile_marker_changed)
         self._profile_handle.sigPositionChanged.connect(self._on_profile_handle_changed)
-        self.view.addItem(self._profile_vline)
-        self.view.addItem(self._profile_hline)
-        self.view.addItem(self._profile_handle)
+        self._layer_owner.add_profile_marker_items(self._profile_vline, self._profile_hline, self._profile_handle)
         self.view.sigRangeChanged.connect(self._on_view_range_changed)
 
     def setupUI(self):
@@ -398,7 +399,7 @@ class ImageView2D(QtWidgets.QWidget):
             self._update_profile_line_bounds()
             self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
             self._updateAspectRatio()
-            self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy)
+            self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy, image_origin=(geometry.montage_origin_x, geometry.montage_origin_y))
         finally:
             self._applying_presentation = applying
             self._finish_upload_timing()
@@ -442,7 +443,7 @@ class ImageView2D(QtWidgets.QWidget):
     def setImage(self, img, autoRange=None, autoLevels=True, levels=None, 
                  pos=None, scale=None, transform=None, autoHistogramRange=True,
                  histogramData=None, histogramPlotData=None, viewport_policy=ViewportPolicy.PRESERVE,
-                 rgb_already_windowed: bool = False):
+                 rgb_already_windowed: bool = False, image_origin: tuple[float, float] = (0.0, 0.0)):
         """
         Set the image to be displayed.
         
@@ -527,11 +528,12 @@ class ImageView2D(QtWidgets.QWidget):
             
             if transform is not None:
                 self.imageItem.setTransform(transform)
+            self.imageItem.setPos(float(image_origin[0]), float(image_origin[1]))
 
             # Update aspect ratio based on display mode
             self._updateAspectRatio()
 
-            self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy)
+            self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy, image_origin=image_origin)
         finally:
             self._finish_upload_timing()
 
@@ -545,6 +547,7 @@ class ImageView2D(QtWidgets.QWidget):
         histogramRange: tuple[float, float],
         viewport_policy=ViewportPolicy.PRESERVE,
         rgb_already_windowed: bool = False,
+        image_origin: tuple[float, float] = (0.0, 0.0),
     ) -> None:
         """Set fully decided image pixels, levels, and histogram range."""
         self.setImage(
@@ -556,6 +559,7 @@ class ImageView2D(QtWidgets.QWidget):
             autoHistogramRange=False,
             viewport_policy=viewport_policy,
             rgb_already_windowed=rgb_already_windowed,
+            image_origin=image_origin,
         )
         self.setHistogramDataBounds(histogramRange)
         self.setHistogramRange(histogramRange[0], histogramRange[1])
@@ -569,6 +573,7 @@ class ImageView2D(QtWidgets.QWidget):
         levels: tuple[float, float],
         histogramRange: tuple[float, float],
         rgb_already_windowed: bool = False,
+        image_origin: tuple[float, float] = (0.0, 0.0),
     ) -> None:
         """Fast same-shape update with explicit presentation state."""
         self.updateImageDataFast(
@@ -578,6 +583,7 @@ class ImageView2D(QtWidgets.QWidget):
             levels=levels,
             histogramRange=histogramRange,
             rgb_already_windowed=rgb_already_windowed,
+            image_origin=image_origin,
         )
 
     def updateImageDataFast(
@@ -589,6 +595,7 @@ class ImageView2D(QtWidgets.QWidget):
         levels: tuple[float, float] | None = None,
         histogramRange: tuple[float, float] | None = None,
         rgb_already_windowed: bool = False,
+        image_origin: tuple[float, float] = (0.0, 0.0),
     ) -> None:
         """Replace same-shape pixel data without recomputing levels or viewport."""
         if not isinstance(img, np.ndarray):
@@ -650,6 +657,7 @@ class ImageView2D(QtWidgets.QWidget):
                 self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
             if histogramRange is not None:
                 self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+            self.imageItem.setPos(float(image_origin[0]), float(image_origin[1]))
             profile_start = perf_counter()
             self._update_profile_line_bounds()
             self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
@@ -895,21 +903,21 @@ class ImageView2D(QtWidgets.QWidget):
         if self._profile_vline is None or self._profile_hline is None:
             return
         x, y = self._clamp_profile_point(float(x), float(y))
+        self._profile_marker_requested_visible = bool(visible)
         self._profile_marker_updating = True
         try:
             self._profile_handle.setPos(float(x), float(y))
             self._update_profile_line_bounds()
             self._profile_vline.setValue(float(x))
             self._profile_hline.setValue(float(y))
-            self._profile_vline.setVisible(bool(visible))
-            self._profile_hline.setVisible(bool(visible))
-            self._profile_handle.setVisible(bool(visible))
+            self._sync_profile_marker_visibility()
             self.view.update()
         finally:
             self._profile_marker_updating = False
 
     def hideProfileMarker(self):
         """Hide the image-space profile marker."""
+        self._profile_marker_requested_visible = False
         if self._profile_vline is not None:
             self._profile_vline.setVisible(False)
         if self._profile_hline is not None:
@@ -921,7 +929,7 @@ class ImageView2D(QtWidgets.QWidget):
         """Return the current profile marker position in image coordinates."""
         if self._profile_vline is None or self._profile_hline is None:
             return None
-        if not self._profile_handle.isVisible():
+        if not self._profile_marker_requested_visible:
             return None
         return (float(self._profile_vline.value()), float(self._profile_hline.value()))
 
@@ -1006,6 +1014,18 @@ class ImageView2D(QtWidgets.QWidget):
 
     def _current_profile_bounds(self):
         return self._profile_marker.current_bounds(self.image.shape)
+
+    def _sync_profile_marker_visibility(self):
+        visible = bool(self._profile_marker_requested_visible)
+        if visible and self._profile_handle is not None:
+            pos = self._profile_handle.pos()
+            visible = _point_inside_view_range(self.view.viewRange(), float(pos.x()), float(pos.y()))
+        if self._profile_vline is not None:
+            self._profile_vline.setVisible(visible)
+        if self._profile_hline is not None:
+            self._profile_hline.setVisible(visible)
+        if self._profile_handle is not None:
+            self._profile_handle.setVisible(visible)
         
     def clear(self):
         """Clear the displayed image"""
@@ -1025,8 +1045,8 @@ class ImageView2D(QtWidgets.QWidget):
         data = np.asarray(source)
         if self.image is None or tuple(data.shape[:2]) != tuple(self.image.shape[:2]):
             return None
-        y_i = int(mapping.display_y)
-        x_i = int(mapping.display_x)
+        y_i = int(mapping.canvas_y)
+        x_i = int(mapping.canvas_x)
         if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
             return None
         return data[y_i, x_i]
@@ -1066,7 +1086,7 @@ class ImageView2D(QtWidgets.QWidget):
         if self.image is not None:
             self._viewport_applying = True
             try:
-                self.viewport_controller.one_to_one(self.view, self.image.shape[:2], self.graphicsView.viewport().size())
+                self.viewport_controller.one_to_one(self.view, self.image.shape[:2], self.graphicsView.viewport().size(), display_rect=self._current_image_world_rect())
             finally:
                 self._viewport_applying = False
 
@@ -1100,7 +1120,7 @@ class ImageView2D(QtWidgets.QWidget):
         overlays = tuple(overlays or ())
         if self._montage_tile_overlay_item is None:
             self._montage_tile_overlay_item = MontageTileOverlayItem()
-            self.view.addItem(self._montage_tile_overlay_item)
+            self._layer_owner.set_montage_overlay_item(self._montage_tile_overlay_item)
         self._montage_tile_overlay_item.setOverlays(overlays)
         self._montage_tile_overlay_items = [self._montage_tile_overlay_item] if overlays else []
 
@@ -1205,7 +1225,7 @@ class ImageView2D(QtWidgets.QWidget):
         )
         item = item_for_roi(selection)
         self._roi_items[roi_id] = (item, selection)
-        self.view.addItem(item)
+        self._layer_owner.add_roi_item(roi_id, item)
         item.sigRegionChangeFinished.connect(lambda _item=item, roi_id=roi_id: self._on_roi_item_changed(roi_id))
         self.roiCreated.emit(selection)
         return selection
@@ -1215,7 +1235,7 @@ class ImageView2D(QtWidgets.QWidget):
         if item_selection is None:
             return False
         item, _selection = item_selection
-        self.view.removeItem(item)
+        self._layer_owner.remove_roi_item(roi_id)
         self.roiDeleted.emit(str(roi_id))
         return True
 
@@ -1277,7 +1297,8 @@ class ImageView2D(QtWidgets.QWidget):
             # Fit: allow free aspect so the whole image fits inside the view box
             self.view.setAspectLocked(False)
 
-    def _apply_viewport_policy(self, image_shape, viewport_policy):
+    def _apply_viewport_policy(self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0)):
+        display_rect = _world_rect_for_shape(image_shape, image_origin)
         self._viewport_applying = True
         try:
             self.viewport_controller.apply_after_image(
@@ -1285,6 +1306,7 @@ class ImageView2D(QtWidgets.QWidget):
                 image_shape,
                 self.graphicsView.viewport().size(),
                 policy=viewport_policy,
+                display_rect=display_rect,
             )
         finally:
             self._viewport_applying = False
@@ -1292,6 +1314,7 @@ class ImageView2D(QtWidgets.QWidget):
     def _on_view_range_changed(self, *_args):
         if not self._viewport_applying:
             self.viewport_controller.note_user_range_changed()
+        self._sync_profile_marker_visibility()
 
     # --- Qt Events -----------------------------------------------------
     def eventFilter(self, obj, event):
@@ -1299,7 +1322,7 @@ class ImageView2D(QtWidgets.QWidget):
             if self.image is not None:
                 self._viewport_applying = True
                 try:
-                    self.viewport_controller.resize(self.view, self.image.shape[:2], event.size())
+                    self.viewport_controller.resize(self.view, self.image.shape[:2], event.size(), display_rect=self._current_image_world_rect())
                 finally:
                     self._viewport_applying = False
         if (
@@ -1314,6 +1337,12 @@ class ImageView2D(QtWidgets.QWidget):
         if obj is self.graphicsView.viewport() and self._handle_roi_drawing_event(event):
             return True
         return super().eventFilter(obj, event)
+
+    def _current_image_world_rect(self):
+        if self.image is None:
+            return None
+        pos = self.imageItem.pos()
+        return _world_rect_for_shape(self.image.shape[:2], (float(pos.x()), float(pos.y())))
 
     def _handle_context_menu_event(self, event):
         if event.type() != QtCore.QEvent.Type.MouseButtonPress or event.button() != QtCore.Qt.MouseButton.RightButton:
@@ -1359,8 +1388,9 @@ class ImageView2D(QtWidgets.QWidget):
             return None
         scene_pos = self.graphicsView.mapToScene(event.pos())
         view_point = self.view.mapSceneToView(scene_pos)
-        x = max(0.0, min(float(view_point.x()), max(0.0, float(self.image.shape[1] - 1))))
-        y = max(0.0, min(float(view_point.y()), max(0.0, float(self.image.shape[0] - 1))))
+        x0, y0, x1, y1 = self._current_image_world_rect()
+        x = max(float(x0), min(float(view_point.x()), float(x1)))
+        y = max(float(y0), min(float(view_point.y()), float(y1)))
         return (x, y)
 
     def resizeEvent(self, event):
@@ -1374,3 +1404,20 @@ def _coerce_viewport_policy(viewport_policy, auto_range):
     if isinstance(viewport_policy, (ViewportPolicy, ViewportIntent)):
         return viewport_policy
     return ViewportPolicy(str(viewport_policy))
+
+
+def _world_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, float, float]:
+    height, width = tuple(int(value) for value in shape[:2])
+    x0 = float(origin[0])
+    y0 = float(origin[1])
+    return (x0, y0, x0 + float(max(0, width - 1)), y0 + float(max(0, height - 1)))
+
+
+def _point_inside_view_range(view_range, x: float, y: float) -> bool:
+    try:
+        x_range, y_range = view_range
+        x0, x1 = sorted((float(x_range[0]), float(x_range[1])))
+        y0, y1 = sorted((float(y_range[0]), float(y_range[1])))
+    except Exception:
+        return True
+    return x0 <= float(x) <= x1 and y0 <= float(y) <= y1
