@@ -80,9 +80,30 @@ source of array-view state.
 - `arrayscope.core.compare`: minimal compatible-layer model used by ROI histogram comparisons.
 - `arrayscope.core.window_levels`: decides image window/level reuse or auto-level behavior.
 - `arrayscope.display.ImageView2D`, `arrayscope.ui`, and `arrayscope.ui.docks`: Qt display and controls only.
-  Progressive montage uses `ImageView2D.updateImageDataFast()` for same-shape pixel updates that
-  preserve levels, histogram range, transform, and viewport instead of running the full `setImage()`
-  path on every tile flush.
+  Progressive montage uses explicit `ImageView2D` presentation APIs for same-shape pixel updates that
+  preserve caller-decided levels, histogram range, transform, and viewport instead of letting the
+  widget infer semantic display state from partial tile pixels.
+- `arrayscope.window.presentation`: Qt-free display presentation decisions. It normalizes
+  window/level bounds, keeps display levels separate from histogram/data ranges, rejects visible
+  montage subsets as implicit semantic level sources, and is the only place that chooses committed
+  display levels for normal, degraded, initial montage, progressive montage, and explicit Auto Window
+  commits.
+- `arrayscope.window.render_model`: Qt-free immutable request, payload, presentation-decision, and
+  commit-plan models used at the boundary between render orchestration and display mutation. Render
+  orchestration provides a `PresentationInput`; presentation policy returns a `PresentationDecision`;
+  Qt code only receives the decided `DisplayPresentation`.
+- `arrayscope.window.display_commit`: the single gateway from a decided presentation to
+  `ImageView2D`. Window render code must not call image pixel or histogram setters directly.
+  `DisplayCommitter` validates display shape, histogram-source shape, and finite increasing
+  levels/histogram ranges before mutating Qt state.
+- `arrayscope.window.display_frame`: committed display-frame keys and value source ownership for
+  hover/status.
+- `arrayscope.window.montage_levels`: semantic montage histogram coverage tracking keyed by the full
+  montage view, independent of viewport origin and visible canvas shape.
+- `arrayscope.window.montage_controller`, `arrayscope.window.normal_image_controller`, and
+  `arrayscope.window.viewport_bridge`: focused ownership targets for montage orchestration, normal
+  image orchestration, and ViewBox range events as render responsibilities are split out of
+  `RenderMixin`.
 - `arrayscope.ui.dimension_strip`, `arrayscope.ui.display_toolbar`, `arrayscope.ui.command_palette`,
   `arrayscope.ui.diagnostics`, `arrayscope.ui.docks.inspection`, and `arrayscope.ui.hud`: compact
   viewer controls, operation discovery, developer diagnostics, ROI inspection controls, and on-canvas pixel
@@ -181,13 +202,16 @@ evaluation or show an intermediate “updating” value during normal mouse
 movement.
 
 Montage window/level state is tracked separately from both the rendered pixel canvas and the
-committed value source. The window maintains per-montage-level histogram stats with finite bounds,
-source indices, expected indices, and a coverage rank: none, visible subset, or all planned montage
-indices. Viewport culling may reduce rendered pixel work only. It must not make hover semantics stale
-and must not replace broader semantic window/level bounds with a narrower visible subset. Partial
-tiles may display immediately, but implicit relative auto-windowing only uses a semantic source that
-is at least as complete as the previously applied source; explicit Auto Window uses the best semantic
-bounds currently available.
+committed value source. `MontageLevelTracker` maintains per-montage-level histogram stats with finite
+bounds, source indices, expected indices, and a coverage rank: none, visible subset, or all planned
+montage indices. It returns ranked `LevelSource` objects to the presentation model. Viewport culling
+may reduce rendered pixel work only. It must not make hover semantics stale and must not replace
+broader semantic window/level bounds with a narrower visible subset. Partial tiles may display
+immediately, but implicit relative auto-windowing only uses a semantic source that is at least as
+complete as the previously applied source; explicit Auto Window uses the best semantic bounds
+currently available. Degenerate bounds are normalized before display, so zero-width windows are never
+committed. User-edited levels are stored as explicit committed/user level sources, not rediscovered
+from the histogram widget during rendering.
 
 Do not read widget values to reconstruct `ViewState`. Widget state is an output
 of render, except transient UI-only state such as dock visibility and histogram

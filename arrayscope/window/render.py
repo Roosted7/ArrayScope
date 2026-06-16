@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import monotonic, perf_counter
 
 import numpy as np
@@ -10,7 +10,6 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.display.colormaps import gray_colormap, phase_colormap
 from arrayscope.display.geometry import DisplayGeometry
-from arrayscope.display.levels import finite_bounds
 from arrayscope.display.imageview2d import MontageTileOverlay
 from arrayscope.display.montage import (
     MontageTileState,
@@ -36,7 +35,6 @@ from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.view_state import ChannelMode, ScaleMode
-from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.operations.evaluator import evaluate_image_snapshot, evaluate_line_snapshot, evaluate_scalar_snapshot
 from arrayscope.operations.evaluator import EvaluationResult
 from arrayscope.operations.slabs import (
@@ -55,9 +53,21 @@ from arrayscope.operations.render_plan import (
 )
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.ui.toasts import show_status_message
+from arrayscope.window.display_commit import DisplayCommitter
+from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
+from arrayscope.window.montage_levels import MontageLevelStats, MontageLevelTracker
 from arrayscope.window.montage_session import MontageRenderSession
+from arrayscope.window.presentation import (
+    LevelSource,
+    LevelSourceRank,
+    fallback_level_source,
+    normalize_bounds,
+    decide_presentation,
+)
+from arrayscope.window.render_model import CommitKind, DisplayPayload, PresentationInput, RenderRequestContext
+from arrayscope.window.viewport_bridge import ViewportBridge
 
 
 MONTAGE_COMMIT_INTERVAL_MS = 16
@@ -69,26 +79,6 @@ class RenderedView:
     document_key: tuple
     display_image: DisplayImage
     geometry: DisplayGeometry
-
-
-@dataclass(frozen=True)
-class CommittedDisplayFrame:
-    data: np.ndarray
-    histogram_data: np.ndarray | None
-    geometry: DisplayGeometry
-    levels: tuple[float, float] | None
-    document_key: object
-    request_key: object
-    render_generation: int
-    montage_level_key: object | None = None
-
-
-@dataclass(frozen=True)
-class MontageLevelStats:
-    bounds: tuple[float, float] | None
-    source_indices: frozenset[int]
-    expected_indices: frozenset[int]
-    coverage_rank: int
 
 
 def getNumberOfDecimalPlaces(number):
@@ -186,9 +176,9 @@ class RenderMixin:
         return value
 
     def _is_committed_display_frame_current(self, frame: CommittedDisplayFrame) -> bool:
-        if not self._is_current_render_generation(int(frame.render_generation)):
+        if not self._is_current_render_generation(int(frame.key.render_generation)):
             return False
-        if frame.document_key != _document_key(self.document):
+        if frame.key.document_key != _document_key(self.document):
             return False
         if frame.geometry != getattr(self, "display_geometry", None):
             return False
@@ -196,7 +186,7 @@ class RenderMixin:
             return False
         if frame.histogram_data is not None and tuple(np.shape(frame.histogram_data)[:2]) != tuple(frame.geometry.display_shape):
             return False
-        if frame.request_key != getattr(self, "_committed_display_request_key", None):
+        if frame.key.request_key != getattr(self, "_committed_display_request_key", None):
             return False
         return True
 
@@ -539,16 +529,7 @@ class RenderMixin:
         if getattr(self, '_force_autolevel', False):
             self._force_autolevel = False
         
-        previous_levels = None
-        previous_bounds = None
-        if not force_auto and getattr(self.img_view, "image", None) is not None:
-            try:
-                previous_levels = self.img_view.getLevels()
-                previous_bounds = self.img_view.getHistogramDataBounds()
-            except Exception as exc:
-                handle_ui_exception("previous image levels", exc)
-                previous_levels = None
-                previous_bounds = None
+        previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
 
         colormap_lut = None
         if self.view_state.channel == ChannelMode.COMPLEX:
@@ -565,8 +546,7 @@ class RenderMixin:
                 cached,
                 geometry=geometry,
                 window_mode=window_mode,
-                previous_levels=previous_levels,
-                previous_bounds=previous_bounds,
+                previous_frame=previous_frame,
                 force_auto=force_auto,
                 defer_side_panels=defer_side_panels,
                 document_key=_document_key(document),
@@ -639,8 +619,7 @@ class RenderMixin:
                     display_image,
                     geometry=geometry,
                     window_mode=window_mode,
-                    previous_levels=previous_levels,
-                    previous_bounds=previous_bounds,
+                    previous_frame=previous_frame,
                     force_auto=force_auto,
                     defer_side_panels=defer_side_panels,
                     document_key=_document_key(document),
@@ -710,8 +689,7 @@ class RenderMixin:
                 display_image,
                 geometry=geometry,
                 window_mode=window_mode,
-                previous_levels=previous_levels,
-                previous_bounds=previous_bounds,
+                previous_frame=previous_frame,
                 force_auto=force_auto,
                 defer_side_panels=defer_side_panels,
                 document_key=_document_key(document),
@@ -748,16 +726,7 @@ class RenderMixin:
         if getattr(self, '_force_autolevel', False):
             self._force_autolevel = False
         window_mode = self._current_window_mode()
-        previous_levels = None
-        previous_bounds = None
-        if not force_auto and getattr(self.img_view, "image", None) is not None:
-            try:
-                previous_levels = self.img_view.getLevels()
-                previous_bounds = self.img_view.getHistogramDataBounds()
-            except Exception as exc:
-                handle_ui_exception("previous montage levels", exc)
-                previous_levels = None
-                previous_bounds = None
+        previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
 
         colormap_lut = None
         if self.view_state.channel == ChannelMode.COMPLEX:
@@ -872,8 +841,6 @@ class RenderMixin:
             output_dtype=np.dtype(output_dtype),
             rgb=view_state.channel == ChannelMode.COMPLEX,
             window_mode=window_mode,
-            previous_levels=previous_levels,
-            previous_bounds=previous_bounds,
             force_auto=force_auto,
             visible_tiles=tuple(visible_tiles),
             rendered_tiles={int(rendered.tile.montage_index): rendered for rendered in cached_tiles},
@@ -884,8 +851,7 @@ class RenderMixin:
             stage_waiting_tiles=stage_plan["stage_waiting_tiles"],
             stage_values=stage_plan["stage_values"],
             defer_side_panels=bool(defer_side_panels),
-            defer_autolevel_until_tile_loaded=not bool(cached_tiles),
-            final_autolevel_pending=not bool(cached_tiles) and window_mode != "absolute",
+            applied_level_source=None if previous_frame is None else fallback_level_source(previous_frame),
         )
         self._montage_session = session
         self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
@@ -926,69 +892,32 @@ class RenderMixin:
         )
 
     def _empty_montage_level_stats(self, expected_indices) -> MontageLevelStats:
-        return MontageLevelStats(
-            bounds=None,
-            source_indices=frozenset(),
-            expected_indices=frozenset(int(index) for index in expected_indices),
-            coverage_rank=0,
-        )
+        tracker = self._montage_level_tracker()
+        key = ("empty", tuple(int(index) for index in expected_indices))
+        return tracker.ensure(key, expected_indices)
 
     def _ensure_montage_level_stats(self, level_key, *, expected_indices) -> MontageLevelStats:
-        store = getattr(self, "_montage_level_stats", None)
-        if store is None:
-            store = {}
-            self._montage_level_stats = store
-        expected = frozenset(int(index) for index in expected_indices)
-        stats = store.get(level_key)
-        if stats is None:
-            stats = self._empty_montage_level_stats(expected)
-            store[level_key] = stats
-        elif stats.expected_indices != expected:
-            stats = MontageLevelStats(
-                bounds=stats.bounds,
-                source_indices=stats.source_indices,
-                expected_indices=expected,
-                coverage_rank=self._montage_coverage_rank(stats.source_indices, expected),
-            )
-            store[level_key] = stats
-        return stats
+        return self._montage_level_tracker().ensure(level_key, expected_indices)
 
     def _montage_coverage_rank(self, source_indices, expected_indices) -> int:
-        sources = frozenset(int(index) for index in source_indices)
-        expected = frozenset(int(index) for index in expected_indices)
-        if not sources:
+        stats = self._montage_level_tracker().ensure(("rank", tuple(expected_indices)), expected_indices)
+        rank = self._montage_level_tracker()._rank_for(source_indices, stats.expected_indices)
+        if rank == LevelSourceRank.NONE:
             return 0
-        if expected and expected.issubset(sources):
+        if rank == LevelSourceRank.MONTAGE_COMPLETE:
             return 2
         return 1
 
     def _update_montage_level_bounds_from_rendered(self, level_key, rendered, *, expected_indices=None) -> None:
-        source = rendered.histogram_data if rendered.histogram_data is not None else rendered.image
-        bounds = finite_bounds(source)
-        if bounds is None:
-            return
-        low, high = bounds
-        store = getattr(self, "_montage_level_stats", None)
-        if store is None:
-            store = {}
-            self._montage_level_stats = store
         if expected_indices is None:
-            previous_stats = store.get(level_key)
+            previous_stats = self._montage_level_tracker().stats_for(level_key)
             expected_indices = () if previous_stats is None else previous_stats.expected_indices
-        previous = store.get(level_key, self._empty_montage_level_stats(expected_indices))
-        expected = frozenset(int(index) for index in (expected_indices or previous.expected_indices))
-        source_indices = frozenset(set(previous.source_indices) | {int(rendered.tile.source_index)})
-        previous_bounds = previous.bounds
-        merged_bounds = (
-            (float(low), float(high))
-            if previous_bounds is None
-            else (min(float(previous_bounds[0]), float(low)), max(float(previous_bounds[1]), float(high)))
-        )
-        store[level_key] = MontageLevelStats(
-            bounds=merged_bounds,
-            source_indices=source_indices,
-            expected_indices=expected,
-            coverage_rank=self._montage_coverage_rank(source_indices, expected),
+        self._montage_level_tracker().ensure(level_key, expected_indices)
+        self._montage_level_tracker().update_from_tile(
+            level_key,
+            int(rendered.tile.source_index),
+            rendered.histogram_data,
+            rendered.image,
         )
 
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
@@ -996,12 +925,22 @@ class RenderMixin:
         return self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
 
     def _montage_level_bounds_for_session(self, session, *, allow_partial: bool = False):
-        stats = self._montage_level_stats_for_session(session)
-        if stats.bounds is None:
-            return None
-        if allow_partial or int(stats.coverage_rank) >= 2:
-            return stats.bounds
-        return None
+        source = self._montage_level_source_for_session(session, allow_partial=allow_partial)
+        return None if source is None else source.histogram_range
+
+    def _montage_level_source_for_session(self, session, *, allow_partial: bool = False):
+        tracker = self._montage_level_tracker()
+        if allow_partial:
+            stats = tracker.stats_for(session.level_key)
+            return None if stats is None else tracker.source_for_stats(session.level_key, stats)
+        return tracker.best_source(session.level_key, explicit_auto=False)
+
+    def _montage_level_tracker(self) -> MontageLevelTracker:
+        tracker = getattr(self, "_montage_level_tracker_instance", None)
+        if tracker is None:
+            tracker = MontageLevelTracker()
+            self._montage_level_tracker_instance = tracker
+        return tracker
 
     def _plan_montage_stages(self, document, missing_tiles):
         document_key = stage_document_key(document)
@@ -1394,40 +1333,26 @@ class RenderMixin:
             display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
             level_stats = self._montage_level_stats_for_session(session)
             explicit_auto = bool(getattr(session, "force_auto", False))
-            montage_level_bounds = self._montage_level_bounds_for_session(session, allow_partial=explicit_auto)
+            semantic_source = self._montage_level_source_for_session(session, allow_partial=explicit_auto)
             first_display_commit = not bool(session.display_committed)
             if newly_composed or first_display_commit:
-                initial_previous_levels = session.previous_levels
-                initial_force_auto = session.force_auto
-                initial_window_mode = session.window_mode
-                if first_display_commit:
-                    try:
-                        initial_previous_levels = self.img_view.getLevels()
-                    except Exception:
-                        initial_previous_levels = session.previous_levels
-                if first_display_commit and session.window_mode != "absolute":
-                    bounds = montage_level_bounds
-                    initial_force_auto = bounds is not None and float(bounds[1]) > float(bounds[0])
-                    if not initial_force_auto and initial_previous_levels is not None:
-                        initial_window_mode = "absolute"
-                    elif not initial_force_auto:
-                        initial_window_mode = "absolute"
                 self._apply_full_display_image(
                     display_image,
                     geometry=rendered_geometry,
-                    window_mode=initial_window_mode,
-                    previous_levels=initial_previous_levels,
-                    previous_bounds=session.previous_bounds,
-                    force_auto=initial_force_auto,
+                    window_mode=session.window_mode,
+                    previous_frame=getattr(self, "_committed_display_frame", None),
+                    force_auto=explicit_auto,
                     defer_side_panels=getattr(session, "defer_side_panels", False),
-                    level_bounds=montage_level_bounds,
+                    semantic_source=semantic_source,
+                    applied_level_source=session.applied_level_source,
+                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.FULL_MONTAGE_INITIAL,
                     document_key=_document_key(session.document),
                     request_key=session.key,
                     render_generation=session.render_generation,
                     montage_level_key=session.level_key,
                 )
                 session.display_committed = True
-                self._note_montage_level_source_applied(session, level_stats, force_auto=initial_force_auto)
+                self._note_montage_level_source_applied(session, semantic_source, explicit=explicit_auto)
             else:
                 complete = (
                     not session.pending_tiles
@@ -1436,27 +1361,24 @@ class RenderMixin:
                     and not session.stage_waiting_tiles
                 )
                 force_auto = self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
-                if force_auto:
-                    montage_level_bounds = level_stats.bounds
+                semantic_source = self._montage_level_source_for_session(session, allow_partial=force_auto)
                 self._apply_progressive_display_image(
                     display_image,
                     geometry=rendered_geometry,
                     window_mode=session.window_mode,
-                    previous_levels=session.previous_levels,
-                    previous_bounds=session.previous_bounds,
+                    previous_frame=getattr(self, "_committed_display_frame", None),
                     force_auto=force_auto,
                     viewport_policy=ViewportPolicy.PRESERVE,
-                    level_bounds=montage_level_bounds,
+                    semantic_source=semantic_source,
+                    applied_level_source=session.applied_level_source,
+                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if force_auto else CommitKind.PROGRESSIVE_MONTAGE_PATCH,
                     document_key=_document_key(session.document),
                     request_key=session.key,
                     render_generation=session.render_generation,
                     montage_level_key=session.level_key,
                 )
                 if force_auto:
-                    self._note_montage_level_source_applied(session, level_stats, force_auto=True)
-                    session.defer_autolevel_until_tile_loaded = False
-                    if complete:
-                        session.final_autolevel_pending = False
+                    self._note_montage_level_source_applied(session, semantic_source, explicit=True)
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
@@ -1481,27 +1403,30 @@ class RenderMixin:
     def _should_autolevel_progressive_montage(self, session, stats: MontageLevelStats, *, complete: bool) -> bool:
         if session.window_mode == "absolute" or not session.rendered_tiles:
             return False
-        if not (session.defer_autolevel_until_tile_loaded or (complete and session.final_autolevel_pending)):
+        if not complete and not bool(getattr(session, "force_auto", False)):
             return False
         bounds = stats.bounds
         if bounds is None:
             return False
         if int(stats.coverage_rank) < 2 and not bool(getattr(session, "force_auto", False)):
             return False
-        if int(stats.coverage_rank) < int(getattr(session, "applied_level_coverage_rank", 0)):
+        applied = getattr(session, "applied_level_source", None)
+        applied_rank = int(getattr(applied, "rank", 0) or 0)
+        applied_count = int(getattr(applied, "source_count", 0) or 0)
+        if int(stats.rank) < applied_rank:
             return False
-        if len(stats.source_indices) < int(getattr(session, "applied_level_source_count", 0)):
+        if int(stats.rank) == applied_rank and len(stats.source_indices) <= applied_count:
             return False
         low, high = bounds
         if float(high) <= float(low):
             return False
         return True
 
-    def _note_montage_level_source_applied(self, session, stats: MontageLevelStats, *, force_auto: bool) -> None:
-        if not force_auto or stats.bounds is None:
+    def _note_montage_level_source_applied(self, session, source, *, explicit: bool) -> None:
+        if source is None:
             return
-        session.applied_level_coverage_rank = int(stats.coverage_rank)
-        session.applied_level_source_count = len(stats.source_indices)
+        if explicit or int(getattr(source, "rank", 0) or 0) >= int(LevelSourceRank.MONTAGE_COMPLETE):
+            session.applied_level_source = source
 
     def _classify_canvas_tiles(self, session) -> None:
         rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
@@ -1632,8 +1557,7 @@ class RenderMixin:
         *,
         geometry,
         window_mode,
-        previous_levels,
-        previous_bounds,
+        previous_frame,
         force_auto,
         defer_side_panels: bool = False,
         document_key=None,
@@ -1645,8 +1569,7 @@ class RenderMixin:
             display_image,
             geometry=geometry,
             window_mode=window_mode,
-            previous_levels=previous_levels,
-            previous_bounds=previous_bounds,
+            previous_frame=previous_frame,
             force_auto=force_auto,
             defer_side_panels=defer_side_panels,
             document_key=document_key,
@@ -1661,11 +1584,13 @@ class RenderMixin:
         *,
         geometry,
         window_mode,
-        previous_levels,
-        previous_bounds,
+        previous_frame,
         force_auto,
         defer_side_panels: bool = False,
         level_bounds=None,
+        semantic_source=None,
+        applied_level_source=None,
+        commit_kind=None,
         document_key=None,
         request_key=None,
         render_generation=None,
@@ -1673,55 +1598,42 @@ class RenderMixin:
     ):
         commit_start = perf_counter()
         try:
-            preserved_histogram_bounds = self._histogram_bounds_to_preserve_for_commit(
-                geometry,
-                level_bounds=level_bounds,
-            )
             viewport_policy = self._viewport_policy_for_display_shape(display_image.data.shape[:2])
             levels_start = perf_counter()
-            current_bounds = level_bounds if level_bounds is not None else self._display_histogram_bounds(display_image)
-            level_decision = choose_window_levels(
-                mode=window_mode,
-                previous_levels=previous_levels,
-                previous_bounds=previous_bounds,
-                current_bounds=current_bounds,
-                default_levels=level_bounds if level_bounds is not None else display_image.default_levels,
-                force_auto=force_auto,
-            )
-            al = level_decision.auto_levels
-            levels = level_decision.levels
-            self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
-
-            set_image_start = perf_counter()
-            if display_image.histogram_data is not None:
-                self.img_view.setImage(
-                    display_image.data,
-                    autoLevels=al,
-                    levels=levels,
-                    histogramData=display_image.histogram_data,
-                    autoHistogramRange=preserved_histogram_bounds is None,
-                    viewport_policy=viewport_policy,
-                )
-            else:
-                self.img_view.setImage(
-                    display_image.data,
-                    autoLevels=al,
-                    levels=levels,
-                    autoHistogramRange=preserved_histogram_bounds is None,
-                    viewport_policy=viewport_policy,
-                )
-            if preserved_histogram_bounds is not None:
-                self._apply_histogram_data_bounds(preserved_histogram_bounds)
-            self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
-            self.display_geometry = geometry
-            self._commit_display_frame(
-                display_image,
-                geometry=geometry,
+            if commit_kind is None:
+                commit_kind = CommitKind.FULL_MONTAGE_INITIAL if getattr(geometry, "montage", None) is not None else CommitKind.FULL_NORMAL
+            context = self._render_request_context(
                 document_key=document_key,
                 request_key=request_key,
                 render_generation=render_generation,
-                montage_level_key=montage_level_key,
+                semantic_key=montage_level_key,
             )
+            decision = decide_presentation(
+                PresentationInput(
+                    payload=DisplayPayload(
+                        image=display_image,
+                        geometry=geometry,
+                        viewport_policy=viewport_policy,
+                        rgb_already_windowed=display_image.data.ndim == 3 and getattr(geometry, "montage", None) is not None,
+                    ),
+                    context=context,
+                    previous_frame=previous_frame,
+                    window_mode=window_mode,
+                    force_auto=force_auto,
+                    commit_kind=commit_kind,
+                    semantic_source=semantic_source,
+                    applied_level_source=applied_level_source,
+                    level_bounds=normalize_bounds(level_bounds),
+                )
+            )
+            self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
+
+            set_image_start = perf_counter()
+            frame = self._display_committer().commit_full(decision.display_presentation, context.frame_key)
+            self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
+            self.display_geometry = geometry
+            self._set_committed_display_frame(frame)
+            self._note_display_level_source(decision)
             if defer_side_panels:
                 self._deferred_side_panel_refresh_pending = True
             else:
@@ -1748,80 +1660,62 @@ class RenderMixin:
         *,
         geometry,
         window_mode,
-        previous_levels,
-        previous_bounds,
+        previous_frame,
         force_auto,
         viewport_policy,
         level_bounds=None,
+        semantic_source=None,
+        applied_level_source=None,
+        commit_kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
         document_key=None,
         request_key=None,
         render_generation=None,
         montage_level_key=None,
     ):
-        del previous_levels
         commit_start = perf_counter()
         try:
-            preserved_histogram_bounds = self._histogram_bounds_to_preserve_for_commit(
-                geometry,
-                level_bounds=level_bounds,
-                previous_bounds=previous_bounds,
-            )
             levels_start = perf_counter()
-            levels = None
-            if not force_auto:
-                try:
-                    levels = self.img_view.getLevels()
-                except Exception:
-                    levels = None
-            else:
-                levels = level_bounds if level_bounds is not None else self._sampled_display_bounds(display_image)
-            al = levels is None
-            self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
-            set_image_start = perf_counter()
-            can_fast = (
-                not al
-                and viewport_policy == ViewportPolicy.PRESERVE
-                and getattr(self.img_view, "image", None) is not None
-                and tuple(getattr(self.img_view.image, "shape", ())[:2]) == tuple(display_image.data.shape[:2])
-                and hasattr(self.img_view, "updateImageDataFast")
-            )
-            if can_fast:
-                self.img_view.updateImageDataFast(
-                    display_image.data,
-                    histogramData=display_image.histogram_data,
-                    levels=levels,
-                    rgb_already_windowed=display_image.data.ndim == 3,
-                )
-            else:
-                if display_image.histogram_data is not None:
-                    self.img_view.setImage(
-                        display_image.data,
-                        autoLevels=al,
-                        levels=levels,
-                        histogramData=display_image.histogram_data,
-                        autoHistogramRange=preserved_histogram_bounds is None,
-                        viewport_policy=viewport_policy,
-                    )
-                else:
-                    self.img_view.setImage(
-                        display_image.data,
-                        autoLevels=al,
-                        levels=levels,
-                        autoHistogramRange=preserved_histogram_bounds is None,
-                        viewport_policy=viewport_policy,
-                    )
-            if preserved_histogram_bounds is not None:
-                self._apply_histogram_data_bounds(preserved_histogram_bounds)
-            self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
-            self.display_geometry = geometry
-            self._commit_display_frame(
-                display_image,
-                geometry=geometry,
+            context = self._render_request_context(
                 document_key=document_key,
                 request_key=request_key,
                 render_generation=render_generation,
-                montage_level_key=montage_level_key,
+                semantic_key=montage_level_key,
             )
+            decision = decide_presentation(
+                PresentationInput(
+                    payload=DisplayPayload(
+                        image=display_image,
+                        geometry=geometry,
+                        viewport_policy=viewport_policy,
+                        rgb_already_windowed=display_image.data.ndim == 3,
+                    ),
+                    context=context,
+                    previous_frame=previous_frame,
+                    window_mode=window_mode,
+                    force_auto=force_auto,
+                    commit_kind=commit_kind,
+                    semantic_source=semantic_source,
+                    applied_level_source=applied_level_source,
+                    level_bounds=normalize_bounds(level_bounds),
+                )
+            )
+            self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
+            set_image_start = perf_counter()
+            can_fast = (
+                decision.allow_fast_commit
+                and viewport_policy == ViewportPolicy.PRESERVE
+                and getattr(self.img_view, "image", None) is not None
+                and tuple(getattr(self.img_view.image, "shape", ())[:2]) == tuple(display_image.data.shape[:2])
+                and hasattr(self.img_view, "updateImagePresentationFast")
+            )
+            if can_fast:
+                frame = self._display_committer().commit_fast(decision.display_presentation, context.frame_key)
+            else:
+                frame = self._display_committer().commit_full(decision.display_presentation, context.frame_key)
+            self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
+            self.display_geometry = geometry
+            self._set_committed_display_frame(frame)
+            self._note_display_level_source(decision)
             self.apply_axis_flips()
             self.img_view.setImageStale(False)
         except Exception as e:
@@ -1831,101 +1725,97 @@ class RenderMixin:
             self._last_progressive_commit_ms = (perf_counter() - commit_start) * 1000.0
             self._last_display_commit_ms = self._last_progressive_commit_ms
 
-    def _histogram_bounds_to_preserve_for_commit(self, geometry, *, level_bounds=None, previous_bounds=None):
-        if level_bounds is not None:
-            return (float(level_bounds[0]), float(level_bounds[1]))
-        if getattr(geometry, "montage", None) is None:
-            return None
-        if previous_bounds is not None:
-            return (float(previous_bounds[0]), float(previous_bounds[1]))
-        try:
-            current = self.img_view.getHistogramDataBounds()
-        except Exception:
-            current = None
-        if current is None:
-            return None
-        return (float(current[0]), float(current[1]))
+    def _display_committer(self) -> DisplayCommitter:
+        committer = getattr(self, "_display_committer_instance", None)
+        if committer is None or getattr(committer, "image_view", None) is not self.img_view:
+            committer = DisplayCommitter(self.img_view)
+            self._display_committer_instance = committer
+        return committer
 
-    def _apply_histogram_data_bounds(self, bounds) -> None:
-        low, high = float(bounds[0]), float(bounds[1])
-        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
-            return
-        self.img_view.levelMin = low
-        self.img_view.levelMax = high
-        if hasattr(self.img_view, "setHistogramRange"):
-            self.img_view.setHistogramRange(low, high)
+    def _previous_display_frame_for_policy(self, *, force_auto: bool) -> CommittedDisplayFrame | None:
+        if force_auto:
+            return None
+        frame = getattr(self, "_committed_display_frame", None)
+        if frame is None:
+            return None
+        return frame if self._is_committed_display_frame_current(frame) else None
 
-    def _commit_display_frame(
-        self,
-        display_image,
-        *,
-        geometry,
-        document_key=None,
-        request_key=None,
-        render_generation=None,
-        montage_level_key=None,
-    ) -> None:
-        if tuple(display_image.data.shape[:2]) != tuple(geometry.display_shape):
-            self._committed_display_frame = None
-            self._committed_display_request_key = None
-            return
+    def _render_request_context(self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None) -> RenderRequestContext:
         if document_key is None:
             document_key = _document_key(self.document)
         if request_key is None:
-            request_key = ("display", document_key, geometry.view_state)
+            request_key = ("display", document_key, self.view_state)
         if render_generation is None:
             render_generation = self._capture_render_generation()
-        levels = None
-        try:
-            current_levels = self.img_view.getLevels()
-            if current_levels is not None:
-                levels = (float(current_levels[0]), float(current_levels[1]))
-        except Exception:
-            levels = None
-        self._committed_display_request_key = request_key
-        self._committed_display_frame = CommittedDisplayFrame(
-            data=display_image.data,
-            histogram_data=display_image.histogram_data,
-            geometry=geometry,
-            levels=levels,
+        return RenderRequestContext(
             document_key=document_key,
             request_key=request_key,
             render_generation=int(render_generation),
-            montage_level_key=montage_level_key,
+            semantic_key=semantic_key,
         )
 
-    def _sampled_display_bounds(self, display_image, *, max_samples: int = 65536):
-        source = display_image.histogram_data
-        if source is None:
-            source = display_image.data
-        array = np.asarray(source)
-        if array.ndim == 3:
-            array = 0.2126 * array[..., 0].astype(float) + 0.7152 * array[..., 1].astype(float) + 0.0722 * array[..., 2].astype(float)
-        flat = np.ravel(array)
-        if flat.size > int(max_samples):
-            stride = max(1, int(np.ceil(flat.size / int(max_samples))))
-            flat = flat[::stride]
-        bounds = finite_bounds(flat)
-        if bounds is None:
-            return None
-        low, high = bounds
-        if float(low) == float(high):
-            delta = max(abs(float(low)) * 0.01, 0.5)
-            return (float(low) - delta, float(high) + delta)
-        return bounds
+    def _note_display_level_source(self, decision) -> None:
+        frame = getattr(self, "_committed_display_frame", None)
+        session = getattr(self, "_montage_session", None)
+        if session is None or frame is None or frame.key.semantic_key != getattr(session, "level_key", None):
+            return
+        source = getattr(decision, "applied_level_source", None)
+        if source is not None:
+            session.applied_level_source = source
 
-    def _raw_display_bounds(self, display_image, *, max_samples: int = 65536):
-        source = display_image.histogram_data
-        if source is None:
-            source = display_image.data
-        array = np.asarray(source)
-        if array.ndim == 3:
-            array = 0.2126 * array[..., 0].astype(float) + 0.7152 * array[..., 1].astype(float) + 0.0722 * array[..., 2].astype(float)
-        flat = np.ravel(array)
-        if flat.size > int(max_samples):
-            stride = max(1, int(np.ceil(flat.size / int(max_samples))))
-            flat = flat[::stride]
-        return finite_bounds(flat)
+    def _viewport_bridge(self) -> ViewportBridge:
+        bridge = getattr(self, "_viewport_bridge_instance", None)
+        if bridge is None:
+            bridge = ViewportBridge(self)
+            self._viewport_bridge_instance = bridge
+        return bridge
+
+    def _display_frame_key(self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None) -> DisplayFrameKey:
+        if document_key is None:
+            document_key = _document_key(self.document)
+        if request_key is None:
+            request_key = ("display", document_key, self.view_state)
+        if render_generation is None:
+            render_generation = self._capture_render_generation()
+        return DisplayFrameKey(
+            document_key=document_key,
+            request_key=request_key,
+            render_generation=int(render_generation),
+            semantic_key=semantic_key,
+        )
+
+    def _set_committed_display_frame(self, frame: CommittedDisplayFrame) -> None:
+        self._committed_display_request_key = frame.key.request_key
+        self._committed_display_frame = frame
+
+    def _on_display_levels_changed(self) -> None:
+        try:
+            levels = normalize_bounds(self.img_view.getLevels())
+        except Exception:
+            levels = None
+        if levels is None:
+            return
+        try:
+            histogram_range = normalize_bounds(self.img_view.getHistogramDataBounds())
+        except Exception:
+            histogram_range = None
+        source = LevelSource(
+            levels=levels,
+            histogram_range=histogram_range or levels,
+            rank=LevelSourceRank.EXPLICIT_USER,
+            source_count=0,
+            expected_count=0,
+            semantic_key=getattr(getattr(self, "_montage_session", None), "level_key", None),
+        )
+        self._explicit_user_level_source = source
+        session = getattr(self, "_montage_session", None)
+        if session is not None:
+            session.applied_level_source = source
+
+        frame = getattr(self, "_committed_display_frame", None)
+        if frame is None or not self._is_committed_display_frame_current(frame):
+            return
+        self._committed_display_frame = replace(frame, levels=levels)
 
     def _viewport_policy_for_display_shape(self, display_shape):
         display_shape = tuple(int(size) for size in display_shape)
@@ -2129,16 +2019,6 @@ class RenderMixin:
         if self.widgets['buttons']['display']['window_absolute'].isChecked():
             return "absolute"
         return "relative"
-
-    def _display_histogram_bounds(self, display_image):
-        data = display_image.histogram_data
-        if data is None:
-            data = display_image.data
-        try:
-            return finite_bounds(data)
-        except Exception as exc:
-            handle_ui_exception("display histogram bounds", exc)
-            return None
 
     def _estimated_image_display_bytes(self, view_state):
         if view_state.image_axes is None:
@@ -2355,9 +2235,7 @@ class RenderMixin:
 
     def _on_view_range_changed(self):
         """Update display group title when view range changes (for fit mode)."""
-        self._update_display_group_title()
-        if self.view_state.montage_axis is not None and not getattr(self, "_montage_canvas_commit_active", False):
-            self._schedule_montage_viewport_update()
+        self._viewport_bridge().on_view_range_changed()
 
     def on_tab_changed(self, index):
         """Handle central image tab changes."""

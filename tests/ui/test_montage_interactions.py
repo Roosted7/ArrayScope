@@ -479,6 +479,80 @@ def test_montage_loading_canvas_preserves_levels_until_first_real_tile(qtbot, mo
         win.close()
 
 
+def test_montage_degenerate_previous_levels_do_not_become_one_tile_window(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((200, 200, 8), dtype=np.float32)
+    for index in range(data.shape[2]):
+        data[:, :, index] = index * 1000.0
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    calls = []
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
+    try:
+        _process_events(qtbot)
+        initial_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
+        assert initial_levels == (-0.5, 0.5)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
+        win.update_montage_view()
+        assert calls
+
+        tile0 = win._montage_session.plan.tiles[0]
+        calls[0]["on_done"](_tile_result(tile0, 1000.0))
+        qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=1000)
+
+        levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
+        histogram_bounds = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+
+        assert levels == (-0.5, 0.5)
+        assert histogram_bounds == (-0.5, 0.5)
+        assert levels != (1000.0, 1000.0)
+        assert histogram_bounds != (1000.0, 1000.0)
+    finally:
+        win.close()
+
+
+def test_montage_panning_without_new_tiles_does_not_change_levels(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((200, 200, 8), dtype=np.float32)
+    for index in range(data.shape[2]):
+        data[:, :, index] = index * 1000.0
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    calls = []
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
+    try:
+        _process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
+        win.update_montage_view()
+        assert len(calls) >= 2
+
+        for callback_index, value in ((0, 1000.0), (1, 2000.0)):
+            tile = win._montage_session.plan.tiles[callback_index]
+            calls[callback_index]["on_done"](_tile_result(tile, value))
+            _process_events(qtbot, count=10)
+
+        before_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
+        before_bounds = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+        before_stats = win._montage_level_stats_for_session(win._montage_session)
+
+        win.img_view.getView().setRange(xRange=(402, 605), yRange=(0, 199), padding=0)
+        _process_events(qtbot, count=30)
+        win.update_montage_view()
+        _process_events(qtbot, count=10)
+
+        after_stats = win._montage_level_stats_for_session(win._montage_session)
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == before_levels
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == before_bounds
+        assert after_stats.rank == before_stats.rank
+        assert after_stats.source_indices == before_stats.source_indices
+    finally:
+        win.close()
+
+
 def test_montage_visible_tiles_do_not_define_relative_levels(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

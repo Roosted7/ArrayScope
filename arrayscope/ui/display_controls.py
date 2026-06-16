@@ -342,6 +342,7 @@ class DisplayControlBuildMixin:
         self.img_view.roiChanged.connect(self._on_roi_changed)
         self.img_view.roiDeleted.connect(self._on_roi_deleted)
         self.img_view.imageContextMenuRequested.connect(self._show_image_context_menu)
+        self.img_view.levelsChanged.connect(self._on_display_levels_changed)
         
         # Connect to view range changes to update aspect ratio in fit mode
         self.img_view.getView().sigRangeChanged.connect(self._on_view_range_changed)

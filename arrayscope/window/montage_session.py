@@ -33,8 +33,6 @@ class MontageRenderSession:
     output_dtype: np.dtype
     rgb: bool
     window_mode: object
-    previous_levels: object
-    previous_bounds: object
     force_auto: bool
     visible_tiles: tuple[MontageTile, ...]
     rendered_tiles: dict[int, RenderedTile]
@@ -57,11 +55,8 @@ class MontageRenderSession:
     final_commit_pending: bool = False
     show_loading_overlays: bool = False
     defer_side_panels: bool = False
-    defer_autolevel_until_tile_loaded: bool = False
-    final_autolevel_pending: bool = False
     display_committed: bool = False
-    applied_level_coverage_rank: int = 0
-    applied_level_source_count: int = 0
+    applied_level_source: object | None = None
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
