@@ -63,6 +63,7 @@ class DisplayPresentationMixin:
         level_bounds=None,
         semantic_source=None,
         applied_level_source=None,
+        histogram_plot_data=None,
         commit_kind=None,
         document_key=None,
         request_key=None,
@@ -87,7 +88,8 @@ class DisplayPresentationMixin:
                         image=display_image,
                         geometry=geometry,
                         viewport_policy=viewport_policy,
-                        rgb_already_windowed=display_image.data.ndim == 3 and getattr(geometry, "montage", None) is not None,
+                        rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
+                        histogram_plot_data=histogram_plot_data,
                     ),
                     context=context,
                     previous_frame=previous_frame,
@@ -139,6 +141,7 @@ class DisplayPresentationMixin:
         level_bounds=None,
         semantic_source=None,
         applied_level_source=None,
+        histogram_plot_data=None,
         commit_kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
         document_key=None,
         request_key=None,
@@ -160,7 +163,8 @@ class DisplayPresentationMixin:
                         image=display_image,
                         geometry=geometry,
                         viewport_policy=viewport_policy,
-                        rgb_already_windowed=display_image.data.ndim == 3,
+                        rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
+                        histogram_plot_data=histogram_plot_data,
                     ),
                     context=context,
                     previous_frame=previous_frame,
@@ -211,7 +215,31 @@ class DisplayPresentationMixin:
         frame = getattr(self, "_committed_display_frame", None)
         if frame is None:
             return None
-        return frame if self._is_committed_display_frame_current(frame) else None
+        return frame if self._is_level_history_frame_usable(frame) else None
+
+    def _is_level_history_frame_usable(self, frame: CommittedDisplayFrame | None) -> bool:
+        if frame is None or getattr(self, "_closing", False):
+            return False
+        if frame.key.document_key != _document_key(self.document):
+            return False
+        if normalize_bounds(frame.levels) is None:
+            return False
+        if normalize_bounds(frame.histogram_range) is None:
+            return False
+        geometry = getattr(frame, "geometry", None)
+        if geometry is None:
+            return False
+        try:
+            display_shape = tuple(int(size) for size in geometry.display_shape)
+        except Exception:
+            return False
+        if len(display_shape) != 2 or display_shape[0] < 1 or display_shape[1] < 1:
+            return False
+        if tuple(np.shape(frame.data)[:2]) != display_shape:
+            return False
+        if frame.histogram_data is not None and tuple(np.shape(frame.histogram_data)[:2]) != display_shape:
+            return False
+        return True
 
     def _render_request_context(self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None) -> RenderRequestContext:
         if document_key is None:
@@ -272,13 +300,15 @@ class DisplayPresentationMixin:
             histogram_range = normalize_bounds(self.img_view.getHistogramDataBounds())
         except Exception:
             histogram_range = None
+        mode = self._current_window_mode()
         source = LevelSource(
             levels=levels,
             histogram_range=histogram_range or levels,
-            rank=LevelSourceRank.EXPLICIT_USER,
+            rank=LevelSourceRank.EXPLICIT_USER if mode == "absolute" else LevelSourceRank.PREVIOUS_COMMITTED,
             source_count=0,
             expected_count=0,
             semantic_key=getattr(getattr(self, "_montage_session", None), "level_key", None),
+            mode=mode,
         )
         self._explicit_user_level_source = source
         session = getattr(self, "_montage_session", None)
@@ -286,6 +316,6 @@ class DisplayPresentationMixin:
             session.applied_level_source = source
 
         frame = getattr(self, "_committed_display_frame", None)
-        if frame is None or not self._is_committed_display_frame_current(frame):
+        if frame is None or not self._is_level_history_frame_usable(frame):
             return
-        self._committed_display_frame = replace(frame, levels=levels)
+        self._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range or frame.histogram_range)

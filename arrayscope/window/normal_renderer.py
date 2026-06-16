@@ -14,12 +14,13 @@ from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
 from arrayscope.operations.evaluator import _document_key, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.render_plan import (
     RenderDecisionKind,
-    choose_visible_render_decision,
     degraded_view_state,
     estimate_visible_render_context,
+    choose_visible_render_decision as _default_choose_visible_render_decision,
 )
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
@@ -42,8 +43,6 @@ class NormalImageRenderMixin:
         self._current_montage_geometry = None
         self._current_montage_plan = None
         self._current_montage_canvas = None
-        self._committed_display_frame = None
-        self._committed_display_request_key = None
         if hasattr(self.img_view, "clearMontageTileOverlays"):
             self.img_view.clearMontageTileOverlays()
             
@@ -84,7 +83,7 @@ class NormalImageRenderMixin:
             render_budget_bytes=self._visible_render_budget_bytes(),
         )
         self._last_planning_ms = (perf_counter() - planning_start) * 1000.0
-        decision = choose_visible_render_decision(context)
+        decision = _choose_visible_render_decision(context)
         self._last_render_context = context
         self._last_render_decision = decision
         self._last_render_request_key = None
@@ -238,3 +237,11 @@ class NormalImageRenderMixin:
             pass_token=True,
         )
 
+
+def _choose_visible_render_decision(context):
+    try:
+        from arrayscope.window import render as render_module
+        chooser = getattr(render_module, "choose_visible_render_decision")
+    except (ImportError, AttributeError):
+        chooser = _default_choose_visible_render_decision
+    return chooser(context)

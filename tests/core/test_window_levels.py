@@ -64,6 +64,69 @@ def test_force_auto_overrides_absolute_window_for_channel_or_scale_changes():
     assert decision.levels is None
 
 
+def test_controller_relative_same_source_maps_fractions_to_improved_bounds():
+    previous = window_levels.LevelSource(
+        levels=(25.0, 75.0),
+        histogram_range=(0.0, 100.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=1,
+        expected_count=4,
+        semantic_key="same",
+    )
+    candidate = window_levels.LevelSource(
+        levels=(200.0, 400.0),
+        histogram_range=(200.0, 400.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=2,
+        expected_count=4,
+        semantic_key="same",
+    )
+
+    state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="relative")
+
+    assert state.display_levels == (250.0, 350.0)
+    assert state.histogram_range == (200.0, 400.0)
+
+
+def test_controller_absolute_same_source_keeps_numeric_levels_and_updates_histogram():
+    previous = window_levels.LevelSource(
+        levels=(25.0, 75.0),
+        histogram_range=(0.0, 100.0),
+        rank=window_levels.LevelSourceRank.EXPLICIT_USER,
+        semantic_key="same",
+        mode=window_levels.LevelMode.USER_LOCKED,
+    )
+    candidate = window_levels.LevelSource(
+        levels=(200.0, 400.0),
+        histogram_range=(200.0, 400.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=4,
+        expected_count=4,
+        semantic_key="same",
+    )
+
+    state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="absolute")
+
+    assert state.display_levels == (25.0, 75.0)
+    assert state.histogram_range == (0.0, 400.0)
+
+
+def test_relative_user_edit_is_not_absolute_user_lock():
+    source = window_levels.LevelSource(
+        levels=(25.0, 75.0),
+        histogram_range=(0.0, 100.0),
+        rank=window_levels.LevelSourceRank.PREVIOUS_COMMITTED,
+        semantic_key="same",
+        mode=window_levels.LevelMode.RELATIVE,
+    )
+
+    state = window_levels.state_from_source(source, mode="relative")
+
+    assert state is not None
+    assert not state.user_locked
+    assert state.mode == window_levels.LevelMode.RELATIVE
+
+
 def test_window_levels_module_has_no_qt_or_pyqtgraph_imports():
     tree = ast.parse(WINDOW_LEVELS_PATH.read_text())
 

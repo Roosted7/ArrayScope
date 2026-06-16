@@ -433,8 +433,10 @@ class WindowMenuMixin:
             loaded_tiles=0 if session is None else len(session.rendered_tiles),
             loading_tiles=0 if session is None else len(session.loading_tiles),
             pending_tiles=0 if session is None else len(session.pending_tiles),
+            pending_level_tiles=0 if session is None else len(getattr(session, "pending_level_tiles", ())),
             skipped_tiles=0 if session is None else len(session.skipped_tiles),
             visible_tiles=0 if session is None else len(session.visible_tiles),
+            attached_stage_requests=0 if session is None else len(getattr(session, "attached_stage_requests", ())),
             show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
         )
         decision = getattr(self, "_last_render_decision", None)
@@ -498,6 +500,8 @@ class WindowMenuMixin:
                 last_tile_cache_hit=getattr(self, "_last_montage_tile_cache_hit", None),
                 last_stage_cache_lookup_ms=getattr(stage_cache_diagnostics, "last_lookup_ms", None),
                 last_stage_cache_hit=getattr(stage_cache_diagnostics, "last_lookup_hit", None),
+                last_stage_attach_wait_ms=getattr(self, "_last_montage_stage_attach_wait_ms", None),
+                last_level_stats_ms=getattr(self, "_last_montage_level_stats_ms", None),
                 last_canvas_compose_ms=getattr(self, "_last_montage_canvas_compose_ms", None),
                 last_canvas_patch_ms=getattr(self, "_last_montage_canvas_patch_ms", None),
                 last_canvas_commit_ms=getattr(self, "_last_montage_canvas_commit_ms", None),

@@ -179,20 +179,25 @@ class MontageRenderMixin:
             pending_tiles=list(pending_tiles),
             tile_stage_keys=stage_plan["tile_stage_keys"],
             stage_waiting_tiles=stage_plan["stage_waiting_tiles"],
+            attached_stage_requests=stage_plan["attached_stage_keys"],
             stage_values=stage_plan["stage_values"],
             defer_side_panels=bool(defer_side_panels),
             applied_level_source=None if previous_frame is None else fallback_level_source(previous_frame),
         )
         self._montage_session = session
         self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
-        for rendered in cached_tiles:
+        immediate_level_tiles = tuple(cached_tiles[:4])
+        deferred_level_tiles = list(cached_tiles[4:])
+        session.pending_level_tiles = deferred_level_tiles
+        self._montage_pending_level_tiles_last_session = len(deferred_level_tiles)
+        for rendered in immediate_level_tiles:
             self._update_montage_level_bounds_from_rendered(level_key, rendered, expected_indices=all_indices)
         try:
             self._commit_montage_session_canvas(session, force=True)
         except MemoryError as exc:
             show_status_message(self, str(exc), timeout=6000)
             return
-        if not session.pending_tiles and not session.loading_tiles:
+        if not session.pending_tiles and not session.loading_tiles and not session.attached_stage_requests:
             self._stop_montage_session_slow_overlay()
             self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
             self.img_view.setImageStale(False)
@@ -201,6 +206,7 @@ class MontageRenderMixin:
                 self._deferred_side_panel_refresh_pending = True
             else:
                 self._update_operation_dock()
+            self._schedule_montage_cached_level_stats(session)
             return
         self.prefetch_evaluation_controller.cancel_prefetch()
         self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
@@ -209,15 +215,23 @@ class MontageRenderMixin:
         else:
             self._update_operation_dock()
         self._schedule_montage_session_slow_overlay(session)
+        self._schedule_montage_cached_level_stats(session)
         self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
+        self._schedule_montage_attached_stage_waits(session)
         self._schedule_montage_tiles(session)
 
     def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
+        scope_state = view_state.with_montage_axis(
+            view_state.montage_axis,
+            columns=view_state.montage_columns,
+            indices=None,
+            text=None,
+        )
         return (
             "montage_levels",
             _document_key(document),
-            view_state.with_montage_axis(view_state.montage_axis, columns=view_state.montage_columns, indices=tuple(all_indices), text=getattr(view_state, "montage_text", "")),
-            tuple(int(index) for index in all_indices),
+            scope_state,
+            int(view_state.montage_axis),
             None if colormap_lut is None else colormap_lut.tobytes(),
         )
 
@@ -238,7 +252,7 @@ class MontageRenderMixin:
             return 2
         return 1
 
-    def _update_montage_level_bounds_from_rendered(self, level_key, rendered, *, expected_indices=None) -> None:
+    def _update_montage_level_bounds_from_rendered(self, level_key, rendered, *, expected_indices=None, refined: bool = False) -> None:
         if expected_indices is None:
             previous_stats = self._montage_level_tracker().stats_for(level_key)
             expected_indices = () if previous_stats is None else previous_stats.expected_indices
@@ -248,6 +262,7 @@ class MontageRenderMixin:
             int(rendered.tile.source_index),
             rendered.histogram_data,
             rendered.image,
+            refined=bool(refined),
         )
 
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
@@ -266,12 +281,47 @@ class MontageRenderMixin:
         stats = tracker.stats_for(session.level_key)
         return None if stats is None else tracker.source_for_stats(session.level_key, stats)
 
+    def _montage_histogram_plot_data_for_session(self, session):
+        tracker = self._montage_level_tracker()
+        stats = tracker.stats_for(session.level_key)
+        return tracker.histogram_data_for_stats(stats)
+
     def _montage_level_tracker(self) -> MontageLevelTracker:
         tracker = getattr(self, "_montage_level_tracker_instance", None)
         if tracker is None:
             tracker = MontageLevelTracker()
             self._montage_level_tracker_instance = tracker
         return tracker
+
+    def _schedule_montage_cached_level_stats(self, session) -> None:
+        if not getattr(session, "pending_level_tiles", None):
+            return
+        timer = getattr(self, "_montage_level_stats_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._process_montage_cached_level_stats)
+            self._montage_level_stats_timer = timer
+        if not timer.isActive():
+            timer.start(0)
+
+    def _process_montage_cached_level_stats(self) -> None:
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+            return
+        pending = getattr(session, "pending_level_tiles", None)
+        if not pending:
+            return
+        stats_start = perf_counter()
+        expected = tuple(tile.source_index for tile in session.plan.tiles)
+        for _ in range(min(8, len(pending))):
+            rendered = pending.pop(0)
+            self._update_montage_level_bounds_from_rendered(session.level_key, rendered, expected_indices=expected)
+        self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
+        self._montage_pending_level_tiles_last_session = len(pending)
+        if session.display_committed and not pending:
+            self._schedule_montage_canvas_commit(session, force=True)
+        self._schedule_montage_cached_level_stats(session)
 
     def _plan_montage_stages(self, document, missing_tiles):
         document_key = stage_document_key(document)
@@ -298,6 +348,7 @@ class MontageRenderMixin:
         stage_waiting_tiles = {}
         stage_values = {}
         stage_requests = []
+        attached_stage_keys = set()
         waiting_indices = set()
         for key, group in groups.items():
             tiles = tuple(group["tiles"])
@@ -318,6 +369,13 @@ class MontageRenderMixin:
                     waiting_indices.add(int(tile.montage_index))
                 stage_requests.append((result.request, group["plan"]))
                 continue
+            if result.decision == "attached":
+                stage_waiting_tiles[key] = list(tiles)
+                attached_stage_keys.add(key)
+                for tile in tiles:
+                    tile_stage_keys[int(tile.montage_index)] = key
+                    waiting_indices.add(int(tile.montage_index))
+                continue
             for tile in tiles:
                 tile_stage_keys.pop(int(tile.montage_index), None)
         return {
@@ -325,6 +383,7 @@ class MontageRenderMixin:
             "stage_waiting_tiles": stage_waiting_tiles,
             "stage_values": stage_values,
             "stage_requests": stage_requests,
+            "attached_stage_keys": attached_stage_keys,
             "waiting_indices": waiting_indices,
         }
 
@@ -367,7 +426,12 @@ class MontageRenderMixin:
             return
         if not self._is_current_render_generation(session.render_generation):
             return
+        self._activate_montage_stage_value(session, key, value)
+        self._schedule_montage_tiles(session)
+
+    def _activate_montage_stage_value(self, session, key, value) -> None:
         session.active_stage_requests.discard(key)
+        session.attached_stage_requests.discard(key)
         session.stage_values[key] = value
         waiting = list(session.stage_waiting_tiles.pop(key, ()))
         for tile in waiting:
@@ -375,7 +439,37 @@ class MontageRenderMixin:
             if index not in session.rendered_tiles and index not in session.skipped_tiles:
                 session.pending_tiles.append(tile)
                 session.mark_loading(tile)
-        self._schedule_montage_tiles(session)
+
+    def _schedule_montage_attached_stage_waits(self, session) -> None:
+        if not getattr(session, "attached_stage_requests", None):
+            return
+        timer = getattr(self, "_montage_attached_stage_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._process_montage_attached_stage_waits)
+            self._montage_attached_stage_timer = timer
+        if not timer.isActive():
+            timer.start(25)
+
+    def _process_montage_attached_stage_waits(self) -> None:
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+            return
+        pending_keys = tuple(getattr(session, "attached_stage_requests", ()))
+        if not pending_keys:
+            return
+        wait_start = perf_counter()
+        cache = self.operation_evaluator.stage_cache
+        for key in pending_keys:
+            value = cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)
+            if value is not None:
+                self._activate_montage_stage_value(session, key, value)
+        self._last_montage_stage_attach_wait_ms = (perf_counter() - wait_start) * 1000.0
+        if session.pending_tiles:
+            self._schedule_montage_tiles(session)
+        if getattr(session, "attached_stage_requests", None):
+            self._schedule_montage_attached_stage_waits(session)
 
     def _on_montage_stage_error(self, session_id, key, exc) -> None:
         session = getattr(self, "_montage_session", None)
@@ -537,7 +631,7 @@ class MontageRenderMixin:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, key):
             return
-        if not session.pending_tiles and not session.loading_tiles:
+        if not session.pending_tiles and not session.loading_tiles and not getattr(session, "attached_stage_requests", None):
             return
         self._show_montage_session_loading_overlay(session)
 
@@ -663,6 +757,14 @@ class MontageRenderMixin:
         try:
             display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
             level_stats = self._montage_level_stats_for_session(session)
+            complete = (
+                not session.pending_tiles
+                and not session.loading_tiles
+                and not session.active_stage_requests
+                and not session.attached_stage_requests
+                and not session.stage_waiting_tiles
+            )
+            histogram_plot_data = self._montage_histogram_plot_data_for_session(session)
             explicit_auto = bool(getattr(session, "force_auto", False))
             semantic_source = self._montage_level_source_for_session(session, allow_partial=explicit_auto)
             first_display_commit = not bool(session.display_committed)
@@ -676,6 +778,7 @@ class MontageRenderMixin:
                     defer_side_panels=getattr(session, "defer_side_panels", False),
                     semantic_source=semantic_source,
                     applied_level_source=session.applied_level_source,
+                    histogram_plot_data=histogram_plot_data,
                     commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.FULL_MONTAGE_INITIAL,
                     document_key=_document_key(session.document),
                     request_key=session.key,
@@ -683,33 +786,25 @@ class MontageRenderMixin:
                     montage_level_key=session.level_key,
                 )
                 session.display_committed = True
-                self._note_montage_level_source_applied(session, semantic_source, explicit=explicit_auto)
             else:
-                complete = (
-                    not session.pending_tiles
-                    and not session.loading_tiles
-                    and not session.active_stage_requests
-                    and not session.stage_waiting_tiles
-                )
-                force_auto = self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
-                semantic_source = self._montage_level_source_for_session(session, allow_partial=force_auto)
+                implicit_level_update = self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
+                semantic_source = self._montage_level_source_for_session(session, allow_partial=implicit_level_update)
                 self._apply_progressive_display_image(
                     display_image,
                     geometry=rendered_geometry,
                     window_mode=session.window_mode,
                     previous_frame=getattr(self, "_committed_display_frame", None),
-                    force_auto=force_auto,
+                    force_auto=False,
                     viewport_policy=ViewportPolicy.PRESERVE,
                     semantic_source=semantic_source,
                     applied_level_source=session.applied_level_source,
-                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if force_auto else CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+                    histogram_plot_data=histogram_plot_data,
+                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_MONTAGE_PATCH,
                     document_key=_document_key(session.document),
                     request_key=session.key,
                     render_generation=session.render_generation,
                     montage_level_key=session.level_key,
                 )
-                if force_auto:
-                    self._note_montage_level_source_applied(session, semantic_source, explicit=True)
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
@@ -884,4 +979,3 @@ class MontageRenderMixin:
             (float(local_range[0][0]) + origin_x, float(local_range[0][1]) + origin_x),
             (float(local_range[1][0]) + origin_y, float(local_range[1][1]) + origin_y),
         )
-

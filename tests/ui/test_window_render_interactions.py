@@ -115,6 +115,153 @@ def test_hover_reads_op_backed_display_without_scalar_evaluation(qtbot, monkeypa
         win.close()
 
 
+def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((4, 5, 2), dtype=np.float32)
+    data[:, :, 0] = np.arange(20, dtype=np.float32).reshape(4, 5)
+    data[:, :, 1] = 100.0 + np.arange(20, dtype=np.float32).reshape(4, 5)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.img_view.setLevels(5.0, 15.0)
+        _process_events(qtbot, count=5)
+
+        win._on_slice_index_changed(2, 1)
+        win.render_coordinator.flush_now()
+        _process_events(qtbot, count=30)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+    finally:
+        win.close()
+
+
+def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.display.slice_engine import DisplayImage
+    from arrayscope.operations.evaluator import EvaluationResult
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((4, 5, 3), dtype=np.float32)
+    for index in range(3):
+        data[:, :, index] = index * 100.0 + np.arange(20, dtype=np.float32).reshape(4, 5)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    captured = []
+    try:
+        _process_events(qtbot, count=20)
+        win.img_view.setLevels(5.0, 15.0)
+        _process_events(qtbot, count=5)
+        monkeypatch.setattr(win.visible_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
+
+        win._on_slice_index_changed(2, 1)
+        win.render_coordinator.flush_now()
+        win._on_slice_index_changed(2, 2)
+        win.render_coordinator.flush_now()
+
+        latest = data[:, :, 2]
+        captured[-1]["on_done"](EvaluationResult(DisplayImage(latest), 0.0, latest.shape, int(latest.nbytes)))
+        _process_events(qtbot, count=20)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+    finally:
+        win.close()
+
+
+def test_relative_window_levels_match_for_cached_and_uncached_images(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.display.slice_engine import DisplayImage
+    from arrayscope.operations.evaluator import EvaluationResult
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((4, 5, 3), dtype=np.float32)
+    for index in range(3):
+        data[:, :, index] = index * 100.0 + np.arange(20, dtype=np.float32).reshape(4, 5)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    captured = []
+    try:
+        _process_events(qtbot, count=20)
+        win.img_view.setLevels(5.0, 15.0)
+        _process_events(qtbot, count=5)
+        monkeypatch.setattr(win.visible_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
+
+        win._on_slice_index_changed(2, 1)
+        win.render_coordinator.flush_now()
+        slice1 = data[:, :, 1]
+        captured[-1]["on_done"](EvaluationResult(DisplayImage(slice1), 0.0, slice1.shape, int(slice1.nbytes)))
+        _process_events(qtbot, count=20)
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
+
+        slice2_state = win.view_state.with_slice(2, 2)
+        slice2 = data[:, :, 2]
+        win.operation_evaluator.store_image_result(slice2_state, None, EvaluationResult(DisplayImage(slice2), 0.0, slice2.shape, int(slice2.nbytes)))
+        win._on_slice_index_changed(2, 2)
+        win.render_coordinator.flush_now()
+        _process_events(qtbot, count=20)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+    finally:
+        win.close()
+
+
+def test_absolute_window_levels_preserve_numbers_across_2d_slice_scroll(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((4, 5, 2), dtype=np.float32)
+    data[:, :, 0] = np.arange(20, dtype=np.float32).reshape(4, 5)
+    data[:, :, 1] = 100.0 + np.arange(20, dtype=np.float32).reshape(4, 5)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
+        win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
+        win.img_view.setLevels(5.0, 15.0)
+        _process_events(qtbot, count=5)
+
+        win._on_slice_index_changed(2, 1)
+        win.render_coordinator.flush_now()
+        _process_events(qtbot, count=30)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (5.0, 15.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+    finally:
+        win.close()
+
+
+def test_auto_window_resets_absolute_levels_once(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((4, 5, 2), dtype=np.float32)
+    data[:, :, 0] = np.arange(20, dtype=np.float32).reshape(4, 5)
+    data[:, :, 1] = 100.0 + np.arange(20, dtype=np.float32).reshape(4, 5)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
+        win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
+        win.img_view.setLevels(5.0, 15.0)
+        win._on_slice_index_changed(2, 1)
+        win.render_coordinator.flush_now()
+        _process_events(qtbot, count=20)
+
+        win.auto_window_levels()
+        _process_events(qtbot, count=30)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (100.0, 119.0)
+    finally:
+        win.close()
+
+
 def test_strict_ui_mode_raises_callback_exceptions(monkeypatch):
     from arrayscope.app.errors import handle_ui_exception
 

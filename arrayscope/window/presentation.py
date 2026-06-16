@@ -95,6 +95,7 @@ def _decide_normal_presentation(input: PresentationInput) -> PresentationDecisio
     presentation = DisplayPresentation(
         data=payload.data,
         histogram_data=payload.histogram_data,
+        histogram_plot_data=payload.histogram_plot_data,
         geometry=payload.geometry,
         levels=levels,
         histogram_range=histogram_range,
@@ -129,6 +130,7 @@ def _decide_montage_presentation(input: PresentationInput) -> PresentationDecisi
     presentation = DisplayPresentation(
         data=payload.data,
         histogram_data=payload.histogram_data,
+        histogram_plot_data=payload.histogram_plot_data,
         geometry=payload.geometry,
         levels=state.display_levels,
         histogram_range=state.histogram_range,
@@ -174,6 +176,7 @@ def _valid_source(source) -> LevelSource | None:
         source_count=max(0, int(source.source_count)),
         expected_count=max(0, int(source.expected_count)),
         semantic_key=source.semantic_key,
+        mode=getattr(source, "mode", "relative"),
     )
 
 
