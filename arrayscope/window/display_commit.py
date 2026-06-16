@@ -51,6 +51,8 @@ class DisplayCommitter:
             histogramRange=presentation.histogram_range,
             viewport_policy=presentation.viewport_policy,
             rgb_already_windowed=presentation.rgb_already_windowed,
+            montage_dirty_tiles=presentation.montage_dirty_tiles,
+            montage_tile_source_ids=presentation.montage_tile_source_ids,
         )
         return self._frame_for(presentation, key)
 

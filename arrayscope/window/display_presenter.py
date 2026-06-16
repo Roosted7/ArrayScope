@@ -37,6 +37,8 @@ class DisplayPresentationMixin:
         request_key=None,
         render_generation=None,
         montage_level_key=None,
+        montage_dirty_tiles=None,
+        montage_tile_source_ids=None,
     ):
         self._apply_full_display_image(
             display_image,
@@ -49,6 +51,8 @@ class DisplayPresentationMixin:
             request_key=request_key,
             render_generation=render_generation,
             montage_level_key=montage_level_key,
+            montage_dirty_tiles=montage_dirty_tiles,
+            montage_tile_source_ids=montage_tile_source_ids,
         )
 
     def _apply_full_display_image(
@@ -69,6 +73,8 @@ class DisplayPresentationMixin:
         request_key=None,
         render_generation=None,
         montage_level_key=None,
+        montage_dirty_tiles=None,
+        montage_tile_source_ids=None,
     ):
         commit_start = perf_counter()
         try:
@@ -90,6 +96,8 @@ class DisplayPresentationMixin:
                         viewport_policy=viewport_policy,
                         rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
                         histogram_plot_data=histogram_plot_data,
+                        montage_dirty_tiles=montage_dirty_tiles,
+                        montage_tile_source_ids=montage_tile_source_ids,
                     ),
                     context=context,
                     previous_frame=previous_frame,
@@ -155,6 +163,8 @@ class DisplayPresentationMixin:
         request_key=None,
         render_generation=None,
         montage_level_key=None,
+        montage_dirty_tiles=None,
+        montage_tile_source_ids=None,
     ):
         commit_start = perf_counter()
         try:
@@ -173,6 +183,8 @@ class DisplayPresentationMixin:
                         viewport_policy=viewport_policy,
                         rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
                         histogram_plot_data=histogram_plot_data,
+                        montage_dirty_tiles=montage_dirty_tiles,
+                        montage_tile_source_ids=montage_tile_source_ids,
                     ),
                     context=context,
                     previous_frame=previous_frame,

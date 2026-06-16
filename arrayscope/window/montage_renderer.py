@@ -768,6 +768,8 @@ class MontageRenderMixin:
             object.__setattr__(canvas, "tile_states", tuple(session.tile_states))
             self._last_montage_canvas_compose_ms = 0.0
         dirty_rects = session.consume_dirty_rects()
+        dirty_tiles = session.consume_dirty_tiles()
+        tile_source_ids = self._montage_tile_source_ids(session)
         self._montage_patched_tiles_last_flush = len(dirty_rects)
         rendered_geometry = DisplayGeometry(
             view_state=session.view_state,
@@ -815,6 +817,8 @@ class MontageRenderMixin:
                     request_key=session.key,
                     render_generation=session.render_generation,
                     montage_level_key=session.level_key,
+                    montage_dirty_tiles=dirty_tiles,
+                    montage_tile_source_ids=tile_source_ids,
                 )
                 session.display_committed = True
             else:
@@ -835,6 +839,8 @@ class MontageRenderMixin:
                     request_key=session.key,
                     render_generation=session.render_generation,
                     montage_level_key=session.level_key,
+                    montage_dirty_tiles=dirty_tiles,
+                    montage_tile_source_ids=tile_source_ids,
                 )
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
@@ -856,6 +862,30 @@ class MontageRenderMixin:
             self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
         session.note_committed()
         self._retry_live_profile_after_montage_tile()
+
+    def _montage_tile_source_ids(self, session) -> dict[int, object]:
+        source_ids = {}
+        for tile_number, rendered in getattr(session, "rendered_tiles", {}).items():
+            try:
+                source_ids[int(tile_number)] = self.operation_evaluator.montage_tile_key(
+                    rendered.tile.view_state,
+                    montage_axis=session.montage_axis,
+                    source_index=rendered.tile.source_index,
+                    colormap_lut=session.colormap_lut,
+                    document=session.document,
+                )
+            except Exception:
+                image = getattr(rendered, "image", None)
+                histogram = getattr(rendered, "histogram_data", None)
+                source_ids[int(tile_number)] = (
+                    id(image),
+                    tuple(np.shape(image)),
+                    None if image is None else str(np.asarray(image).dtype),
+                    id(histogram),
+                    None if histogram is None else tuple(np.shape(histogram)),
+                    None if histogram is None else str(np.asarray(histogram).dtype),
+                )
+        return source_ids
 
     def _should_autolevel_progressive_montage(self, session, stats: MontageLevelStats, *, complete: bool) -> bool:
         # Automatic montage levels are semantic and monotonic: when new tiles for

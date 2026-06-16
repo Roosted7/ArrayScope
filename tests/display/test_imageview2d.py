@@ -68,6 +68,7 @@ def test_montage_tile_overlays_reuse_single_graphics_item(qt_app):
     assert view._montage_tile_overlay_item is item
     assert view.montageTileOverlayCount() == 2
     assert len(view._montage_tile_overlay_items) == 1
+    view.close()
 
 
 def test_update_image_data_fast_preserves_levels_and_view_range(qt_app, monkeypatch):
@@ -242,17 +243,225 @@ def test_tile_layer_presentation_creates_positioned_tile_items_and_syncs_levels(
 
     assert view.montageDisplayMode() == "tile_layer"
     assert not view.imageItem.isVisible()
-    assert set(view._montage_tile_items) == {0, 1}
-    assert view._montage_tile_items[0].pos().x() == 0.0
-    assert view._montage_tile_items[1].pos().x() == 3.0
+    states = view._montage_tile_layer.states
+    assert set(states) == {0, 1}
+    assert states[0].item.pos().x() == 0.0
+    assert states[1].item.pos().x() == 3.0
 
     view.histogram.setLevels(2.0, 8.0)
     view._on_histogram_levels_changed()
 
-    assert tuple(float(value) for value in view._montage_tile_items[0].levels) == (2.0, 8.0)
+    assert tuple(float(value) for value in states[0].item.levels) == (2.0, 8.0)
     view.clearMontageTileLayer()
     assert view.montageDisplayMode() == "canvas"
     assert view.imageItem.isVisible()
+    view.close()
+
+
+def test_tile_layer_clean_commit_skips_tile_and_histogram_uploads(qt_app, monkeypatch):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.arange(10, dtype=np.float32).reshape(2, 5)
+    hist = canvas.copy()
+    plot = np.arange(16, dtype=np.float32)
+
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=hist,
+        histogramPlotData=plot,
+        geometry=geometry,
+        levels=(0.0, 9.0),
+        histogramRange=(0.0, 9.0),
+    )
+
+    calls = []
+    for state in view._montage_tile_layer.states.values():
+        monkeypatch.setattr(state.item, "setImage", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(view.histogramImageItem, "setImage", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=hist,
+        histogramPlotData=plot,
+        geometry=geometry,
+        levels=(0.0, 9.0),
+        histogramRange=(0.0, 9.0),
+        montage_dirty_tiles=(),
+    )
+
+    timing = view.lastImageUploadTiming()
+    assert calls == []
+    assert timing.tile_layer_visible_items == 2
+    assert timing.tile_layer_items_updated == 0
+    assert timing.tile_layer_items_skipped == 2
+    assert timing.visible_bytes == 0
+    assert timing.histogram_bytes == 0
+    view.close()
+
+
+def test_tile_layer_dirty_commit_updates_only_dirty_tile(qt_app, monkeypatch):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.arange(10, dtype=np.float32).reshape(2, 5)
+    hist = canvas.copy()
+    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=geometry, levels=(0.0, 9.0), histogramRange=(0.0, 9.0))
+
+    calls = []
+    for tile_number, state in view._montage_tile_layer.states.items():
+        monkeypatch.setattr(state.item, "setImage", lambda *args, tile_number=tile_number, **kwargs: calls.append(tile_number))
+
+    canvas[:, 3:5] = 99
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 9.0),
+        histogramRange=(0.0, 9.0),
+        montage_dirty_tiles=(1,),
+    )
+
+    assert calls == [1]
+    timing = view.lastImageUploadTiming()
+    assert timing.tile_layer_items_updated == 1
+    assert timing.tile_layer_items_skipped == 1
+    view.close()
+
+
+def test_rgb_tile_layer_clean_commit_does_not_rewindow(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.full((2, 5, 3), 200, dtype=np.uint8)
+    hist = np.linspace(0.0, 1.0, 10, dtype=np.float32).reshape(2, 5)
+    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=geometry, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+
+    for state in view._montage_tile_layer.states.values():
+        assert state.rgb_base is not None
+        assert state.rgb_base.dtype == np.float32
+
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        montage_dirty_tiles=(),
+    )
+
+    timing = view.lastImageUploadTiming()
+    assert timing.tile_layer_rgb_window_tiles == 0
+    assert timing.rgb_window_ms == 0.0
+    assert timing.tile_layer_items_updated == 0
+    assert timing.tile_layer_items_skipped == 2
+    view.close()
+
+
+def test_rgb_tile_layer_level_change_rewindows_cached_bases(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.full((2, 5, 3), 200, dtype=np.uint8)
+    hist = np.linspace(0.0, 1.0, 10, dtype=np.float32).reshape(2, 5)
+    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=geometry, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+
+    before = {tile: np.array(state.item.image, copy=True) for tile, state in view._montage_tile_layer.states.items()}
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.5, 1.0),
+        histogramRange=(0.0, 1.0),
+        montage_dirty_tiles=(),
+    )
+
+    timing = view.lastImageUploadTiming()
+    assert timing.tile_layer_rgb_window_tiles == 2
+    assert timing.tile_layer_items_updated == 2
+    for tile, state in view._montage_tile_layer.states.items():
+        assert not np.array_equal(state.item.image, before[tile])
+    view.close()
+
+
+def test_display_ready_rgb_tile_layer_level_change_keeps_uint8_item_levels(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":"),
+        display_shape=(2, 2),
+        montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,),
+    )
+    canvas = np.full((2, 2, 3), 128, dtype=np.uint8)
+    hist = np.linspace(0.0, 1.0, 4, dtype=np.float32).reshape(2, 2)
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        rgb_already_windowed=True,
+    )
+
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.5, 1.0),
+        histogramRange=(0.0, 1.0),
+        rgb_already_windowed=True,
+        montage_dirty_tiles=(),
+    )
+
+    state = view._montage_tile_layer.states[0]
+    assert tuple(float(value) for value in state.item.levels) == (0.0, 255.0)
+    assert view.lastImageUploadTiming().tile_layer_items_updated == 0
     view.close()
 
 

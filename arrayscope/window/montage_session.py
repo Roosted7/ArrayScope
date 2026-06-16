@@ -51,6 +51,7 @@ class MontageRenderSession:
     canvas_rect: tuple[int, int, int, int] | None = None
     tile_states: list[MontageTileState] = field(default_factory=list)
     dirty_rects: list[tuple[int, int, int, int]] = field(default_factory=list)
+    dirty_tiles: list[int] = field(default_factory=list)
     flush_pending: bool = False
     last_commit_monotonic: float = 0.0
     final_commit_pending: bool = False
@@ -113,6 +114,7 @@ class MontageRenderSession:
         self.canvas_rect = tuple(int(value) for value in canvas.canvas_rect)
         self.tile_states = list(canvas.tile_states)
         self.dirty_rects.clear()
+        self.dirty_tiles.clear()
 
     def has_canvas(self) -> bool:
         return self.canvas is not None
@@ -141,12 +143,18 @@ class MontageRenderSession:
         if dirty is None:
             return False
         self.dirty_rects.append(tuple(int(value) for value in dirty))
+        self.dirty_tiles.append(int(rendered.tile.montage_index))
         return True
 
     def consume_dirty_rects(self) -> tuple[tuple[int, int, int, int], ...]:
         rects = tuple(self.dirty_rects)
         self.dirty_rects.clear()
         return rects
+
+    def consume_dirty_tiles(self) -> tuple[int, ...]:
+        tiles = tuple(dict.fromkeys(int(tile) for tile in self.dirty_tiles))
+        self.dirty_tiles.clear()
+        return tiles
 
     def note_committed(self) -> None:
         self.last_commit_monotonic = monotonic()

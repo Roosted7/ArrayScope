@@ -182,3 +182,22 @@ def test_explicit_auto_clears_user_lock_and_uses_best_available_source():
 
     assert decision.levels == (100.0, 200.0)
     assert decision.level_source_rank == int(LevelSourceRank.MONTAGE_VISIBLE_SUBSET)
+
+
+def test_montage_dirty_tiles_pass_through_presentation():
+    payload = DisplayPayload(
+        image=DisplayImage(np.zeros((2, 2), dtype=np.float32), histogram_data=np.zeros((2, 2), dtype=np.float32)),
+        geometry=_geometry((2, 2)),
+        viewport_policy=ViewportPolicy.PRESERVE,
+        montage_dirty_tiles=(3,),
+    )
+
+    decision = decide_presentation(
+        _input(
+            payload,
+            previous_frame=_frame(),
+            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+        )
+    )
+
+    assert decision.display_presentation.montage_dirty_tiles == (3,)

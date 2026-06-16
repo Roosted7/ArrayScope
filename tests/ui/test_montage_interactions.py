@@ -753,8 +753,8 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
 
         qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=3000)
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=3000)
-        assert win.img_view._montage_tile_rgb_bases
-        first_item = next(iter(win.img_view._montage_tile_items.values()))
+        assert any(state.rgb_base is not None for state in win.img_view._montage_tile_layer.states.values())
+        first_item = next(iter(win.img_view._montage_tile_layer.states.values())).item
         before = np.array(first_item.image, copy=True)
 
         low, high = win.img_view.getHistogramDataBounds()

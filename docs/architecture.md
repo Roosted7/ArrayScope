@@ -87,6 +87,11 @@ source of array-view state.
   montage commits may use an internal exact tile-layer display path: the committed canvas remains the
   hover/value source, while per-tile `ImageItem`s paint the visible loaded tiles so progressive
   updates do not upload a full canvas for every tile.
+- `arrayscope.display.montage_tile_layer`: Qt display helper owned by `ImageView2D` for exact
+  per-tile montage painting. It keeps per-item source, histogram, local-rect, level, and RGB-windowing
+  state so known-clean tile-layer flushes skip pixel uploads entirely, dirty flushes update only the
+  affected tile items, all-cached newly composed sessions can reuse unchanged rendered tile sources,
+  and RGB/complex level changes reuse cached float32 tile bases.
 - `arrayscope.window.presentation`: Qt-free display presentation decisions. It normalizes
   window/level bounds, keeps display levels separate from histogram/data ranges, accepts accumulated
   semantic montage tile coverage as provisional level sources, and is the only place that chooses
@@ -101,7 +106,11 @@ source of array-view state.
 - `arrayscope.window.display_commit`: the single gateway from a decided presentation to
   `ImageView2D`. Window render code must not call image pixel or histogram setters directly.
   `DisplayCommitter` validates display shape, local histogram-source shape, optional sampled
-  histogram plot sources, and finite increasing levels/histogram ranges before mutating Qt state.
+  histogram plot sources, finite increasing levels/histogram ranges, and forwards montage dirty-tile
+  metadata only to the tile-layer presentation path before mutating Qt state.
+- `arrayscope.window.diagnostics_snapshot`: window-owned runtime diagnostics snapshot construction.
+  Menu code opens the diagnostics dialog only; it does not assemble scheduler, cache, render, montage,
+  operation, or upload timing snapshots.
 - `arrayscope.window.display_frame`: committed display-frame keys and value source ownership for
   hover/status.
 - `arrayscope.window.montage_levels`: semantic montage histogram coverage tracking keyed by montage
@@ -188,7 +197,13 @@ Histogram image-item binding is idempotent: pyqtgraph connects image-change sign
 refreshes the histogram plot once per committed state. Progressive montage commits are coalesced to
 the latest state when upload is slow. For large canvases or previously slow uploads, montage display
 switches to exact tile-layer painting; the committed canvas and geometry still own hover/status,
-histogram source, and level semantics.
+histogram source, and level semantics. Tile-layer presentations carry dirty-tile metadata and
+per-rendered-tile source identities: `None` means full/unknown refresh, `()` means a known-clean flush
+that must skip tile image data uploads when item state is unchanged, and non-empty tuples update only
+those dirty loaded tiles plus newly visible or missing items. Source identities are derived from the
+rendered tile cache payload rather than the transient composed canvas, so an all-cached montage session
+can avoid re-uploading and re-windowing the same tile items even when the viewport canvas is rebuilt.
+Tile-layer diagnostics report visible, updated, skipped, and RGB-windowed item counts.
 
 `render()` then:
 

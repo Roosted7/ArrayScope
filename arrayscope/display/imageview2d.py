@@ -26,6 +26,7 @@ from arrayscope.core.roi import (
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.levels import finite_bounds
+from arrayscope.display.montage_tile_layer import MontageTileLayer, TileLayerUpdateStats
 from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
 
 
@@ -146,9 +147,8 @@ class ImageView2D(QtWidgets.QWidget):
         self._upload_timing = None
         self._last_upload_timing = ImageUploadTiming()
         self._montage_display_mode = "canvas"
-        self._montage_tile_items = {}
-        self._montage_tile_rgb_bases = {}
-        self._montage_tile_hist_sources = {}
+        self._montage_tile_layer = None
+        self._montage_tile_layer_histogram_key = None
         self._profile_vline = None
         self._profile_hline = None
         self._profile_handle = None
@@ -189,6 +189,13 @@ class ImageView2D(QtWidgets.QWidget):
         else:
             self.imageItem = imageItem
         self.view.addItem(self.imageItem)
+        self._montage_tile_layer = MontageTileLayer(
+            self.view,
+            set_image_item_data=self._set_image_item_data,
+            record_upload_timing=self._record_upload_timing,
+            histogram_levels_for_display=self._histogram_levels_for_display,
+            is_rgb_image=self._is_rgb_image,
+        )
         
         # Setup histogram
         self.histogramImageItem = ImageItem(axisOrder="row-major")
@@ -229,7 +236,7 @@ class ImageView2D(QtWidgets.QWidget):
         self.view.addItem(self._profile_hline)
         self.view.addItem(self._profile_handle)
         self.view.sigRangeChanged.connect(self._on_view_range_changed)
-        
+
     def setupUI(self):
         """Create the user interface"""
         # Main layout
@@ -261,6 +268,10 @@ class ImageView2D(QtWidgets.QWidget):
             "histogram_bytes": 0,
             "histogram_pixels": 0,
             "fast_same_object": False,
+            "tile_layer_visible_items": 0,
+            "tile_layer_items_updated": 0,
+            "tile_layer_items_skipped": 0,
+            "tile_layer_rgb_window_tiles": 0,
         }
 
     def _record_upload_timing(self, field: str, ms: float) -> None:
@@ -287,6 +298,10 @@ class ImageView2D(QtWidgets.QWidget):
             histogram_pixels=int(timing["histogram_pixels"]),
             fast_same_object=bool(timing["fast_same_object"]),
             mode=str(timing["mode"]),
+            tile_layer_visible_items=int(timing["tile_layer_visible_items"]),
+            tile_layer_items_updated=int(timing["tile_layer_items_updated"]),
+            tile_layer_items_skipped=int(timing["tile_layer_items_skipped"]),
+            tile_layer_rgb_window_tiles=int(timing["tile_layer_rgb_window_tiles"]),
         )
         self._upload_timing = None
 
@@ -368,15 +383,9 @@ class ImageView2D(QtWidgets.QWidget):
         return str(self._montage_display_mode)
 
     def clearMontageTileLayer(self) -> None:
-        if self._montage_tile_items:
-            for item in tuple(self._montage_tile_items.values()):
-                try:
-                    self.view.removeItem(item)
-                except Exception:
-                    pass
-        self._montage_tile_items.clear()
-        self._montage_tile_rgb_bases.clear()
-        self._montage_tile_hist_sources.clear()
+        if self._montage_tile_layer is not None:
+            self._montage_tile_layer.clear()
+        self._montage_tile_layer_histogram_key = None
         self._montage_display_mode = "canvas"
         self.imageItem.setVisible(True)
 
@@ -391,6 +400,8 @@ class ImageView2D(QtWidgets.QWidget):
         histogramRange: tuple[float, float],
         viewport_policy=ViewportPolicy.PRESERVE,
         rgb_already_windowed: bool = False,
+        montage_dirty_tiles: tuple[int, ...] | None = None,
+        montage_tile_source_ids: dict[int, object] | None = None,
     ) -> None:
         if geometry is None or getattr(geometry, "montage", None) is None:
             raise ValueError("tile-layer presentation requires montage geometry")
@@ -404,14 +415,31 @@ class ImageView2D(QtWidgets.QWidget):
             self.setHistogramDataBounds(histogramRange)
             self._montage_display_mode = "tile_layer"
             self.imageItem.setVisible(False)
-            self._update_montage_tile_layer_items(
+            stats = self._update_montage_tile_layer_items(
                 img,
                 histogramData=histogramData,
                 geometry=geometry,
                 levels=levels,
                 rgb_already_windowed=rgb_already_windowed,
+                montage_dirty_tiles=montage_dirty_tiles,
+                montage_tile_source_ids=montage_tile_source_ids,
             )
-            plot_data = self._histogram_plot_data(histogramData)
+            self._record_tile_layer_stats(stats)
+            histogram_key = self._tile_layer_histogram_key(
+                histogramData,
+                histogramPlotData,
+                levels=levels,
+                histogramRange=histogramRange,
+            )
+            skip_histogram_upload = (
+                montage_dirty_tiles == ()
+                and self._montage_tile_layer_histogram_key == histogram_key
+                and getattr(self.histogramImageItem, "image", None) is not None
+            )
+            if not skip_histogram_upload:
+                plot_data = self._histogram_plot_data(histogramData)
+            else:
+                plot_data = None
             if plot_data is not None:
                 self._bind_histogram_item(self.histogramImageItem)
                 self._set_image_item_data(
@@ -420,6 +448,7 @@ class ImageView2D(QtWidgets.QWidget):
                     self._histogram_levels_for_display(levels),
                     role="histogram",
                 )
+            self._montage_tile_layer_histogram_key = histogram_key
             self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
             self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
             profile_start = perf_counter()
@@ -431,94 +460,41 @@ class ImageView2D(QtWidgets.QWidget):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
-    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool) -> None:
-        montage = geometry.montage
-        tile_h = int(montage.tile_height)
-        tile_w = int(montage.tile_width)
-        stride_x = tile_w + int(montage.gap)
-        stride_y = tile_h + int(montage.gap)
-        active = set()
-        states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
-        for tile_number, _source_index in enumerate(tuple(montage.indices)):
-            state = states[tile_number] if tile_number < len(states) else "unloaded"
-            state_value = str(getattr(state, "value", state))
-            if state_value != "loaded":
-                continue
-            row = tile_number // int(montage.columns)
-            col = tile_number % int(montage.columns)
-            global_x = col * stride_x
-            global_y = row * stride_y
-            local_x = global_x - int(geometry.montage_origin_x)
-            local_y = global_y - int(geometry.montage_origin_y)
-            source_x0 = max(0, -local_x)
-            source_y0 = max(0, -local_y)
-            dest_x0 = max(0, local_x)
-            dest_y0 = max(0, local_y)
-            width = min(tile_w - source_x0, int(np.shape(img)[1]) - dest_x0)
-            height = min(tile_h - source_y0, int(np.shape(img)[0]) - dest_y0)
-            if width <= 0 or height <= 0:
-                continue
-            tile_data = np.asarray(img)[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...]
-            tile_hist = None
-            if histogramData is not None:
-                tile_hist = np.asarray(histogramData)[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width]
-            item = self._montage_tile_items.get(tile_number)
-            if item is None:
-                item = ImageItem(axisOrder="row-major")
-                item.setZValue(1)
-                self.view.addItem(item)
-                self._montage_tile_items[tile_number] = item
-            item.setVisible(True)
-            item.setPos(float(local_x + source_x0), float(local_y + source_y0))
-            self._set_montage_tile_item_data(
-                tile_number,
-                item,
-                tile_data,
-                tile_hist,
-                levels,
-                rgb_already_windowed=rgb_already_windowed,
-            )
-            active.add(tile_number)
-        for tile_number, item in tuple(self._montage_tile_items.items()):
-            if tile_number not in active:
-                item.setVisible(False)
+    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids) -> TileLayerUpdateStats:
+        if self._montage_tile_layer is None:
+            return TileLayerUpdateStats()
+        return self._montage_tile_layer.update_presentation(
+            img,
+            histogram_data=histogramData,
+            geometry=geometry,
+            levels=levels,
+            rgb_already_windowed=rgb_already_windowed,
+            dirty_tiles=montage_dirty_tiles,
+            tile_source_ids=montage_tile_source_ids,
+        )
 
-    def _set_montage_tile_item_data(self, tile_number, item, tile_data, tile_hist, levels, *, rgb_already_windowed: bool) -> None:
-        is_rgb = self._is_rgb_image(tile_data)
-        if is_rgb:
-            if rgb_already_windowed or tile_hist is None:
-                self._montage_tile_rgb_bases.pop(tile_number, None)
-                self._montage_tile_hist_sources.pop(tile_number, None)
-                display = tile_data[..., :3]
-            else:
-                rgb_start = perf_counter()
-                base = tile_data[..., :3].astype(float)
-                self._montage_tile_rgb_bases[tile_number] = base
-                self._montage_tile_hist_sources[tile_number] = np.asarray(tile_hist)
-                display = self._rgb_tile_display_for_levels(base, tile_hist, levels)
-                self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
-            self._set_image_item_data(item, display, (0, 255), role="visible", emit_histogram_change=False)
-        else:
-            self._montage_tile_rgb_bases.pop(tile_number, None)
-            self._montage_tile_hist_sources.pop(tile_number, None)
-            self._set_image_item_data(item, tile_data, self._histogram_levels_for_display(levels), role="visible", emit_histogram_change=False)
+    def _record_tile_layer_stats(self, stats: TileLayerUpdateStats) -> None:
+        timing = self._upload_timing
+        if timing is None:
+            return
+        timing["tile_layer_visible_items"] = int(stats.visible_items)
+        timing["tile_layer_items_updated"] = int(stats.items_updated)
+        timing["tile_layer_items_skipped"] = int(stats.items_skipped)
+        timing["tile_layer_rgb_window_tiles"] = int(stats.rgb_window_tiles)
 
-    def _rgb_tile_display_for_levels(self, base, histogram_data, levels):
-        low, high = levels
-        span = max(float(high) - float(low), 1e-12)
-        intensity = np.clip((np.asarray(histogram_data).astype(float) - float(low)) / span, 0.0, 1.0)
-        intensity = np.nan_to_num(intensity, nan=0.0, posinf=1.0, neginf=0.0)
-        return np.clip(base * intensity[..., np.newaxis], 0, 255).astype(np.uint8)
+    def _tile_layer_histogram_key(self, histogramData, histogramPlotData, *, levels, histogramRange):
+        source = histogramPlotData if histogramPlotData is not None else histogramData
+        return (
+            id(source),
+            tuple(np.shape(source)) if source is not None else None,
+            None if source is None else str(np.asarray(source).dtype),
+            (float(levels[0]), float(levels[1])),
+            (float(histogramRange[0]), float(histogramRange[1])),
+        )
 
     def _update_montage_tile_levels(self, levels) -> None:
-        for tile_number, item in tuple(self._montage_tile_items.items()):
-            base = self._montage_tile_rgb_bases.get(tile_number)
-            hist = self._montage_tile_hist_sources.get(tile_number)
-            if base is not None and hist is not None:
-                display = self._rgb_tile_display_for_levels(base, hist, levels)
-                self._set_image_item_data(item, display, (0, 255), role="visible", emit_histogram_change=False)
-            else:
-                item.setLevels(levels)
+        if self._montage_tile_layer is not None:
+            self._montage_tile_layer.update_levels(levels)
         
     def setImage(self, img, autoRange=None, autoLevels=True, levels=None, 
                  pos=None, scale=None, transform=None, autoHistogramRange=True,
@@ -700,7 +676,7 @@ class ImageView2D(QtWidgets.QWidget):
                     self.imageDisp = img[..., :3]
                 else:
                     rgb_start = perf_counter()
-                    self._rgbBaseImage = img[..., :3].astype(float)
+                    self._rgbBaseImage = img[..., :3].astype(np.float32, copy=False)
                     self.imageDisp = self._rgb_display_for_levels(levels)
                     self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
                 self._set_image_item_data(self.imageItem, self.imageDisp, (0, 255), role="visible", emit_histogram_change=False)
@@ -764,7 +740,7 @@ class ImageView2D(QtWidgets.QWidget):
                 self.imageDisp = self.imageDisp[..., :3]
             else:
                 rgb_start = perf_counter()
-                self._rgbBaseImage = self.imageDisp[..., :3].astype(float)
+                self._rgbBaseImage = self.imageDisp[..., :3].astype(np.float32, copy=False)
                 self.imageDisp = self._rgb_display_for_levels(histogram_levels)
                 self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
             self._set_image_item_data(self.imageItem, self.imageDisp, (0, 255), role="visible", emit_histogram_change=False)
@@ -813,7 +789,7 @@ class ImageView2D(QtWidgets.QWidget):
 
     def _histogram_data(self, img):
         if self._is_rgb_image(img):
-            rgb = img[..., :3].astype(float)
+            rgb = img[..., :3].astype(np.float32, copy=False)
             return 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
         return img
 
@@ -848,7 +824,7 @@ class ImageView2D(QtWidgets.QWidget):
 
         low, high = levels
         span = max(float(high) - float(low), 1e-12)
-        intensity = np.clip((histogram_data.astype(float) - float(low)) / span, 0.0, 1.0)
+        intensity = np.clip((np.asarray(histogram_data, dtype=np.float32) - float(low)) / span, 0.0, 1.0)
         intensity = np.nan_to_num(intensity, nan=0.0, posinf=1.0, neginf=0.0)
         return np.clip(self._rgbBaseImage * intensity[..., np.newaxis], 0, 255).astype(np.uint8)
 
