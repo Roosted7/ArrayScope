@@ -10,7 +10,8 @@ from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
 from arrayscope.core.compute_policy import ComputeLane, EvaluationContext, compute_policy_from_settings
-from arrayscope.core.latency_feedback import LatencyFeedbackController
+from arrayscope.core.resource_governor import ResourceGovernor, SchedulerBusyState
+from arrayscope.core.resource_telemetry import sample_resource_snapshot
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.core.roi_store import RoiStore
 from arrayscope.export.workflow import ExportWorkflowMixin
@@ -67,7 +68,6 @@ class ArrayScopeWindow(
         self._apply_theme_choice(self.app_settings.theme, persist=False)
         self._apply_performance_settings(persist=False)
         self.compute_policy = compute_policy_from_settings(self.app_settings)
-        self.latency_feedback = LatencyFeedbackController()
 
         self.operation_coordinator = OperationCoordinator(data)
         self.profile_coordinator = ProfileCoordinator()
@@ -75,6 +75,15 @@ class ArrayScopeWindow(
         self.document = self.operation_coordinator.document
         self.operation_evaluator = self.operation_coordinator.evaluator
         self._refresh_memory_policy(active_render=False)
+        self.resource_governor = ResourceGovernor(
+            self.compute_policy,
+            profile=self.app_settings.memory_profile,
+        )
+        self.latency_feedback = self.resource_governor.latency_feedback
+        self.resource_governor.update_telemetry(
+            sample_resource_snapshot(),
+            self._memory_policy(),
+        )
         self._init_compare_document(data)
         self._render_generation = RenderGeneration()
         self.visible_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.visible_workers, name="visible")
@@ -90,6 +99,7 @@ class ArrayScopeWindow(
         self.profile_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.profile_workers, name="profile")
         self.roi_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.roi_workers, name="roi")
         self.prefetch_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.prefetch_workers, name="prefetch")
+        self._ensure_resource_governor_timer()
         self.render_coordinator = RenderCoordinator(self)
         self._deferred_side_panel_refresh_pending = False
         self.data = derived_info_for(self.document)
@@ -161,7 +171,17 @@ class ArrayScopeWindow(
 
     def _apply_compute_policy(self) -> None:
         self.compute_policy = compute_policy_from_settings(self.app_settings)
-        controllers = {
+        governor = getattr(self, "resource_governor", None)
+        if governor is not None:
+            governor.update_policy(self.compute_policy, profile=getattr(self.app_settings, "memory_profile", None))
+            self._apply_resource_governor_decisions()
+            return
+        for lane, controller in self._evaluation_controllers_by_lane().items():
+            if controller is not None:
+                controller.set_max_workers(self.compute_policy.workers_for_lane(lane))
+
+    def _evaluation_controllers_by_lane(self):
+        return {
             ComputeLane.VISIBLE: getattr(self, "visible_evaluation_controller", None),
             ComputeLane.MONTAGE_TILE: getattr(self, "montage_tile_evaluation_controller", None),
             ComputeLane.STAGE: getattr(self, "stage_evaluation_controller", None),
@@ -170,9 +190,105 @@ class ArrayScopeWindow(
             ComputeLane.ROI: getattr(self, "roi_evaluation_controller", None),
             ComputeLane.PIXEL: getattr(self, "pixel_evaluation_controller", None),
         }
-        for lane, controller in controllers.items():
-            if controller is not None:
-                controller.pool.setMaxThreadCount(self.compute_policy.workers_for_lane(lane))
+
+    def _ensure_resource_governor_timer(self):
+        timer = getattr(self, "_resource_governor_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.timeout.connect(self._on_resource_governor_timer)
+            self._resource_governor_timer = timer
+        if not timer.isActive():
+            timer.start(250)
+        return timer
+
+    def _on_resource_governor_timer(self) -> None:
+        if getattr(self, "_closing", False):
+            return
+        active = self._resource_governor_work_active()
+        self._apply_resource_governor_decisions()
+        timer = getattr(self, "_resource_governor_timer", None)
+        if timer is not None:
+            timer.start(250 if active else 1000)
+
+    def _resource_governor_work_active(self) -> bool:
+        for controller in self._evaluation_controllers_by_lane().values():
+            if controller is not None and controller.is_busy():
+                return True
+        coordinator = getattr(self, "render_coordinator", None)
+        return bool(coordinator is not None and getattr(coordinator, "has_pending_render", False))
+
+    def _scheduler_busy_state(self) -> SchedulerBusyState:
+        session = getattr(self, "_montage_session", None)
+        stage_ready = False
+        backlog = 0
+        if session is not None:
+            stage_ready = bool(getattr(session, "stage_values", None) or getattr(session, "active_stage_requests", None) or getattr(session, "attached_stage_requests", None))
+            backlog = len(getattr(session, "pending_completed_tiles", ()) or ())
+        return SchedulerBusyState(
+            visible_busy=getattr(getattr(self, "visible_evaluation_controller", None), "is_busy", lambda: False)(),
+            montage_busy=getattr(getattr(self, "montage_tile_evaluation_controller", None), "is_busy", lambda: False)(),
+            stage_busy=getattr(getattr(self, "stage_evaluation_controller", None), "is_busy", lambda: False)(),
+            prefetch_busy=getattr(getattr(self, "prefetch_evaluation_controller", None), "is_busy", lambda: False)(),
+            result_backlog=backlog,
+            stage_ready_or_in_flight=stage_ready,
+        )
+
+    def _apply_resource_governor_decisions(self) -> None:
+        governor = getattr(self, "resource_governor", None)
+        if governor is None:
+            return
+        policy = self._refresh_memory_policy(active_render=self._resource_governor_work_active())
+        governor.update_telemetry(sample_resource_snapshot(), policy)
+        interactive = bool(getattr(getattr(self, "render_coordinator", None), "interactive_active", False))
+        busy = self._scheduler_busy_state()
+        for lane, controller in self._evaluation_controllers_by_lane().items():
+            if controller is None:
+                continue
+            decision = governor.decide_lane_workers(lane, interactive=interactive, busy_state=busy)
+            controller.set_max_workers(decision.target_workers)
+        for channel, controller in (
+            ("visible_callback", getattr(self, "visible_evaluation_controller", None)),
+            ("montage_tile_result", getattr(self, "montage_tile_evaluation_controller", None)),
+            ("stage_callback", getattr(self, "stage_evaluation_controller", None)),
+            ("prefetch_callback", getattr(self, "prefetch_evaluation_controller", None)),
+            ("profile_update", getattr(self, "profile_evaluation_controller", None)),
+            ("roi_refresh", getattr(self, "roi_evaluation_controller", None)),
+            ("pixel_hover", getattr(self, "pixel_evaluation_controller", None)),
+        ):
+            if controller is None:
+                continue
+            decision = governor.decide_ui_work(channel, interactive=interactive)
+            controller.set_max_callback_dispatch_per_drain(decision.batch_limit)
+        histogram_decision = governor.decide_ui_work("histogram_preview", interactive=interactive)
+        img_view = getattr(self, "img_view", None)
+        if img_view is not None and hasattr(img_view, "setHistogramPreviewInterval"):
+            img_view.setHistogramPreviewInterval(histogram_decision.interval_ms)
+        profile_decision = governor.decide_ui_work("profile_update", interactive=interactive)
+        profile_timer = getattr(self, "_profile_timer", None)
+        if profile_timer is not None:
+            profile_timer.setInterval(max(1, int(profile_decision.interval_ms)))
+        prefetch_decision = governor.decide_montage_prefetch(
+            stage_ready_or_in_flight=busy.stage_ready_or_in_flight,
+            visible_busy=busy.visible_busy or busy.montage_busy or busy.stage_busy,
+        )
+        prefetch = getattr(self, "prefetch_evaluation_controller", None)
+        if prefetch is not None:
+            prefetch.set_max_prefetch(max(1, prefetch_decision.max_items if prefetch_decision.allowed else 1))
+
+    def _record_ui_work(self, channel: str, elapsed_ms: float, *, count: int = 1) -> None:
+        governor = getattr(self, "resource_governor", None)
+        if governor is not None:
+            governor.record_ui_observation(channel, elapsed_ms, item_count=count)
+            return
+        feedback = getattr(self, "latency_feedback", None)
+        if feedback is not None:
+            feedback.observe(channel, elapsed_ms, count=count)
+
+    def _ui_work_decision(self, channel: str, *, interactive: bool = False):
+        governor = getattr(self, "resource_governor", None)
+        if governor is not None:
+            return governor.decide_ui_work(channel, interactive=interactive)
+        return None
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

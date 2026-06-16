@@ -483,6 +483,8 @@ Goal: finish the remaining interaction-latency work by making expensive reusable
 * [x] Add directional next-slice pre-render only when cost is cheap or the needed stage already exists.
 * [x] Forbid prefetch paths that compute the same expensive FFT separately per tile.
 * [x] Add diagnostics and tests for predictive work decisions.
+* [x] Add global resource-governor feedback for lane workers, UI fan-in budgets, prefetch admission,
+  and realtime diagnostics.
 
 ### P4 — regression, benchmarks, and documentation
 

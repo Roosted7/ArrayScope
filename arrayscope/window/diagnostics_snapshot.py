@@ -75,6 +75,15 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         backend_fallback_available="canvas",
         backend_warning=str(getattr(window, "_last_montage_backend_warning", "") or ""),
         show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
+        tile_compute_cache_hits=0 if session is None else int(getattr(session, "tile_compute_cache_hits", 0) or 0),
+        tile_compute_stage_backed=0 if session is None else int(getattr(session, "tile_compute_stage_backed", 0) or 0),
+        tile_compute_direct=0 if session is None else int(getattr(session, "tile_compute_direct", 0) or 0),
+        tile_compute_waiting_for_stage=0 if session is None else sum(len(tiles) for tiles in getattr(session, "stage_waiting_tiles", {}).values()),
+        lead_direct_tiles=0 if session is None else int(getattr(session, "lead_direct_tiles", 0) or 0),
+        stage_backed_tiles_pending=0 if session is None else int(getattr(session, "stage_backed_tiles_pending", 0) or 0),
+        retained_stage_index=None if session is None else getattr(session, "retained_stage_index", None),
+        retained_stage_decision="" if session is None else str(getattr(session, "retained_stage_decision", "") or ""),
+        repeated_expensive_stage_per_tile=False if session is None else bool(getattr(session, "repeated_expensive_stage_per_tile", False)),
     )
 
     decision = getattr(window, "_last_render_decision", None)
@@ -139,6 +148,20 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         stage_materialization=stage_materialization_diagnostics,
         stage_warmup=getattr(window, "_last_stage_warmup_decision", None),
         montage_prefetch=tuple(getattr(window, "_last_montage_prefetch_decisions", ()) or ()),
+        resource_governor=(
+            None
+            if getattr(window, "resource_governor", None) is None
+            else window.resource_governor.diagnostics(
+                channels=(
+                    "montage_tile_result",
+                    "montage_commit",
+                    "histogram_preview",
+                    "roi_refresh",
+                    "profile_update",
+                    "pixel_hover",
+                )
+            )
+        ),
         schedulers=tuple(schedulers),
         render=render,
         montage=montage,

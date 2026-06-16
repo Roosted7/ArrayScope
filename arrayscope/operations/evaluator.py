@@ -51,6 +51,7 @@ class EvaluationResult:
     chunk_count: int = 1
     degraded: bool = False
     region_plan: object | None = None
+    compute_path: str = "direct"
 
 
 @dataclass

@@ -26,6 +26,15 @@ class LatencyFeedbackChannel:
     last_count: int = 0
 
 
+@dataclass(frozen=True)
+class LatencyFeedbackChannelSnapshot:
+    channel: str
+    elapsed_ewma_ms: float | None
+    per_item_ewma_ms: float | None
+    last_elapsed_ms: float
+    last_count: int
+
+
 @dataclass
 class LatencyFeedbackController:
     tuning: LatencyFeedbackTuning = field(default_factory=LatencyFeedbackTuning)
@@ -65,6 +74,22 @@ class LatencyFeedbackController:
             return max(int(self.tuning.min_interval_ms), int(round(target * 2.0)))
         interval = int(round(max(target * 2.0, state.elapsed_ewma_ms * 2.0)))
         return max(int(self.tuning.min_interval_ms), min(int(self.tuning.max_interval_ms), interval))
+
+    def channel_snapshot(self, channel: str) -> LatencyFeedbackChannelSnapshot:
+        name = str(channel)
+        state = self._channels.get(name)
+        if state is None:
+            return LatencyFeedbackChannelSnapshot(name, None, None, 0.0, 0)
+        return LatencyFeedbackChannelSnapshot(
+            channel=name,
+            elapsed_ewma_ms=state.elapsed_ewma_ms,
+            per_item_ewma_ms=state.per_item_ewma_ms,
+            last_elapsed_ms=float(state.last_elapsed_ms),
+            last_count=int(state.last_count),
+        )
+
+    def snapshots(self) -> tuple[LatencyFeedbackChannelSnapshot, ...]:
+        return tuple(self.channel_snapshot(channel) for channel in sorted(self._channels))
 
     def _target(self, interactive: bool) -> float:
         return float(self.tuning.target_interactive_ms if interactive else self.tuning.target_idle_ms)

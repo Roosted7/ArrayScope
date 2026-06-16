@@ -23,7 +23,7 @@ class MontagePrefetchDecision:
     tile_key: object | None = None
 
 
-def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int = 2) -> tuple[MontagePrefetchDecision, ...]:
+def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int | None = None) -> tuple[MontagePrefetchDecision, ...]:
     if _busy(window):
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_visible_busy", "visible work is busy"),))
     if not window._is_current_montage_session(session.session_id, session.key):
@@ -32,6 +32,14 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int =
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_no_stage", "raw montage tiles rely on visible-level commit ordering"),))
     if window.operation_evaluator._tile_cache.bytes_used > int(window.operation_evaluator._tile_cache.max_bytes * 0.8):
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_budget", "tile cache is near capacity"),))
+    governor = getattr(window, "resource_governor", None)
+    if governor is not None:
+        decision = governor.decide_montage_prefetch(stage_ready_or_in_flight=True, visible_busy=False)
+        if not decision.allowed:
+            return _record(window, (MontagePrefetchDecision(None, None, "blocked_governor", decision.reason),))
+        max_tiles = decision.max_items
+    if max_tiles is None:
+        max_tiles = 2
 
     decisions = []
     scheduled = 0

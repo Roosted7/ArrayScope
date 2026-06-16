@@ -229,6 +229,9 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             self._profile_timer.start()
 
     def _update_live_profile_from_pending_pos(self):
+        from time import perf_counter
+
+        profile_update_start = perf_counter()
         point = self._pending_profile_point
         pos = self._pending_profile_pos
         self._pending_profile_point = None
@@ -284,6 +287,8 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             self.profile_dock.update_line_results(tuple(cached_entries), y_range=y_range)
             self._update_operation_dock()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
+            if hasattr(self, "_record_ui_work"):
+                self._record_ui_work("profile_update", (perf_counter() - profile_update_start) * 1000.0)
             return
 
         def evaluate():
@@ -316,6 +321,8 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             self.profile_dock.update_line_results(tuple(entries), y_range=y_range)
             self._update_operation_dock()
             self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
+            if hasattr(self, "_record_ui_work"):
+                self._record_ui_work("profile_update", (perf_counter() - profile_update_start) * 1000.0)
             if view_state.montage_axis is None:
                 for axis in profile_axes:
                     self._prefetch_profiles_near_marker(view_state, point[0], point[1], line_axis=axis)

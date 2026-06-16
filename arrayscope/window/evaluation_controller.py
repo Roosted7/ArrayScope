@@ -246,6 +246,15 @@ class EvaluationController(Qt.QtCore.QObject):
             self._handlers.pop(key, None)
         self.pool.clear()
 
+    def set_max_workers(self, count: int) -> None:
+        self.pool.setMaxThreadCount(max(1, int(count)))
+
+    def set_max_callback_dispatch_per_drain(self, count: int) -> None:
+        self._max_callback_dispatch_per_drain = max(1, int(count))
+
+    def set_max_prefetch(self, count: int) -> None:
+        self._max_prefetch = max(0, int(count))
+
     def is_busy(self) -> bool:
         return self.has_running_or_pending()
 

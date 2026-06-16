@@ -7,6 +7,7 @@ from enum import Enum
 import os
 
 from arrayscope.app.settings_state import FFTWorkersChoice, normalize_fft_workers_choice
+from arrayscope.core.memory_policy import MemoryProfileChoice, normalize_memory_profile_choice
 from arrayscope.operations import fft_backend
 
 
@@ -71,13 +72,20 @@ class EvaluationContext:
 def compute_policy_from_settings(settings, *, cpu_count: int | None = None) -> ComputePolicy:
     count = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
     choice = normalize_fft_workers_choice(getattr(settings, "fft_workers", FFTWorkersChoice.AUTO))
+    profile = normalize_memory_profile_choice(getattr(settings, "memory_profile", MemoryProfileChoice.BALANCED))
     resolved = int(fft_backend.resolve_fft_workers(choice.value, cpu_count=count))
-    visible_fft = max(1, min(8, resolved))
-    stage_fft = max(1, min(8, resolved))
+    fft_cap = 4 if profile == MemoryProfileChoice.CONSERVATIVE else (12 if profile == MemoryProfileChoice.AGGRESSIVE else 8)
+    visible_fft = max(1, min(fft_cap, resolved))
+    stage_fft = max(1, min(fft_cap, resolved))
     explicit_aggressive = choice == FFTWorkersChoice.ALL_MINUS_ONE
     tile_fft = 1
     product_limit = max(2, count // 2)
-    tile_workers = max(2, min(8, product_limit))
+    if profile == MemoryProfileChoice.CONSERVATIVE:
+        tile_workers = max(1, min(4, max(1, count // 4)))
+    elif profile == MemoryProfileChoice.AGGRESSIVE:
+        tile_workers = max(2, min(12, max(2, count - 2)))
+    else:
+        tile_workers = max(2, min(8, product_limit))
     if not explicit_aggressive:
         while tile_workers * tile_fft > product_limit and tile_workers > 1:
             tile_workers -= 1

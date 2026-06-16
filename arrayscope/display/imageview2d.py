@@ -790,6 +790,10 @@ class ImageView2D(QtWidgets.QWidget):
         if self._histogram_preview_controller is not None:
             self._histogram_preview_controller.schedule_from_widget()
 
+    def setHistogramPreviewInterval(self, interval_ms: int) -> None:
+        if self._histogram_preview_controller is not None:
+            self._histogram_preview_controller.interval_ms = max(1, int(interval_ms))
+
     def _apply_histogram_preview_levels(self, levels) -> None:
         levels = (float(levels[0]), float(levels[1]))
         started_timing = self._upload_timing is None

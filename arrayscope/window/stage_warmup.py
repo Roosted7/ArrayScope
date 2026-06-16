@@ -45,6 +45,30 @@ def schedule_stage_warmup(window, view_state) -> StageWarmupDecision:
 
     materializer = window.operation_evaluator.stage_materializer
     document_key = stage_document_key(document)
+    key = materializer.key_for_candidate(document_key, candidate)
+    cache = window.operation_evaluator.stage_cache
+    cached = (cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)) is not None
+    in_flight = key in getattr(materializer, "_in_flight", {})
+    governor = getattr(window, "resource_governor", None)
+    if governor is not None:
+        admission = governor.decide_stage_warmup(candidate, app_idle=True, stage_cached=cached, stage_in_flight=in_flight)
+        if not admission.allowed:
+            decision_name = {
+                "stage already cached": "hit",
+                "stage already in flight": "in_flight",
+                "visible work is busy": "blocked_idle",
+                "memory pressure": "blocked_budget",
+            }.get(admission.reason, "refused")
+            return _record(
+                window,
+                StageWarmupDecision(
+                    decision_name,
+                    key=key,
+                    candidate_bytes=None if estimated is None else int(estimated),
+                    budget_bytes=budget,
+                    reason=admission.reason,
+                ),
+            )
     result = materializer.request_stage(document_key, candidate)
     decision = StageWarmupDecision(
         result.decision if result.decision != "attached" else "in_flight",

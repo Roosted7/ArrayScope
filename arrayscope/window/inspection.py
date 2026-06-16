@@ -132,6 +132,9 @@ class InspectionWorkflowMixin:
             self._roi_refresh_timer.setSingleShot(True)
             self._roi_refresh_timer.setInterval(60)
             self._roi_refresh_timer.timeout.connect(self._refresh_inspection_dock_now)
+        decision = getattr(self, "_ui_work_decision", lambda *args, **kwargs: None)("roi_refresh", interactive=False)
+        if decision is not None:
+            self._roi_refresh_timer.setInterval(max(1, int(decision.interval_ms)))
         self._roi_refresh_reason = reason
         self._roi_refresh_timer.start()
 
@@ -183,6 +186,8 @@ class InspectionWorkflowMixin:
             )
         finally:
             self._last_inspection_refresh_ms = (perf_counter() - start) * 1000.0
+            if hasattr(self, "_record_ui_work"):
+                self._record_ui_work("roi_refresh", self._last_inspection_refresh_ms)
 
     def _roi_inspection_key(self, image, selections, layers):
         if self._roi_uses_montage_demand(selections):

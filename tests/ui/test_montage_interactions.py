@@ -263,6 +263,39 @@ def test_montage_loading_overlay_is_session_delayed(qtbot, monkeypatch):
         win.close()
 
 
+def test_montage_loading_overlay_clears_after_final_delayed_commit(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
+    qtbot.addWidget(win)
+    calls = []
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
+    try:
+        _process_events(qtbot)
+        win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
+        win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
+        win.update_montage_view()
+        win._show_montage_session_loading_overlay(win._montage_session)
+        assert win.img_view._evaluation_overlay.isVisible()
+
+        while calls:
+            call = calls.pop(0)
+            tile = call["key"][2]
+            call["on_done"](_tile_result(win._montage_session.plan.tiles[tile], tile + 1))
+            _process_events(qtbot, count=20)
+
+        qtbot.waitUntil(
+            lambda: win.img_view._evaluation_overlay is None or not win.img_view._evaluation_overlay.isVisible(),
+            timeout=1000,
+        )
+        assert getattr(win.img_view, "_montage_tile_overlay_items", []) == []
+        assert win._montage_session.is_complete()
+    finally:
+        win.close()
+
+
 def test_montage_canvas_tiles_are_all_accounted_for(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.display.montage import MontageTileState

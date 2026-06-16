@@ -61,6 +61,13 @@ source of array-view state.
 - `arrayscope.core.compute_policy`: Qt-free lane worker policy. It derives per-lane Qt worker counts
   and FFT worker counts from runtime settings so visible/stage work can use capped multi-worker FFTs
   while montage tile and prefetch lanes avoid native-worker oversubscription.
+- `arrayscope.core.resource_telemetry` and `arrayscope.core.resource_governor`: Qt-free adaptive
+  scheduling inputs and decisions. Resource telemetry samples system/process CPU and memory without
+  blocking the UI. The resource governor combines `ComputePolicy`, `MemoryPolicy`, resource
+  telemetry, scheduler busy state, and UI latency feedback to choose effective lane worker counts,
+  callback fan-in budgets, commit intervals, and prefetch admission. It is bounded and damped:
+  worker changes step gradually, UI pressure backs off immediately, and recovery requires healthy
+  feedback.
 - `arrayscope.operations.fft_backend`: FFT backend abstraction and worker-count runtime settings.
   `auto` resolves to SciPy when available, with NumPy fallback and an optional pyFFTW backend when
   explicitly selected and importable. The centered FFT/IFFT naming follows ArrayScope's MRI/k-space
@@ -226,12 +233,14 @@ attached to each `EvaluationContext`: visible and stage lanes can use the capped
 count (auto resolves to up to half the machine, capped at eight workers), while montage tile and
 prefetch lanes use one FFT worker by default.
 
-UI-thread fan-in is governed by `LatencyFeedbackController`, not fixed duration tiers. Subsystems
-record measured costs under named channels and ask the controller for a work budget, batch limit, or
-commit interval. Montage uses `montage_tile_result` to decide how many completed tile results to
-patch in one UI tick and `montage_commit` to decide how quickly to flush canvas/display updates. This
-keeps worker throughput high while adapting patch/upload pressure to recent UI-thread cost and to
-interactive vs idle state.
+UI-thread fan-in is governed by the resource governor, backed by `LatencyFeedbackController`, not
+fixed duration tiers. Subsystems record measured costs under named channels and ask the governor for
+a work budget, batch limit, or commit interval. Montage uses `montage_tile_result` to decide how many
+completed tile results to patch in one UI tick and `montage_commit` to decide how quickly to flush
+canvas/display updates. Histogram preview, ROI refresh, live profile updates, pixel hover, and
+diagnostics callbacks use the same feedback model where they have explicit debounce or callback
+limits. This keeps worker throughput high while adapting UI-thread fan-in to recent cost, profile
+tuning, memory pressure, CPU headroom, and interactive vs idle state.
 
 Display upload is a UI-thread phase separate from render/evaluation. `ImageView2D` measures visible
 image upload, histogram plot upload, histogram recompute, RGB re-windowing, level synchronization, and
@@ -257,11 +266,14 @@ float32 bases may be pruned while the displayed tile image remains intact. Clean
 commits still skip uploads; level-changing presentation commits re-window from retained bases or from
 the current canvas for pruned tiles.
 
-Predictive compute is stage-aware. Stage warmup runs only while visible work is idle and only when a
-retained cacheable candidate fits the stage-cache budget. Rendered tile and next-slice prefetch run
-only while idle; expensive FFT-backed prefetch is allowed only when the required reusable stage is
-already cached or in-flight. Otherwise the prefetch path records a skip decision instead of computing
-the same expanded transform separately for each predicted output.
+Predictive compute is stage-aware and governor-admitted. Stage warmup runs only while visible work is
+idle and only when a retained cacheable candidate fits the stage-cache budget. Rendered tile and
+next-slice prefetch run only while idle; expensive FFT-backed prefetch is allowed only when the
+required reusable stage is already cached or in-flight. Otherwise the prefetch path records a skip
+decision instead of computing the same expanded transform separately for each predicted output. During
+cold montage redraws, diagnostics distinguish cache hits, direct lead tiles, stage-backed tiles, and
+tiles waiting for a shared stage so the operation log does not imply per-tile repetition of the
+retained FFT/IFFT stage.
 
 `render()` then:
 
