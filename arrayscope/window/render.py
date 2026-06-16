@@ -66,6 +66,8 @@ from arrayscope.window.render_model import CommitKind
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.normal_renderer import NormalImageRenderMixin
 from arrayscope.window.montage_renderer import MontageRenderMixin
+from arrayscope.window.render_prefetch import RenderPrefetchMixin
+from arrayscope.window.render_resources import RenderResourceMixin
 
 
 MONTAGE_COMMIT_INTERVAL_MS = 16
@@ -86,7 +88,7 @@ def getNumberOfDecimalPlaces(number):
         return int(max(1, (number.as_integer_ratio()[1]).bit_length()))
 
 
-class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRenderMixin):
+class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRenderMixin, RenderPrefetchMixin, RenderResourceMixin):
     def getPixel(self, pos):
         source = getattr(self.img_view, "histogramSource", None)
         if source is None:
@@ -517,250 +519,11 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             return ViewportPolicy.RESET_FOR_NEW_SHAPE
         return ViewportPolicy.PRESERVE
 
-    def _ensure_prefetch_idle_timer(self):
-        timer = getattr(self, "_prefetch_idle_timer", None)
-        if timer is None:
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.setInterval(PREFETCH_IDLE_DELAY_MS)
-            timer.timeout.connect(self._run_pending_prefetch)
-            self._prefetch_idle_timer = timer
-        return timer
-
-    def _schedule_prefetch_nearby_slices(self, view_state, colormap_lut):
-        if not getattr(self.app_settings, "prefetch_nearby_slices", False):
-            self.operation_evaluator.note_prefetch_skipped()
-            return
-        self._pending_prefetch_request = (view_state, colormap_lut)
-        timer = self._ensure_prefetch_idle_timer()
-        timer.start(PREFETCH_IDLE_DELAY_MS)
-
-    def _run_pending_prefetch(self):
-        request = getattr(self, "_pending_prefetch_request", None)
-        self._pending_prefetch_request = None
-        if request is None:
-            return
-        view_state, colormap_lut = request
-        self._refresh_memory_policy(active_render=self.visible_evaluation_controller.is_busy())
-        if self.visible_evaluation_controller.is_busy():
-            self.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
-            self.operation_evaluator.note_prefetch_skipped()
-            return
-        self._prefetch_nearby_slices(view_state, colormap_lut)
-
-    def _prefetch_nearby_slices(self, view_state, colormap_lut):
-        if not getattr(self.app_settings, "prefetch_nearby_slices", False):
-            self.operation_evaluator.note_prefetch_skipped()
-            return
-        if view_state.montage_axis is not None:
-            self.operation_evaluator.note_prefetch_skipped()
-            return
-        if self.visible_evaluation_controller.is_busy():
-            self.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
-            self.operation_evaluator.note_prefetch_skipped()
-            return
-        policy = self._memory_policy()
-        if self.operation_evaluator._image_cache.bytes_used > int(self.operation_evaluator._image_cache.max_bytes * policy.cache_prefetch_skip_fraction):
-            self.operation_evaluator.note_prefetch_skipped()
-            return
-        if self._estimated_image_display_bytes(view_state) > policy.prefetch_budget_bytes:
-            self.operation_evaluator.note_prefetch_skipped()
-            return
-        if not self._prefetch_cost_allowed(view_state):
-            self.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="cost")
-            self.operation_evaluator.note_prefetch_skipped()
-            return
-        axis = getattr(self, "_active_slice_axis", None)
-        if axis is None or view_state.image_axes is None or axis in view_state.image_axes:
-            return
-        document = self.document
-        size = view_state.shape[axis]
-        current = view_state.slice_indices[axis]
-        last = getattr(self, "_last_prefetch_slice_index", None)
-        direction = 0 if last is None else (1 if current >= last else -1)
-        self._last_prefetch_slice_index = current
-        deltas = self._prefetch_deltas(direction, max_radius=min(2, max(1, size - 1)))
-        scheduled = 0
-        for delta in deltas:
-            limit = MAX_IDLE_PREFETCH_SLICES if direction != 0 else 1
-            if scheduled >= limit:
-                break
-            index = current + delta
-            if 0 <= index < size:
-                prefetch_state = view_state.with_slice(axis, index)
-                prefetch_key = self.operation_evaluator.image_key(
-                    prefetch_state,
-                    colormap_lut=colormap_lut,
-                    document=document,
-                )
-                started = self.prefetch_evaluation_controller.start_prefetch(
-                    lambda prefetch_state=prefetch_state, document=document: self.operation_evaluator.prefetch_image_snapshot(
-                        document,
-                        prefetch_state,
-                        colormap_lut=colormap_lut,
-                    ),
-                    on_done=lambda result, prefetch_state=prefetch_state, document=document, prefetch_key=prefetch_key: self._store_prefetch_image_if_current(
-                        document,
-                        prefetch_key,
-                        prefetch_state,
-                        colormap_lut,
-                        result,
-                    ),
-                    key=prefetch_key,
-                    memory_budget_bytes=policy.prefetch_budget_bytes,
-                )
-                self._note_prefetch_start(started)
-                if started.scheduled:
-                    scheduled += 1
-
-    def _prefetch_cost_allowed(self, view_state):
-        operations = tuple(self.document.enabled_operations)
-        if not operations:
-            return True
-        image_axes = set(view_state.image_axes or ())
-        for operation in operations:
-            if type(operation).__name__ in {"Mean", "Sum", "Maximum", "Minimum", "RootSumSquares"} and int(operation.axis) in image_axes:
-                return False
-        cost = estimate_pipeline_cost(self.base_data.shape, getattr(self.base_data, "dtype", None), operations)
-        peak = cost.estimated_peak_bytes or 0
-        policy = self._memory_policy()
-        if peak > policy.operation_prefetch_peak_budget_bytes:
-            return False
-        if any(type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in operations) and peak > policy.fft_prefetch_peak_budget_bytes:
-            return False
-        return True
-
-    def _prefetch_deltas(self, direction, *, max_radius):
-        radii = range(1, int(max_radius) + 1)
-        if direction > 0:
-            return tuple(delta for radius in radii for delta in (radius, -radius))
-        if direction < 0:
-            return tuple(delta for radius in radii for delta in (-radius, radius))
-        return tuple(delta for radius in radii for delta in (-radius, radius))
-
-    def _prefetch_profiles_near_marker(self, view_state, image_x, image_y, *, line_axis=None):
-        if view_state.image_axes is None or line_axis is None:
-            return
-        document = self.document
-        primary_axis, secondary_axis = view_state.image_axes
-        cx = int(round(image_x))
-        cy = int(round(image_y))
-        max_radius = 4
-        scheduled = 0
-        request_key_cache = {}
-        for radius in range(0, max_radius + 1):
-            points = []
-            if radius == 0:
-                points.append((cx, cy))
-            else:
-                for dx in (-radius, radius):
-                    points.append((cx + dx, cy))
-                for dy in (-radius, radius):
-                    points.append((cx, cy + dy))
-            for x, y in points:
-                if scheduled >= 24:
-                    return
-                if not (0 <= x < view_state.shape[secondary_axis] and 0 <= y < view_state.shape[primary_axis]):
-                    continue
-                profile_state = self.profile_coordinator.state_from_marker(view_state, x, y, line_axis=line_axis)
-                if profile_state is None:
-                    continue
-                request_key_cache[profile_state] = self.operation_evaluator.line_key(profile_state, document=document)
-                started = self.prefetch_evaluation_controller.start_prefetch(
-                    lambda profile_state=profile_state, document=document: self.operation_evaluator.prefetch_line_snapshot(document, profile_state),
-                    on_done=lambda result, profile_state=profile_state, document=document, key=request_key_cache[profile_state]: self._store_prefetch_profile_if_current(
-                        document,
-                        key,
-                        profile_state,
-                        result,
-                    ),
-                    key=request_key_cache[profile_state],
-                    memory_budget_bytes=self._prefetch_budget_bytes(),
-                )
-                self._note_prefetch_start(started)
-                if started.scheduled:
-                    scheduled += 1
-
-    def _store_prefetch_profile_if_current(self, document, request_key, profile_state, result):
-        if request_key != self.operation_evaluator.line_key(profile_state):
-            self.operation_evaluator.note_prefetch_stale()
-            return False
-        return self.operation_evaluator.store_prefetch_line_result(document, profile_state, result)
-
-    def _store_prefetch_image_if_current(self, document, request_key, view_state, colormap_lut, result):
-        current_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut)
-        if request_key != current_key:
-            self.operation_evaluator.note_prefetch_stale()
-            return False
-        return self.operation_evaluator.store_prefetch_image_result(document, view_state, colormap_lut, result)
-
-    def _note_prefetch_start(self, started):
-        if started.scheduled:
-            self.operation_evaluator.note_prefetch_scheduled()
-        elif started.reason == "deduped":
-            self.operation_evaluator.note_prefetch_deduped()
-        elif started.reason == "limited":
-            self.operation_evaluator.note_prefetch_limited()
-
     def _current_window_mode(self):
         if self.widgets['buttons']['display']['window_absolute'].isChecked():
             return "absolute"
         return "relative"
 
-    def _estimated_image_display_bytes(self, view_state):
-        if view_state.image_axes is None:
-            return 0
-        shape = []
-        for axis in view_state.image_axes:
-            indices = view_state.axis_range_indices[axis]
-            shape.append(len(indices) if indices is not None else view_state.shape[axis])
-        dtypes = self.operation_coordinator.operation_dtype_estimates()
-        dtype = dtypes[-1] if dtypes else getattr(self.document.base_data, "dtype", np.dtype(float))
-        rgb = view_state.channel == ChannelMode.COMPLEX
-        return estimate_display_image_bytes(tuple(shape), dtype, rgb=rgb, histogram=rgb)
-
-    def _visible_render_budget_bytes(self) -> int:
-        return int(self._memory_policy().visible_render_budget_bytes)
-
-    def _montage_canvas_budget_bytes(self) -> int:
-        return int(self._memory_policy().montage_canvas_budget_bytes)
-
-    def _single_montage_tile_budget_bytes(self) -> int:
-        return int(self._memory_policy().single_tile_budget_bytes)
-
-    def _prefetch_budget_bytes(self) -> int:
-        return int(self._memory_policy().prefetch_budget_bytes)
-
-    def _memory_policy(self):
-        policy = getattr(self, "_current_memory_policy", None)
-        if policy is None:
-            policy = self._refresh_memory_policy()
-        return policy
-
-    def _refresh_memory_policy(self, *, active_render: bool = False):
-        current = compute_memory_policy(
-            profile=getattr(getattr(self, "app_settings", None), "memory_profile", "balanced"),
-            render_cap_mb=getattr(getattr(self, "app_settings", None), "render_memory_budget_mb", 512),
-            input_nbytes=input_nbytes_for(getattr(self, "base_data", None)),
-        )
-        policy = apply_policy_hysteresis(
-            getattr(self, "_current_memory_policy", None),
-            current,
-            active_render=bool(active_render),
-        )
-        self._current_memory_policy = policy
-        self._apply_memory_policy_to_caches(policy)
-        return policy
-
-    def _apply_memory_policy_to_caches(self, policy) -> None:
-        evaluator = getattr(self, "operation_evaluator", None)
-        if evaluator is not None and hasattr(evaluator, "apply_memory_policy"):
-            evaluator.apply_memory_policy(policy)
-
-    def _montage_render_active(self) -> bool:
-        session = getattr(self, "_montage_session", None)
-        return bool(session is not None and (session.pending_tiles or session.loading_tiles))
-    
     def update_display_mode(self):
         """Update the display mode for the image view"""
         if self.widgets['buttons']['display']['square_pixels'].isChecked():
