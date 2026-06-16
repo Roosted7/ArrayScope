@@ -43,6 +43,7 @@ class MontageRenderSession:
     tile_stage_keys: dict[int, object] = field(default_factory=dict)
     stage_waiting_tiles: dict[object, list[MontageTile]] = field(default_factory=dict)
     active_stage_requests: set[object] = field(default_factory=set)
+    attached_stage_requests: set[object] = field(default_factory=set)
     stage_values: dict[object, object] = field(default_factory=dict)
     canvas: MontageViewportCanvas | None = None
     canvas_data: np.ndarray | None = None
@@ -57,6 +58,7 @@ class MontageRenderSession:
     defer_side_panels: bool = False
     display_committed: bool = False
     applied_level_source: object | None = None
+    pending_level_tiles: list[RenderedTile] = field(default_factory=list)
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles

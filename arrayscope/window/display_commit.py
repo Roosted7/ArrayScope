@@ -17,6 +17,7 @@ class DisplayCommitter:
         self.image_view.setImagePresentation(
             presentation.data,
             histogramData=presentation.histogram_data,
+            histogramPlotData=presentation.histogram_plot_data,
             levels=presentation.levels,
             histogramRange=presentation.histogram_range,
             viewport_policy=presentation.viewport_policy,
@@ -32,6 +33,7 @@ class DisplayCommitter:
         self.image_view.updateImagePresentationFast(
             presentation.data,
             histogramData=presentation.histogram_data,
+            histogramPlotData=presentation.histogram_plot_data,
             levels=presentation.levels,
             histogramRange=presentation.histogram_range,
             rgb_already_windowed=presentation.rgb_already_windowed,
@@ -54,6 +56,8 @@ class DisplayCommitter:
             raise ValueError(f"display data shape {shape} does not match geometry {presentation.geometry.display_shape}")
         if presentation.histogram_data is not None and tuple(np.shape(presentation.histogram_data)[:2]) != shape:
             raise ValueError("histogram data shape does not match display data shape")
+        if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
+            raise ValueError("histogram plot data must not be empty")
         self._validate_bounds("levels", presentation.levels)
         self._validate_bounds("histogram range", presentation.histogram_range)
 

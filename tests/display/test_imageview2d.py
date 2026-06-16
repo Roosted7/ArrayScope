@@ -129,6 +129,75 @@ def test_update_image_data_fast_accepts_display_ready_rgb(qt_app):
     view.close()
 
 
+def test_separate_histogram_plot_source_drives_histogram_without_replacing_value_source(qt_app):
+    from arrayscope.display.geometry import DisplayPointMapping
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    local = np.arange(16, dtype=float).reshape(4, 4)
+    plot = np.linspace(100.0, 200.0, 25)
+    view.setImagePresentation(
+        local,
+        histogramData=local.copy(),
+        histogramPlotData=plot,
+        levels=(110.0, 190.0),
+        histogramRange=(100.0, 200.0),
+    )
+
+    assert view.histogramPlotSource is not None
+    assert view.histogramImageItem.image.shape == (5, 5)
+    assert view.valueAtDisplayMapping(DisplayPointMapping(3, 2, 3, 2, (2, 3))) == local[2, 3]
+    assert tuple(float(value) for value in view.imageItem.levels) == (110.0, 190.0)
+    view.histogram.setLevels(120.0, 180.0)
+    view._on_histogram_levels_changed()
+    assert tuple(float(value) for value in view.imageItem.levels) == (120.0, 180.0)
+    view.close()
+
+
+def test_complex_rgb_histogram_levels_rewindow_display(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    rgb = np.full((4, 4, 3), 200, dtype=np.uint8)
+    magnitude = np.linspace(0.0, 1.0, 16, dtype=float).reshape(4, 4)
+    view.setImagePresentation(
+        rgb,
+        histogramData=magnitude,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        rgb_already_windowed=False,
+    )
+    before = np.array(view.imageDisp, copy=True)
+
+    view.setLevels(0.5, 1.0)
+
+    assert view._rgbBaseImage is not None
+    assert not np.array_equal(view.imageDisp, before)
+    view.close()
+
+
+def test_display_ready_rgb_histogram_levels_do_not_rewindow_display(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    rgb = np.full((4, 4, 3), 128, dtype=np.uint8)
+    hist = np.linspace(0.0, 1.0, 16, dtype=float).reshape(4, 4)
+    view.setImagePresentation(
+        rgb,
+        histogramData=hist,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        rgb_already_windowed=True,
+    )
+    before = np.array(view.imageDisp, copy=True)
+
+    view.setLevels(0.5, 1.0)
+
+    assert view._rgbBaseImage is None
+    np.testing.assert_array_equal(view.imageDisp, before)
+    view.close()
+
+
 def test_scalar_image_upload_passes_levels_to_image_item(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
@@ -138,6 +207,19 @@ def test_scalar_image_upload_passes_levels_to_image_item(qt_app):
     assert tuple(float(value) for value in view.imageItem.levels) == (2.0, 12.0)
     view.updateImageDataFast(np.ones((4, 4), dtype=float), levels=(3.0, 9.0))
     assert tuple(float(value) for value in view.imageItem.levels) == (3.0, 9.0)
+    view.close()
+
+
+def test_scalar_histogram_level_drag_updates_display_item(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 15.0))
+
+    view.histogram.setLevels(2.0, 8.0)
+    view._on_histogram_levels_changed()
+
+    assert tuple(float(value) for value in view.imageItem.levels) == (2.0, 8.0)
     view.close()
 
 

@@ -19,8 +19,10 @@ class MontageRuntimeDiagnostics:
     loaded_tiles: int = 0
     loading_tiles: int = 0
     pending_tiles: int = 0
+    pending_level_tiles: int = 0
     skipped_tiles: int = 0
     visible_tiles: int = 0
+    attached_stage_requests: int = 0
     show_loading_overlays: bool = False
 
 
@@ -66,6 +68,8 @@ class MontageTimingDiagnostics:
     last_tile_cache_hit: bool | None = None
     last_stage_cache_lookup_ms: float | None = None
     last_stage_cache_hit: bool | None = None
+    last_stage_attach_wait_ms: float | None = None
+    last_level_stats_ms: float | None = None
     last_canvas_compose_ms: float | None = None
     last_canvas_patch_ms: float | None = None
     last_canvas_commit_ms: float | None = None
@@ -205,14 +209,18 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                     "Tiles: "
                     f"visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
                     f"loading={snapshot.montage.loading_tiles} pending={snapshot.montage.pending_tiles} "
+                    f"pending levels={snapshot.montage.pending_level_tiles} "
                     f"skipped={snapshot.montage.skipped_tiles}"
                 ),
+                f"Attached stage waits: {snapshot.montage.attached_stage_requests}",
                 f"Loading overlays: {snapshot.montage.show_loading_overlays}",
                 f"Timing tile eval: {_ms_text(snapshot.montage_timing.last_tile_eval_ms)}",
                 f"Timing tile cache lookup: {_ms_text(snapshot.montage_timing.last_tile_cache_lookup_ms)}",
                 f"Tile cache hit: {_bool_text(snapshot.montage_timing.last_tile_cache_hit)}",
                 f"Timing stage cache lookup: {_ms_text(snapshot.montage_timing.last_stage_cache_lookup_ms)}",
                 f"Stage cache hit: {_bool_text(snapshot.montage_timing.last_stage_cache_hit)}",
+                f"Timing attached stage wait: {_ms_text(snapshot.montage_timing.last_stage_attach_wait_ms)}",
+                f"Timing level stats: {_ms_text(snapshot.montage_timing.last_level_stats_ms)}",
                 f"Timing canvas compose: {_ms_text(snapshot.montage_timing.last_canvas_compose_ms)}",
                 f"Timing canvas patch: {_ms_text(snapshot.montage_timing.last_canvas_patch_ms)}",
                 f"Timing canvas commit: {_ms_text(snapshot.montage_timing.last_canvas_commit_ms)}",

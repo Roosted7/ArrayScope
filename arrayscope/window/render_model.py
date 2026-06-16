@@ -45,6 +45,7 @@ class DisplayPayload:
     geometry: DisplayGeometry
     viewport_policy: ViewportPolicy
     rgb_already_windowed: bool = False
+    histogram_plot_data: np.ndarray | None = None
 
     @property
     def data(self) -> np.ndarray:
@@ -59,6 +60,7 @@ class DisplayPayload:
 class DisplayPresentation:
     data: np.ndarray
     histogram_data: np.ndarray | None
+    histogram_plot_data: np.ndarray | None
     geometry: DisplayGeometry
     levels: tuple[float, float]
     histogram_range: tuple[float, float]

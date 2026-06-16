@@ -53,10 +53,11 @@ class LevelSource:
     source_count: int = 0
     expected_count: int = 0
     semantic_key: object | None = None
+    mode: LevelMode = LevelMode.USER_LOCKED
 
     @property
     def user_locked(self) -> bool:
-        return self.rank == LevelSourceRank.EXPLICIT_USER
+        return self.rank == LevelSourceRank.EXPLICIT_USER and self.mode != LevelMode.RELATIVE
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class WindowLevelState:
             source_count=self.source_count,
             expected_count=self.expected_count,
             semantic_key=self.semantic_key,
+            mode=self.mode,
         )
 
 
@@ -166,10 +168,14 @@ def state_from_source(source: LevelSource | None, *, mode: str | LevelMode = Lev
     if levels is None or histogram is None:
         return None
     rank = source.rank if isinstance(source.rank, LevelSourceRank) else LevelSourceRank(int(source.rank))
+    source_mode = getattr(source, "mode", mode) if rank == LevelSourceRank.EXPLICIT_USER else mode
     try:
-        coerced_mode = mode if isinstance(mode, LevelMode) else LevelMode(str(mode))
+        coerced_mode = source_mode if isinstance(source_mode, LevelMode) else LevelMode(str(source_mode))
     except ValueError:
-        coerced_mode = LevelMode.RELATIVE
+        try:
+            coerced_mode = mode if isinstance(mode, LevelMode) else LevelMode(str(mode))
+        except ValueError:
+            coerced_mode = LevelMode.RELATIVE
     return WindowLevelState(
         semantic_key=source.semantic_key,
         display_levels=levels,
@@ -177,7 +183,7 @@ def state_from_source(source: LevelSource | None, *, mode: str | LevelMode = Lev
         source_rank=rank,
         source_count=max(0, int(source.source_count)),
         expected_count=max(0, int(source.expected_count)),
-        user_locked=rank == LevelSourceRank.EXPLICIT_USER,
+        user_locked=rank == LevelSourceRank.EXPLICIT_USER and coerced_mode != LevelMode.RELATIVE,
         mode=coerced_mode,
     )
 
@@ -215,8 +221,8 @@ class WindowLevelController:
                     source_rank=LevelSourceRank.EXPLICIT_USER,
                     source_count=0,
                     expected_count=0,
-                    user_locked=True,
-                    mode=LevelMode.USER_LOCKED,
+                    user_locked=mode == LevelMode.ABSOLUTE,
+                    mode=LevelMode.USER_LOCKED if mode == LevelMode.ABSOLUTE else LevelMode.RELATIVE,
                 )
 
         if explicit_auto:
@@ -237,9 +243,41 @@ class WindowLevelController:
         same_semantic = previous_state.semantic_key == candidate_state.semantic_key
 
         if previous_state.user_locked and same_semantic:
-            return previous_state
+            histogram = union_bounds(previous_state.histogram_range, candidate_state.histogram_range) or previous_state.histogram_range
+            return replace(
+                previous_state,
+                histogram_range=histogram,
+                source_rank=max(previous_state.source_rank, candidate_state.source_rank),
+                source_count=max(previous_state.source_count, candidate_state.source_count),
+                expected_count=max(previous_state.expected_count, candidate_state.expected_count),
+                mode=previous_state.mode,
+            )
 
         if not same_semantic:
+            if mode == LevelMode.ABSOLUTE:
+                histogram = candidate_state.histogram_range
+                return WindowLevelState(
+                    semantic_key=candidate_state.semantic_key,
+                    display_levels=previous_state.display_levels,
+                    histogram_range=histogram,
+                    source_rank=candidate_state.source_rank,
+                    source_count=candidate_state.source_count,
+                    expected_count=candidate_state.expected_count,
+                    user_locked=previous_state.user_locked,
+                    mode=previous_state.mode if previous_state.user_locked else mode,
+                )
+            if mode == LevelMode.RELATIVE:
+                mapped = relative_levels(previous_state.display_levels, previous_state.histogram_range, candidate_state.histogram_range)
+                return WindowLevelState(
+                    semantic_key=candidate_state.semantic_key,
+                    display_levels=normalize_bounds(mapped) or candidate_state.display_levels,
+                    histogram_range=candidate_state.histogram_range,
+                    source_rank=candidate_state.source_rank,
+                    source_count=candidate_state.source_count,
+                    expected_count=candidate_state.expected_count,
+                    user_locked=False,
+                    mode=mode,
+                )
             return candidate_state
 
         if mode == LevelMode.ABSOLUTE and not previous_state.user_locked:
@@ -253,8 +291,9 @@ class WindowLevelController:
                 mode=mode,
             )
 
-        levels = union_bounds(previous_state.display_levels, candidate_state.display_levels) or candidate_state.display_levels
-        histogram = union_bounds(previous_state.histogram_range, candidate_state.histogram_range) or levels
+        mapped = relative_levels(previous_state.display_levels, previous_state.histogram_range, candidate_state.histogram_range)
+        levels = normalize_bounds(mapped) or candidate_state.display_levels
+        histogram = candidate_state.histogram_range
         return WindowLevelState(
             semantic_key=previous_state.semantic_key,
             display_levels=levels,

@@ -15,6 +15,7 @@ class DisplayImage:
     data: np.ndarray
     histogram_data: Optional[np.ndarray] = None
     default_levels: Optional[Tuple[float, float]] = None
+    rgb_already_windowed: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,7 @@ def make_image(data, state, colormap_lut=None):
     channel = _channel_mode(state.channel)
     if channel == ChannelMode.COMPLEX:
         rgb_data, magnitude_data = complex_to_rgb(image_data, colormap_lut=colormap_lut)
-        return DisplayImage(data=rgb_data, histogram_data=magnitude_data)
+        return DisplayImage(data=rgb_data, histogram_data=magnitude_data, rgb_already_windowed=False)
 
     default_levels = None
     if channel == ChannelMode.ANGLE:
@@ -103,7 +104,7 @@ def make_image_from_slab(slab, request, colormap_lut=None):
     channel = _channel_mode(state.channel)
     if channel == ChannelMode.COMPLEX:
         rgb_data, magnitude_data = complex_to_rgb(image_data, colormap_lut=colormap_lut)
-        return DisplayImage(data=rgb_data, histogram_data=magnitude_data)
+        return DisplayImage(data=rgb_data, histogram_data=magnitude_data, rgb_already_windowed=False)
 
     default_levels = None
     if channel == ChannelMode.ANGLE:

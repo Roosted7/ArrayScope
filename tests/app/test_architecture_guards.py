@@ -189,6 +189,12 @@ def test_display_presentation_boundary_modules_exist():
         assert (ROOT / rel).exists()
 
 
+def test_display_presenter_does_not_infer_windowed_rgb_from_array_rank():
+    text = (ROOT / "arrayscope" / "window" / "display_presenter.py").read_text()
+    assert "data.ndim == 3" not in text
+    assert "rgb_already_windowed=display_image.data.ndim" not in text
+
+
 def test_imageview2d_has_no_multi_imageitem_tile_display_path():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
     forbidden = ("setImageTiles", "clearTiles", "_tile_items", "_tile_histogram_sources", "_tile_mode")
