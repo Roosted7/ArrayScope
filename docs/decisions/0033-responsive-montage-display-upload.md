@@ -56,7 +56,22 @@ Complex/RGB tile-layer windowing uses float32 working arrays. Each tile stores o
 histogram source for the current item state; unchanged levels reuse the display cache, changed levels
 recompute only visible RGB tiles from those cached bases, and dirty-tile commits recompute/upload only
 the affected tile items. Diagnostics include tile-layer visible, updated, skipped, and RGB-windowed
-item counts in addition to existing upload and RGB-window timings.
+item counts in addition to existing upload and RGB-window timings. Diagnostics also split
+tile-layer-specific `ImageItem.setImage()` time and tile-layer RGB windowing time from the aggregate
+visible-upload and RGB-window totals.
+
+Each tile keeps one display-ready RGB cache variant for the current levels. ArrayScope intentionally
+does not keep a second level variant by default because large visible montages can contain hundreds
+of tiles; duplicating uint8 display tiles would trade CPU latency for another large memory pressure
+source. Level changes remain real work, but unchanged-level hot-cache commits are expected to reuse
+the single cached display variant and upload nothing.
+
+Tile-layer float32 RGB source bases are bounded separately from the rendered-tile cache and montage
+canvas. They are useful for immediate RGB/complex level changes, but retaining one base for every
+visible tile in a large montage can duplicate hundreds of MiB. ArrayScope therefore prunes older
+per-tile source bases while keeping the displayed `ImageItem` data intact; unchanged-level clean
+commits still upload nothing, and later presentation commits can re-window pruned tiles from the
+current committed canvas when levels change.
 
 ## Consequences
 

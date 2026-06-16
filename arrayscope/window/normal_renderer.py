@@ -12,6 +12,7 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
+from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
@@ -24,6 +25,7 @@ from arrayscope.operations.render_plan import (
 )
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
+from arrayscope.window.stage_warmup import schedule_stage_warmup
 
 
 class NormalImageRenderMixin:
@@ -115,6 +117,7 @@ class NormalImageRenderMixin:
 
             def evaluate_preview(token):
                 self._last_worker_queue_wait_ms = (perf_counter() - submitted_at) * 1000.0
+                context = self._evaluation_context(ComputeLane.VISIBLE, token)
                 return evaluate_image_snapshot(
                     document,
                     preview_state,
@@ -123,6 +126,7 @@ class NormalImageRenderMixin:
                     degraded=True,
                     stage_cache=self.operation_evaluator.stage_cache,
                     stage_document_key=stage_document_key(document),
+                    evaluation_context=context,
                 )
 
             def done_preview(result):
@@ -165,6 +169,7 @@ class NormalImageRenderMixin:
 
         def evaluate(token):
             self._last_worker_queue_wait_ms = (perf_counter() - submitted_at) * 1000.0
+            context = self._evaluation_context(ComputeLane.VISIBLE, token)
             if decision.kind == RenderDecisionKind.ASYNC_CHUNKED:
                 return evaluate_image_snapshot_chunked(
                     document,
@@ -175,6 +180,7 @@ class NormalImageRenderMixin:
                     cancellation_token=token,
                     stage_cache=self.operation_evaluator.stage_cache,
                     stage_document_key=stage_document_key(document),
+                    evaluation_context=context,
                 )
             return evaluate_image_snapshot(
                 document,
@@ -183,6 +189,7 @@ class NormalImageRenderMixin:
                 cancellation_token=token,
                 stage_cache=self.operation_evaluator.stage_cache,
                 stage_document_key=stage_document_key(document),
+                evaluation_context=context,
             )
 
         def slow():
@@ -216,6 +223,7 @@ class NormalImageRenderMixin:
                 request_key=request_key,
                 render_generation=render_generation,
             )
+            schedule_stage_warmup(self, view_state)
             self._schedule_prefetch_nearby_slices(view_state, colormap_lut)
 
         def error(exc):

@@ -60,7 +60,7 @@ class CastDType:
         del input_shape
         return output_region
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del input_region, output_region
         return self.apply(data)
 

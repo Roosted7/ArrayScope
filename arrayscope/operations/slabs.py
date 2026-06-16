@@ -94,17 +94,25 @@ def plan_slab(document: ArrayDocument, request: SlabRequest) -> SlabPlan:
     )
 
 
-def evaluate_slab(document: ArrayDocument, request: SlabRequest, *, stage_cache=None, document_key=None, cancellation_token=None):
+def evaluate_slab(document: ArrayDocument, request: SlabRequest, *, stage_cache=None, document_key=None, cancellation_token=None, evaluation_context=None):
     plan = plan_slab(document, request)
-    return evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=document_key, cancellation_token=cancellation_token)
+    return evaluate_slab_from_plan(
+        document,
+        request,
+        plan,
+        stage_cache=stage_cache,
+        document_key=document_key,
+        cancellation_token=cancellation_token,
+        evaluation_context=evaluation_context,
+    )
 
 
-def evaluate_slab_from_plan(document: ArrayDocument, request: SlabRequest, plan: SlabPlan, *, stage_cache=None, document_key=None, cancellation_token=None):
+def evaluate_slab_from_plan(document: ArrayDocument, request: SlabRequest, plan: SlabPlan, *, stage_cache=None, document_key=None, cancellation_token=None, evaluation_context=None):
     del request
     region_plan = plan.region_plan
     _check_cancelled(cancellation_token)
     if stage_cache is not None and region_plan.cache_candidates:
-        return _evaluate_slab_with_stage_cache(document, region_plan, stage_cache, document_key, cancellation_token=cancellation_token)
+        return _evaluate_slab_with_stage_cache(document, region_plan, stage_cache, document_key, cancellation_token=cancellation_token, evaluation_context=evaluation_context)
     data = apply_region(document.base_data, region_plan.required_input_region)
     _check_cancelled(cancellation_token)
     for transition in region_plan.transitions:
@@ -114,6 +122,7 @@ def evaluate_slab_from_plan(document: ArrayDocument, request: SlabRequest, plan:
             data,
             input_region=transition.required_input_region,
             output_region=transition.output_region,
+            evaluation_context=evaluation_context,
         )
         _check_cancelled(cancellation_token)
     return data
@@ -129,7 +138,7 @@ def stage_key_for_candidate(document_key, candidate: StageCacheCandidate) -> Sta
     )
 
 
-def materialize_stage_candidate(document: ArrayDocument, region_plan, candidate: StageCacheCandidate, *, stage_cache=None, document_key=None, cancellation_token=None) -> StageValue:
+def materialize_stage_candidate(document: ArrayDocument, region_plan, candidate: StageCacheCandidate, *, stage_cache=None, document_key=None, cancellation_token=None, evaluation_context=None) -> StageValue:
     document_key = _default_stage_document_key(document) if document_key is None else document_key
     candidate = StageCacheCandidate(**candidate.__dict__) if not isinstance(candidate, StageCacheCandidate) else candidate
     _check_cancelled(cancellation_token)
@@ -153,6 +162,7 @@ def materialize_stage_candidate(document: ArrayDocument, region_plan, candidate:
             operation_input,
             input_region=input_region,
             output_region=output_region,
+            evaluation_context=evaluation_context,
         )
         current_region = output_region
         _check_cancelled(cancellation_token)
@@ -173,7 +183,7 @@ def materialize_stage_candidate(document: ArrayDocument, region_plan, candidate:
     return value
 
 
-def evaluate_slab_from_stage(document: ArrayDocument, request: SlabRequest, plan: SlabPlan, stage_value: StageValue, candidate: StageCacheCandidate, *, cancellation_token=None):
+def evaluate_slab_from_stage(document: ArrayDocument, request: SlabRequest, plan: SlabPlan, stage_value: StageValue, candidate: StageCacheCandidate, *, cancellation_token=None, evaluation_context=None):
     del request
     region_plan = plan.region_plan
     data = stage_value.data
@@ -195,6 +205,7 @@ def evaluate_slab_from_stage(document: ArrayDocument, request: SlabRequest, plan
             operation_input,
             input_region=input_region,
             output_region=transition.output_region,
+            evaluation_context=evaluation_context,
         )
         current_region = transition.output_region
         _check_cancelled(cancellation_token)
@@ -209,7 +220,7 @@ def evaluate_slab_from_stage(document: ArrayDocument, request: SlabRequest, plan
     return data
 
 
-def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_cache, document_key, *, cancellation_token=None):
+def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_cache, document_key, *, cancellation_token=None, evaluation_context=None):
     document_key = _default_stage_document_key(document) if document_key is None else document_key
     candidates = tuple(region_plan.cache_candidates)
     candidate_by_stage = {int(candidate.stage_index): candidate for candidate in candidates}
@@ -265,6 +276,7 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
             operation_input,
             input_region=input_region,
             output_region=output_region,
+            evaluation_context=evaluation_context,
         )
         current_region = output_region
         _check_cancelled(cancellation_token)

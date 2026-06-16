@@ -12,6 +12,7 @@ from arrayscope.core.runtime_diagnostics import (
     RenderTimingDiagnostics,
     WindowRuntimeDiagnostics,
 )
+from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.operations import fft_backend
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.regions import region_text
@@ -103,6 +104,26 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         if hasattr(getattr(window, "img_view", None), "lastImageUploadTiming")
         else None
     )
+    compute_policy = getattr(window, "compute_policy", None)
+    lanes = (
+        ComputeLane.VISIBLE,
+        ComputeLane.MONTAGE_TILE,
+        ComputeLane.STAGE,
+        ComputeLane.PREFETCH,
+        ComputeLane.PROFILE,
+        ComputeLane.ROI,
+        ComputeLane.PIXEL,
+    )
+    compute_worker_summaries = (
+        tuple(f"{lane.value}={compute_policy.workers_for_lane(lane)}" for lane in lanes)
+        if compute_policy is not None
+        else ()
+    )
+    compute_fft_worker_summaries = (
+        tuple(f"{lane.value}={compute_policy.fft_workers_for_lane(lane)}" for lane in lanes)
+        if compute_policy is not None
+        else ()
+    )
 
     return WindowRuntimeDiagnostics(
         memory_policy=policy,
@@ -111,6 +132,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         profile_cache=window.operation_evaluator.profile_cache_diagnostics(),
         stage_cache=stage_cache_diagnostics,
         stage_materialization=stage_materialization_diagnostics,
+        stage_warmup=getattr(window, "_last_stage_warmup_decision", None),
+        montage_prefetch=tuple(getattr(window, "_last_montage_prefetch_decisions", ()) or ()),
         schedulers=tuple(schedulers),
         render=render,
         montage=montage,
@@ -143,6 +166,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             last_histogram_upload_ms=None if upload_timing is None else upload_timing.histogram_upload_ms,
             last_histogram_recompute_ms=None if upload_timing is None else upload_timing.histogram_recompute_ms,
             last_rgb_window_ms=None if upload_timing is None else upload_timing.rgb_window_ms,
+            last_tile_layer_upload_ms=None if upload_timing is None else upload_timing.tile_layer_upload_ms,
+            last_tile_layer_rgb_window_ms=None if upload_timing is None else upload_timing.tile_layer_rgb_window_ms,
             last_level_sync_ms=None if upload_timing is None else upload_timing.level_sync_ms,
             last_canvas_compose_ms=getattr(window, "_last_montage_canvas_compose_ms", None),
             last_canvas_patch_ms=getattr(window, "_last_montage_canvas_patch_ms", None),
@@ -173,6 +198,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         fft_backend_resolved=resolved.name,
         fft_workers_choice=workers_choice.value,
         fft_workers_resolved=int(fft_backend.runtime_fft_workers()),
+        compute_worker_summaries=compute_worker_summaries,
+        compute_fft_worker_summaries=compute_fft_worker_summaries,
         operation_count=len(tuple(window.document.enabled_operations)),
         derived_shape=tuple(int(size) for size in window.document.current_shape),
         derived_dtype=str(window.data.dtype),

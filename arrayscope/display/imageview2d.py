@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from time import perf_counter
 import weakref
 import warnings
@@ -27,76 +26,16 @@ from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.levels import finite_bounds
 from arrayscope.display.montage_tile_layer import MontageTileLayer, TileLayerUpdateStats
+from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
+from arrayscope.display.profile_marker import ProfileMarkerOwner
+from arrayscope.display.roi_items import (
+    MovableInfoPanel,
+    default_roi_label,
+    geometry_from_item,
+    item_for_roi,
+    point_distance,
+)
 from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
-
-
-@dataclass(frozen=True)
-class MontageTileOverlay:
-    x: int
-    y: int
-    width: int
-    height: int
-    state: str
-    text: str
-
-
-class _MontageTileOverlayItem(QtWidgets.QGraphicsItem):
-    def __init__(self):
-        super().__init__()
-        self._overlays = ()
-        self.setZValue(20)
-
-    @property
-    def overlay_count(self) -> int:
-        return len(self._overlays)
-
-    def setOverlays(self, overlays: tuple[MontageTileOverlay, ...]) -> None:
-        self.prepareGeometryChange()
-        self._overlays = tuple(overlays or ())
-        self.setVisible(bool(self._overlays))
-        self.update()
-
-    def boundingRect(self):
-        if not self._overlays:
-            return QtCore.QRectF()
-        x0 = min(float(overlay.x) for overlay in self._overlays)
-        y0 = min(float(overlay.y) for overlay in self._overlays)
-        x1 = max(float(overlay.x + overlay.width) for overlay in self._overlays)
-        y1 = max(float(overlay.y + overlay.height) for overlay in self._overlays)
-        return QtCore.QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0))
-
-    def paint(self, painter, option, widget=None):
-        del option, widget
-        for overlay in self._overlays:
-            rect = QtCore.QRectF(float(overlay.x), float(overlay.y), float(overlay.width), float(overlay.height))
-            if str(overlay.state) == "skipped":
-                brush = QtGui.QColor(130, 70, 20, 95)
-                pen = QtGui.QColor(210, 130, 60, 180)
-            else:
-                brush = QtGui.QColor(35, 35, 35, 95)
-                pen = QtGui.QColor(170, 170, 170, 140)
-            painter.setBrush(QtGui.QBrush(brush))
-            painter.setPen(QtGui.QPen(pen))
-            painter.drawRect(rect)
-            self._paint_status_mark(painter, rect, str(overlay.state))
-
-    def _paint_status_mark(self, painter, rect, state: str) -> None:
-        tile_extent = min(float(rect.width()), float(rect.height()))
-        size = max(tile_extent * 0.08, min(tile_extent * 0.18, 0.35))
-        cx = float(rect.center().x())
-        cy = float(rect.center().y())
-        icon_rect = QtCore.QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
-        pen = QtGui.QPen(QtGui.QColor(245, 245, 245, 230))
-        pen.setWidthF(max(tile_extent * 0.006, size * 0.12))
-        painter.setPen(pen)
-        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        if state == "skipped":
-            painter.drawLine(icon_rect.topLeft(), icon_rect.bottomRight())
-            painter.drawLine(icon_rect.bottomLeft(), icon_rect.topRight())
-            return
-        painter.drawEllipse(icon_rect)
-        painter.drawLine(QtCore.QPointF(cx, cy), QtCore.QPointF(cx, cy - size * 0.32))
-        painter.drawLine(QtCore.QPointF(cx, cy), QtCore.QPointF(cx + size * 0.28, cy))
 
 
 class ImageView2D(QtWidgets.QWidget):
@@ -152,7 +91,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._profile_vline = None
         self._profile_hline = None
         self._profile_handle = None
-        self._profile_bounds_rect = None
+        self._profile_marker = ProfileMarkerOwner()
         self._profile_marker_callback = None
         self._profile_marker_updating = False
         self._hud_widget = None
@@ -262,6 +201,8 @@ class ImageView2D(QtWidgets.QWidget):
             "histogram_recompute_ms": 0.0,
             "level_sync_ms": 0.0,
             "rgb_window_ms": 0.0,
+            "tile_layer_upload_ms": 0.0,
+            "tile_layer_rgb_window_ms": 0.0,
             "profile_bounds_ms": 0.0,
             "visible_bytes": 0,
             "visible_pixels": 0,
@@ -291,6 +232,8 @@ class ImageView2D(QtWidgets.QWidget):
             histogram_recompute_ms=float(timing["histogram_recompute_ms"]),
             level_sync_ms=float(timing["level_sync_ms"]),
             rgb_window_ms=float(timing["rgb_window_ms"]),
+            tile_layer_upload_ms=float(timing["tile_layer_upload_ms"]),
+            tile_layer_rgb_window_ms=float(timing["tile_layer_rgb_window_ms"]),
             profile_bounds_ms=float(timing["profile_bounds_ms"]),
             visible_bytes=int(timing["visible_bytes"]),
             visible_pixels=int(timing["visible_pixels"]),
@@ -1053,27 +996,16 @@ class ImageView2D(QtWidgets.QWidget):
                 self._profile_hline.setValue(y)
 
     def setProfileMarkerBoundsRect(self, rect):
-        if rect is None:
-            self._profile_bounds_rect = None
-        else:
-            x0, y0, x1, y1 = rect
-            self._profile_bounds_rect = (float(x0), float(y0), float(x1), float(y1))
+        self._profile_marker.set_bounds_rect(rect)
         self._update_profile_line_bounds()
 
     def _clamp_profile_point(self, x, y):
         if self.image is None:
             return (float(x), float(y))
-        x0, y0, x1, y1 = self._current_profile_bounds()
-        x = max(x0, min(float(x), x1))
-        y = max(y0, min(float(y), y1))
-        return (x, y)
+        return self._profile_marker.clamp_point(self.image.shape, x, y)
 
     def _current_profile_bounds(self):
-        height, width = self.image.shape[:2]
-        x0, y0, x1, y1 = self._profile_bounds_rect or (0.0, 0.0, float(max(0, width - 1)), float(max(0, height - 1)))
-        x0, x1 = min(x0, x1), max(x0, x1)
-        y0, y1 = min(y0, y1), max(y0, y1)
-        return (float(x0), float(y0), float(x1), float(y1))
+        return self._profile_marker.current_bounds(self.image.shape)
         
     def clear(self):
         """Clear the displayed image"""
@@ -1167,7 +1099,7 @@ class ImageView2D(QtWidgets.QWidget):
     def setMontageTileOverlays(self, overlays):
         overlays = tuple(overlays or ())
         if self._montage_tile_overlay_item is None:
-            self._montage_tile_overlay_item = _MontageTileOverlayItem()
+            self._montage_tile_overlay_item = MontageTileOverlayItem()
             self.view.addItem(self._montage_tile_overlay_item)
         self._montage_tile_overlay_item.setOverlays(overlays)
         self._montage_tile_overlay_items = [self._montage_tile_overlay_item] if overlays else []
@@ -1189,7 +1121,7 @@ class ImageView2D(QtWidgets.QWidget):
                 self._roi_info_panel.hide()
             return
         if self._roi_info_panel is None:
-            self._roi_info_panel = _MovableInfoPanel(self.graphicsView)
+            self._roi_info_panel = MovableInfoPanel(self.graphicsView)
             self._roi_info_panel.move(12, 44)
         self._roi_info_panel.setText(text)
         self._roi_info_panel.adjustSize()
@@ -1242,7 +1174,7 @@ class ImageView2D(QtWidgets.QWidget):
             self.getView().unsetCursor()
 
     def createRoi(self, kind, *, points=None, rect=None, line_width=1.0, label=None, color=None):
-        kind = kind if isinstance(kind, RoiKind) else RoiKind(str(kind))
+        kind = kind if isinstance(kind, RoiKind) else RoiKind(getattr(kind, "value", kind))
         points = tuple(points or ())
         if kind == RoiKind.LINE and len(points) < 2:
             points = self._default_line_points()
@@ -1267,11 +1199,11 @@ class ImageView2D(QtWidgets.QWidget):
         color = DEFAULT_ROI_COLORS[(self._roi_counter - 1) % len(DEFAULT_ROI_COLORS)] if color is None else tuple(int(value) for value in color[:3])
         selection = RoiSelection(
             id=roi_id,
-            label=label or _default_roi_label(kind, self._roi_counter),
+            label=label or default_roi_label(kind, self._roi_counter),
             geometry=geometry,
             color=color,
         )
-        item = self._item_for_roi(selection)
+        item = item_for_roi(selection)
         self._roi_items[roi_id] = (item, selection)
         self.view.addItem(item)
         item.sigRegionChangeFinished.connect(lambda _item=item, roi_id=roi_id: self._on_roi_item_changed(roi_id))
@@ -1301,31 +1233,12 @@ class ImageView2D(QtWidgets.QWidget):
             item.setPen(pg.mkPen(selection.color + (255,), width=width))
         return roi_id in self._roi_items
 
-    def _item_for_roi(self, selection):
-        geometry = selection.geometry
-        pen = pg.mkPen(selection.color + (220,), width=2)
-        hover_pen = pg.mkPen(selection.color + (255,), width=3)
-        if geometry.kind == RoiKind.LINE:
-            return pg.LineSegmentROI(geometry.points[:2], pen=pen, hoverPen=hover_pen, movable=True)
-        if geometry.kind == RoiKind.RECTANGLE:
-            x, y, width, height = geometry.rect
-            return pg.RectROI((x, y), (width, height), pen=pen, hoverPen=hover_pen, movable=True)
-        if geometry.kind in (RoiKind.POLYLINE, RoiKind.FREEHAND_POLYGON):
-            return pg.PolyLineROI(
-                geometry.points,
-                closed=geometry.kind == RoiKind.FREEHAND_POLYGON,
-                pen=pen,
-                hoverPen=hover_pen,
-                movable=True,
-            )
-        raise ValueError(f"unsupported ROI kind: {geometry.kind}")
-
     def _on_roi_item_changed(self, roi_id):
         item_selection = self._roi_items.get(str(roi_id))
         if item_selection is None:
             return
         item, selection = item_selection
-        geometry = self._geometry_from_item(item, selection.geometry)
+        geometry = geometry_from_item(item, selection.geometry)
         updated = RoiSelection(
             id=selection.id,
             label=selection.label,
@@ -1335,22 +1248,6 @@ class ImageView2D(QtWidgets.QWidget):
         )
         self._roi_items[str(roi_id)] = (item, updated)
         self.roiChanged.emit(str(roi_id), geometry)
-
-    def _geometry_from_item(self, item, previous):
-        state = item.getState()
-        if previous.kind == RoiKind.RECTANGLE:
-            pos = state["pos"]
-            size = state["size"]
-            return RoiGeometry(previous.kind, rect=(float(pos.x()), float(pos.y()), float(size.x()), float(size.y())))
-        if previous.kind in (RoiKind.LINE, RoiKind.POLYLINE, RoiKind.FREEHAND_POLYGON):
-            pos = state.get("pos")
-            dx = 0.0 if pos is None else float(pos.x())
-            dy = 0.0 if pos is None else float(pos.y())
-            points = tuple((float(point.x()) + dx, float(point.y()) + dy) for point in state.get("points", ()))
-            if previous.kind == RoiKind.FREEHAND_POLYGON:
-                points = close_polygon(points)
-            return RoiGeometry(previous.kind, points=points, line_width=previous.line_width, closed=previous.closed)
-        return previous
 
     def _default_line_points(self):
         x, y, width, height = self._default_rect()
@@ -1441,7 +1338,7 @@ class ImageView2D(QtWidgets.QWidget):
             point = self._event_image_point(event)
             if point is None:
                 return True
-            if not self._drawing_points or _point_distance(self._drawing_points[-1], point) >= self._freehand_spacing:
+            if not self._drawing_points or point_distance(self._drawing_points[-1], point) >= self._freehand_spacing:
                 self._drawing_points.append(point)
             return True
         if event_type == QtCore.QEvent.Type.MouseButtonRelease and self._drawing_active:
@@ -1477,51 +1374,3 @@ def _coerce_viewport_policy(viewport_policy, auto_range):
     if isinstance(viewport_policy, (ViewportPolicy, ViewportIntent)):
         return viewport_policy
     return ViewportPolicy(str(viewport_policy))
-
-
-def _default_roi_label(kind, index):
-    labels = {
-        RoiKind.LINE: "Line",
-        RoiKind.RECTANGLE: "Rectangle",
-        RoiKind.POLYLINE: "Polyline",
-        RoiKind.FREEHAND_POLYGON: "Freehand",
-    }
-    return f"{labels.get(kind, 'ROI')} {int(index)}"
-
-
-def _point_distance(a, b):
-    return float(np.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1])))
-
-
-class _MovableInfoPanel(QtWidgets.QLabel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._drag_offset = None
-        self.setObjectName("RoiInfoPanel")
-        self.setWordWrap(False)
-        self.setStyleSheet(
-            "QLabel#RoiInfoPanel { background: rgba(20, 20, 20, 175); color: white; "
-            "border: 1px solid rgba(255, 255, 255, 90); border-radius: 4px; padding: 6px 8px; }"
-        )
-
-    def mousePressEvent(self, event):
-        if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self._drag_offset = event.pos()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._drag_offset is None:
-            return super().mouseMoveEvent(event)
-        next_pos = self.mapToParent(event.pos() - self._drag_offset)
-        parent = self.parentWidget()
-        if parent is not None:
-            next_pos.setX(max(0, min(next_pos.x(), parent.width() - self.width())))
-            next_pos.setY(max(0, min(next_pos.y(), parent.height() - self.height())))
-        self.move(next_pos)
-        event.accept()
-
-    def mouseReleaseEvent(self, event):
-        self._drag_offset = None
-        event.accept()

@@ -9,6 +9,7 @@ import platform
 from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
+from arrayscope.core.compute_policy import ComputeLane, EvaluationContext, compute_policy_from_settings
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.core.roi_store import RoiStore
 from arrayscope.export.workflow import ExportWorkflowMixin
@@ -64,6 +65,7 @@ class ArrayScopeWindow(
         self.app_settings = self._load_app_settings()
         self._apply_theme_choice(self.app_settings.theme, persist=False)
         self._apply_performance_settings(persist=False)
+        self.compute_policy = compute_policy_from_settings(self.app_settings)
 
         self.operation_coordinator = OperationCoordinator(data)
         self.profile_coordinator = ProfileCoordinator()
@@ -73,14 +75,14 @@ class ArrayScopeWindow(
         self._refresh_memory_policy(active_render=False)
         self._init_compare_document(data)
         self._render_generation = RenderGeneration()
-        self.visible_evaluation_controller = EvaluationController(self, max_workers=1, name="visible")
+        self.visible_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.visible_workers, name="visible")
         self.evaluation_controller = self.visible_evaluation_controller
-        self.montage_tile_evaluation_controller = EvaluationController(self, max_workers=2, name="montage")
-        self.stage_evaluation_controller = EvaluationController(self, max_workers=1, name="stage")
-        self.pixel_evaluation_controller = EvaluationController(self, max_workers=1, name="pixel")
-        self.profile_evaluation_controller = EvaluationController(self, max_workers=1, name="profile")
-        self.roi_evaluation_controller = EvaluationController(self, max_workers=1, name="roi")
-        self.prefetch_evaluation_controller = EvaluationController(self, max_workers=1, name="prefetch")
+        self.montage_tile_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.montage_tile_workers, name="montage")
+        self.stage_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.stage_workers, name="stage")
+        self.pixel_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.pixel_workers, name="pixel")
+        self.profile_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.profile_workers, name="profile")
+        self.roi_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.roi_workers, name="roi")
+        self.prefetch_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.prefetch_workers, name="prefetch")
         self.render_coordinator = RenderCoordinator(self)
         self._deferred_side_panel_refresh_pending = False
         self.data = derived_info_for(self.document)
@@ -140,6 +142,30 @@ class ArrayScopeWindow(
         if filepath is not None:
             self._file_watcher = Qt.QtCore.QFileSystemWatcher([str(filepath)])
             self._file_watcher.fileChanged.connect(self._on_file_changed)
+
+    def _evaluation_context(self, lane, token=None):
+        lane = ComputeLane(lane)
+        return EvaluationContext(
+            lane=lane,
+            cancellation_token=token,
+            fft_workers=self.compute_policy.fft_workers_for_lane(lane),
+            memory_policy=self._memory_policy(),
+        )
+
+    def _apply_compute_policy(self) -> None:
+        self.compute_policy = compute_policy_from_settings(self.app_settings)
+        controllers = {
+            ComputeLane.VISIBLE: getattr(self, "visible_evaluation_controller", None),
+            ComputeLane.MONTAGE_TILE: getattr(self, "montage_tile_evaluation_controller", None),
+            ComputeLane.STAGE: getattr(self, "stage_evaluation_controller", None),
+            ComputeLane.PREFETCH: getattr(self, "prefetch_evaluation_controller", None),
+            ComputeLane.PROFILE: getattr(self, "profile_evaluation_controller", None),
+            ComputeLane.ROI: getattr(self, "roi_evaluation_controller", None),
+            ComputeLane.PIXEL: getattr(self, "pixel_evaluation_controller", None),
+        }
+        for lane, controller in controllers.items():
+            if controller is not None:
+                controller.pool.setMaxThreadCount(self.compute_policy.workers_for_lane(lane))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

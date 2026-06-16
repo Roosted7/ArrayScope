@@ -271,8 +271,13 @@ def required_input_region_for_operation(operation, input_shape, output_region: R
     return operation.required_input_region(tuple(int(size) for size in input_shape), output_region)
 
 
-def apply_operation_to_region(operation, data, *, input_region: RegionSpec, output_region: RegionSpec):
-    return operation.apply_to_region(data, input_region=input_region, output_region=output_region)
+def apply_operation_to_region(operation, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    return operation.apply_to_region(
+        data,
+        input_region=input_region,
+        output_region=output_region,
+        evaluation_context=evaluation_context,
+    )
 
 
 def expanded_axes_for_transition(output_region: RegionSpec, required_input_region: RegionSpec, operation) -> tuple[int, ...]:

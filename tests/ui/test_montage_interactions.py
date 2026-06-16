@@ -803,3 +803,27 @@ def test_visible_render_budget_uses_app_setting():
     mixin.app_settings = AppSettingsState(render_memory_budget_mb=256)
 
     assert mixin._visible_render_budget_bytes() == 256 * 1024 * 1024
+
+
+def test_montage_memory_warning_uses_viewport_canvas_estimate(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    import arrayscope.window.montage_renderer as montage_renderer
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((512, 512, 100), dtype=np.float32)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    messages = []
+    monkeypatch.setattr(montage_renderer, "show_status_message", lambda _parent, text, **_kwargs: messages.append(str(text)))
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **_kwargs: None)
+    try:
+        win.app_settings = AppSettingsState(render_memory_budget_mb=128)
+        _process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=10, indices=tuple(range(100)), text=":"))
+        win.update_montage_view()
+
+        assert not any("Montage would allocate" in message for message in messages)
+        assert not any("Montage viewport canvas would allocate" in message for message in messages)
+    finally:
+        win.close()

@@ -154,6 +154,7 @@ def _scipy_or_numpy_backend() -> FFTBackend:
 def _normalize_backend_choice(value) -> FFTBackendChoice:
     if isinstance(value, FFTBackendChoice):
         return value
+    value = getattr(value, "value", value)
     try:
         return FFTBackendChoice(str(value))
     except Exception:
@@ -163,6 +164,7 @@ def _normalize_backend_choice(value) -> FFTBackendChoice:
 def _normalize_workers_choice(value) -> FFTWorkersChoice:
     if isinstance(value, FFTWorkersChoice):
         return value
+    value = getattr(value, "value", value)
     try:
         return FFTWorkersChoice(str(value))
     except Exception:

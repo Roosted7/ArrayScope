@@ -42,6 +42,9 @@ source of array-view state.
   reusable stage materialization. It is owned by `OperationEvaluator`, deduplicates in-flight
   expanded stage requests by `StageKey`, records stage decision diagnostics, and refuses oversized
   candidates without forcing them into `StageCache`.
+- `arrayscope.operations.chunked_stage`: Qt-free reusable-stage materialization helper that chunks
+  only over non-blocking axes, preserves full FFT/blocking axes, checks cancellation between chunks,
+  and stores only a complete final `StageValue`.
 - `arrayscope.core.memory_policy`: Qt-free runtime memory policy. It samples system total,
   available memory, and process RSS through psutil with a deterministic fallback, then derives visible
   render, montage canvas/tile, image cache, montage tile cache, profile cache, future stage-cache, and
@@ -50,6 +53,9 @@ source of array-view state.
   owned by `MemoryPolicy`, not static constants.
 - `arrayscope.core.runtime_diagnostics`: Qt-free diagnostics snapshots and plain-text formatting for
   memory policy, caches, schedulers, render decisions, montage state, FFT, and operation state.
+- `arrayscope.core.compute_policy`: Qt-free lane worker policy. It derives per-lane Qt worker counts
+  and FFT worker counts from runtime settings so visible/stage work can use capped multi-worker FFTs
+  while montage tile and prefetch lanes avoid native-worker oversubscription.
 - `arrayscope.operations.fft_backend`: FFT backend abstraction and worker-count runtime settings.
   `auto` resolves to SciPy when available, with NumPy fallback and an optional pyFFTW backend when
   explicitly selected and importable. The centered FFT/IFFT naming follows ArrayScope's MRI/k-space
@@ -92,6 +98,10 @@ source of array-view state.
   state so known-clean tile-layer flushes skip pixel uploads entirely, dirty flushes update only the
   affected tile items, all-cached newly composed sessions can reuse unchanged rendered tile sources,
   and RGB/complex level changes reuse cached float32 tile bases.
+- `arrayscope.display.overlays`, `arrayscope.display.roi_items`, and
+  `arrayscope.display.profile_marker`: focused Qt display helpers for montage/loading overlays, ROI
+  graphics item conversion, ROI info panels, and profile marker bounds. `ImageView2D` keeps the
+  widget-facing API and delegates concrete helper ownership to these modules.
 - `arrayscope.window.presentation`: Qt-free display presentation decisions. It normalizes
   window/level bounds, keeps display levels separate from histogram/data ranges, accepts accumulated
   semantic montage tile coverage as provisional level sources, and is the only place that chooses
@@ -111,6 +121,13 @@ source of array-view state.
 - `arrayscope.window.diagnostics_snapshot`: window-owned runtime diagnostics snapshot construction.
   Menu code opens the diagnostics dialog only; it does not assemble scheduler, cache, render, montage,
   operation, or upload timing snapshots.
+- `arrayscope.window.stage_warmup`: idle-only reusable stage warmup. It uses the stage-cache budget,
+  schedules on the stage lane with a stage `EvaluationContext`, attaches to existing singleflight
+  requests, and records the latest warmup decision for diagnostics.
+- `arrayscope.window.montage_prefetch`: stage-aware rendered montage tile prefetch. It predicts
+  nearby tiles after visible montage commits, schedules only on the prefetch lane, requires expensive
+  operation stages to be cached or in-flight, and refuses paths that would recompute the same FFT once
+  per predicted tile.
 - `arrayscope.window.display_frame`: committed display-frame keys and value source ownership for
   hover/status.
 - `arrayscope.window.montage_levels`: semantic montage histogram coverage tracking keyed by montage
@@ -187,7 +204,9 @@ refreshes run only on full commits or after the interaction burst is quiet. Mont
 uses a dedicated `montage` scheduler lane with two workers. Shared expanded operation stages use a
 separate max-1 `stage` lane and are materialized before cold dependent tiles are rendered. Visible
 exact image rendering remains latest-only on the max-1 `visible` lane and prefetch remains idle-only
-on the separate `prefetch` lane.
+on the separate `prefetch` lane. `ComputePolicy` supplies these lane widths and the FFT worker count
+attached to each `EvaluationContext`: visible and stage lanes can use the capped runtime FFT worker
+count, while montage tile and prefetch lanes use one FFT worker by default.
 
 Display upload is a UI-thread phase separate from render/evaluation. `ImageView2D` measures visible
 image upload, histogram plot upload, histogram recompute, RGB re-windowing, level synchronization, and
@@ -203,7 +222,19 @@ that must skip tile image data uploads when item state is unchanged, and non-emp
 those dirty loaded tiles plus newly visible or missing items. Source identities are derived from the
 rendered tile cache payload rather than the transient composed canvas, so an all-cached montage session
 can avoid re-uploading and re-windowing the same tile items even when the viewport canvas is rebuilt.
-Tile-layer diagnostics report visible, updated, skipped, and RGB-windowed item counts.
+Tile-layer diagnostics report visible, updated, skipped, and RGB-windowed item counts. They also
+split aggregate upload/windowing timings from tile-layer-specific upload and RGB-windowing timings so
+hot clean tile-layer commits can be verified as zero pixel-upload work.
+Tile-layer RGB source bases are a bounded helper cache, not a second rendered-tile cache: older
+float32 bases may be pruned while the displayed tile image remains intact. Clean unchanged-level
+commits still skip uploads; level-changing presentation commits re-window from retained bases or from
+the current canvas for pruned tiles.
+
+Predictive compute is stage-aware. Stage warmup runs only while visible work is idle and only when a
+retained cacheable candidate fits the stage-cache budget. Rendered tile and next-slice prefetch run
+only while idle; expensive FFT-backed prefetch is allowed only when the required reusable stage is
+already cached or in-flight. Otherwise the prefetch path records a skip decision instead of computing
+the same expanded transform separately for each predicted output.
 
 `render()` then:
 

@@ -6,6 +6,7 @@ import numpy as np
 import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.colormaps import gray_colormap, phase_colormap
 from arrayscope.display.viewport import ViewportPolicy
@@ -153,12 +154,14 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             return
 
         def evaluate():
+            eval_context = self._evaluation_context(ComputeLane.PIXEL, None)
             return evaluate_scalar_snapshot(
                 document,
                 view_state,
                 index,
                 stage_cache=self.operation_evaluator.stage_cache,
                 stage_document_key=stage_document_key(document),
+                evaluation_context=eval_context,
             )
 
         request_key = self.operation_evaluator.scalar_key(view_state, index, document=document)
@@ -294,6 +297,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             return
 
         def evaluate():
+            eval_context = self._evaluation_context(ComputeLane.PROFILE, None)
             return tuple(
                 (
                     profile_state,
@@ -302,6 +306,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
                         profile_state,
                         stage_cache=self.operation_evaluator.stage_cache,
                         stage_document_key=stage_document_key(document),
+                        evaluation_context=eval_context,
                     ),
                 )
                 for profile_state in profile_states
@@ -595,6 +600,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             return
 
         def evaluate():
+            eval_context = self._evaluation_context(ComputeLane.PROFILE, None)
             return tuple(
                 (
                     profile_state,
@@ -603,6 +609,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
                         profile_state,
                         stage_cache=self.operation_evaluator.stage_cache,
                         stage_document_key=stage_document_key(document),
+                        evaluation_context=eval_context,
                     ),
                 )
                 for profile_state in profile_states

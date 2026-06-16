@@ -204,6 +204,24 @@ def test_imageview2d_owns_internal_montage_tile_layer_path():
     assert "montageDisplayMode" in text
 
 
+def test_imageview2d_display_ownership_helpers_are_split_out():
+    text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
+    assert "class _MontageTileOverlayItem" not in text
+    assert "class MontageTileOverlayItem" in (ROOT / "arrayscope" / "display" / "overlays.py").read_text()
+    assert "def item_for_roi" in (ROOT / "arrayscope" / "display" / "roi_items.py").read_text()
+    assert "class ProfileMarkerOwner" in (ROOT / "arrayscope" / "display" / "profile_marker.py").read_text()
+
+
+def test_predictive_compute_modules_exist():
+    for rel in (
+        Path("arrayscope/core/compute_policy.py"),
+        Path("arrayscope/window/stage_warmup.py"),
+        Path("arrayscope/window/montage_prefetch.py"),
+        Path("arrayscope/operations/chunked_stage.py"),
+    ):
+        assert (ROOT / rel).exists()
+
+
 def test_histogram_imageitem_binding_is_centralized():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
     assert "def _bind_histogram_item" in text
@@ -436,7 +454,9 @@ def test_normal_renderer_uses_render_decision_helper():
 
 def test_visible_controller_remains_single_worker():
     text = (ROOT / "arrayscope" / "window" / "main.py").read_text()
-    assert 'EvaluationController(self, max_workers=1, name="visible")' in text
+    policy_text = (ROOT / "arrayscope" / "core" / "compute_policy.py").read_text()
+    assert 'EvaluationController(self, max_workers=self.compute_policy.visible_workers, name="visible")' in text
+    assert "visible_workers=1" in policy_text
 
 
 def test_degraded_preview_is_not_stored_in_exact_image_cache():

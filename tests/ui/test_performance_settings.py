@@ -58,6 +58,11 @@ def test_selecting_fft_workers_updates_settings(qtbot):
         _submenu_action(win, "Performance", "FFT Workers", "2").trigger()
         _process_events(qtbot)
         assert win.app_settings.fft_workers == FFTWorkersChoice.TWO
+        assert win.compute_policy.fft_workers_visible == 2
+        assert win.compute_policy.fft_workers_stage == 2
+        assert win.compute_policy.fft_workers_tile == 1
+        assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.montage_tile_workers
+        assert win.stage_evaluation_controller.pool.maxThreadCount() == win.compute_policy.stage_workers
     finally:
         win.close()
 

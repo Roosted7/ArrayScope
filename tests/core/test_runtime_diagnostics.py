@@ -10,6 +10,8 @@ from arrayscope.core.runtime_diagnostics import (
     format_runtime_diagnostics,
 )
 from arrayscope.operations.stage_cache import StageCacheDiagnostics
+from arrayscope.window.stage_warmup import StageWarmupDecision
+from arrayscope.window.montage_prefetch import MontagePrefetchDecision
 from arrayscope.core.scheduler import SchedulerDiagnostics
 
 
@@ -45,12 +47,16 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
         montage=MontageRuntimeDiagnostics(active=False, display_mode="tile_layer"),
         canvas_preserve=CanvasPreserveRuntimeDiagnostics(events=("start gen=1",)),
         render_timing=RenderTimingDiagnostics(last_render_sync_ms=1.25),
+        stage_warmup=StageWarmupDecision("scheduled", candidate_bytes=128, budget_bytes=1024, reason="tiles wait for shared stage"),
+        montage_prefetch=(MontagePrefetchDecision(12, 12, "skipped_stage_missing", "would recompute expensive stage per tile"),),
         montage_timing=MontageTimingDiagnostics(
             last_canvas_compose_ms=2.5,
             last_visible_upload_ms=10.0,
             last_histogram_upload_ms=5.0,
             last_histogram_recompute_ms=3.0,
             last_rgb_window_ms=2.0,
+            last_tile_layer_upload_ms=0.25,
+            last_tile_layer_rgb_window_ms=1.5,
             last_level_sync_ms=1.0,
             cached_tiles_last_session=3,
             missing_tiles_last_session=4,
@@ -67,6 +73,8 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
         fft_backend_resolved="numpy",
         fft_workers_choice="auto",
         fft_workers_resolved=1,
+        compute_worker_summaries=("visible=1", "montage_tile=2"),
+        compute_fft_worker_summaries=("visible=4", "montage_tile=1"),
         operation_count=0,
         derived_shape=(4, 5),
         derived_dtype="float32",
@@ -81,7 +89,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
 
     text = format_runtime_diagnostics(snapshot)
 
-    for heading in ("Memory", "Caches", "Schedulers", "Render", "Canvas Preserve", "Montage", "FFT", "Operations"):
+    for heading in ("Memory", "Caches", "Schedulers", "Render", "Canvas Preserve", "Montage", "FFT", "Compute", "Operations"):
         assert heading in text
     assert "hit-rate=n/a" in text
     assert "start gen=1" in text
@@ -92,8 +100,10 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "removed Conjugate pair" in text
     assert "stage 1 CenteredFFT" in text
     assert "Stage cache:" in text
+    assert "Stage warmup: decision=scheduled" in text
     assert "Stage cache last miss: stage=1" in text
     assert "Stage cache last store: stage=1" in text
+    assert "Montage prefetch: tile=12 source=12 decision=skipped_stage_missing reason=would recompute expensive stage per tile" in text
     assert "Coalescer: pending=False, interactive=False" in text
     assert "Timing render sync: 1.25 ms" in text
     assert "Timing worker queue wait: n/a" in text
@@ -103,9 +113,13 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Timing histogram upload: 5.00 ms" in text
     assert "Timing histogram recompute: 3.00 ms" in text
     assert "Timing RGB window: 2.00 ms" in text
+    assert "Timing tile layer upload: 0.25 ms" in text
+    assert "Timing tile layer RGB window: 1.50 ms" in text
     assert "Timing level sync: 1.00 ms" in text
     assert "Coalesced montage commits: 7" in text
     assert "Tile layer items: visible=50 updated=1 skipped=49" in text
     assert "Tile layer RGB window tiles: 1" in text
     assert "Upload: visible=1.0 KiB histogram=512 B same object=True" in text
     assert "Tile cache last session: cached=3 missing=4" in text
+    assert "Workers: visible=1, montage_tile=2" in text
+    assert "FFT workers: visible=4, montage_tile=1" in text

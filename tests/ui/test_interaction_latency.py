@@ -32,6 +32,59 @@ def test_rapid_slice_burst_is_coalesced_and_latest(qtbot, monkeypatch):
         win.close()
 
 
+def test_slice_control_updates_before_render_completion(qtbot, monkeypatch):
+    clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=np.float32).reshape(4, 5, 8))
+    qtbot.addWidget(win)
+    render_calls = []
+
+    def blocked_render(**kwargs):
+        render_calls.append((kwargs, win.view_state.slice_indices[2]))
+
+    monkeypatch.setattr(win, "render", blocked_render)
+    try:
+        win._on_slice_index_changed(2, 4)
+
+        assert render_calls == []
+        assert win.view_state.slice_indices[2] == 4
+        assert win.widgets["spins"]["slice_indices"][2].value() == 4
+        assert win.dimension_strip.chip(2).slice_edit.text() == "4"
+
+        qtbot.waitUntil(lambda: bool(render_calls), timeout=500)
+        assert render_calls[-1][1] == 4
+    finally:
+        win.close()
+
+
+def test_rapid_scroll_latest_control_state_not_blocked_by_slow_commit(qtbot, monkeypatch):
+    clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=np.float32).reshape(4, 5, 8))
+    qtbot.addWidget(win)
+    render_calls = []
+
+    def recording_render(**kwargs):
+        render_calls.append((kwargs.get("reason"), win.view_state.slice_indices[2]))
+
+    monkeypatch.setattr(win, "render", recording_render)
+    try:
+        for index in (1, 2, 3, 6):
+            win._on_slice_index_changed(2, index)
+            assert win.view_state.slice_indices[2] == index
+            assert win.widgets["spins"]["slice_indices"][2].value() == index
+            assert win.dimension_strip.chip(2).slice_edit.text() == str(index)
+
+        assert render_calls == []
+        qtbot.waitUntil(lambda: bool(render_calls), timeout=500)
+        assert render_calls[-1] == ("slice", 6)
+        assert len(render_calls) < 4
+    finally:
+        win.close()
+
+
 def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, monkeypatch):
     clear_arrayscope_settings()
     from arrayscope.display.montage import make_montage_plan
@@ -101,6 +154,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
         assert timing.tile_layer_visible_items == 2
         assert timing.tile_layer_items_updated == 0
         assert timing.tile_layer_items_skipped == 2
+        assert timing.tile_layer_upload_ms == 0.0
         assert timing.visible_bytes == 0
 
         win._commit_montage_session_canvas(win._montage_session, force=True)
@@ -110,6 +164,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
         assert timing.tile_layer_visible_items == 2
         assert timing.tile_layer_items_updated == 0
         assert timing.tile_layer_items_skipped == 2
+        assert timing.tile_layer_upload_ms == 0.0
         assert timing.visible_bytes == 0
     finally:
         win.close()
