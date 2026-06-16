@@ -24,8 +24,9 @@ def test_centered_fft_ifft_round_trip_preserves_existing_viewer_convention():
     np.testing.assert_allclose(result, data, atol=1e-6)
 
 
-def test_resolve_fft_workers_auto_is_conservative():
-    assert fft_backend.resolve_fft_workers("auto", cpu_count=16) == 4
+def test_resolve_fft_workers_auto_uses_half_machine_with_cap():
+    assert fft_backend.resolve_fft_workers("auto", cpu_count=16) == 8
+    assert fft_backend.resolve_fft_workers("auto", cpu_count=32) == 8
     assert fft_backend.resolve_fft_workers("auto", cpu_count=2) == 1
 
 

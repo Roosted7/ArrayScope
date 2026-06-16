@@ -72,15 +72,17 @@ def compute_policy_from_settings(settings, *, cpu_count: int | None = None) -> C
     count = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
     choice = normalize_fft_workers_choice(getattr(settings, "fft_workers", FFTWorkersChoice.AUTO))
     resolved = int(fft_backend.resolve_fft_workers(choice.value, cpu_count=count))
-    visible_fft = max(1, min(4, resolved))
-    stage_fft = max(1, min(4, resolved))
+    visible_fft = max(1, min(8, resolved))
+    stage_fft = max(1, min(8, resolved))
     explicit_aggressive = choice == FFTWorkersChoice.ALL_MINUS_ONE
-    tile_workers = 2
     tile_fft = 1
     product_limit = max(2, count // 2)
+    tile_workers = max(2, min(8, product_limit))
     if not explicit_aggressive:
         while tile_workers * tile_fft > product_limit and tile_workers > 1:
             tile_workers -= 1
+    else:
+        tile_workers = max(tile_workers, min(max(2, count - 2), 12))
     return ComputePolicy(
         visible_workers=1,
         montage_tile_workers=max(1, tile_workers),

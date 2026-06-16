@@ -68,7 +68,7 @@ class _PrefetchRunnable(Qt.QtCore.QRunnable):
 
 
 class EvaluationController(Qt.QtCore.QObject):
-    def __init__(self, parent=None, *, max_workers=None, name="evaluation"):
+    def __init__(self, parent=None, *, max_workers=None, name="evaluation", max_callback_dispatch_per_drain: int = 4):
         super().__init__(parent)
         self.name = str(name)
         self.pool = Qt.QtCore.QThreadPool(self)
@@ -96,6 +96,7 @@ class EvaluationController(Qt.QtCore.QObject):
         self._prefetch_idle_blocked_count = 0
         self._prefetch_visible_busy_blocked_count = 0
         self._prefetch_cost_blocked_count = 0
+        self._max_callback_dispatch_per_drain = max(1, int(max_callback_dispatch_per_drain))
         self._queue = SimpleQueue()
         self._poll_timer = Qt.QtCore.QTimer(self)
         self._poll_timer.setInterval(10)
@@ -284,6 +285,7 @@ class EvaluationController(Qt.QtCore.QObject):
             self._poll_timer.start()
 
     def _drain_queue(self):
+        dispatched_callbacks = 0
         while not self._queue.empty():
             kind, key, value = self._queue.get()
             if kind == "started":
@@ -302,6 +304,9 @@ class EvaluationController(Qt.QtCore.QObject):
                         on_done(value)
                     except Exception as exc:
                         handle_ui_exception("prefetch callback", exc)
+                    dispatched_callbacks += 1
+                    if dispatched_callbacks >= self._max_callback_dispatch_per_drain:
+                        break
                 continue
             if kind == "prefetch_failed":
                 self._prefetch_keys.discard(key)
@@ -310,9 +315,13 @@ class EvaluationController(Qt.QtCore.QObject):
                 continue
             if kind == "finished":
                 self._finish(key, value)
+                dispatched_callbacks += 1
             elif kind == "failed":
                 self._fail(key, value)
-        if not self._runnables:
+                dispatched_callbacks += 1
+            if dispatched_callbacks >= self._max_callback_dispatch_per_drain:
+                break
+        if not self._runnables and self._queue.empty():
             self._poll_timer.stop()
 
     def _finish(self, generation, value):

@@ -9,6 +9,8 @@ from typing import Callable
 import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 
+from arrayscope.display.image_upload import rgb_display_for_levels
+
 
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 
@@ -211,8 +213,10 @@ class MontageTileLayer:
             rgb_window_tiles=int(rgb_window_tiles),
         )
 
-    def update_levels(self, levels) -> TileLayerUpdateStats:
+    def update_levels(self, levels, *, image=None, histogram_data=None) -> TileLayerUpdateStats:
         levels = (float(levels[0]), float(levels[1]))
+        image_array = None if image is None else np.asarray(image)
+        hist_array = None if histogram_data is None else np.asarray(histogram_data)
         visible_items = 0
         items_updated = 0
         items_skipped = 0
@@ -221,11 +225,12 @@ class MontageTileLayer:
             if not state.visible:
                 continue
             visible_items += 1
-            updated, windowed = self._update_tile_levels(state, levels)
+            updated, windowed = self._update_tile_levels(state, levels, image=image_array, histogram_data=hist_array)
             items_updated += int(updated)
             rgb_window_tiles += int(windowed)
             if not updated:
                 items_skipped += 1
+            self._prune_rgb_source_cache()
         return TileLayerUpdateStats(visible_items, items_updated, items_skipped, rgb_window_tiles)
 
     def _hide_tile(self, tile_number: int) -> None:
@@ -272,7 +277,7 @@ class MontageTileLayer:
                 rgb_start = perf_counter()
                 base = np.asarray(tile_data)[..., :3].astype(np.float32, copy=False)
                 hist = np.asarray(tile_hist, dtype=np.float32)
-                display = self._rgb_display_for_levels(base, hist, levels)
+                display = rgb_display_for_levels(base, hist, levels)
                 rgb_ms = (perf_counter() - rgb_start) * 1000.0
                 self._record_upload_timing("rgb_window_ms", rgb_ms)
                 self._record_upload_timing("tile_layer_rgb_window_ms", rgb_ms)
@@ -306,10 +311,21 @@ class MontageTileLayer:
         state.visible = True
         return True, windowed
 
-    def _update_tile_levels(self, state: TileLayerItemState, levels: tuple[float, float]) -> tuple[bool, bool]:
+    def _update_tile_levels(
+        self,
+        state: TileLayerItemState,
+        levels: tuple[float, float],
+        *,
+        image=None,
+        histogram_data=None,
+    ) -> tuple[bool, bool]:
+        if state.rgb_base is None and state.hist_source is None and state.display_cache is not None:
+            rebuilt = self._set_tile_data_from_current_source(state, levels, image=image, histogram_data=histogram_data)
+            if rebuilt is not None:
+                return rebuilt
         if state.rgb_base is not None and state.hist_source is not None:
             rgb_start = perf_counter()
-            display = self._rgb_display_for_levels(state.rgb_base, state.hist_source, levels)
+            display = rgb_display_for_levels(state.rgb_base, state.hist_source, levels)
             rgb_ms = (perf_counter() - rgb_start) * 1000.0
             self._record_upload_timing("rgb_window_ms", rgb_ms)
             self._record_upload_timing("tile_layer_rgb_window_ms", rgb_ms)
@@ -321,19 +337,48 @@ class MontageTileLayer:
             self._record_upload_timing("tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0)
             return True, True
         if state.display_cache is not None:
-            state.item.setLevels((0, 255))
-            state.levels = levels
+            if state.rgb_already_windowed:
+                state.item.setLevels((0, 255))
+                state.levels = levels
             return False, False
         state.item.setLevels(self._histogram_levels_for_display(levels))
         state.levels = levels
         return False, False
 
-    def _rgb_display_for_levels(self, base, histogram_data, levels):
-        low, high = levels
-        span = max(float(high) - float(low), 1e-12)
-        intensity = np.clip((np.asarray(histogram_data, dtype=np.float32) - float(low)) / span, 0.0, 1.0)
-        intensity = np.nan_to_num(intensity, nan=0.0, posinf=1.0, neginf=0.0)
-        return np.clip(np.asarray(base, dtype=np.float32) * intensity[..., np.newaxis], 0, 255).astype(np.uint8)
+    def _set_tile_data_from_current_source(
+        self,
+        state: TileLayerItemState,
+        levels: tuple[float, float],
+        *,
+        image,
+        histogram_data,
+    ) -> tuple[bool, bool] | None:
+        if state.rgb_already_windowed or image is None or histogram_data is None:
+            return None
+        x, y, width, height = tuple(int(value) for value in state.local_rect)
+        if width <= 0 or height <= 0:
+            return None
+        image_array = np.asarray(image)
+        hist_array = np.asarray(histogram_data)
+        if y < 0 or x < 0 or y + height > image_array.shape[0] or x + width > image_array.shape[1]:
+            return None
+        if y + height > hist_array.shape[0] or x + width > hist_array.shape[1]:
+            return None
+        tile_data = image_array[y : y + height, x : x + width, ...]
+        if not self._is_rgb_image(tile_data):
+            return None
+        tile_hist = hist_array[y : y + height, x : x + width]
+        return self._set_tile_data(
+            state,
+            tile_data,
+            tile_hist,
+            levels,
+            source_index=state.source_index,
+            source_array_id=state.source_array_id,
+            histogram_array_id=state.histogram_array_id,
+            local_rect=state.local_rect,
+            rgb_already_windowed=False,
+        )
 
     def _touch_rgb_source_cache(self, state: TileLayerItemState) -> None:
         if state.rgb_base is None and state.hist_source is None:

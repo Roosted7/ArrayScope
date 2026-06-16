@@ -48,11 +48,12 @@ def plan_chunked_stage_materialization(
     if not _region_is_simple_full(candidate.region):
         return None
     if allowed_chunk_axes is None:
-        return None
+        allowed_chunk_axes = stage_materialization_allowed_chunk_axes(candidate.shape)
     allowed = {int(axis) for axis in tuple(allowed_chunk_axes)}
     if not allowed:
         return None
-    target = int(target_chunk_bytes or min(256 * 1024 * 1024, max(32 * 1024 * 1024, int(getattr(memory_policy, "stage_cache_budget_bytes", 0) or 0) // 4)))
+    stage_budget = int(getattr(memory_policy, "stage_cache_budget_bytes", 0) or 0)
+    target = int(target_chunk_bytes or (stage_budget if stage_budget > 0 else 256 * 1024 * 1024))
     total = candidate.estimated_nbytes
     if total is None or int(total) <= target:
         return None
@@ -88,6 +89,23 @@ def plan_chunked_stage_materialization(
         return None
     estimated = int(region_nbytes(candidate.shape, candidate.dtype, chunks[0]) or min(int(total), target))
     return StageChunkPlan(candidate=candidate, chunk_axes=(int(axis),), blocking_axes=blocking_axes, chunks=tuple(chunks), estimated_chunk_bytes=estimated)
+
+
+def stage_materialization_allowed_chunk_axes(shape, *, preferred_axes=None) -> tuple[int, ...]:
+    ndim = len(tuple(shape))
+    if preferred_axes is None:
+        return tuple(range(ndim))
+    result = []
+    for axis in tuple(preferred_axes):
+        axis = int(axis)
+        if axis < 0 or axis >= ndim:
+            raise ValueError(f"axis {axis} is out of range for ndim {ndim}")
+        if axis not in result:
+            result.append(axis)
+    for axis in range(ndim):
+        if axis not in result:
+            result.append(axis)
+    return tuple(result)
 
 
 def materialize_stage_candidate_chunked(

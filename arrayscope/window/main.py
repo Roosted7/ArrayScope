@@ -10,6 +10,7 @@ from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
 from arrayscope.core.compute_policy import ComputeLane, EvaluationContext, compute_policy_from_settings
+from arrayscope.core.latency_feedback import LatencyFeedbackController
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.core.roi_store import RoiStore
 from arrayscope.export.workflow import ExportWorkflowMixin
@@ -66,6 +67,7 @@ class ArrayScopeWindow(
         self._apply_theme_choice(self.app_settings.theme, persist=False)
         self._apply_performance_settings(persist=False)
         self.compute_policy = compute_policy_from_settings(self.app_settings)
+        self.latency_feedback = LatencyFeedbackController()
 
         self.operation_coordinator = OperationCoordinator(data)
         self.profile_coordinator = ProfileCoordinator()
@@ -77,7 +79,12 @@ class ArrayScopeWindow(
         self._render_generation = RenderGeneration()
         self.visible_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.visible_workers, name="visible")
         self.evaluation_controller = self.visible_evaluation_controller
-        self.montage_tile_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.montage_tile_workers, name="montage")
+        self.montage_tile_evaluation_controller = EvaluationController(
+            self,
+            max_workers=self.compute_policy.montage_tile_workers,
+            name="montage",
+            max_callback_dispatch_per_drain=8,
+        )
         self.stage_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.stage_workers, name="stage")
         self.pixel_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.pixel_workers, name="pixel")
         self.profile_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.profile_workers, name="profile")

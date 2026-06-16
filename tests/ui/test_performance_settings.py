@@ -40,6 +40,7 @@ def test_performance_menu_exists(qtbot):
         assert _menu(win, "Performance") is not None
         assert _submenu_action(win, "Performance", "Memory Profile", "Balanced") is not None
         assert _submenu_action(win, "Performance", "Render Memory Budget", "128 MiB") is not None
+        assert _submenu_action(win, "Performance", "Montage Display Backend", "Auto") is not None
         assert _menu_action(win, "Performance", "Use Less Memory") is not None
         assert _menu_action(win, "Performance", "Use More Memory") is not None
     finally:
@@ -63,6 +64,22 @@ def test_selecting_fft_workers_updates_settings(qtbot):
         assert win.compute_policy.fft_workers_tile == 1
         assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.montage_tile_workers
         assert win.stage_evaluation_controller.pool.maxThreadCount() == win.compute_policy.stage_workers
+    finally:
+        win.close()
+
+
+def test_selecting_montage_backend_updates_settings(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        _submenu_action(win, "Performance", "Montage Display Backend", "Tile layer").trigger()
+        _process_events(qtbot)
+        assert win.app_settings.montage_display_backend == MontageDisplayBackendChoice.TILE_LAYER
     finally:
         win.close()
 

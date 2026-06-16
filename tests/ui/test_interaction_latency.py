@@ -1,4 +1,5 @@
 import numpy as np
+from dataclasses import replace
 
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.evaluator import EvaluationResult
@@ -119,6 +120,7 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, monkeypatch):
 
 def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch):
     clear_arrayscope_settings()
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.window import ArrayScopeWindow
 
@@ -137,7 +139,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
             )
         calls = []
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
-        win._montage_tile_layer_policy = lambda _geometry, _data: True
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
 
         win._set_view_state(state)
         win.update_montage_view()

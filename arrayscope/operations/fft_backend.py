@@ -124,7 +124,7 @@ def resolve_fft_workers(choice: FFTWorkersChoice | str, *, cpu_count: int | None
         return 4
     if choice == FFTWorkersChoice.ALL_MINUS_ONE:
         return max(1, count - 1)
-    return min(4, max(1, count // 2))
+    return min(8, max(1, count // 2))
 
 
 def set_fft_runtime_options(*, backend: FFTBackendChoice | str, workers: FFTWorkersChoice | str) -> None:

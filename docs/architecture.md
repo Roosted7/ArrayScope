@@ -45,9 +45,11 @@ source of array-view state.
   reusable stage materialization. It is owned by `OperationEvaluator`, deduplicates in-flight
   expanded stage requests by `StageKey`, records stage decision diagnostics, and refuses oversized
   candidates without forcing them into `StageCache`.
-- `arrayscope.operations.chunked_stage`: Qt-free reusable-stage materialization helper that chunks
-  only over non-blocking axes, preserves full FFT/blocking axes, checks cancellation between chunks,
-  and stores only a complete final `StageValue`.
+- `arrayscope.operations.chunked_stage`: Qt-free reusable-stage materialization helper that chooses
+  allowed chunk axes independently from view image axes, then chunks only over operation non-blocking
+  axes. Blocking axes such as FFT axes remain complete in every chunk. A reusable stage that already
+  fits the stage-cache budget is materialized unchunked by default because chunking reduces peak
+  memory but can be slower when the same full stage must still be stored.
 - `arrayscope.core.memory_policy`: Qt-free runtime memory policy. It samples system total,
   available memory, and process RSS through psutil with a deterministic fallback, then derives visible
   render, montage canvas/tile, image cache, montage tile cache, profile cache, future stage-cache, and
@@ -96,6 +98,10 @@ source of array-view state.
   montage commits may use an internal exact tile-layer display path: the committed canvas remains the
   hover/value source, while per-tile `ImageItem`s paint the visible loaded tiles so progressive
   updates do not upload a full canvas for every tile.
+- `arrayscope.display.histogram_controller` and `arrayscope.display.image_upload`: focused display
+  helpers for histogram preview/final level interaction, ImageItem upload preparation, and shared
+  RGB/complex windowing. Histogram level drags update display pixels as a throttled preview, while
+  `userLevelsChanged` remains the semantic final user edit signal emitted on drag finish.
 - `arrayscope.display.montage_tile_layer`: Qt display helper owned by `ImageView2D` for exact
   per-tile montage painting. It keeps per-item source, histogram, local-rect, level, and RGB-windowing
   state so known-clean tile-layer flushes skip pixel uploads entirely, dirty flushes update only the
@@ -124,6 +130,10 @@ source of array-view state.
 - `arrayscope.window.diagnostics_snapshot`: window-owned runtime diagnostics snapshot construction.
   Menu code opens the diagnostics dialog only; it does not assemble scheduler, cache, render, montage,
   operation, or upload timing snapshots.
+- `arrayscope.window.montage_backend`: explicit montage display backend policy. The Performance menu
+  stores Auto, Tile layer, or Canvas fallback. Auto keeps small/scalar montages on canvas, sends large
+  RGB/complex montages and slow upload paths to tile-layer painting, and records the chosen backend,
+  reason, fallback, and any warning in diagnostics.
 - `arrayscope.window.stage_warmup`: idle-only reusable stage warmup. It uses the stage-cache budget,
   schedules on the stage lane with a stage `EvaluationContext`, attaches to existing singleflight
   requests, and records the latest warmup decision for diagnostics.
@@ -204,19 +214,33 @@ not the hover/status value source until a successful display commit records a co
 Progressive commits update pixels, display geometry, axis flips, viewport preservation, the committed
 display frame, and montage loading/skipped overlays; side panels and expensive dock/profile/ROI
 refreshes run only on full commits or after the interaction burst is quiet. Montage tile evaluation
-uses a dedicated `montage` scheduler lane with two workers. Shared expanded operation stages use a
-separate max-1 `stage` lane and are materialized before cold dependent tiles are rendered. Visible
+uses a dedicated `montage` scheduler lane sized by `ComputePolicy` (auto uses roughly half the CPU,
+capped, with one FFT worker per tile). Shared expanded operation stages use a
+separate max-1 `stage` lane and are materialized before most cold dependent tiles are rendered; one
+lead visible tile may render directly while a cold stage warms so the montage does not appear frozen
+behind a single reusable-stage job. If an attached stage is no longer cached or in-flight, waiting
+tiles fall back to direct tile evaluation instead of remaining in a loading state. Visible
 exact image rendering remains latest-only on the max-1 `visible` lane and prefetch remains idle-only
 on the separate `prefetch` lane. `ComputePolicy` supplies these lane widths and the FFT worker count
 attached to each `EvaluationContext`: visible and stage lanes can use the capped runtime FFT worker
-count, while montage tile and prefetch lanes use one FFT worker by default.
+count (auto resolves to up to half the machine, capped at eight workers), while montage tile and
+prefetch lanes use one FFT worker by default.
+
+UI-thread fan-in is governed by `LatencyFeedbackController`, not fixed duration tiers. Subsystems
+record measured costs under named channels and ask the controller for a work budget, batch limit, or
+commit interval. Montage uses `montage_tile_result` to decide how many completed tile results to
+patch in one UI tick and `montage_commit` to decide how quickly to flush canvas/display updates. This
+keeps worker throughput high while adapting patch/upload pressure to recent UI-thread cost and to
+interactive vs idle state.
 
 Display upload is a UI-thread phase separate from render/evaluation. `ImageView2D` measures visible
 image upload, histogram plot upload, histogram recompute, RGB re-windowing, level synchronization, and
 profile-bound updates so runtime diagnostics can distinguish slow evaluation from slow Qt painting.
 Histogram image-item binding is idempotent: pyqtgraph connects image-change signals in
 `setImageItem()`, so ArrayScope routes all histogram item switches through one helper and explicitly
-refreshes the histogram plot once per committed state. Progressive montage commits are coalesced to
+refreshes the histogram plot once per committed state. User histogram drags have a preview/final
+split: preview updates are throttled to the visible display path, tile-layer mode re-windows visible
+tile items only, and the semantic level state is emitted once on drag finish. Progressive montage commits are coalesced to
 the latest state when upload is slow. For large canvases or previously slow uploads, montage display
 switches to exact tile-layer painting; the committed canvas and geometry still own hover/status,
 histogram source, and level semantics. Tile-layer presentations carry dirty-tile metadata and

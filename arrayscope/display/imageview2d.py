@@ -24,6 +24,8 @@ from arrayscope.core.roi import (
 )
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
+from arrayscope.display.histogram_controller import HistogramLevelPreviewController
+from arrayscope.display.image_upload import ensure_imageitem_array, rgb_display_for_levels
 from arrayscope.display.levels import finite_bounds
 from arrayscope.display.layers import ViewLayerOwner
 from arrayscope.display.montage_tile_layer import MontageTileLayer, TileLayerUpdateStats
@@ -84,6 +86,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._rgbBaseImage = None
         self._histogram_bound_item = None
         self._histogram_known_item_ids = set()
+        self._histogram_preview_controller = None
         self._upload_timing = None
         self._last_upload_timing = ImageUploadTiming()
         self._montage_display_mode = "canvas"
@@ -142,6 +145,7 @@ class ImageView2D(QtWidgets.QWidget):
         # Setup histogram
         self.histogramImageItem = ImageItem(axisOrder="row-major")
         self._bind_histogram_item(self.histogramImageItem)
+        self._histogram_preview_controller = HistogramLevelPreviewController(self)
         self.histogram.setLevelMode('mono')  # Force mono mode for scalar values
         self.histogram.item.sigLevelsChanged.connect(self._on_histogram_levels_changed)
         finish_signal = getattr(self.histogram.item, "sigLevelChangeFinished", None)
@@ -304,7 +308,7 @@ class ImageView2D(QtWidgets.QWidget):
         if same_object:
             item.setImage(None, autoLevels=False, levels=levels)
         else:
-            item.setImage(data, autoLevels=False, levels=levels)
+            item.setImage(ensure_imageitem_array(data), autoLevels=False, levels=levels)
         elapsed = (perf_counter() - start) * 1000.0
         array = np.asarray(data)
         timing = self._upload_timing
@@ -436,9 +440,14 @@ class ImageView2D(QtWidgets.QWidget):
             (float(histogramRange[0]), float(histogramRange[1])),
         )
 
-    def _update_montage_tile_levels(self, levels) -> None:
+    def _update_montage_tile_levels(self, levels) -> TileLayerUpdateStats:
         if self._montage_tile_layer is not None:
-            self._montage_tile_layer.update_levels(levels)
+            return self._montage_tile_layer.update_levels(
+                levels,
+                image=self.image,
+                histogram_data=self.histogramSource,
+            )
+        return TileLayerUpdateStats()
         
     def setImage(self, img, autoRange=None, autoLevels=True, levels=None, 
                  pos=None, scale=None, transform=None, autoHistogramRange=True,
@@ -773,29 +782,39 @@ class ImageView2D(QtWidgets.QWidget):
             except Exception:
                 levels = (self.levelMin, self.levelMax)
 
-        low, high = levels
-        span = max(float(high) - float(low), 1e-12)
-        intensity = np.clip((np.asarray(histogram_data, dtype=np.float32) - float(low)) / span, 0.0, 1.0)
-        intensity = np.nan_to_num(intensity, nan=0.0, posinf=1.0, neginf=0.0)
-        return np.clip(self._rgbBaseImage * intensity[..., np.newaxis], 0, 255).astype(np.uint8)
+        return rgb_display_for_levels(self._rgbBaseImage, histogram_data, levels)
 
     def _on_histogram_levels_changed(self, *args):
         if self._applying_presentation:
             return
-        if self._montage_display_mode == "tile_layer":
-            self._displayLevels = tuple(float(value) for value in self.histogram.getLevels())
-            self._update_montage_tile_levels(self._displayLevels)
-            return
-        if self._rgbBaseImage is None or self.histogramSource is None:
-            if self.imageItem is not None and self.imageDisp is not None and not self._is_rgb_image(self.image):
-                try:
-                    self.imageItem.setLevels(self.histogram.getLevels())
-                except Exception:
-                    pass
-            return
+        if self._histogram_preview_controller is not None:
+            self._histogram_preview_controller.schedule_from_widget()
 
-        self.imageDisp = self._rgb_display_for_levels()
-        self._set_image_item_data(self.imageItem, self.imageDisp, (0, 255), role="visible", emit_histogram_change=False)
+    def _apply_histogram_preview_levels(self, levels) -> None:
+        levels = (float(levels[0]), float(levels[1]))
+        started_timing = self._upload_timing is None
+        if started_timing:
+            self._start_upload_timing("level_preview")
+        try:
+            self._displayLevels = levels
+            if self._montage_display_mode == "tile_layer":
+                stats = self._update_montage_tile_levels(levels)
+                self._record_tile_layer_stats(stats)
+                return
+            if self._rgbBaseImage is None or self.histogramSource is None:
+                if self.imageItem is not None and self.imageDisp is not None and not self._is_rgb_image(self.image):
+                    try:
+                        self.imageItem.setLevels(levels)
+                    except Exception:
+                        pass
+                return
+            rgb_start = perf_counter()
+            self.imageDisp = self._rgb_display_for_levels(levels)
+            self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
+            self._set_image_item_data(self.imageItem, self.imageDisp, (0, 255), role="visible", emit_histogram_change=False)
+        finally:
+            if started_timing:
+                self._finish_upload_timing()
                 
     def autoLevels(self):
         """Automatically set the histogram levels based on image data"""
@@ -826,6 +845,8 @@ class ImageView2D(QtWidgets.QWidget):
         low = float(min_level)
         high = float(max_level)
         self._displayLevels = (low, high)
+        if self._histogram_preview_controller is not None and self._applying_presentation:
+            self._histogram_preview_controller.cancel()
         applying = self._applying_presentation
         self._applying_presentation = True
         try:
@@ -833,7 +854,7 @@ class ImageView2D(QtWidgets.QWidget):
         finally:
             self._applying_presentation = applying
         if update_image:
-            self._on_histogram_levels_changed()
+            self._apply_histogram_preview_levels((low, high))
         self._record_upload_timing("level_sync_ms", (perf_counter() - start) * 1000.0)
         if emit_user:
             self.userLevelsChanged.emit()
@@ -841,13 +862,9 @@ class ImageView2D(QtWidgets.QWidget):
     def _on_histogram_level_change_finished(self, *args):
         if self._applying_presentation:
             return
-        try:
-            levels = self.histogram.getLevels()
-            if levels is not None:
-                low, high = levels
-                self._displayLevels = (float(low), float(high))
-        except Exception:
-            pass
+        if self._histogram_preview_controller is not None:
+            self._histogram_preview_controller.finish_from_widget()
+            return
         self.userLevelsChanged.emit()
         
     def getLevels(self):

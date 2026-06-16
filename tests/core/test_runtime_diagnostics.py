@@ -43,8 +43,15 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
             last_store="stage=1",
         ),
         schedulers=(scheduler,),
-        render=RenderRuntimeDiagnostics(),
-        montage=MontageRuntimeDiagnostics(active=False, display_mode="tile_layer"),
+        render=RenderRuntimeDiagnostics(last_request_key="('image', b'\\xf9\\x7f\\x10')"),
+        montage=MontageRuntimeDiagnostics(
+            active=False,
+            display_mode="tile_layer",
+            backend_setting="auto",
+            backend_chosen="tile_layer",
+            backend_reason="RGB/complex montage canvas pixels 3000000 > 2000000",
+            backend_warning="",
+        ),
         canvas_preserve=CanvasPreserveRuntimeDiagnostics(events=("start gen=1",)),
         render_timing=RenderTimingDiagnostics(last_render_sync_ms=1.25),
         stage_warmup=StageWarmupDecision("scheduled", candidate_bytes=128, budget_bytes=1024, reason="tiles wait for shared stage"),
@@ -89,7 +96,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
 
     text = format_runtime_diagnostics(snapshot)
 
-    for heading in ("Memory", "Caches", "Schedulers", "Render", "Canvas Preserve", "Montage", "FFT", "Compute", "Operations"):
+    for heading in ("Realtime", "Montage", "Render", "Schedulers", "Caches", "Memory", "Compute", "FFT", "Canvas Preserve", "Operations"):
         assert heading in text
     assert "hit-rate=n/a" in text
     assert "start gen=1" in text
@@ -104,11 +111,16 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Stage cache last miss: stage=1" in text
     assert "Stage cache last store: stage=1" in text
     assert "Montage prefetch: tile=12 source=12 decision=skipped_stage_missing reason=would recompute expensive stage per tile" in text
+    assert "Request: captured" in text
+    assert "\\xf9" not in text
     assert "Coalescer: pending=False, interactive=False" in text
     assert "Timing render sync: 1.25 ms" in text
     assert "Timing worker queue wait: n/a" in text
     assert "Timing canvas compose: 2.50 ms" in text
     assert "Display mode: tile_layer" in text
+    assert "Display backend: tile_layer (setting=auto, fallback=canvas)" in text
+    assert "Display backend reason: RGB/complex montage" in text
+    assert "Tile layer: visible=50 updated=1 skipped=49 rgb tiles=1" in text
     assert "Timing visible upload: 10.00 ms" in text
     assert "Timing histogram upload: 5.00 ms" in text
     assert "Timing histogram recompute: 3.00 ms" in text

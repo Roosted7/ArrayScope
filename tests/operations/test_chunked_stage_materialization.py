@@ -7,8 +7,8 @@ from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.chunked_stage import (
     materialize_stage_candidate_chunked,
     plan_chunked_stage_materialization,
+    stage_materialization_allowed_chunk_axes,
 )
-from arrayscope.window.montage_renderer import _montage_stage_chunk_axes
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, CenteredIFFT, FFTShift
 from arrayscope.operations.slabs import materialize_stage_candidate, plan_slab, request_for_image
 from arrayscope.operations.stage_cache import StageCache
@@ -38,10 +38,21 @@ def test_fft_axis_stage_chunks_only_non_blocking_axes():
     assert chunk_plan.estimated_chunk_bytes <= 320
 
 
-def test_chunk_plan_requires_explicit_allowed_axes():
+def test_chunk_plan_defaults_to_all_non_blocking_axes():
     _document, plan, candidate = _fft_plan()
 
-    assert plan_chunked_stage_materialization(plan.region_plan, candidate, _MemoryPolicy(), target_chunk_bytes=320) is None
+    chunk_plan = plan_chunked_stage_materialization(plan.region_plan, candidate, _MemoryPolicy(), target_chunk_bytes=320)
+
+    assert chunk_plan is not None
+    assert chunk_plan.chunk_axes == (0,)
+    assert 2 not in chunk_plan.chunk_axes
+
+
+def test_default_chunk_plan_keeps_fitting_stage_unchunked():
+    _document, plan, candidate = _fft_plan(shape=(24, 24, 17))
+
+    assert candidate.estimated_nbytes < _MemoryPolicy.stage_cache_budget_bytes
+    assert plan_chunked_stage_materialization(plan.region_plan, candidate, _MemoryPolicy()) is None
 
 
 def test_chunked_stage_equals_non_chunked_stage():
@@ -141,14 +152,36 @@ def test_chunk_plan_respects_memory_threshold():
 
 def test_montage_axis_can_be_allowed_but_fft_blocking_axis_is_not_chunked():
     _document, _plan, _candidate = _fft_plan(shape=(6, 5, 4))
-    state = ViewState.from_shape((6, 5, 4)).with_montage_axis(2, columns=2, indices=tuple(range(4)), text=":")
     _document, plan, candidate = _fft_plan(shape=(6, 5, 4))
+    allowed = stage_materialization_allowed_chunk_axes(candidate.shape)
 
-    assert _montage_stage_chunk_axes(state) == (2,)
-    assert plan_chunked_stage_materialization(
+    assert allowed == (0, 1, 2)
+    chunk_plan = plan_chunked_stage_materialization(
         plan.region_plan,
         candidate,
         _MemoryPolicy(),
         target_chunk_bytes=16,
-        allowed_chunk_axes=_montage_stage_chunk_axes(state),
-    ) is None
+        allowed_chunk_axes=allowed,
+    )
+
+    assert chunk_plan is not None
+    assert 2 in chunk_plan.blocking_axes
+    assert 2 not in chunk_plan.chunk_axes
+    assert chunk_plan.chunk_axes[0] in (0, 1)
+
+
+def test_prime_fft_stage_chunks_over_image_axes_preserving_fft_axis():
+    _document, plan, candidate = _fft_plan(shape=(336, 336, 272))
+
+    chunk_plan = plan_chunked_stage_materialization(
+        plan.region_plan,
+        candidate,
+        _MemoryPolicy(),
+        target_chunk_bytes=8 * 1024 * 1024,
+    )
+
+    assert chunk_plan is not None
+    assert chunk_plan.chunk_axes[0] in (0, 1)
+    assert 2 in chunk_plan.blocking_axes
+    assert 2 not in chunk_plan.chunk_axes
+    assert len(chunk_plan.chunks) > 1
