@@ -57,8 +57,15 @@ def test_square_fov_is_not_visible_production_ui():
     assert offenders == []
 
 
-def test_window_render_does_not_compare_partial_document_keys():
-    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+def test_visible_render_paths_do_not_compare_partial_document_keys():
+    text = "\n".join(
+        (ROOT / rel).read_text()
+        for rel in (
+            Path("arrayscope/window/render.py"),
+            Path("arrayscope/window/normal_renderer.py"),
+            Path("arrayscope/window/render_prefetch.py"),
+        )
+    )
     assert ".image_key(" in text
     assert "image_key(view_state, colormap_lut=colormap_lut)[1]" not in text
     assert "line_key(profile_state)[1]" not in text
