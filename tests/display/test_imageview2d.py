@@ -89,6 +89,32 @@ def test_update_image_data_fast_preserves_levels_and_view_range(qt_app, monkeypa
     view.close()
 
 
+def test_image_presentation_keeps_levels_and_histogram_range_separate(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImagePresentation(
+        np.zeros((4, 4), dtype=float),
+        histogramData=np.zeros((4, 4), dtype=float),
+        levels=(2.0, 8.0),
+        histogramRange=(0.0, 10.0),
+    )
+
+    assert tuple(float(value) for value in view.getLevels()) == (2.0, 8.0)
+    assert view.getHistogramDataBounds() == (0.0, 10.0)
+
+    view.updateImagePresentationFast(
+        np.full((4, 4), 1000.0, dtype=float),
+        histogramData=np.full((4, 4), 1000.0, dtype=float),
+        levels=(2.0, 8.0),
+        histogramRange=(0.0, 10.0),
+    )
+
+    assert tuple(float(value) for value in view.getLevels()) == (2.0, 8.0)
+    assert view.getHistogramDataBounds() == (0.0, 10.0)
+    view.close()
+
+
 def test_update_image_data_fast_accepts_display_ready_rgb(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 

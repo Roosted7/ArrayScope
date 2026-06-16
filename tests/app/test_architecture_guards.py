@@ -133,6 +133,49 @@ def test_window_render_montage_view_does_not_call_make_montage():
     assert "make_montage_viewport_canvas(" in text
 
 
+def test_render_display_commits_go_through_display_committer():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    forbidden = (
+        ".setImage(",
+        ".updateImageDataFast(",
+        ".setHistogramRange(",
+    )
+    for token in forbidden:
+        assert token not in text
+    assert "DisplayCommitter" in text
+
+
+def test_window_render_does_not_own_presentation_policy():
+    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    forbidden = (
+        "choose_window_levels",
+        "choose_montage_presentation",
+        "choose_normal_image_presentation",
+        "display_data_bounds",
+        "finite_bounds",
+        "_sampled_display_bounds",
+        "_raw_display_bounds",
+        "_display_histogram_bounds",
+    )
+    for token in forbidden:
+        assert token not in text
+    assert "decide_presentation" in text
+
+
+def test_display_presentation_boundary_modules_exist():
+    for rel in (
+        Path("arrayscope/window/display_frame.py"),
+        Path("arrayscope/window/display_commit.py"),
+        Path("arrayscope/window/render_model.py"),
+        Path("arrayscope/window/presentation.py"),
+        Path("arrayscope/window/montage_levels.py"),
+        Path("arrayscope/window/montage_controller.py"),
+        Path("arrayscope/window/normal_image_controller.py"),
+        Path("arrayscope/window/viewport_bridge.py"),
+    ):
+        assert (ROOT / rel).exists()
+
+
 def test_imageview2d_has_no_multi_imageitem_tile_display_path():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
     forbidden = ("setImageTiles", "clearTiles", "_tile_items", "_tile_histogram_sources", "_tile_mode")

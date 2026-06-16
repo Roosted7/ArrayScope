@@ -1,0 +1,128 @@
+import numpy as np
+
+from arrayscope.core.view_state import ViewState
+from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.display.slice_engine import DisplayImage
+from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey
+from arrayscope.window.presentation import LevelSource, LevelSourceRank, decide_presentation
+from arrayscope.window.render_model import CommitKind, DisplayPayload, PresentationInput, RenderRequestContext
+
+
+def _geometry(shape=(2, 2)):
+    return DisplayGeometry(view_state=ViewState.from_shape(shape), display_shape=shape)
+
+
+def _context():
+    return RenderRequestContext(document_key=("doc", 1), request_key=("image", 1), render_generation=1, semantic_key="levels")
+
+
+def _payload(data, *, histogram_data=None):
+    image = DisplayImage(np.asarray(data, dtype=np.float32), histogram_data=None if histogram_data is None else np.asarray(histogram_data, dtype=np.float32))
+    return DisplayPayload(image=image, geometry=_geometry(image.data.shape[:2]), viewport_policy=ViewportPolicy.PRESERVE)
+
+
+def _frame(*, levels=(10.0, 20.0), histogram_range=(0.0, 100.0)):
+    data = np.zeros((2, 2), dtype=np.float32)
+    return CommittedDisplayFrame(
+        data=data,
+        histogram_data=data.copy(),
+        geometry=_geometry(),
+        levels=levels,
+        histogram_range=histogram_range,
+        key=DisplayFrameKey(("doc", 1), ("image", 0), 1, "levels"),
+    )
+
+
+def _input(payload, *, previous_frame=None, force_auto=False, kind=CommitKind.FULL_NORMAL, semantic_source=None, applied_level_source=None, window_mode="relative"):
+    return PresentationInput(
+        payload=payload,
+        context=_context(),
+        previous_frame=previous_frame,
+        window_mode=window_mode,
+        force_auto=force_auto,
+        commit_kind=kind,
+        semantic_source=semantic_source,
+        applied_level_source=applied_level_source,
+    )
+
+
+def test_normal_relative_level_reuse_uses_committed_frame():
+    decision = decide_presentation(_input(_payload([[200, 300], [200, 300]]), previous_frame=_frame(levels=(25, 75), histogram_range=(0, 100))))
+
+    assert decision.levels == (225.0, 275.0)
+    assert decision.histogram_range == (200.0, 300.0)
+
+
+def test_normal_absolute_level_reuse_uses_committed_frame():
+    decision = decide_presentation(
+        _input(
+            _payload([[200, 300], [200, 300]]),
+            previous_frame=_frame(levels=(25, 75), histogram_range=(0, 100)),
+            window_mode="absolute",
+        )
+    )
+
+    assert decision.levels == (25.0, 75.0)
+    assert decision.histogram_range == (200.0, 300.0)
+
+
+def test_explicit_auto_window_accepts_partial_montage_source():
+    source = LevelSource((100.0, 200.0), (100.0, 200.0), LevelSourceRank.MONTAGE_VISIBLE_SUBSET, source_count=1, expected_count=4, semantic_key="levels")
+    decision = decide_presentation(
+        _input(
+            _payload(np.full((2, 2), 1000.0)),
+            previous_frame=_frame(),
+            force_auto=True,
+            kind=CommitKind.EXPLICIT_AUTO_WINDOW,
+            semantic_source=source,
+        )
+    )
+
+    assert decision.levels == (100.0, 200.0)
+    assert decision.level_source_rank == int(LevelSourceRank.MONTAGE_VISIBLE_SUBSET)
+
+
+def test_progressive_montage_patch_rejects_partial_implicit_source():
+    source = LevelSource((100.0, 200.0), (100.0, 200.0), LevelSourceRank.MONTAGE_VISIBLE_SUBSET, source_count=1, expected_count=4, semantic_key="levels")
+    decision = decide_presentation(
+        _input(
+            _payload(np.full((2, 2), 1000.0)),
+            previous_frame=_frame(levels=(2.0, 8.0), histogram_range=(0.0, 10.0)),
+            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            semantic_source=source,
+        )
+    )
+
+    assert decision.levels == (2.0, 8.0)
+    assert decision.histogram_range == (0.0, 10.0)
+
+
+def test_progressive_montage_patch_accepts_complete_source():
+    source = LevelSource((0.0, 300.0), (0.0, 300.0), LevelSourceRank.MONTAGE_COMPLETE, source_count=4, expected_count=4, semantic_key="levels")
+    decision = decide_presentation(
+        _input(
+            _payload(np.full((2, 2), 1000.0)),
+            previous_frame=_frame(levels=(2.0, 8.0), histogram_range=(0.0, 10.0)),
+            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            semantic_source=source,
+        )
+    )
+
+    assert decision.levels == (0.0, 300.0)
+    assert decision.histogram_range == (0.0, 300.0)
+
+
+def test_degenerate_and_nan_bounds_fall_back_to_previous_frame():
+    source = LevelSource((5.0, 5.0), (float("nan"), float("nan")), LevelSourceRank.MONTAGE_COMPLETE, source_count=4, expected_count=4, semantic_key="levels")
+    decision = decide_presentation(
+        _input(
+            _payload(np.full((2, 2), np.nan)),
+            previous_frame=_frame(levels=(2.0, 8.0), histogram_range=(0.0, 10.0)),
+            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            semantic_source=source,
+        )
+    )
+
+    assert decision.levels == (4.5, 5.5)
+    assert decision.histogram_range == (0.0, 10.0)

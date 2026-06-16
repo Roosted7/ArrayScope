@@ -472,7 +472,7 @@ Goal: finish the remaining interaction-latency work by making expensive reusable
 * [x] Freeze levels during progressive montage except at explicit recompute boundaries.
 * [x] Skip histogram, side-panel, operation dock, ROI, and profile refreshes during tile patch commits.
 * [ ] Patch display-ready dirty tile regions for complex/RGB progressive montage.
-* [~] Add tests proving progressive tile patches avoid level scans, histogram refreshes, and unrelated dock refreshes.
+* [x] Add tests proving progressive tile patches avoid level scans, histogram refreshes, and unrelated dock refreshes.
 
 ### P3 — stage-aware predictive cache and compute policy
 
@@ -488,7 +488,7 @@ Goal: finish the remaining interaction-latency work by making expensive reusable
 
 * [ ] Add latency benchmarks for hot rendered-tile display, hot stage/cold tile display, cold shared-stage montage warmup, and rapid slice bursts.
 * [ ] Add manual regression coverage for FFT montage, fast slice scrolling, cache-hit stale-result prevention, and progressive levels behavior.
-* [ ] Update architecture docs for stage materialization ownership, compute policy, and progressive image APIs.
+* [~] Update architecture docs for stage materialization ownership, compute policy, and progressive image APIs.
 * [ ] Keep Phase 4i items open until broad tests pass and manual interaction confirms the lag/jitter path is gone.
 
 ## Phase 5 — Multi-window and sessions

@@ -23,8 +23,6 @@ def _session():
         output_dtype=np.dtype(np.float32),
         rgb=False,
         window_mode=None,
-        previous_levels=None,
-        previous_bounds=None,
         force_auto=False,
         visible_tiles=plan.tiles,
         rendered_tiles={},

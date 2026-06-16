@@ -39,6 +39,9 @@ updates use coverage-ranked montage histogram stats. Viewport culling can limit 
 but it cannot narrow semantic bounds after broader bounds are known, and zero-real-tile canvases do
 not replace the displayed image with placeholders.
 
+See also decision 0030 for the explicit presentation/commit boundary that keeps
+viewport refreshes from altering semantic display scaling.
+
 ## Rejected Alternatives
 
 - Let every tile worker race to populate `StageCache`: rejected because it permits duplicate expensive
