@@ -1,4 +1,7 @@
 from dataclasses import dataclass
+from time import perf_counter
+import weakref
+import warnings
 
 import numpy as np
 from arrayscope.app.qt_binding import prefer_pyside6
@@ -21,6 +24,7 @@ from arrayscope.core.roi import (
     simplify_polyline,
 )
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
+from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.levels import finite_bounds
 from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
 
@@ -137,6 +141,14 @@ class ImageView2D(QtWidgets.QWidget):
         self.histogramSource = None
         self.histogramPlotSource = None
         self._rgbBaseImage = None
+        self._histogram_bound_item = None
+        self._histogram_known_item_ids = set()
+        self._upload_timing = None
+        self._last_upload_timing = ImageUploadTiming()
+        self._montage_display_mode = "canvas"
+        self._montage_tile_items = {}
+        self._montage_tile_rgb_bases = {}
+        self._montage_tile_hist_sources = {}
         self._profile_vline = None
         self._profile_hline = None
         self._profile_handle = None
@@ -180,7 +192,7 @@ class ImageView2D(QtWidgets.QWidget):
         
         # Setup histogram
         self.histogramImageItem = ImageItem(axisOrder="row-major")
-        self.histogram.setImageItem(self.histogramImageItem)
+        self._bind_histogram_item(self.histogramImageItem)
         self.histogram.setLevelMode('mono')  # Force mono mode for scalar values
         self.histogram.item.sigLevelsChanged.connect(self._on_histogram_levels_changed)
         finish_signal = getattr(self.histogram.item, "sigLevelChangeFinished", None)
@@ -232,6 +244,281 @@ class ImageView2D(QtWidgets.QWidget):
         # Histogram widget
         self.histogram = pg.HistogramLUTWidget()
         self.layout.addWidget(self.histogram)
+
+    def _start_upload_timing(self, mode: str) -> None:
+        self._upload_timing = {
+            "mode": str(mode),
+            "start": perf_counter(),
+            "visible_upload_ms": 0.0,
+            "histogram_upload_ms": 0.0,
+            "histogram_bind_ms": 0.0,
+            "histogram_recompute_ms": 0.0,
+            "level_sync_ms": 0.0,
+            "rgb_window_ms": 0.0,
+            "profile_bounds_ms": 0.0,
+            "visible_bytes": 0,
+            "visible_pixels": 0,
+            "histogram_bytes": 0,
+            "histogram_pixels": 0,
+            "fast_same_object": False,
+        }
+
+    def _record_upload_timing(self, field: str, ms: float) -> None:
+        timing = self._upload_timing
+        if timing is not None:
+            timing[field] = float(timing.get(field, 0.0) or 0.0) + float(ms)
+
+    def _finish_upload_timing(self) -> None:
+        timing = self._upload_timing
+        if timing is None:
+            return
+        self._last_upload_timing = ImageUploadTiming(
+            total_ms=(perf_counter() - float(timing["start"])) * 1000.0,
+            visible_upload_ms=float(timing["visible_upload_ms"]),
+            histogram_upload_ms=float(timing["histogram_upload_ms"]),
+            histogram_bind_ms=float(timing["histogram_bind_ms"]),
+            histogram_recompute_ms=float(timing["histogram_recompute_ms"]),
+            level_sync_ms=float(timing["level_sync_ms"]),
+            rgb_window_ms=float(timing["rgb_window_ms"]),
+            profile_bounds_ms=float(timing["profile_bounds_ms"]),
+            visible_bytes=int(timing["visible_bytes"]),
+            visible_pixels=int(timing["visible_pixels"]),
+            histogram_bytes=int(timing["histogram_bytes"]),
+            histogram_pixels=int(timing["histogram_pixels"]),
+            fast_same_object=bool(timing["fast_same_object"]),
+            mode=str(timing["mode"]),
+        )
+        self._upload_timing = None
+
+    def lastImageUploadTiming(self) -> ImageUploadTiming:
+        return self._last_upload_timing
+
+    def _disconnect_histogram_image_signal(self, item) -> None:
+        signal = getattr(item, "sigImageChanged", None)
+        if signal is None:
+            return
+        slot = self.histogram.item.imageChanged
+        # Pyqtgraph's public setImageItem connects every time it is called.  We
+        # own histogram refreshes explicitly so repeated image commits cannot
+        # accumulate duplicate histogram recomputation callbacks.
+        for _ in range(32):
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=".*Failed to disconnect.*", category=RuntimeWarning)
+                    signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                break
+
+    def _bind_histogram_item(self, item) -> None:
+        if item is None or self._histogram_bound_item is item:
+            return
+        start = perf_counter()
+        item_id = id(item)
+        if item_id not in self._histogram_known_item_ids:
+            self.histogram.setImageItem(item)
+            self._histogram_known_item_ids.add(item_id)
+        else:
+            hist_item = self.histogram.item
+            hist_item.imageItem = weakref.ref(item)
+            if hasattr(hist_item, "_setImageLookupTable"):
+                hist_item._setImageLookupTable()
+            hist_item.regionChanged()
+        self._disconnect_histogram_image_signal(item)
+        self._histogram_bound_item = item
+        self._record_upload_timing("histogram_bind_ms", (perf_counter() - start) * 1000.0)
+
+    def _refresh_histogram_plot(self, *, auto_level: bool = False) -> None:
+        start = perf_counter()
+        self.histogram.item.imageChanged(autoLevel=bool(auto_level))
+        self._record_upload_timing("histogram_recompute_ms", (perf_counter() - start) * 1000.0)
+
+    def _set_image_item_data(self, item, data, levels, *, role: str, emit_histogram_change: bool = True) -> bool:
+        previous = getattr(item, "image", None)
+        same_object = previous is data
+        if not same_object and isinstance(previous, np.ndarray) and isinstance(data, np.ndarray):
+            same_object = (
+                tuple(previous.shape) == tuple(data.shape)
+                and np.dtype(previous.dtype) == np.dtype(data.dtype)
+                and np.shares_memory(previous, data)
+            )
+        start = perf_counter()
+        if same_object:
+            item.setImage(None, autoLevels=False, levels=levels)
+        else:
+            item.setImage(data, autoLevels=False, levels=levels)
+        elapsed = (perf_counter() - start) * 1000.0
+        array = np.asarray(data)
+        timing = self._upload_timing
+        if str(role) == "histogram":
+            self._record_upload_timing("histogram_upload_ms", elapsed)
+            if timing is not None:
+                timing["histogram_bytes"] = int(timing["histogram_bytes"]) + int(array.nbytes)
+                timing["histogram_pixels"] = int(timing["histogram_pixels"]) + int(np.prod(array.shape[:2]))
+        else:
+            self._record_upload_timing("visible_upload_ms", elapsed)
+            if timing is not None:
+                timing["visible_bytes"] = int(timing["visible_bytes"]) + int(array.nbytes)
+                timing["visible_pixels"] = int(timing["visible_pixels"]) + int(np.prod(array.shape[:2]))
+                timing["fast_same_object"] = bool(timing["fast_same_object"] or same_object)
+        if emit_histogram_change and self._histogram_bound_item is item:
+            self._refresh_histogram_plot(auto_level=False)
+        return same_object
+
+    def montageDisplayMode(self) -> str:
+        return str(self._montage_display_mode)
+
+    def clearMontageTileLayer(self) -> None:
+        if self._montage_tile_items:
+            for item in tuple(self._montage_tile_items.values()):
+                try:
+                    self.view.removeItem(item)
+                except Exception:
+                    pass
+        self._montage_tile_items.clear()
+        self._montage_tile_rgb_bases.clear()
+        self._montage_tile_hist_sources.clear()
+        self._montage_display_mode = "canvas"
+        self.imageItem.setVisible(True)
+
+    def setMontageTileLayerPresentation(
+        self,
+        img: np.ndarray,
+        *,
+        histogramData: np.ndarray | None,
+        histogramPlotData: np.ndarray | None,
+        geometry,
+        levels: tuple[float, float],
+        histogramRange: tuple[float, float],
+        viewport_policy=ViewportPolicy.PRESERVE,
+        rgb_already_windowed: bool = False,
+    ) -> None:
+        if geometry is None or getattr(geometry, "montage", None) is None:
+            raise ValueError("tile-layer presentation requires montage geometry")
+        self._start_upload_timing("tile_layer")
+        applying = self._applying_presentation
+        self._applying_presentation = True
+        try:
+            self.image = img
+            self.histogramSource = histogramData
+            self.histogramPlotSource = histogramPlotData
+            self.setHistogramDataBounds(histogramRange)
+            self._montage_display_mode = "tile_layer"
+            self.imageItem.setVisible(False)
+            self._update_montage_tile_layer_items(
+                img,
+                histogramData=histogramData,
+                geometry=geometry,
+                levels=levels,
+                rgb_already_windowed=rgb_already_windowed,
+            )
+            plot_data = self._histogram_plot_data(histogramData)
+            if plot_data is not None:
+                self._bind_histogram_item(self.histogramImageItem)
+                self._set_image_item_data(
+                    self.histogramImageItem,
+                    plot_data,
+                    self._histogram_levels_for_display(levels),
+                    role="histogram",
+                )
+            self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
+            self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+            profile_start = perf_counter()
+            self._update_profile_line_bounds()
+            self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
+            self._updateAspectRatio()
+            self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy)
+        finally:
+            self._applying_presentation = applying
+            self._finish_upload_timing()
+
+    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool) -> None:
+        montage = geometry.montage
+        tile_h = int(montage.tile_height)
+        tile_w = int(montage.tile_width)
+        stride_x = tile_w + int(montage.gap)
+        stride_y = tile_h + int(montage.gap)
+        active = set()
+        states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
+        for tile_number, _source_index in enumerate(tuple(montage.indices)):
+            state = states[tile_number] if tile_number < len(states) else "unloaded"
+            state_value = str(getattr(state, "value", state))
+            if state_value != "loaded":
+                continue
+            row = tile_number // int(montage.columns)
+            col = tile_number % int(montage.columns)
+            global_x = col * stride_x
+            global_y = row * stride_y
+            local_x = global_x - int(geometry.montage_origin_x)
+            local_y = global_y - int(geometry.montage_origin_y)
+            source_x0 = max(0, -local_x)
+            source_y0 = max(0, -local_y)
+            dest_x0 = max(0, local_x)
+            dest_y0 = max(0, local_y)
+            width = min(tile_w - source_x0, int(np.shape(img)[1]) - dest_x0)
+            height = min(tile_h - source_y0, int(np.shape(img)[0]) - dest_y0)
+            if width <= 0 or height <= 0:
+                continue
+            tile_data = np.asarray(img)[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...]
+            tile_hist = None
+            if histogramData is not None:
+                tile_hist = np.asarray(histogramData)[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width]
+            item = self._montage_tile_items.get(tile_number)
+            if item is None:
+                item = ImageItem(axisOrder="row-major")
+                item.setZValue(1)
+                self.view.addItem(item)
+                self._montage_tile_items[tile_number] = item
+            item.setVisible(True)
+            item.setPos(float(local_x + source_x0), float(local_y + source_y0))
+            self._set_montage_tile_item_data(
+                tile_number,
+                item,
+                tile_data,
+                tile_hist,
+                levels,
+                rgb_already_windowed=rgb_already_windowed,
+            )
+            active.add(tile_number)
+        for tile_number, item in tuple(self._montage_tile_items.items()):
+            if tile_number not in active:
+                item.setVisible(False)
+
+    def _set_montage_tile_item_data(self, tile_number, item, tile_data, tile_hist, levels, *, rgb_already_windowed: bool) -> None:
+        is_rgb = self._is_rgb_image(tile_data)
+        if is_rgb:
+            if rgb_already_windowed or tile_hist is None:
+                self._montage_tile_rgb_bases.pop(tile_number, None)
+                self._montage_tile_hist_sources.pop(tile_number, None)
+                display = tile_data[..., :3]
+            else:
+                rgb_start = perf_counter()
+                base = tile_data[..., :3].astype(float)
+                self._montage_tile_rgb_bases[tile_number] = base
+                self._montage_tile_hist_sources[tile_number] = np.asarray(tile_hist)
+                display = self._rgb_tile_display_for_levels(base, tile_hist, levels)
+                self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
+            self._set_image_item_data(item, display, (0, 255), role="visible", emit_histogram_change=False)
+        else:
+            self._montage_tile_rgb_bases.pop(tile_number, None)
+            self._montage_tile_hist_sources.pop(tile_number, None)
+            self._set_image_item_data(item, tile_data, self._histogram_levels_for_display(levels), role="visible", emit_histogram_change=False)
+
+    def _rgb_tile_display_for_levels(self, base, histogram_data, levels):
+        low, high = levels
+        span = max(float(high) - float(low), 1e-12)
+        intensity = np.clip((np.asarray(histogram_data).astype(float) - float(low)) / span, 0.0, 1.0)
+        intensity = np.nan_to_num(intensity, nan=0.0, posinf=1.0, neginf=0.0)
+        return np.clip(base * intensity[..., np.newaxis], 0, 255).astype(np.uint8)
+
+    def _update_montage_tile_levels(self, levels) -> None:
+        for tile_number, item in tuple(self._montage_tile_items.items()):
+            base = self._montage_tile_rgb_bases.get(tile_number)
+            hist = self._montage_tile_hist_sources.get(tile_number)
+            if base is not None and hist is not None:
+                display = self._rgb_tile_display_for_levels(base, hist, levels)
+                self._set_image_item_data(item, display, (0, 255), role="visible", emit_histogram_change=False)
+            else:
+                item.setLevels(levels)
         
     def setImage(self, img, autoRange=None, autoLevels=True, levels=None, 
                  pos=None, scale=None, transform=None, autoHistogramRange=True,
@@ -266,61 +553,68 @@ class ImageView2D(QtWidgets.QWidget):
         is_rgb = self._is_rgb_image(img)
         if img.ndim != 2 and not is_rgb:
             raise ValueError("ImageView2D only supports 2D scalar or RGB images")
-            
-        previous_shape = None if self.image is None else tuple(self.image.shape[:2])
-        self.image = img
-        self.imageDisp = None
-        self.histogramSource = histogramData
-        self.histogramPlotSource = histogramPlotData
-        display_levels = None
-        if levels is not None:
-            if isinstance(levels, (list, tuple)) and len(levels) == 2:
-                display_levels = (float(levels[0]), float(levels[1]))
-            else:
-                low, high = levels
-                display_levels = (float(low), float(high))
-        
-        applying = self._applying_presentation
-        self._applying_presentation = True
-        try:
-            # Update the image display
-            self.updateImage(
-                autoHistogramRange=autoHistogramRange,
-                displayLevels=display_levels,
-                rgb_already_windowed=rgb_already_windowed,
-            )
-            self._update_profile_line_bounds()
-            
-            # Set levels
-            self.histogram.setVisible(True)
-            if levels is None and autoLevels:
-                self.autoLevels()
-            elif levels is not None:
-                if isinstance(levels, (list, tuple)) and len(levels) == 2:
-                    self._apply_display_levels(levels[0], levels[1], emit_user=False)
-                else:
-                    self._apply_display_levels(*levels, emit_user=False)
-        finally:
-            self._applying_presentation = applying
-            
-        # Set transform
-        if transform is None:
-            if pos is not None or scale is not None:
-                if pos is None:
-                    pos = (0, 0)
-                if scale is None:
-                    scale = (1, 1)
-                transform = QtGui.QTransform()
-                transform.translate(pos[0], pos[1])
-                transform.scale(scale[0], scale[1])
-        
-        if transform is not None:
-            self.imageItem.setTransform(transform)
-            
-        # Update aspect ratio based on display mode
-        self._updateAspectRatio()
 
-        self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy)
+        self._start_upload_timing("full")
+        previous_shape = None if self.image is None else tuple(self.image.shape[:2])
+        try:
+            self.clearMontageTileLayer()
+            self.image = img
+            self.imageDisp = None
+            self.histogramSource = histogramData
+            self.histogramPlotSource = histogramPlotData
+            display_levels = None
+            if levels is not None:
+                if isinstance(levels, (list, tuple)) and len(levels) == 2:
+                    display_levels = (float(levels[0]), float(levels[1]))
+                else:
+                    low, high = levels
+                    display_levels = (float(low), float(high))
+
+            applying = self._applying_presentation
+            self._applying_presentation = True
+            try:
+                # Update the image display
+                self.updateImage(
+                    autoHistogramRange=autoHistogramRange,
+                    displayLevels=display_levels,
+                    rgb_already_windowed=rgb_already_windowed,
+                )
+                profile_start = perf_counter()
+                self._update_profile_line_bounds()
+                self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
+
+                # Set levels
+                self.histogram.setVisible(True)
+                if levels is None and autoLevels:
+                    self.autoLevels()
+                elif levels is not None:
+                    if isinstance(levels, (list, tuple)) and len(levels) == 2:
+                        self._sync_display_levels(levels[0], levels[1], update_image=False, emit_user=False)
+                    else:
+                        self._sync_display_levels(*levels, update_image=False, emit_user=False)
+            finally:
+                self._applying_presentation = applying
+            
+            # Set transform
+            if transform is None:
+                if pos is not None or scale is not None:
+                    if pos is None:
+                        pos = (0, 0)
+                    if scale is None:
+                        scale = (1, 1)
+                    transform = QtGui.QTransform()
+                    transform.translate(pos[0], pos[1])
+                    transform.scale(scale[0], scale[1])
+            
+            if transform is not None:
+                self.imageItem.setTransform(transform)
+
+            # Update aspect ratio based on display mode
+            self._updateAspectRatio()
+
+            self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy)
+        finally:
+            self._finish_upload_timing()
 
     def setImagePresentation(
         self,
@@ -388,9 +682,11 @@ class ImageView2D(QtWidgets.QWidget):
         if img.ndim != 2 and not is_rgb:
             raise ValueError("ImageView2D only supports 2D scalar or RGB images")
 
+        self._start_upload_timing("fast")
         applying = self._applying_presentation
         self._applying_presentation = True
         try:
+            self.clearMontageTileLayer()
             self.image = img
             self.histogramSource = histogramData
             self.histogramPlotSource = histogramPlotData
@@ -398,42 +694,49 @@ class ImageView2D(QtWidgets.QWidget):
                 self.setHistogramDataBounds(histogramRange)
 
             if is_rgb:
-                self.histogram.setImageItem(self.histogramImageItem)
+                self._bind_histogram_item(self.histogramImageItem)
                 if rgb_already_windowed:
                     self._rgbBaseImage = None
                     self.imageDisp = img[..., :3]
                 else:
+                    rgb_start = perf_counter()
                     self._rgbBaseImage = img[..., :3].astype(float)
                     self.imageDisp = self._rgb_display_for_levels(levels)
-                self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=(0, 255))
+                    self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
+                self._set_image_item_data(self.imageItem, self.imageDisp, (0, 255), role="visible", emit_histogram_change=False)
                 plot_data = self._histogram_plot_data(histogramData)
                 if plot_data is not None:
                     # Fast progressive updates must not scan the histogram source or
                     # replace missing/NaN data with zeros; missing tile state is
                     # represented separately by the montage overlay.
-                    self.histogramImageItem.setImage(
+                    self._set_image_item_data(
+                        self.histogramImageItem,
                         plot_data,
-                        autoLevels=False,
-                        levels=self._histogram_levels_for_display(levels),
+                        self._histogram_levels_for_display(levels),
+                        role="histogram",
                     )
             else:
                 self._rgbBaseImage = None
                 self.imageDisp = img
                 image_levels = self._histogram_levels_for_display(levels)
-                self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=image_levels)
+                self._set_image_item_data(self.imageItem, self.imageDisp, image_levels, role="visible", emit_histogram_change=False)
                 plot_data = self._histogram_plot_data(histogramData)
                 if plot_data is not None:
-                    self.histogram.setImageItem(self.histogramImageItem)
-                    self.histogramImageItem.setImage(plot_data, autoLevels=False, levels=image_levels)
+                    self._bind_histogram_item(self.histogramImageItem)
+                    self._set_image_item_data(self.histogramImageItem, plot_data, image_levels, role="histogram")
                 else:
-                    self.histogram.setImageItem(self.imageItem)
+                    self._bind_histogram_item(self.imageItem)
+                    self._refresh_histogram_plot(auto_level=False)
             if levels is not None:
-                self._apply_display_levels(float(levels[0]), float(levels[1]), emit_user=False)
+                self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
             if histogramRange is not None:
                 self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+            profile_start = perf_counter()
             self._update_profile_line_bounds()
+            self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
         finally:
             self._applying_presentation = applying
+            self._finish_upload_timing()
             
     def updateImage(self, autoHistogramRange=True, displayLevels=None, *, rgb_already_windowed: bool = False):
         """Update the displayed image"""
@@ -455,25 +758,28 @@ class ImageView2D(QtWidgets.QWidget):
         
         # Set the image data
         if is_rgb:
-            self.histogram.setImageItem(self.histogramImageItem)
+            self._bind_histogram_item(self.histogramImageItem)
             if rgb_already_windowed:
                 self._rgbBaseImage = None
                 self.imageDisp = self.imageDisp[..., :3]
             else:
+                rgb_start = perf_counter()
                 self._rgbBaseImage = self.imageDisp[..., :3].astype(float)
                 self.imageDisp = self._rgb_display_for_levels(histogram_levels)
-            self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=(0, 255))
+                self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
+            self._set_image_item_data(self.imageItem, self.imageDisp, (0, 255), role="visible", emit_histogram_change=False)
             histogram_display = histogram_plot_data if histogram_plot_data is not None else histogram_data
             if finite_bounds(histogram_display) is None:
                 histogram_display = np.zeros_like(np.asarray(histogram_data), dtype=float)
-            self.histogramImageItem.setImage(histogram_display, autoLevels=False, levels=histogram_levels)
+            self._set_image_item_data(self.histogramImageItem, histogram_display, histogram_levels, role="histogram")
         else:
-            self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=histogram_levels)
+            self._set_image_item_data(self.imageItem, self.imageDisp, histogram_levels, role="visible", emit_histogram_change=False)
             if histogram_plot_data is not None:
-                self.histogram.setImageItem(self.histogramImageItem)
-                self.histogramImageItem.setImage(histogram_plot_data, autoLevels=False, levels=histogram_levels)
+                self._bind_histogram_item(self.histogramImageItem)
+                self._set_image_item_data(self.histogramImageItem, histogram_plot_data, histogram_levels, role="histogram")
             else:
-                self.histogram.setImageItem(self.imageItem)
+                self._bind_histogram_item(self.imageItem)
+                self._refresh_histogram_plot(auto_level=False)
         
         # Update histogram range if requested
         if autoHistogramRange:
@@ -547,6 +853,12 @@ class ImageView2D(QtWidgets.QWidget):
         return np.clip(self._rgbBaseImage * intensity[..., np.newaxis], 0, 255).astype(np.uint8)
 
     def _on_histogram_levels_changed(self, *args):
+        if self._applying_presentation:
+            return
+        if self._montage_display_mode == "tile_layer":
+            self._displayLevels = tuple(float(value) for value in self.histogram.getLevels())
+            self._update_montage_tile_levels(self._displayLevels)
+            return
         if self._rgbBaseImage is None or self.histogramSource is None:
             if self.imageItem is not None and self.imageDisp is not None and not self._is_rgb_image(self.image):
                 try:
@@ -556,7 +868,7 @@ class ImageView2D(QtWidgets.QWidget):
             return
 
         self.imageDisp = self._rgb_display_for_levels()
-        self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=(0, 255))
+        self._set_image_item_data(self.imageItem, self.imageDisp, (0, 255), role="visible", emit_histogram_change=False)
                 
     def autoLevels(self):
         """Automatically set the histogram levels based on image data"""
@@ -569,7 +881,7 @@ class ImageView2D(QtWidgets.QWidget):
             else:
                 self._updateImageLevels()
             bounds = self.getHistogramDataBounds() or (self.levelMin, self.levelMax)
-            self._apply_display_levels(bounds[0], bounds[1], emit_user=False)
+            self._sync_display_levels(bounds[0], bounds[1], update_image=True, emit_user=False)
                 
     def setLevels(self, min_level, max_level):
         """Set levels as an explicit user action.
@@ -577,9 +889,13 @@ class ImageView2D(QtWidgets.QWidget):
         Programmatic render/presentation paths must use _apply_display_levels
         with emit_user=False so automatic commits never become user-locked.
         """
-        self._apply_display_levels(min_level, max_level, emit_user=True)
+        self._sync_display_levels(min_level, max_level, update_image=True, emit_user=True)
 
     def _apply_display_levels(self, min_level, max_level, *, emit_user: bool) -> None:
+        self._sync_display_levels(min_level, max_level, update_image=True, emit_user=emit_user)
+
+    def _sync_display_levels(self, min_level, max_level, *, update_image: bool, emit_user: bool) -> None:
+        start = perf_counter()
         low = float(min_level)
         high = float(max_level)
         self._displayLevels = (low, high)
@@ -587,9 +903,11 @@ class ImageView2D(QtWidgets.QWidget):
         self._applying_presentation = True
         try:
             self.histogram.setLevels(low, high)
-            self._on_histogram_levels_changed()
         finally:
             self._applying_presentation = applying
+        if update_image:
+            self._on_histogram_levels_changed()
+        self._record_upload_timing("level_sync_ms", (perf_counter() - start) * 1000.0)
         if emit_user:
             self.userLevelsChanged.emit()
 

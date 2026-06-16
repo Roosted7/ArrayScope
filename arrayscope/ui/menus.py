@@ -437,6 +437,7 @@ class WindowMenuMixin:
             skipped_tiles=0 if session is None else len(session.skipped_tiles),
             visible_tiles=0 if session is None else len(session.visible_tiles),
             attached_stage_requests=0 if session is None else len(getattr(session, "attached_stage_requests", ())),
+            display_mode=str(getattr(self.img_view, "montageDisplayMode", lambda: "canvas")()),
             show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
         )
         decision = getattr(self, "_last_render_decision", None)
@@ -467,6 +468,11 @@ class WindowMenuMixin:
         )
         stage_cache_diagnostics = self.operation_evaluator.stage_cache_diagnostics()
         stage_materialization_diagnostics = self.operation_evaluator.stage_materialization_diagnostics()
+        upload_timing = (
+            self.img_view.lastImageUploadTiming()
+            if hasattr(getattr(self, "img_view", None), "lastImageUploadTiming")
+            else None
+        )
         return WindowRuntimeDiagnostics(
             memory_policy=policy,
             image_cache=self.operation_evaluator.image_cache_diagnostics(),
@@ -502,6 +508,11 @@ class WindowMenuMixin:
                 last_stage_cache_hit=getattr(stage_cache_diagnostics, "last_lookup_hit", None),
                 last_stage_attach_wait_ms=getattr(self, "_last_montage_stage_attach_wait_ms", None),
                 last_level_stats_ms=getattr(self, "_last_montage_level_stats_ms", None),
+                last_visible_upload_ms=None if upload_timing is None else upload_timing.visible_upload_ms,
+                last_histogram_upload_ms=None if upload_timing is None else upload_timing.histogram_upload_ms,
+                last_histogram_recompute_ms=None if upload_timing is None else upload_timing.histogram_recompute_ms,
+                last_rgb_window_ms=None if upload_timing is None else upload_timing.rgb_window_ms,
+                last_level_sync_ms=None if upload_timing is None else upload_timing.level_sync_ms,
                 last_canvas_compose_ms=getattr(self, "_last_montage_canvas_compose_ms", None),
                 last_canvas_patch_ms=getattr(self, "_last_montage_canvas_patch_ms", None),
                 last_canvas_commit_ms=getattr(self, "_last_montage_canvas_commit_ms", None),
@@ -510,6 +521,10 @@ class WindowMenuMixin:
                 cached_tiles_last_session=int(getattr(self, "_montage_cached_tiles_last_session", 0) or 0),
                 missing_tiles_last_session=int(getattr(self, "_montage_missing_tiles_last_session", 0) or 0),
                 patched_tiles_last_flush=int(getattr(self, "_montage_patched_tiles_last_flush", 0) or 0),
+                upload_visible_bytes=0 if upload_timing is None else int(upload_timing.visible_bytes),
+                upload_histogram_bytes=0 if upload_timing is None else int(upload_timing.histogram_bytes),
+                upload_fast_same_object=False if upload_timing is None else bool(upload_timing.fast_same_object),
+                coalesced_commits=int(getattr(self, "_montage_coalesced_commits", 0) or 0),
             ),
             render_coalescer=RenderCoalescerDiagnostics(
                 pending=False if coalescer is None else bool(coalescer.has_pending_render),

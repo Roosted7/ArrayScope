@@ -42,10 +42,23 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
         ),
         schedulers=(scheduler,),
         render=RenderRuntimeDiagnostics(),
-        montage=MontageRuntimeDiagnostics(active=False),
+        montage=MontageRuntimeDiagnostics(active=False, display_mode="tile_layer"),
         canvas_preserve=CanvasPreserveRuntimeDiagnostics(events=("start gen=1",)),
         render_timing=RenderTimingDiagnostics(last_render_sync_ms=1.25),
-        montage_timing=MontageTimingDiagnostics(last_canvas_compose_ms=2.5, cached_tiles_last_session=3, missing_tiles_last_session=4),
+        montage_timing=MontageTimingDiagnostics(
+            last_canvas_compose_ms=2.5,
+            last_visible_upload_ms=10.0,
+            last_histogram_upload_ms=5.0,
+            last_histogram_recompute_ms=3.0,
+            last_rgb_window_ms=2.0,
+            last_level_sync_ms=1.0,
+            cached_tiles_last_session=3,
+            missing_tiles_last_session=4,
+            upload_visible_bytes=1024,
+            upload_histogram_bytes=512,
+            upload_fast_same_object=True,
+            coalesced_commits=7,
+        ),
         fft_backend_choice="auto",
         fft_backend_resolved="numpy",
         fft_workers_choice="auto",
@@ -81,4 +94,12 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Timing render sync: 1.25 ms" in text
     assert "Timing worker queue wait: n/a" in text
     assert "Timing canvas compose: 2.50 ms" in text
+    assert "Display mode: tile_layer" in text
+    assert "Timing visible upload: 10.00 ms" in text
+    assert "Timing histogram upload: 5.00 ms" in text
+    assert "Timing histogram recompute: 3.00 ms" in text
+    assert "Timing RGB window: 2.00 ms" in text
+    assert "Timing level sync: 1.00 ms" in text
+    assert "Coalesced montage commits: 7" in text
+    assert "Upload: visible=1.0 KiB histogram=512 B same object=True" in text
     assert "Tile cache last session: cached=3 missing=4" in text

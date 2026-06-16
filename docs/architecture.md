@@ -83,7 +83,10 @@ source of array-view state.
   Progressive montage uses explicit `ImageView2D` presentation APIs for same-shape pixel updates that
   preserve caller-decided levels, histogram range, transform, and viewport instead of letting the
   widget infer semantic display state from partial tile pixels. Complex/RGB windowability is explicit
-  display metadata; RGB array rank alone does not mean pixels are already windowed.
+  display metadata; RGB array rank alone does not mean pixels are already windowed. Large or slow
+  montage commits may use an internal exact tile-layer display path: the committed canvas remains the
+  hover/value source, while per-tile `ImageItem`s paint the visible loaded tiles so progressive
+  updates do not upload a full canvas for every tile.
 - `arrayscope.window.presentation`: Qt-free display presentation decisions. It normalizes
   window/level bounds, keeps display levels separate from histogram/data ranges, accepts accumulated
   semantic montage tile coverage as provisional level sources, and is the only place that chooses
@@ -176,6 +179,16 @@ uses a dedicated `montage` scheduler lane with two workers. Shared expanded oper
 separate max-1 `stage` lane and are materialized before cold dependent tiles are rendered. Visible
 exact image rendering remains latest-only on the max-1 `visible` lane and prefetch remains idle-only
 on the separate `prefetch` lane.
+
+Display upload is a UI-thread phase separate from render/evaluation. `ImageView2D` measures visible
+image upload, histogram plot upload, histogram recompute, RGB re-windowing, level synchronization, and
+profile-bound updates so runtime diagnostics can distinguish slow evaluation from slow Qt painting.
+Histogram image-item binding is idempotent: pyqtgraph connects image-change signals in
+`setImageItem()`, so ArrayScope routes all histogram item switches through one helper and explicitly
+refreshes the histogram plot once per committed state. Progressive montage commits are coalesced to
+the latest state when upload is slow. For large canvases or previously slow uploads, montage display
+switches to exact tile-layer painting; the committed canvas and geometry still own hover/status,
+histogram source, and level semantics.
 
 `render()` then:
 

@@ -44,9 +44,25 @@ from arrayscope.window.render_model import CommitKind
 
 
 MONTAGE_COMMIT_INTERVAL_MS = 16
+MONTAGE_SLOW_UPLOAD_MS = 50.0
+MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
+MONTAGE_EXTREME_UPLOAD_MS = 250.0
 
 
 class MontageRenderMixin:
+    def _montage_tile_layer_policy(self, geometry, data) -> bool:
+        if getattr(geometry, "montage", None) is None:
+            return False
+        pixels = int(np.prod(np.shape(data)[:2]))
+        if pixels > 2_000_000:
+            return True
+        if float(getattr(self, "_last_set_image_ms", 0.0) or 0.0) > MONTAGE_VERY_SLOW_UPLOAD_MS:
+            return True
+        if int(getattr(self, "_montage_patched_tiles_last_flush", 0) or 0) > 8:
+            return True
+        mode = getattr(self.img_view, "montageDisplayMode", lambda: "canvas")()
+        return str(mode) == "tile_layer"
+
     def update_montage_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         axis = self.view_state.montage_axis
         if axis is None or self.view_state.image_axes is None or axis in self.view_state.image_axes:
@@ -687,12 +703,14 @@ class MontageRenderMixin:
     def _schedule_montage_canvas_commit(self, session, *, force=False) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
+        interval_ms = self._montage_commit_interval_ms(session, force=force)
         elapsed_ms = (monotonic() - float(session.last_commit_monotonic or 0.0)) * 1000.0
-        if session.canvas is None or force and not session.flush_pending or elapsed_ms >= MONTAGE_COMMIT_INTERVAL_MS:
+        if session.canvas is None or force and not session.flush_pending or elapsed_ms >= interval_ms:
             self._commit_montage_session_canvas(session, force=force)
             return
         session.final_commit_pending = True
         session.flush_pending = True
+        self._montage_coalesced_commits = int(getattr(self, "_montage_coalesced_commits", 0) or 0) + 1
         timer = getattr(self, "_montage_commit_timer", None)
         if timer is None:
             timer = Qt.QtCore.QTimer(self)
@@ -700,7 +718,20 @@ class MontageRenderMixin:
             timer.timeout.connect(self._flush_montage_canvas_commit)
             self._montage_commit_timer = timer
         if not timer.isActive():
-            timer.start(max(1, int(MONTAGE_COMMIT_INTERVAL_MS - elapsed_ms)))
+            timer.start(max(1, int(interval_ms - elapsed_ms)))
+
+    def _montage_commit_interval_ms(self, session, *, force: bool) -> int:
+        if force:
+            if not session.pending_tiles and not session.loading_tiles and not session.active_tile_requests:
+                return MONTAGE_COMMIT_INTERVAL_MS
+        upload_ms = float(getattr(self, "_last_set_image_ms", 0.0) or 0.0)
+        if upload_ms > MONTAGE_EXTREME_UPLOAD_MS:
+            return 250
+        if upload_ms > MONTAGE_VERY_SLOW_UPLOAD_MS:
+            return 200
+        if upload_ms > MONTAGE_SLOW_UPLOAD_MS:
+            return 100
+        return MONTAGE_COMMIT_INTERVAL_MS
 
     def _flush_montage_canvas_commit(self):
         session = getattr(self, "_montage_session", None)
