@@ -41,17 +41,17 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           PYQTGRAPH_QT_LIB: PySide6
-        run: python test/screenshot_test.py --style Fusion
+        run: pytest tests/ui/test_qt_smoke_artifacts.py -q
 
       - name: Run screenshot test (macOS / Windows)
         if: runner.os != 'Linux'
         env:
           PYQTGRAPH_QT_LIB: PySide6
-        run: python test/screenshot_test.py --style Fusion
+        run: pytest tests/ui/test_qt_smoke_artifacts.py -q
 
       - name: Upload screenshots
         uses: actions/upload-artifact@v4
         with:
           name: screenshots-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: test/screenshots/
+          path: tests/artifacts/*.png
           if-no-files-found: error
