@@ -212,6 +212,31 @@ def test_imageview2d_display_ownership_helpers_are_split_out():
     assert "class ProfileMarkerOwner" in (ROOT / "arrayscope" / "display" / "profile_marker.py").read_text()
 
 
+def test_image_view_graphics_items_are_added_only_by_layer_owner():
+    offenders = []
+    allowed = {Path("arrayscope/display/layers.py")}
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        rel = path.relative_to(ROOT)
+        if rel in allowed:
+            continue
+        text = path.read_text()
+        if ".view.addItem(" in text or "self.view.addItem(" in text:
+            offenders.append(str(rel))
+    assert offenders == []
+
+
+def test_image_view_z_order_is_centralized_in_layer_owner():
+    offenders = []
+    allowed = {Path("arrayscope/display/layers.py")}
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        rel = path.relative_to(ROOT)
+        if rel in allowed:
+            continue
+        if ".setZValue(" in path.read_text():
+            offenders.append(str(rel))
+    assert offenders == []
+
+
 def test_predictive_compute_modules_exist():
     for rel in (
         Path("arrayscope/core/compute_policy.py"),

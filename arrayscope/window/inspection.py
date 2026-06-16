@@ -11,7 +11,10 @@ from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.core.compare import CompareDocument, compatible_roi_shape
 from arrayscope.core.histograms import HistogramSpec, comparison_histograms
-from arrayscope.core.roi import RoiKind, roi_statistics, roi_values
+from arrayscope.core.roi import RoiKind, RoiStatsAccumulator, roi_bounding_rect, roi_statistics, roi_values, roi_values_for_region
+from arrayscope.operations.evaluator import _document_key
+from arrayscope.operations.tile_regions import TileRegionRequest
+from arrayscope.window.tile_data_provider import TileDataProvider
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
 
@@ -146,33 +149,59 @@ class InspectionWorkflowMixin:
             self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
             selections = self.roi_store.selections
             self.inspection_dock.set_rois(selections)
+            if not any(selection.enabled for selection in selections):
+                key = ("empty-roi", tuple((selection.id, selection.enabled, selection.geometry) for selection in selections))
+                self._roi_inspection_request_key = key
+                self._roi_inspection_in_flight = False
+                if key != getattr(self, "_roi_inspection_applied_key", None):
+                    self.inspection_dock.set_statistics(OrderedDict())
+                    self.inspection_dock.set_histograms(())
+                    self._update_roi_info_overlay(OrderedDict())
+                    self._roi_inspection_applied_key = key
+                return
             image = self._roi_source_image()
             layers = self._compatible_compare_layers(image) if image is not None else ()
             key = self._roi_inspection_key(image, selections, layers)
+            if key == getattr(self, "_roi_inspection_request_key", None) and (
+                getattr(self, "_roi_inspection_in_flight", False) or key == getattr(self, "_roi_inspection_applied_key", None)
+            ):
+                return
             self._roi_inspection_request_key = key
             work_size = 0 if image is None else int(np.size(image)) * max(1, sum(1 for selection in selections if selection.enabled))
-            if work_size <= 250_000:
+            if work_size <= 250_000 and not self._roi_uses_montage_demand(selections):
                 self._apply_roi_inspection_snapshot_if_current(key, self._compute_roi_inspection_snapshot(key, image, selections, layers))
                 return
+            self._roi_inspection_in_flight = True
             self.roi_evaluation_controller.start_latest(
                 lambda key=key, image=image, selections=selections, layers=layers: self._compute_roi_inspection_snapshot(key, image, selections, layers),
                 key=key,
                 priority=EvalPriority.SELECTED_ROI,
                 replace_group="roi-inspection",
                 on_done=lambda snapshot, key=key: self._apply_roi_inspection_snapshot_if_current(key, snapshot),
-                on_error=lambda exc: None,
+                on_error=lambda exc: self._finish_roi_inspection_error(),
                 slow_ms=0,
             )
         finally:
             self._last_inspection_refresh_ms = (perf_counter() - start) * 1000.0
 
     def _roi_inspection_key(self, image, selections, layers):
-        image_key = None if image is None else (id(image), tuple(np.shape(image)), str(getattr(image, "dtype", None)))
+        if self._roi_uses_montage_demand(selections):
+            geometry = getattr(self, "display_geometry", None)
+            image_key = (
+                "montage-demand",
+                _document_key(self.document),
+                self.view_state,
+                None if geometry is None else getattr(geometry, "montage", None),
+            )
+        else:
+            image_key = None if image is None else (id(image), tuple(np.shape(image)), str(getattr(image, "dtype", None)))
         selection_key = tuple((selection.id, selection.enabled, selection.geometry) for selection in selections)
         layer_key = tuple((layer.label, id(layer.data), tuple(np.shape(layer.data)), str(getattr(layer.data, "dtype", None))) for layer in layers)
         return image_key, selection_key, layer_key
 
     def _compute_roi_inspection_snapshot(self, key, image, selections, layers):
+        if self._roi_uses_montage_demand(selections):
+            return self._compute_montage_roi_inspection_snapshot(key, selections)
         stats_by_roi = OrderedDict()
         hist_inputs = []
         if image is not None:
@@ -197,11 +226,105 @@ class InspectionWorkflowMixin:
     def _apply_roi_inspection_snapshot_if_current(self, key, snapshot):
         if key != getattr(self, "_roi_inspection_request_key", None):
             return False
+        self._roi_inspection_in_flight = False
+        self._roi_inspection_applied_key = key
         self.inspection_dock.set_statistics(snapshot.stats_by_roi)
         self.inspection_dock.set_histograms(snapshot.histograms)
         self._update_roi_info_overlay(snapshot.stats_by_roi)
         self._sync_progressive_docks()
         return True
+
+    def _finish_roi_inspection_error(self):
+        self._roi_inspection_in_flight = False
+
+    def _roi_uses_montage_demand(self, selections) -> bool:
+        if not selections:
+            return False
+        geometry = getattr(self, "display_geometry", None)
+        return bool(geometry is not None and getattr(geometry, "montage", None) is not None)
+
+    def _compute_montage_roi_inspection_snapshot(self, key, selections):
+        stats_by_roi = OrderedDict()
+        hist_inputs = []
+        provider = self._tile_data_provider()
+        plan = getattr(self, "_current_montage_plan", None)
+        if provider is None or plan is None:
+            return RoiInspectionSnapshot(key, stats_by_roi, ())
+        for selection in selections:
+            if not selection.enabled:
+                continue
+            accumulator = RoiStatsAccumulator()
+            exact_values = []
+            for tile, region in self._roi_tile_regions(selection.geometry, plan):
+                request = TileRegionRequest(
+                    document_key=_document_key(self.document),
+                    view_state=tile.view_state,
+                    montage_axis=getattr(self.view_state, "montage_axis", None),
+                    source_index=tile.source_index,
+                    tile_number=tile.montage_index,
+                    tile_local_region=region,
+                    purpose="roi",
+                )
+                result = provider.request_tile_region(request, priority=EvalPriority.SELECTED_ROI)
+                source = result.histogram_data if result.histogram_data is not None else result.image
+                y_slice, x_slice = region
+                offset = (tile.x0 + int(x_slice.start or 0), tile.y0 + int(y_slice.start or 0))
+                values = roi_values_for_region(source, selection.geometry, offset=offset)
+                accumulator.add_values(values)
+                finite = np.asarray(values).ravel()
+                finite = finite[np.isfinite(finite)]
+                if finite.size and sum(value.size for value in exact_values) + finite.size <= 250_000:
+                    exact_values.append(finite.copy())
+            stats = accumulator.result()
+            stats_by_roi[selection.id] = (selection, stats)
+            if exact_values:
+                hist_inputs.append((selection.label, np.concatenate(exact_values)))
+        return RoiInspectionSnapshot(key, stats_by_roi, comparison_histograms(hist_inputs, HistogramSpec(bins=96)))
+
+    def _tile_data_provider(self):
+        if not hasattr(self, "operation_evaluator"):
+            return None
+        return TileDataProvider(
+            operation_evaluator=self.operation_evaluator,
+            document=self.document,
+            committed_frame=getattr(self, "_committed_display_frame", None),
+            montage_plan=getattr(self, "_current_montage_plan", None),
+            colormap_lut=self._roi_colormap_lut(),
+        )
+
+    def _roi_colormap_lut(self):
+        try:
+            if getattr(getattr(self.view_state, "channel", None), "value", getattr(self.view_state, "channel", None)) == "phase":
+                return self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
+        except Exception:
+            return None
+        return None
+
+    def _roi_tile_regions(self, geometry, plan):
+        bounds = roi_bounding_rect(geometry)
+        if bounds is None:
+            return ()
+        x0, y0, x1, y1 = bounds
+        regions = []
+        for tile in plan.tiles:
+            tx0 = int(tile.x0)
+            ty0 = int(tile.y0)
+            tx1 = tx0 + int(tile.width)
+            ty1 = ty0 + int(tile.height)
+            if tx1 <= x0 or tx0 >= x1 or ty1 <= y0 or ty0 >= y1:
+                continue
+            if geometry.kind == RoiKind.RECTANGLE:
+                rx0 = max(tx0, int(np.floor(x0)))
+                rx1 = min(tx1, int(np.ceil(x1)))
+                ry0 = max(ty0, int(np.floor(y0)))
+                ry1 = min(ty1, int(np.ceil(y1)))
+                if rx1 <= rx0 or ry1 <= ry0:
+                    continue
+                region = (slice(ry0 - ty0, ry1 - ty0), slice(rx0 - tx0, rx1 - tx0))
+            else:
+                region = (slice(0, int(tile.height)), slice(0, int(tile.width)))
+            regions.append((tile, region))
+        return tuple(regions)
 
     def _compatible_compare_layers(self, reference_image):
         if not hasattr(self, "compare_document"):

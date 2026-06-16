@@ -2,7 +2,7 @@
 
 ArrayScope supports first-class ROI inspection for line, rectangle, polyline, and freehand polygon
 regions. The implementation keeps ROI geometry and sampling in Qt-free helpers, while `ImageView2D`
-owns pyqtgraph ROI graphics and emits complete geometry changes to the window.
+owns pyqtgraph ROI graphics and emits complete world-coordinate geometry changes to the window.
 
 Line and polyline ROIs are sampled along their path with `scipy.ndimage.map_coordinates`. Rectangle
 and freehand ROIs are area-based; freehand gestures are simplified and closed into polygons before
@@ -12,9 +12,9 @@ matplotlib as a dependency.
 Basic ROI operations are available from the image view context menu. Creating an ROI does not open the
 Inspection dock; instead, a movable semi-transparent overlay on top of the 2D view shows the most
 important ROI values. The Inspection dock remains optional, defaults to a left-docked panel when opened,
-and provides finite-value statistics and shared-range histogram comparisons. ROI statistics are computed
-from the current displayed scalar image or the image histogram source, so complex RGB views use the same
-magnitude source as the image histogram.
+and provides finite-value statistics and shared-range histogram comparisons. Normal-image ROI
+statistics are computed from the current displayed scalar image or the image histogram source, so
+complex RGB views use the same magnitude source as the image histogram.
 
 Phase 4c makes interaction ownership explicit. The Inspection dock is an analysis/management panel and
 may create line and rectangle ROIs immediately because they have sensible defaults. Polyline and
@@ -31,4 +31,10 @@ A minimal compare-layer scaffold exists for same-ROI histogram comparison agains
 arrays. It is intentionally not full Phase 5 session or synchronized-window support. Phase 4c
 debounces ROI statistics/histogram refreshes and moves large ROI computations to the window's ROI
 evaluation controller. ROI rows update immediately, but statistics and histograms commit only when
-the debounced ROI/image request key is still current.
+the debounced ROI/image request key is still current. Montage ROI statistics use demand tile-region
+requests rather than sampling only the current visible canvas. The demand path checks committed canvas
+coverage, rendered tile cache, region cache, stage-cache reuse through the evaluator, and exact tile
+evaluation without mutating the visible montage session. Rectangle ROIs request intersected
+subregions; line, polyline, and freehand/polygon ROIs stream per-tile values through the same Qt-free
+ROI helpers. The dock keeps previous results visible and shows a local updating indicator while demand
+stats are in flight.

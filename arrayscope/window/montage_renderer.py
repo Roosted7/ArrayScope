@@ -852,18 +852,6 @@ class MontageRenderMixin:
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
-            if previous_canvas is not None and previous_global_range is not None:
-                local_range = (
-                    (
-                        float(previous_global_range[0][0]) - float(canvas.origin_x),
-                        float(previous_global_range[0][1]) - float(canvas.origin_x),
-                    ),
-                    (
-                        float(previous_global_range[1][0]) - float(canvas.origin_y),
-                        float(previous_global_range[1][1]) - float(canvas.origin_y),
-                    ),
-                )
-                self.img_view.getView().setRange(xRange=local_range[0], yRange=local_range[1], padding=0)
         finally:
             self._montage_canvas_commit_active = False
         self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
@@ -952,16 +940,26 @@ class MontageRenderMixin:
                 continue
             if state not in {MontageTileState.LOADING, MontageTileState.SKIPPED}:
                 continue
-            x = int(tile.x0) - int(canvas.origin_x)
-            y = int(tile.y0) - int(canvas.origin_y)
-            if x + int(tile.width) <= 0 or y + int(tile.height) <= 0 or x >= canvas.display_shape[1] or y >= canvas.display_shape[0]:
+            canvas_x0 = int(canvas.origin_x)
+            canvas_y0 = int(canvas.origin_y)
+            canvas_x1 = canvas_x0 + int(canvas.display_shape[1])
+            canvas_y1 = canvas_y0 + int(canvas.display_shape[0])
+            tile_x0 = int(tile.x0)
+            tile_y0 = int(tile.y0)
+            tile_x1 = tile_x0 + int(tile.width)
+            tile_y1 = tile_y0 + int(tile.height)
+            x = max(tile_x0, canvas_x0)
+            y = max(tile_y0, canvas_y0)
+            x1 = min(tile_x1, canvas_x1)
+            y1 = min(tile_y1, canvas_y1)
+            if x1 <= x or y1 <= y:
                 continue
             overlays.append(
                 MontageTileOverlay(
-                    x=max(0, x),
-                    y=max(0, y),
-                    width=max(1, min(int(tile.width), canvas.display_shape[1] - max(0, x))),
-                    height=max(1, min(int(tile.height), canvas.display_shape[0] - max(0, y))),
+                    x=x,
+                    y=y,
+                    width=max(1, x1 - x),
+                    height=max(1, y1 - y),
                     state=state.value,
                     text="Skipped" if state == MontageTileState.SKIPPED else "Loading",
                 )
@@ -1038,15 +1036,12 @@ class MontageRenderMixin:
 
     def _current_montage_global_view_range(self):
         try:
-            local_range = self.img_view.getView().viewRange()
+            view_range = self.img_view.getView().viewRange()
         except Exception:
             return None
-        canvas = getattr(self, "_current_montage_canvas", None)
-        origin_x = 0 if canvas is None else int(canvas.origin_x)
-        origin_y = 0 if canvas is None else int(canvas.origin_y)
         return (
-            (float(local_range[0][0]) + origin_x, float(local_range[0][1]) + origin_x),
-            (float(local_range[1][0]) + origin_y, float(local_range[1][1]) + origin_y),
+            (float(view_range[0][0]), float(view_range[0][1])),
+            (float(view_range[1][0]), float(view_range[1][1])),
         )
 
 

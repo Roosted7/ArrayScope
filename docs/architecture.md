@@ -13,8 +13,11 @@ source of array-view state.
   bounded viewport canvas used by interactive montage display, and keeps the small `make_montage()`
   helper for pure utility/test use.
 - `arrayscope.display.geometry`: the pure display-coordinate contract for normal image and montage
-  views. It maps display points to array indices and profile states using the geometry committed with
-  the current image.
+  views. It maps stable ViewBox/world points to canvas-local points, tile-local points, array
+  indices, and profile states using the geometry committed with the current image.
+- `arrayscope.display.layers`: the only owner for adding image-view graphics items to the ViewBox.
+  It applies the shared z-order policy for image/tile pixels, ROI graphics, profile markers, montage
+  loading overlays, and HUD graphics.
 - `arrayscope.display.viewport`: explicit viewport update policy and `ViewportController` for
   preserving, fitting, resetting, and true 1:1 2D ViewBox ranges.
 - `arrayscope.operations.pipeline`: immutable NumPy operations plus shape, dtype, and capability
@@ -426,14 +429,15 @@ available from the image context menu, so ROI use does not require opening a doc
 manages analysis and immediate line/rectangle ROI creation; freehand and polyline drawing are one-shot
 canvas interactions owned by `ImageView2D`. ImageView2D owns ROI graphics items, emits complete ROI
 geometry, and displays a movable semi-transparent ROI info overlay.
-The window debounces ROI statistics and histogram updates from the current displayed scalar image or
-histogram source, then sends settled results back to the dock and overlay. Small snapshots compute
-directly; larger ROI/image combinations run through the ROI evaluation controller and commit only if
-their ROI/image request key is still current. Extra comparison layers are internal scaffolding for
-same-ROI histogram comparison and are not full session/sync support.
-ROI sampling is display-space in Phase 4a. Montage histogram sources contain
-`NaN` in gaps, so ROI statistics ignore inter-tile spacing. Full nD ROI
-back-projection is intentionally deferred.
+The window debounces ROI statistics and histogram updates, then sends settled results back to the dock
+and overlay. Normal image snapshots can compute directly from the committed scalar image or histogram
+source. Montage ROI work uses demand tile-region requests derived from world-coordinate ROI geometry:
+loaded visible canvas data is reused when it covers the region, otherwise rendered-tile, region, and
+stage caches are checked before exact tile evaluation is scheduled on the ROI lane. The visible montage
+session, viewport canvas, and main-view loading overlays are not mutated by offscreen ROI demand work.
+ROI rows remain visible while stale stats are replaced atomically when the current request key matches.
+Extra comparison layers are internal scaffolding for same-ROI histogram comparison and are not full
+session/sync support.
 
 The Profile dock can plot multiple active profile axes. The window evaluates each profile state through
 the existing line evaluator/cache and sends all results to one plot. Complex profile mode is dock-local:
@@ -449,10 +453,12 @@ Visible tiles are evaluated through the same image snapshot path as normal views
 and composed into one bounded `MontageViewportCanvas` with `origin_x`/`origin_y` in full montage
 coordinates. The canvas carries per-tile states (`loaded`, `loading`, `skipped`, `unloaded`) so hover
 and live profile can distinguish real data from loading placeholders, hard budget-skipped tiles, and
-inter-tile gaps. Interactive montage display keeps a single `ImageItem` plus lightweight tile-state
-overlays; `DisplayGeometry` maps canvas-local display points through the canvas origin into the full
-montage grid before resolving source tile indices, and only loaded tiles produce array/profile
-mappings. Missing visible tiles are scheduled sequentially through the one-worker visible controller,
+inter-tile gaps. ViewBox coordinates are full montage world coordinates: the bounded canvas `ImageItem`
+is positioned at `canvas.origin_x/origin_y`, and the exact tile-layer mode positions tile `ImageItem`s
+at their full montage tile origins. `DisplayGeometry` maps world points to canvas-local points,
+tile-local points, and array indices; hover/value lookup requires loaded committed pixels, while
+ROI/profile demand mapping can resolve valid offscreen or unloaded tiles. Missing visible tiles are
+scheduled sequentially through the one-worker visible controller,
 and each completed tile can update the current canvas with visual commits throttled to roughly 30 Hz.
 Visible tiles are not skipped merely because there are many of them; progressive rendering evaluates
 them one at a time. A tile is skipped only when an individual tile would exceed the visible render

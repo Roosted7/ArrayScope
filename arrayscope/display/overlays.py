@@ -25,7 +25,6 @@ class MontageTileOverlayItem(QtWidgets.QGraphicsItem):
     def __init__(self):
         super().__init__()
         self._overlays = ()
-        self.setZValue(20)
 
     @property
     def overlay_count(self) -> int:
@@ -78,4 +77,3 @@ class MontageTileOverlayItem(QtWidgets.QGraphicsItem):
         painter.drawEllipse(icon_rect)
         painter.drawLine(QtCore.QPointF(cx, cy), QtCore.QPointF(cx, cy - size * 0.32))
         painter.drawLine(QtCore.QPointF(cx, cy), QtCore.QPointF(cx + size * 0.28, cy))
-

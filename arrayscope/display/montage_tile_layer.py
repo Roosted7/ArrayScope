@@ -27,7 +27,6 @@ class TileLayerItemState:
     rgb_base: np.ndarray | None = None
     hist_source: np.ndarray | None = None
     display_cache: np.ndarray | None = None
-    hidden_commits: int = 0
     source_cache_serial: int = 0
 
 
@@ -42,14 +41,14 @@ class TileLayerUpdateStats:
 class MontageTileLayer:
     def __init__(
         self,
-        view,
+        layer_owner,
         *,
         set_image_item_data: Callable,
         record_upload_timing: Callable[[str, float], None],
         histogram_levels_for_display: Callable,
         is_rgb_image: Callable[[object], bool],
     ):
-        self.view = view
+        self.layer_owner = layer_owner
         self._set_image_item_data = set_image_item_data
         self._record_upload_timing = record_upload_timing
         self._histogram_levels_for_display = histogram_levels_for_display
@@ -64,10 +63,7 @@ class MontageTileLayer:
 
     def clear(self) -> None:
         for state in tuple(self._states.values()):
-            try:
-                self.view.removeItem(state.item)
-            except Exception:
-                pass
+            self.layer_owner.remove_tile_item(state.tile_number)
         self._states.clear()
 
     def update_presentation(
@@ -123,8 +119,7 @@ class MontageTileLayer:
             item_state = self._states.get(tile_number)
             if item_state is None:
                 item = ImageItem(axisOrder="row-major")
-                item.setZValue(1)
-                self.view.addItem(item)
+                self.layer_owner.add_tile_item(tile_number, item)
                 item_state = TileLayerItemState(
                     tile_number=int(tile_number),
                     source_index=int(source_index),
@@ -139,8 +134,9 @@ class MontageTileLayer:
                 self._states[int(tile_number)] = item_state
 
             item_state.item.setVisible(True)
-            item_state.hidden_commits = 0
-            item_state.item.setPos(float(local_x + source_x0), float(local_y + source_y0))
+            world_x = global_x + source_x0
+            world_y = global_y + source_y0
+            item_state.item.setPos(float(world_x), float(world_y))
             visible_items += 1
             active.add(int(tile_number))
 
@@ -241,16 +237,14 @@ class MontageTileLayer:
         state.rgb_base = None
         state.hist_source = None
         state.display_cache = None
-        state.hidden_commits += 1
-        if state.hidden_commits >= 3:
-            self._remove_tile(tile_number)
+        self._remove_tile(tile_number)
 
     def _remove_tile(self, tile_number: int) -> None:
         state = self._states.pop(int(tile_number), None)
         if state is None:
             return
         try:
-            self.view.removeItem(state.item)
+            self.layer_owner.remove_tile_item(int(tile_number))
         except Exception:
             pass
 
@@ -310,7 +304,6 @@ class MontageTileLayer:
         state.levels = levels
         state.rgb_already_windowed = bool(rgb_already_windowed)
         state.visible = True
-        state.hidden_commits = 0
         return True, windowed
 
     def _update_tile_levels(self, state: TileLayerItemState, levels: tuple[float, float]) -> tuple[bool, bool]:

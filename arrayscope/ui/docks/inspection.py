@@ -57,7 +57,6 @@ class InspectionDock(StandardDockWidget):
         controls.addWidget(self.clear_button)
         controls.addStretch()
         layout.addLayout(controls)
-
         self.roi_model = RoiTableModel(self)
         self.stats_table = QtWidgets.QTableView()
         self.stats_table.setModel(self.roi_model)
