@@ -134,19 +134,22 @@ def test_window_render_montage_view_does_not_call_make_montage():
 
 
 def test_render_display_commits_go_through_display_committer():
-    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    render_text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    presenter_text = (ROOT / "arrayscope" / "window" / "display_presenter.py").read_text()
     forbidden = (
         ".setImage(",
         ".updateImageDataFast(",
         ".setHistogramRange(",
     )
     for token in forbidden:
-        assert token not in text
-    assert "DisplayCommitter" in text
+        assert token not in render_text
+    assert "DisplayPresentationMixin" in render_text
+    assert "DisplayCommitter" in presenter_text
 
 
 def test_window_render_does_not_own_presentation_policy():
-    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    render_text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    presenter_text = (ROOT / "arrayscope" / "window" / "display_presenter.py").read_text()
     forbidden = (
         "choose_window_levels",
         "choose_montage_presentation",
@@ -158,8 +161,8 @@ def test_window_render_does_not_own_presentation_policy():
         "_display_histogram_bounds",
     )
     for token in forbidden:
-        assert token not in text
-    assert "decide_presentation" in text
+        assert token not in render_text
+    assert "decide_presentation" in presenter_text
 
 
 def test_display_presentation_boundary_modules_exist():
@@ -172,6 +175,7 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/window/montage_controller.py"),
         Path("arrayscope/window/normal_image_controller.py"),
         Path("arrayscope/window/viewport_bridge.py"),
+        Path("arrayscope/window/display_presenter.py"),
     ):
         assert (ROOT / rel).exists()
 
