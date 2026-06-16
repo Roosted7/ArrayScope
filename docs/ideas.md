@@ -28,7 +28,6 @@ Rules:
 * Add keyboard-first navigation: arrow keys/scroll for active slice dimension, shortcuts for active dimension selection, `F` fit, `1` 1:1 pixels, `A` auto window.
 * Add transient toast/status messages instead of printing warnings to stdout.
 * Add an overview/minimap dock for large 2D images.
-* Add visually richer operation rows: drag handle, enable checkbox, operation name, output shape, cache status, delete button/context menu.
 * Add operation row color/status bar: cached/ready/stale/error, but only when the status reflects real state.
 * Add optional dark/light/native theme choice after the interaction model is stable.
 * Add visual warnings before expensive full materialization or export.
@@ -57,7 +56,6 @@ Rules:
 * Add pipeline comments/labels.
 * Add recipe save/load including ViewState, not just operation stack.
 * Add full session save/load: operation stack, axes, slices, windowing, channel, scale, layout, profile state.
-* Add derived-array export: save materialized result after operations as `.npy` / `.npz` first, with recipe sidecar.
 * Add output-size estimation before materialization/export.
 * Add undo/redo stack for view and operation changes.
 * Add operation compatibility preview before applying or reordering.
@@ -66,13 +64,10 @@ Rules:
 
 ## Performance ideas
 
-* Support lazy/view-like ops for crop, reverse, conjugate, and simple slicing.
 * Add optional per-cache manual budget overrides on top of the current memory profile presets if users need finer control.
 * Add richer diagnostics graphs/timelines for cache growth, scheduler activity, and prefetch usefulness.
 * Add explicit export progress for derived-array `.npy/.npz` saves after materialization is complete.
 * Add benchmark fixtures for representative MRI stacks so cache and slab changes can be compared over time.
-* Consider a dedicated viewport-tile planner that owns montage canvas rect, tile coverage, and scheduling
-  decisions so the window render path can stay thin as Phase 4g stage caching evolves.
 * Add chunked/cancellable FFT and reduction execution so expensive transforms can be interrupted rather
   than only estimated and warned about.
 * True cancellation inside one FFT call remains unsolved; current chunking cancels only between
@@ -113,10 +108,6 @@ Rules:
 * Consider a debug overlay showing the current `DisplayGeometry` mapping under the cursor when strict UI mode is enabled.
 * Consider a deliberate migration from current `start:step:stop` range text to Python `start:stop:step`
   syntax with a compatibility warning or explicit preference.
-* Consider detached managed panels backed by `QDialog`/tool windows if platform-specific `QDockWidget`
-  floating behavior remains problematic after the Phase 4c lifecycle cleanup.
-* Prototype a detached `QDialog`/tool-window panel model for medium-term Wayland reliability instead
-  of repairing `QDockWidget` lifecycle events with event filters.
 * Add a priority scheduler for visible rendering, profile, ROI, hover, and prefetch work before
   reintroducing operation-backed predictive prefetch.
 * Reintroduce physical FOV/aspect controls only after axis spacing/unit metadata is available.

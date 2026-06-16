@@ -18,15 +18,6 @@ AGGREGATE_SAMPLE_LIMIT = 262144
 
 
 @dataclass(frozen=True)
-class MontageLevelKey:
-    document_key: object
-    view_state: object
-    montage_axis: int
-    indices: tuple[int, ...]
-    colormap_key: object | None
-
-
-@dataclass(frozen=True)
 class TileLevelStats:
     source_index: int
     bounds: tuple[float, float]
