@@ -1,85 +1,30 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from time import monotonic, perf_counter
+from time import perf_counter
 
 import numpy as np
-
 import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.colormaps import gray_colormap, phase_colormap
-from arrayscope.display.geometry import DisplayGeometry
-from arrayscope.display.imageview2d import MontageTileOverlay
-from arrayscope.display.montage import (
-    MontageTileState,
-    make_montage_plan,
-    make_montage_viewport_canvas,
-    montage_rect_for_viewport,
-    optimal_montage_columns,
+from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.operations.evaluator import (
+    _document_key,
+    evaluate_line_snapshot,
+    evaluate_scalar_snapshot,
+    stage_document_key,
 )
-from arrayscope.display.slice_engine import DisplayImage, make_image_from_slab
-from arrayscope.display.viewport import ViewportIntent, ViewportPolicy
-from arrayscope.core.memory_budget import (
-    estimate_display_image_bytes,
-    estimate_montage_bytes,
-    format_bytes,
-)
-from arrayscope.core.memory_policy import (
-    apply_policy_hysteresis,
-    compute_memory_policy,
-    input_nbytes_for,
-)
-from arrayscope.operations.evaluator import _document_key, stage_document_key
-from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
 from arrayscope.profiles.model import profile_y_range
-from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
-from arrayscope.core.view_state import ChannelMode, ScaleMode
-from arrayscope.operations.evaluator import evaluate_image_snapshot, evaluate_line_snapshot, evaluate_scalar_snapshot
-from arrayscope.operations.evaluator import EvaluationResult
-from arrayscope.operations.slabs import (
-    evaluate_slab_from_stage,
-    materialize_stage_candidate,
-    plan_slab,
-    request_for_image,
-)
-from arrayscope.operations.render_plan import (
-    MAX_IDLE_PREFETCH_SLICES,
-    PREFETCH_IDLE_DELAY_MS,
-    RenderDecisionKind,
-    choose_visible_render_decision,
-    degraded_view_state,
-    estimate_visible_render_context,
-)
-from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.display_frame import CommittedDisplayFrame
+from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
-from arrayscope.window.montage_levels import MontageLevelStats, MontageLevelTracker
-from arrayscope.window.montage_session import MontageRenderSession
-from arrayscope.window.presentation import (
-    LevelSourceRank,
-    fallback_level_source,
-)
-from arrayscope.window.render_model import CommitKind
-from arrayscope.window.display_presenter import DisplayPresentationMixin
-from arrayscope.window.normal_renderer import NormalImageRenderMixin
 from arrayscope.window.montage_renderer import MontageRenderMixin
+from arrayscope.window.normal_renderer import NormalImageRenderMixin
 from arrayscope.window.render_prefetch import RenderPrefetchMixin
 from arrayscope.window.render_resources import RenderResourceMixin
-
-
-MONTAGE_COMMIT_INTERVAL_MS = 16
-
-
-@dataclass(frozen=True)
-class RenderedView:
-    view_state: object
-    document_key: tuple
-    display_image: DisplayImage
-    geometry: DisplayGeometry
-
 
 def getNumberOfDecimalPlaces(number):
     if isinstance(number, (int, np.integer)):
