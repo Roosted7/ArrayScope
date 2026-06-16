@@ -341,6 +341,33 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
         _process_events(qt_app)
 
 
+def test_diagnostics_dialog_artifact_is_compact(qt_app):
+    _clear_arrayscope_settings()
+
+    for name in list(sys.modules):
+        if name == "arrayscope" or name.startswith("arrayscope."):
+            del sys.modules[name]
+
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((32, 32, 4), dtype=np.float32))
+    try:
+        win.show()
+        _process_events(qt_app)
+        win.open_diagnostics_dialog()
+        dialog = win._diagnostics_dialog
+        dialog.resize(500, 500)
+        _process_events(qt_app)
+
+        assert dialog.minimumWidth() <= 480
+        assert dialog.width() <= 560
+        assert "All" in dialog._section_edits
+        _grab_widget(dialog, "arrayscope_diagnostics_dialog.png", min_width=480, min_height=420)
+    finally:
+        win.close()
+        _process_events(qt_app)
+
+
 def test_pixel_status_label_elides_slice_context_first(qt_app):
     from arrayscope.ui.status_label import PixelStatusLabel
 

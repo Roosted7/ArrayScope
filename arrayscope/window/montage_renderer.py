@@ -197,6 +197,13 @@ class MontageRenderMixin:
             stage_values=stage_plan["stage_values"],
             defer_side_panels=bool(defer_side_panels),
             applied_level_source=None if previous_frame is None else fallback_level_source(previous_frame),
+            tile_compute_cache_hits=len(cached_tiles),
+            tile_compute_waiting_for_stage=len(stage_plan["waiting_indices"]),
+            lead_direct_tiles=stage_plan["lead_direct_tiles"],
+            stage_backed_tiles_pending=len(stage_plan["waiting_indices"]),
+            retained_stage_index=stage_plan["retained_stage_index"],
+            retained_stage_decision=stage_plan["retained_stage_decision"],
+            repeated_expensive_stage_per_tile=stage_plan["repeated_expensive_stage_per_tile"],
         )
         self._montage_session = session
         self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
@@ -211,11 +218,8 @@ class MontageRenderMixin:
         except MemoryError as exc:
             show_status_message(self, str(exc), timeout=6000)
             return
-        if not session.pending_tiles and not session.loading_tiles and not session.attached_stage_requests:
-            self._stop_montage_session_slow_overlay()
-            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
-            self.img_view.setImageStale(False)
-            self.img_view.setEvaluationOverlay(False)
+        if session.is_complete():
+            self._finish_montage_session_if_complete(session)
             if defer_side_panels:
                 self._deferred_side_panel_refresh_pending = True
             else:
@@ -364,13 +368,19 @@ class MontageRenderMixin:
         stage_requests = []
         attached_stage_keys = set()
         waiting_indices = set()
+        lead_direct_tile_count = 0
+        retained_stage_index = None
+        retained_stage_decision = ""
+        repeated_expensive_stage_per_tile = False
         for key, group in groups.items():
             tiles = tuple(group["tiles"])
             candidate = group["candidate"]
+            retained_stage_index = int(getattr(candidate, "stage_index", -1) or -1)
             estimated = int(getattr(candidate, "estimated_nbytes", 0) or 0)
             if len(tiles) < 2 and estimated < 16 * 1024 * 1024:
                 continue
             result = self.operation_evaluator.stage_materializer.request_stage(document_key, candidate)
+            retained_stage_decision = result.decision
             if result.decision == "hit":
                 stage_values[key] = result.value
                 for tile in tiles:
@@ -378,6 +388,7 @@ class MontageRenderMixin:
                 continue
             if result.decision == "scheduled":
                 _direct_tiles, waiting_tiles = _lead_direct_tiles(tiles)
+                lead_direct_tile_count += len(_direct_tiles)
                 if waiting_tiles:
                     stage_waiting_tiles[key] = list(waiting_tiles)
                 for tile in waiting_tiles:
@@ -397,6 +408,8 @@ class MontageRenderMixin:
                 continue
             for tile in tiles:
                 tile_stage_keys.pop(int(tile.montage_index), None)
+            if len(tiles) > 1:
+                repeated_expensive_stage_per_tile = True
         return {
             "tile_stage_keys": tile_stage_keys,
             "stage_waiting_tiles": stage_waiting_tiles,
@@ -404,6 +417,10 @@ class MontageRenderMixin:
             "stage_requests": stage_requests,
             "attached_stage_keys": attached_stage_keys,
             "waiting_indices": waiting_indices,
+            "lead_direct_tiles": int(lead_direct_tile_count),
+            "retained_stage_index": retained_stage_index,
+            "retained_stage_decision": retained_stage_decision,
+            "repeated_expensive_stage_per_tile": bool(repeated_expensive_stage_per_tile),
         }
 
     def _schedule_montage_stage_jobs(self, session, stage_requests) -> None:
@@ -550,6 +567,8 @@ class MontageRenderMixin:
     def _schedule_montage_tiles(self, session: MontageRenderSession) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
+        if hasattr(self, "_apply_resource_governor_decisions"):
+            self._apply_resource_governor_decisions()
         controller = getattr(self, "montage_tile_evaluation_controller", self.visible_evaluation_controller)
         max_workers = max(1, int(controller.pool.maxThreadCount()))
         while len(session.active_tile_requests) < max_workers:
@@ -568,11 +587,7 @@ class MontageRenderMixin:
             self._schedule_montage_canvas_commit(session, force=True)
             if session.pending_tiles:
                 return self._schedule_next_montage_tile(session)
-            if self._is_current_montage_session(session.session_id, session.key):
-                self._stop_montage_session_slow_overlay()
-                self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
-                self.img_view.setImageStale(False)
-                self.img_view.setEvaluationOverlay(False)
+            if self._finish_montage_session_if_complete(session):
                 if getattr(session, "defer_side_panels", False):
                     self._deferred_side_panel_refresh_pending = True
                 else:
@@ -632,6 +647,7 @@ class MontageRenderMixin:
                         slab_shape=tuple(np.shape(slab)),
                         slab_nbytes=int(getattr(slab, "nbytes", 0)),
                         region_plan=plan.region_plan,
+                        compute_path="stage_backed",
                     )
             return evaluate_image_snapshot(
                 session.document,
@@ -743,7 +759,10 @@ class MontageRenderMixin:
             self._last_montage_tile_result_flush_ms = elapsed_ms
             self._last_montage_tile_result_flush_count = int(processed)
             if feedback is not None:
-                feedback.observe("montage_tile_result", elapsed_ms, count=processed)
+                if hasattr(self, "_record_ui_work"):
+                    self._record_ui_work("montage_tile_result", elapsed_ms, count=processed)
+                else:
+                    feedback.observe("montage_tile_result", elapsed_ms, count=processed)
             self._activate_cached_waiting_stages(session, release_missing=True)
             if session.pending_tiles:
                 self._schedule_montage_tiles(session)
@@ -763,6 +782,11 @@ class MontageRenderMixin:
             colormap_lut=session.colormap_lut,
             result=result,
         )
+        compute_path = str(getattr(result, "compute_path", "direct") or "direct")
+        if compute_path == "stage_backed":
+            session.tile_compute_stage_backed += 1
+        else:
+            session.tile_compute_direct += 1
         self._update_montage_level_bounds_from_rendered(
             session.level_key,
             rendered,
@@ -868,14 +892,7 @@ class MontageRenderMixin:
         try:
             display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
             level_stats = self._montage_level_stats_for_session(session)
-            complete = (
-                not session.pending_tiles
-                and not session.loading_tiles
-                and not session.pending_completed_tiles
-                and not session.active_stage_requests
-                and not session.attached_stage_requests
-                and not session.stage_waiting_tiles
-            )
+            complete = session.is_complete()
             histogram_plot_data = self._montage_histogram_plot_data_for_session(session)
             explicit_auto = bool(getattr(session, "force_auto", False))
             semantic_source = self._montage_level_source_for_session(session, allow_partial=explicit_auto)
@@ -929,10 +946,28 @@ class MontageRenderMixin:
         self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
         feedback = _latency_feedback(self)
         if feedback is not None:
-            feedback.observe("montage_commit", self._last_montage_canvas_commit_ms)
+            if hasattr(self, "_record_ui_work"):
+                self._record_ui_work("montage_commit", self._last_montage_canvas_commit_ms)
+            else:
+                feedback.observe("montage_commit", self._last_montage_canvas_commit_ms)
         session.note_committed()
+        self._finish_montage_session_if_complete(session)
         schedule_near_viewport_montage_prefetch(self, session)
         self._retry_live_profile_after_montage_tile()
+
+    def _finish_montage_session_if_complete(self, session) -> bool:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return False
+        if not session.is_complete():
+            return False
+        session.show_loading_overlays = False
+        self._stop_montage_session_slow_overlay()
+        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
+        self.img_view.setImageStale(False)
+        self.img_view.setEvaluationOverlay(False)
+        if hasattr(self.img_view, "clearMontageTileOverlays"):
+            self.img_view.clearMontageTileOverlays()
+        return True
 
     def _montage_tile_source_ids(self, session) -> dict[int, object]:
         source_ids = {}
@@ -1157,6 +1192,9 @@ def _montage_tile_result_batch_limit(window, *, interactive: bool) -> int:
     configured = getattr(window, "_montage_tile_result_batch_size", None)
     if configured is not None:
         return max(1, int(configured))
+    decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)("montage_tile_result", interactive=interactive)
+    if decision is not None:
+        return max(1, int(decision.batch_limit))
     feedback = _latency_feedback(window)
     if feedback is None:
         return 4 if interactive else 8
@@ -1164,6 +1202,9 @@ def _montage_tile_result_batch_limit(window, *, interactive: bool) -> int:
 
 
 def _montage_tile_result_budget_ms(window, *, interactive: bool) -> float:
+    decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)("montage_tile_result", interactive=interactive)
+    if decision is not None:
+        return max(1.0, float(decision.budget_ms))
     feedback = _latency_feedback(window)
     if feedback is None:
         return 4.0 if interactive else 8.0
@@ -1171,6 +1212,9 @@ def _montage_tile_result_budget_ms(window, *, interactive: bool) -> float:
 
 
 def _montage_commit_interval_ms(window, *, force: bool) -> int:
+    decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)("montage_commit", interactive=_interactive_active(window))
+    if decision is not None:
+        return int(8 if force else max(1, decision.interval_ms))
     feedback = _latency_feedback(window)
     if feedback is None:
         return 8 if force else 16

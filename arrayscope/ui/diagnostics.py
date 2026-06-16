@@ -13,28 +13,49 @@ from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.runtime_diagnostics import format_runtime_diagnostics, format_runtime_diagnostics_sections
 
 
-class _SegmentBar(QtWidgets.QWidget):
-    def __init__(self, title: str, parent=None):
+class _CompactUsageBar(QtWidgets.QProgressBar):
+    def __init__(self, label: str, parent=None):
         super().__init__(parent)
-        self._title = str(title)
+        self._label = str(label)
+        self.setRange(0, 1000)
+        self.setTextVisible(True)
+        self.setMinimumHeight(16)
+        self.setMaximumHeight(18)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+
+    def set_usage(self, *, used: int, total: int, detail: str | None = None, color_mode: str = "usage") -> None:
+        total = max(1, int(total))
+        used = max(0, int(used))
+        fraction = min(1.0, used / float(total))
+        self.setValue(int(round(fraction * 1000)))
+        text = detail or f"{format_bytes(used)} / {format_bytes(total)}"
+        self.setFormat(f"{self._label}: {text}")
+        self.setStyleSheet(_compact_bar_style(fraction, color_mode=color_mode))
+
+
+class _CompactSegmentBar(QtWidgets.QWidget):
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent)
+        self._label = str(label)
         self._segments = ()
-        self._summary = "no activity"
-        self.setMinimumHeight(26)
+        self._summary = "n/a"
+        self.setMinimumHeight(16)
+        self.setMaximumHeight(18)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
     def set_segments(self, segments, *, summary: str) -> None:
         self._segments = tuple((str(label), int(value), str(color)) for label, value, color in segments if int(value) > 0)
         self._summary = str(summary)
+        self.setVisible(bool(self._segments))
         self.update()
 
     def paintEvent(self, event):
         del event
         painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(0, 2, -1, -2)
+        rect = self.rect().adjusted(0, 0, -1, -1)
         painter.setPen(QtGui.QPen(self.palette().mid().color(), 1))
         painter.setBrush(self.palette().base())
-        painter.drawRoundedRect(rect, 3, 3)
-
+        painter.drawRoundedRect(rect, 2, 2)
         total = sum(value for _label, value, _color in self._segments)
         if total > 0:
             x = rect.x()
@@ -47,30 +68,40 @@ class _SegmentBar(QtWidgets.QWidget):
                 painter.drawRect(segment_rect)
                 x += width
                 remaining_width = max(0, rect.right() - x + 1)
-
         painter.setPen(self.palette().text().color())
         font = painter.font()
-        font.setPointSize(max(8, font.pointSize()))
+        font.setPointSize(8)
         painter.setFont(font)
-        painter.drawText(rect.adjusted(8, 0, -8, 0), Qt.QtCore.Qt.AlignmentFlag.AlignVCenter, f"{self._title}: {self._summary}")
+        painter.drawText(rect.adjusted(5, 0, -5, 0), Qt.QtCore.Qt.AlignmentFlag.AlignVCenter, f"{self._label}: {self._summary}")
 
 
-class _UsageBar(QtWidgets.QProgressBar):
-    def __init__(self, label: str, parent=None):
-        super().__init__(parent)
-        self._label = str(label)
-        self.setRange(0, 1000)
-        self.setTextVisible(True)
-        self.setMinimumHeight(22)
+class _ElidedOverviewLabel(QtWidgets.QLabel):
+    def __init__(self, text: str, parent=None):
+        super().__init__("", parent)
+        self._text = str(text)
+        self.setToolTip(self._text)
+        self.setMinimumHeight(18)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
-    def set_usage(self, *, used: int, total: int, detail: str | None = None, color_mode: str = "usage") -> None:
-        total = max(1, int(total))
-        used = max(0, int(used))
-        fraction = min(1.0, used / float(total))
-        self.setValue(int(round(fraction * 1000)))
-        text = detail or f"{format_bytes(used)} / {format_bytes(total)}"
-        self.setFormat(f"{self._label}: {text}")
-        self.setStyleSheet(_bar_style(fraction, color_mode=color_mode))
+    def setText(self, text: str) -> None:
+        self._text = str(text)
+        self.setToolTip(self._text)
+        self.update()
+
+    def text(self) -> str:
+        return self._text
+
+    def sizeHint(self):
+        return Qt.QtCore.QSize(80, 18)
+
+    def paintEvent(self, event):
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setPen(self.palette().text().color())
+        metrics = painter.fontMetrics()
+        text = metrics.elidedText(self._text, Qt.QtCore.Qt.TextElideMode.ElideRight, max(1, self.width() - 2))
+        painter.drawText(self.rect(), Qt.QtCore.Qt.AlignmentFlag.AlignVCenter | Qt.QtCore.Qt.AlignmentFlag.AlignLeft, text)
 
 
 class DiagnosticsDialog(QtWidgets.QDialog):
@@ -78,62 +109,70 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self._snapshot_provider = snapshot_provider
         self.setWindowTitle("ArrayScope Diagnostics")
-        self.resize(840, 720)
+        self.setMinimumSize(480, 400)
+        self.resize(520, 540)
 
         layout = QtWidgets.QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        overview = QtWidgets.QWidget()
-        overview_layout = QtWidgets.QVBoxLayout(overview)
-        overview_layout.setContentsMargins(0, 0, 0, 0)
-        overview_layout.setSpacing(8)
-
-        bars = QtWidgets.QGridLayout()
-        bars.setHorizontalSpacing(10)
-        bars.setVerticalSpacing(6)
-        self._bars = {
-            "system": _UsageBar("System used"),
-            "rss": _UsageBar("Process RSS"),
-            "image": _UsageBar("Image cache"),
-            "tile": _UsageBar("Tile cache"),
-            "profile": _UsageBar("Profile cache"),
-            "stage": _UsageBar("Stage cache"),
-            "render": _UsageBar("Last render"),
-            "canvas": _UsageBar("Montage canvas"),
-            "prefetch": _UsageBar("Prefetch"),
+        overview = QtWidgets.QFrame()
+        overview.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        overview_layout = QtWidgets.QGridLayout(overview)
+        overview_layout.setContentsMargins(8, 6, 8, 6)
+        overview_layout.setHorizontalSpacing(12)
+        overview_layout.setVerticalSpacing(3)
+        self._overview_labels = {
+            "status": _overview_label("Status"),
+            "resources": _overview_label("Resources"),
+            "work": _overview_label("Work"),
+            "render": _overview_label("Render"),
+            "montage": _overview_label("Montage"),
         }
-        for row, key in enumerate(("system", "rss", "image", "tile", "profile", "stage", "render", "canvas", "prefetch")):
-            bars.addWidget(self._bars[key], row // 2, row % 2)
-        overview_layout.addLayout(bars)
-
-        scheduler_layout = QtWidgets.QVBoxLayout()
-        scheduler_layout.setSpacing(4)
-        scheduler_grid = QtWidgets.QGridLayout()
-        scheduler_grid.setHorizontalSpacing(8)
-        scheduler_grid.setVerticalSpacing(4)
-        self._scheduler_bars = {}
-        for index, name in enumerate(("visible", "pixel", "profile", "roi", "prefetch")):
-            bar = _SegmentBar(name)
-            self._scheduler_bars[name] = bar
-            scheduler_grid.addWidget(bar, index // 2, index % 2)
-        scheduler_layout.addLayout(scheduler_grid)
-        self._canvas_preserve_bar = _SegmentBar("Canvas preserve")
-        scheduler_layout.addWidget(self._canvas_preserve_bar)
-        self._render_timing_bar = _SegmentBar("Render timing")
-        self._montage_timing_bar = _SegmentBar("Montage timing")
-        scheduler_layout.addWidget(self._render_timing_bar)
-        scheduler_layout.addWidget(self._montage_timing_bar)
-        overview_layout.addLayout(scheduler_layout)
+        overview_layout.addWidget(self._overview_labels["status"], 0, 0, 1, 2)
+        overview_layout.addWidget(self._overview_labels["resources"], 1, 0)
+        overview_layout.addWidget(self._overview_labels["work"], 1, 1)
+        overview_layout.addWidget(self._overview_labels["render"], 2, 0)
+        overview_layout.addWidget(self._overview_labels["montage"], 2, 1)
+        bar_row = QtWidgets.QWidget()
+        bar_layout = QtWidgets.QHBoxLayout(bar_row)
+        bar_layout.setContentsMargins(0, 2, 0, 0)
+        bar_layout.setSpacing(6)
+        self._compact_bars = {
+            "system": _CompactUsageBar("System"),
+            "rss": _CompactUsageBar("RSS"),
+            "render": _CompactUsageBar("Render"),
+            "stage": _CompactUsageBar("Stage"),
+            "tile": _CompactUsageBar("Tiles"),
+            "canvas": _CompactUsageBar("Canvas"),
+        }
+        for bar in self._compact_bars.values():
+            bar_layout.addWidget(bar, 1)
+        overview_layout.addWidget(bar_row, 3, 0, 1, 2)
+        segment_row = QtWidgets.QWidget()
+        segment_layout = QtWidgets.QHBoxLayout(segment_row)
+        segment_layout.setContentsMargins(0, 0, 0, 0)
+        segment_layout.setSpacing(6)
+        self._segment_bars = {
+            "work": _CompactSegmentBar("Work"),
+            "render": _CompactSegmentBar("Render"),
+            "montage": _CompactSegmentBar("Montage"),
+        }
+        for bar in self._segment_bars.values():
+            segment_layout.addWidget(bar, 1)
+        overview_layout.addWidget(segment_row, 4, 0, 1, 2)
         layout.addWidget(overview, 0)
 
         font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
         self.tabs = QtWidgets.QTabWidget()
         self._section_edits = {}
-        for title in ("Memory", "Caches", "Schedulers", "Render", "Canvas Preserve", "Montage", "FFT", "Operations", "All"):
+        self._section_titles = tuple(format_runtime_diagnostics_sections(self._snapshot_provider()).keys())
+        for title in (*self._section_titles, "All"):
             edit = QtWidgets.QPlainTextEdit()
             edit.setReadOnly(True)
             edit.setFont(font)
+            edit.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+            edit.setHorizontalScrollBarPolicy(Qt.QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self._section_edits[title] = edit
             self.tabs.addTab(edit, title)
         self.text_edit = self._section_edits["All"]
@@ -160,7 +199,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         try:
             snapshot = self._snapshot_provider()
             self._last_snapshot = snapshot
-            self._update_bars(snapshot)
+            self._update_overview(snapshot)
             if force_text or self.refresh_button.isChecked():
                 self._refresh_current_text_tab(force=force_text)
             return
@@ -187,95 +226,81 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         sections = format_runtime_diagnostics_sections(self._last_snapshot)
         edit.setPlainText(sections.get(title, ""))
 
-    def _update_bars(self, snapshot) -> None:
+    def _update_overview(self, snapshot) -> None:
         policy = snapshot.memory_policy
         system_used = max(0, int(policy.system_total_bytes) - int(policy.system_available_bytes))
-        self._bars["system"].set_usage(used=system_used, total=policy.system_total_bytes)
-        self._bars["rss"].set_usage(used=policy.process_rss_bytes, total=policy.system_total_bytes)
-        self._bars["image"].set_usage(
-            used=snapshot.image_cache.bytes_used,
-            total=snapshot.image_cache.max_bytes,
-            detail=f"entries={snapshot.image_cache.entries}, {format_bytes(snapshot.image_cache.bytes_used)} / {format_bytes(snapshot.image_cache.max_bytes)}",
+        governor = snapshot.resource_governor
+        pressure = "n/a" if governor is None else (
+            f"ui {governor.pressure.ui_pressure.value}, "
+            f"cpu headroom {governor.pressure.cpu_headroom:.0%}, "
+            f"memory {governor.pressure.memory_pressure.value}"
         )
-        self._bars["tile"].set_usage(
-            used=snapshot.tile_cache.bytes_used,
-            total=snapshot.tile_cache.max_bytes,
-            detail=f"entries={snapshot.tile_cache.entries}, {format_bytes(snapshot.tile_cache.bytes_used)} / {format_bytes(snapshot.tile_cache.max_bytes)}",
+        self._overview_labels["status"].setText(
+            f"{_overview_bottleneck(snapshot)} | {pressure}"
         )
-        self._bars["profile"].set_usage(
-            used=snapshot.profile_cache.bytes_used,
-            total=snapshot.profile_cache.max_bytes,
-            detail=f"entries={snapshot.profile_cache.entries}, {format_bytes(snapshot.profile_cache.bytes_used)} / {format_bytes(snapshot.profile_cache.max_bytes)}",
+        cache_parts = _interesting_cache_parts(snapshot)
+        self._overview_labels["resources"].setText(
+            f"RSS {_short_bytes(policy.process_rss_bytes)} | "
+            f"sys {_short_bytes(system_used)}/{_short_bytes(policy.system_total_bytes)}"
+            + (", " + ", ".join(cache_parts) if cache_parts else "")
         )
-        stage_hit_rate = "n/a" if snapshot.stage_cache.hit_rate is None else f"{snapshot.stage_cache.hit_rate:.0%}"
-        self._bars["stage"].set_usage(
-            used=snapshot.stage_cache.bytes_used,
-            total=snapshot.stage_cache.max_bytes,
-            detail=(
-                f"entries={snapshot.stage_cache.entries}, "
-                f"{format_bytes(snapshot.stage_cache.bytes_used)} / {format_bytes(snapshot.stage_cache.max_bytes)}, "
-                f"hit-rate={stage_hit_rate}"
-            ),
+        self._overview_labels["work"].setText(
+            "Work " + _active_work_summary(snapshot.schedulers)
         )
+        self._overview_labels["render"].setText(
+            f"{snapshot.render.last_decision_kind or 'n/a'} | "
+            f"sync {_ms_text(snapshot.render_timing.last_render_sync_ms)}, "
+            f"eval {_ms_text(snapshot.render_timing.last_evaluation_ms)}, "
+            f"commit {_ms_text(snapshot.render_timing.last_display_commit_ms)}"
+        )
+        self._overview_labels["montage"].setText(
+            "Montage " + _montage_overview(snapshot)
+        )
+        self._update_compact_bars(snapshot, system_used)
+        self._update_segment_bars(snapshot)
+
+    def _update_compact_bars(self, snapshot, system_used: int) -> None:
+        policy = snapshot.memory_policy
+        bars = self._compact_bars
+        bars["system"].set_usage(used=system_used, total=policy.system_total_bytes)
+        bars["system"].setFormat(f"System {_percent(system_used, policy.system_total_bytes)}")
+        bars["rss"].set_usage(used=policy.process_rss_bytes, total=policy.system_total_bytes)
+        bars["rss"].setFormat(f"RSS {_short_bytes(policy.process_rss_bytes)}")
         render_used = snapshot.render.estimated_display_bytes
         render_budget = snapshot.render.render_budget_bytes or policy.visible_render_budget_bytes
-        self._bars["render"].set_usage(
+        bars["render"].set_usage(
             used=0 if render_used is None else render_used,
             total=render_budget,
-            detail=(
-                f"n/a / {format_bytes(render_budget)}"
-                if render_used is None
-                else f"{format_bytes(render_used)} / {format_bytes(render_budget)}"
-            ),
+            detail="n/a" if render_used is None else f"{_short_bytes(render_used)} / {_short_bytes(render_budget)}",
         )
-        canvas_used = snapshot.montage.canvas_bytes
-        self._bars["canvas"].set_usage(
-            used=0 if canvas_used is None else canvas_used,
+        bars["stage"].set_usage(
+            used=snapshot.stage_cache.bytes_used,
+            total=snapshot.stage_cache.max_bytes,
+            detail=f"{_short_bytes(snapshot.stage_cache.bytes_used)} / {_short_bytes(snapshot.stage_cache.max_bytes)}",
+        )
+        bars["tile"].set_usage(
+            used=snapshot.tile_cache.bytes_used,
+            total=snapshot.tile_cache.max_bytes,
+            detail=f"{_short_bytes(snapshot.tile_cache.bytes_used)} / {_short_bytes(snapshot.tile_cache.max_bytes)}",
+        )
+        canvas_used = 0 if snapshot.montage.canvas_bytes is None else int(snapshot.montage.canvas_bytes)
+        bars["canvas"].set_usage(
+            used=canvas_used,
             total=policy.montage_canvas_budget_bytes,
-            detail=(
-                f"n/a / {format_bytes(policy.montage_canvas_budget_bytes)}"
-                if canvas_used is None
-                else f"{format_bytes(canvas_used)} / {format_bytes(policy.montage_canvas_budget_bytes)}"
-            ),
+            detail="n/a" if snapshot.montage.canvas_bytes is None else f"{_short_bytes(canvas_used)} / {_short_bytes(policy.montage_canvas_budget_bytes)}",
         )
-        self._bars["prefetch"].set_usage(
-            used=policy.prefetch_budget_bytes,
-            total=max(1, policy.stage_cache_budget_bytes),
-            detail=f"{format_bytes(policy.prefetch_budget_bytes)} of stage {format_bytes(policy.stage_cache_budget_bytes)}",
-            color_mode="info",
-        )
-        for scheduler in snapshot.schedulers:
-            bar = self._scheduler_bars.get(scheduler.name)
-            if bar is None:
-                continue
-            planned = int(scheduler.pending) + int(scheduler.queued) + int(scheduler.running)
-            completed = int(scheduler.completed)
-            cancelled = int(scheduler.cancelled)
-            stale = int(scheduler.stale)
-            failed = int(scheduler.failed)
-            summary = (
-                f"done {completed}, planned {planned}, "
-                f"cancelled {cancelled}, stale {stale}, failed {failed}"
-            )
-            bar.set_segments(
-                (
-                    ("completed", completed, "#15803d"),
-                    ("planned", planned, "#2563eb"),
-                    ("cancelled", cancelled, "#ca8a04"),
-                    ("stale", stale, "#6b7280"),
-                    ("failed", failed, "#c2410c"),
-                ),
-                summary=summary,
-            )
-        preserve = snapshot.canvas_preserve
-        result = str(preserve.last_result or "none")
-        color = _preserve_color(result, bool(preserve.active), bool(preserve.strong_used))
-        summary = (
-            f"{result}, mode {preserve.mode}, attempts {preserve.attempts_used}, "
-            f"strong {'yes' if preserve.strong_used else 'no'}"
-        )
-        self._canvas_preserve_bar.set_segments((("state", 1, color),), summary=summary)
-        self._render_timing_bar.set_segments(
+        bars["stage"].setVisible(bool(snapshot.stage_cache.bytes_used or snapshot.stage_cache.entries))
+        bars["tile"].setVisible(bool(snapshot.tile_cache.bytes_used or snapshot.montage.active))
+        bars["canvas"].setVisible(bool(snapshot.montage.active or canvas_used))
+
+    def _update_segment_bars(self, snapshot) -> None:
+        work_segments = []
+        for scheduler, color in zip(snapshot.schedulers, ("#2563eb", "#9333ea", "#0f766e", "#ca8a04", "#0891b2", "#64748b", "#dc2626")):
+            active = int(getattr(scheduler, "pending", 0) or 0) + int(getattr(scheduler, "running", 0) or 0) + int(getattr(scheduler, "queued", 0) or 0)
+            if active:
+                work_segments.append((scheduler.name, active, color))
+        self._segment_bars["work"].set_segments(work_segments, summary=_active_work_summary(snapshot.schedulers))
+        self._segment_bars["render"].set_segments(
             _timing_segments(
                 (
                     ("control", snapshot.render_timing.last_control_sync_ms, "#2563eb"),
@@ -300,19 +325,17 @@ class DiagnosticsDialog(QtWidgets.QDialog):
                 ),
             ),
         )
-        self._montage_timing_bar.set_segments(
+        self._segment_bars["montage"].set_segments(
             _timing_segments(
                 (
                     ("tile", snapshot.montage_timing.last_tile_eval_ms, "#c2410c"),
-                    ("tile cache", snapshot.montage_timing.last_tile_cache_lookup_ms, "#2563eb"),
-                    ("stage cache", snapshot.montage_timing.last_stage_cache_lookup_ms, "#0f766e"),
-                    ("stage wait", snapshot.montage_timing.last_stage_attach_wait_ms, "#0d9488"),
-                    ("level stats", snapshot.montage_timing.last_level_stats_ms, "#a16207"),
-                    ("visible upload", snapshot.montage_timing.last_visible_upload_ms, "#15803d"),
-                    ("hist upload", snapshot.montage_timing.last_histogram_upload_ms, "#65a30d"),
-                    ("hist recompute", snapshot.montage_timing.last_histogram_recompute_ms, "#84cc16"),
+                    ("cache", snapshot.montage_timing.last_tile_cache_lookup_ms, "#2563eb"),
+                    ("stage", snapshot.montage_timing.last_stage_cache_lookup_ms, "#0f766e"),
+                    ("wait", snapshot.montage_timing.last_stage_attach_wait_ms, "#0d9488"),
+                    ("levels", snapshot.montage_timing.last_level_stats_ms, "#a16207"),
+                    ("upload", snapshot.montage_timing.last_visible_upload_ms, "#15803d"),
+                    ("hist", snapshot.montage_timing.last_histogram_upload_ms, "#65a30d"),
                     ("rgb", snapshot.montage_timing.last_rgb_window_ms, "#db2777"),
-                    ("levels", snapshot.montage_timing.last_level_sync_ms, "#475569"),
                     ("compose", snapshot.montage_timing.last_canvas_compose_ms, "#7c3aed"),
                     ("patch", snapshot.montage_timing.last_canvas_patch_ms, "#9333ea"),
                     ("set", snapshot.montage_timing.last_set_image_ms, "#15803d"),
@@ -320,9 +343,23 @@ class DiagnosticsDialog(QtWidgets.QDialog):
                     ("overlay", snapshot.montage_timing.last_overlay_update_ms, "#0891b2"),
                 )
             ),
-            summary=(
-                f"{_timing_summary('total', (snapshot.montage_timing.last_tile_eval_ms, snapshot.montage_timing.last_tile_cache_lookup_ms, snapshot.montage_timing.last_stage_cache_lookup_ms, snapshot.montage_timing.last_stage_attach_wait_ms, snapshot.montage_timing.last_level_stats_ms, snapshot.montage_timing.last_visible_upload_ms, snapshot.montage_timing.last_histogram_upload_ms, snapshot.montage_timing.last_histogram_recompute_ms, snapshot.montage_timing.last_rgb_window_ms, snapshot.montage_timing.last_level_sync_ms, snapshot.montage_timing.last_canvas_compose_ms, snapshot.montage_timing.last_canvas_patch_ms, snapshot.montage_timing.last_set_image_ms, snapshot.montage_timing.last_canvas_commit_ms, snapshot.montage_timing.last_overlay_update_ms))}, "
-                f"tiles cached {snapshot.montage_timing.cached_tiles_last_session}, missing {snapshot.montage_timing.missing_tiles_last_session}, patched {snapshot.montage_timing.patched_tiles_last_flush}"
+            summary=_timing_summary(
+                "total",
+                (
+                    snapshot.montage_timing.last_tile_eval_ms,
+                    snapshot.montage_timing.last_tile_cache_lookup_ms,
+                    snapshot.montage_timing.last_stage_cache_lookup_ms,
+                    snapshot.montage_timing.last_stage_attach_wait_ms,
+                    snapshot.montage_timing.last_level_stats_ms,
+                    snapshot.montage_timing.last_visible_upload_ms,
+                    snapshot.montage_timing.last_histogram_upload_ms,
+                    snapshot.montage_timing.last_rgb_window_ms,
+                    snapshot.montage_timing.last_canvas_compose_ms,
+                    snapshot.montage_timing.last_canvas_patch_ms,
+                    snapshot.montage_timing.last_set_image_ms,
+                    snapshot.montage_timing.last_canvas_commit_ms,
+                    snapshot.montage_timing.last_overlay_update_ms,
+                ),
             ),
         )
 
@@ -340,7 +377,11 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         super().closeEvent(event)
 
 
-def _bar_style(fraction: float, *, color_mode: str = "usage") -> str:
+def _overview_label(name: str) -> QtWidgets.QLabel:
+    return _ElidedOverviewLabel(f"{name}: n/a")
+
+
+def _compact_bar_style(fraction: float, *, color_mode: str = "usage") -> str:
     if color_mode == "info":
         color = "#2563eb"
     elif fraction >= 0.85:
@@ -352,13 +393,14 @@ def _bar_style(fraction: float, *, color_mode: str = "usage") -> str:
     return (
         "QProgressBar {"
         " border: 1px solid palette(mid);"
-        " border-radius: 3px;"
+        " border-radius: 2px;"
         " background: palette(base);"
         " color: palette(text);"
         " text-align: center;"
-        " padding: 1px;"
+        " padding: 0;"
+        " font-size: 8pt;"
         "}"
-        f"QProgressBar::chunk {{ background-color: {color}; border-radius: 2px; }}"
+        f"QProgressBar::chunk {{ background-color: {color}; }}"
     )
 
 
@@ -379,15 +421,78 @@ def _timing_summary(label: str, values) -> str:
     return f"{label} {sum(present):.2f} ms"
 
 
-def _preserve_color(result: str, active: bool, strong_used: bool) -> str:
-    if active:
-        return "#2563eb"
-    if "unsettled" in result:
-        return "#ca8a04"
-    if result.startswith("skipped"):
-        return "#6b7280"
-    if strong_used:
-        return "#c2410c"
-    if result == "settled":
-        return "#15803d"
-    return "#6b7280"
+def _short_bytes(value: int | None) -> str:
+    if value is None:
+        return "n/a"
+    value = float(max(0, int(value)))
+    units = ("B", "K", "M", "G", "T")
+    unit = units[0]
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            break
+        value /= 1024.0
+    if unit == "B":
+        return f"{int(value)}B"
+    if value >= 100.0:
+        return f"{value:.0f}{unit}"
+    return f"{value:.1f}{unit}"
+
+
+def _percent(used: int, total: int) -> str:
+    return f"{(float(used) / max(1.0, float(total)) * 100.0):.0f}%"
+
+
+def _overview_bottleneck(snapshot) -> str:
+    governor = snapshot.resource_governor
+    if governor is not None and governor.pressure.ui_pressure.value in {"elevated", "high"}:
+        return "UI fan-in"
+    if governor is not None and governor.pressure.memory_pressure.value in {"elevated", "high"}:
+        return "memory"
+    if snapshot.montage.active and snapshot.montage.tile_compute_waiting_for_stage:
+        return "stage compute"
+    if snapshot.montage.pending_tiles:
+        return "tile compute"
+    if snapshot.montage_timing.tile_layer_rgb_window_tiles:
+        return "RGB/window upload"
+    return "idle"
+
+
+def _interesting_cache_parts(snapshot) -> list[str]:
+    parts = []
+    for label, cache in (
+        ("image", snapshot.image_cache),
+        ("tiles", snapshot.tile_cache),
+        ("stage", snapshot.stage_cache),
+    ):
+        used = int(getattr(cache, "bytes_used", 0) or 0)
+        total = max(1, int(getattr(cache, "max_bytes", 1) or 1))
+        fraction = used / float(total)
+        if used and (fraction >= 0.5 or label == "stage"):
+            parts.append(f"{label} {format_bytes(used)} / {format_bytes(total)}")
+    return parts
+
+
+def _active_work_summary(schedulers) -> str:
+    parts = []
+    for scheduler in schedulers:
+        active = int(getattr(scheduler, "pending", 0) or 0) + int(getattr(scheduler, "running", 0) or 0) + int(getattr(scheduler, "queued", 0) or 0)
+        if active:
+            parts.append(f"{scheduler.name} {active}")
+    return ", ".join(parts) if parts else "idle"
+
+
+def _montage_overview(snapshot) -> str:
+    if not snapshot.montage.active:
+        return "inactive"
+    return (
+        f"{snapshot.montage.loaded_tiles}/{snapshot.montage.visible_tiles} loaded, "
+        f"pending {snapshot.montage.pending_tiles}, "
+        f"updated {snapshot.montage_timing.tile_layer_items_updated}, "
+        f"rgb tiles {snapshot.montage_timing.tile_layer_rgb_window_tiles}, "
+        f"stage-backed {snapshot.montage.tile_compute_stage_backed}, "
+        f"direct {snapshot.montage.tile_compute_direct}"
+    )
+
+
+def _ms_text(value) -> str:
+    return "n/a" if value is None else f"{float(value):.2f} ms"

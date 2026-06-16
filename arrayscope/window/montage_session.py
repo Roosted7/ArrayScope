@@ -61,6 +61,15 @@ class MontageRenderSession:
     applied_level_source: object | None = None
     pending_level_tiles: list[RenderedTile] = field(default_factory=list)
     pending_completed_tiles: list[tuple[MontageTile, object]] = field(default_factory=list)
+    tile_compute_cache_hits: int = 0
+    tile_compute_stage_backed: int = 0
+    tile_compute_direct: int = 0
+    tile_compute_waiting_for_stage: int = 0
+    lead_direct_tiles: int = 0
+    stage_backed_tiles_pending: int = 0
+    retained_stage_index: int | None = None
+    retained_stage_decision: str = ""
+    repeated_expensive_stage_per_tile: bool = False
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -107,6 +116,19 @@ class MontageRenderSession:
 
     def skipped_tile_tuple(self) -> tuple[MontageTile, ...]:
         return tuple(self.plan.tiles[index] for index in sorted(self.skipped_tiles) if 0 <= index < len(self.plan.tiles))
+
+    def is_complete(self) -> bool:
+        return not (
+            self.pending_tiles
+            or self.loading_tiles
+            or self.pending_completed_tiles
+            or self.active_tile_requests
+            or self.active_stage_requests
+            or self.attached_stage_requests
+            or self.stage_waiting_tiles
+            or self.final_commit_pending
+            or self.flush_pending
+        )
 
     def initialize_canvas(self, canvas: MontageViewportCanvas) -> None:
         self.canvas = canvas

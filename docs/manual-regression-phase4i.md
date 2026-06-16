@@ -55,6 +55,20 @@ Expected:
 - Cached or in-flight stage: nearby tile/slice prefetch may schedule on the prefetch lane.
 - Prefetch never computes a separate expanded FFT per predicted tile.
 
+## Resource Governor And Redraw Throughput
+
+1. Trigger a cold FFT montage redraw.
+2. Keep the diagnostics dialog open on Realtime, Feedback, and Montage.
+
+Expected:
+- Reusable stage reports `scheduled`, `hit`, or `in_flight`.
+- `repeated per tile=no` for fitting reusable stages.
+- Tile compute distinguishes cache hits, direct lead tiles, stage-backed tiles, and waiting tiles.
+- UI remains responsive while completed tiles draw in bounded batches.
+- Feedback shows UI pressure, CPU headroom, memory pressure, worker decisions, and channel
+  batch/budget/interval values.
+- The All diagnostics tab contains the same sections available as individual tabs.
+
 ## Chunked Stage Cancellation
 
 1. Start a large reusable stage materialization.

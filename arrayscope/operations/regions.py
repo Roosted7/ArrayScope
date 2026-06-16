@@ -131,7 +131,11 @@ def region_text(region: RegionSpec) -> str:
             else:
                 parts.append(f"{int(start)}:{stop_text}:{int(step)}")
         elif kind == AxisRegionKind.INDICES:
-            parts.append("[" + ",".join(str(int(index)) for index in axis.value) + "]")
+            indices = tuple(int(index) for index in axis.value)
+            if len(indices) > 24:
+                parts.append(f"[{indices[0]},{indices[1]},{indices[2]},...; {len(indices)} indices]")
+            else:
+                parts.append("[" + ",".join(str(index) for index in indices) + "]")
     return "[" + ", ".join(parts) + "]"
 
 

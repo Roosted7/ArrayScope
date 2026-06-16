@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from arrayscope.core.cache_status import CacheDiagnosticsSnapshot
 from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.memory_policy import MemoryPolicy, format_memory_policy
+from arrayscope.core.resource_governor import ResourceGovernorDiagnostics, ResourcePressure
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,15 @@ class MontageRuntimeDiagnostics:
     backend_fallback_available: str = "canvas"
     backend_warning: str = ""
     show_loading_overlays: bool = False
+    tile_compute_cache_hits: int = 0
+    tile_compute_stage_backed: int = 0
+    tile_compute_direct: int = 0
+    tile_compute_waiting_for_stage: int = 0
+    lead_direct_tiles: int = 0
+    stage_backed_tiles_pending: int = 0
+    retained_stage_index: int | None = None
+    retained_stage_decision: str = ""
+    repeated_expensive_stage_per_tile: bool = False
 
 
 @dataclass(frozen=True)
@@ -181,6 +191,7 @@ class WindowRuntimeDiagnostics:
     stage_materialization: object | None = None
     stage_warmup: object | None = None
     montage_prefetch: tuple[object, ...] = ()
+    resource_governor: ResourceGovernorDiagnostics | None = None
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
@@ -190,6 +201,7 @@ def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
 def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> dict[str, str]:
     sections = {
         "Realtime": "\n".join(_realtime_lines(snapshot)),
+        "Feedback": "\n".join(_feedback_lines(snapshot.resource_governor)),
         "Montage": "\n".join(_montage_lines(snapshot)),
         "Render": "\n".join(_render_lines(snapshot)),
         "Schedulers": "\n".join(_scheduler_lines(snapshot.schedulers)),
@@ -225,26 +237,35 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
 def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
     return (
         (
-            "Render: "
-            f"{snapshot.render.last_decision_kind or 'n/a'}; "
-            f"control={_ms_text(snapshot.render_timing.last_control_sync_ms)}, "
-            f"eval={_ms_text(snapshot.render_timing.last_evaluation_ms)}, "
-            f"commit={_ms_text(snapshot.render_timing.last_display_commit_ms)}, "
+            "Bottleneck: "
+            f"{_bottleneck_text(snapshot)}"
+        ),
+        (
+            "Feedback: "
+            f"{_pressure_summary(snapshot.resource_governor)}"
+        ),
+        (
+            "Render:\n"
+            f"  decision={snapshot.render.last_decision_kind or 'n/a'}\n"
+            f"  control={_ms_text(snapshot.render_timing.last_control_sync_ms)} "
+            f"eval={_ms_text(snapshot.render_timing.last_evaluation_ms)} "
+            f"commit={_ms_text(snapshot.render_timing.last_display_commit_ms)} "
             f"sync={_ms_text(snapshot.render_timing.last_render_sync_ms)}"
         ),
         (
-            "Montage: "
-            f"active={snapshot.montage.active}, mode={snapshot.montage.display_mode}, "
-            f"tiles visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
-            f"pending={snapshot.montage.pending_tiles}, canvas={_bytes_or_na(snapshot.montage.canvas_bytes)}"
+            "Montage:\n"
+            f"  active={snapshot.montage.active} mode={snapshot.montage.display_mode}\n"
+            f"  tiles visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
+            f"pending={snapshot.montage.pending_tiles}\n"
+            f"  canvas={_bytes_or_na(snapshot.montage.canvas_bytes)}"
         ),
         (
-            "Tile layer: "
-            f"visible={snapshot.montage_timing.tile_layer_visible_items} "
+            "Tile layer:\n"
+            f"  visible={snapshot.montage_timing.tile_layer_visible_items} "
             f"updated={snapshot.montage_timing.tile_layer_items_updated} "
             f"skipped={snapshot.montage_timing.tile_layer_items_skipped} "
-            f"rgb tiles={snapshot.montage_timing.tile_layer_rgb_window_tiles}; "
-            f"rgb={_ms_text(snapshot.montage_timing.last_tile_layer_rgb_window_ms)}, "
+            f"rgb_tiles={snapshot.montage_timing.tile_layer_rgb_window_tiles}\n"
+            f"  rgb={_ms_text(snapshot.montage_timing.last_tile_layer_rgb_window_ms)} "
             f"upload={_ms_text(snapshot.montage_timing.last_tile_layer_upload_ms)}"
         ),
         (
@@ -265,11 +286,122 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
     )
 
 
+def _feedback_lines(diagnostics: ResourceGovernorDiagnostics | None) -> tuple[str, ...]:
+    if diagnostics is None:
+        return ("n/a",)
+    lines = [
+        f"Pressure: {_pressure_summary(diagnostics)}",
+        (
+            "CPU: "
+            f"system={_percent_text(diagnostics.system_cpu_percent)} "
+            f"process={_percent_text(diagnostics.process_cpu_percent)} "
+            f"load1={_float_or_na(diagnostics.load_average_1m)} "
+            f"source={diagnostics.telemetry_source}"
+        ),
+    ]
+    if diagnostics.lane_decisions:
+        lines.append("Lane workers:")
+        for decision in diagnostics.lane_decisions:
+            reason = _compact_reason(decision.reason)
+            suffix = "" if not reason else f" ({reason})"
+            lines.append(f"  {decision.lane.value}: {decision.target_workers}/{decision.max_workers}{suffix}")
+    if diagnostics.feedback_channels:
+        lines.append("Channels:")
+        inactive = []
+        active_channel_lines = []
+        for channel in diagnostics.feedback_channels:
+            if (
+                channel.elapsed_ewma_ms is None
+                and channel.per_item_ewma_ms is None
+                and float(channel.last_elapsed_ms) <= 0.0
+            ):
+                inactive.append(channel.channel)
+                continue
+            active_channel_lines.append(
+                f"  {channel.channel}:\n"
+                f"    last={_ms_text(channel.last_elapsed_ms)} "
+                f"ewma={_ms_text(channel.elapsed_ewma_ms)} "
+                f"per-item={_ms_text(channel.per_item_ewma_ms)}\n"
+                f"    batch={channel.batch_limit} "
+                f"budget={channel.budget_ms:.1f} ms "
+                f"interval={channel.interval_ms} ms"
+            )
+        lines.extend(active_channel_lines or ("  n/a",))
+        if inactive:
+            lines.append("  Inactive:")
+            lines.extend(f"    - {name}" for name in inactive)
+    return tuple(lines)
+
+
+def _compact_reason(reason: str) -> str:
+    reason = str(reason or "").strip()
+    if not reason or reason == "profile baseline":
+        return ""
+    lower = reason.lower()
+    if "high ui" in lower:
+        return "high UI"
+    if "elevated ui" in lower:
+        return "elevated UI"
+    if "prefetch kept narrow" in lower:
+        return "narrow"
+    if "backlog" in lower:
+        return "backlog"
+    if "memory" in lower:
+        return "memory"
+    if "headroom" in lower:
+        return "CPU"
+    return _short_debug_text(reason, limit=28)
+
+
+def _pressure_summary(diagnostics: ResourceGovernorDiagnostics | None) -> str:
+    if diagnostics is None:
+        return "n/a"
+    pressure = diagnostics.pressure
+    ui_source = _ui_pressure_source(diagnostics)
+    ui_text = pressure.ui_pressure.value if ui_source is None else f"{pressure.ui_pressure.value}({ui_source})"
+    return (
+        f"ui={ui_text} "
+        f"cpu_headroom={pressure.cpu_headroom:.0%} "
+        f"memory={pressure.memory_pressure.value} "
+        f"cache={pressure.cache_pressure.value}"
+    )
+
+
+def _ui_pressure_source(diagnostics: ResourceGovernorDiagnostics) -> str | None:
+    if diagnostics.pressure.ui_pressure not in {ResourcePressure.ELEVATED, ResourcePressure.HIGH}:
+        return None
+    channels = tuple(
+        channel
+        for channel in diagnostics.feedback_channels
+        if channel.elapsed_ewma_ms is not None and float(channel.elapsed_ewma_ms) > 0.0
+    )
+    if not channels:
+        return None
+    channel = max(channels, key=lambda item: float(item.elapsed_ewma_ms or 0.0))
+    return str(channel.channel)
+
+
+def _bottleneck_text(snapshot: WindowRuntimeDiagnostics) -> str:
+    governor = snapshot.resource_governor
+    if governor is not None:
+        if governor.pressure.ui_pressure in {ResourcePressure.ELEVATED, ResourcePressure.HIGH}:
+            return "UI fan-in"
+        if governor.pressure.memory_pressure in {ResourcePressure.ELEVATED, ResourcePressure.HIGH}:
+            return "memory"
+    if snapshot.montage.active and snapshot.montage.tile_compute_waiting_for_stage:
+        return "stage compute"
+    if snapshot.montage_timing.tile_layer_rgb_window_tiles:
+        return "RGB window/upload"
+    if snapshot.montage.pending_tiles:
+        return "tile compute"
+    return "idle"
+
+
 def _render_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
     return (
         f"Decision: {snapshot.render.last_decision_kind or 'n/a'}",
         f"Reason: {snapshot.render.last_decision_reason or 'n/a'}",
-        f"Context: {_short_debug_text(snapshot.render.last_context_summary or 'n/a')}",
+        f"Context:\n{_wrapped_debug_text(snapshot.render.last_context_summary or 'n/a', indent='  ')}",
         f"Request: {_request_text(snapshot.render.last_request_key)}",
         f"Error: {snapshot.render.last_error or 'n/a'}",
         (
@@ -335,6 +467,20 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         f"Display backend reason: {snapshot.montage.backend_reason or 'n/a'}",
         f"Warning: {snapshot.montage.backend_warning}" if snapshot.montage.backend_warning else "Warning: n/a",
         f"Loading overlays: {snapshot.montage.show_loading_overlays}",
+        (
+            "Reusable stage: "
+            f"stage={snapshot.montage.retained_stage_index if snapshot.montage.retained_stage_index is not None else 'n/a'} "
+            f"{snapshot.montage.retained_stage_decision or 'n/a'}, "
+            f"repeated per tile={'yes' if snapshot.montage.repeated_expensive_stage_per_tile else 'no'}"
+        ),
+        (
+            "Tile compute: "
+            f"cache_hit={snapshot.montage.tile_compute_cache_hits} "
+            f"stage_backed={snapshot.montage.tile_compute_stage_backed} "
+            f"direct={snapshot.montage.tile_compute_direct} "
+            f"waiting_stage={snapshot.montage.tile_compute_waiting_for_stage}"
+        ),
+        f"Lead direct tiles: {snapshot.montage.lead_direct_tiles}",
         f"Timing tile eval: {_ms_text(snapshot.montage_timing.last_tile_eval_ms)}",
         f"Timing tile cache lookup: {_ms_text(snapshot.montage_timing.last_tile_cache_lookup_ms)}",
         f"Tile cache hit: {_bool_text(snapshot.montage_timing.last_tile_cache_hit)}",
@@ -375,23 +521,30 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
 
 
 def _operation_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
+    optimization_lines = tuple(f"  {_short_debug_text(summary, limit=140)}" for summary in snapshot.operation_optimization_summaries)
+    transition_lines = tuple(f"  {_short_debug_text(transition, limit=160)}" for transition in snapshot.operation_transition_summaries)
+    candidate_lines = tuple(f"  {_short_debug_text(candidate, limit=160)}" for candidate in snapshot.stage_cache_candidate_summaries)
+    warning_lines = tuple(f"Warning: {warning}" for warning in snapshot.pipeline_warnings)
+    stage_cache_lines = _stage_cache_operation_lines(snapshot.stage_cache)
     return (
         f"Count: {snapshot.operation_count}",
         f"Optimized count: {'n/a' if snapshot.optimized_operation_count is None else snapshot.optimized_operation_count}",
         f"Derived: {snapshot.derived_shape} {snapshot.derived_dtype}",
         f"Pipeline peak: {'n/a' if snapshot.pipeline_peak_bytes is None else format_bytes(snapshot.pipeline_peak_bytes)}",
-        "Optimizations:",
-        *(f"  {_short_debug_text(summary)}" for summary in snapshot.operation_optimization_summaries),
         f"Final region: {_short_debug_text(snapshot.operation_final_region or 'n/a')}",
         f"Required input: {_short_debug_text(snapshot.operation_required_input_region or 'n/a')}",
         f"Expanded axes: {_axes_text(snapshot.operation_expanded_axes)}",
+        *(warning_lines or ()),
+        "Optimizations:",
+        *(optimization_lines or ("  n/a",)),
         "Transitions:",
-        *(f"  {_short_debug_text(transition)}" for transition in snapshot.operation_transition_summaries),
+        *(transition_lines or ("  n/a",)),
         f"Capability stages: {'n/a' if snapshot.capability_stage_count is None else snapshot.capability_stage_count}",
         f"Stage cache candidates: {'n/a' if snapshot.stage_cache_candidate_count is None else snapshot.stage_cache_candidate_count}",
-        *(f"Candidate: {_short_debug_text(candidate)}" for candidate in snapshot.stage_cache_candidate_summaries),
-        *_stage_cache_operation_lines(snapshot.stage_cache),
-        *(f"Warning: {warning}" for warning in snapshot.pipeline_warnings),
+        *(("Candidates:",) if candidate_lines else ()),
+        *candidate_lines,
+        *(("Stage cache recent:",) if stage_cache_lines else ()),
+        *stage_cache_lines,
     )
 
 
@@ -480,9 +633,31 @@ def _bytes_or_na(value: int | None) -> str:
 
 def _short_debug_text(value: object, *, limit: int = 220) -> str:
     text = str(value)
+    if "b'" in text or 'b"' in text:
+        return f"captured ({len(text)} chars; payload hidden)"
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 24)] + f"... ({len(text)} chars)"
+
+
+def _wrapped_debug_text(value: object, *, indent: str = "", limit: int = 120) -> str:
+    text = _short_debug_text(value, limit=max(limit * 3, limit))
+    if len(text) <= limit:
+        return indent + text
+    words = text.split(" ")
+    lines = []
+    current = ""
+    for word in words:
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= limit:
+            current += " " + word
+        else:
+            lines.append(indent + current)
+            current = word
+    if current:
+        lines.append(indent + current)
+    return "\n".join(lines)
 
 
 def _request_text(value: str) -> str:
@@ -508,9 +683,18 @@ def _bool_text(value: bool | None) -> str:
     return "yes" if bool(value) else "no"
 
 
+def _percent_text(value: float | None) -> str:
+    return "n/a" if value is None else f"{float(value):.0f}%"
+
+
+def _float_or_na(value: float | None) -> str:
+    return "n/a" if value is None else f"{float(value):.2f}"
+
+
 def _scheduler_lines(schedulers: tuple[object, ...]) -> tuple[str, ...]:
     lines: list[str] = []
     idle: list[str] = []
+    event_only: list[str] = []
     for scheduler in schedulers:
         active_parts = _nonzero_parts(
             (
@@ -537,12 +721,16 @@ def _scheduler_lines(schedulers: tuple[object, ...]) -> tuple[str, ...]:
             idle.append(str(scheduler.name))
             continue
         if not active_parts and event_parts == [f"completed={int(scheduler.completed)}"]:
-            idle.append(f"{scheduler.name}({int(scheduler.completed)} done)")
+            event_only.append(f"{scheduler.name}: completed={int(scheduler.completed)}")
             continue
         prefix = [*active_parts] if active_parts else ["idle"]
         lines.append(f"{scheduler.name}: " + ", ".join((*prefix, *event_parts)))
+    if event_only:
+        lines.append("Completed:")
+        lines.extend(f"  - {name}" for name in event_only)
     if idle:
-        lines.append("Idle: " + ", ".join(idle))
+        lines.append("Inactive:")
+        lines.extend(f"  - {name}" for name in idle)
     return tuple(lines) or ("n/a",)
 
 

@@ -34,27 +34,33 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
         dialog = getattr(win, "_diagnostics_dialog", None)
         assert isinstance(dialog, DiagnosticsDialog)
         assert dialog.isVisible()
-        assert dialog.tabs.tabText(0) == "Memory"
+        assert dialog.minimumWidth() <= 480
+        assert dialog.width() <= 560
+        assert dialog.tabs.tabText(0) == "Realtime"
         assert {dialog.tabs.tabText(index) for index in range(dialog.tabs.count())} == {
+            "Realtime",
+            "Feedback",
             "Memory",
             "Caches",
             "Schedulers",
             "Render",
             "Canvas Preserve",
             "Montage",
+            "Compute",
             "FFT",
             "Operations",
             "All",
         }
         dialog.tabs.setCurrentWidget(dialog._section_edits["All"])
         text = dialog.text_edit.toPlainText()
-        for heading in ("Memory", "Caches", "Schedulers", "Render", "Canvas Preserve", "Montage", "FFT", "Operations"):
+        for heading in ("Realtime", "Feedback", "Memory", "Caches", "Schedulers", "Render", "Canvas Preserve", "Montage", "Compute", "FFT", "Operations"):
             assert heading in text
         assert dialog.refresh_button.isCheckable()
         assert dialog.refresh_button.isChecked()
-        assert "stage" in dialog._bars
-        assert dialog._render_timing_bar._summary.startswith("total ")
-        assert "tiles cached" in dialog._montage_timing_bar._summary
+        assert dialog._overview_labels["status"].text()
+        assert "RSS" in dialog._overview_labels["resources"].text()
+        assert "sync" in dialog._overview_labels["render"].text()
+        assert dialog._overview_labels["montage"].text()
     finally:
         win.close()
 
@@ -167,10 +173,11 @@ def test_diagnostics_stage_cache_bar_and_cache_text_update(qtbot):
         dialog = win._diagnostics_dialog
         dialog.refresh(force_text=True)
 
-        assert "entries=1" in dialog._bars["stage"].text()
         dialog.tabs.setCurrentWidget(dialog._section_edits["Caches"])
         dialog.refresh(force_text=True)
-        assert "Stage cache:" in dialog.current_text_edit().toPlainText()
+        cache_text = dialog.current_text_edit().toPlainText()
+        assert "Stage cache:" in cache_text
+        assert "entries=1" in cache_text
     finally:
         win.close()
 
@@ -193,8 +200,7 @@ def test_diagnostics_auto_text_toggle_pauses_text_but_not_bars(qtbot):
         dialog.refresh()
 
         assert dialog.text_edit.toPlainText() == before
-        assert "entries=1" in dialog._bars["image"].text()
-        assert "Stage cache" in dialog._bars["stage"].text()
+        assert "RSS" in dialog._overview_labels["resources"].text()
 
         dialog.refresh_button.setChecked(True)
         assert "entries=1" in dialog.text_edit.toPlainText()

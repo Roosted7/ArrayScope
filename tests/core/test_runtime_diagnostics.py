@@ -8,6 +8,7 @@ from arrayscope.core.runtime_diagnostics import (
     RenderTimingDiagnostics,
     WindowRuntimeDiagnostics,
     format_runtime_diagnostics,
+    format_runtime_diagnostics_sections,
 )
 from arrayscope.operations.stage_cache import StageCacheDiagnostics
 from arrayscope.window.stage_warmup import StageWarmupDecision
@@ -51,6 +52,14 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
             backend_chosen="tile_layer",
             backend_reason="RGB/complex montage canvas pixels 3000000 > 2000000",
             backend_warning="",
+            tile_compute_cache_hits=3,
+            tile_compute_stage_backed=4,
+            tile_compute_direct=1,
+            tile_compute_waiting_for_stage=2,
+            lead_direct_tiles=1,
+            retained_stage_index=3,
+            retained_stage_decision="hit",
+            repeated_expensive_stage_per_tile=False,
         ),
         canvas_preserve=CanvasPreserveRuntimeDiagnostics(events=("start gen=1",)),
         render_timing=RenderTimingDiagnostics(last_render_sync_ms=1.25),
@@ -96,7 +105,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
 
     text = format_runtime_diagnostics(snapshot)
 
-    for heading in ("Realtime", "Montage", "Render", "Schedulers", "Caches", "Memory", "Compute", "FFT", "Canvas Preserve", "Operations"):
+    for heading in ("Realtime", "Feedback", "Montage", "Render", "Schedulers", "Caches", "Memory", "Compute", "FFT", "Canvas Preserve", "Operations"):
         assert heading in text
     assert "hit-rate=n/a" in text
     assert "start gen=1" in text
@@ -120,7 +129,10 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Display mode: tile_layer" in text
     assert "Display backend: tile_layer (setting=auto, fallback=canvas)" in text
     assert "Display backend reason: RGB/complex montage" in text
-    assert "Tile layer: visible=50 updated=1 skipped=49 rgb tiles=1" in text
+    assert "Reusable stage: stage=3 hit, repeated per tile=no" in text
+    assert "Tile compute: cache_hit=3 stage_backed=4 direct=1 waiting_stage=2" in text
+    assert "Lead direct tiles: 1" in text
+    assert "Tile layer:\n  visible=50 updated=1 skipped=49 rgb_tiles=1" in text
     assert "Timing visible upload: 10.00 ms" in text
     assert "Timing histogram upload: 5.00 ms" in text
     assert "Timing histogram recompute: 3.00 ms" in text
@@ -135,3 +147,65 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Tile cache last session: cached=3 missing=4" in text
     assert "Workers: visible=1, montage_tile=2" in text
     assert "FFT workers: visible=4, montage_tile=1" in text
+    assert "Inactive:" in text
+    assert "Context:\n" in text
+
+
+def test_runtime_diagnostics_avoids_long_feedback_worker_lines():
+    from arrayscope.core.compute_policy import ComputeLane, ComputePolicy
+    from arrayscope.core.resource_governor import (
+        FeedbackChannelDiagnostics,
+        LaneWorkerDecision,
+        ResourceGovernorDiagnostics,
+        ResourcePressure,
+        ResourcePressureState,
+    )
+
+    policy = compute_memory_policy(profile=MemoryProfileChoice.BALANCED, render_cap_mb=512, input_nbytes=1, system=None)
+    snapshot = WindowRuntimeDiagnostics(
+        memory_policy=policy,
+        image_cache=_cache(),
+        tile_cache=_cache(),
+        profile_cache=_cache(),
+        stage_cache=StageCacheDiagnostics(
+            entries=0,
+            bytes_used=0,
+            max_bytes=1024,
+            hits=0,
+            misses=0,
+            evictions=0,
+            hit_rate=None,
+            candidates_seen=0,
+            stores=0,
+            refused_over_budget=0,
+        ),
+        schedulers=(SchedulerDiagnostics("visible", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),),
+        render=RenderRuntimeDiagnostics(last_context_summary=" ".join(["verylongcontext"] * 60)),
+        montage=MontageRuntimeDiagnostics(active=False),
+        canvas_preserve=CanvasPreserveRuntimeDiagnostics(),
+        fft_backend_choice="auto",
+        fft_backend_resolved="numpy",
+        fft_workers_choice="auto",
+        fft_workers_resolved=1,
+        operation_count=0,
+        derived_shape=(1,),
+        derived_dtype="float32",
+        pipeline_peak_bytes=None,
+        resource_governor=ResourceGovernorDiagnostics(
+            pressure=ResourcePressureState(ResourcePressure.NORMAL, 0.5, ResourcePressure.LOW, ResourcePressure.NORMAL, ""),
+            lane_decisions=(
+                LaneWorkerDecision(ComputeLane.MONTAGE_TILE, 8, 1, 8, "profile baseline"),
+                LaneWorkerDecision(ComputeLane.PREFETCH, 1, 1, 1, "prefetch kept narrow while user-visible work is active"),
+            ),
+            feedback_channels=(
+                FeedbackChannelDiagnostics("montage_commit", 15.0, 1, 15.0, 15.0, 4.0, 1, 30),
+                FeedbackChannelDiagnostics("roi_refresh", 0.0, 0, None, None, 8.0, 8, 16),
+            ),
+        ),
+    )
+
+    sections = format_runtime_diagnostics_sections(snapshot)
+
+    assert "Lane workers:\n  montage_tile: 8/8" in sections["Feedback"]
+    assert "  Inactive:\n    - roi_refresh" in sections["Feedback"]
+    assert all(len(line) <= 145 for line in sections["Render"].splitlines())
