@@ -40,6 +40,20 @@ class DisplayCommitter:
         )
         return self._frame_for(presentation, key)
 
+    def commit_tile_layer(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
+        self._validate_presentation(presentation)
+        self.image_view.setMontageTileLayerPresentation(
+            presentation.data,
+            histogramData=presentation.histogram_data,
+            histogramPlotData=presentation.histogram_plot_data,
+            geometry=presentation.geometry,
+            levels=presentation.levels,
+            histogramRange=presentation.histogram_range,
+            viewport_policy=presentation.viewport_policy,
+            rgb_already_windowed=presentation.rgb_already_windowed,
+        )
+        return self._frame_for(presentation, key)
+
     def _frame_for(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         return CommittedDisplayFrame(
             data=presentation.data,

@@ -734,6 +734,38 @@ def test_operation_backed_complex_montage_rewindows_rgb_from_histogram_levels(qt
         win.close()
 
 
+def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogram_levels(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.operations.pipeline import CenteredFFT
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.arange(4 * 5 * 3, dtype=np.float32).reshape(4, 5, 3)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.operation_coordinator.load_operations((CenteredFFT(axis=0),))
+        win._set_document(win.operation_coordinator.document)
+        win._coerce_channel_for_current_dtype()
+        win._montage_tile_layer_policy = lambda _geometry, _data: True
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
+        win.update_montage_view()
+
+        qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=3000)
+        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=3000)
+        assert win.img_view._montage_tile_rgb_bases
+        first_item = next(iter(win.img_view._montage_tile_items.values()))
+        before = np.array(first_item.image, copy=True)
+
+        low, high = win.img_view.getHistogramDataBounds()
+        win.img_view.setLevels((float(low) + float(high)) / 2.0, float(high))
+        _process_events(qtbot, count=10)
+
+        assert not np.array_equal(first_item.image, before)
+    finally:
+        win.close()
+
+
 def test_stale_montage_tile_result_does_not_mutate_current_ui_state(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

@@ -195,9 +195,23 @@ def test_display_presenter_does_not_infer_windowed_rgb_from_array_rank():
     assert "rgb_already_windowed=display_image.data.ndim" not in text
 
 
-def test_imageview2d_has_no_multi_imageitem_tile_display_path():
+def test_imageview2d_owns_internal_montage_tile_layer_path():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
-    forbidden = ("setImageTiles", "clearTiles", "_tile_items", "_tile_histogram_sources", "_tile_mode")
+    assert "setMontageTileLayerPresentation" in text
+    assert "_montage_tile_items" in text
+    assert "montageDisplayMode" in text
+
+
+def test_histogram_imageitem_binding_is_centralized():
+    text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
+    assert "def _bind_histogram_item" in text
+    assert text.count(".setImageItem(") == 1
+    assert "self.histogram.setImageItem(item)" in text
+
+
+def test_montage_renderer_does_not_mutate_image_items_directly():
+    text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
+    forbidden = (".setImage(", ".setMontageTileLayerPresentation(", "ImageItem(")
     for token in forbidden:
         assert token not in text
 

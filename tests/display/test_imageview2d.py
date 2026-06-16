@@ -154,6 +154,108 @@ def test_separate_histogram_plot_source_drives_histogram_without_replacing_value
     view.close()
 
 
+def test_repeated_fast_updates_do_not_rebind_same_histogram_item(qt_app, monkeypatch):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    data = np.ones((4, 4), dtype=float)
+    view.setImagePresentation(data, histogramData=data, histogramPlotData=np.arange(16, dtype=float), levels=(0.0, 2.0), histogramRange=(0.0, 2.0))
+    calls = []
+    monkeypatch.setattr(view.histogram, "setImageItem", lambda item: calls.append(item))
+
+    view.updateImagePresentationFast(data, histogramData=data, histogramPlotData=np.arange(16, dtype=float), levels=(0.0, 2.0), histogramRange=(0.0, 2.0))
+    view.updateImagePresentationFast(data, histogramData=data, histogramPlotData=np.arange(16, dtype=float), levels=(0.0, 2.0), histogramRange=(0.0, 2.0))
+
+    assert calls == []
+    view.close()
+
+
+def test_programmatic_scalar_presentation_uploads_visible_image_once(qt_app, monkeypatch):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    calls = []
+    original = view.imageItem.setImage
+
+    def recording_set_image(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(view.imageItem, "setImage", recording_set_image)
+    data = np.arange(16, dtype=float).reshape(4, 4)
+
+    view.setImagePresentation(data, histogramData=data, levels=(2.0, 12.0), histogramRange=(0.0, 15.0))
+
+    assert len(calls) == 1
+    assert tuple(float(value) for value in view.imageItem.levels) == (2.0, 12.0)
+    view.close()
+
+
+def test_same_memory_fast_refresh_uses_no_new_data_path(qt_app, monkeypatch):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    data = np.zeros((4, 4), dtype=float)
+    view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    calls = []
+    original = view.imageItem.setImage
+
+    def recording_set_image(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(view.imageItem, "setImage", recording_set_image)
+    data[:] = 2.0
+
+    view.updateImagePresentationFast(data, histogramData=data, levels=(0.0, 2.0), histogramRange=(0.0, 2.0))
+
+    assert calls
+    assert calls[0][0][0] is None
+    assert view.lastImageUploadTiming().fast_same_object is True
+    view.close()
+
+
+def test_tile_layer_presentation_creates_positioned_tile_items_and_syncs_levels(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.arange(10, dtype=float).reshape(2, 5)
+    hist = canvas.copy()
+
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=hist,
+        histogramPlotData=np.arange(16, dtype=float),
+        geometry=geometry,
+        levels=(0.0, 9.0),
+        histogramRange=(0.0, 9.0),
+    )
+
+    assert view.montageDisplayMode() == "tile_layer"
+    assert not view.imageItem.isVisible()
+    assert set(view._montage_tile_items) == {0, 1}
+    assert view._montage_tile_items[0].pos().x() == 0.0
+    assert view._montage_tile_items[1].pos().x() == 3.0
+
+    view.histogram.setLevels(2.0, 8.0)
+    view._on_histogram_levels_changed()
+
+    assert tuple(float(value) for value in view._montage_tile_items[0].levels) == (2.0, 8.0)
+    view.clearMontageTileLayer()
+    assert view.montageDisplayMode() == "canvas"
+    assert view.imageItem.isVisible()
+    view.close()
+
+
 def test_complex_rgb_histogram_levels_rewindow_display(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 

@@ -308,6 +308,11 @@ class DiagnosticsDialog(QtWidgets.QDialog):
                     ("stage cache", snapshot.montage_timing.last_stage_cache_lookup_ms, "#0f766e"),
                     ("stage wait", snapshot.montage_timing.last_stage_attach_wait_ms, "#0d9488"),
                     ("level stats", snapshot.montage_timing.last_level_stats_ms, "#a16207"),
+                    ("visible upload", snapshot.montage_timing.last_visible_upload_ms, "#15803d"),
+                    ("hist upload", snapshot.montage_timing.last_histogram_upload_ms, "#65a30d"),
+                    ("hist recompute", snapshot.montage_timing.last_histogram_recompute_ms, "#84cc16"),
+                    ("rgb", snapshot.montage_timing.last_rgb_window_ms, "#db2777"),
+                    ("levels", snapshot.montage_timing.last_level_sync_ms, "#475569"),
                     ("compose", snapshot.montage_timing.last_canvas_compose_ms, "#7c3aed"),
                     ("patch", snapshot.montage_timing.last_canvas_patch_ms, "#9333ea"),
                     ("set", snapshot.montage_timing.last_set_image_ms, "#15803d"),
@@ -316,7 +321,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
                 )
             ),
             summary=(
-                f"{_timing_summary('total', (snapshot.montage_timing.last_tile_eval_ms, snapshot.montage_timing.last_tile_cache_lookup_ms, snapshot.montage_timing.last_stage_cache_lookup_ms, snapshot.montage_timing.last_stage_attach_wait_ms, snapshot.montage_timing.last_level_stats_ms, snapshot.montage_timing.last_canvas_compose_ms, snapshot.montage_timing.last_canvas_patch_ms, snapshot.montage_timing.last_set_image_ms, snapshot.montage_timing.last_canvas_commit_ms, snapshot.montage_timing.last_overlay_update_ms))}, "
+                f"{_timing_summary('total', (snapshot.montage_timing.last_tile_eval_ms, snapshot.montage_timing.last_tile_cache_lookup_ms, snapshot.montage_timing.last_stage_cache_lookup_ms, snapshot.montage_timing.last_stage_attach_wait_ms, snapshot.montage_timing.last_level_stats_ms, snapshot.montage_timing.last_visible_upload_ms, snapshot.montage_timing.last_histogram_upload_ms, snapshot.montage_timing.last_histogram_recompute_ms, snapshot.montage_timing.last_rgb_window_ms, snapshot.montage_timing.last_level_sync_ms, snapshot.montage_timing.last_canvas_compose_ms, snapshot.montage_timing.last_canvas_patch_ms, snapshot.montage_timing.last_set_image_ms, snapshot.montage_timing.last_canvas_commit_ms, snapshot.montage_timing.last_overlay_update_ms))}, "
                 f"tiles cached {snapshot.montage_timing.cached_tiles_last_session}, missing {snapshot.montage_timing.missing_tiles_last_session}, patched {snapshot.montage_timing.patched_tiles_last_flush}"
             ),
         )

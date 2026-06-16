@@ -104,7 +104,15 @@ class DisplayPresentationMixin:
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
 
             set_image_start = perf_counter()
-            frame = self._display_committer().commit_full(decision.display_presentation, context.frame_key)
+            use_tile_layer = (
+                getattr(geometry, "montage", None) is not None
+                and hasattr(self.img_view, "setMontageTileLayerPresentation")
+                and self._should_use_montage_tile_layer_for_display(geometry, display_image.data)
+            )
+            if use_tile_layer:
+                frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
+            else:
+                frame = self._display_committer().commit_full(decision.display_presentation, context.frame_key)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
             self._set_committed_display_frame(frame)
@@ -185,7 +193,15 @@ class DisplayPresentationMixin:
                 and tuple(getattr(self.img_view.image, "shape", ())[:2]) == tuple(display_image.data.shape[:2])
                 and hasattr(self.img_view, "updateImagePresentationFast")
             )
-            if can_fast:
+            use_tile_layer = (
+                can_fast
+                and getattr(geometry, "montage", None) is not None
+                and hasattr(self.img_view, "setMontageTileLayerPresentation")
+                and self._should_use_montage_tile_layer_for_display(geometry, display_image.data)
+            )
+            if use_tile_layer:
+                frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
+            elif can_fast:
                 frame = self._display_committer().commit_fast(decision.display_presentation, context.frame_key)
             else:
                 frame = self._display_committer().commit_full(decision.display_presentation, context.frame_key)
@@ -201,6 +217,12 @@ class DisplayPresentationMixin:
         finally:
             self._last_progressive_commit_ms = (perf_counter() - commit_start) * 1000.0
             self._last_display_commit_ms = self._last_progressive_commit_ms
+
+    def _should_use_montage_tile_layer_for_display(self, geometry, data) -> bool:
+        policy = getattr(self, "_montage_tile_layer_policy", None)
+        if policy is None:
+            return False
+        return bool(policy(geometry, data))
 
     def _display_committer(self) -> DisplayCommitter:
         committer = getattr(self, "_display_committer_instance", None)
