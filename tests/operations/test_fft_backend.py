@@ -3,6 +3,8 @@ import pytest
 
 from arrayscope.operations import dim_ops, fft_backend
 from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT
+from arrayscope.core.compute_policy import ComputeLane, EvaluationContext
+from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec
 
 
 def test_scipy_backend_matches_numpy_convention_for_centered_fft_and_ifft():
@@ -55,3 +57,21 @@ def test_dim_ops_uses_runtime_options():
     fft_backend.set_fft_runtime_options(backend="numpy", workers="1")
     data = np.arange(3 * 4, dtype=np.float32).reshape(3, 4)
     np.testing.assert_allclose(dim_ops.centered_fft(data, 0), fft_backend.NumpyFFTBackend().centered_fft(data, 0))
+
+
+def test_fft_operations_honor_evaluation_context_workers(monkeypatch):
+    calls = []
+
+    def fake_centered_fft(data, axis, *, workers=None, backend=None):
+        del axis, backend
+        calls.append(workers)
+        return data
+
+    monkeypatch.setattr(dim_ops, "centered_fft", fake_centered_fft)
+    data = np.arange(3 * 4, dtype=np.float32).reshape(3, 4)
+    region = RegionSpec((AxisRegion(AxisRegionKind.ALL), AxisRegion(AxisRegionKind.ALL)))
+    context = EvaluationContext(ComputeLane.MONTAGE_TILE, None, 1, None)
+
+    CenteredFFT(axis=1).apply_to_region(data, input_region=region, output_region=region, evaluation_context=context)
+
+    assert calls == [1]

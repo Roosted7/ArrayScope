@@ -18,6 +18,8 @@ class ImageUploadTiming:
     histogram_recompute_ms: float | None = None
     level_sync_ms: float | None = None
     rgb_window_ms: float | None = None
+    tile_layer_upload_ms: float | None = None
+    tile_layer_rgb_window_ms: float | None = None
     profile_bounds_ms: float | None = None
     visible_bytes: int = 0
     visible_pixels: int = 0
@@ -97,6 +99,8 @@ class MontageTimingDiagnostics:
     last_histogram_upload_ms: float | None = None
     last_histogram_recompute_ms: float | None = None
     last_rgb_window_ms: float | None = None
+    last_tile_layer_upload_ms: float | None = None
+    last_tile_layer_rgb_window_ms: float | None = None
     last_level_sync_ms: float | None = None
     last_canvas_compose_ms: float | None = None
     last_canvas_patch_ms: float | None = None
@@ -154,6 +158,8 @@ class WindowRuntimeDiagnostics:
     derived_shape: tuple[int, ...]
     derived_dtype: str
     pipeline_peak_bytes: int | None
+    compute_worker_summaries: tuple[str, ...] = ()
+    compute_fft_worker_summaries: tuple[str, ...] = ()
     pipeline_warnings: tuple[str, ...] = ()
     optimized_operation_count: int | None = None
     operation_optimization_summaries: tuple[str, ...] = ()
@@ -168,6 +174,8 @@ class WindowRuntimeDiagnostics:
     montage_timing: MontageTimingDiagnostics = field(default_factory=MontageTimingDiagnostics)
     render_coalescer: RenderCoalescerDiagnostics = field(default_factory=RenderCoalescerDiagnostics)
     stage_materialization: object | None = None
+    stage_warmup: object | None = None
+    montage_prefetch: tuple[object, ...] = ()
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
@@ -184,6 +192,7 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 _cache_line("Profiles/scalars", snapshot.profile_cache),
                 _stage_cache_line("Stage cache", snapshot.stage_cache),
                 _stage_materialization_line("Stage materialization", snapshot.stage_materialization),
+                _stage_warmup_line("Stage warmup", snapshot.stage_warmup),
             )
         ),
         "Schedulers": "\n".join(_scheduler_line(scheduler) for scheduler in snapshot.schedulers),
@@ -262,6 +271,8 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 f"Timing histogram upload: {_ms_text(snapshot.montage_timing.last_histogram_upload_ms)}",
                 f"Timing histogram recompute: {_ms_text(snapshot.montage_timing.last_histogram_recompute_ms)}",
                 f"Timing RGB window: {_ms_text(snapshot.montage_timing.last_rgb_window_ms)}",
+                f"Timing tile layer upload: {_ms_text(snapshot.montage_timing.last_tile_layer_upload_ms)}",
+                f"Timing tile layer RGB window: {_ms_text(snapshot.montage_timing.last_tile_layer_rgb_window_ms)}",
                 f"Timing level sync: {_ms_text(snapshot.montage_timing.last_level_sync_ms)}",
                 f"Timing canvas compose: {_ms_text(snapshot.montage_timing.last_canvas_compose_ms)}",
                 f"Timing canvas patch: {_ms_text(snapshot.montage_timing.last_canvas_patch_ms)}",
@@ -277,6 +288,7 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                     f"skipped={snapshot.montage_timing.tile_layer_items_skipped}"
                 ),
                 f"Tile layer RGB window tiles: {snapshot.montage_timing.tile_layer_rgb_window_tiles}",
+                _montage_prefetch_line("Montage prefetch", snapshot.montage_prefetch),
                 f"Coalesced montage commits: {snapshot.montage_timing.coalesced_commits}",
                 (
                     "Upload: "
@@ -290,6 +302,12 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
             (
                 f"Backend: {snapshot.fft_backend_choice} -> {snapshot.fft_backend_resolved}",
                 f"Workers: {snapshot.fft_workers_choice} -> {snapshot.fft_workers_resolved}",
+            )
+        ),
+        "Compute": "\n".join(
+            (
+                "Workers: " + (", ".join(snapshot.compute_worker_summaries) or "n/a"),
+                "FFT workers: " + (", ".join(snapshot.compute_fft_worker_summaries) or "n/a"),
             )
         ),
         "Operations": "\n".join(
@@ -347,6 +365,33 @@ def _stage_materialization_line(name: str, diagnostics) -> str:
         f"attached={getattr(diagnostics, 'attached', 0)}, completed={getattr(diagnostics, 'completed', 0)}, "
         f"refused={getattr(diagnostics, 'refused', 0)}, consequence={getattr(diagnostics, 'consequence', '') or 'n/a'}"
     )
+
+
+def _stage_warmup_line(name: str, diagnostics) -> str:
+    if diagnostics is None:
+        return f"{name}: n/a"
+    candidate = getattr(diagnostics, "candidate_bytes", None)
+    candidate_text = "unknown" if candidate is None else format_bytes(int(candidate))
+    return (
+        f"{name}: decision={getattr(diagnostics, 'decision', '') or 'n/a'}, "
+        f"candidate={candidate_text}, budget={format_bytes(int(getattr(diagnostics, 'budget_bytes', 0)))}, "
+        f"reason={getattr(diagnostics, 'reason', '') or 'n/a'}"
+    )
+
+
+def _montage_prefetch_line(name: str, decisions: tuple[object, ...]) -> str:
+    if not decisions:
+        return f"{name}: n/a"
+    parts = []
+    for decision in decisions[:4]:
+        tile = getattr(decision, "tile_number", None)
+        source = getattr(decision, "source_index", None)
+        label = getattr(decision, "decision", "") or "n/a"
+        reason = getattr(decision, "reason", "") or ""
+        tile_text = "n/a" if tile is None else str(int(tile))
+        source_text = "n/a" if source is None else str(int(source))
+        parts.append(f"tile={tile_text} source={source_text} decision={label}" + (f" reason={reason}" if reason else ""))
+    return f"{name}: " + "; ".join(parts)
 
 
 def _stage_cache_operation_lines(cache) -> tuple[str, ...]:

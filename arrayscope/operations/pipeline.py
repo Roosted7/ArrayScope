@@ -67,7 +67,7 @@ class Crop:
         start, stop = _validate_crop_bounds(input_shape[axis], self.start, self.stop)
         return replace_region_axis(output_region, axis, _crop_axis_region(output_region.axes[axis], start, stop))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del input_region, output_region
         return data
 
@@ -95,7 +95,7 @@ class ReverseAxis:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, _reverse_axis_region(output_region.axes[axis], input_shape[axis]))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del input_region, output_region
         return data
 
@@ -118,7 +118,7 @@ class Conjugate:
         del input_shape
         return output_region
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del input_region, output_region
         return np.conjugate(data)
 
@@ -153,7 +153,7 @@ class Mean:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del output_region
         return np.mean(data, axis=axis_in_region_result(input_region, self.axis))
 
@@ -189,7 +189,7 @@ class RootSumSquares:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del output_region
         return np.sqrt(np.sum(np.abs(data) ** 2, axis=axis_in_region_result(input_region, self.axis)))
 
@@ -224,7 +224,7 @@ class Sum:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del output_region
         return np.sum(data, axis=axis_in_region_result(input_region, self.axis))
 
@@ -257,7 +257,7 @@ class Maximum:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del output_region
         return np.max(data, axis=axis_in_region_result(input_region, self.axis))
 
@@ -290,7 +290,7 @@ class Minimum:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del output_region
         return np.min(data, axis=axis_in_region_result(input_region, self.axis))
 
@@ -326,10 +326,13 @@ class CenteredFFT:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         axis = _validate_axis(input_region.axes, self.axis)
         slab_axis = axis_in_region_result(input_region, axis)
-        transformed = dim_ops.centered_fft(data, slab_axis)
+        if evaluation_context is None:
+            transformed = dim_ops.centered_fft(data, slab_axis)
+        else:
+            transformed = dim_ops.centered_fft(data, slab_axis, workers=int(evaluation_context.fft_workers))
         return take_axis_region(transformed, output_region.axes[axis], transformed.shape[slab_axis], axis=slab_axis)
 
 
@@ -364,10 +367,13 @@ class CenteredIFFT:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         axis = _validate_axis(input_region.axes, self.axis)
         slab_axis = axis_in_region_result(input_region, axis)
-        transformed = dim_ops.centered_ifft(data, slab_axis)
+        if evaluation_context is None:
+            transformed = dim_ops.centered_ifft(data, slab_axis)
+        else:
+            transformed = dim_ops.centered_ifft(data, slab_axis, workers=int(evaluation_context.fft_workers))
         return take_axis_region(transformed, output_region.axes[axis], transformed.shape[slab_axis], axis=slab_axis)
 
 
@@ -398,7 +404,7 @@ class FFTShift:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, _fftshift_axis_region(output_region.axes[axis], input_shape[axis]))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         del input_region, output_region
         return data
 
@@ -429,7 +435,7 @@ class CombineRealImagAxis:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         axis = _validate_axis(input_region.axes, self.axis)
         slab_axis = axis_in_region_result(input_region, axis)
         combined = dim_ops.combine_real_imag_axis(data, slab_axis)
@@ -464,7 +470,7 @@ class SplitComplexAxis:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.POINT, 0))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec):
+    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
         axis = _validate_axis(output_region.axes, self.axis)
         requested = output_region.axes[axis]
         if axis_region_kind(requested.kind) == AxisRegionKind.POINT:

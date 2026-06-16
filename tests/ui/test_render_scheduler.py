@@ -213,6 +213,23 @@ def test_prefetch_never_runs_during_montage(qtbot):
         win.close()
 
 
+def test_compute_policy_configures_stage_and_montage_lanes(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.core.compute_policy import ComputeLane
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.workers_for_lane(ComputeLane.MONTAGE_TILE)
+        assert win.stage_evaluation_controller.pool.maxThreadCount() == win.compute_policy.workers_for_lane(ComputeLane.STAGE)
+        assert win.compute_policy.fft_workers_for_lane(ComputeLane.MONTAGE_TILE) == 1
+        assert win.compute_policy.fft_workers_for_lane(ComputeLane.STAGE) >= 1
+    finally:
+        win.close()
+
+
 def test_stale_visible_result_does_not_clear_updating_overlay(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

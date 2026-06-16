@@ -347,7 +347,7 @@ class OperationEvaluator:
         self.last_diagnostics = self._tile_cache.diagnostics(CacheStatus.READY, _request_message("Montage tile cached", result))
         return value.bind(tile)
 
-    def prefetch_image_snapshot(self, document, view_state, colormap_lut=None):
+    def prefetch_image_snapshot(self, document, view_state, colormap_lut=None, *, evaluation_context=None):
         key = self.image_key(view_state, colormap_lut=colormap_lut, document=document)
         if self._image_cache.get(key) is not None:
             self.prefetch_skipped += 1
@@ -361,6 +361,7 @@ class OperationEvaluator:
             colormap_lut=colormap_lut,
             stage_cache=self._stage_cache,
             stage_document_key=stage_document_key(document),
+            evaluation_context=evaluation_context,
         )
 
     def store_prefetch_image_result(self, document, view_state, colormap_lut, result):
@@ -373,7 +374,7 @@ class OperationEvaluator:
         self.prefetch_stored += 1
         return True
 
-    def prefetch_line_snapshot(self, document, view_state):
+    def prefetch_line_snapshot(self, document, view_state, *, evaluation_context=None):
         key = self.line_key(view_state, document=document)
         if self._profile_cache.get(key) is not None:
             self.prefetch_skipped += 1
@@ -386,6 +387,7 @@ class OperationEvaluator:
             view_state,
             stage_cache=self._stage_cache,
             stage_document_key=stage_document_key(document),
+            evaluation_context=evaluation_context,
         )
 
     def store_prefetch_line_result(self, document, view_state, result):
@@ -552,12 +554,21 @@ def evaluate_image_snapshot(
     degraded=False,
     stage_cache=None,
     stage_document_key=None,
+    evaluation_context=None,
 ) -> EvaluationResult:
     request = request_for_image(view_state)
     plan = plan_slab(document, request)
     start = perf_counter()
     _check_cancelled(cancellation_token)
-    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key, cancellation_token=cancellation_token)
+    slab = evaluate_slab_from_plan(
+        document,
+        request,
+        plan,
+        stage_cache=stage_cache,
+        document_key=stage_document_key,
+        cancellation_token=cancellation_token,
+        evaluation_context=evaluation_context,
+    )
     _check_cancelled(cancellation_token)
     value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
     _check_cancelled(cancellation_token)
@@ -571,12 +582,20 @@ def evaluate_image_snapshot(
     )
 
 
-def evaluate_line_snapshot(document, view_state, *, stage_cache=None, stage_document_key=None, cancellation_token=None) -> EvaluationResult:
+def evaluate_line_snapshot(document, view_state, *, stage_cache=None, stage_document_key=None, cancellation_token=None, evaluation_context=None) -> EvaluationResult:
     request = request_for_line(view_state)
     plan = plan_slab(document, request)
     start = perf_counter()
     _check_cancelled(cancellation_token)
-    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key, cancellation_token=cancellation_token)
+    slab = evaluate_slab_from_plan(
+        document,
+        request,
+        plan,
+        stage_cache=stage_cache,
+        document_key=stage_document_key,
+        cancellation_token=cancellation_token,
+        evaluation_context=evaluation_context,
+    )
     _check_cancelled(cancellation_token)
     value = make_line_from_slab(slab, request)
     return EvaluationResult(
@@ -588,12 +607,20 @@ def evaluate_line_snapshot(document, view_state, *, stage_cache=None, stage_docu
     )
 
 
-def evaluate_scalar_snapshot(document, view_state, index, *, stage_cache=None, stage_document_key=None, cancellation_token=None) -> EvaluationResult:
+def evaluate_scalar_snapshot(document, view_state, index, *, stage_cache=None, stage_document_key=None, cancellation_token=None, evaluation_context=None) -> EvaluationResult:
     request = request_for_scalar(view_state, index)
     plan = plan_slab(document, request)
     start = perf_counter()
     _check_cancelled(cancellation_token)
-    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key, cancellation_token=cancellation_token)
+    slab = evaluate_slab_from_plan(
+        document,
+        request,
+        plan,
+        stage_cache=stage_cache,
+        document_key=stage_document_key,
+        cancellation_token=cancellation_token,
+        evaluation_context=evaluation_context,
+    )
     _check_cancelled(cancellation_token)
     value = make_scalar_from_slab(slab, request)
     return EvaluationResult(
@@ -615,12 +642,21 @@ def evaluate_export_frame_snapshot(
     stage_cache=None,
     stage_document_key=None,
     cancellation_token=None,
+    evaluation_context=None,
 ) -> EvaluationResult:
     request = request_for_export_frame(view_state, frame_axis, frame_index)
     plan = plan_slab(document, request)
     start = perf_counter()
     _check_cancelled(cancellation_token)
-    slab = evaluate_slab_from_plan(document, request, plan, stage_cache=stage_cache, document_key=stage_document_key, cancellation_token=cancellation_token)
+    slab = evaluate_slab_from_plan(
+        document,
+        request,
+        plan,
+        stage_cache=stage_cache,
+        document_key=stage_document_key,
+        cancellation_token=cancellation_token,
+        evaluation_context=evaluation_context,
+    )
     _check_cancelled(cancellation_token)
     value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
     return EvaluationResult(

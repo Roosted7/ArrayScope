@@ -304,6 +304,7 @@ def test_tile_layer_clean_commit_skips_tile_and_histogram_uploads(qt_app, monkey
     assert timing.tile_layer_visible_items == 2
     assert timing.tile_layer_items_updated == 0
     assert timing.tile_layer_items_skipped == 2
+    assert timing.tile_layer_upload_ms == 0.0
     assert timing.visible_bytes == 0
     assert timing.histogram_bytes == 0
     view.close()
@@ -382,6 +383,8 @@ def test_rgb_tile_layer_clean_commit_does_not_rewindow(qt_app):
     timing = view.lastImageUploadTiming()
     assert timing.tile_layer_rgb_window_tiles == 0
     assert timing.rgb_window_ms == 0.0
+    assert timing.tile_layer_rgb_window_ms == 0.0
+    assert timing.tile_layer_upload_ms == 0.0
     assert timing.tile_layer_items_updated == 0
     assert timing.tile_layer_items_skipped == 2
     view.close()
@@ -418,8 +421,85 @@ def test_rgb_tile_layer_level_change_rewindows_cached_bases(qt_app):
     timing = view.lastImageUploadTiming()
     assert timing.tile_layer_rgb_window_tiles == 2
     assert timing.tile_layer_items_updated == 2
+    assert timing.tile_layer_rgb_window_ms > 0.0
+    assert timing.tile_layer_upload_ms > 0.0
     for tile, state in view._montage_tile_layer.states.items():
         assert not np.array_equal(state.item.image, before[tile])
+    view.close()
+
+
+def test_rgb_tile_layer_pruned_source_cache_rewindows_from_canvas(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.full((2, 5, 3), 200, dtype=np.uint8)
+    hist = np.linspace(0.0, 1.0, 10, dtype=np.float32).reshape(2, 5)
+    view._montage_tile_layer._rgb_source_cache_budget_bytes = 1
+    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=geometry, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+
+    assert all(state.rgb_base is None for state in view._montage_tile_layer.states.values())
+    before = {tile: np.array(state.item.image, copy=True) for tile, state in view._montage_tile_layer.states.items()}
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.5, 1.0),
+        histogramRange=(0.0, 1.0),
+        montage_dirty_tiles=(),
+    )
+
+    timing = view.lastImageUploadTiming()
+    assert timing.tile_layer_rgb_window_tiles == 2
+    assert timing.tile_layer_items_updated == 2
+    for tile, state in view._montage_tile_layer.states.items():
+        assert not np.array_equal(state.item.image, before[tile])
+    view.close()
+
+
+def test_tile_layer_hidden_tile_drops_cached_arrays_and_is_removed_after_grace(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    loaded = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.full((2, 5, 3), 200, dtype=np.uint8)
+    hist = np.linspace(0.0, 1.0, 10, dtype=np.float32).reshape(2, 5)
+    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=loaded, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    assert view._montage_tile_layer.states[1].rgb_base is not None
+
+    hidden = DisplayGeometry(
+        view_state=loaded.view_state,
+        display_shape=loaded.display_shape,
+        montage=loaded.montage,
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.UNLOADED),
+    )
+    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=hidden, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), montage_dirty_tiles=())
+    state = view._montage_tile_layer.states[1]
+    assert not state.visible
+    assert state.rgb_base is None
+    assert state.hist_source is None
+    assert state.display_cache is None
+
+    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=hidden, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), montage_dirty_tiles=())
+    view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=hidden, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), montage_dirty_tiles=())
+    assert 1 not in view._montage_tile_layer.states
     view.close()
 
 
@@ -604,8 +684,8 @@ def test_imageview_creates_polyline_and_freehand_rois(qt_app):
     freehand = view.createRoi(RoiKind.FREEHAND_POLYGON, points=((2, 2), (7, 2), (7, 8), (2, 8)))
 
     assert len(created) == 2
-    assert polyline.geometry.kind == RoiKind.POLYLINE
-    assert freehand.geometry.kind == RoiKind.FREEHAND_POLYGON
+    assert polyline.geometry.kind.value == RoiKind.POLYLINE.value
+    assert freehand.geometry.kind.value == RoiKind.FREEHAND_POLYGON.value
     assert freehand.geometry.points[0] == freehand.geometry.points[-1]
     assert len(view.roiSelections()) == 2
 

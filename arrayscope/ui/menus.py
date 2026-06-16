@@ -261,6 +261,8 @@ class WindowMenuMixin:
             self._save_app_settings()
         if hasattr(self, "_refresh_memory_policy"):
             policy = self._refresh_memory_policy(active_render=False)
+            if hasattr(self, "_apply_compute_policy"):
+                self._apply_compute_policy()
             if persist:
                 show_status_message(
                     self,

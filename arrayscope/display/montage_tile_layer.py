@@ -10,6 +10,9 @@ import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 
 
+RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
+
+
 @dataclass
 class TileLayerItemState:
     tile_number: int
@@ -24,6 +27,8 @@ class TileLayerItemState:
     rgb_base: np.ndarray | None = None
     hist_source: np.ndarray | None = None
     display_cache: np.ndarray | None = None
+    hidden_commits: int = 0
+    source_cache_serial: int = 0
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,8 @@ class MontageTileLayer:
         self._histogram_levels_for_display = histogram_levels_for_display
         self._is_rgb_image = is_rgb_image
         self._states: dict[int, TileLayerItemState] = {}
+        self._source_cache_serial = 0
+        self._rgb_source_cache_budget_bytes = RGB_SOURCE_CACHE_BUDGET_BYTES
 
     @property
     def states(self) -> dict[int, TileLayerItemState]:
@@ -132,6 +139,7 @@ class MontageTileLayer:
                 self._states[int(tile_number)] = item_state
 
             item_state.item.setVisible(True)
+            item_state.hidden_commits = 0
             item_state.item.setPos(float(local_x + source_x0), float(local_y + source_y0))
             visible_items += 1
             active.add(int(tile_number))
@@ -156,13 +164,20 @@ class MontageTileLayer:
             )
             dirty = dirty_set is None or int(tile_number) in dirty_set
             levels_changed = tuple(item_state.levels) != levels
-            missing_display = item_state.display_cache is None and self._is_rgb_image(
-                image[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...]
+            tile_view = image[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...]
+            is_rgb_tile = self._is_rgb_image(tile_view)
+            missing_display = getattr(item_state.item, "image", None) is None and is_rgb_tile
+            needs_source_rewindow = (
+                levels_changed
+                and is_rgb_tile
+                and not bool(rgb_already_windowed)
+                and hist is not None
+                and (item_state.rgb_base is None or item_state.hist_source is None)
             )
-            should_upload = bool(source_changed or dirty or not item_state.visible or missing_display)
+            should_upload = bool(source_changed or dirty or not item_state.visible or missing_display or needs_source_rewindow)
 
             if should_upload:
-                tile_data = image[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...]
+                tile_data = tile_view
                 tile_hist = None if hist is None else hist[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width]
                 updated, windowed = self._set_tile_data(
                     item_state,
@@ -191,6 +206,7 @@ class MontageTileLayer:
         for tile_number in tuple(self._states):
             if int(tile_number) not in active:
                 self._hide_tile(tile_number)
+        self._prune_rgb_source_cache()
 
         return TileLayerUpdateStats(
             visible_items=int(visible_items),
@@ -225,6 +241,18 @@ class MontageTileLayer:
         state.rgb_base = None
         state.hist_source = None
         state.display_cache = None
+        state.hidden_commits += 1
+        if state.hidden_commits >= 3:
+            self._remove_tile(tile_number)
+
+    def _remove_tile(self, tile_number: int) -> None:
+        state = self._states.pop(int(tile_number), None)
+        if state is None:
+            return
+        try:
+            self.view.removeItem(state.item)
+        except Exception:
+            pass
 
     def _set_tile_data(
         self,
@@ -251,16 +279,22 @@ class MontageTileLayer:
                 base = np.asarray(tile_data)[..., :3].astype(np.float32, copy=False)
                 hist = np.asarray(tile_hist, dtype=np.float32)
                 display = self._rgb_display_for_levels(base, hist, levels)
-                self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
+                rgb_ms = (perf_counter() - rgb_start) * 1000.0
+                self._record_upload_timing("rgb_window_ms", rgb_ms)
+                self._record_upload_timing("tile_layer_rgb_window_ms", rgb_ms)
                 state.rgb_base = base
                 state.hist_source = hist
+                self._touch_rgb_source_cache(state)
                 windowed = True
             state.display_cache = display
+            upload_start = perf_counter()
             self._set_image_item_data(state.item, display, (0, 255), role="visible", emit_histogram_change=False)
+            self._record_upload_timing("tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0)
         else:
             state.rgb_base = None
             state.hist_source = None
             state.display_cache = None
+            upload_start = perf_counter()
             self._set_image_item_data(
                 state.item,
                 tile_data,
@@ -268,6 +302,7 @@ class MontageTileLayer:
                 role="visible",
                 emit_histogram_change=False,
             )
+            self._record_upload_timing("tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0)
         state.source_index = int(source_index)
         state.source_array_id = source_array_id
         state.histogram_array_id = histogram_array_id
@@ -275,16 +310,22 @@ class MontageTileLayer:
         state.levels = levels
         state.rgb_already_windowed = bool(rgb_already_windowed)
         state.visible = True
+        state.hidden_commits = 0
         return True, windowed
 
     def _update_tile_levels(self, state: TileLayerItemState, levels: tuple[float, float]) -> tuple[bool, bool]:
         if state.rgb_base is not None and state.hist_source is not None:
             rgb_start = perf_counter()
             display = self._rgb_display_for_levels(state.rgb_base, state.hist_source, levels)
-            self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
+            rgb_ms = (perf_counter() - rgb_start) * 1000.0
+            self._record_upload_timing("rgb_window_ms", rgb_ms)
+            self._record_upload_timing("tile_layer_rgb_window_ms", rgb_ms)
             state.display_cache = display
+            self._touch_rgb_source_cache(state)
             state.levels = levels
+            upload_start = perf_counter()
             self._set_image_item_data(state.item, display, (0, 255), role="visible", emit_histogram_change=False)
+            self._record_upload_timing("tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0)
             return True, True
         if state.display_cache is not None:
             state.item.setLevels((0, 255))
@@ -300,3 +341,39 @@ class MontageTileLayer:
         intensity = np.clip((np.asarray(histogram_data, dtype=np.float32) - float(low)) / span, 0.0, 1.0)
         intensity = np.nan_to_num(intensity, nan=0.0, posinf=1.0, neginf=0.0)
         return np.clip(np.asarray(base, dtype=np.float32) * intensity[..., np.newaxis], 0, 255).astype(np.uint8)
+
+    def _touch_rgb_source_cache(self, state: TileLayerItemState) -> None:
+        if state.rgb_base is None and state.hist_source is None:
+            state.source_cache_serial = 0
+            return
+        self._source_cache_serial += 1
+        state.source_cache_serial = int(self._source_cache_serial)
+
+    def _prune_rgb_source_cache(self) -> None:
+        budget = int(self._rgb_source_cache_budget_bytes)
+        states = [state for state in self._states.values() if state.rgb_base is not None or state.hist_source is not None]
+        if budget <= 0:
+            for state in states:
+                state.rgb_base = None
+                state.hist_source = None
+                state.source_cache_serial = 0
+            return
+        total = sum(_source_cache_nbytes(state) for state in states)
+        if total <= budget:
+            return
+        for state in sorted(states, key=lambda item: int(item.source_cache_serial)):
+            if total <= budget:
+                break
+            total -= _source_cache_nbytes(state)
+            state.rgb_base = None
+            state.hist_source = None
+            state.source_cache_serial = 0
+
+
+def _source_cache_nbytes(state: TileLayerItemState) -> int:
+    total = 0
+    if state.rgb_base is not None:
+        total += int(getattr(state.rgb_base, "nbytes", 0) or 0)
+    if state.hist_source is not None:
+        total += int(getattr(state.hist_source, "nbytes", 0) or 0)
+    return total

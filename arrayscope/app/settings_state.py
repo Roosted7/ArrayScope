@@ -78,6 +78,7 @@ def normalize_panel_resize_behavior(value) -> PanelResizeBehavior:
 def normalize_fft_backend_choice(value) -> FFTBackendChoice:
     if isinstance(value, FFTBackendChoice):
         return value
+    value = getattr(value, "value", value)
     try:
         return FFTBackendChoice(str(value))
     except Exception:
@@ -87,6 +88,7 @@ def normalize_fft_backend_choice(value) -> FFTBackendChoice:
 def normalize_fft_workers_choice(value) -> FFTWorkersChoice:
     if isinstance(value, FFTWorkersChoice):
         return value
+    value = getattr(value, "value", value)
     try:
         return FFTWorkersChoice(str(value))
     except Exception:

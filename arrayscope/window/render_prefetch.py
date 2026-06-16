@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import pyqtgraph.Qt as Qt
 
+from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.operations.cost import estimate_pipeline_cost
+from arrayscope.operations.evaluator import stage_document_key
 from arrayscope.operations.render_plan import MAX_IDLE_PREFETCH_SLICES, PREFETCH_IDLE_DELAY_MS
+from arrayscope.operations.slabs import plan_slab, request_for_image
 
 
 class RenderPrefetchMixin:
@@ -90,6 +93,7 @@ class RenderPrefetchMixin:
                         document,
                         prefetch_state,
                         colormap_lut=colormap_lut,
+                        evaluation_context=self._evaluation_context(ComputeLane.PREFETCH, None),
                     ),
                     on_done=lambda result, prefetch_state=prefetch_state, document=document, prefetch_key=prefetch_key: self._store_prefetch_image_if_current(
                         document,
@@ -118,9 +122,28 @@ class RenderPrefetchMixin:
         policy = self._memory_policy()
         if peak > policy.operation_prefetch_peak_budget_bytes:
             return False
-        if any(type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in operations) and peak > policy.fft_prefetch_peak_budget_bytes:
+        has_fft = any(type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in operations)
+        if has_fft and peak > policy.fft_prefetch_peak_budget_bytes and not self._stage_cached_or_in_flight_for_prefetch(view_state):
             return False
         return True
+
+    def _stage_cached_or_in_flight_for_prefetch(self, view_state) -> bool:
+        try:
+            request = request_for_image(view_state)
+            plan = plan_slab(self.document, request)
+        except Exception:
+            return False
+        candidates = tuple(candidate for candidate in getattr(plan.region_plan, "cache_candidates", ()) if getattr(candidate, "retain", True))
+        if not candidates:
+            return False
+        candidate = candidates[-1]
+        if candidate.estimated_nbytes is not None and int(candidate.estimated_nbytes) > int(self._memory_policy().stage_cache_budget_bytes):
+            return False
+        key = self.operation_evaluator.stage_materializer.key_for_candidate(stage_document_key(self.document), candidate)
+        cache = self.operation_evaluator.stage_cache
+        if (cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)) is not None:
+            return True
+        return key in getattr(self.operation_evaluator.stage_materializer, "_in_flight", {})
 
     def _prefetch_deltas(self, direction, *, max_radius):
         radii = range(1, int(max_radius) + 1)
@@ -159,7 +182,11 @@ class RenderPrefetchMixin:
                     continue
                 request_key_cache[profile_state] = self.operation_evaluator.line_key(profile_state, document=document)
                 started = self.prefetch_evaluation_controller.start_prefetch(
-                    lambda profile_state=profile_state, document=document: self.operation_evaluator.prefetch_line_snapshot(document, profile_state),
+                    lambda profile_state=profile_state, document=document: self.operation_evaluator.prefetch_line_snapshot(
+                        document,
+                        profile_state,
+                        evaluation_context=self._evaluation_context(ComputeLane.PREFETCH, None),
+                    ),
                     on_done=lambda result, profile_state=profile_state, document=document, key=request_key_cache[profile_state]: self._store_prefetch_profile_if_current(
                         document,
                         key,
@@ -193,4 +220,3 @@ class RenderPrefetchMixin:
             self.operation_evaluator.note_prefetch_deduped()
         elif started.reason == "limited":
             self.operation_evaluator.note_prefetch_limited()
-

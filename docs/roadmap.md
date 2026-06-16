@@ -448,7 +448,7 @@ Goal: finish the remaining interaction-latency work by making expensive reusable
 * [x] Make `EvaluationController.clear_group()` invalidate group generations even when no replacement job is submitted.
 * [x] Pass cancellation tokens into montage tile evaluation and stage-cache slab execution.
 * [x] Remove the eager `ArrayScopeWindow` import from `arrayscope.window.__init__` and lazy-load it through `__getattr__`.
-* [ ] Fix broad-run chunked cancellation flakes.
+* [x] Fix broad-run chunked cancellation flakes.
 * [~] Add stale-commit, group-invalidation, montage-cancellation, and pure-import regression tests.
 
 ### P1 — stage-first rendering and singleflight
@@ -456,13 +456,13 @@ Goal: finish the remaining interaction-latency work by making expensive reusable
 * [x] Add `StageMaterializationManager` owned by `OperationEvaluator`.
 * [x] Add in-flight singleflight for expanded stage keys.
 * [~] Route duplicate stage requests to the in-flight job instead of recomputing.
-* [ ] Add a dedicated stage materialization lane with controlled FFT worker settings.
+* [x] Add a dedicated stage materialization lane with controlled FFT worker settings.
 * [x] Surface stage candidate bytes, budget, decision, and recompute consequence in diagnostics.
 * [x] Detect common cacheable expanded stages during montage session planning.
 * [x] Materialize missing fitting stages before scheduling cold tile renders.
 * [x] Attach loading tiles to in-flight stage work.
 * [x] Render cached-stage tiles through rendered tile cache and patch the montage session canvas.
-* [ ] Keep visible image, montage tile, stage materialization, and prefetch work on separate lanes.
+* [x] Keep visible image, montage tile, stage materialization, and prefetch work on separate lanes.
 * [~] Add concurrent cold-stage, cancellation/error cleanup, revision invalidation, refusal-diagnostics, and FFT-over-montage-axis tests.
 
 ### P2 — true progressive image update path
@@ -476,19 +476,19 @@ Goal: finish the remaining interaction-latency work by making expensive reusable
 
 ### P3 — stage-aware predictive cache and compute policy
 
-* [ ] Add a compute policy coordinating Qt worker lanes and FFT worker counts.
-* [ ] Enforce conservative limits for tile workers multiplied by FFT workers.
-* [ ] Add idle stage pre-materialization for valuable expanded stages that fit.
-* [ ] Add near-viewport rendered tile prefetch only when the required stage is cached or in-flight.
-* [ ] Add directional next-slice pre-render only when cost is cheap or the needed stage already exists.
-* [ ] Forbid prefetch paths that compute the same expensive FFT separately per tile.
-* [ ] Add diagnostics and tests for predictive work decisions.
+* [x] Add a compute policy coordinating Qt worker lanes and FFT worker counts.
+* [x] Enforce conservative limits for tile workers multiplied by FFT workers.
+* [x] Add idle stage pre-materialization for valuable expanded stages that fit.
+* [x] Add near-viewport rendered tile prefetch only when the required stage is cached or in-flight.
+* [x] Add directional next-slice pre-render only when cost is cheap or the needed stage already exists.
+* [x] Forbid prefetch paths that compute the same expensive FFT separately per tile.
+* [x] Add diagnostics and tests for predictive work decisions.
 
 ### P4 — regression, benchmarks, and documentation
 
 * [ ] Add latency benchmarks for hot rendered-tile display, hot stage/cold tile display, cold shared-stage montage warmup, and rapid slice bursts.
-* [ ] Add manual regression coverage for FFT montage, fast slice scrolling, cache-hit stale-result prevention, and progressive levels behavior.
-* [~] Update architecture docs for stage materialization ownership, compute policy, and progressive image APIs.
+* [x] Add manual regression coverage for FFT montage, fast slice scrolling, cache-hit stale-result prevention, and progressive levels behavior.
+* [x] Update architecture docs for stage materialization ownership, compute policy, and progressive image APIs.
 * [ ] Keep Phase 4i items open until broad tests pass and manual interaction confirms the lag/jitter path is gone.
 
 ## Phase 5 — Multi-window and sessions

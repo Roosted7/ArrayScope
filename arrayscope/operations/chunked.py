@@ -30,12 +30,13 @@ def evaluate_image_snapshot_chunked(
     cancellation_token=None,
     stage_cache=None,
     stage_document_key=None,
+    evaluation_context=None,
 ):
     from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot
 
     _check_cancelled(cancellation_token)
     if view_state.image_axes is None:
-        return _evaluate_image_snapshot(
+        result = _evaluate_image_snapshot(
             evaluate_image_snapshot,
             document,
             view_state,
@@ -43,7 +44,10 @@ def evaluate_image_snapshot_chunked(
             cancellation_token=cancellation_token,
             stage_cache=stage_cache,
             stage_document_key=stage_document_key,
+            evaluation_context=evaluation_context,
         )
+        _check_cancelled(cancellation_token)
+        return result
     original_axis = int(chunk_axis)
     display_axis = tuple(int(axis) for axis in view_state.image_axes).index(original_axis)
     axis_indices = view_state.axis_range_indices[original_axis]
@@ -54,7 +58,7 @@ def evaluate_image_snapshot_chunked(
     chunk_size = max(1, int(chunk_size))
     chunks = [axis_indices[start : start + chunk_size] for start in range(0, len(axis_indices), chunk_size)]
     if len(chunks) <= 1:
-        return _evaluate_image_snapshot(
+        result = _evaluate_image_snapshot(
             evaluate_image_snapshot,
             document,
             view_state,
@@ -62,7 +66,10 @@ def evaluate_image_snapshot_chunked(
             cancellation_token=cancellation_token,
             stage_cache=stage_cache,
             stage_document_key=stage_document_key,
+            evaluation_context=evaluation_context,
         )
+        _check_cancelled(cancellation_token)
+        return result
 
     start_time = perf_counter()
     out_data = None
@@ -79,6 +86,7 @@ def evaluate_image_snapshot_chunked(
             cancellation_token=cancellation_token,
             stage_cache=stage_cache,
             stage_document_key=stage_document_key,
+            evaluation_context=evaluation_context,
         )
         image = result.value
         if out_data is None:
@@ -117,7 +125,7 @@ def _assign_axis(output, chunk, axis, start, stop):
     output[tuple(index)] = chunk
 
 
-def _evaluate_image_snapshot(evaluate, document, view_state, *, colormap_lut, cancellation_token, stage_cache, stage_document_key):
+def _evaluate_image_snapshot(evaluate, document, view_state, *, colormap_lut, cancellation_token, stage_cache, stage_document_key, evaluation_context):
     kwargs = {
         "colormap_lut": colormap_lut,
         "cancellation_token": cancellation_token,
@@ -125,6 +133,8 @@ def _evaluate_image_snapshot(evaluate, document, view_state, *, colormap_lut, ca
     if stage_cache is not None or stage_document_key is not None:
         kwargs["stage_cache"] = stage_cache
         kwargs["stage_document_key"] = stage_document_key
+    if evaluation_context is not None:
+        kwargs["evaluation_context"] = evaluation_context
     return evaluate(document, view_state, **kwargs)
 
 

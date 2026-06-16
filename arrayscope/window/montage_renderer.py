@@ -15,7 +15,8 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
-from arrayscope.core.memory_budget import estimate_display_image_bytes, estimate_montage_bytes, format_bytes
+from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.imageview2d import MontageTileOverlay
@@ -29,15 +30,16 @@ from arrayscope.display.montage import (
 from arrayscope.display.slice_engine import DisplayImage, make_image_from_slab
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import EvaluationResult, _document_key, evaluate_image_snapshot, stage_document_key
+from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked
 from arrayscope.operations.slabs import (
     evaluate_slab_from_stage,
-    materialize_stage_candidate,
     plan_slab,
     request_for_image,
 )
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_levels import MontageLevelStats, MontageLevelTracker
+from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.window.presentation import LevelSourceRank, fallback_level_source
 from arrayscope.window.render_model import CommitKind
@@ -86,20 +88,6 @@ class MontageRenderMixin:
         columns = view_state.montage_columns
         if columns is None and all_indices:
             columns = optimal_montage_columns(len(all_indices), tile_shape, viewport_shape)
-        estimate = estimate_montage_bytes(
-            tile_shape,
-            len(all_indices),
-            getattr(document.base_data, "dtype", np.dtype(float)),
-            rgb=view_state.channel == ChannelMode.COMPLEX,
-            histogram=True,
-            columns=columns,
-        )
-        if estimate > policy.montage_canvas_budget_bytes:
-            show_status_message(
-                self,
-                f"Montage would allocate {format_bytes(estimate)}. Showing visible tiles only; reduce tile count or zoom in for detail.",
-                timeout=6000,
-            )
         plan = make_montage_plan(
             view_state,
             axis=axis,
@@ -112,6 +100,18 @@ class MontageRenderMixin:
         canvas_rect = montage_rect_for_viewport(plan, view_range=current_range, viewport_shape=viewport_shape)
         candidate_tiles = plan.tiles_intersecting(((canvas_rect[0], canvas_rect[2]), (canvas_rect[1], canvas_rect[3])), margin_tiles=0)
         output_dtype = np.uint8 if view_state.channel == ChannelMode.COMPLEX else getattr(document.base_data, "dtype", np.dtype(float))
+        canvas_estimate = estimate_display_image_bytes(
+            (max(1, int(canvas_rect[3]) - int(canvas_rect[1])), max(1, int(canvas_rect[2]) - int(canvas_rect[0]))),
+            output_dtype,
+            rgb=view_state.channel == ChannelMode.COMPLEX,
+            histogram=True,
+        )
+        if canvas_estimate > policy.montage_canvas_budget_bytes:
+            show_status_message(
+                self,
+                f"Montage viewport canvas would allocate {format_bytes(canvas_estimate)} over budget {format_bytes(policy.montage_canvas_budget_bytes)}. Zoom in or increase Performance > Render Memory Budget.",
+                timeout=6000,
+            )
         single_estimate = estimate_display_image_bytes(
             tile_shape,
             output_dtype,
@@ -413,13 +413,17 @@ class MontageRenderMixin:
             session.active_stage_requests.add(request.key)
 
             def evaluate(token, request=request, plan=plan):
-                return materialize_stage_candidate(
+                context = self._evaluation_context(ComputeLane.STAGE, token)
+                return materialize_stage_candidate_chunked(
                     session.document,
                     plan.region_plan,
                     request.candidate,
                     stage_cache=self.operation_evaluator.stage_cache,
                     document_key=request.document_key,
                     cancellation_token=token,
+                    evaluation_context=context,
+                    memory_policy=context.memory_policy,
+                    allowed_chunk_axes=_montage_stage_chunk_axes(session.view_state),
                 )
 
             controller.start_latest(
@@ -567,6 +571,7 @@ class MontageRenderMixin:
 
     def _evaluate_montage_tile_snapshot(self, session, tile, token=None):
         start = perf_counter()
+        context = self._evaluation_context(ComputeLane.MONTAGE_TILE, token)
         try:
             stage_key = getattr(session, "tile_stage_keys", {}).get(int(tile.montage_index))
             stage_value = None if stage_key is None else getattr(session, "stage_values", {}).get(stage_key)
@@ -590,6 +595,7 @@ class MontageRenderMixin:
                         stage_value,
                         candidate,
                         cancellation_token=token,
+                        evaluation_context=context,
                     )
                     display_image = make_image_from_slab(slab, request, colormap_lut=session.colormap_lut)
                     return EvaluationResult(
@@ -606,6 +612,7 @@ class MontageRenderMixin:
                 cancellation_token=token,
                 stage_cache=self.operation_evaluator.stage_cache,
                 stage_document_key=stage_document_key(session.document),
+                evaluation_context=context,
             )
         finally:
             self._last_montage_tile_eval_ms = (perf_counter() - start) * 1000.0
@@ -859,8 +866,9 @@ class MontageRenderMixin:
                 self.img_view.getView().setRange(xRange=local_range[0], yRange=local_range[1], padding=0)
         finally:
             self._montage_canvas_commit_active = False
-            self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
+        self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
         session.note_committed()
+        schedule_near_viewport_montage_prefetch(self, session)
         self._retry_live_profile_after_montage_tile()
 
     def _montage_tile_source_ids(self, session) -> dict[int, object]:
@@ -1040,3 +1048,8 @@ class MontageRenderMixin:
             (float(local_range[0][0]) + origin_x, float(local_range[0][1]) + origin_x),
             (float(local_range[1][0]) + origin_y, float(local_range[1][1]) + origin_y),
         )
+
+
+def _montage_stage_chunk_axes(view_state) -> tuple[int, ...]:
+    image_axes = set(() if view_state.image_axes is None else tuple(int(axis) for axis in view_state.image_axes))
+    return tuple(axis for axis in range(len(tuple(view_state.shape))) if axis not in image_axes)
