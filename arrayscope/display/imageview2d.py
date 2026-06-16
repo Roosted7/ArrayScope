@@ -96,9 +96,7 @@ class _MontageTileOverlayItem(QtWidgets.QGraphicsItem):
 
 class ImageView2D(QtWidgets.QWidget):
     # Emitted only for explicit user edits of the histogram/LUT levels.
-    # Keep levelsChanged as a compatibility alias for existing callers/tests.
     userLevelsChanged = QtCore.Signal()
-    levelsChanged = QtCore.Signal()
 
     """
     Simplified widget for displaying 2D image data.
@@ -544,7 +542,6 @@ class ImageView2D(QtWidgets.QWidget):
             self._applying_presentation = False
         if emit_user:
             self.userLevelsChanged.emit()
-            self.levelsChanged.emit()
 
     def _on_histogram_level_change_finished(self, *args):
         if self._applying_presentation:
@@ -557,7 +554,6 @@ class ImageView2D(QtWidgets.QWidget):
         except Exception:
             pass
         self.userLevelsChanged.emit()
-        self.levelsChanged.emit()
         
     def getLevels(self):
         """Get the current histogram levels"""
