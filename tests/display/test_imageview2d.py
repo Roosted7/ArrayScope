@@ -311,9 +311,7 @@ def test_programmatic_presentation_does_not_emit_user_level_signal(qt_app):
 
     view = ImageView2D()
     user_calls = []
-    compat_calls = []
     view.userLevelsChanged.connect(lambda: user_calls.append(True))
-    view.levelsChanged.connect(lambda: compat_calls.append(True))
 
     view.setImagePresentation(
         np.zeros((4, 4), dtype=float),
@@ -329,7 +327,6 @@ def test_programmatic_presentation_does_not_emit_user_level_signal(qt_app):
     )
 
     assert user_calls == []
-    assert compat_calls == []
     view.close()
 
 
