@@ -127,10 +127,12 @@ def test_canvas_preserve_controller_owns_strong_preserve_path():
     assert "commit_nudge" in preserve_text
 
 
-def test_window_render_montage_view_does_not_call_make_montage():
-    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
-    assert "make_montage(" not in text
-    assert "make_montage_viewport_canvas(" in text
+def test_montage_renderer_uses_viewport_canvas_not_full_montage():
+    render_text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    montage_text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
+    assert "make_montage(" not in render_text
+    assert "make_montage(" not in montage_text
+    assert "make_montage_viewport_canvas(" in montage_text
 
 
 def test_render_display_commits_go_through_display_committer():
@@ -172,8 +174,8 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/window/render_model.py"),
         Path("arrayscope/window/presentation.py"),
         Path("arrayscope/window/montage_levels.py"),
-        Path("arrayscope/window/montage_controller.py"),
-        Path("arrayscope/window/normal_image_controller.py"),
+        Path("arrayscope/window/montage_renderer.py"),
+        Path("arrayscope/window/normal_renderer.py"),
         Path("arrayscope/window/viewport_bridge.py"),
         Path("arrayscope/window/display_presenter.py"),
     ):
@@ -374,7 +376,7 @@ def test_montage_state_modules_are_qt_free():
 
 
 def test_update_montage_view_does_not_batch_missing_tiles():
-    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
     tree = ast.parse(text)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "update_montage_view":
@@ -387,7 +389,7 @@ def test_update_montage_view_does_not_batch_missing_tiles():
 
 
 def test_stale_montage_callbacks_do_not_clear_current_overlay():
-    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
     for name in ("_on_montage_tile_done", "_on_montage_tile_error"):
         marker = f"def {name}"
         assert marker in text
@@ -397,8 +399,8 @@ def test_stale_montage_callbacks_do_not_clear_current_overlay():
         assert "setImageStale(False)" not in stale_prefix
 
 
-def test_window_render_uses_render_decision_helper():
-    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+def test_normal_renderer_uses_render_decision_helper():
+    text = (ROOT / "arrayscope" / "window" / "normal_renderer.py").read_text()
     assert "choose_visible_render_decision" in text
     assert "estimate_visible_render_context" in text
 
@@ -409,7 +411,7 @@ def test_visible_controller_remains_single_worker():
 
 
 def test_degraded_preview_is_not_stored_in_exact_image_cache():
-    text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
+    text = (ROOT / "arrayscope" / "window" / "normal_renderer.py").read_text()
     marker = "if decision.kind == RenderDecisionKind.DEGRADED_PREVIEW:"
     assert marker in text
     degraded_block = text.split(marker, 1)[1].split("def evaluate(token):", 1)[0]

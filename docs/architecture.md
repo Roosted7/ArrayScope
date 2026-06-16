@@ -84,10 +84,10 @@ source of array-view state.
   preserve caller-decided levels, histogram range, transform, and viewport instead of letting the
   widget infer semantic display state from partial tile pixels.
 - `arrayscope.window.presentation`: Qt-free display presentation decisions. It normalizes
-  window/level bounds, keeps display levels separate from histogram/data ranges, rejects visible
-  montage subsets as implicit semantic level sources, and is the only place that chooses committed
-  display levels for normal, degraded, initial montage, progressive montage, and explicit Auto Window
-  commits.
+  window/level bounds, keeps display levels separate from histogram/data ranges, accepts accumulated
+  semantic montage tile coverage as provisional level sources, and is the only place that chooses
+  committed display levels for normal, degraded, initial montage, progressive montage, and explicit
+  Auto Window commits.
 - `arrayscope.window.render_model`: Qt-free immutable request, payload, presentation-decision, and
   commit-plan models used at the boundary between render orchestration and display mutation. Render
   orchestration provides a `PresentationInput`; presentation policy returns a `PresentationDecision`;
@@ -100,10 +100,10 @@ source of array-view state.
   hover/status.
 - `arrayscope.window.montage_levels`: semantic montage histogram coverage tracking keyed by the full
   montage view, independent of viewport origin and visible canvas shape.
-- `arrayscope.window.montage_controller`, `arrayscope.window.normal_image_controller`, and
-  `arrayscope.window.viewport_bridge`: focused ownership targets for montage orchestration, normal
-  image orchestration, and ViewBox range events as render responsibilities are split out of
-  `RenderMixin`.
+- `arrayscope.window.montage_renderer`, `arrayscope.window.normal_renderer`, and
+  `arrayscope.window.viewport_bridge`: focused ownership modules for montage orchestration, normal
+  image orchestration, and ViewBox range events. `RenderMixin` keeps high-level interaction/status
+  glue and delegates actual visible-image paths to these modules.
 - `arrayscope.ui.dimension_strip`, `arrayscope.ui.display_toolbar`, `arrayscope.ui.command_palette`,
   `arrayscope.ui.diagnostics`, `arrayscope.ui.docks.inspection`, and `arrayscope.ui.hud`: compact
   viewer controls, operation discovery, developer diagnostics, ROI inspection controls, and on-canvas pixel

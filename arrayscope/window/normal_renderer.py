@@ -1,0 +1,240 @@
+"""Normal image render orchestration for ArrayScope windows.
+
+This module owns the non-montage visible-image path.  It intentionally contains
+real rendering behavior, not a facade back into ``render.py``.
+"""
+
+from __future__ import annotations
+
+from time import perf_counter
+
+import pyqtgraph.Qt as Qt
+
+from arrayscope.app.errors import handle_ui_exception
+from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
+from arrayscope.core.view_state import ChannelMode
+from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.operations.evaluator import _document_key, evaluate_image_snapshot, stage_document_key
+from arrayscope.operations.render_plan import (
+    RenderDecisionKind,
+    choose_visible_render_decision,
+    degraded_view_state,
+    estimate_visible_render_context,
+)
+from arrayscope.ui.toasts import show_status_message
+from arrayscope.window.evaluation_controller import EvalPriority
+
+
+class NormalImageRenderMixin:
+    def update_image_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
+        if self.view_state.image_axes is None: # No image view for 1D data
+            return
+        self._refresh_memory_policy(active_render=self.visible_evaluation_controller.is_busy())
+        if self.view_state.montage_axis is not None:
+            return self.update_montage_view(force_autolevel=force_autolevel, defer_side_panels=defer_side_panels)
+        force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
+        window_mode = self._current_window_mode()
+        # Capture presentation history before clearing montage/session state.
+        previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
+
+        self._montage_session = None
+        self._stop_montage_session_slow_overlay()
+        self._current_montage_geometry = None
+        self._current_montage_plan = None
+        self._current_montage_canvas = None
+        self._committed_display_frame = None
+        self._committed_display_request_key = None
+        if hasattr(self.img_view, "clearMontageTileOverlays"):
+            self.img_view.clearMontageTileOverlays()
+            
+        al = True
+        # reset the one-shot flag after using it
+        if getattr(self, '_force_autolevel', False):
+            self._force_autolevel = False
+
+        colormap_lut = None
+        if self.view_state.channel == ChannelMode.COMPLEX:
+            colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
+        view_state = self.view_state
+        document = self.document
+        request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)
+        render_generation = self._capture_render_generation()
+        cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut)
+        if cached is not None:
+            self._last_render_was_degraded = False
+            geometry = DisplayGeometry(view_state=view_state, display_shape=cached.data.shape[:2])
+            self._apply_display_image(
+                cached,
+                geometry=geometry,
+                window_mode=window_mode,
+                previous_frame=previous_frame,
+                force_auto=force_auto,
+                defer_side_panels=defer_side_panels,
+                document_key=_document_key(document),
+                request_key=request_key,
+                render_generation=render_generation,
+            )
+            return
+        planning_start = perf_counter()
+        estimated_bytes = self._estimated_image_display_bytes(view_state)
+        context = estimate_visible_render_context(
+            document,
+            view_state,
+            display_bytes=estimated_bytes,
+            render_budget_bytes=self._visible_render_budget_bytes(),
+        )
+        self._last_planning_ms = (perf_counter() - planning_start) * 1000.0
+        decision = choose_visible_render_decision(context)
+        self._last_render_context = context
+        self._last_render_decision = decision
+        self._last_render_request_key = None
+        self._last_render_error = ""
+        self._last_render_completed_ms = None
+        if decision.kind == RenderDecisionKind.REFUSE:
+            self.operation_evaluator.note_render_refused(decision.reason)
+            show_status_message(
+                self,
+                decision.status_text or f"Image view would allocate {format_bytes(estimated_bytes)}. Reduce image-axis ranges or switch axes.",
+                timeout=6000,
+            )
+            if getattr(self.img_view, "image", None) is not None:
+                self.img_view.setImageStale(True)
+                self.img_view.setEvaluationOverlay(True, decision.overlay_text or "Exact view over budget")
+            if defer_side_panels:
+                self._deferred_side_panel_refresh_pending = True
+            else:
+                self._update_operation_dock()
+            return
+
+        self._last_render_request_key = str(request_key)
+        self.prefetch_evaluation_controller.cancel_prefetch()
+
+        if decision.kind == RenderDecisionKind.DEGRADED_PREVIEW:
+            preview_state = degraded_view_state(view_state, factor=decision.degraded_factor)
+            preview_key = ("degraded_preview", request_key, decision.degraded_factor)
+            submitted_at = perf_counter()
+
+            def evaluate_preview(token):
+                self._last_worker_queue_wait_ms = (perf_counter() - submitted_at) * 1000.0
+                return evaluate_image_snapshot(
+                    document,
+                    preview_state,
+                    colormap_lut=colormap_lut,
+                    cancellation_token=token,
+                    degraded=True,
+                    stage_cache=self.operation_evaluator.stage_cache,
+                    stage_document_key=stage_document_key(document),
+                )
+
+            def done_preview(result):
+                if not self._is_current_render_generation(render_generation):
+                    return
+                if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut):
+                    return
+                self.operation_evaluator.note_render_degraded()
+                display_image = result.value
+                self._degraded_rendered_view = display_image
+                self._last_render_was_degraded = True
+                geometry = DisplayGeometry(view_state=preview_state, display_shape=display_image.data.shape[:2])
+                self._apply_display_image(
+                    display_image,
+                    geometry=geometry,
+                    window_mode=window_mode,
+                    previous_frame=previous_frame,
+                    force_auto=force_auto,
+                    defer_side_panels=defer_side_panels,
+                    document_key=_document_key(document),
+                    request_key=preview_key,
+                    render_generation=render_generation,
+                )
+                self.img_view.setImageStale(True)
+                self.img_view.setEvaluationOverlay(True, decision.overlay_text)
+                show_status_message(self, decision.status_text, timeout=6000)
+
+            self.visible_evaluation_controller.start_latest(
+                evaluate_preview,
+                key=preview_key,
+                priority=EvalPriority.VISIBLE_IMAGE,
+                replace_group="visible-image",
+                on_done=done_preview,
+                on_error=lambda exc: show_status_message(self, f"Preview update failed: {exc}"),
+                on_stale=lambda: None,
+                on_slow=lambda: self.img_view.setEvaluationOverlay(True, "Updating preview..."),
+                pass_token=True,
+            )
+            return
+
+        def evaluate(token):
+            self._last_worker_queue_wait_ms = (perf_counter() - submitted_at) * 1000.0
+            if decision.kind == RenderDecisionKind.ASYNC_CHUNKED:
+                return evaluate_image_snapshot_chunked(
+                    document,
+                    view_state,
+                    chunk_axis=decision.chunk_axis,
+                    chunk_size=decision.chunk_size,
+                    colormap_lut=colormap_lut,
+                    cancellation_token=token,
+                    stage_cache=self.operation_evaluator.stage_cache,
+                    stage_document_key=stage_document_key(document),
+                )
+            return evaluate_image_snapshot(
+                document,
+                view_state,
+                colormap_lut=colormap_lut,
+                cancellation_token=token,
+                stage_cache=self.operation_evaluator.stage_cache,
+                stage_document_key=stage_document_key(document),
+            )
+
+        def slow():
+            self.img_view.setImageStale(True)
+            text = "Updating view in chunks..." if decision.kind == RenderDecisionKind.ASYNC_CHUNKED else "Updating view..."
+            self.img_view.setEvaluationOverlay(True, text)
+            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image view")
+            if defer_side_panels:
+                self._deferred_side_panel_refresh_pending = True
+            else:
+                self._update_operation_dock()
+
+        def done(result):
+            if not self._is_current_render_generation(render_generation):
+                return
+            if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut):
+                return
+            self._last_render_completed_ms = float(getattr(result, "eval_ms", 0.0) or 0.0)
+            self._last_render_was_degraded = False
+            self._degraded_rendered_view = None
+            display_image = self.operation_evaluator.store_image_result(view_state, colormap_lut, result)
+            geometry = DisplayGeometry(view_state=view_state, display_shape=display_image.data.shape[:2])
+            self._apply_display_image(
+                display_image,
+                geometry=geometry,
+                window_mode=window_mode,
+                previous_frame=previous_frame,
+                force_auto=force_auto,
+                defer_side_panels=defer_side_panels,
+                document_key=_document_key(document),
+                request_key=request_key,
+                render_generation=render_generation,
+            )
+            self._schedule_prefetch_nearby_slices(view_state, colormap_lut)
+
+        def error(exc):
+            self._last_render_error = str(exc)
+            self.img_view.setImageStale(False)
+            self.img_view.setEvaluationOverlay(False)
+            show_status_message(self, f"Image update failed: {exc}")
+
+        submitted_at = perf_counter()
+        self.visible_evaluation_controller.start_latest(
+            evaluate,
+            key=request_key,
+            priority=EvalPriority.VISIBLE_IMAGE,
+            replace_group="visible-image",
+            on_done=done,
+            on_error=error,
+            on_stale=lambda: self.operation_evaluator.note_render_cancelled(),
+            on_slow=slow,
+            pass_token=True,
+        )
+
