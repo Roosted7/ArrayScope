@@ -304,3 +304,65 @@ def test_imageview_resets_view_range_when_shape_changes(qt_app):
 
     assert after != [[2.0, 5.0], [1.0, 6.0]]
     view.close()
+
+
+def test_programmatic_presentation_does_not_emit_user_level_signal(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    user_calls = []
+    compat_calls = []
+    view.userLevelsChanged.connect(lambda: user_calls.append(True))
+    view.levelsChanged.connect(lambda: compat_calls.append(True))
+
+    view.setImagePresentation(
+        np.zeros((4, 4), dtype=float),
+        histogramData=np.zeros((4, 4), dtype=float),
+        levels=(2.0, 8.0),
+        histogramRange=(0.0, 10.0),
+    )
+    view.updateImagePresentationFast(
+        np.ones((4, 4), dtype=float),
+        histogramData=np.ones((4, 4), dtype=float),
+        levels=(1.0, 9.0),
+        histogramRange=(0.0, 10.0),
+    )
+
+    assert user_calls == []
+    assert compat_calls == []
+    view.close()
+
+
+def test_explicit_set_levels_emits_user_level_signal(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    view.setImage(np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
+    user_calls = []
+    view.userLevelsChanged.connect(lambda: user_calls.append(True))
+
+    view.setLevels(2.0, 8.0)
+
+    assert user_calls == [True]
+    assert tuple(float(value) for value in view.getLevels()) == (2.0, 8.0)
+    view.close()
+
+
+def test_full_presentation_accepts_display_ready_rgb(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    rgb = np.full((4, 4, 3), 128, dtype=np.uint8)
+    hist = np.linspace(0.0, 1.0, 16, dtype=float).reshape(4, 4)
+
+    view.setImagePresentation(
+        rgb,
+        histogramData=hist,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        rgb_already_windowed=True,
+    )
+
+    assert view._rgbBaseImage is None
+    np.testing.assert_array_equal(view.imageDisp, rgb)
+    view.close()

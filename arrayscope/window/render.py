@@ -512,6 +512,11 @@ class RenderMixin:
         self._refresh_memory_policy(active_render=self.visible_evaluation_controller.is_busy())
         if self.view_state.montage_axis is not None:
             return self.update_montage_view(force_autolevel=force_autolevel, defer_side_panels=defer_side_panels)
+        force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
+        window_mode = self._current_window_mode()
+        # Capture presentation history before clearing montage/session state.
+        previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
+
         self._montage_session = None
         self._stop_montage_session_slow_overlay()
         self._current_montage_geometry = None
@@ -523,13 +528,9 @@ class RenderMixin:
             self.img_view.clearMontageTileOverlays()
             
         al = True
-        force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
-        window_mode = self._current_window_mode()
         # reset the one-shot flag after using it
         if getattr(self, '_force_autolevel', False):
             self._force_autolevel = False
-        
-        previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
 
         colormap_lut = None
         if self.view_state.channel == ChannelMode.COMPLEX:
@@ -929,11 +930,12 @@ class RenderMixin:
         return None if source is None else source.histogram_range
 
     def _montage_level_source_for_session(self, session, *, allow_partial: bool = False):
+        # Partial semantic tile coverage is a valid provisional level source.
+        # It must not be confused with viewport pixels; the level key is semantic
+        # and excludes zoom/pan.  WindowLevelController keeps updates monotonic.
         tracker = self._montage_level_tracker()
-        if allow_partial:
-            stats = tracker.stats_for(session.level_key)
-            return None if stats is None else tracker.source_for_stats(session.level_key, stats)
-        return tracker.best_source(session.level_key, explicit_auto=False)
+        stats = tracker.stats_for(session.level_key)
+        return None if stats is None else tracker.source_for_stats(session.level_key, stats)
 
     def _montage_level_tracker(self) -> MontageLevelTracker:
         tracker = getattr(self, "_montage_level_tracker_instance", None)
@@ -1401,14 +1403,17 @@ class RenderMixin:
         self._retry_live_profile_after_montage_tile()
 
     def _should_autolevel_progressive_montage(self, session, stats: MontageLevelStats, *, complete: bool) -> bool:
+        # Automatic montage levels are semantic and monotonic: when new tiles for
+        # the same montage source arrive, the available source may improve/expand
+        # levels.  It must not wait for full completion, and it must not depend on
+        # the current zoomed viewport.
         if session.window_mode == "absolute" or not session.rendered_tiles:
-            return False
-        if not complete and not bool(getattr(session, "force_auto", False)):
             return False
         bounds = stats.bounds
         if bounds is None:
             return False
-        if int(stats.coverage_rank) < 2 and not bool(getattr(session, "force_auto", False)):
+        low, high = bounds
+        if float(high) <= float(low):
             return False
         applied = getattr(session, "applied_level_source", None)
         applied_rank = int(getattr(applied, "rank", 0) or 0)
@@ -1417,16 +1422,16 @@ class RenderMixin:
             return False
         if int(stats.rank) == applied_rank and len(stats.source_indices) <= applied_count:
             return False
-        low, high = bounds
-        if float(high) <= float(low):
-            return False
         return True
 
     def _note_montage_level_source_applied(self, session, source, *, explicit: bool) -> None:
         if source is None:
             return
-        if explicit or int(getattr(source, "rank", 0) or 0) >= int(LevelSourceRank.MONTAGE_COMPLETE):
-            session.applied_level_source = source
+        # Store partial as well as complete semantic sources.  The presentation
+        # controller expands same-key sources monotonically and protects explicit
+        # user locks, so storing partial coverage is safe and prevents fallback
+        # to stale tiny placeholder ranges.
+        session.applied_level_source = source
 
     def _classify_canvas_tiles(self, session) -> None:
         rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)

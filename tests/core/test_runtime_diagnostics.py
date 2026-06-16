@@ -10,7 +10,7 @@ from arrayscope.core.runtime_diagnostics import (
     format_runtime_diagnostics,
 )
 from arrayscope.operations.stage_cache import StageCacheDiagnostics
-from arrayscope.window.evaluation_controller import SchedulerDiagnostics
+from arrayscope.core.scheduler import SchedulerDiagnostics
 
 
 def _cache():

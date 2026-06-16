@@ -83,7 +83,7 @@ def test_explicit_auto_window_accepts_partial_montage_source():
     assert decision.level_source_rank == int(LevelSourceRank.MONTAGE_VISIBLE_SUBSET)
 
 
-def test_progressive_montage_patch_rejects_partial_implicit_source():
+def test_progressive_montage_patch_accepts_partial_implicit_source_monotonically():
     source = LevelSource((100.0, 200.0), (100.0, 200.0), LevelSourceRank.MONTAGE_VISIBLE_SUBSET, source_count=1, expected_count=4, semantic_key="levels")
     decision = decide_presentation(
         _input(
@@ -94,8 +94,8 @@ def test_progressive_montage_patch_rejects_partial_implicit_source():
         )
     )
 
-    assert decision.levels == (2.0, 8.0)
-    assert decision.histogram_range == (0.0, 10.0)
+    assert decision.levels == (2.0, 200.0)
+    assert decision.histogram_range == (0.0, 200.0)
 
 
 def test_progressive_montage_patch_accepts_complete_source():
@@ -113,7 +113,7 @@ def test_progressive_montage_patch_accepts_complete_source():
     assert decision.histogram_range == (0.0, 300.0)
 
 
-def test_degenerate_and_nan_bounds_fall_back_to_previous_frame():
+def test_degenerate_complete_source_does_not_shrink_previous_levels():
     source = LevelSource((5.0, 5.0), (float("nan"), float("nan")), LevelSourceRank.MONTAGE_COMPLETE, source_count=4, expected_count=4, semantic_key="levels")
     decision = decide_presentation(
         _input(
@@ -124,5 +124,43 @@ def test_degenerate_and_nan_bounds_fall_back_to_previous_frame():
         )
     )
 
-    assert decision.levels == (4.5, 5.5)
+    assert decision.levels == (2.0, 8.0)
     assert decision.histogram_range == (0.0, 10.0)
+
+
+def test_user_locked_montage_levels_are_not_overridden_by_complete_source():
+    user = LevelSource((20.0, 40.0), (0.0, 100.0), LevelSourceRank.EXPLICIT_USER, semantic_key="levels")
+    complete = LevelSource((0.0, 300.0), (0.0, 300.0), LevelSourceRank.MONTAGE_COMPLETE, source_count=4, expected_count=4, semantic_key="levels")
+
+    decision = decide_presentation(
+        _input(
+            _payload(np.full((2, 2), 1000.0)),
+            previous_frame=_frame(levels=(2.0, 8.0), histogram_range=(0.0, 10.0)),
+            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            semantic_source=complete,
+            applied_level_source=user,
+        )
+    )
+
+    assert decision.levels == (20.0, 40.0)
+    assert decision.histogram_range == (0.0, 100.0)
+    assert decision.level_source_rank == int(LevelSourceRank.EXPLICIT_USER)
+
+
+def test_explicit_auto_clears_user_lock_and_uses_best_available_source():
+    user = LevelSource((20.0, 40.0), (0.0, 100.0), LevelSourceRank.EXPLICIT_USER, semantic_key="levels")
+    partial = LevelSource((100.0, 200.0), (100.0, 200.0), LevelSourceRank.MONTAGE_VISIBLE_SUBSET, source_count=1, expected_count=4, semantic_key="levels")
+
+    decision = decide_presentation(
+        _input(
+            _payload(np.full((2, 2), 1000.0)),
+            previous_frame=_frame(),
+            force_auto=True,
+            kind=CommitKind.EXPLICIT_AUTO_WINDOW,
+            semantic_source=partial,
+            applied_level_source=user,
+        )
+    )
+
+    assert decision.levels == (100.0, 200.0)
+    assert decision.level_source_rank == int(LevelSourceRank.MONTAGE_VISIBLE_SUBSET)
