@@ -39,12 +39,34 @@ mode. The full canvas remains the committed value source for hover/status and se
 `ImageItem`s paint visible loaded tiles. Updating one tile then uploads that tile rather than the full
 canvas. This mode is internal and does not change the public viewer API.
 
+Tile-layer presentation is stateful and dirty-aware. Presentation models carry optional dirty tile
+numbers: `None` means the tile state is unknown and visible loaded items should refresh, `()` means a
+known-clean flush, and non-empty tuples identify the loaded items whose pixels changed. `ImageView2D`
+delegates the per-item state to `arrayscope.display.montage_tile_layer`, which tracks item source
+identity, histogram identity, local canvas rect, levels, RGB-windowing policy, and cached display data.
+Known-clean commits skip tile image uploads and, when histogram source/range/levels are unchanged,
+skip histogram image upload as well.
+
+Tile item source identity comes from the rendered tile cache payload, not from the transient montage
+viewport canvas. Rebuilding a canvas from already-cached rendered tiles therefore does not by itself
+force tile item uploads or RGB re-windowing; items refresh only when the tile source, visible crop,
+levels, RGB policy, or dirty-tile set requires it.
+
+Complex/RGB tile-layer windowing uses float32 working arrays. Each tile stores one RGB base and one
+histogram source for the current item state; unchanged levels reuse the display cache, changed levels
+recompute only visible RGB tiles from those cached bases, and dirty-tile commits recompute/upload only
+the affected tile items. Diagnostics include tile-layer visible, updated, skipped, and RGB-windowed
+item counts in addition to existing upload and RGB-window timings.
+
 ## Consequences
 
 Diagnostics can distinguish slow operation evaluation from slow Qt upload.
 
 Large progressive montage is more responsive because intermediate canvas commits can be coalesced and
-tile-layer mode avoids repeated full-canvas uploads.
+tile-layer mode avoids repeated full-canvas uploads. Hot cached tile-layer flushes with unchanged
+levels and no dirty tiles, including all-cached sessions that rebuild the viewport canvas, are expected
+to report zero tile item updates and zero visible upload bytes.
 
 The display implementation is more complex: ImageView2D now owns two montage paint modes, and tests
-must guard that both use the same levels, histogram source, and hover/value semantics.
+must guard that both use the same levels, histogram source, hover/value semantics, and dirty-only
+update behavior.

@@ -64,6 +64,57 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, monkeypatch):
         win.close()
 
 
+def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch):
+    clear_arrayscope_settings()
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 2 * 2, dtype=np.float32).reshape(2, 2, 2))
+    qtbot.addWidget(win)
+    try:
+        process_events(qtbot)
+        state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text=":")
+        plan = make_montage_plan(state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
+        for tile in plan.tiles:
+            win.operation_evaluator.store_montage_tile_result(
+                tile,
+                montage_axis=2,
+                colormap_lut=None,
+                result=_tile_result(tile, int(tile.source_index) + 1),
+            )
+        calls = []
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
+        win._montage_tile_layer_policy = lambda _geometry, _data: True
+
+        win._set_view_state(state)
+        win.update_montage_view()
+        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=500)
+        first_sources = {tile: state.source_array_id for tile, state in win.img_view._montage_tile_layer.states.items()}
+
+        win.update_montage_view()
+        timing = win.img_view.lastImageUploadTiming()
+        second_sources = {tile: state.source_array_id for tile, state in win.img_view._montage_tile_layer.states.items()}
+
+        assert calls == []
+        assert second_sources == first_sources
+        assert all(str(source[0]) == "montage_tile" for source in second_sources.values())
+        assert timing.tile_layer_visible_items == 2
+        assert timing.tile_layer_items_updated == 0
+        assert timing.tile_layer_items_skipped == 2
+        assert timing.visible_bytes == 0
+
+        win._commit_montage_session_canvas(win._montage_session, force=True)
+        timing = win.img_view.lastImageUploadTiming()
+
+        assert calls == []
+        assert timing.tile_layer_visible_items == 2
+        assert timing.tile_layer_items_updated == 0
+        assert timing.tile_layer_items_skipped == 2
+        assert timing.visible_bytes == 0
+    finally:
+        win.close()
+
+
 def test_cold_montage_tile_patches_without_side_panel_refresh(qtbot, monkeypatch):
     clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

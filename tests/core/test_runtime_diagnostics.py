@@ -57,6 +57,10 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
             upload_visible_bytes=1024,
             upload_histogram_bytes=512,
             upload_fast_same_object=True,
+            tile_layer_visible_items=50,
+            tile_layer_items_updated=1,
+            tile_layer_items_skipped=49,
+            tile_layer_rgb_window_tiles=1,
             coalesced_commits=7,
         ),
         fft_backend_choice="auto",
@@ -101,5 +105,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Timing RGB window: 2.00 ms" in text
     assert "Timing level sync: 1.00 ms" in text
     assert "Coalesced montage commits: 7" in text
+    assert "Tile layer items: visible=50 updated=1 skipped=49" in text
+    assert "Tile layer RGB window tiles: 1" in text
     assert "Upload: visible=1.0 KiB histogram=512 B same object=True" in text
     assert "Tile cache last session: cached=3 missing=4" in text

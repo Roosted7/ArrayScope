@@ -101,6 +101,8 @@ def _decide_normal_presentation(input: PresentationInput) -> PresentationDecisio
         histogram_range=histogram_range,
         viewport_policy=payload.viewport_policy,
         rgb_already_windowed=payload.rgb_already_windowed,
+        montage_dirty_tiles=payload.montage_dirty_tiles,
+        montage_tile_source_ids=payload.montage_tile_source_ids,
     )
     return PresentationDecision(
         display_presentation=presentation,
@@ -136,6 +138,8 @@ def _decide_montage_presentation(input: PresentationInput) -> PresentationDecisi
         histogram_range=state.histogram_range,
         viewport_policy=payload.viewport_policy,
         rgb_already_windowed=payload.rgb_already_windowed,
+        montage_dirty_tiles=payload.montage_dirty_tiles,
+        montage_tile_source_ids=payload.montage_tile_source_ids,
     )
     source = state.as_level_source()
     return PresentationDecision(

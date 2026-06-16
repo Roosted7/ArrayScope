@@ -471,7 +471,7 @@ Goal: finish the remaining interaction-latency work by making expensive reusable
 * [x] Split full display commits from progressive pixel commits at the window/render boundary.
 * [x] Freeze levels during progressive montage except at explicit recompute boundaries.
 * [x] Skip histogram, side-panel, operation dock, ROI, and profile refreshes during tile patch commits.
-* [ ] Patch display-ready dirty tile regions for complex/RGB progressive montage.
+* [x] Patch display-ready dirty tile regions for complex/RGB progressive montage.
 * [x] Add tests proving progressive tile patches avoid level scans, histogram refreshes, and unrelated dock refreshes.
 
 ### P3 — stage-aware predictive cache and compute policy

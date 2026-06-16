@@ -197,8 +197,10 @@ def test_display_presenter_does_not_infer_windowed_rgb_from_array_rank():
 
 def test_imageview2d_owns_internal_montage_tile_layer_path():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
+    layer_text = (ROOT / "arrayscope" / "display" / "montage_tile_layer.py").read_text()
     assert "setMontageTileLayerPresentation" in text
-    assert "_montage_tile_items" in text
+    assert "MontageTileLayer" in text
+    assert "TileLayerItemState" in layer_text
     assert "montageDisplayMode" in text
 
 

@@ -46,6 +46,8 @@ class DisplayPayload:
     viewport_policy: ViewportPolicy
     rgb_already_windowed: bool = False
     histogram_plot_data: np.ndarray | None = None
+    montage_dirty_tiles: tuple[int, ...] | None = None
+    montage_tile_source_ids: dict[int, object] | None = None
 
     @property
     def data(self) -> np.ndarray:
@@ -66,6 +68,8 @@ class DisplayPresentation:
     histogram_range: tuple[float, float]
     viewport_policy: ViewportPolicy
     rgb_already_windowed: bool = False
+    montage_dirty_tiles: tuple[int, ...] | None = None
+    montage_tile_source_ids: dict[int, object] | None = None
 
 
 @dataclass(frozen=True)

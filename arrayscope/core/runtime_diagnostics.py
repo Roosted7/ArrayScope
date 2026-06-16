@@ -25,6 +25,10 @@ class ImageUploadTiming:
     histogram_pixels: int = 0
     fast_same_object: bool = False
     mode: str = ""
+    tile_layer_visible_items: int = 0
+    tile_layer_items_updated: int = 0
+    tile_layer_items_skipped: int = 0
+    tile_layer_rgb_window_tiles: int = 0
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,10 @@ class MontageTimingDiagnostics:
     upload_visible_bytes: int = 0
     upload_histogram_bytes: int = 0
     upload_fast_same_object: bool = False
+    tile_layer_visible_items: int = 0
+    tile_layer_items_updated: int = 0
+    tile_layer_items_skipped: int = 0
+    tile_layer_rgb_window_tiles: int = 0
     coalesced_commits: int = 0
 
 
@@ -262,6 +270,13 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 f"Timing overlay update: {_ms_text(snapshot.montage_timing.last_overlay_update_ms)}",
                 f"Tile cache last session: cached={snapshot.montage_timing.cached_tiles_last_session} missing={snapshot.montage_timing.missing_tiles_last_session}",
                 f"Patched tiles last flush: {snapshot.montage_timing.patched_tiles_last_flush}",
+                (
+                    "Tile layer items: "
+                    f"visible={snapshot.montage_timing.tile_layer_visible_items} "
+                    f"updated={snapshot.montage_timing.tile_layer_items_updated} "
+                    f"skipped={snapshot.montage_timing.tile_layer_items_skipped}"
+                ),
+                f"Tile layer RGB window tiles: {snapshot.montage_timing.tile_layer_rgb_window_tiles}",
                 f"Coalesced montage commits: {snapshot.montage_timing.coalesced_commits}",
                 (
                     "Upload: "
