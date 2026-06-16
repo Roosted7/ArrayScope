@@ -8,6 +8,7 @@ from arrayscope.app.settings_state import (
     FFTBackendChoice,
     FFTWorkersChoice,
     MemoryProfileChoice,
+    MontageDisplayBackendChoice,
     PanelResizeBehavior,
     settings_from_mapping,
     settings_to_mapping,
@@ -31,6 +32,7 @@ class WindowMenuMixin:
                 "panel_resize_behavior": self._settings.value("panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value),
                 "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
                 "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
+                "montage_display_backend": self._settings.value("montage_display_backend", MontageDisplayBackendChoice.AUTO.value),
                 "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
             }
@@ -159,6 +161,23 @@ class WindowMenuMixin:
             workers_menu.addAction(action)
             self._fft_workers_actions[choice] = action
 
+        self._montage_backend_actions = {}
+        self._montage_backend_action_group = QtGui.QActionGroup(self)
+        self._montage_backend_action_group.setExclusive(True)
+        montage_backend_menu = QtWidgets.QMenu("Montage Display Backend", self)
+        performance_menu.addMenu(montage_backend_menu)
+        self._montage_backend_menu = montage_backend_menu
+        for choice, label in (
+            (MontageDisplayBackendChoice.AUTO, "Auto"),
+            (MontageDisplayBackendChoice.TILE_LAYER, "Tile layer"),
+            (MontageDisplayBackendChoice.CANVAS, "Canvas fallback"),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            self._montage_backend_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, choice=choice: self._set_montage_display_backend_choice(choice))
+            montage_backend_menu.addAction(action)
+            self._montage_backend_actions[choice] = action
+
         self._render_budget_actions = {}
         self._render_budget_action_group = QtGui.QActionGroup(self)
         self._render_budget_action_group.setExclusive(True)
@@ -237,6 +256,10 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(self.app_settings.fft_workers == choice)
             action.blockSignals(False)
+        for choice, action in self._montage_backend_actions.items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.montage_display_backend == choice)
+            action.blockSignals(False)
         for choice, action in self._memory_profile_actions.items():
             action.blockSignals(True)
             action.setChecked(self.app_settings.memory_profile == choice)
@@ -283,6 +306,10 @@ class WindowMenuMixin:
         self.app_settings = self._updated_app_settings(fft_workers=choice)
         self._apply_performance_settings(persist=True)
 
+    def _set_montage_display_backend_choice(self, choice):
+        self.app_settings = self._updated_app_settings(montage_display_backend=choice)
+        self._apply_performance_settings(persist=True)
+
     def _set_memory_profile_choice(self, choice):
         self.app_settings = self._updated_app_settings(memory_profile=choice)
         self._apply_performance_settings(persist=True)
@@ -318,6 +345,7 @@ class WindowMenuMixin:
             "panel_resize_behavior": current.panel_resize_behavior,
             "fft_backend": current.fft_backend,
             "fft_workers": current.fft_workers,
+            "montage_display_backend": current.montage_display_backend,
             "memory_profile": current.memory_profile,
             "render_memory_budget_mb": current.render_memory_budget_mb,
         }
@@ -348,6 +376,7 @@ class WindowMenuMixin:
             panel_resize_behavior=current.panel_resize_behavior,
             fft_backend=current.fft_backend,
             fft_workers=current.fft_workers,
+            montage_display_backend=current.montage_display_backend,
             memory_profile=current.memory_profile,
             render_memory_budget_mb=current.render_memory_budget_mb,
         )
@@ -362,6 +391,7 @@ class WindowMenuMixin:
             panel_resize_behavior=self.app_settings.panel_resize_behavior,
             fft_backend=self.app_settings.fft_backend,
             fft_workers=self.app_settings.fft_workers,
+            montage_display_backend=self.app_settings.montage_display_backend,
             memory_profile=self.app_settings.memory_profile,
             render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
         )
@@ -378,6 +408,7 @@ class WindowMenuMixin:
             panel_resize_behavior=behavior,
             fft_backend=self.app_settings.fft_backend,
             fft_workers=self.app_settings.fft_workers,
+            montage_display_backend=self.app_settings.montage_display_backend,
             memory_profile=self.app_settings.memory_profile,
             render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
         )

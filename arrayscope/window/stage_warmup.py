@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.scheduler import EvalPriority
 from arrayscope.operations.evaluator import stage_document_key
-from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked
+from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked, stage_materialization_allowed_chunk_axes
 from arrayscope.operations.slabs import plan_slab, request_for_image
 
 
@@ -70,7 +70,7 @@ def schedule_stage_warmup(window, view_state) -> StageWarmupDecision:
             cancellation_token=token,
             evaluation_context=context,
             memory_policy=context.memory_policy,
-            allowed_chunk_axes=_stage_warmup_chunk_axes(view_state),
+            allowed_chunk_axes=stage_materialization_allowed_chunk_axes(request.candidate.shape),
         )
 
     def done(value, key=result.key, generation=render_generation):
@@ -109,11 +109,3 @@ def _visible_work_busy(window) -> bool:
 def _record(window, decision: StageWarmupDecision) -> StageWarmupDecision:
     window._last_stage_warmup_decision = decision
     return decision
-
-
-def _stage_warmup_chunk_axes(view_state) -> tuple[int, ...]:
-    image_axes = set(() if view_state.image_axes is None else tuple(int(axis) for axis in view_state.image_axes))
-    montage_axis = getattr(view_state, "montage_axis", None)
-    if montage_axis is not None:
-        image_axes.add(int(montage_axis))
-    return tuple(axis for axis in range(len(tuple(view_state.shape))) if axis not in image_axes)

@@ -69,6 +69,11 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         visible_tiles=0 if session is None else len(session.visible_tiles),
         attached_stage_requests=0 if session is None else len(getattr(session, "attached_stage_requests", ())),
         display_mode=str(getattr(window.img_view, "montageDisplayMode", lambda: "canvas")()),
+        backend_setting=str(getattr(getattr(getattr(window, "app_settings", None), "montage_display_backend", "auto"), "value", getattr(getattr(window, "app_settings", None), "montage_display_backend", "auto"))),
+        backend_chosen=str(getattr(window, "_last_montage_backend_actual", getattr(getattr(window, "_last_montage_backend_choice", None), "backend", "canvas"))),
+        backend_reason=str(getattr(getattr(window, "_last_montage_backend_choice", None), "reason", "")),
+        backend_fallback_available="canvas",
+        backend_warning=str(getattr(window, "_last_montage_backend_warning", "") or ""),
         show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
     )
 

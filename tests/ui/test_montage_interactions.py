@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -389,7 +390,7 @@ def test_montage_schedules_missing_tiles_on_montage_lane(qtbot, monkeypatch):
         assert len(calls) == 2
         assert calls[0]["key"][0] == "montage_tile"
         assert calls[0]["replace_group"].startswith("montage-tile:")
-        assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == 2
+        assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.montage_tile_workers
         assert win.visible_evaluation_controller.pool.maxThreadCount() == 1
         tile = win._montage_session.plan.tiles[0]
         calls[0]["on_done"](_tile_result(tile, 1))
@@ -450,6 +451,46 @@ def test_montage_finished_tile_patches_without_rebuilding_canvas(qtbot, monkeypa
 
         assert id(win._current_montage_canvas.data) == data_id
         np.testing.assert_array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 7, dtype=np.float32))
+    finally:
+        win.close()
+
+
+def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 2 * 4, dtype=np.float32).reshape(2, 2, 4))
+    qtbot.addWidget(win)
+    calls = []
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
+    try:
+        _process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
+        win.update_montage_view()
+        win._montage_tile_result_batch_size = 4
+        commit_calls = []
+        original_schedule_commit = win._schedule_montage_canvas_commit
+
+        def record_schedule_commit(session, *, force=False):
+            commit_calls.append(force)
+            return original_schedule_commit(session, force=force)
+
+        monkeypatch.setattr(win, "_schedule_montage_canvas_commit", record_schedule_commit)
+        tile0 = win._montage_session.plan.tiles[0]
+        tile1 = win._montage_session.plan.tiles[1]
+        calls[0]["on_done"](_tile_result(tile0, 7))
+        calls[1]["on_done"](_tile_result(tile1, 9))
+
+        assert win._montage_session.pending_completed_tiles
+        qtbot.waitUntil(
+            lambda: (
+                np.array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 7, dtype=np.float32))
+                and np.array_equal(win._current_montage_canvas.data[0:2, 3:5], np.full((2, 2), 9, dtype=np.float32))
+            ),
+            timeout=1000,
+        )
+
+        assert len(commit_calls) == 1
     finally:
         win.close()
 
@@ -686,7 +727,7 @@ def test_montage_visible_tiles_do_not_define_relative_levels(qtbot, monkeypatch)
         win.close()
 
 
-def test_fft_montage_schedules_shared_stage_before_tile_workers(qtbot, monkeypatch):
+def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.window import ArrayScopeWindow
@@ -705,14 +746,14 @@ def test_fft_montage_schedules_shared_stage_before_tile_workers(qtbot, monkeypat
 
         win.update_montage_view()
 
-        assert len(stage_calls) == 1
-        assert tile_calls == []
+        assert stage_calls == []
+        assert len(tile_calls) == 1
         assert win._montage_session.stage_waiting_tiles
     finally:
         win.close()
 
 
-def test_fft_montage_attaches_to_inflight_stage_instead_of_tile_recompute(qtbot, monkeypatch):
+def test_fft_montage_keeps_waiting_tiles_behind_lead_tile_cache_warmup(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.window import ArrayScopeWindow
@@ -732,9 +773,8 @@ def test_fft_montage_attaches_to_inflight_stage_instead_of_tile_recompute(qtbot,
         win.update_montage_view()
         win.update_montage_view()
 
-        assert len(stage_calls) == 1
-        assert tile_calls == []
-        assert win._montage_session.attached_stage_requests
+        assert stage_calls == []
+        assert len(tile_calls) == 2
         assert win._montage_session.stage_waiting_tiles
     finally:
         win.close()
@@ -771,6 +811,7 @@ def test_operation_backed_complex_montage_rewindows_rgb_from_histogram_levels(qt
 
 def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogram_levels(qtbot):
     _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.window import ArrayScopeWindow
 
@@ -782,7 +823,7 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         win.operation_coordinator.load_operations((CenteredFFT(axis=0),))
         win._set_document(win.operation_coordinator.document)
         win._coerce_channel_for_current_dtype()
-        win._montage_tile_layer_policy = lambda _geometry, _data: True
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_montage_view()
 
@@ -797,6 +838,79 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         _process_events(qtbot, count=10)
 
         assert not np.array_equal(first_item.image, before)
+    finally:
+        win.close()
+
+
+def test_large_complex_montage_auto_uses_tile_layer(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.ones((840, 840, 3), dtype=np.complex64)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
+        win.update_montage_view()
+
+        qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=5000)
+
+        assert win.img_view.montageDisplayMode() == "tile_layer"
+        assert getattr(win, "_last_montage_backend_actual", None) == "tile_layer"
+    finally:
+        win.close()
+
+
+def test_large_complex_montage_tile_layer_histogram_drag_does_not_upload_canvas(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.ones((840, 840, 3), dtype=np.complex64)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
+        win.update_montage_view()
+        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=5000)
+        assert win.img_view._montage_tile_layer.states
+
+        def fail_canvas_upload(*args, **kwargs):
+            raise AssertionError("main canvas ImageItem upload during tile-layer histogram drag")
+
+        monkeypatch.setattr(win.img_view.imageItem, "setImage", fail_canvas_upload)
+        low, high = win.img_view.getHistogramDataBounds()
+        win.img_view.histogram.setLevels((float(low) + float(high)) / 2.0, float(high))
+        qtbot.wait(50)
+        win.img_view._on_histogram_level_change_finished()
+
+        timing = win.img_view.lastImageUploadTiming()
+        assert timing.mode == "level_preview"
+        assert timing.tile_layer_visible_items > 0
+        assert timing.tile_layer_items_updated > 0
+    finally:
+        win.close()
+
+
+def test_large_complex_montage_forced_canvas_records_warning(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.ones((840, 840, 3), dtype=np.complex64)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.CANVAS)
+        _process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
+        win.update_montage_view()
+
+        qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=5000)
+
+        assert win.img_view.montageDisplayMode() == "canvas"
+        assert "manual" in win._last_montage_backend_warning
     finally:
         win.close()
 

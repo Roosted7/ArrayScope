@@ -60,6 +60,7 @@ class MontageRenderSession:
     display_committed: bool = False
     applied_level_source: object | None = None
     pending_level_tiles: list[RenderedTile] = field(default_factory=list)
+    pending_completed_tiles: list[tuple[MontageTile, object]] = field(default_factory=list)
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles

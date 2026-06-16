@@ -39,6 +39,12 @@ mode. The full canvas remains the committed value source for hover/status and se
 `ImageItem`s paint visible loaded tiles. Updating one tile then uploads that tile rather than the full
 canvas. This mode is internal and does not change the public viewer API.
 
+The Performance menu exposes the montage display backend as Auto, Tile layer, or Canvas fallback.
+Auto keeps small and scalar montages on canvas, selects tile-layer mode for large RGB/complex
+montages and previously slow upload paths, and records the chosen backend and reason in diagnostics.
+Canvas fallback remains available for developer/user escape hatches, but large RGB/complex canvas
+fallback is diagnosed as potentially slow.
+
 Tile-layer presentation is stateful and dirty-aware. Presentation models carry optional dirty tile
 numbers: `None` means the tile state is unknown and visible loaded items should refresh, `()` means a
 known-clean flush, and non-empty tuples identify the loaded items whose pixels changed. `ImageView2D`
@@ -72,6 +78,11 @@ visible tile in a large montage can duplicate hundreds of MiB. ArrayScope theref
 per-tile source bases while keeping the displayed `ImageItem` data intact; unchanged-level clean
 commits still upload nothing, and later presentation commits can re-window pruned tiles from the
 current committed canvas when levels change.
+
+Histogram/window-level interaction uses a preview/final split. Preview updates are throttled on the
+Qt thread; tile-layer mode re-windows only visible tile items and skips full-canvas RGB re-windowing,
+full-canvas upload, and histogram recomputation. The final user level state is emitted once on level
+change finish.
 
 ## Consequences
 
