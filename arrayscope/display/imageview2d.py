@@ -95,6 +95,9 @@ class _MontageTileOverlayItem(QtWidgets.QGraphicsItem):
 
 
 class ImageView2D(QtWidgets.QWidget):
+    # Emitted only for explicit user edits of the histogram/LUT levels.
+    # Keep levelsChanged as a compatibility alias for existing callers/tests.
+    userLevelsChanged = QtCore.Signal()
     levelsChanged = QtCore.Signal()
 
     """
@@ -130,6 +133,8 @@ class ImageView2D(QtWidgets.QWidget):
         self.levelMin = None
         self.levelMax = None
         self._histogramDataBounds = None
+        self._displayLevels = None
+        self._applying_presentation = False
         self.displayMode = 'square_pixels'  # Default to square pixels
         self.histogramSource = None
         self._rgbBaseImage = None
@@ -179,10 +184,14 @@ class ImageView2D(QtWidgets.QWidget):
         self.histogram.setImageItem(self.histogramImageItem)
         self.histogram.setLevelMode('mono')  # Force mono mode for scalar values
         self.histogram.item.sigLevelsChanged.connect(self._on_histogram_levels_changed)
+        finish_signal = getattr(self.histogram.item, "sigLevelChangeFinished", None)
+        if finish_signal is not None:
+            finish_signal.connect(self._on_histogram_level_change_finished)
         
         # Initialize levels
         self.levelMin = 0.0
         self.levelMax = 1.0
+        self._displayLevels = (0.0, 1.0)
         self._histogramDataBounds = (0.0, 1.0)
 
         marker_pen = pg.mkPen((230, 60, 30, 180), width=1)
@@ -227,7 +236,8 @@ class ImageView2D(QtWidgets.QWidget):
         
     def setImage(self, img, autoRange=None, autoLevels=True, levels=None, 
                  pos=None, scale=None, transform=None, autoHistogramRange=True,
-                 histogramData=None, viewport_policy=ViewportPolicy.PRESERVE):
+                 histogramData=None, viewport_policy=ViewportPolicy.PRESERVE,
+                 rgb_already_windowed: bool = False):
         """
         Set the image to be displayed.
         
@@ -271,7 +281,11 @@ class ImageView2D(QtWidgets.QWidget):
                 display_levels = (float(low), float(high))
         
         # Update the image display
-        self.updateImage(autoHistogramRange=autoHistogramRange, displayLevels=display_levels)
+        self.updateImage(
+            autoHistogramRange=autoHistogramRange,
+            displayLevels=display_levels,
+            rgb_already_windowed=rgb_already_windowed,
+        )
         self._update_profile_line_bounds()
         
         # Set levels
@@ -280,9 +294,9 @@ class ImageView2D(QtWidgets.QWidget):
             self.autoLevels()
         elif levels is not None:
             if isinstance(levels, (list, tuple)) and len(levels) == 2:
-                self.setLevels(levels[0], levels[1])
+                self._apply_display_levels(levels[0], levels[1], emit_user=False)
             else:
-                self.setLevels(*levels)
+                self._apply_display_levels(*levels, emit_user=False)
             
         # Set transform
         if transform is None:
@@ -311,6 +325,7 @@ class ImageView2D(QtWidgets.QWidget):
         levels: tuple[float, float],
         histogramRange: tuple[float, float],
         viewport_policy=ViewportPolicy.PRESERVE,
+        rgb_already_windowed: bool = False,
     ) -> None:
         """Set fully decided image pixels, levels, and histogram range."""
         self.setImage(
@@ -320,6 +335,7 @@ class ImageView2D(QtWidgets.QWidget):
             histogramData=histogramData,
             autoHistogramRange=False,
             viewport_policy=viewport_policy,
+            rgb_already_windowed=rgb_already_windowed,
         )
         self.setHistogramDataBounds(histogramRange)
         self.setHistogramRange(histogramRange[0], histogramRange[1])
@@ -377,11 +393,11 @@ class ImageView2D(QtWidgets.QWidget):
                 self.imageDisp = self._rgb_display_for_levels(levels)
             self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=(0, 255))
             if histogramData is not None:
-                histogram_display = histogramData
-                if finite_bounds(histogram_display) is None:
-                    histogram_display = np.zeros_like(np.asarray(histogramData), dtype=float)
+                # Fast progressive updates must not scan the histogram source or
+                # replace missing/NaN data with zeros; missing tile state is
+                # represented separately by the montage overlay.
                 self.histogramImageItem.setImage(
-                    histogram_display,
+                    histogramData,
                     autoLevels=False,
                     levels=self._histogram_levels_for_display(levels),
                 )
@@ -392,12 +408,12 @@ class ImageView2D(QtWidgets.QWidget):
             image_levels = self._histogram_levels_for_display(levels)
             self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=image_levels)
         if levels is not None:
-            self.histogram.setLevels(float(levels[0]), float(levels[1]))
+            self._apply_display_levels(float(levels[0]), float(levels[1]), emit_user=False)
         if histogramRange is not None:
             self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
         self._update_profile_line_bounds()
             
-    def updateImage(self, autoHistogramRange=True, displayLevels=None):
+    def updateImage(self, autoHistogramRange=True, displayLevels=None, *, rgb_already_windowed: bool = False):
         """Update the displayed image"""
         if self.image is None:
             return
@@ -417,8 +433,12 @@ class ImageView2D(QtWidgets.QWidget):
         # Set the image data
         if is_rgb:
             self.histogram.setImageItem(self.histogramImageItem)
-            self._rgbBaseImage = self.imageDisp[..., :3].astype(float)
-            self.imageDisp = self._rgb_display_for_levels(histogram_levels)
+            if rgb_already_windowed:
+                self._rgbBaseImage = None
+                self.imageDisp = self.imageDisp[..., :3]
+            else:
+                self._rgbBaseImage = self.imageDisp[..., :3].astype(float)
+                self.imageDisp = self._rgb_display_for_levels(histogram_levels)
             self.imageItem.setImage(self.imageDisp, autoLevels=False, levels=(0, 255))
             histogram_display = histogram_data
             if finite_bounds(histogram_display) is None:
@@ -502,12 +522,41 @@ class ImageView2D(QtWidgets.QWidget):
             else:
                 self._updateImageLevels()
             bounds = self.getHistogramDataBounds() or (self.levelMin, self.levelMax)
-            self.setLevels(bounds[0], bounds[1])
+            self._apply_display_levels(bounds[0], bounds[1], emit_user=False)
                 
     def setLevels(self, min_level, max_level):
-        """Set the histogram levels"""
-        self.histogram.setLevels(min_level, max_level)
-        self._on_histogram_levels_changed()
+        """Set levels as an explicit user action.
+
+        Programmatic render/presentation paths must use _apply_display_levels
+        with emit_user=False so automatic commits never become user-locked.
+        """
+        self._apply_display_levels(min_level, max_level, emit_user=True)
+
+    def _apply_display_levels(self, min_level, max_level, *, emit_user: bool) -> None:
+        low = float(min_level)
+        high = float(max_level)
+        self._displayLevels = (low, high)
+        self._applying_presentation = not bool(emit_user)
+        try:
+            self.histogram.setLevels(low, high)
+            self._on_histogram_levels_changed()
+        finally:
+            self._applying_presentation = False
+        if emit_user:
+            self.userLevelsChanged.emit()
+            self.levelsChanged.emit()
+
+    def _on_histogram_level_change_finished(self, *args):
+        if self._applying_presentation:
+            return
+        try:
+            levels = self.histogram.getLevels()
+            if levels is not None:
+                low, high = levels
+                self._displayLevels = (float(low), float(high))
+        except Exception:
+            pass
+        self.userLevelsChanged.emit()
         self.levelsChanged.emit()
         
     def getLevels(self):

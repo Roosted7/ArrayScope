@@ -20,6 +20,7 @@ class DisplayCommitter:
             levels=presentation.levels,
             histogramRange=presentation.histogram_range,
             viewport_policy=presentation.viewport_policy,
+            rgb_already_windowed=presentation.rgb_already_windowed,
         )
         return self._frame_for(presentation, key)
 

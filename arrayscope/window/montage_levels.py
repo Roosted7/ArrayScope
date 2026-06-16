@@ -8,7 +8,7 @@ from typing import Iterable
 import numpy as np
 
 from arrayscope.display.levels import finite_bounds
-from arrayscope.window.presentation import LevelSource, LevelSourceRank, normalize_bounds
+from arrayscope.core.window_levels import LevelSource, LevelSourceRank, normalize_bounds
 
 
 @dataclass(frozen=True)
@@ -76,11 +76,9 @@ class MontageLevelTracker:
         self._stats[key] = stats
         return stats
 
-    def best_source(self, key: object, *, explicit_auto: bool) -> LevelSource | None:
+    def best_source(self, key: object, *, explicit_auto: bool = False) -> LevelSource | None:
         stats = self._stats.get(key)
         if stats is None or stats.bounds is None:
-            return None
-        if stats.rank == LevelSourceRank.MONTAGE_VISIBLE_SUBSET and not explicit_auto:
             return None
         return self.source_for_stats(key, stats)
 
