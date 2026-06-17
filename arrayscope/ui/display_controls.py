@@ -3,7 +3,7 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
-from arrayscope.display.imageview2d import ImageView2D
+from arrayscope.display.image_view_factory import create_image_view
 from arrayscope.ui.docks.inspection import InspectionDock
 from arrayscope.ui.docks.operations import OperationStackDock
 from arrayscope.ui.docks.profiles import ProfileDock
@@ -331,7 +331,7 @@ class DisplayControlBuildMixin:
         self.image_tab = QtWidgets.QWidget()
         self.image_tab_layout = QtWidgets.QVBoxLayout()
         
-        self.img_view = ImageView2D()
+        self.img_view = create_image_view(getattr(self, "app_settings", None), notify=lambda message: self.statusBar().showMessage(message, 5000))
         self.pixel_hud = PixelHud()
         self.img_view.setHudWidget(self.pixel_hud)
         self.image_tab_layout.addWidget(self.img_view)

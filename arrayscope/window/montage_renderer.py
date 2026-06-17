@@ -1126,20 +1126,34 @@ class MontageRenderMixin:
         self._update_live_profile_from_pending_pos()
 
     def _schedule_montage_viewport_update(self) -> None:
+        if getattr(self, "_montage_viewport_update_running", False):
+            self._montage_viewport_update_pending = True
+            return
         timer = getattr(self, "_montage_viewport_update_timer", None)
         if timer is None:
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._run_montage_viewport_update)
             self._montage_viewport_update_timer = timer
-        timer.start(60)
+        timer.start(120)
 
     def _run_montage_viewport_update(self) -> None:
         if getattr(self, "_closing", False):
             return
         if self.view_state.montage_axis is None:
             return
-        self.update_montage_view()
+        if getattr(self, "_montage_viewport_update_running", False):
+            self._montage_viewport_update_pending = True
+            return
+        self._montage_viewport_update_running = True
+        self._montage_viewport_update_pending = False
+        try:
+            self.update_montage_view()
+        finally:
+            self._montage_viewport_update_running = False
+        if getattr(self, "_montage_viewport_update_pending", False) and self.view_state.montage_axis is not None:
+            self._montage_viewport_update_pending = False
+            self._schedule_montage_viewport_update()
 
     def _montage_tile_shape(self, view_state):
         primary_axis, secondary_axis = view_state.image_axes

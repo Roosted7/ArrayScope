@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from dataclasses import replace
 
 from arrayscope.display.slice_engine import DisplayImage
@@ -170,6 +171,79 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
         assert timing.visible_bytes == 0
     finally:
         win.close()
+
+
+def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtbot, monkeypatch):
+    pytest.importorskip("vispy")
+
+    clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice, MontageDisplayBackendChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+    settings.sync()
+
+    win = ArrayScopeWindow(np.arange(2 * 2 * 8, dtype=np.float32).reshape(2, 2, 8))
+    qtbot.addWidget(win)
+    scheduled = []
+    try:
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
+        process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
+        win.update_montage_view()
+        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer", timeout=3000)
+        monkeypatch.setattr(win, "_schedule_montage_viewport_update", lambda: scheduled.append(win.img_view.getView().viewRange()))
+
+        assert win.img_view._vispy_canvas_native.testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        win.img_view.getView().setRange(xRange=(0.0, 4.0), yRange=(0.0, 2.0), padding=0)
+        process_events(qtbot)
+
+        assert win.img_view.rendering_backend_name == "vispy"
+        assert scheduled
+    finally:
+        win.close()
+        clear_arrayscope_settings()
+
+
+def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeypatch):
+    pytest.importorskip("vispy")
+
+    clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice, MontageDisplayBackendChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+    settings.sync()
+
+    win = ArrayScopeWindow(np.arange(4 * 100 * 8, dtype=np.float32).reshape(4, 100, 8))
+    qtbot.addWidget(win)
+    try:
+        win.resize(360, 240)
+        win.show()
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
+        process_events(qtbot)
+        monkeypatch.setattr(
+            win.montage_tile_evaluation_controller,
+            "start_latest",
+            lambda _fn, **kwargs: len(getattr(win._montage_session, "active_tile_requests", ())) + 1,
+        )
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=8, indices=tuple(range(8)), text=":"))
+        win.update_montage_view()
+        initial_visible = len(win._montage_session.visible_tiles)
+
+        win.img_view.getView().setRange(xRange=(0.0, 807.0), yRange=(0.0, 4.0), padding=0)
+        win._run_montage_viewport_update()
+        expanded_visible = len(win._montage_session.visible_tiles)
+
+        assert initial_visible < 8
+        assert expanded_visible == 8
+    finally:
+        win.close()
+        clear_arrayscope_settings()
 
 
 def test_cold_montage_tile_patches_without_side_panel_refresh(qtbot, monkeypatch):
