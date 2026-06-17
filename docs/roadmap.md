@@ -531,3 +531,18 @@ Goal: make repeated inspection work reproducible and efficient.
 * QML rewrite.
 * GPU compute backend.
 * General node-graph pipeline editor.
+
+## Phase 4l — rendering backend experiment and foundation closure
+
+Goal: answer whether VisPy should replace the PyQtGraph pixel display path while preserving the stable ArrayScope state, coordinate, ROI, and scheduling model.
+
+* [x] Add thread-safe bounded cache access for demand-rendered tile/ROI regions.
+* [x] Add status-silent evaluator accessors for offscreen demand rendering so ROI/profile requests do not pollute visible-render diagnostics.
+* [x] Add an experimental VisPy image rendering backend selected from the Performance menu.
+* [x] Keep PyQtGraph as the stable default until the VisPy backend is manually validated.
+* [x] Document the hybrid VisPy strategy and trade-offs.
+* [ ] Manually test VisPy normal image rendering, Fit, 1:1, hover, profile marker, ROI overlays, and histogram level dragging.
+* [x] Benchmark PyQtGraph vs VisPy hot-cache level changes on large scalar and complex montages.
+* [x] Prototype a VisPy shader path for RGB/complex intensity windowing from separate color and scalar textures.
+* [ ] Prototype full VisPy shader mapping from complex scalar data to magnitude/phase/RGBA if the intensity-windowing experiment is promising.
+* [ ] Decide whether VisPy becomes the only renderer before Phase 5 feature work.
