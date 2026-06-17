@@ -1,4 +1,5 @@
 import numpy as np
+from dataclasses import replace
 
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings, process_events as _process_events
 
@@ -102,6 +103,25 @@ def test_diagnostics_refresh_updates_cache_text(qtbot):
         assert before != after
         assert "Image:" in after
         assert "entries=1" in after
+    finally:
+        win.close()
+
+
+def test_diagnostics_reports_actual_image_backend_separately_from_setting(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.app_settings = replace(win.app_settings, image_rendering_backend=ImageRenderingBackendChoice.VISPY)
+        snapshot = win.collect_runtime_diagnostics()
+
+        assert snapshot.image_rendering_backend_selected == "vispy"
+        assert snapshot.image_rendering_backend_actual == "pyqtgraph"
+        assert snapshot.image_rendering_backend == "pyqtgraph"
     finally:
         win.close()
 

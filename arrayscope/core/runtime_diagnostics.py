@@ -192,6 +192,9 @@ class WindowRuntimeDiagnostics:
     stage_warmup: object | None = None
     montage_prefetch: tuple[object, ...] = ()
     resource_governor: ResourceGovernorDiagnostics | None = None
+    image_rendering_backend: str = "stable"
+    image_rendering_backend_selected: str = "stable"
+    image_rendering_backend_actual: str = "stable"
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
@@ -243,6 +246,12 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         (
             "Feedback: "
             f"{_pressure_summary(snapshot.resource_governor)}"
+        ),
+        (
+            "Renderer:\n"
+            f"  image={snapshot.image_rendering_backend_actual} "
+            f"setting={snapshot.image_rendering_backend_selected} "
+            f"montage={snapshot.montage.backend_chosen} montage_setting={snapshot.montage.backend_setting}"
         ),
         (
             "Render:\n"
