@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import RLock
 from time import perf_counter
 
 import numpy as np
@@ -15,6 +16,7 @@ from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
 class BoundedArrayCache:
     max_bytes: int
     max_entries: int
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         self.max_bytes = int(self.max_bytes)
@@ -27,38 +29,43 @@ class BoundedArrayCache:
         self.last_eval_ms = None
 
     def clear(self):
-        self._items.clear()
-        self.bytes_used = 0
+        with self._lock:
+            self._items.clear()
+            self.bytes_used = 0
 
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
-        if max_bytes is not None:
-            self.max_bytes = int(max_bytes)
-        if max_entries is not None:
-            self.max_entries = int(max_entries)
-        self._evict()
+        with self._lock:
+            if max_bytes is not None:
+                self.max_bytes = int(max_bytes)
+            if max_entries is not None:
+                self.max_entries = int(max_entries)
+            self._evict_locked()
 
     def clear_counters(self) -> None:
-        self.hits = 0
-        self.misses = 0
-        self.evictions = 0
+        with self._lock:
+            self.hits = 0
+            self.misses = 0
+            self.evictions = 0
 
     def get(self, key):
-        if key not in self._items:
-            self.misses += 1
-            return None
-        value, nbytes = self._items.pop(key)
-        self._items[key] = (value, nbytes)
-        self.hits += 1
-        return value
+        with self._lock:
+            if key not in self._items:
+                self.misses += 1
+                return None
+            value, nbytes = self._items.pop(key)
+            self._items[key] = (value, nbytes)
+            self.hits += 1
+            return value
 
     def put(self, key, value):
         nbytes = _nbytes(value)
-        if key in self._items:
-            _old_value, old_nbytes = self._items.pop(key)
-            self.bytes_used -= old_nbytes
-        self._items[key] = (value, nbytes)
-        self.bytes_used += nbytes
-        self._evict()
+        with self._lock:
+            if key in self._items:
+                _old_value, old_nbytes = self._items.pop(key)
+                self.bytes_used -= old_nbytes
+            self._items[key] = (value, nbytes)
+            self.bytes_used += nbytes
+            self._evict_locked()
         return value
 
     def get_or_compute(self, key, compute):
@@ -67,28 +74,31 @@ class BoundedArrayCache:
             return cached, True
         start = perf_counter()
         value = compute()
-        self.last_eval_ms = (perf_counter() - start) * 1000.0
+        elapsed_ms = (perf_counter() - start) * 1000.0
+        with self._lock:
+            self.last_eval_ms = elapsed_ms
         self.put(key, value)
         return value, False
 
     def diagnostics(self, status=CacheStatus.READY, message="", **extra):
-        total = int(self.hits) + int(self.misses)
-        hit_rate = None if total == 0 else float(self.hits) / float(total)
-        return CacheDiagnosticsSnapshot(
-            status=status,
-            message=message,
-            entries=len(self._items),
-            bytes_used=int(self.bytes_used),
-            max_bytes=int(self.max_bytes),
-            hits=int(self.hits),
-            misses=int(self.misses),
-            evictions=int(self.evictions),
-            last_eval_ms=self.last_eval_ms,
-            hit_rate=hit_rate,
-            **extra,
-        )
+        with self._lock:
+            total = int(self.hits) + int(self.misses)
+            hit_rate = None if total == 0 else float(self.hits) / float(total)
+            return CacheDiagnosticsSnapshot(
+                status=status,
+                message=message,
+                entries=len(self._items),
+                bytes_used=int(self.bytes_used),
+                max_bytes=int(self.max_bytes),
+                hits=int(self.hits),
+                misses=int(self.misses),
+                evictions=int(self.evictions),
+                last_eval_ms=self.last_eval_ms,
+                hit_rate=hit_rate,
+                **extra,
+            )
 
-    def _evict(self):
+    def _evict_locked(self):
         while self._items and (len(self._items) > self.max_entries or self.bytes_used > self.max_bytes):
             _key, (_value, nbytes) = self._items.popitem(last=False)
             self.bytes_used -= nbytes
