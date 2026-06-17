@@ -56,3 +56,40 @@ def test_toolbar_fit_and_one_to_one_are_viewport_commands(qtbot):
         assert not hasattr(win.display_toolbar, "aspect_combo")
     finally:
         win.close()
+
+
+def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
+    pytest.importorskip("vispy")
+
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+    settings.sync()
+
+    win = ArrayScopeWindow(np.arange(20 * 30, dtype=np.float32).reshape(20, 30))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        assert win.img_view.rendering_backend_name == "vispy"
+        y_dim, x_dim = win.view_state.image_axes
+
+        win._set_view_state(win.view_state.with_axis_flipped(y_dim, True).with_axis_flipped(x_dim, True))
+        win.apply_axis_flips()
+        _process_events(qtbot)
+        assert win.img_view.getView().state["xInverted"] is True
+        assert win.img_view.getView().state["yInverted"] is False
+        assert win.img_view._vispy_view.camera.flip == (True, False, False)
+
+        win._set_view_state(win.view_state.with_axis_flipped(y_dim, False).with_axis_flipped(x_dim, False))
+        win.apply_axis_flips()
+        _process_events(qtbot)
+        assert win.img_view.getView().state["xInverted"] is False
+        assert win.img_view.getView().state["yInverted"] is True
+        assert win.img_view._vispy_view.camera.flip == (False, True, False)
+    finally:
+        win.close()
+        _clear_arrayscope_settings()

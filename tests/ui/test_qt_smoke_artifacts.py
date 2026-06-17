@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -174,6 +175,52 @@ def test_progressive_view_configuration_artifacts(qt_app):
         assert complex_win.view_state.channel.value == "real"
     finally:
         complex_win.close()
+        _process_events(qt_app)
+
+
+def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
+    from pyqtgraph.Qt import QtCore
+    _clear_arrayscope_settings()
+
+    for name in list(sys.modules):
+        if name == "arrayscope" or name.startswith("arrayscope."):
+            del sys.modules[name]
+
+    pytest.importorskip("vispy")
+
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.display.imageview2d import MontageTileOverlay
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+    settings.sync()
+
+    data = np.linspace(0.0, 1.0, 96 * 96, dtype=np.float32).reshape(96, 96)
+    win = ArrayScopeWindow(data)
+    try:
+        win.resize(900, 640)
+        win.show()
+        _process_events(qt_app, count=20)
+
+        assert win.img_view.rendering_backend_name == "vispy"
+        selection = win.img_view.createRoi("rectangle", rect=(18.0, 20.0, 34.0, 28.0), color=(255, 32, 16))
+        assert selection.id in getattr(win.img_view, "_vispy_roi_visuals", {})
+        assert selection.id in getattr(win.img_view, "_vispy_roi_handle_visuals", {})
+        win.img_view.setProfileMarker(38.0, 42.0, visible=True)
+        assert getattr(win.img_view, "_vispy_profile_visuals", {})
+        win.img_view.setMontageTileOverlays((MontageTileOverlay(58, 16, 18, 18, "loading", "Loading"),))
+        assert getattr(win.img_view, "_vispy_overlay_visuals", [])
+        scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(20.0, 20.0))
+        win.img_view.view.scene().sigMouseMoved.emit(scene_pos)
+        _process_events(qt_app, count=8)
+
+        assert win.widgets["labels"]["pixelValue"].text()
+        assert "FIXME" not in win.widgets["labels"]["pixelValue"].text()
+        _grab_widget(win, "arrayscope_vispy_backend_smoke.png", min_width=500, min_height=360)
+    finally:
+        win.close()
+        _clear_arrayscope_settings()
         _process_events(qt_app)
 
 

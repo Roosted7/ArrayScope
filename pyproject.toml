@@ -44,6 +44,9 @@ dependencies = [
 arrayscope = "arrayscope.__main__:main"
 
 [project.optional-dependencies]
+vispy = [
+    "vispy>=0.14.0",
+]
 dev = [
     "build>=0.10.0",
     "hypothesis>=6.0.0",

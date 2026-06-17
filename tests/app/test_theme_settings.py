@@ -84,6 +84,7 @@ def test_settings_round_trip_defaults_and_values():
             "fft_backend": "pyfftw",
             "fft_workers": "2",
             "montage_display_backend": "tile_layer",
+            "image_rendering_backend": "vispy",
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
         }
@@ -97,6 +98,7 @@ def test_settings_round_trip_defaults_and_values():
         "fft_backend": "pyfftw",
         "fft_workers": "2",
         "montage_display_backend": "tile_layer",
+        "image_rendering_backend": "vispy",
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
     }
@@ -106,6 +108,7 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.fft_backend == settings_state.FFTBackendChoice.AUTO
     assert defaults.fft_workers == settings_state.FFTWorkersChoice.AUTO
     assert defaults.montage_display_backend == settings_state.MontageDisplayBackendChoice.AUTO
+    assert defaults.image_rendering_backend == settings_state.ImageRenderingBackendChoice.PYQTGRAPH
     assert defaults.memory_profile == settings_state.MemoryProfileChoice.BALANCED
     assert defaults.render_memory_budget_mb == 512
     unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})
@@ -113,10 +116,11 @@ def test_settings_round_trip_defaults_and_values():
 
 
 def test_performance_settings_normalize_unknowns_and_clamp_budget():
-    unknown = settings_state.settings_from_mapping({"fft_backend": "unknown", "fft_workers": "many", "montage_display_backend": "bad"})
+    unknown = settings_state.settings_from_mapping({"fft_backend": "unknown", "fft_workers": "many", "montage_display_backend": "bad", "image_rendering_backend": "nope"})
     assert unknown.fft_backend == settings_state.FFTBackendChoice.AUTO
     assert unknown.fft_workers == settings_state.FFTWorkersChoice.AUTO
     assert unknown.montage_display_backend == settings_state.MontageDisplayBackendChoice.AUTO
+    assert unknown.image_rendering_backend == settings_state.ImageRenderingBackendChoice.PYQTGRAPH
     assert settings_state.settings_from_mapping({"memory_profile": "bad"}).memory_profile == settings_state.MemoryProfileChoice.BALANCED
 
     assert settings_state.settings_from_mapping({"render_memory_budget_mb": "bad"}).render_memory_budget_mb == 512
