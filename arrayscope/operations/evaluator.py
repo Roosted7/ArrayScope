@@ -310,11 +310,32 @@ class OperationEvaluator:
             self.last_diagnostics = self._region_cache.diagnostics(CacheStatus.CACHED, "Using cached tile region")
         return cached
 
+    def cached_tile_region_silent(self, request):
+        return self._region_cache.get(self.tile_region_key(request))
+
+    def cached_montage_tile_silent(self, tile_state, *, montage_axis, source_index, colormap_lut=None):
+        return self._tile_cache.get(
+            self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut)
+        )
+
     def store_tile_region_result(self, request, result):
         self._region_cache.put(self.tile_region_key(request), result)
         self.last_status = cache_status_ready("Tile region cached")
         self.last_diagnostics = self._region_cache.diagnostics(CacheStatus.READY, "Tile region cached")
         return result
+
+    def store_tile_region_result_silent(self, request, result):
+        return self._region_cache.put(self.tile_region_key(request), result)
+
+    def evaluate_image_snapshot_silent(self, document, view_state, colormap_lut=None, *, evaluation_context=None):
+        return evaluate_image_snapshot(
+            document,
+            view_state,
+            colormap_lut=colormap_lut,
+            stage_cache=self._stage_cache,
+            stage_document_key=stage_document_key(document),
+            evaluation_context=evaluation_context,
+        )
 
     def store_image_result(self, view_state, colormap_lut, result: EvaluationResult):
         key = self.image_key(view_state, colormap_lut=colormap_lut)

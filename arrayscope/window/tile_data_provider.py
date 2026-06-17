@@ -8,17 +8,27 @@ from arrayscope.operations.tile_regions import TileRegionRequest, TileRegionResu
 
 
 class TileDataProvider:
-    def __init__(self, *, operation_evaluator, document, committed_frame=None, montage_plan=None, colormap_lut=None):
+    def __init__(
+        self,
+        *,
+        operation_evaluator,
+        document,
+        committed_frame=None,
+        montage_plan=None,
+        colormap_lut=None,
+        evaluation_context=None,
+    ):
         self.operation_evaluator = operation_evaluator
         self.document = document
         self.committed_frame = committed_frame
         self.montage_plan = montage_plan
         self.colormap_lut = colormap_lut
+        self.evaluation_context = evaluation_context
 
     def request_tile_region(self, request: TileRegionRequest, *, priority=None, cancellation_token=None) -> TileRegionResult:
         del priority
         _check_cancelled(cancellation_token)
-        cached = self.operation_evaluator.cached_tile_region(request)
+        cached = _call_cache(self.operation_evaluator, "cached_tile_region_silent", "cached_tile_region", request)
         if cached is not None:
             return TileRegionResult(request, cached[0], cached[1], "region_cache")
 
@@ -26,12 +36,15 @@ class TileDataProvider:
         region = self._normalized_region(request, tile)
         visible = self._from_committed_canvas(request, tile, region)
         if visible is not None:
-            self.operation_evaluator.store_tile_region_result(request, (visible.image, visible.histogram_data))
+            _store_region(self.operation_evaluator, request, (visible.image, visible.histogram_data))
             return visible
 
         _check_cancelled(cancellation_token)
         if tile is not None and request.montage_axis is not None:
-            payload = self.operation_evaluator.cached_montage_tile(
+            payload = _call_cache(
+                self.operation_evaluator,
+                "cached_montage_tile_silent",
+                "cached_montage_tile",
                 tile.view_state,
                 montage_axis=request.montage_axis,
                 source_index=tile.source_index,
@@ -39,14 +52,19 @@ class TileDataProvider:
             )
             if payload is not None:
                 result = _slice_payload(request, payload.image, payload.histogram_data, region, "tile_cache")
-                self.operation_evaluator.store_tile_region_result(request, (result.image, result.histogram_data))
+                _store_region(self.operation_evaluator, request, (result.image, result.histogram_data))
                 return result
 
         _check_cancelled(cancellation_token)
         view_state = tile.view_state if tile is not None else request.view_state
-        display_image = self.operation_evaluator.image(view_state, colormap_lut=self.colormap_lut)
+        display_image = self.operation_evaluator.evaluate_image_snapshot_silent(
+            self.document,
+            view_state,
+            colormap_lut=self.colormap_lut,
+            evaluation_context=self.evaluation_context,
+        ).value
         result = _slice_payload(request, display_image.data, display_image.histogram_data, region, "computed")
-        self.operation_evaluator.store_tile_region_result(request, (result.image, result.histogram_data))
+        _store_region(self.operation_evaluator, request, (result.image, result.histogram_data))
         return result
 
     def _tile_for_request(self, request: TileRegionRequest):
@@ -110,3 +128,17 @@ def _check_cancelled(token) -> None:
         from arrayscope.operations.cancellation import EvaluationCancelled
 
         raise EvaluationCancelled()
+
+
+def _call_cache(evaluator, silent_name: str, status_name: str, *args, **kwargs):
+    method = getattr(evaluator, silent_name, None)
+    if callable(method):
+        return method(*args, **kwargs)
+    return getattr(evaluator, status_name)(*args, **kwargs)
+
+
+def _store_region(evaluator, request, result):
+    method = getattr(evaluator, "store_tile_region_result_silent", None)
+    if callable(method):
+        return method(request, result)
+    return evaluator.store_tile_region_result(request, result)

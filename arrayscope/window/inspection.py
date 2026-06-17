@@ -289,12 +289,16 @@ class InspectionWorkflowMixin:
     def _tile_data_provider(self):
         if not hasattr(self, "operation_evaluator"):
             return None
+        evaluation_context = None
+        if hasattr(self, "_evaluation_context"):
+            evaluation_context = self._evaluation_context("roi")
         return TileDataProvider(
             operation_evaluator=self.operation_evaluator,
             document=self.document,
             committed_frame=getattr(self, "_committed_display_frame", None),
             montage_plan=getattr(self, "_current_montage_plan", None),
             colormap_lut=self._roi_colormap_lut(),
+            evaluation_context=evaluation_context,
         )
 
     def _roi_colormap_lut(self):
