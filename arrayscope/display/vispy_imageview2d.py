@@ -366,7 +366,7 @@ class VisPyImageView2D(ImageView2D):
             timing["visible_pixels"] = int(timing["visible_pixels"]) + int(np.prod(array.shape[:2]))
             timing["fast_same_object"] = bool(timing["fast_same_object"] or same_object)
 
-    def _vispy_display_data(self, img, histogramData, levels, *, rgb_already_windowed=False):
+    def _vispy_display_data(self, img, histogramData, levels, *, rgb_already_windowed=False, timing_field="rgb_window_ms"):
         if self._is_rgb_image(img):
             if rgb_already_windowed:
                 self.imageDisp = np.asarray(img[..., :3])
@@ -375,7 +375,7 @@ class VisPyImageView2D(ImageView2D):
             base = np.asarray(img[..., :3], dtype=np.float32)
             source = histogramData if histogramData is not None else self._histogram_data(base)
             self.imageDisp = rgb_display_for_levels(base, source, levels)
-            self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
+            self._record_upload_timing(timing_field, (perf_counter() - rgb_start) * 1000.0)
             return _contiguous_display(self.imageDisp)
         self.imageDisp = np.asarray(img)
         return _contiguous_display(self.imageDisp)
@@ -899,7 +899,6 @@ class VisPyImageView2D(ImageView2D):
         for tile_number in tuple(self._vispy_tile_visuals):
             if tile_number not in active:
                 self._hide_vispy_tile(tile_number)
-        self._record_upload_timing("tile_layer_rgb_window_ms", float(rgb_tiles) * 0.0)
         return TileLayerUpdateStats(visible_items=visible_items, items_updated=updated, items_skipped=skipped, rgb_window_tiles=rgb_tiles)
 
     def _ensure_vispy_tile(self, tile_number: int, *, windowed_rgb: bool = False) -> _VisPyTileState:
