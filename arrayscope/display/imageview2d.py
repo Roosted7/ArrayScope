@@ -42,6 +42,8 @@ from arrayscope.display.viewport import ViewportController, ViewportIntent, View
 
 
 class ImageView2D(QtWidgets.QWidget):
+    rendering_backend_name = "pyqtgraph"
+
     # Emitted only for explicit user edits of the histogram/LUT levels.
     userLevelsChanged = QtCore.Signal()
 

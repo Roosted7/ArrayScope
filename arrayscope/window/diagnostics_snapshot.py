@@ -139,6 +139,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         else ()
     )
 
+    image_backend_selected = getattr(getattr(getattr(window, "app_settings", None), "image_rendering_backend", "pyqtgraph"), "value", "pyqtgraph")
+    image_backend_actual = str(getattr(getattr(window, "img_view", None), "rendering_backend_name", "pyqtgraph"))
+
     return WindowRuntimeDiagnostics(
         memory_policy=policy,
         image_cache=window.operation_evaluator.image_cache_diagnostics(),
@@ -250,6 +253,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         operation_required_input_region="" if region_plan is None else region_text(region_plan.required_input_region),
         operation_expanded_axes=expanded_axes,
         operation_transition_summaries=tuple(_region_transition_summary(transition) for transition in transitions),
+        image_rendering_backend=image_backend_actual,
+        image_rendering_backend_selected=str(image_backend_selected),
+        image_rendering_backend_actual=image_backend_actual,
     )
 
 
