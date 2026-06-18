@@ -99,21 +99,14 @@ class TileDataProvider:
             state = geometry.view_point_to_tile_point(tile.x0, tile.y0, require_loaded=True)
             if state is None or state.kind != "loaded":
                 return None
-        y_slice, x_slice = region
-        x0 = int(0 if x_slice.start is None else x_slice.start)
-        x1 = int(tile.width if x_slice.stop is None else x_slice.stop)
-        y0 = int(0 if y_slice.start is None else y_slice.start)
-        y1 = int(tile.height if y_slice.stop is None else y_slice.stop)
-        canvas_x0 = int(tile.x0 + x0 - geometry.montage_origin_x)
-        canvas_y0 = int(tile.y0 + y0 - geometry.montage_origin_y)
-        canvas_x1 = int(tile.x0 + x1 - geometry.montage_origin_x)
-        canvas_y1 = int(tile.y0 + y1 - geometry.montage_origin_y)
-        data = np.asarray(frame.data)
-        if canvas_x0 < 0 or canvas_y0 < 0 or canvas_x1 > data.shape[1] or canvas_y1 > data.shape[0]:
+        value_source = getattr(frame, "value_source", None)
+        if value_source is None:
             return None
-        hist = None if frame.histogram_data is None else np.asarray(frame.histogram_data)
-        hist_region = None if hist is None else hist[canvas_y0:canvas_y1, canvas_x0:canvas_x1]
-        return TileRegionResult(request, data[canvas_y0:canvas_y1, canvas_x0:canvas_x1, ...], hist_region, "committed_canvas")
+        committed = value_source.tile_region(tile, region)
+        if committed is None:
+            return None
+        image, histogram, source = committed
+        return TileRegionResult(request, image, histogram, source)
 
 
 def _slice_payload(request, image, histogram_data, region: tuple[slice, slice], source: str) -> TileRegionResult:

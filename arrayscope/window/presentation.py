@@ -103,6 +103,7 @@ def _decide_normal_presentation(input: PresentationInput) -> PresentationDecisio
         rgb_already_windowed=payload.rgb_already_windowed,
         montage_dirty_tiles=payload.montage_dirty_tiles,
         montage_tile_source_ids=payload.montage_tile_source_ids,
+        montage_tile_payloads=payload.montage_tile_payloads,
     )
     return PresentationDecision(
         display_presentation=presentation,
@@ -140,6 +141,7 @@ def _decide_montage_presentation(input: PresentationInput) -> PresentationDecisi
         rgb_already_windowed=payload.rgb_already_windowed,
         montage_dirty_tiles=payload.montage_dirty_tiles,
         montage_tile_source_ids=payload.montage_tile_source_ids,
+        montage_tile_payloads=payload.montage_tile_payloads,
     )
     source = state.as_level_source()
     return PresentationDecision(

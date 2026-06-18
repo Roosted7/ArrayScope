@@ -1,4 +1,5 @@
 from time import perf_counter
+from typing import TYPE_CHECKING
 import weakref
 import warnings
 
@@ -39,6 +40,9 @@ from arrayscope.display.roi_items import (
     point_distance,
 )
 from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
+
+if TYPE_CHECKING:
+    from arrayscope.window.display_frame import DisplayTilePayload
 
 
 class ImageView2D(QtWidgets.QWidget):
@@ -352,6 +356,7 @@ class ImageView2D(QtWidgets.QWidget):
         rgb_already_windowed: bool = False,
         montage_dirty_tiles: tuple[int, ...] | None = None,
         montage_tile_source_ids: dict[int, object] | None = None,
+        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
     ) -> None:
         if geometry is None or getattr(geometry, "montage", None) is None:
             raise ValueError("tile-layer presentation requires montage geometry")
@@ -373,6 +378,7 @@ class ImageView2D(QtWidgets.QWidget):
                 rgb_already_windowed=rgb_already_windowed,
                 montage_dirty_tiles=montage_dirty_tiles,
                 montage_tile_source_ids=montage_tile_source_ids,
+                montage_tile_payloads=montage_tile_payloads,
             )
             self._record_tile_layer_stats(stats)
             histogram_key = self._tile_layer_histogram_key(
@@ -410,7 +416,7 @@ class ImageView2D(QtWidgets.QWidget):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
-    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids) -> TileLayerUpdateStats:
+    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None) -> TileLayerUpdateStats:
         if self._montage_tile_layer is None:
             return TileLayerUpdateStats()
         return self._montage_tile_layer.update_presentation(
@@ -421,6 +427,7 @@ class ImageView2D(QtWidgets.QWidget):
             rgb_already_windowed=rgb_already_windowed,
             dirty_tiles=montage_dirty_tiles,
             tile_source_ids=montage_tile_source_ids,
+            tile_payloads=montage_tile_payloads,
         )
 
     def _record_tile_layer_stats(self, stats: TileLayerUpdateStats) -> None:

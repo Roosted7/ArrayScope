@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from arrayscope.app.settings_state import MontageDisplayBackendChoice
 from arrayscope.window.montage_backend import choose_montage_backend
-from arrayscope.window.montage_renderer import MontageRenderMixin
 
 
 def _geometry():
@@ -27,6 +27,24 @@ def test_auto_large_scalar_montage_stays_canvas_until_upload_is_slow():
     assert decision.backend == "canvas"
     assert slow.backend == "tile_layer"
 
+
+def test_auto_large_scalar_vispy_montage_uses_tile_layer_to_avoid_full_uploads():
+    data = np.zeros((1500, 1500), dtype=np.float32)
+
+    decision = choose_montage_backend(_geometry(), data, renderer_backend="vispy")
+
+    assert decision.backend == "tile_layer"
+    assert decision.expected_tile_layer is True
+    assert "full texture uploads" in decision.reason
+
+
+def test_auto_preserves_vispy_tile_layer_mode():
+    data = np.zeros((64, 64), dtype=np.float32)
+
+    decision = choose_montage_backend(_geometry(), data, current_mode="vispy_tile_layer")
+
+    assert decision.backend == "tile_layer"
+    assert "preserving" in decision.reason
 
 def test_auto_large_rgb_montage_uses_tile_layer():
     data = np.zeros((1500, 1500, 3), dtype=np.uint8)
@@ -58,6 +76,9 @@ def test_forced_tile_layer_wins():
 
 
 def test_stage_wait_release_falls_back_to_direct_tile_evaluation():
+    pytest.importorskip("pyqtgraph")
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
     class _Window(MontageRenderMixin):
         pass
 

@@ -544,5 +544,6 @@ Goal: answer whether VisPy should replace the PyQtGraph pixel display path while
 * [ ] Manually test VisPy normal image rendering, Fit, 1:1, hover, profile marker, ROI overlays, and histogram level dragging.
 * [x] Benchmark PyQtGraph vs VisPy hot-cache level changes on large scalar and complex montages.
 * [x] Prototype a VisPy shader path for RGB/complex intensity windowing from separate color and scalar textures.
+* [x] Replace the per-tile VisPy montage prototype with a typed, batched atlas-backed tiled renderer.
 * [ ] Prototype full VisPy shader mapping from complex scalar data to magnitude/phase/RGBA if the intensity-windowing experiment is promising.
 * [ ] Decide whether VisPy becomes the only renderer before Phase 5 feature work.

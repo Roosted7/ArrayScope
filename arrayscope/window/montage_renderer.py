@@ -43,10 +43,11 @@ from arrayscope.window.montage_levels import MontageLevelStats, MontageLevelTrac
 from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.window.presentation import LevelSourceRank, fallback_level_source
-from arrayscope.window.render_model import CommitKind
+from arrayscope.window.render_model import CommitKind, DisplayTilePayload
 
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
+
 
 class MontageRenderMixin:
     def _montage_tile_layer_policy(self, geometry, data) -> bool:
@@ -60,6 +61,7 @@ class MontageRenderMixin:
             previous_upload_ms=float(getattr(self, "_last_set_image_ms", 0.0) or 0.0),
             patched_tiles=int(getattr(self, "_montage_patched_tiles_last_flush", 0) or 0),
             current_mode=str(getattr(self.img_view, "montageDisplayMode", lambda: "canvas")()),
+            renderer_backend=getattr(self.img_view, "rendering_backend_name", "pyqtgraph"),
             very_slow_upload_ms=MONTAGE_VERY_SLOW_UPLOAD_MS,
         )
 
@@ -797,6 +799,9 @@ class MontageRenderMixin:
         if session.has_canvas():
             session.patch_rendered_tile(rendered)
             self._last_montage_canvas_patch_ms = (perf_counter() - patch_start) * 1000.0
+        else:
+            session.dirty_tiles.append(int(tile.montage_index))
+            self._last_montage_canvas_patch_ms = 0.0
 
     def _on_montage_tile_error(self, session_id, tile, exc) -> None:
         session = getattr(self, "_montage_session", None)
@@ -814,7 +819,8 @@ class MontageRenderMixin:
             return
         interval_ms = self._montage_commit_interval_ms(session, force=force)
         elapsed_ms = (monotonic() - float(session.last_commit_monotonic or 0.0)) * 1000.0
-        if session.canvas is None or force and not session.flush_pending or elapsed_ms >= interval_ms:
+        needs_initial_commit = session.canvas is None and not bool(getattr(session, "display_committed", False))
+        if needs_initial_commit or force and not session.flush_pending or elapsed_ms >= interval_ms:
             self._commit_montage_session_canvas(session, force=force)
             return
         session.final_commit_pending = True
@@ -846,6 +852,10 @@ class MontageRenderMixin:
             return
         commit_start = perf_counter()
         self._classify_canvas_tiles(session)
+        direct_presentation = self._direct_montage_tile_layer_presentation(session)
+        if direct_presentation is not None:
+            self._commit_montage_session_tile_layer(session, direct_presentation, commit_start=commit_start)
+            return
         previous_canvas = getattr(self, "_current_montage_canvas", None)
         previous_global_range = self._current_montage_global_view_range()
         newly_composed = session.canvas is None
@@ -955,6 +965,110 @@ class MontageRenderMixin:
         schedule_near_viewport_montage_prefetch(self, session)
         self._retry_live_profile_after_montage_tile()
 
+    def _direct_montage_tile_layer_presentation(self, session):
+        if str(getattr(self.img_view, "rendering_backend_name", "pyqtgraph")) != "vispy":
+            return None
+        if not hasattr(self.img_view, "setMontageTileLayerPresentation"):
+            return None
+        tile_states = session.ensure_tile_states()
+        placeholder = _montage_tile_layer_placeholder(session)
+        geometry = DisplayGeometry(
+            view_state=session.view_state,
+            display_shape=tuple(placeholder.shape[:2]),
+            montage=session.plan.geometry,
+            montage_origin_x=0,
+            montage_origin_y=0,
+            montage_tile_states=tile_states,
+        )
+        decision = self._montage_backend_policy(geometry, placeholder)
+        if decision.backend != "tile_layer":
+            return None
+        return DisplayImage(data=placeholder, histogram_data=None, rgb_already_windowed=False), geometry
+
+    def _commit_montage_session_tile_layer(self, session, direct_presentation, *, commit_start: float) -> None:
+        display_image, rendered_geometry = direct_presentation
+        dirty_tiles = session.consume_dirty_tiles()
+        tile_source_ids = self._montage_tile_source_ids(session)
+        self._montage_patched_tiles_last_flush = len(dirty_tiles)
+        self._last_montage_canvas_compose_ms = 0.0
+        self._current_montage_geometry = session.plan.geometry
+        self._current_montage_plan = session.plan
+        self._current_montage_canvas = None
+        if not session.rendered_tiles:
+            self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
+            return
+        self._next_viewport_policy = ViewportPolicy.PRESERVE
+        self._montage_canvas_commit_active = True
+        try:
+            level_stats = self._montage_level_stats_for_session(session)
+            complete = session.is_complete()
+            histogram_plot_data = self._montage_histogram_plot_data_for_session(session)
+            explicit_auto = bool(getattr(session, "force_auto", False))
+            semantic_source = self._montage_level_source_for_session(session, allow_partial=explicit_auto)
+            first_display_commit = not bool(session.display_committed)
+            montage_dirty_tiles = None if first_display_commit else dirty_tiles
+            tile_payloads = _display_tile_payloads_for_session(session, tile_source_ids)
+            if first_display_commit:
+                self._apply_full_display_image(
+                    display_image,
+                    geometry=rendered_geometry,
+                    window_mode=session.window_mode,
+                    previous_frame=getattr(self, "_committed_display_frame", None),
+                    force_auto=explicit_auto,
+                    defer_side_panels=getattr(session, "defer_side_panels", False),
+                    semantic_source=semantic_source,
+                    applied_level_source=session.applied_level_source,
+                    histogram_plot_data=histogram_plot_data,
+                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.FULL_MONTAGE_INITIAL,
+                    document_key=_document_key(session.document),
+                    request_key=session.key,
+                    render_generation=session.render_generation,
+                    montage_level_key=session.level_key,
+                    montage_dirty_tiles=montage_dirty_tiles,
+                    montage_tile_source_ids=tile_source_ids,
+                    montage_tile_payloads=tile_payloads,
+                )
+                session.display_committed = True
+            else:
+                implicit_level_update = self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
+                semantic_source = self._montage_level_source_for_session(session, allow_partial=implicit_level_update)
+                self._apply_progressive_display_image(
+                    display_image,
+                    geometry=rendered_geometry,
+                    window_mode=session.window_mode,
+                    previous_frame=getattr(self, "_committed_display_frame", None),
+                    force_auto=False,
+                    viewport_policy=ViewportPolicy.PRESERVE,
+                    semantic_source=semantic_source,
+                    applied_level_source=session.applied_level_source,
+                    histogram_plot_data=histogram_plot_data,
+                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+                    document_key=_document_key(session.document),
+                    request_key=session.key,
+                    render_generation=session.render_generation,
+                    montage_level_key=session.level_key,
+                    montage_dirty_tiles=montage_dirty_tiles,
+                    montage_tile_source_ids=tile_source_ids,
+                    montage_tile_payloads=tile_payloads,
+                )
+            overlay_start = perf_counter()
+            rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
+            self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
+            self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
+        finally:
+            self._montage_canvas_commit_active = False
+        self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
+        feedback = _latency_feedback(self)
+        if feedback is not None:
+            if hasattr(self, "_record_ui_work"):
+                self._record_ui_work("montage_commit", self._last_montage_canvas_commit_ms)
+            else:
+                feedback.observe("montage_commit", self._last_montage_canvas_commit_ms)
+        session.note_committed()
+        self._finish_montage_session_if_complete(session)
+        schedule_near_viewport_montage_prefetch(self, session)
+        self._retry_live_profile_after_montage_tile()
+
     def _finish_montage_session_if_complete(self, session) -> bool:
         if not self._is_current_montage_session(session.session_id, session.key):
             return False
@@ -1047,19 +1161,23 @@ class MontageRenderMixin:
                 session.mark_loading(tile)
 
     def _update_montage_tile_overlays(self, canvas) -> None:
+        self._update_montage_tile_overlays_for_plan(
+            canvas.full_plan,
+            canvas.tile_states,
+            canvas.canvas_rect,
+        )
+
+    def _update_montage_tile_overlays_for_plan(self, plan, tile_states, canvas_rect) -> None:
         if not hasattr(self.img_view, "setMontageTileOverlays"):
             return
         overlays = []
-        for tile in canvas.full_plan.tiles:
-            state = canvas.tile_states[int(tile.montage_index)] if int(tile.montage_index) < len(canvas.tile_states) else MontageTileState.UNLOADED
+        canvas_x0, canvas_y0, canvas_x1, canvas_y1 = (int(value) for value in canvas_rect)
+        for tile in plan.tiles:
+            state = tile_states[int(tile.montage_index)] if int(tile.montage_index) < len(tile_states) else MontageTileState.UNLOADED
             if state == MontageTileState.LOADING and not bool(getattr(getattr(self, "_montage_session", None), "show_loading_overlays", False)):
                 continue
             if state not in {MontageTileState.LOADING, MontageTileState.SKIPPED}:
                 continue
-            canvas_x0 = int(canvas.origin_x)
-            canvas_y0 = int(canvas.origin_y)
-            canvas_x1 = canvas_x0 + int(canvas.display_shape[1])
-            canvas_y1 = canvas_y0 + int(canvas.display_shape[0])
             tile_x0 = int(tile.x0)
             tile_y0 = int(tile.y0)
             tile_x1 = tile_x0 + int(tile.width)
@@ -1173,6 +1291,29 @@ class MontageRenderMixin:
             (float(view_range[0][0]), float(view_range[0][1])),
             (float(view_range[1][0]), float(view_range[1][1])),
         )
+
+
+def _montage_tile_layer_placeholder(session) -> np.ndarray:
+    height, width = (max(1, int(value)) for value in session.plan.display_shape)
+    if bool(getattr(session, "rgb", False)):
+        base = np.zeros((1, 1, 3), dtype=np.uint8)
+        return np.broadcast_to(base, (height, width, 3))
+    base = np.zeros((1, 1), dtype=np.float32)
+    return np.broadcast_to(base, (height, width))
+
+
+def _display_tile_payloads_for_session(session, source_ids: dict[int, object]) -> dict[int, DisplayTilePayload]:
+    payloads: dict[int, DisplayTilePayload] = {}
+    for tile_number, rendered in getattr(session, "rendered_tiles", {}).items():
+        tile_number = int(tile_number)
+        payloads[tile_number] = DisplayTilePayload(
+            tile_number=tile_number,
+            source_index=int(rendered.tile.source_index),
+            image=np.asarray(rendered.image),
+            histogram_data=None if rendered.histogram_data is None else np.asarray(rendered.histogram_data),
+            source_id=source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image))),
+        )
+    return payloads
 
 
 def _lead_direct_tiles(tiles, *, count: int = 1):

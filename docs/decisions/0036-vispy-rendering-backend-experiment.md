@@ -1,5 +1,11 @@
 # 0036 — Experimental VisPy rendering backend
 
+## Status
+
+Superseded in part by [0037 — First-class VisPy tiled montage renderer](0037-first-class-vispy-tiled-renderer.md).
+The hybrid PyQtGraph-interaction / VisPy-pixel strategy remains accepted, but the original
+per-tile-VisPy-visual montage experiment is no longer the tiled renderer design.
+
 ## Problem
 
 ArrayScope now avoids most unnecessary computation for large montage views, but the remaining hot path is often display upload/windowing rather than operation evaluation. PyQtGraph remains valuable for interaction and histogram controls, but its `ImageItem` path still requires repeated CPU-side RGB/windowing and large `setImage()` commits in some cases.
@@ -15,7 +21,9 @@ The first implementation is intentionally hybrid:
 - Where native `QOpenGLWidget` stacking can hide PyQtGraph graphics on Wayland, VisPy draws passive visual mirrors for ROI outlines/handles, the live-profile crosshair/target, and montage loading/skipped placeholders. Those mirrors do not own application state; PyQtGraph callbacks still update ROI/profile state and downstream profile/inspection work.
 - Scalar images use VisPy `ImageVisual` with `texture_format="auto"` and `clim` so window/level changes can be evaluated by the GPU where possible.
 - RGB/complex views that carry scalar histogram/intensity data use an ArrayScope VisPy visual with separate color and scalar textures. Window/level changes update shader uniforms instead of rebuilding a CPU-windowed RGB image.
-- Large montage tile-layer presentation maps to VisPy visuals per tile rather than a single full-canvas RGB upload.
+- Large montage tile-layer presentation originally mapped to VisPy visuals per tile rather than a
+  single full-canvas RGB upload. That prototype was useful but too slow at high tile counts; ADR 0037
+  replaces it with one batched atlas-backed visual.
 
 This tests the question we actually care about: whether replacing the pixel display path improves large-view responsiveness without rewriting all tools at once.
 

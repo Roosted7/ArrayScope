@@ -28,6 +28,7 @@ def choose_montage_backend(
     previous_upload_ms: float = 0.0,
     patched_tiles: int = 0,
     current_mode: str = "canvas",
+    renderer_backend: str = "pyqtgraph",
     very_slow_upload_ms: float = 100.0,
 ) -> MontageBackendDecision:
     if getattr(geometry, "montage", None) is None:
@@ -38,6 +39,8 @@ def choose_montage_backend(
     rgb_like = _is_rgb_like(data)
     large = pixels > LARGE_MONTAGE_CANVAS_PIXELS
     large_rgb = large and rgb_like
+    renderer_backend = str(getattr(renderer_backend, "value", renderer_backend) or "pyqtgraph").lower()
+    current_is_tile_layer = str(current_mode) in {"tile_layer", "vispy_tile_layer"}
 
     if setting == MontageDisplayBackendChoice.TILE_LAYER:
         return MontageBackendDecision("tile_layer", "user forced tile layer", expected_tile_layer=True)
@@ -54,6 +57,12 @@ def choose_montage_backend(
             f"RGB/complex montage canvas pixels {pixels} > {LARGE_MONTAGE_CANVAS_PIXELS}",
             expected_tile_layer=True,
         )
+    if large and renderer_backend == "vispy":
+        return MontageBackendDecision(
+            "tile_layer",
+            f"VisPy montage canvas pixels {pixels} > {LARGE_MONTAGE_CANVAS_PIXELS}; avoid full texture uploads",
+            expected_tile_layer=True,
+        )
     if float(previous_upload_ms or 0.0) > float(very_slow_upload_ms):
         return MontageBackendDecision(
             "tile_layer",
@@ -66,7 +75,7 @@ def choose_montage_backend(
             f"patched tiles last flush {int(patched_tiles)} > 8",
             expected_tile_layer=True,
         )
-    if str(current_mode) == "tile_layer":
+    if current_is_tile_layer:
         return MontageBackendDecision("tile_layer", "preserving active tile-layer backend", expected_tile_layer=True)
     if large:
         return MontageBackendDecision("canvas", f"large scalar montage canvas pixels {pixels}; scalar levels are cheap")

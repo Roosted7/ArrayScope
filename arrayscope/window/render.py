@@ -28,6 +28,7 @@ from arrayscope.window.normal_renderer import NormalImageRenderMixin
 from arrayscope.window.render_prefetch import RenderPrefetchMixin
 from arrayscope.window.render_resources import RenderResourceMixin
 
+
 def getNumberOfDecimalPlaces(number):
     if isinstance(number, (int, np.integer)):
         return int(0)
@@ -100,27 +101,10 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         frame = getattr(self, "_committed_display_frame", None)
         if frame is None or not self._is_committed_display_frame_current(frame):
             return None
-        source = frame.histogram_data
-        if source is None:
-            source = frame.data
-        if source is None:
+        value_source = getattr(frame, "value_source", None)
+        if value_source is None:
             return None
-        data = np.asarray(source)
-        if tuple(data.shape[:2]) != tuple(frame.geometry.display_shape):
-            return None
-        y_i = int(mapping.canvas_y)
-        x_i = int(mapping.canvas_x)
-        if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
-            return None
-        value = data[y_i, x_i]
-        if isinstance(value, np.ndarray):
-            return tuple(value.tolist())
-        if np.isscalar(value):
-            try:
-                return value.item()
-            except AttributeError:
-                return value
-        return value
+        return value_source.value_at(mapping)
 
     def _is_committed_display_frame_current(self, frame: CommittedDisplayFrame) -> bool:
         if not self._is_current_render_generation(int(frame.key.render_generation)):
@@ -210,7 +194,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
 
     def _on_image_mouse_moved(self, pos):
         self.getPixel(pos)
-    
+
     def _on_profile_marker_moved(self, image_x, image_y):
         if not self.widgets['buttons']['display']['live_profile'].isChecked():
             return
@@ -545,32 +529,32 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         """Update the display group title with aspect ratio information."""
         mode = self.img_view.displayMode
         aspect_str = ''
-        
+
         if mode == 'square_pixels': # Simple
             self.display_group.setTitle('Display (1:1)')
             return
-        
+
         if mode == 'fit': #use the viewport aspect ratio
             aspect_str = ''
             try:
                 if hasattr(self.img_view, 'image') and self.img_view.image is not None:
                     view = self.img_view.getView()
-                    
+
                     img_height, img_width = self.img_view.image.shape[:2]
                     widget_ratio = view.size().width() / view.size().height()
                     img_ratio = img_width / img_height
                     ratio = img_ratio * widget_ratio
-                    
+
                     if abs(ratio - 1.0) < 1e-2:
                         aspect_str = '(1:1)'
                     else:
                         aspect_str = f'({ratio:.2f}:1)'
             finally:
                 self.display_group.setTitle(f'Display {aspect_str}')
-            
+
         else:
             self.display_group.setTitle('Display')
-    
+
     def update_line_plot(self):
         if not hasattr(self, "profile_dock") or not self.profile_dock.isVisible():
             return
@@ -642,7 +626,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         self.update_dimension_controls()
         self.update()
         self.line_plot.hide_crosshair()
-    
+
     def is_line_plot_mode(self):
         """The historical line-plot tab is no longer the primary plot surface."""
         return False
