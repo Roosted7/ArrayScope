@@ -244,6 +244,162 @@ def test_vispy_tile_layer_clean_flush_skips_existing_visual_uploads(qt_app):
         view.close()
 
 
+def test_vispy_direct_tiled_payloads_use_batched_gpu_layer(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.window.display_frame import DisplayTilePayload
+
+    view = VisPyImageView2D()
+    left = np.full((2, 2, 3), 180, dtype=np.uint8)
+    right = np.full((2, 2, 3), 90, dtype=np.uint8)
+    left_hist = np.array([[0.0, 0.25], [0.5, 1.0]], dtype=np.float32)
+    right_hist = np.array([[1.0, 0.5], [0.25, 0.0]], dtype=np.float32)
+    payloads = {
+        0: DisplayTilePayload(0, 0, left, left_hist, ("tile", 0)),
+        1: DisplayTilePayload(1, 1, right, right_hist, ("tile", 1)),
+    }
+    placeholder = np.broadcast_to(np.zeros((1, 1, 3), dtype=np.uint8), (2, 5, 3))
+    try:
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=_montage_geometry(),
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            montage_dirty_tiles=None,
+            montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1)},
+            montage_tile_payloads=payloads,
+        )
+
+        timing = view.lastImageUploadTiming()
+        assert timing.tile_layer_visible_items == 2
+        assert timing.tile_layer_items_updated == 2
+        assert timing.tile_layer_rgb_window_tiles == 0
+        assert not any(state.visible for state in view._vispy_tile_visuals.values())
+        assert view._vispy_gpu_montage_layer.visual.visible
+    finally:
+        view.close()
+
+
+def test_vispy_direct_tiled_clean_and_dirty_counters(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.window.display_frame import DisplayTilePayload
+
+    view = VisPyImageView2D()
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2, 3), 180, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2, 3), 90, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", 1)),
+    }
+    placeholder = np.broadcast_to(np.zeros((1, 1, 3), dtype=np.uint8), (2, 5, 3))
+    kwargs = dict(
+        histogramData=None,
+        histogramPlotData=None,
+        geometry=_montage_geometry(),
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        rgb_already_windowed=False,
+    )
+    try:
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            montage_dirty_tiles=None,
+            montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1)},
+            montage_tile_payloads=payloads,
+            **kwargs,
+        )
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            montage_dirty_tiles=(),
+            montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1)},
+            montage_tile_payloads=payloads,
+            **kwargs,
+        )
+        clean = view.lastImageUploadTiming()
+        assert clean.tile_layer_items_updated == 0
+        assert clean.tile_layer_items_skipped == 2
+        assert clean.visible_bytes == 0
+
+        dirty_payloads = dict(payloads)
+        dirty_payloads[1] = DisplayTilePayload(
+            1,
+            1,
+            np.full((2, 2, 3), 128, dtype=np.uint8),
+            np.ones((2, 2), dtype=np.float32),
+            ("tile", 1, "dirty"),
+        )
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            montage_dirty_tiles=(1,),
+            montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1, "dirty")},
+            montage_tile_payloads=dirty_payloads,
+            **kwargs,
+        )
+        dirty = view.lastImageUploadTiming()
+        assert dirty.tile_layer_items_updated == 1
+        assert dirty.tile_layer_items_skipped == 1
+        assert dirty.visible_bytes > 0
+    finally:
+        view.close()
+
+
+def test_vispy_direct_tiled_scalar_atlas_preserves_high_dynamic_range(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.window.display_frame import DisplayTilePayload
+
+    view = VisPyImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((3, 4, 31)).with_montage_axis(2, columns=3, indices=(10, 20, 30), text=":"),
+        display_shape=(3, 14),
+        montage=MontageGeometry(indices=(10, 20, 30), tile_shape=(3, 4), columns=3, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    payloads = {
+        0: DisplayTilePayload(0, 10, np.full((3, 4), 250.0, dtype=np.float32), None, ("tile", 10)),
+        1: DisplayTilePayload(1, 20, np.full((3, 4), 1000.0, dtype=np.float32), None, ("tile", 20)),
+        2: DisplayTilePayload(2, 30, np.full((3, 4), 4096.0, dtype=np.float32), None, ("tile", 30)),
+    }
+    try:
+        view.setMontageTileLayerPresentation(
+            np.zeros((3, 14), dtype=np.float32),
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=geometry,
+            levels=(0.0, 4096.0),
+            histogramRange=(0.0, 4096.0),
+            rgb_already_windowed=False,
+            montage_dirty_tiles=None,
+            montage_tile_source_ids={index: payload.source_id for index, payload in payloads.items()},
+            montage_tile_payloads=payloads,
+        )
+
+        layer = view._vispy_gpu_montage_layer
+        pool = layer._pool
+        expected_values = {0: 250.0, 1: 1000.0, 2: 4096.0}
+        for tile_number, expected in expected_values.items():
+            slot = pool.slots[tile_number]
+            row = slot // pool.columns
+            col = slot % pool.columns
+            y0 = row * geometry.montage.tile_height
+            x0 = col * geometry.montage.tile_width
+            np.testing.assert_allclose(
+                pool.scalar_cpu[y0 : y0 + geometry.montage.tile_height, x0 : x0 + geometry.montage.tile_width],
+                expected,
+            )
+        assert pool.scalar_texture._format == "red"
+        assert pool.scalar_texture._internalformat == "r32f"
+
+        vertices = layer.visual.vertex_data.reshape((-1, 6, 2))
+        expected_origins = np.array([[0.0, 0.0], [5.0, 0.0], [10.0, 0.0]], dtype=np.float32)
+        np.testing.assert_allclose(vertices[:, 0, :], expected_origins)
+        assert layer.visual.mode_data.reshape((-1, 6))[:, 0].tolist() == [0.0, 0.0, 0.0]
+    finally:
+        view.close()
+
+
 def test_vispy_mouse_bridge_emits_qpointf_for_pyqtgraph_scene(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
@@ -396,11 +552,16 @@ def test_vispy_montage_tile_overlays_have_vispy_placeholder_visuals(qt_app):
         view.setMontageTileOverlays(overlays)
 
         assert view.montageTileOverlayCount() == 2
-        assert len(view._vispy_overlay_visuals) == 4
+        assert len(view._vispy_overlay_visuals) == 2
         assert all(visual.visible for visual in view._vispy_overlay_visuals)
+        visuals = tuple(view._vispy_overlay_visuals)
+
+        view.setMontageTileOverlays(overlays)
+        assert tuple(view._vispy_overlay_visuals) == visuals
 
         view.clearMontageTileOverlays()
         assert view.montageTileOverlayCount() == 0
-        assert view._vispy_overlay_visuals == []
+        assert tuple(view._vispy_overlay_visuals) == visuals
+        assert all(not visual.visible for visual in view._vispy_overlay_visuals)
     finally:
         view.close()

@@ -102,9 +102,10 @@ source of array-view state.
   preserve caller-decided levels, histogram range, transform, and viewport instead of letting the
   widget infer semantic display state from partial tile pixels. Complex/RGB windowability is explicit
   display metadata; RGB array rank alone does not mean pixels are already windowed. Large or slow
-  montage commits may use an internal exact tile-layer display path: the committed canvas remains the
-  hover/value source, while per-tile `ImageItem`s paint the visible loaded tiles so progressive
-  updates do not upload a full canvas for every tile.
+  montage commits may use an exact tile-layer display path. PyQtGraph tile-layer fallback paints
+  typed payloads with per-tile `ImageItem`s; VisPy tile-layer mode paints typed payloads with a
+  batched atlas visual. The committed frame's `FrameValueSource`, not a full-canvas placeholder,
+  owns hover/value semantics.
 - `arrayscope.display.histogram_controller` and `arrayscope.display.image_upload`: focused display
   helpers for histogram preview/final level interaction, ImageItem upload preparation, and shared
   RGB/complex windowing. Histogram level drags update display pixels as a throttled preview, while
@@ -114,6 +115,11 @@ source of array-view state.
   state so known-clean tile-layer flushes skip pixel uploads entirely, dirty flushes update only the
   affected tile items, all-cached newly composed sessions can reuse unchanged rendered tile sources,
   and RGB/complex level changes reuse cached float32 tile bases.
+- `arrayscope.display.vispy_tiled_renderer`: VisPy display helper owned by `VisPyImageView2D` for
+  first-class tiled montage painting. It stores visible tile payloads in scalar and color texture
+  atlases, draws all resident tiles through one batched visual, updates shader uniforms for
+  level-only changes, skips texture uploads for clean commits, and uploads only dirty tile atlas
+  regions when tile data changes.
 - `arrayscope.display.overlays`, `arrayscope.display.roi_items`, and
   `arrayscope.display.profile_marker`: focused Qt display helpers for montage/loading overlays, ROI
   graphics item conversion, ROI info panels, and profile marker bounds. `ImageView2D` keeps the
@@ -128,12 +134,17 @@ source of array-view state.
 - `arrayscope.window.render_model`: Qt-free immutable request, payload, presentation-decision, and
   commit-plan models used at the boundary between render orchestration and display mutation. Render
   orchestration provides a `PresentationInput`; presentation policy returns a `PresentationDecision`;
-  Qt code only receives the decided `DisplayPresentation`.
+  Qt code only receives the decided `DisplayPresentation`. Raster/canvas display is represented by
+  `DisplayRasterPresentation`; direct montage tile display uses typed `DisplayTilePayload` values and
+  `DisplayTiledPresentation`-style metadata so renderers do not infer tile data from generic objects
+  or full-canvas placeholders.
 - `arrayscope.window.display_commit`: the single gateway from a decided presentation to
   `ImageView2D`. Window render code must not call image pixel or histogram setters directly.
   `DisplayCommitter` validates display shape, local histogram-source shape, optional sampled
   histogram plot sources, finite increasing levels/histogram ranges, and forwards montage dirty-tile
-  metadata only to the tile-layer presentation path before mutating Qt state.
+  metadata only to the tile-layer presentation path before mutating Qt state. Committed frames store a
+  `FrameValueSource`: `CanvasValueSource` reads normal/viewport-canvas pixels, while
+  `TiledValueSource` reads typed tile payloads for hover/status and demand ROI/profile regions.
 - `arrayscope.window.diagnostics_snapshot`: window-owned runtime diagnostics snapshot construction.
   Menu code opens the diagnostics dialog only; it does not assemble scheduler, cache, render, montage,
   operation, or upload timing snapshots.
@@ -149,7 +160,8 @@ source of array-view state.
   operation stages to be cached or in-flight, and refuses paths that would recompute the same FFT once
   per predicted tile.
 - `arrayscope.window.display_frame`: committed display-frame keys and value source ownership for
-  hover/status.
+  hover/status. Tiled frames must not report values from placeholder arrays; they resolve values and
+  tile-local regions through their `TiledValueSource`.
 - `arrayscope.window.montage_levels`: semantic montage histogram coverage tracking keyed by montage
   scope, independent of viewport origin, visible canvas shape, and the current tiled index window.
   It stores deterministic sampled per-source-index tile stats so shifted tiled ranges reuse overlap

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -31,6 +32,9 @@ from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.viewport import ViewportPolicy
+
+if TYPE_CHECKING:
+    from arrayscope.window.display_frame import DisplayTilePayload
 
 
 @dataclass
@@ -61,7 +65,7 @@ class VisPyImageView2D(ImageView2D):
     rendering_backend_name = "vispy"
 
     def setupUI(self):
-        self._vispy_scene, self._vispy_visuals, self._vispy_transforms, self._vispy_panzoom_camera = _import_vispy()
+        self._vispy_scene, self._vispy_visuals, self._vispy_transforms, self._vispy_panzoom_camera, self._vispy_gloo = _import_vispy()
         try:
             from vispy.app import use_app
 
@@ -100,10 +104,23 @@ class VisPyImageView2D(ImageView2D):
         )
         self._vispy_windowed_image.visible = False
         self._vispy_windowed_image.transform = self._vispy_transforms.STTransform(translate=(0.0, 0.0, 0.0))
+        from arrayscope.display.vispy_tiled_renderer import create_gpu_montage_layer
+
+        self._vispy_gpu_montage_layer = create_gpu_montage_layer(
+            scene=self._vispy_scene,
+            visuals=self._vispy_visuals,
+            gloo=self._vispy_gloo,
+            transforms=self._vispy_transforms,
+            parent=self._vispy_view.scene,
+        )
         self._vispy_tile_visuals: dict[int, _VisPyTileState] = {}
         self._vispy_roi_visuals: dict[str, object] = {}
         self._vispy_roi_handle_visuals: dict[str, object] = {}
         self._vispy_overlay_visuals: list[object] = []
+        self._vispy_overlay_mesh = None
+        self._vispy_overlay_lines = None
+        self._vispy_overlay_key: tuple[object, ...] = ()
+        self._vispy_overlay_count = 0
         self._vispy_profile_visuals: dict[str, object] = {}
         self._vispy_last_levels: tuple[float, float] = (0.0, 1.0)
         self._vispy_main_data_id: int | None = None
@@ -111,6 +128,8 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_main_scalar_source_id: int | None = None
         self._vispy_display_shape: tuple[int, int] = (1, 1)
         self._vispy_roi_cursor_active = False
+        self._vispy_camera_sync_pending = False
+        self._vispy_camera_key = None
         self._vispy_canvas_native = self._vispy_canvas.native
         self._vispy_canvas_native.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._display_stack.addWidget(self._vispy_canvas_native)
@@ -137,12 +156,11 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_bounds_item.setPen(QtGui.QPen(QtCore.Qt.PenStyle.NoPen))
         self._vispy_bounds_item.setBrush(QtGui.QBrush(QtCore.Qt.BrushStyle.NoBrush))
         self._vispy_bounds_item.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
-        self._vispy_bounds_item.setZValue(-1000)
-        self.view.addItem(self._vispy_bounds_item)
-        self.view.sigRangeChanged.connect(lambda *_args: self._sync_vispy_camera_to_view())
+        self._layer_owner.add_bounds_item(self._vispy_bounds_item)
+        self.view.sigRangeChanged.connect(lambda *_args: self._request_vispy_camera_sync())
         state_signal = getattr(self.view, "sigStateChanged", None)
         if state_signal is not None:
-            state_signal.connect(lambda *_args: self._sync_vispy_camera_to_view())
+            state_signal.connect(lambda *_args: self._request_vispy_camera_sync())
 
     def clearMontageTileLayer(self) -> None:
         for state in getattr(self, "_vispy_tile_visuals", {}).values():
@@ -150,7 +168,13 @@ class VisPyImageView2D(ImageView2D):
             _set_visual_visible(state.windowed_visual, False)
             state.visual = None
             state.visible = False
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        if layer is not None:
+            layer.clear()
         self.clearMontageTileOverlays()
+        self._last_vispy_tile_payloads = None
+        self._last_vispy_tiled_source_key = None
+        self._last_vispy_tiled_structure_key = None
         self._montage_display_mode = "canvas"
         self.imageItem.setVisible(False)
         try:
@@ -253,6 +277,7 @@ class VisPyImageView2D(ImageView2D):
         rgb_already_windowed: bool = False,
         montage_dirty_tiles: tuple[int, ...] | None = None,
         montage_tile_source_ids: dict[int, object] | None = None,
+        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
     ) -> None:
         if geometry is None or getattr(geometry, "montage", None) is None:
             raise ValueError("tile-layer presentation requires montage geometry")
@@ -260,33 +285,59 @@ class VisPyImageView2D(ImageView2D):
         applying = self._applying_presentation
         self._applying_presentation = True
         try:
+            source_key = _tiled_source_key(montage_tile_payloads, montage_tile_source_ids)
+            structure_key = _tiled_structure_key(
+                geometry,
+                levels=levels,
+                histogram_range=histogramRange,
+                viewport_policy=viewport_policy,
+                rgb_already_windowed=rgb_already_windowed,
+            )
             self.image = img
             self.histogramSource = histogramData
             self.histogramPlotSource = histogramPlotData
+            self._last_vispy_tile_payloads = montage_tile_payloads
             self.setHistogramDataBounds(histogramRange)
             self._montage_display_mode = "vispy_tile_layer"
             try:
                 self._vispy_image.visible = False
             except Exception:
                 pass
-            stats = self._update_vispy_tile_layer(
-                img,
-                histogram_data=histogramData,
-                geometry=geometry,
-                levels=(float(levels[0]), float(levels[1])),
-                rgb_already_windowed=rgb_already_windowed,
-                dirty_tiles=montage_dirty_tiles,
-                tile_source_ids=montage_tile_source_ids,
+            clean_noop = (
+                montage_tile_payloads is not None
+                and montage_dirty_tiles == ()
+                and source_key == getattr(self, "_last_vispy_tiled_source_key", None)
+                and structure_key == getattr(self, "_last_vispy_tiled_structure_key", None)
             )
+            if clean_noop:
+                from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
+
+                visible = len(montage_tile_payloads or {})
+                stats = TileLayerUpdateStats(visible_items=visible, items_updated=0, items_skipped=visible, rgb_window_tiles=0)
+            else:
+                stats = self._update_vispy_tile_layer(
+                    img,
+                    histogram_data=histogramData,
+                    geometry=geometry,
+                    levels=(float(levels[0]), float(levels[1])),
+                    rgb_already_windowed=rgb_already_windowed,
+                    dirty_tiles=montage_dirty_tiles,
+                    tile_source_ids=montage_tile_source_ids,
+                    tile_payloads=montage_tile_payloads,
+                )
             self._record_tile_layer_stats(stats)
-            self._update_histogram_for_vispy(histogramData, histogramPlotData, levels)
-            self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
-            self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
-            self._update_profile_line_bounds()
-            self._updateAspectRatio()
-            montage_shape = self._sync_vispy_montage_bounds(geometry)
-            self._apply_viewport_policy(montage_shape, viewport_policy, image_origin=(0.0, 0.0))
-            self._sync_vispy_camera_to_view()
+            structure_unchanged = structure_key == getattr(self, "_last_vispy_tiled_structure_key", None)
+            if not structure_unchanged:
+                self._update_histogram_for_vispy(histogramData, histogramPlotData, levels)
+                self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
+                self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+                self._update_profile_line_bounds()
+                self._updateAspectRatio()
+                montage_shape = self._sync_vispy_montage_bounds(geometry)
+                self._apply_viewport_policy(montage_shape, viewport_policy, image_origin=(0.0, 0.0))
+                self._sync_vispy_camera_to_view()
+            self._last_vispy_tiled_source_key = source_key
+            self._last_vispy_tiled_structure_key = structure_key
         finally:
             self._applying_presentation = applying
             self._finish_upload_timing()
@@ -308,6 +359,7 @@ class VisPyImageView2D(ImageView2D):
                     rgb_already_windowed=False,
                     dirty_tiles=(),
                     tile_source_ids=None,
+                    tile_payloads=getattr(self, "_last_vispy_tile_payloads", None),
                     force_levels=True,
                 )
                 self._record_tile_layer_stats(stats)
@@ -668,55 +720,84 @@ class VisPyImageView2D(ImageView2D):
 
     def setMontageTileOverlays(self, overlays):
         overlays = tuple(overlays or ())
-        super().setMontageTileOverlays(overlays)
+        # Do not mirror these through the PyQtGraph overlay item in the VisPy
+        # backend.  The scene already has a transparent PyQtGraph layer for
+        # interaction, and painting hundreds of duplicate QGraphics overlays is
+        # exactly the kind of UI fan-in that makes large montage commits hang.
+        super().clearMontageTileOverlays()
+        self._montage_tile_overlay_items = []
         self._set_vispy_montage_tile_overlays(overlays)
 
     def clearMontageTileOverlays(self):
         super().clearMontageTileOverlays()
+        self._vispy_overlay_key = ()
+        self._vispy_overlay_count = 0
         for visual in getattr(self, "_vispy_overlay_visuals", ()):
-            try:
-                visual.parent = None
-            except Exception:
-                _set_visual_visible(visual, False)
-        self._vispy_overlay_visuals = []
+            _set_visual_visible(visual, False)
         self._vispy_canvas.update()
+
+    def montageTileOverlayCount(self) -> int:
+        return int(getattr(self, "_vispy_overlay_count", 0) or 0)
 
     def _set_vispy_montage_tile_overlays(self, overlays) -> None:
-        for visual in getattr(self, "_vispy_overlay_visuals", ()):
-            try:
-                visual.parent = None
-            except Exception:
+        overlays = tuple(overlays or ())
+        key = _overlay_batch_key(overlays)
+        self._vispy_overlay_count = len(overlays)
+        if key == getattr(self, "_vispy_overlay_key", ()):
+            for visual in getattr(self, "_vispy_overlay_visuals", ()):
+                _set_visual_visible(visual, bool(overlays))
+            return
+        self._vispy_overlay_key = key
+        if not overlays:
+            for visual in getattr(self, "_vispy_overlay_visuals", ()):
                 _set_visual_visible(visual, False)
-        self._vispy_overlay_visuals = []
-        for overlay in tuple(overlays or ()):
-            fill, border, mark = _overlay_vispy_colors(overlay)
-            rect = self._vispy_visuals.Rectangle(
-                center=(
-                    float(getattr(overlay, "x", 0.0)) + float(getattr(overlay, "width", 1.0)) * 0.5,
-                    float(getattr(overlay, "y", 0.0)) + float(getattr(overlay, "height", 1.0)) * 0.5,
-                ),
-                width=float(max(1.0, getattr(overlay, "width", 1.0))),
-                height=float(max(1.0, getattr(overlay, "height", 1.0))),
-                parent=self._vispy_view.scene,
-                color=fill,
-                border_color=border,
-            )
-            rect.order = 11_000
-            rect.visible = True
-            self._vispy_overlay_visuals.append(rect)
+            self._vispy_canvas.update()
+            return
 
-            mark_visual = self._vispy_visuals.Line(
-                _overlay_status_mark_points(overlay),
-                parent=self._vispy_view.scene,
-                color=mark,
-                width=1.25,
-                method="gl",
-                connect="segments",
-            )
-            mark_visual.order = 11_001
-            mark_visual.visible = True
-            self._vispy_overlay_visuals.append(mark_visual)
+        mesh = self._ensure_vispy_overlay_mesh()
+        lines = self._ensure_vispy_overlay_lines()
+        vertices, faces, colors = _overlay_mesh_arrays(overlays)
+        line_points, line_colors = _overlay_line_arrays(overlays)
+        mesh.set_data(vertices=vertices, faces=faces, vertex_colors=colors)
+        lines.set_data(pos=line_points, color=line_colors, width=1.25, connect="segments")
+        mesh.visible = True
+        lines.visible = bool(len(line_points))
         self._vispy_canvas.update()
+
+    def _ensure_vispy_overlay_mesh(self):
+        mesh = getattr(self, "_vispy_overlay_mesh", None)
+        if mesh is None:
+            mesh = self._vispy_visuals.Mesh(parent=self._vispy_view.scene)
+            mesh.order = 11_000
+            try:
+                mesh.set_gl_state("translucent", depth_test=False)
+            except Exception:
+                pass
+            mesh.visible = False
+            self._vispy_overlay_mesh = mesh
+            self._refresh_vispy_overlay_visual_list()
+        return mesh
+
+    def _ensure_vispy_overlay_lines(self):
+        lines = getattr(self, "_vispy_overlay_lines", None)
+        if lines is None:
+            lines = self._vispy_visuals.Line(parent=self._vispy_view.scene, method="gl", connect="segments")
+            lines.order = 11_001
+            try:
+                lines.set_gl_state("translucent", depth_test=False)
+            except Exception:
+                pass
+            lines.visible = False
+            self._vispy_overlay_lines = lines
+            self._refresh_vispy_overlay_visual_list()
+        return lines
+
+    def _refresh_vispy_overlay_visual_list(self) -> None:
+        self._vispy_overlay_visuals = [
+            visual
+            for visual in (getattr(self, "_vispy_overlay_mesh", None), getattr(self, "_vispy_overlay_lines", None))
+            if visual is not None
+        ]
 
     def _sync_vispy_bounds(self, image_shape, *, image_origin=(0.0, 0.0)) -> None:
         if getattr(self, "_vispy_bounds_item", None) is None:
@@ -787,11 +868,24 @@ class VisPyImageView2D(ImageView2D):
         rgb_already_windowed: bool,
         dirty_tiles,
         tile_source_ids,
+        tile_payloads=None,
         force_levels: bool = False,
     ):
         from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
 
-        if img is None or geometry is None or getattr(geometry, "montage", None) is None:
+        if geometry is None or getattr(geometry, "montage", None) is None:
+            return TileLayerUpdateStats()
+        if tile_payloads is not None:
+            return self._update_vispy_direct_tile_layer(
+                tile_payloads,
+                geometry=geometry,
+                levels=levels,
+                rgb_already_windowed=rgb_already_windowed,
+                dirty_tiles=dirty_tiles,
+                tile_source_ids=tile_source_ids,
+                force_levels=force_levels,
+            )
+        if img is None:
             return TileLayerUpdateStats()
         self._last_vispy_geometry = geometry
         montage = geometry.montage
@@ -847,17 +941,24 @@ class VisPyImageView2D(ImageView2D):
                 state.levels = level_tuple
                 skipped += 1
                 continue
+            scalar_level_only = not use_windowed_rgb and not self._is_rgb_image(tile_img)
             needs_data = (
                 dirty is None
                 or tile_number in dirty
                 or state.source_id != source_id
                 or state.windowed_rgb != bool(use_windowed_rgb)
                 or not state.visible
-                or (not use_windowed_rgb and levels_changed)
+                or (not use_windowed_rgb and levels_changed and not scalar_level_only)
             )
             if not needs_data:
                 if use_windowed_rgb and levels_changed:
                     state.visual.set_levels(level_tuple)
+                    state.levels = level_tuple
+                elif scalar_level_only and levels_changed:
+                    try:
+                        state.visual.clim = level_tuple
+                    except Exception:
+                        pass
                     state.levels = level_tuple
                 skipped += 1
                 continue
@@ -901,6 +1002,61 @@ class VisPyImageView2D(ImageView2D):
                 self._hide_vispy_tile(tile_number)
         return TileLayerUpdateStats(visible_items=visible_items, items_updated=updated, items_skipped=skipped, rgb_window_tiles=rgb_tiles)
 
+    def _update_vispy_direct_tile_layer(
+        self,
+        tile_payloads,
+        *,
+        geometry,
+        levels,
+        rgb_already_windowed: bool,
+        dirty_tiles,
+        tile_source_ids,
+        force_levels: bool = False,
+    ):
+        from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
+
+        montage = geometry.montage
+        if montage is None:
+            return TileLayerUpdateStats()
+        self._last_vispy_geometry = geometry
+        for state in getattr(self, "_vispy_tile_visuals", {}).values():
+            _set_visual_visible(state.image_visual, False)
+            _set_visual_visible(state.windowed_visual, False)
+            state.visible = False
+        states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
+        loaded_payloads = {}
+        for tile_number, _source_index in enumerate(tuple(montage.indices)):
+            kind = "loaded"
+            if states and tile_number < len(states):
+                kind = str(getattr(states[tile_number], "value", states[tile_number]))
+            if kind == "loaded" and int(tile_number) in tile_payloads:
+                loaded_payloads[int(tile_number)] = tile_payloads[int(tile_number)]
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        if layer is None:
+            return TileLayerUpdateStats()
+        if force_levels and getattr(layer, "last_stats", None).visible_items:
+            stats = layer.set_levels(levels)
+        else:
+            stats = layer.update(
+                payloads=loaded_payloads,
+                geometry=geometry,
+                levels=levels,
+                dirty_tiles=dirty_tiles,
+                rgb_already_windowed=rgb_already_windowed,
+            )
+        self._record_upload_timing("tile_layer_upload_ms", float(stats.upload_ms))
+        timing = self._upload_timing
+        if timing is not None:
+            timing["visible_bytes"] = int(timing["visible_bytes"]) + int(stats.texture_upload_bytes)
+        for tile_number in tuple(self._vispy_tile_visuals):
+            self._hide_vispy_tile(tile_number)
+        return TileLayerUpdateStats(
+            visible_items=int(stats.visible_items),
+            items_updated=int(stats.items_updated),
+            items_skipped=int(stats.items_skipped),
+            rgb_window_tiles=0,
+        )
+
     def _ensure_vispy_tile(self, tile_number: int, *, windowed_rgb: bool = False) -> _VisPyTileState:
         tile_number = int(tile_number)
         state = self._vispy_tile_visuals.get(tile_number)
@@ -941,15 +1097,31 @@ class VisPyImageView2D(ImageView2D):
         try:
             x_range, y_range = self.view.viewRange()
             state = getattr(self.view, "state", {}) or {}
-            self._vispy_view.camera.flip = (
+            key = (
+                (float(x_range[0]), float(x_range[1])),
+                (float(y_range[0]), float(y_range[1])),
                 bool(state.get("xInverted", False)),
                 bool(state.get("yInverted", True)),
-                False,
             )
+            if key == getattr(self, "_vispy_camera_key", None):
+                return
+            self._vispy_camera_key = key
+            self._vispy_view.camera.flip = (key[2], key[3], False)
             self._vispy_view.camera.set_range(x=(float(x_range[0]), float(x_range[1])), y=(float(y_range[0]), float(y_range[1])), margin=0)
             self._vispy_canvas.update()
         except Exception:
             pass
+
+    def _request_vispy_camera_sync(self) -> None:
+        if getattr(self, "_vispy_camera_sync_pending", False):
+            return
+        self._vispy_camera_sync_pending = True
+
+        def apply_sync():
+            self._vispy_camera_sync_pending = False
+            self._sync_vispy_camera_to_view()
+
+        QtCore.QTimer.singleShot(0, apply_sync)
 
     def _on_vispy_mouse_move(self, event) -> None:
         # The PyQtGraph overlay owns interaction.  This bridge is only useful if
@@ -971,12 +1143,13 @@ class VisPyImageView2D(ImageView2D):
 def _import_vispy():
     try:
         from vispy import scene
+        from vispy import gloo
         from vispy.scene import visuals
         from vispy.scene.cameras import PanZoomCamera
         from vispy.visuals import transforms
     except Exception as exc:  # pragma: no cover - depends on optional package
         raise RuntimeError("VisPy rendering backend is not available. Install ArrayScope[vispy] or vispy.") from exc
-    return scene, visuals, transforms, PanZoomCamera
+    return scene, visuals, transforms, PanZoomCamera, gloo
 
 
 class _WindowedRgbVisual(Visual):
@@ -1161,6 +1334,41 @@ def _coerce_viewport_policy(policy, auto_range):
     return policy
 
 
+def _tiled_source_key(tile_payloads, tile_source_ids):
+    if tile_payloads is None:
+        return None
+    ids = tile_source_ids or {}
+    return tuple(
+        (int(tile), ids.get(int(tile), getattr(payload, "source_id", None)))
+        for tile, payload in sorted(dict(tile_payloads).items())
+    )
+
+
+def _tiled_structure_key(geometry, *, levels, histogram_range, viewport_policy, rgb_already_windowed):
+    montage = getattr(geometry, "montage", None)
+    if montage is None:
+        montage_key = None
+    else:
+        montage_key = (
+            tuple(int(index) for index in tuple(montage.indices)),
+            int(montage.tile_height),
+            int(montage.tile_width),
+            int(montage.columns),
+            int(montage.rows),
+            int(montage.gap),
+            int(getattr(geometry, "montage_origin_x", 0)),
+            int(getattr(geometry, "montage_origin_y", 0)),
+        )
+    return (
+        tuple(int(value) for value in tuple(getattr(geometry, "display_shape", ()))[:2]),
+        montage_key,
+        (float(levels[0]), float(levels[1])),
+        (float(histogram_range[0]), float(histogram_range[1])),
+        str(getattr(viewport_policy, "value", viewport_policy)),
+        bool(rgb_already_windowed),
+    )
+
+
 def _set_visual_visible(visual, visible: bool) -> None:
     if visual is None:
         return
@@ -1224,6 +1432,75 @@ def _vispy_roi_handle_points(geometry):
     if kind in {"polyline", "freehand_polygon"} and len(points) >= 2:
         return np.asarray(points, dtype=np.float32)
     return None
+
+
+def _overlay_batch_key(overlays):
+    return tuple(
+        (
+            int(getattr(overlay, "x", 0)),
+            int(getattr(overlay, "y", 0)),
+            int(getattr(overlay, "width", 1)),
+            int(getattr(overlay, "height", 1)),
+            str(getattr(overlay, "state", "")),
+        )
+        for overlay in tuple(overlays or ())
+    )
+
+
+def _overlay_mesh_arrays(overlays):
+    vertices = []
+    faces = []
+    colors = []
+    for overlay in tuple(overlays or ()):
+        x = float(getattr(overlay, "x", 0.0))
+        y = float(getattr(overlay, "y", 0.0))
+        width = float(max(1.0, getattr(overlay, "width", 1.0)))
+        height = float(max(1.0, getattr(overlay, "height", 1.0)))
+        fill, _border, _mark = _overlay_vispy_colors(overlay)
+        base = len(vertices)
+        vertices.extend(
+            (
+                (x, y, 0.0),
+                (x + width, y, 0.0),
+                (x + width, y + height, 0.0),
+                (x, y + height, 0.0),
+            )
+        )
+        faces.extend(((base, base + 1, base + 2), (base, base + 2, base + 3)))
+        colors.extend((fill, fill, fill, fill))
+    return (
+        np.asarray(vertices, dtype=np.float32).reshape((-1, 3)),
+        np.asarray(faces, dtype=np.uint32).reshape((-1, 3)),
+        np.asarray(colors, dtype=np.float32).reshape((-1, 4)),
+    )
+
+
+def _overlay_line_arrays(overlays):
+    points = []
+    colors = []
+    for overlay in tuple(overlays or ()):
+        x = float(getattr(overlay, "x", 0.0))
+        y = float(getattr(overlay, "y", 0.0))
+        width = float(max(1.0, getattr(overlay, "width", 1.0)))
+        height = float(max(1.0, getattr(overlay, "height", 1.0)))
+        _fill, border, mark = _overlay_vispy_colors(overlay)
+        border_segments = (
+            ((x, y), (x + width, y)),
+            ((x + width, y), (x + width, y + height)),
+            ((x + width, y + height), (x, y + height)),
+            ((x, y + height), (x, y)),
+        )
+        for a, b in border_segments:
+            points.extend((a, b))
+            colors.extend((border, border))
+        mark_points = np.asarray(_overlay_status_mark_points(overlay), dtype=np.float32).reshape((-1, 2))
+        for point in mark_points:
+            points.append((float(point[0]), float(point[1])))
+            colors.append(mark)
+    return (
+        np.asarray(points, dtype=np.float32).reshape((-1, 2)),
+        np.asarray(colors, dtype=np.float32).reshape((-1, 4)),
+    )
 
 
 def _overlay_vispy_colors(overlay):

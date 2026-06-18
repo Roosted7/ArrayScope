@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 Z_IMAGE = 0
+Z_BOUNDS = -1000
 Z_TILE_IMAGE = 0
 Z_ROI = 40
 Z_PROFILE_MARKER = 60
@@ -24,6 +25,9 @@ class ViewLayerOwner:
     def add_image_item(self, item) -> None:
         self._add_item(item, Z_IMAGE)
         self._image_item = item
+
+    def add_bounds_item(self, item) -> None:
+        self._add_item(item, Z_BOUNDS)
 
     def add_tile_item(self, tile_number: int, item) -> None:
         tile_number = int(tile_number)

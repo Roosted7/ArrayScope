@@ -11,7 +11,14 @@ import numpy as np
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey
+from arrayscope.window.display_frame import (
+    CanvasValueSource,
+    CommittedDisplayFrame,
+    DisplayFrameKey,
+    DisplayTilePayload,
+    FrameValueSource,
+    TiledValueSource,
+)
 
 
 class CommitKind(Enum):
@@ -48,6 +55,7 @@ class DisplayPayload:
     histogram_plot_data: np.ndarray | None = None
     montage_dirty_tiles: tuple[int, ...] | None = None
     montage_tile_source_ids: dict[int, object] | None = None
+    montage_tile_payloads: dict[int, DisplayTilePayload] | None = None
 
     @property
     def data(self) -> np.ndarray:
@@ -59,7 +67,7 @@ class DisplayPayload:
 
 
 @dataclass(frozen=True)
-class DisplayPresentation:
+class DisplayRasterPresentation:
     data: np.ndarray
     histogram_data: np.ndarray | None
     histogram_plot_data: np.ndarray | None
@@ -70,6 +78,35 @@ class DisplayPresentation:
     rgb_already_windowed: bool = False
     montage_dirty_tiles: tuple[int, ...] | None = None
     montage_tile_source_ids: dict[int, object] | None = None
+    montage_tile_payloads: dict[int, DisplayTilePayload] | None = None
+
+
+@dataclass(frozen=True)
+class DisplayTiledPresentation:
+    geometry: DisplayGeometry
+    levels: tuple[float, float]
+    histogram_range: tuple[float, float]
+    viewport_policy: ViewportPolicy
+    tile_payloads: dict[int, DisplayTilePayload]
+    histogram_plot_data: np.ndarray | None = None
+    montage_dirty_tiles: tuple[int, ...] | None = None
+    montage_tile_source_ids: dict[int, object] | None = None
+    rgb_already_windowed: bool = False
+
+    @property
+    def data(self) -> np.ndarray:
+        height, width = (max(1, int(value)) for value in self.geometry.display_shape)
+        sample = next(iter(self.tile_payloads.values()), None)
+        if sample is not None and np.asarray(sample.image).ndim == 3:
+            return np.broadcast_to(np.zeros((1, 1, 3), dtype=np.uint8), (height, width, 3))
+        return np.broadcast_to(np.zeros((1, 1), dtype=np.float32), (height, width))
+
+    @property
+    def histogram_data(self) -> np.ndarray | None:
+        return None
+
+
+DisplayPresentation = DisplayRasterPresentation
 
 
 @dataclass(frozen=True)

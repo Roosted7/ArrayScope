@@ -258,6 +258,65 @@ def test_tile_layer_presentation_creates_positioned_tile_items_and_syncs_levels(
     view.close()
 
 
+
+def test_tile_layer_direct_payloads_avoid_canvas_slicing(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.window.display_frame import DisplayTilePayload
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    placeholder = np.broadcast_to(np.zeros((1, 1), dtype=np.float32), (2, 5))
+    left = np.array([[1, 2], [3, 4]], dtype=np.float32)
+    right = np.array([[5, 6], [7, 8]], dtype=np.float32)
+    payloads = {
+        0: DisplayTilePayload(0, 0, left, left * 10, ("payload", 0)),
+        1: DisplayTilePayload(1, 1, right, right * 10, ("payload", 1)),
+    }
+
+    view.setMontageTileLayerPresentation(
+        placeholder,
+        histogramData=None,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 80.0),
+        histogramRange=(0.0, 80.0),
+        montage_tile_payloads=payloads,
+        montage_tile_source_ids={0: ("payload", 0), 1: ("payload", 1)},
+    )
+
+    states = view._montage_tile_layer.states
+    assert set(states) == {0, 1}
+    np.testing.assert_array_equal(states[0].item.image, left)
+    np.testing.assert_array_equal(states[1].item.image, right)
+    assert states[1].item.pos().x() == 3.0
+
+    view.setMontageTileLayerPresentation(
+        placeholder,
+        histogramData=None,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(10.0, 70.0),
+        histogramRange=(0.0, 80.0),
+        montage_dirty_tiles=(),
+        montage_tile_payloads=payloads,
+        montage_tile_source_ids={0: ("payload", 0), 1: ("payload", 1)},
+    )
+
+    timing = view.lastImageUploadTiming()
+    assert timing.tile_layer_items_updated == 0
+    assert timing.tile_layer_items_skipped == 2
+    assert timing.visible_bytes == 0
+    assert tuple(float(value) for value in states[0].item.levels) == (10.0, 70.0)
+    view.close()
+
 def test_montage_canvas_presentation_sets_image_item_world_origin(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry

@@ -40,6 +40,7 @@ class DisplayPresentationMixin:
         montage_level_key=None,
         montage_dirty_tiles=None,
         montage_tile_source_ids=None,
+        montage_tile_payloads=None,
     ):
         self._apply_full_display_image(
             display_image,
@@ -54,6 +55,7 @@ class DisplayPresentationMixin:
             montage_level_key=montage_level_key,
             montage_dirty_tiles=montage_dirty_tiles,
             montage_tile_source_ids=montage_tile_source_ids,
+            montage_tile_payloads=montage_tile_payloads,
         )
 
     def _apply_full_display_image(
@@ -76,6 +78,7 @@ class DisplayPresentationMixin:
         montage_level_key=None,
         montage_dirty_tiles=None,
         montage_tile_source_ids=None,
+        montage_tile_payloads=None,
     ):
         commit_start = perf_counter()
         try:
@@ -99,6 +102,7 @@ class DisplayPresentationMixin:
                         histogram_plot_data=histogram_plot_data,
                         montage_dirty_tiles=montage_dirty_tiles,
                         montage_tile_source_ids=montage_tile_source_ids,
+                        montage_tile_payloads=montage_tile_payloads,
                     ),
                     context=context,
                     previous_frame=previous_frame,
@@ -166,6 +170,7 @@ class DisplayPresentationMixin:
         montage_level_key=None,
         montage_dirty_tiles=None,
         montage_tile_source_ids=None,
+        montage_tile_payloads=None,
     ):
         commit_start = perf_counter()
         try:
@@ -186,6 +191,7 @@ class DisplayPresentationMixin:
                         histogram_plot_data=histogram_plot_data,
                         montage_dirty_tiles=montage_dirty_tiles,
                         montage_tile_source_ids=montage_tile_source_ids,
+                        montage_tile_payloads=montage_tile_payloads,
                     ),
                     context=context,
                     previous_frame=previous_frame,

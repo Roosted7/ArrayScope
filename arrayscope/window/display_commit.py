@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey
+from arrayscope.window.display_frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
 from arrayscope.window.presentation import DisplayPresentation
 
 
@@ -57,11 +57,20 @@ class DisplayCommitter:
             rgb_already_windowed=presentation.rgb_already_windowed,
             montage_dirty_tiles=presentation.montage_dirty_tiles,
             montage_tile_source_ids=presentation.montage_tile_source_ids,
+            montage_tile_payloads=presentation.montage_tile_payloads,
         )
         self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)
 
     def _frame_for(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
+        if presentation.montage_tile_payloads is not None:
+            value_source = TiledValueSource(presentation.montage_tile_payloads)
+        else:
+            value_source = CanvasValueSource(
+                data=presentation.data,
+                histogram_data=presentation.histogram_data,
+                geometry=presentation.geometry,
+            )
         return CommittedDisplayFrame(
             data=presentation.data,
             histogram_data=presentation.histogram_data,
@@ -69,6 +78,7 @@ class DisplayCommitter:
             levels=(float(presentation.levels[0]), float(presentation.levels[1])),
             histogram_range=(float(presentation.histogram_range[0]), float(presentation.histogram_range[1])),
             key=key,
+            value_source=value_source,
         )
 
     def _validate_presentation(self, presentation: DisplayPresentation) -> None:

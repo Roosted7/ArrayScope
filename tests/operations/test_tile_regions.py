@@ -54,6 +54,42 @@ def test_tile_region_provider_uses_committed_canvas_before_evaluation():
     np.testing.assert_array_equal(result.image, np.full((2, 2), 99.0))
 
 
+def test_tile_region_provider_uses_committed_direct_tile_payload_before_canvas_placeholder():
+    _data, state, plan, document, evaluator = _setup()
+    from arrayscope.window.display_frame import DisplayTilePayload, TiledValueSource
+
+    tile = plan.tiles[1]
+    placeholder = np.full((2, 7), -1.0, dtype=float)
+    geometry = DisplayGeometry(state, placeholder.shape, montage=plan.geometry)
+    image = np.arange(6, dtype=float).reshape(2, 3) + 100.0
+    histogram = image * 2.0
+    frame = CommittedDisplayFrame(
+        data=placeholder,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 200.0),
+        histogram_range=(0.0, 200.0),
+        key=DisplayFrameKey(_document_key(document), ("test",), 1),
+        value_source=TiledValueSource(
+            {
+                1: DisplayTilePayload(
+                    tile_number=1,
+                    source_index=tile.source_index,
+                    image=image,
+                    histogram_data=histogram,
+                    source_id=("payload", 1),
+                )
+            }
+        ),
+    )
+    provider = TileDataProvider(operation_evaluator=evaluator, document=document, committed_frame=frame, montage_plan=plan)
+
+    result = provider.request_tile_region(_request(document, tile, state, (slice(0, 2), slice(1, 3))))
+
+    assert result.source == "committed_tile_payload"
+    np.testing.assert_array_equal(result.image, image[:, 1:3])
+    np.testing.assert_array_equal(result.histogram_data, histogram[:, 1:3])
+
 def test_tile_region_provider_reuses_region_cache():
     _data, state, plan, document, evaluator = _setup()
     tile = plan.tiles[2]

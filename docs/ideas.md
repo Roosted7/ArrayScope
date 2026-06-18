@@ -124,6 +124,5 @@ Rules:
 
 ## Rendering backend experiments
 
-* Evaluate the experimental VisPy image backend on representative scalar and complex montages before replacing PyQtGraph as the only renderer.
-* If VisPy wins, move the remaining complex display preparation to GPU shaders: upload complex/scalar source data and generate phase/color plus magnitude/intensity mapping on the GPU.
+* Move remaining complex display preparation to GPU shaders: upload complex/scalar source data and generate phase/color plus magnitude/intensity mapping on the GPU.
 * Keep PyQtGraph's histogram as long as it remains useful; only replace it after the pixel display path is proven better.

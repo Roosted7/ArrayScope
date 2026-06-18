@@ -9,6 +9,8 @@ from typing import Callable
 import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 
+from arrayscope.window.display_frame import DisplayTilePayload
+
 from arrayscope.display.image_upload import rgb_display_for_levels
 
 
@@ -78,7 +80,17 @@ class MontageTileLayer:
         rgb_already_windowed: bool,
         dirty_tiles: tuple[int, ...] | None,
         tile_source_ids: dict[int, object] | None = None,
+        tile_payloads: dict[int, DisplayTilePayload] | None = None,
     ) -> TileLayerUpdateStats:
+        if tile_payloads is not None:
+            return self._update_direct_payload_presentation(
+                tile_payloads,
+                geometry=geometry,
+                levels=levels,
+                rgb_already_windowed=rgb_already_windowed,
+                dirty_tiles=dirty_tiles,
+                tile_source_ids=tile_source_ids,
+            )
         montage = geometry.montage
         tile_h = int(montage.tile_height)
         tile_w = int(montage.tile_width)
@@ -177,6 +189,151 @@ class MontageTileLayer:
             if should_upload:
                 tile_data = tile_view
                 tile_hist = None if hist is None else hist[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width]
+                updated, windowed = self._set_tile_data(
+                    item_state,
+                    tile_data,
+                    tile_hist,
+                    levels,
+                    source_index=int(source_index),
+                    source_array_id=source_id,
+                    histogram_array_id=hist_id,
+                    local_rect=local_rect,
+                    rgb_already_windowed=bool(rgb_already_windowed),
+                )
+                items_updated += int(updated)
+                rgb_window_tiles += int(windowed)
+            elif levels_changed:
+                updated, windowed = self._update_tile_levels(item_state, levels)
+                items_updated += int(updated)
+                rgb_window_tiles += int(windowed)
+                if not updated:
+                    items_skipped += 1
+            else:
+                items_skipped += 1
+                item_state.levels = levels
+                item_state.visible = True
+
+        for tile_number in tuple(self._states):
+            if int(tile_number) not in active:
+                self._hide_tile(tile_number)
+        self._prune_rgb_source_cache()
+
+        return TileLayerUpdateStats(
+            visible_items=int(visible_items),
+            items_updated=int(items_updated),
+            items_skipped=int(items_skipped),
+            rgb_window_tiles=int(rgb_window_tiles),
+        )
+
+
+    def _update_direct_payload_presentation(
+        self,
+        tile_payloads: dict[int, DisplayTilePayload],
+        *,
+        geometry,
+        levels: tuple[float, float],
+        rgb_already_windowed: bool,
+        dirty_tiles: tuple[int, ...] | None,
+        tile_source_ids: dict[int, object] | None = None,
+    ) -> TileLayerUpdateStats:
+        montage = geometry.montage
+        if montage is None:
+            return TileLayerUpdateStats()
+        tile_h = int(montage.tile_height)
+        tile_w = int(montage.tile_width)
+        stride_x = tile_w + int(montage.gap)
+        stride_y = tile_h + int(montage.gap)
+        active = set()
+        states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
+        dirty_set = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
+        levels = (float(levels[0]), float(levels[1]))
+        visible_items = 0
+        items_updated = 0
+        items_skipped = 0
+        rgb_window_tiles = 0
+
+        for tile_number, source_index in enumerate(tuple(montage.indices)):
+            state_value = "loaded"
+            if states and tile_number < len(states):
+                state_value = str(getattr(states[tile_number], "value", states[tile_number]))
+            payload = tile_payloads.get(int(tile_number)) if state_value == "loaded" else None
+            if payload is None:
+                self._hide_tile(tile_number)
+                continue
+
+            if not isinstance(payload, DisplayTilePayload):
+                raise TypeError("direct tile-layer payloads must be DisplayTilePayload instances")
+            tile_img = payload.image
+            if tile_img is None:
+                self._hide_tile(tile_number)
+                continue
+            tile_data = np.asarray(tile_img)
+            if tile_data.ndim < 2:
+                self._hide_tile(tile_number)
+                continue
+            width = min(tile_w, int(tile_data.shape[1]))
+            height = min(tile_h, int(tile_data.shape[0]))
+            if width <= 0 or height <= 0:
+                self._hide_tile(tile_number)
+                continue
+            if width != int(tile_data.shape[1]) or height != int(tile_data.shape[0]):
+                tile_data = tile_data[:height, :width, ...]
+            tile_hist = None if payload.histogram_data is None else np.asarray(payload.histogram_data)[:height, :width]
+
+            row = tile_number // int(montage.columns)
+            col = tile_number % int(montage.columns)
+            world_x = col * stride_x
+            world_y = row * stride_y
+            item_state = self._states.get(tile_number)
+            if item_state is None:
+                item = ImageItem(axisOrder="row-major")
+                self.layer_owner.add_tile_item(tile_number, item)
+                item_state = TileLayerItemState(
+                    tile_number=int(tile_number),
+                    source_index=int(source_index),
+                    item=item,
+                    local_rect=(-1, -1, -1, -1),
+                    source_array_id=0,
+                    histogram_array_id=None,
+                    levels=levels,
+                    rgb_already_windowed=bool(rgb_already_windowed),
+                    visible=False,
+                )
+                self._states[int(tile_number)] = item_state
+
+            item_state.item.setVisible(True)
+            item_state.item.setPos(float(world_x), float(world_y))
+            visible_items += 1
+            active.add(int(tile_number))
+
+            source_id = (
+                tile_source_ids.get(int(tile_number), payload.source_id)
+                if tile_source_ids is not None
+                else payload.source_id
+            )
+            hist_id = ("tile-source", source_id) if tile_hist is not None else None
+            local_rect = (0, 0, int(width), int(height))
+            source_changed = (
+                item_state.source_array_id != source_id
+                or item_state.histogram_array_id != hist_id
+                or tuple(item_state.local_rect) != local_rect
+                or int(item_state.source_index) != int(source_index)
+                or bool(item_state.rgb_already_windowed) != bool(rgb_already_windowed)
+            )
+            dirty = dirty_set is None or int(tile_number) in dirty_set
+            levels_changed = tuple(item_state.levels) != levels
+            is_rgb_tile = self._is_rgb_image(tile_data)
+            missing_display = getattr(item_state.item, "image", None) is None and is_rgb_tile
+            needs_source_rewindow = (
+                levels_changed
+                and is_rgb_tile
+                and not bool(rgb_already_windowed)
+                and tile_hist is not None
+                and (item_state.rgb_base is None or item_state.hist_source is None)
+            )
+            should_upload = bool(source_changed or dirty or not item_state.visible or missing_display or needs_source_rewindow)
+
+            if should_upload:
                 updated, windowed = self._set_tile_data(
                     item_state,
                     tile_data,
@@ -406,7 +563,6 @@ class MontageTileLayer:
             state.rgb_base = None
             state.hist_source = None
             state.source_cache_serial = 0
-
 
 def _source_cache_nbytes(state: TileLayerItemState) -> int:
     total = 0

@@ -117,6 +117,25 @@ class MontageRenderSession:
     def skipped_tile_tuple(self) -> tuple[MontageTile, ...]:
         return tuple(self.plan.tiles[index] for index in sorted(self.skipped_tiles) if 0 <= index < len(self.plan.tiles))
 
+    def ensure_tile_states(self) -> tuple[MontageTileState, ...]:
+        states = [MontageTileState.UNLOADED for _tile in self.plan.tiles]
+        for index in tuple(self.skipped_tiles):
+            index = int(index)
+            if 0 <= index < len(states):
+                states[index] = MontageTileState.SKIPPED
+        for index in tuple(self.loading_tiles):
+            index = int(index)
+            if 0 <= index < len(states) and states[index] != MontageTileState.SKIPPED:
+                states[index] = MontageTileState.LOADING
+        for index in tuple(self.rendered_tiles):
+            index = int(index)
+            if 0 <= index < len(states):
+                states[index] = MontageTileState.LOADED
+        self.tile_states = states
+        if self.canvas is not None:
+            object.__setattr__(self.canvas, "tile_states", tuple(self.tile_states))
+        return tuple(self.tile_states)
+
     def is_complete(self) -> bool:
         return not (
             self.pending_tiles
