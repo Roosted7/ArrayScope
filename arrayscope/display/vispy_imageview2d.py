@@ -38,7 +38,7 @@ from arrayscope.display.backends.vispy.raster import (
     _normalize_levels,
 )
 from arrayscope.display.shader_mapping import TexturePlaneKind, common_shader_mapping, shader_mapping_with_lut
-from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.display.viewport import ViewportPolicy, coerce_viewport_policy
 
 if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
@@ -306,7 +306,7 @@ class VisPyImageView2D(ImageView2D):
     ):
         if not isinstance(img, np.ndarray):
             raise TypeError("Image must be a numpy array")
-        viewport_policy = _coerce_viewport_policy(viewport_policy, autoRange)
+        viewport_policy = coerce_viewport_policy(viewport_policy, autoRange)
         self._start_upload_timing("vispy_full")
         applying = self._applying_presentation
         self._applying_presentation = True
@@ -1778,12 +1778,6 @@ def _import_vispy():
     except Exception as exc:  # pragma: no cover - depends on optional package
         raise RuntimeError("VisPy rendering backend is not available. Install ArrayScope[vispy] or vispy.") from exc
     return scene, visuals, transforms, PanZoomCamera, gloo
-
-
-def _coerce_viewport_policy(policy, auto_range):
-    if auto_range is not None:
-        return ViewportPolicy.FIT if bool(auto_range) else ViewportPolicy.PRESERVE
-    return policy
 
 
 def _tiled_source_key(tile_payloads, tile_source_ids):

@@ -26,6 +26,28 @@ class ViewportIntent(Enum):
     RESET_FOR_NEW_SHAPE = "reset_for_new_shape"
 
 
+def coerce_viewport_policy(
+    policy: ViewportPolicy | ViewportIntent | str,
+    auto_range: bool | None = None,
+) -> ViewportPolicy | ViewportIntent:
+    """Normalize legacy ``autoRange`` and semantic viewport requests once.
+
+    Rendering backends must not maintain independent translations of the
+    legacy boolean.  ``True`` means a one-time fit request; persistent Fit is
+    represented explicitly by :class:`ViewportIntent.FIT`/controller state.
+    """
+
+    if auto_range is not None:
+        return ViewportPolicy.FIT_ONCE if bool(auto_range) else ViewportPolicy.PRESERVE
+    if isinstance(policy, (ViewportPolicy, ViewportIntent)):
+        return policy
+    value = str(policy)
+    try:
+        return ViewportPolicy(value)
+    except ValueError:
+        return ViewportIntent(value)
+
+
 @dataclass
 class ViewportController:
     mode: ViewportMode = ViewportMode.AUTO_UNTOUCHED
