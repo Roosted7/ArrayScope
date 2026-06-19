@@ -347,11 +347,16 @@ class VisPyImageView2D(ImageView2D):
                 from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
 
                 visible = len(montage_tile_payloads or {})
+                previous = getattr(getattr(self, "_vispy_gpu_montage_layer", None), "last_stats", None)
                 stats = TileLayerUpdateStats(
                     visible_items=visible,
                     items_updated=0,
                     items_skipped=visible,
                     rgb_window_tiles=0,
+                    resident_items=int(getattr(previous, "resident_items", 0) or 0),
+                    storage_capacity=int(getattr(previous, "atlas_capacity", 0) or 0),
+                    estimated_gpu_bytes=int(getattr(previous, "estimated_gpu_bytes", 0) or 0),
+                    cpu_shadow_bytes=int(getattr(previous, "cpu_shadow_bytes", 0) or 0),
                 )
             else:
                 stats = self._update_vispy_tile_layer(
@@ -1229,6 +1234,16 @@ class VisPyImageView2D(ImageView2D):
             items_updated=int(stats.items_updated),
             items_skipped=int(stats.items_skipped),
             rgb_window_tiles=0,
+            resident_items=int(stats.resident_items),
+            storage_capacity=int(stats.atlas_capacity),
+            storage_rebuilds=int(stats.atlas_rebuilds),
+            storage_evictions=int(stats.atlas_evictions),
+            texture_uploads=int(stats.texture_uploads),
+            texture_upload_bytes=int(stats.texture_upload_bytes),
+            vertex_uploads=int(stats.vertex_uploads),
+            level_updates=int(stats.level_updates),
+            estimated_gpu_bytes=int(stats.estimated_gpu_bytes),
+            cpu_shadow_bytes=int(stats.cpu_shadow_bytes),
         )
 
     def _ensure_vispy_tile(self, tile_number: int, *, windowed_rgb: bool = False) -> _VisPyTileState:

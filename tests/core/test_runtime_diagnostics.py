@@ -83,6 +83,16 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
             tile_layer_items_updated=1,
             tile_layer_items_skipped=49,
             tile_layer_rgb_window_tiles=1,
+            tile_layer_resident_items=80,
+            tile_layer_storage_capacity=128,
+            tile_layer_storage_rebuilds=1,
+            tile_layer_storage_evictions=2,
+            tile_layer_texture_uploads=3,
+            tile_layer_texture_upload_bytes=4096,
+            tile_layer_vertex_uploads=1,
+            tile_layer_level_updates=1,
+            tile_layer_estimated_gpu_bytes=8192,
+            tile_layer_cpu_shadow_bytes=0,
             coalesced_commits=7,
         ),
         fft_backend_choice="auto",
@@ -132,7 +142,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Reusable stage: stage=3 hit, repeated per tile=no" in text
     assert "Tile compute: cache_hit=3 stage_backed=4 direct=1 waiting_stage=2" in text
     assert "Lead direct tiles: 1" in text
-    assert "Tile layer:\n  visible=50 updated=1 skipped=49 rgb_tiles=1" in text
+    assert "Tile layer:\n  visible=50 resident=80/128 updated=1 skipped=49 rgb_tiles=1" in text
     assert "Timing visible upload: 10.00 ms" in text
     assert "Timing histogram upload: 5.00 ms" in text
     assert "Timing histogram recompute: 3.00 ms" in text
@@ -141,8 +151,10 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Timing tile layer RGB window: 1.50 ms" in text
     assert "Timing level sync: 1.00 ms" in text
     assert "Coalesced montage commits: 7" in text
-    assert "Tile layer items: visible=50 updated=1 skipped=49" in text
+    assert "Tile layer items: visible=50 resident=80/128 updated=1 skipped=49" in text
     assert "Tile layer RGB window tiles: 1" in text
+    assert "Tile layer storage: rebuilds=1 evictions=2 gpu=8.0 KiB cpu_shadow=0 B" in text
+    assert "Tile layer submissions: textures=3 bytes=4.0 KiB vertices=1 levels=1" in text
     assert "Upload: visible=1.0 KiB histogram=512 B same object=True" in text
     assert "Tile cache last session: cached=3 missing=4" in text
     assert "Workers: visible=1, montage_tile=2" in text

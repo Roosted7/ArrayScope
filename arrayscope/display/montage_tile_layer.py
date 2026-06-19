@@ -40,6 +40,20 @@ class TileLayerUpdateStats:
     items_updated: int = 0
     items_skipped: int = 0
     rgb_window_tiles: int = 0
+    # Backend-neutral diagnostics.  CPU tile layers leave these at zero;
+    # GPU-backed implementations fill them so the diagnostics UI can expose
+    # residency and upload behaviour instead of treating every tile layer as
+    # equivalent.
+    resident_items: int = 0
+    storage_capacity: int = 0
+    storage_rebuilds: int = 0
+    storage_evictions: int = 0
+    texture_uploads: int = 0
+    texture_upload_bytes: int = 0
+    vertex_uploads: int = 0
+    level_updates: int = 0
+    estimated_gpu_bytes: int = 0
+    cpu_shadow_bytes: int = 0
 
 
 class MontageTileLayer:

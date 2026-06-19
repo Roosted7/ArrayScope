@@ -229,6 +229,16 @@ class ImageView2D(QtWidgets.QWidget):
             "tile_layer_items_updated": 0,
             "tile_layer_items_skipped": 0,
             "tile_layer_rgb_window_tiles": 0,
+            "tile_layer_resident_items": 0,
+            "tile_layer_storage_capacity": 0,
+            "tile_layer_storage_rebuilds": 0,
+            "tile_layer_storage_evictions": 0,
+            "tile_layer_texture_uploads": 0,
+            "tile_layer_texture_upload_bytes": 0,
+            "tile_layer_vertex_uploads": 0,
+            "tile_layer_level_updates": 0,
+            "tile_layer_estimated_gpu_bytes": 0,
+            "tile_layer_cpu_shadow_bytes": 0,
         }
 
     def _record_upload_timing(self, field: str, ms: float) -> None:
@@ -261,6 +271,16 @@ class ImageView2D(QtWidgets.QWidget):
             tile_layer_items_updated=int(timing["tile_layer_items_updated"]),
             tile_layer_items_skipped=int(timing["tile_layer_items_skipped"]),
             tile_layer_rgb_window_tiles=int(timing["tile_layer_rgb_window_tiles"]),
+            tile_layer_resident_items=int(timing["tile_layer_resident_items"]),
+            tile_layer_storage_capacity=int(timing["tile_layer_storage_capacity"]),
+            tile_layer_storage_rebuilds=int(timing["tile_layer_storage_rebuilds"]),
+            tile_layer_storage_evictions=int(timing["tile_layer_storage_evictions"]),
+            tile_layer_texture_uploads=int(timing["tile_layer_texture_uploads"]),
+            tile_layer_texture_upload_bytes=int(timing["tile_layer_texture_upload_bytes"]),
+            tile_layer_vertex_uploads=int(timing["tile_layer_vertex_uploads"]),
+            tile_layer_level_updates=int(timing["tile_layer_level_updates"]),
+            tile_layer_estimated_gpu_bytes=int(timing["tile_layer_estimated_gpu_bytes"]),
+            tile_layer_cpu_shadow_bytes=int(timing["tile_layer_cpu_shadow_bytes"]),
         )
         self._upload_timing = None
 
@@ -443,6 +463,16 @@ class ImageView2D(QtWidgets.QWidget):
         timing["tile_layer_items_updated"] = int(stats.items_updated)
         timing["tile_layer_items_skipped"] = int(stats.items_skipped)
         timing["tile_layer_rgb_window_tiles"] = int(stats.rgb_window_tiles)
+        timing["tile_layer_resident_items"] = int(stats.resident_items)
+        timing["tile_layer_storage_capacity"] = int(stats.storage_capacity)
+        timing["tile_layer_storage_rebuilds"] = int(stats.storage_rebuilds)
+        timing["tile_layer_storage_evictions"] = int(stats.storage_evictions)
+        timing["tile_layer_texture_uploads"] = int(stats.texture_uploads)
+        timing["tile_layer_texture_upload_bytes"] = int(stats.texture_upload_bytes)
+        timing["tile_layer_vertex_uploads"] = int(stats.vertex_uploads)
+        timing["tile_layer_level_updates"] = int(stats.level_updates)
+        timing["tile_layer_estimated_gpu_bytes"] = int(stats.estimated_gpu_bytes)
+        timing["tile_layer_cpu_shadow_bytes"] = int(stats.cpu_shadow_bytes)
 
     def _tile_layer_histogram_key(self, histogramData, histogramPlotData, *, levels, histogramRange):
         source = histogramPlotData if histogramPlotData is not None else histogramData
