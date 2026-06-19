@@ -565,6 +565,7 @@ def test_vispy_roi_visuals_update_during_live_region_changes(qt_app):
         view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
         selection = view.createRoi("rectangle", rect=(3.0, 4.0, 8.0, 6.0), color=(255, 32, 16))
         item, _selection = view._roi_items[selection.id]
+        handle_visual = view._vispy_roi_handle_visuals[selection.id][0]
 
         item.setPos(5.0, 7.0)
         qt_app.processEvents()
@@ -574,6 +575,50 @@ def test_vispy_roi_visuals_update_during_live_region_changes(qt_app):
         assert live_selection.geometry.rect[:2] == (5.0, 7.0)
         assert view._vispy_roi_visuals[selection.id].visible
         assert view._vispy_roi_handle_visuals[selection.id][0].visible
+        assert view._vispy_roi_handle_visuals[selection.id][0] is handle_visual
+    finally:
+        view.close()
+
+
+def test_vispy_line_roi_has_reused_endpoint_handles_and_hover_cursor(qt_app):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    data = np.linspace(0.0, 1.0, 20 * 24, dtype=np.float32).reshape(20, 24)
+    try:
+        view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+        selection = view.createRoi("line", points=((3.0, 4.0), (11.0, 8.0)), color=(40, 190, 255))
+        marker = view._vispy_roi_handle_visuals[selection.id][0]
+
+        assert marker.visible
+        assert view._vispy_roi_cursor_for_point(3.0, 4.0).shape() == QtCore.Qt.CursorShape.SizeAllCursor
+        assert view._vispy_roi_cursor_for_point(7.0, 6.0).shape() == QtCore.Qt.CursorShape.SizeAllCursor
+
+        item, _selection = view._roi_items[selection.id]
+        item.setPos(1.0, 2.0)
+        qt_app.processEvents()
+
+        assert view._vispy_roi_handle_visuals[selection.id][0] is marker
+    finally:
+        view.close()
+
+
+def test_vispy_freehand_drawing_preview_reuses_one_visual(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    try:
+        view._set_roi_drawing_preview("roi_freehand", ((1.0, 1.0), (3.0, 2.0)))
+        preview = view._vispy_roi_drawing_preview
+        assert preview is not None
+        assert preview.visible
+
+        view._set_roi_drawing_preview("roi_freehand", ((1.0, 1.0), (3.0, 2.0), (5.0, 4.0)))
+        assert view._vispy_roi_drawing_preview is preview
+
+        view._set_roi_drawing_preview(None, ())
+        assert not preview.visible
     finally:
         view.close()
 
