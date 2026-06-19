@@ -17,6 +17,22 @@ EXACT_TILE_SAMPLE_LIMIT = 32768
 AGGREGATE_SAMPLE_LIMIT = 262144
 
 
+def montage_level_key(document_key, view_state, all_indices, colormap_lut) -> tuple[object, ...]:
+    """Identity for semantic montage levels, independent of layout/viewport."""
+
+    axis = view_state.montage_axis
+    scope_state = view_state.with_montage_axis(axis, columns=None, indices=None, text=None)
+    lut_key = None if colormap_lut is None else np.asarray(colormap_lut).tobytes()
+    return (
+        "montage_levels",
+        document_key,
+        scope_state,
+        None if axis is None else int(axis),
+        tuple(int(index) for index in all_indices),
+        lut_key,
+    )
+
+
 @dataclass(frozen=True)
 class TileLevelStats:
     source_index: int
@@ -51,10 +67,14 @@ class MontageLevelTracker:
     def __init__(self):
         self._tiles: dict[object, dict[int, TileLevelStats]] = {}
         self._expected: dict[object, frozenset[int]] = {}
+        self._revisions: dict[object, int] = {}
+        self._aggregate_cache: dict[object, tuple[int, frozenset[int], MontageLevelStats]] = {}
 
     def ensure(self, key: object, expected_indices: Iterable[int]) -> MontageLevelStats:
         expected = frozenset(int(index) for index in expected_indices)
-        self._expected[key] = expected
+        if self._expected.get(key) != expected:
+            self._expected[key] = expected
+            self._invalidate(key)
         self._tiles.setdefault(key, {})
         return self._stats_for_expected(key, expected)
 
@@ -66,17 +86,19 @@ class MontageLevelTracker:
         image: np.ndarray,
         *,
         refined: bool = False,
-    ) -> MontageLevelStats:
+        aggregate: bool = True,
+    ) -> MontageLevelStats | None:
         expected = self._expected.get(key, frozenset())
         source = histogram_data if histogram_data is not None else image
         tile_stats = _sample_tile_stats(source, int(source_index), refined=bool(refined))
         if tile_stats is None:
-            return self._stats_for_expected(key, expected)
+            return self.stats_for(key) if aggregate else None
         by_source = self._tiles.setdefault(key, {})
         previous = by_source.get(int(source_index))
         if previous is None or bool(refined) or not previous.refined:
             by_source[int(source_index)] = tile_stats
-        return self._stats_for_expected(key, expected)
+            self._invalidate(key)
+        return self.stats_for(key) if aggregate else None
 
     def best_source(self, key: object, *, explicit_auto: bool = False) -> LevelSource | None:
         del explicit_auto
@@ -112,18 +134,29 @@ class MontageLevelTracker:
         return {key: self._stats_for_expected(key, expected) for key, expected in self._expected.items()}
 
     def _stats_for_expected(self, key: object, expected: frozenset[int]) -> MontageLevelStats:
+        revision = int(self._revisions.get(key, 0))
+        cached = self._aggregate_cache.get(key)
+        if cached is not None and cached[0] == revision and cached[1] == expected:
+            return cached[2]
         by_source = self._tiles.get(key, {})
         selected = [by_source[index] for index in sorted(expected) if index in by_source]
         if not selected:
-            return MontageLevelStats(None, frozenset(), expected, LevelSourceRank.NONE, None, False)
-        bounds = _union_tile_bounds(selected)
-        sources = frozenset(stat.source_index for stat in selected)
-        rank = self._rank_for(sources, expected)
-        refined = bool(selected) and all(stat.refined for stat in selected)
-        if rank == LevelSourceRank.MONTAGE_COMPLETE and refined:
-            rank = LevelSourceRank.MONTAGE_SAMPLED_FULL
-        sample = _aggregate_samples(tuple(stat.sample for stat in selected), AGGREGATE_SAMPLE_LIMIT)
-        return MontageLevelStats(bounds, sources, expected, rank, sample, refined)
+            stats = MontageLevelStats(None, frozenset(), expected, LevelSourceRank.NONE, None, False)
+        else:
+            bounds = _union_tile_bounds(selected)
+            sources = frozenset(stat.source_index for stat in selected)
+            rank = self._rank_for(sources, expected)
+            refined = bool(selected) and all(stat.refined for stat in selected)
+            if rank == LevelSourceRank.MONTAGE_COMPLETE and refined:
+                rank = LevelSourceRank.MONTAGE_SAMPLED_FULL
+            sample = _aggregate_samples(tuple(stat.sample for stat in selected), AGGREGATE_SAMPLE_LIMIT)
+            stats = MontageLevelStats(bounds, sources, expected, rank, sample, refined)
+        self._aggregate_cache[key] = (revision, expected, stats)
+        return stats
+
+    def _invalidate(self, key: object) -> None:
+        self._revisions[key] = int(self._revisions.get(key, 0)) + 1
+        self._aggregate_cache.pop(key, None)
 
     def _rank_for(self, source_indices: Iterable[int], expected_indices: Iterable[int]) -> LevelSourceRank:
         sources = frozenset(int(index) for index in source_indices)
@@ -153,7 +186,8 @@ def _finite_sample(values, *, limit: int) -> np.ndarray:
     if array.size == 0:
         return np.asarray((), dtype=np.float32)
     flat = array.reshape(-1)
-    finite = flat[np.isfinite(flat)]
+    mask = np.isfinite(flat)
+    finite = flat if bool(np.all(mask)) else flat[mask]
     if finite.size > int(limit):
         finite = _sparse_even_random_sample(finite, limit=int(limit))
     return np.asarray(finite, dtype=np.float32)
@@ -164,7 +198,8 @@ def _finite_bounds(values) -> tuple[float, float] | None:
     if array.size == 0:
         return None
     flat = array.reshape(-1)
-    finite = flat[np.isfinite(flat)]
+    mask = np.isfinite(flat)
+    finite = flat if bool(np.all(mask)) else flat[mask]
     if finite.size == 0:
         return None
     return normalize_bounds((float(np.min(finite)), float(np.max(finite))))
@@ -212,8 +247,18 @@ def _aggregate_samples(samples: tuple[np.ndarray, ...], limit: int) -> np.ndarra
     non_empty = [np.asarray(sample, dtype=np.float32).reshape(-1) for sample in samples if np.asarray(sample).size]
     if not non_empty:
         return None
-    combined = np.concatenate(non_empty)
-    if combined.size <= int(limit):
-        return combined
-    step = max(1, int(math.ceil(combined.size / max(1, int(limit)))))
-    return combined[::step][: int(limit)]
+    limit = max(1, int(limit))
+    total = sum(int(sample.size) for sample in non_empty)
+    if total <= limit:
+        return np.concatenate(non_empty)
+    step = max(1, int(math.ceil(total / limit)))
+    conceptual = np.arange(0, total, step, dtype=np.int64)[:limit]
+    selected = []
+    offset = 0
+    for sample in non_empty:
+        end = offset + int(sample.size)
+        local = conceptual[(conceptual >= offset) & (conceptual < end)] - offset
+        if local.size:
+            selected.append(sample[local])
+        offset = end
+    return np.concatenate(selected) if selected else None
