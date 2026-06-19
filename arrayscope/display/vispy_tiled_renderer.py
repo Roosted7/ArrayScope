@@ -59,6 +59,9 @@ class TextureAtlasPool:
         self.atlas_shape: tuple[int, int] = (1, 1)
         self.scalar_texture = None
         self.color_texture = None
+        self.storage_mode: str | None = None
+        self.scalar_is_atlas = False
+        self.color_is_atlas = False
         self.slots: dict[int, int] = {}
         self.slot_owners: list[int | None] = []
         self.source_ids: dict[int, object] = {}
@@ -78,7 +81,18 @@ class TextureAtlasPool:
         # staging arrays exist during a sub-upload.
         return 0
 
-    def ensure_layout(self, *, tile_shape: tuple[int, int], count: int) -> bool:
+    @property
+    def estimated_gpu_bytes(self) -> int:
+        pixels = int(self.atlas_shape[0]) * int(self.atlas_shape[1])
+        return pixels * (4 if self.scalar_is_atlas else 0) + pixels * (3 if self.color_is_atlas else 0)
+
+    def ensure_layout(
+        self,
+        *,
+        tile_shape: tuple[int, int],
+        count: int,
+        storage_mode: str = "scalar_color",
+    ) -> bool:
         tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
         requested = max(1, int(count))
         max_columns = self.max_texture_size // tile_w
@@ -94,11 +108,13 @@ class TextureAtlasPool:
                 f"{self.max_texture_size}x{self.max_texture_size} atlas page (capacity {max_slots})"
             )
 
+        storage_mode = _normalize_storage_mode(storage_mode)
         shape_changed = self.tile_shape != (tile_h, tile_w)
-        if not shape_changed and requested <= self.capacity:
+        mode_changed = self.storage_mode != storage_mode
+        if not shape_changed and not mode_changed and requested <= self.capacity:
             return False
 
-        if shape_changed or self.capacity < 1:
+        if shape_changed or mode_changed or self.capacity < 1:
             target_capacity = requested
         else:
             # Amortise growth when no complete visibility estimate was
@@ -118,21 +134,44 @@ class TextureAtlasPool:
         self.columns = int(columns)
         self.rows = int(rows)
         self.atlas_shape = atlas_shape
-        # Shape-only allocation avoids a full scalar plus RGB CPU shadow copy.
-        self.scalar_texture = self._gloo.Texture2D(
-            shape=atlas_shape + (1,),
-            format="red",
-            internalformat="r32f",
-            interpolation="nearest",
-            wrapping="clamp_to_edge",
-        )
-        self.color_texture = self._gloo.Texture2D(
-            shape=atlas_shape + (3,),
-            format="rgb",
-            internalformat="rgb8",
-            interpolation="nearest",
-            wrapping="clamp_to_edge",
-        )
+        # Shape-only allocation avoids a full CPU shadow copy.  Allocate only
+        # the full-size texture planes actually used by this presentation; the
+        # other sampler receives a tiny initialized fallback texture.
+        self.storage_mode = storage_mode
+        self.scalar_is_atlas = storage_mode in {"scalar", "scalar_color"}
+        self.color_is_atlas = storage_mode in {"color", "scalar_color"}
+        if self.scalar_is_atlas:
+            self.scalar_texture = self._gloo.Texture2D(
+                shape=atlas_shape + (1,),
+                format="red",
+                internalformat="r32f",
+                interpolation="nearest",
+                wrapping="clamp_to_edge",
+            )
+        else:
+            self.scalar_texture = self._gloo.Texture2D(
+                np.ones((1, 1), dtype=np.float32),
+                format="red",
+                internalformat="r32f",
+                interpolation="nearest",
+                wrapping="clamp_to_edge",
+            )
+        if self.color_is_atlas:
+            self.color_texture = self._gloo.Texture2D(
+                shape=atlas_shape + (3,),
+                format="rgb",
+                internalformat="rgb8",
+                interpolation="nearest",
+                wrapping="clamp_to_edge",
+            )
+        else:
+            self.color_texture = self._gloo.Texture2D(
+                np.zeros((1, 1, 3), dtype=np.uint8),
+                format="rgb",
+                internalformat="rgb8",
+                interpolation="nearest",
+                wrapping="clamp_to_edge",
+            )
         self.slots.clear()
         self.slot_owners = [None] * self.capacity
         self.source_ids.clear()
@@ -153,7 +192,16 @@ class TextureAtlasPool:
         start = perf_counter()
         payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
         requested_capacity = max(len(payload_items), int(reserve_count or 0), 1)
-        rebuilt = self.ensure_layout(tile_shape=tile_shape, count=requested_capacity)
+        storage_mode = (
+            _atlas_storage_mode(payload_items, rgb_already_windowed=rgb_already_windowed)
+            if payload_items
+            else (self.storage_mode or "scalar")
+        )
+        rebuilt = self.ensure_layout(
+            tile_shape=tile_shape,
+            count=requested_capacity,
+            storage_mode=storage_mode,
+        )
         dirty = set() if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
         active = {int(tile_number) for tile_number, _payload in payload_items}
         uvs: dict[int, tuple[float, float, float, float]] = {}
@@ -181,17 +229,23 @@ class TextureAtlasPool:
                 skipped += 1
                 continue
 
-            scalar, color = _payload_textures(
+            scalar, color = _payload_texture_data(
                 payload,
                 tile_shape=(tile_h, tile_w),
                 rgb_already_windowed=rgb_already_windowed,
+                need_scalar=self.scalar_is_atlas,
+                need_color=self.color_is_atlas,
             )
-            self.scalar_texture.set_data(scalar, offset=(int(y0), int(x0)), copy=False)
-            self.color_texture.set_data(color, offset=(int(y0), int(x0)), copy=False)
+            if scalar is not None:
+                self.scalar_texture.set_data(scalar, offset=(int(y0), int(x0)), copy=False)
+                uploads += 1
+                upload_bytes += int(scalar.nbytes)
+            if color is not None:
+                self.color_texture.set_data(color, offset=(int(y0), int(x0)), copy=False)
+                uploads += 1
+                upload_bytes += int(color.nbytes)
             self.source_ids[tile_number] = payload.source_id
             updated += 1
-            uploads += 2
-            upload_bytes += int(scalar.nbytes + color.nbytes)
 
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
         return uvs, GpuMontageLayerStats(
@@ -387,21 +441,30 @@ class GpuWindowedTileVisual(Visual):
     varying float v_mode;
 
     void main() {
-        float scalar = texture2D(u_scalar_texture, v_texcoord).r;
-        vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
-        float span = max(u_levels.y - u_levels.x, 1e-12);
-        float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
-        float alpha = 1.0;
-        if (scalar != scalar) {
-            intensity = 0.0;
-            alpha = 0.0;
-        }
         if (v_mode < 0.5) {
+            float scalar = texture2D(u_scalar_texture, v_texcoord).r;
+            float span = max(u_levels.y - u_levels.x, 1e-12);
+            float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
+            float alpha = 1.0;
+            if (scalar != scalar) {
+                intensity = 0.0;
+                alpha = 0.0;
+            }
             gl_FragColor = vec4(vec3(intensity), alpha);
         } else if (v_mode < 1.5) {
+            float scalar = texture2D(u_scalar_texture, v_texcoord).r;
+            vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
+            float span = max(u_levels.y - u_levels.x, 1e-12);
+            float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
+            float alpha = 1.0;
+            if (scalar != scalar) {
+                intensity = 0.0;
+                alpha = 0.0;
+            }
             gl_FragColor = vec4(color * intensity, alpha);
         } else {
-            gl_FragColor = vec4(color, alpha);
+            vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
+            gl_FragColor = vec4(color, 1.0);
         }
     }
     """
@@ -484,20 +547,43 @@ def create_gpu_montage_layer(*, scene, visuals, gloo, transforms, parent) -> Gpu
 
 
 def _payload_textures(payload: DisplayTilePayload, *, tile_shape: tuple[int, int], rgb_already_windowed: bool):
+    """Compatibility helper returning both texture planes for tests/tools."""
+
+    scalar, color = _payload_texture_data(
+        payload,
+        tile_shape=tile_shape,
+        rgb_already_windowed=rgb_already_windowed,
+        need_scalar=True,
+        need_color=True,
+    )
+    return scalar, color
+
+
+def _payload_texture_data(
+    payload: DisplayTilePayload,
+    *,
+    tile_shape: tuple[int, int],
+    rgb_already_windowed: bool,
+    need_scalar: bool,
+    need_color: bool,
+):
     tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
     image = np.asarray(payload.image)
     if image.ndim == 3 and image.shape[-1] in (3, 4):
-        color = _fit_color(image[..., :3], (tile_h, tile_w))
-        if rgb_already_windowed:
-            scalar = np.ones((tile_h, tile_w), dtype=np.float32)
-        else:
-            source = payload.histogram_data
-            if source is None:
-                source = _luminance(color)
-            scalar = _fit_scalar(source, (tile_h, tile_w))
+        color = _fit_color(image[..., :3], (tile_h, tile_w)) if need_color else None
+        scalar = None
+        if need_scalar:
+            if rgb_already_windowed:
+                scalar = np.ones((tile_h, tile_w), dtype=np.float32)
+            else:
+                source = payload.histogram_data
+                if source is None:
+                    source = _luminance(image[..., :3])
+                scalar = _fit_scalar(source, (tile_h, tile_w))
         return scalar, color
-    scalar = _fit_scalar(image, (tile_h, tile_w))
-    return scalar, np.zeros((tile_h, tile_w, 3), dtype=np.uint8)
+    scalar = _fit_scalar(image, (tile_h, tile_w)) if need_scalar else None
+    color = np.zeros((tile_h, tile_w, 3), dtype=np.uint8) if need_color else None
+    return scalar, color
 
 
 def _fit_scalar(data, shape: tuple[int, int]) -> np.ndarray:
@@ -575,6 +661,31 @@ def _normalize_levels(levels, fallback):
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         return tuple(float(value) for value in fallback)
     return low, high
+
+
+def _atlas_storage_mode(payload_items, *, rgb_already_windowed: bool) -> str:
+    needs_scalar = False
+    needs_color = False
+    for _tile_number, payload in payload_items:
+        image = np.asarray(payload.image)
+        is_color = image.ndim == 3 and image.shape[-1] in (3, 4)
+        if is_color:
+            needs_color = True
+            needs_scalar = needs_scalar or not bool(rgb_already_windowed)
+        else:
+            needs_scalar = True
+    if needs_scalar and needs_color:
+        return "scalar_color"
+    if needs_color:
+        return "color"
+    return "scalar"
+
+
+def _normalize_storage_mode(mode: str) -> str:
+    mode = str(mode or "scalar_color")
+    if mode not in {"scalar", "color", "scalar_color"}:
+        raise ValueError(f"unknown atlas storage mode: {mode}")
+    return mode
 
 
 def _atlas_grid(*, tile_shape: tuple[int, int], capacity: int, max_texture_size: int) -> tuple[int, int]:
