@@ -9,6 +9,7 @@ import numpy as np
 
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.lod import LodInfo
+from arrayscope.display.scene import DisplayScene, DisplayStorage, display_scene_for_geometry
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 
 
@@ -291,6 +292,7 @@ class CommittedDisplayFrame:
     histogram_range: tuple[float, float]
     key: DisplayFrameKey
     value_source: FrameValueSource | None = None
+    scene: DisplayScene | None = None
 
     def __post_init__(self) -> None:
         if self.value_source is None:
@@ -307,6 +309,16 @@ class CommittedDisplayFrame:
             )
         elif self.data is None and not isinstance(self.value_source, TiledValueSource):
             raise ValueError("data-less committed frames require a tiled value source")
+        if self.scene is None:
+            storage = DisplayStorage.TILED if isinstance(self.value_source, TiledValueSource) else DisplayStorage.RASTER
+            payloads = self.value_source.payloads if isinstance(self.value_source, TiledValueSource) else {}
+            object.__setattr__(
+                self,
+                "scene",
+                display_scene_for_geometry(self.geometry, storage=storage, payloads=payloads),
+            )
+        elif self.scene.geometry != self.geometry:
+            raise ValueError("committed display frame scene geometry must match frame geometry")
 
     @property
     def is_tiled(self) -> bool:
