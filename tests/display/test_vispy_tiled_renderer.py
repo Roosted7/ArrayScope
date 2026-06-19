@@ -127,6 +127,30 @@ def test_atlas_reserve_avoids_progressive_reallocation():
     assert pool.rebuild_count == 1
 
 
+def test_none_dirty_set_forces_refresh_even_when_sources_match():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    values = {0: payload(0, 1.0), 1: payload(1, 2.0)}
+    pool.update_payloads(
+        values,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=2,
+    )
+
+    _uvs, refreshed = pool.update_payloads(
+        values,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=2,
+    )
+
+    assert refreshed.items_updated == 2
+    assert refreshed.items_skipped == 0
+    assert refreshed.texture_uploads == 2
+
+
 def test_atlas_retains_offscreen_payload_for_later_clean_reuse():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     values = {0: payload(0, 1.0), 1: payload(1, 2.0)}
