@@ -42,7 +42,7 @@ from arrayscope.operations.slabs import (
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_backend import choose_montage_backend
-from arrayscope.window.montage_levels import MontageLevelStats, MontageLevelTracker
+from arrayscope.window.montage_levels import MontageLevelStats, MontageLevelTracker, montage_level_key
 from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.window.presentation import LevelSourceRank, fallback_level_source
@@ -274,18 +274,11 @@ class MontageRenderMixin:
         self._schedule_montage_tiles(session)
 
     def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
-        scope_state = view_state.with_montage_axis(
-            view_state.montage_axis,
-            columns=view_state.montage_columns,
-            indices=None,
-            text=None,
-        )
-        return (
-            "montage_levels",
+        return montage_level_key(
             _document_key(document),
-            scope_state,
-            int(view_state.montage_axis),
-            None if colormap_lut is None else colormap_lut.tobytes(),
+            view_state,
+            all_indices,
+            colormap_lut,
         )
 
     def _empty_montage_level_stats(self, expected_indices) -> MontageLevelStats:
@@ -316,6 +309,7 @@ class MontageRenderMixin:
             rendered.histogram_data,
             rendered.image,
             refined=bool(refined),
+            aggregate=False,
         )
 
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:

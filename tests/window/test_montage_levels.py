@@ -60,3 +60,36 @@ def test_montage_level_tracker_samples_deterministically_and_caps_aggregate():
     assert sample is not None
     assert sample.size <= AGGREGATE_SAMPLE_LIMIT
     assert np.array_equal(sample[:5], np.asarray([0, 4, 8, 12, 16], dtype=np.float32))
+
+
+def test_montage_level_key_tracks_tile_population_but_not_layout():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.window.montage_levels import montage_level_key
+
+    state = ViewState.from_shape((8, 8, 6)).with_montage_axis(2, columns=2, indices=(0, 1, 2), text="0:3")
+    relaid = state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text="0:3")
+
+    first = montage_level_key("doc", state, (0, 1, 2), None)
+    second = montage_level_key("doc", relaid, (0, 1, 2), None)
+    changed_population = montage_level_key("doc", relaid, (0, 1, 2, 3), None)
+
+    assert first == second
+    assert first != changed_population
+
+
+def test_montage_level_tracker_can_defer_aggregate_rebuild():
+    tracker = MontageLevelTracker()
+    key = "scope"
+    tracker.ensure(key, (0, 1))
+
+    assert tracker.update_from_tile(
+        key,
+        0,
+        np.ones((4, 4), dtype=np.float32),
+        np.ones((4, 4), dtype=np.float32),
+        aggregate=False,
+    ) is None
+    stats = tracker.stats_for(key)
+
+    assert stats.source_indices == frozenset({0})
+    assert tracker.stats_for(key) is stats
