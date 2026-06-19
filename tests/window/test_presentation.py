@@ -144,7 +144,7 @@ def test_progressive_montage_patch_accepts_partial_implicit_source_monotonically
         )
     )
 
-    assert decision.levels == (2.0, 8.0)
+    assert decision.levels == (40.0, 160.0)
     assert decision.histogram_range == (0.0, 200.0)
 
 
@@ -159,7 +159,7 @@ def test_progressive_montage_patch_accepts_complete_source():
         )
     )
 
-    assert decision.levels == (2.0, 8.0)
+    assert decision.levels == (60.0, 240.0)
     assert decision.histogram_range == (0.0, 300.0)
 
 

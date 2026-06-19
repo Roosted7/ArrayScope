@@ -86,6 +86,7 @@ class DisplayPresentationMixin:
         tile_state=None,
         tile_delta=None,
         user_levels=None,
+        semantic_commit: bool = True,
     ):
         commit_start = perf_counter()
         try:
@@ -138,12 +139,13 @@ class DisplayPresentationMixin:
             self._record_montage_backend_commit(backend_decision, actual_backend)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
-            self._set_committed_display_frame(frame)
-            self._consume_pending_display_levels(user_levels)
-            self._note_display_level_source(decision)
+            if semantic_commit:
+                self._set_committed_display_frame(frame)
+                self._consume_pending_display_levels(user_levels)
+                self._note_display_level_source(decision)
             if defer_side_panels:
                 self._deferred_side_panel_refresh_pending = True
-            else:
+            elif semantic_commit:
                 self._update_operation_dock()
         
             # Apply axis flips after setting the image
@@ -152,7 +154,7 @@ class DisplayPresentationMixin:
             self.img_view.setEvaluationOverlay(False)
             if defer_side_panels:
                 self._deferred_side_panel_refresh_pending = True
-            else:
+            elif semantic_commit:
                 self._refresh_inspection_dock()
         
         except Exception as e:
@@ -184,6 +186,7 @@ class DisplayPresentationMixin:
         tile_state=None,
         tile_delta=None,
         user_levels=None,
+        semantic_commit: bool = True,
     ):
         commit_start = perf_counter()
         try:
@@ -242,9 +245,10 @@ class DisplayPresentationMixin:
             self._record_montage_backend_commit(backend_decision, actual_backend)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
-            self._set_committed_display_frame(frame)
-            self._consume_pending_display_levels(user_levels)
-            self._note_display_level_source(decision)
+            if semantic_commit:
+                self._set_committed_display_frame(frame)
+                self._consume_pending_display_levels(user_levels)
+                self._note_display_level_source(decision)
             self.apply_axis_flips()
             self.img_view.setImageStale(False)
         except Exception as e:

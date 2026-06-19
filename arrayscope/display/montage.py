@@ -148,8 +148,6 @@ class MontagePlan:
             tile_y1 = tile.y0 + tile.height
             if tile_x1 >= x0 and tile.x0 <= x1 and tile_y1 >= y0 and tile.y0 <= y1:
                 visible.append(tile)
-        if not visible and self.tiles:
-            return self.tiles[: min(len(self.tiles), max(1, self.columns))]
         return tuple(visible)
 
 
@@ -329,12 +327,13 @@ def make_montage_viewport_canvas(
     x0, y0, x1, y1 = rect
     width = max(1, int(x1) - int(x0))
     height = max(1, int(y1) - int(y0))
-    sample = np.asarray(rendered_tiles[0].image) if rendered_tiles else None
+    rendered_images = tuple(np.asarray(rendered.image) for rendered in rendered_tiles)
+    sample = rendered_images[0] if rendered_images else None
     if dtype is None:
         dtype = sample.dtype if sample is not None else float
     data_dtype = np.dtype(dtype)
-    is_rgb = bool(rgb or (sample is not None and sample.ndim == 3))
-    trailing_shape = (sample.shape[2:] if sample is not None and sample.ndim == 3 else ((3,) if is_rgb else ()))
+    is_rgb = bool(rgb or any(image.ndim == 3 for image in rendered_images))
+    trailing_shape = _rgb_trailing_shape(rendered_images) if is_rgb else ()
     canvas_shape = (height, width) + tuple(trailing_shape)
     estimated = estimate_viewport_canvas_bytes((height, width), dtype, rgb=is_rgb, histogram=include_histogram)
     if estimated > int(budget_bytes):
@@ -509,11 +508,15 @@ def _copy_rendered_tile_into_canvas(rendered: RenderedTile, data, histogram_data
     dest_y0 = y0 - canvas_rect[1]
     height = y1 - y0
     width = x1 - x0
-    data[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...] = rendered.image[
+    source_image = np.asarray(rendered.image)[
         source_y0 : source_y0 + height,
         source_x0 : source_x0 + width,
         ...,
     ]
+    source_image = _coerce_rendered_image_for_canvas(source_image, data)
+    if source_image is None:
+        return None
+    data[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...] = source_image
     if histogram_data is None:
         return dest_x0, dest_y0, dest_x0 + width, dest_y0 + height
     source = rendered.histogram_data
@@ -526,6 +529,24 @@ def _copy_rendered_tile_into_canvas(rendered: RenderedTile, data, histogram_data
         source_x0 : source_x0 + width,
     ]
     return dest_x0, dest_y0, dest_x0 + width, dest_y0 + height
+
+
+def _rgb_trailing_shape(images: Sequence[np.ndarray]) -> tuple[int, ...]:
+    for image in images:
+        if np.asarray(image).ndim == 3:
+            return tuple(int(value) for value in np.asarray(image).shape[2:])
+    return (3,)
+
+
+def _coerce_rendered_image_for_canvas(source, data) -> np.ndarray | None:
+    source = np.asarray(source)
+    if source.ndim == data.ndim:
+        return source
+    if source.ndim == 2 and data.ndim == 3:
+        return np.broadcast_to(source[..., np.newaxis], source.shape + tuple(data.shape[2:]))
+    if source.ndim == 3 and data.ndim == 2:
+        return None
+    return None
 
 
 def optimal_montage_columns(count, tile_shape, viewport_shape, gap=1):

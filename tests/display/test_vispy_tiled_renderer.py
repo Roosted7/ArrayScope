@@ -13,6 +13,7 @@ from arrayscope.display.backends.vispy.tiles import (
     TextureAtlasPage,
     TextureAtlasPool,
     _atlas_reserve_count,
+    _complex_rg_texture,
     _fit_color,
     _fit_scalar,
     _payload_mode,
@@ -187,6 +188,49 @@ def test_complex_payload_quad_buffers_use_phase_color_shader_mode():
 
     assert _payload_mode(payload, rgb_already_windowed=False) == 4
     np.testing.assert_array_equal(modes, np.full((6,), 4.0, dtype=np.float32))
+
+
+def test_complex_payload_upload_uses_defensive_copy_into_atlas():
+    payloads = {0: complex_payload(0)}
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+
+    pool.update_payloads(
+        payloads,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+    )
+
+    uploaded, _offset, copy = pool.scalar_texture.updates[0]
+    assert copy
+    np.testing.assert_allclose(uploaded, _complex_rg_texture(payloads[0].texture_data))
+
+
+def test_invalid_complex_payload_is_not_made_visible_from_slot_zero():
+    bad_rgb = np.full((2, 2, 3), 255, dtype=np.uint8)
+    bad = DisplayTilePayload(
+        0,
+        0,
+        bad_rgb,
+        np.ones((2, 2), dtype=np.float32),
+        ("bad", 0),
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        semantic_data=bad_rgb,
+    )
+    good = complex_payload(1)
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+
+    uvs, stats = pool.update_payloads(
+        {0: bad, 1: good},
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+    )
+
+    assert 0 not in uvs
+    assert 1 in uvs
+    assert stats.visible_items == 1
+    assert stats.items_skipped == 1
 
 
 def test_gpu_windowed_tile_shader_supports_complex_components():
@@ -442,6 +486,50 @@ def test_atlas_retains_offscreen_payload_for_later_clean_reuse():
     assert reused.items_updated == 0
     assert reused.items_skipped == 1
     assert reused.resident_items == 2
+
+
+def test_gpu_layer_empty_active_set_hides_visuals_but_keeps_residency():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=8),
+    )
+    montage = SimpleNamespace(
+        indices=(0, 1),
+        tile_width=2,
+        tile_height=2,
+        columns=2,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded", "loaded"))
+    delta = SimpleNamespace(planned_tiles=(0, 1), near_tiles=(0, 1), near_tile_source_ids={})
+
+    first = layer.update(
+        payloads={0: payload(0, 1.0), 1: payload(1, 2.0)},
+        geometry=geometry,
+        levels=(0.0, 2.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=delta,
+    )
+    empty = layer.update(
+        payloads={},
+        geometry=geometry,
+        levels=(0.0, 2.0),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        tile_delta=delta,
+    )
+
+    assert first.active_pages == 1
+    assert empty.visible_items == 0
+    assert empty.active_pages == 0
+    assert layer._pool.resident_count == 2
+    assert not any(visual.visible for visual in layer._visuals_by_page)
 
 
 def test_atlas_reuses_resident_source_when_tile_number_changes():

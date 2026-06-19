@@ -26,6 +26,7 @@ from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.imageview2d import _point_inside_view_range
+from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
 from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import CursorIntent, hit_test_display_overlays
@@ -220,11 +221,18 @@ class VisPyImageView2D(ImageView2D):
         self._last_vispy_tiled_viewport_key = None
         self._montage_display_mode = "canvas"
         self.imageItem.setVisible(False)
-        try:
-            self._vispy_image.visible = True
-        except Exception:
-            pass
+        _set_visual_visible(getattr(self, "_vispy_image", None), False)
         _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
+
+    def clear(self):
+        super().clear()
+        self.clearMontageTileLayer()
+        self._vispy_main_data_id = None
+        self._vispy_main_color_source_id = None
+        self._vispy_main_scalar_source_id = None
+        self._last_vispy_main_source_shader_mapping = None
+        self._last_vispy_main_shader_mapping = None
+        self._last_vispy_main_texture_kind = None
 
     def setColorMap(self, colormap):
         """Update the shared colorbar/render-surface LUT without re-uploading pixels."""
@@ -480,44 +488,60 @@ class VisPyImageView2D(ImageView2D):
             structure_changed = structure_key != previous_structure_key
             levels_changed = level_key != previous_levels_key
             mapping_changed = mapping_key != previous_mapping_key
+            loading_only = _is_tiled_loading_only_commit(
+                montage_tile_payloads,
+                histogramData=histogramData,
+                histogramPlotData=histogramPlotData,
+            )
+            previous_layer_stats = getattr(getattr(self, "_vispy_gpu_montage_layer", None), "last_stats", None)
+            must_clear_visible_pages = bool(
+                loading_only
+                and (
+                    int(getattr(previous_layer_stats, "visible_items", 0) or 0) > 0
+                    or int(getattr(previous_layer_stats, "active_pages", 0) or 0) > 0
+                )
+            )
             data_unchanged = (
                 montage_tile_payloads is not None
                 and montage_dirty_tiles == ()
                 and source_key == previous_source_key
                 and not structure_changed
+                and not must_clear_visible_pages
             )
 
             self.image = img
-            self.histogramSource = histogramData
-            self.histogramPlotSource = histogramPlotData
+            if not loading_only:
+                self.histogramSource = histogramData
+                self.histogramPlotSource = histogramPlotData
             self._last_vispy_tile_payloads = montage_tile_payloads
-            self.setHistogramDataBounds(histogramRange)
+            if not loading_only:
+                self.setHistogramDataBounds(histogramRange)
             self._montage_display_mode = "vispy_tile_layer"
             try:
                 self._vispy_image.visible = False
             except Exception:
                 pass
+            _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
 
             if data_unchanged and not levels_changed and not mapping_changed:
                 from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
                 visible = len(montage_tile_payloads or {})
-                previous = getattr(getattr(self, "_vispy_gpu_montage_layer", None), "last_stats", None)
                 stats = TileLayerUpdateStats(
                     visible_items=visible,
                     items_updated=0,
                     items_skipped=visible,
                     rgb_window_tiles=0,
-                    resident_items=int(getattr(previous, "resident_items", 0) or 0),
-                    storage_capacity=int(getattr(previous, "atlas_capacity", 0) or 0),
-                    estimated_gpu_bytes=int(getattr(previous, "estimated_gpu_bytes", 0) or 0),
-                    cpu_shadow_bytes=int(getattr(previous, "cpu_shadow_bytes", 0) or 0),
-                    page_count=int(getattr(previous, "page_count", 0) or 0),
-                    active_pages=int(getattr(previous, "active_pages", 0) or 0),
-                    device_max_texture_size=int(getattr(previous, "device_max_texture_size", 0) or 0),
-                    budget_bytes=int(getattr(previous, "budget_bytes", 0) or 0),
-                    near_resident_items=int(getattr(previous, "near_resident_items", 0) or 0),
-                    warm_resident_items=int(getattr(previous, "warm_resident_items", 0) or 0),
+                    resident_items=int(getattr(previous_layer_stats, "resident_items", 0) or 0),
+                    storage_capacity=int(getattr(previous_layer_stats, "atlas_capacity", 0) or 0),
+                    estimated_gpu_bytes=int(getattr(previous_layer_stats, "estimated_gpu_bytes", 0) or 0),
+                    cpu_shadow_bytes=int(getattr(previous_layer_stats, "cpu_shadow_bytes", 0) or 0),
+                    page_count=int(getattr(previous_layer_stats, "page_count", 0) or 0),
+                    active_pages=int(getattr(previous_layer_stats, "active_pages", 0) or 0),
+                    device_max_texture_size=int(getattr(previous_layer_stats, "device_max_texture_size", 0) or 0),
+                    budget_bytes=int(getattr(previous_layer_stats, "budget_bytes", 0) or 0),
+                    near_resident_items=int(getattr(previous_layer_stats, "near_resident_items", 0) or 0),
+                    warm_resident_items=int(getattr(previous_layer_stats, "warm_resident_items", 0) or 0),
                 )
             else:
                 stats = self._update_vispy_tile_layer(
@@ -540,10 +564,10 @@ class VisPyImageView2D(ImageView2D):
             # Histogram, levels, geometry, and viewport are separate concerns.
             # A level-only change must not look like a full structural commit.
             histogram_changed = histogram_key != previous_histogram_key or not data_unchanged
-            if histogram_changed:
+            if histogram_changed and not loading_only:
                 self._update_histogram_for_vispy(histogramData, histogramPlotData, level_key)
                 self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
-            if levels_changed:
+            if levels_changed and not loading_only:
                 self._sync_display_levels(level_key[0], level_key[1], update_image=False, emit_user=False)
 
             montage_shape = None
@@ -559,11 +583,12 @@ class VisPyImageView2D(ImageView2D):
 
             self._last_vispy_tiled_source_key = source_key
             self._last_vispy_tiled_structure_key = structure_key
-            self._last_vispy_tiled_levels_key = level_key
-            self._last_vispy_tiled_mapping_key = mapping_key
-            self._last_vispy_tiled_source_shader_mapping = source_shader_mapping
-            self._last_vispy_tiled_shader_mapping = shader_mapping
-            self._last_vispy_tiled_histogram_key = histogram_key
+            if not loading_only:
+                self._last_vispy_tiled_levels_key = level_key
+                self._last_vispy_tiled_mapping_key = mapping_key
+                self._last_vispy_tiled_source_shader_mapping = source_shader_mapping
+                self._last_vispy_tiled_shader_mapping = shader_mapping
+                self._last_vispy_tiled_histogram_key = histogram_key
             self._last_vispy_tiled_viewport_key = viewport_key
         finally:
             self._applying_presentation = applying
@@ -1593,8 +1618,14 @@ class VisPyImageView2D(ImageView2D):
             _set_visual_visible(state.windowed_visual, False)
             state.visible = False
         states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
+        if tile_delta is not None:
+            active_set = {int(tile) for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())}
+        else:
+            active_set = set(dict(tile_payloads or {}))
         loaded_payloads = {}
         for tile_number, _source_index in enumerate(tuple(montage.indices)):
+            if int(tile_number) not in active_set:
+                continue
             kind = "loaded"
             if states and tile_number < len(states):
                 kind = str(getattr(states[tile_number], "value", states[tile_number]))
@@ -1831,7 +1862,7 @@ def _array_identity_key(data):
     if data is None:
         return None
     array = np.asarray(data)
-    return (id(data), tuple(int(value) for value in array.shape), str(array.dtype))
+    return (tuple(int(value) for value in array.shape), str(array.dtype), array.tobytes())
 
 
 def _set_visual_visible(visual, visible: bool) -> None:

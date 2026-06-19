@@ -47,6 +47,11 @@ def choose_montage_backend(
         if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
         else renderer_backend == "vispy"
     )
+    direct_tile_payloads = (
+        bool(renderer_capabilities.direct_montage_tile_payloads)
+        if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
+        else renderer_backend == "vispy"
+    )
     renderer_name = (
         str(renderer_capabilities.name)
         if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
@@ -63,6 +68,12 @@ def choose_montage_backend(
             warning = "canvas fallback is manual and may be slow for large RGB/complex montage"
         return MontageBackendDecision("canvas", "user forced canvas fallback", warning=warning, expected_tile_layer=False)
 
+    if prefers_tiled_montages and direct_tile_payloads:
+        return MontageBackendDecision(
+            "tile_layer",
+            f"{renderer_name} prefers tiled montages; avoid canvas composition",
+            expected_tile_layer=True,
+        )
     if large_rgb:
         return MontageBackendDecision(
             "tile_layer",

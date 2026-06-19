@@ -10,6 +10,7 @@ from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
     limited_payload_cache as _limited_payload_cache,
     payload_lod_matches as _payload_lod_matches,
+    payload_compatible_with_tile as _payload_compatible_with_tile,
 )
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
@@ -46,7 +47,17 @@ def test_auto_large_scalar_vispy_montage_uses_tile_layer_to_avoid_full_uploads()
 
     assert decision.backend == "tile_layer"
     assert decision.expected_tile_layer is True
-    assert "full-surface uploads" in decision.reason
+    assert "prefers tiled montages" in decision.reason
+
+
+def test_auto_small_scalar_vispy_montage_uses_tile_layer():
+    data = np.zeros((64, 64), dtype=np.float32)
+
+    decision = choose_montage_backend(_geometry(), data, renderer_backend="vispy")
+
+    assert decision.backend == "tile_layer"
+    assert decision.expected_tile_layer is True
+    assert "canvas composition" in decision.reason
 
 
 def test_auto_policy_uses_capability_instead_of_backend_name():
@@ -67,6 +78,25 @@ def test_auto_policy_uses_capability_instead_of_backend_name():
 
     assert decision.backend == "tile_layer"
     assert "future-gpu-backend" in decision.reason
+
+
+def test_auto_prefers_tiled_capability_without_direct_payloads_stays_canvas_until_large():
+    data = np.zeros((64, 64), dtype=np.float32)
+    capabilities = ImageViewBackendCapabilities(
+        name="future-gpu-backend",
+        direct_montage_tile_payloads=False,
+        prefers_tiled_montages=True,
+        persistent_tile_residency=True,
+    )
+
+    decision = choose_montage_backend(
+        _geometry(),
+        data,
+        renderer_backend="pyqtgraph",
+        renderer_capabilities=capabilities,
+    )
+
+    assert decision.backend == "canvas"
 
 
 def test_auto_preserves_vispy_tile_layer_mode():
@@ -118,6 +148,101 @@ def test_recent_payload_cache_requires_matching_lod_factor():
 
     assert _payload_lod_matches(SimpleNamespace(lod=lod4), 4)
     assert not _payload_lod_matches(SimpleNamespace(lod=lod1), 4)
+
+
+def test_previous_complex_shader_payload_must_carry_complex_texture():
+    from arrayscope.core.view_state import ChannelMode, ViewState
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    state = ViewState.from_shape((2, 2, 4)).with_channel(ChannelMode.COMPLEX)
+    stale_rgb = np.zeros((2, 2, 3), dtype=np.uint8)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        stale_rgb,
+        np.zeros((2, 2), dtype=np.float32),
+        ("source", 0),
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        semantic_data=stale_rgb,
+    )
+
+    assert not _payload_compatible_with_tile(payload, state, shader_display=True)
+
+
+def test_previous_complex_shader_payload_accepts_complex_texture():
+    from arrayscope.core.view_state import ChannelMode, ViewState
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    state = ViewState.from_shape((2, 2, 4)).with_channel(ChannelMode.COMPLEX)
+    texture = np.ones((2, 2), dtype=np.complex64)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        texture,
+        np.ones((2, 2), dtype=np.float32),
+        ("source", 0),
+        texture_data=texture,
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        semantic_data=texture,
+    )
+
+    assert _payload_compatible_with_tile(payload, state, shader_display=True)
+
+
+def test_tiled_payload_source_id_changes_when_texture_content_changes():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import RenderedTile, make_montage_plan
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    state = ViewState.from_shape((2, 2, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":")
+    plan = make_montage_plan(state, axis=2, indices=(0,), tile_shape=(2, 2), columns=1)
+    tile = plan.tiles[0]
+
+    def rendered(value):
+        image = np.full((2, 2), float(value), dtype=np.float32)
+        return RenderedTile(
+            tile=tile,
+            image=image,
+            histogram_data=image.copy(),
+            eval_ms=0.0,
+            slab_shape=image.shape,
+            slab_nbytes=int(image.nbytes),
+        )
+
+    session = MontageRenderSession(
+        session_id=1,
+        key=("session",),
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=(0,),
+        plan=plan,
+        view_state=state,
+        document=object(),
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(2, 2),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={0: rendered(1.0)},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+
+    first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    session.rendered_tiles[0] = rendered(2.0)
+    second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+
+    assert _base_tile_source_id(first.source_id) == ("tile", 0)
+    assert _base_tile_source_id(second.source_id) == ("tile", 0)
+    assert first.source_id != second.source_id
+
 
 def test_auto_large_rgb_montage_uses_tile_layer():
     data = np.zeros((1500, 1500, 3), dtype=np.uint8)

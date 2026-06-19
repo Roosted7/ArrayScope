@@ -174,9 +174,9 @@ source of array-view state.
   operation, or upload timing snapshots.
 - `arrayscope.window.montage_backend`: explicit montage display backend policy. The Performance menu
   stores Auto, Tile layer, or Canvas fallback. Auto always sends large RGB/complex and previously slow
-  upload paths to tiled painting; a backend that declares a tiled-montage preference also receives
-  large scalar montages through that path. The chosen backend, reason, fallback, and any warning are
-  recorded in diagnostics.
+  upload paths to tiled painting; a backend that declares both direct tiled payload support and a
+  tiled-montage preference uses tiled painting immediately. The chosen backend, reason, fallback, and
+  any warning are recorded in diagnostics.
 - `arrayscope.window.stage_warmup`: idle-only reusable stage warmup. It uses the stage-cache budget,
   schedules on the stage lane with a stage `EvaluationContext`, attaches to existing singleflight
   requests, and records the latest warmup decision for diagnostics.

@@ -40,10 +40,12 @@ mode. The full canvas remains the committed value source for hover/status and se
 canvas. This mode is internal and does not change the public viewer API.
 
 The Performance menu exposes the montage display backend as Auto, Tile layer, or Canvas fallback.
-Auto keeps small and scalar montages on canvas, selects tile-layer mode for large RGB/complex
+Auto keeps PyQtGraph small/scalar montages on canvas, selects tile-layer mode for large RGB/complex
 montages and previously slow upload paths, and records the chosen backend and reason in diagnostics.
-Canvas fallback remains available for developer/user escape hatches, but large RGB/complex canvas
-fallback is diagnosed as potentially slow.
+Backends that declare both direct tiled payload support and a tiled-montage preference, such as
+VisPy, use tile-layer mode immediately in Auto to avoid canvas composition/upload during progressive
+montage updates. Canvas fallback remains available for developer/user escape hatches, but large
+RGB/complex canvas fallback is diagnosed as potentially slow.
 
 Tile-layer presentation is stateful and dirty-aware. Presentation models carry optional dirty tile
 numbers: `None` means the tile state is unknown and visible loaded items should refresh, `()` means a

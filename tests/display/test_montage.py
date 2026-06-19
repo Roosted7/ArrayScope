@@ -102,6 +102,17 @@ def test_montage_plan_visible_tiles_intersect_view_range():
     assert tuple(tile.source_index for tile in visible) == (1, 2)
 
 
+def test_montage_plan_empty_view_range_does_not_fallback_to_tile_zero():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 3, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 3), columns=3, gap=1)
+
+    visible = plan.tiles_intersecting(((10_000.0, 10_100.0), (10_000.0, 10_100.0)), margin_tiles=0)
+
+    assert visible == ()
+
+
 def test_montage_plan_preserves_source_indices():
     from arrayscope.core.view_state import ViewState
 
@@ -308,6 +319,46 @@ def test_montage_viewport_canvas_histogram_marks_gaps_and_unloaded_as_nan():
     assert np.isnan(canvas.histogram_data[:, 3:5]).all()
     assert np.isfinite(canvas.histogram_data[:, :2]).all()
     assert np.isfinite(canvas.histogram_data[:, 6:8]).all()
+
+
+def test_montage_viewport_canvas_handles_scalar_tile_after_rgb_tile():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 2, 2)).with_montage_axis(2, indices=(0, 1), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2, gap=1)
+    rgb = np.zeros((2, 2, 3), dtype=np.uint8)
+    rgb[..., 1] = 7
+    scalar = np.full((2, 2), 5, dtype=np.uint8)
+    rendered = (
+        montage.RenderedTile(plan.tiles[0], rgb, np.ones((2, 2), dtype=np.float32), 0.0, rgb.shape, rgb.nbytes),
+        montage.RenderedTile(plan.tiles[1], scalar, scalar.astype(np.float32), 0.0, scalar.shape, scalar.nbytes),
+    )
+
+    canvas = montage.make_montage_viewport_canvas(plan, rendered, view_range=None, budget_bytes=1024 * 1024)
+
+    assert canvas.data.shape == (2, 5, 3)
+    np.testing.assert_array_equal(canvas.data[:, 3:5], np.full((2, 2, 3), 5, dtype=np.uint8))
+    assert np.isfinite(canvas.histogram_data[:, 3:5]).all()
+
+
+def test_montage_viewport_canvas_handles_rgb_tile_after_scalar_tile():
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((2, 2, 2)).with_montage_axis(2, indices=(0, 1), text=":")
+    plan = montage.make_montage_plan(state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2, gap=1)
+    scalar = np.full((2, 2), 5, dtype=np.uint8)
+    rgb = np.zeros((2, 2, 3), dtype=np.uint8)
+    rgb[..., 2] = 9
+    rendered = (
+        montage.RenderedTile(plan.tiles[0], scalar, scalar.astype(np.float32), 0.0, scalar.shape, scalar.nbytes),
+        montage.RenderedTile(plan.tiles[1], rgb, np.ones((2, 2), dtype=np.float32), 0.0, rgb.shape, rgb.nbytes),
+    )
+
+    canvas = montage.make_montage_viewport_canvas(plan, rendered, view_range=None, budget_bytes=1024 * 1024)
+
+    assert canvas.data.shape == (2, 5, 3)
+    np.testing.assert_array_equal(canvas.data[:, :2], np.full((2, 2, 3), 5, dtype=np.uint8))
+    np.testing.assert_array_equal(canvas.data[:, 3:5], rgb)
 
 
 def test_montage_viewport_canvas_rejects_over_budget_before_allocation():

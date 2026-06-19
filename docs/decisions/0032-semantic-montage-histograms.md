@@ -36,19 +36,28 @@ are already windowed. Complex phase-color images set `rgb_already_windowed=False
 changes remap magnitude intensity; display-ready RGB images set it to `True`.
 
 User histogram edits preserve intent according to the active window mode. Relative edits preserve
-fractions across improving histogram ranges. Absolute edits preserve numeric low/high values while
-histogram metadata may improve. Explicit Auto Window clears user intent once and uses the best
-available semantic source.
+fractions across improving histogram ranges, so levels may numerically refine as more tiles for the
+same montage population are sampled. Absolute edits preserve numeric low/high values while histogram
+metadata may improve. Explicit Auto Window clears user intent once and uses the best available
+semantic source.
 
 ## Consequences
 
 Progressive montage can show sensible levels from the first loaded tiles, improve relative levels as
 more semantic stats arrive, preserve broader stats across zoom culling, and reuse overlap when the
-tiled range shifts.
+tiled range shifts. A loading-only montage presentation may be committed before the first tile to
+clear stale renderer contents; that placeholder must not become the semantic level baseline.
+Cached tiles that are visible in the first commit of a montage session must all contribute
+provisional semantic stats before being drawn, rather than deferring some stats behind the initial
+display update.
 
 The histogram widget may show semantic sampled data that is not the same shape as the displayed
 canvas. Display commit validation therefore checks local value-source shape separately from optional
 plot-source presence.
+
+Persistent GPU tile residency is keyed by semantic tile identity plus texture-content identity. The
+semantic base key is still used for overlap and warm-residency reuse, but a clean commit may skip
+upload only when the resident slot already contains the same texture content.
 
 Montage operation performance depends on two caches: per-tile display cache and shared stage cache.
 If a new montage session attaches to an in-flight stage materialization, tile workers wait for the

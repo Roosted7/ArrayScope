@@ -46,6 +46,7 @@ from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
     limited_payload_cache as _limited_payload_cache,
     payload_lod_matches as _payload_lod_matches,
+    payload_compatible_with_tile as _payload_compatible_with_tile,
     previous_tiled_payloads as _previous_tiled_payloads,
     previous_tiled_payloads_by_base_source as _previous_tiled_payloads_by_base_source,
 )
@@ -56,7 +57,7 @@ from arrayscope.window.montage_viewport import (
     montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
 )
 from arrayscope.window.montage_session import MontageRenderSession
-from arrayscope.display.planning import LevelSourceRank, fallback_level_source
+from arrayscope.display.planning import LevelSourceRank, fallback_level_source, normalize_bounds
 from arrayscope.display.model.commit import CommitKind
 
 
@@ -247,11 +248,9 @@ class MontageRenderMixin:
         session.shader_display = bool(shader_display)
         self._montage_session = session
         self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
-        immediate_level_tiles = tuple(cached_tiles[:4])
-        deferred_level_tiles = list(cached_tiles[4:])
-        session.pending_level_tiles = deferred_level_tiles
-        self._montage_pending_level_tiles_last_session = len(deferred_level_tiles)
-        for rendered in immediate_level_tiles:
+        session.pending_level_tiles = []
+        self._montage_pending_level_tiles_last_session = 0
+        for rendered in cached_tiles:
             self._update_montage_level_bounds_from_rendered(level_key, rendered, expected_indices=all_indices)
         try:
             self._commit_montage_session_canvas(session, force=True)
@@ -330,7 +329,11 @@ class MontageRenderMixin:
                     shader_display=shader_display,
                 )
                 previous_payload = previous_payloads.get(tile_key)
-                if previous_payload is None:
+                if previous_payload is None or not _payload_compatible_with_tile(
+                    previous_payload,
+                    tile.view_state,
+                    shader_display=shader_display,
+                ):
                     missing_tiles.append(tile)
                 else:
                     cached_tiles.append(_rendered_tile_from_previous_payload(tile, previous_payload))
@@ -413,18 +416,14 @@ class MontageRenderMixin:
         )
         session.tile_compute_cache_hits += len(cached_tiles)
         expected_indices = self._montage_level_expected_indices(session)
-        for rendered in cached_tiles[:4]:
+        for rendered in cached_tiles:
             self._update_montage_level_bounds_from_rendered(
                 session.level_key,
                 rendered,
                 expected_indices=expected_indices,
             )
             session.mark_loaded(rendered)
-        for rendered in cached_tiles[4:]:
-            session.pending_level_tiles.append(rendered)
-            session.mark_loaded(rendered)
-        if cached_tiles[4:]:
-            self._montage_pending_level_tiles_last_session = len(session.pending_level_tiles)
+        self._montage_pending_level_tiles_last_session = len(getattr(session, "pending_level_tiles", ()) or ())
         for tile in missing_tiles:
             session.mark_loading(tile)
 
@@ -1128,34 +1127,30 @@ class MontageRenderMixin:
         self._current_montage_geometry = session.plan.geometry
         self._current_montage_plan = session.plan
         self._current_montage_canvas = canvas
-        if not session.rendered_tiles:
-            self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
-            return
         self._next_viewport_policy = ViewportPolicy.PRESERVE
         self._montage_canvas_commit_active = True
         try:
             display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
             level_stats = self._montage_level_stats_for_session(session)
-            complete = session.is_complete()
             explicit_auto = bool(getattr(session, "force_auto", False))
+            semantic_commit = bool(session.rendered_tiles)
+            decision_force_auto = bool(explicit_auto and semantic_commit)
             first_display_commit = not bool(session.display_committed)
-            first_level_update = bool(explicit_auto) or (
-                first_display_commit and self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
-            )
-            semantic_source = self._montage_level_source_for_session(session, allow_partial=first_level_update)
-            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=first_level_update)
+            publish_metadata = bool(explicit_auto) or self._should_publish_montage_level_metadata(session, level_stats)
+            semantic_source = self._montage_level_source_for_session(session, allow_partial=publish_metadata)
+            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
             if newly_composed or first_display_commit:
                 self._apply_full_display_image(
                     display_image,
                     geometry=rendered_geometry,
                     window_mode=session.window_mode,
                     previous_frame=getattr(self, "_committed_display_frame", None),
-                    force_auto=explicit_auto,
+                    force_auto=decision_force_auto,
                     defer_side_panels=getattr(session, "defer_side_panels", False),
                     semantic_source=semantic_source,
                     applied_level_source=session.applied_level_source,
                     histogram_plot_data=histogram_plot_data,
-                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.FULL_MONTAGE_INITIAL,
+                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if decision_force_auto else CommitKind.FULL_MONTAGE_INITIAL,
                     document_key=_document_key(session.document),
                     request_key=session.key,
                     render_generation=session.render_generation,
@@ -1163,12 +1158,10 @@ class MontageRenderMixin:
                     montage_dirty_tiles=dirty_tiles,
                     montage_tile_source_ids=tile_source_ids,
                     user_levels=session.user_levels_override,
+                    semantic_commit=semantic_commit,
                 )
-                session.display_committed = True
+                session.display_committed = bool(session.rendered_tiles)
             else:
-                implicit_level_update = self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
-                semantic_source = self._montage_level_source_for_session(session, allow_partial=implicit_level_update)
-                histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=implicit_level_update)
                 self._apply_progressive_display_image(
                     display_image,
                     geometry=rendered_geometry,
@@ -1187,6 +1180,7 @@ class MontageRenderMixin:
                     montage_dirty_tiles=dirty_tiles,
                     montage_tile_source_ids=tile_source_ids,
                     user_levels=session.user_levels_override,
+                    semantic_commit=semantic_commit,
                 )
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
@@ -1235,21 +1229,17 @@ class MontageRenderMixin:
         self._current_montage_geometry = session.plan.geometry
         self._current_montage_plan = session.plan
         self._current_montage_canvas = None
-        if not session.rendered_tiles:
-            self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
-            return
         self._next_viewport_policy = ViewportPolicy.PRESERVE
         self._montage_canvas_commit_active = True
         try:
             level_stats = self._montage_level_stats_for_session(session)
-            complete = session.is_complete()
             explicit_auto = bool(getattr(session, "force_auto", False))
+            semantic_commit = bool(session.rendered_tiles)
+            decision_force_auto = bool(explicit_auto and semantic_commit)
             first_display_commit = not bool(session.display_committed)
-            first_level_update = bool(explicit_auto) or (
-                first_display_commit and self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
-            )
-            semantic_source = self._montage_level_source_for_session(session, allow_partial=first_level_update)
-            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=first_level_update)
+            publish_metadata = bool(explicit_auto) or self._should_publish_montage_level_metadata(session, level_stats)
+            semantic_source = self._montage_level_source_for_session(session, allow_partial=publish_metadata)
+            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
             payload_start = perf_counter()
             previous_payloads = _previous_tiled_payloads(getattr(self, "_committed_display_frame", None))
             if previous_payloads:
@@ -1269,12 +1259,12 @@ class MontageRenderMixin:
                     geometry=rendered_geometry,
                     window_mode=session.window_mode,
                     previous_frame=getattr(self, "_committed_display_frame", None),
-                    force_auto=explicit_auto,
+                    force_auto=decision_force_auto,
                     defer_side_panels=getattr(session, "defer_side_panels", False),
                     semantic_source=semantic_source,
                     applied_level_source=session.applied_level_source,
                     histogram_plot_data=histogram_plot_data,
-                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.FULL_MONTAGE_INITIAL,
+                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if decision_force_auto else CommitKind.FULL_MONTAGE_INITIAL,
                     document_key=_document_key(session.document),
                     request_key=session.key,
                     render_generation=session.render_generation,
@@ -1282,12 +1272,10 @@ class MontageRenderMixin:
                     tile_state=tile_state,
                     tile_delta=tile_delta,
                     user_levels=session.user_levels_override,
+                    semantic_commit=semantic_commit,
                 )
-                session.display_committed = True
+                session.display_committed = bool(session.rendered_tiles)
             else:
-                implicit_level_update = self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
-                semantic_source = self._montage_level_source_for_session(session, allow_partial=implicit_level_update)
-                histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=implicit_level_update)
                 self._apply_progressive_display_image(
                     display_image,
                     geometry=rendered_geometry,
@@ -1306,6 +1294,7 @@ class MontageRenderMixin:
                     tile_state=tile_state,
                     tile_delta=tile_delta,
                     user_levels=session.user_levels_override,
+                    semantic_commit=semantic_commit,
                 )
             overlay_start = perf_counter()
             rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
@@ -1388,29 +1377,31 @@ class MontageRenderMixin:
         session.tile_source_ids_trusted = bool(trusted)
         return dict(source_ids)
 
-    def _should_autolevel_progressive_montage(self, session, stats: MontageLevelStats, *, complete: bool) -> bool:
-        del complete
-        # Automatic montage levels are semantic and monotonic: when new tiles for
-        # the same montage source arrive, the available source may improve/expand
-        # levels.  It must not wait for full completion, and it must not depend on
-        # the current zoomed viewport.
-        if session.window_mode == "absolute" or not session.rendered_tiles:
+    def _should_publish_montage_level_metadata(self, session, stats: MontageLevelStats) -> bool:
+        # Histogram metadata is independent from whether display levels are
+        # allowed to move.  Publishing better semantic stats lets absolute mode
+        # update the histogram while preserving numeric levels, and lets
+        # relative mode remap through WindowLevelController.
+        if not session.rendered_tiles:
             return False
         bounds = stats.bounds
+        bounds = normalize_bounds(bounds)
         if bounds is None:
             return False
-        low, high = bounds
-        if float(high) <= float(low):
-            return False
         applied = getattr(session, "applied_level_source", None)
+        same_semantic = getattr(applied, "semantic_key", None) == session.level_key
+        if not same_semantic:
+            return True
         applied_rank = int(getattr(applied, "rank", 0) or 0)
         applied_count = int(getattr(applied, "source_count", 0) or 0)
-        same_semantic = getattr(applied, "semantic_key", None) == session.level_key
-        if same_semantic and int(stats.rank) < applied_rank:
-            return False
-        if same_semantic and len(stats.source_indices) <= applied_count:
-            return False
-        return True
+        if int(stats.rank) > applied_rank:
+            return True
+        if len(stats.source_indices) > applied_count:
+            return True
+        applied_bounds = normalize_bounds(getattr(applied, "histogram_range", None))
+        if applied_bounds is None:
+            return True
+        return bounds[0] < applied_bounds[0] or bounds[1] > applied_bounds[1]
 
     def _note_montage_level_source_applied(self, session, source, *, explicit: bool) -> None:
         if source is None:
@@ -1537,6 +1528,9 @@ class MontageRenderMixin:
             return
         if self.view_state.montage_axis is None:
             return
+        if _viewport_gesture_active():
+            self._schedule_montage_viewport_update()
+            return
         if getattr(self, "_montage_viewport_update_running", False):
             self._montage_viewport_update_pending = True
             return
@@ -1647,6 +1641,14 @@ def _montage_commit_interval_ms(window, *, force: bool) -> int:
 
 def _latency_feedback(window):
     return getattr(window, "latency_feedback", None)
+
+
+def _viewport_gesture_active() -> bool:
+    try:
+        buttons = Qt.QtWidgets.QApplication.mouseButtons()
+        return bool(buttons & Qt.QtCore.Qt.MouseButton.LeftButton)
+    except Exception:
+        return False
 
 
 def _interactive_active(window) -> bool:

@@ -218,18 +218,25 @@ class MontageRenderSession:
             semantic = getattr(rendered, "semantic_data", None)
             semantic = exact_image if semantic is None else np.asarray(semantic)
             lod = self._planned_lod_info(rendered, factor=lod_factor)
-            source_id = self._payload_source_id(base_source_id, texture_kind=texture_kind, mapping=mapping, lod=lod)
+            texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
+            del texture_histogram
+            source_id = self._payload_source_id(
+                base_source_id,
+                texture_kind=texture_kind,
+                mapping=mapping,
+                lod=lod,
+                texture_data=texture_data,
+            )
             previous = self.display_tile_payloads.get(tile_number)
             if (
                 previous is not None
+                and _base_source_id(previous.source_id) == base_source_id
                 and previous.source_id == source_id
                 and previous.image is exact_image
                 and previous.histogram_data is exact_histogram
                 and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
             ):
                 continue
-            texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
-            del texture_histogram
             self.display_tile_payloads[tile_number] = DisplayTilePayload(
                 tile_number=tile_number,
                 source_index=int(rendered.tile.source_index),
@@ -258,12 +265,13 @@ class MontageRenderSession:
             if tile_number in self.display_tile_payloads:
                 continue
             base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
-            lod = self._planned_lod_info(rendered, factor=lod_factor)
+            texture_data, _texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
             source_id = self._payload_source_id(
                 base_source_id,
                 texture_kind=getattr(rendered, "texture_kind", None),
                 mapping=getattr(rendered, "shader_mapping", None),
                 lod=lod,
+                texture_data=texture_data,
             )
             previous = by_source.get(source_id)
             if previous is None:
@@ -277,7 +285,7 @@ class MontageRenderSession:
                     source_index=int(rendered.tile.source_index),
                 )
 
-    def _payload_source_id(self, base_source_id, *, texture_kind, mapping, lod: LodInfo) -> tuple[object, ...]:
+    def _payload_source_id(self, base_source_id, *, texture_kind, mapping, lod: LodInfo, texture_data) -> tuple[object, ...]:
         del mapping
         return (
             base_source_id,
@@ -292,6 +300,8 @@ class MontageRenderSession:
             int(lod.factor),
             int(lod.level),
             int(lod.gutter),
+            "content",
+            _array_content_token(texture_data),
         )
 
     def _selected_lod_factor(self) -> int:
@@ -543,3 +553,16 @@ class MontageRenderSession:
         self.last_commit_monotonic = monotonic()
         self.final_commit_pending = False
         self.flush_pending = False
+
+
+def _base_source_id(source_id) -> object:
+    if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
+        return source_id[0]
+    return source_id
+
+
+def _array_content_token(array) -> tuple[object, ...]:
+    values = np.asarray(array)
+    shape = tuple(int(value) for value in values.shape)
+    dtype = values.dtype.str
+    return shape, dtype, id(values)
