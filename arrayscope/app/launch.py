@@ -89,6 +89,8 @@ def _create_window(data, title="", complex_dim=None, filepath=None,
     _prepare_qt_environment()
 
     app = pg.mkQApp()
+    app.setOrganizationName("ArrayScope")
+    app.setApplicationName("ArrayScope")
     app.setStyle("Fusion")
 
     win = ArrayScopeWindow(

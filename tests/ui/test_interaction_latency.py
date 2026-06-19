@@ -181,7 +181,7 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
     from arrayscope.app.settings_state import ImageRenderingBackendChoice, MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
-    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings = QtCore.QSettings()
     settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
     settings.sync()
 
@@ -215,7 +215,7 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
     from arrayscope.app.settings_state import ImageRenderingBackendChoice, MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
-    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings = QtCore.QSettings()
     settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
     settings.sync()
 

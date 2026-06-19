@@ -47,11 +47,11 @@ class ViewportController:
 
         if intent == ViewportIntent.FIT:
             self.mode = ViewportMode.FIT
-            _fit(view_box)
+            _fit(view_box, display_rect=display_rect)
             return
         if intent == ViewportIntent.ONE_TO_ONE:
-            self.mode = ViewportMode.ONE_TO_ONE
             _set_one_to_one(view_box, image_shape, viewport_size, display_rect=display_rect)
+            self.mode = ViewportMode.USER
             return
 
         rect_changed_only = previous_shape == image_shape and previous_rect != display_rect
@@ -61,20 +61,18 @@ class ViewportController:
                 _preserve_center_for_shape(view_box, image_shape, display_rect=display_rect)
             else:
                 self.mode = ViewportMode.AUTO_UNTOUCHED
-                _fit(view_box)
+                _fit(view_box, display_rect=display_rect)
             return
 
         if rect_changed_only and intent == ViewportIntent.PRESERVE:
             return
 
         if self.mode == ViewportMode.FIT and shape_changed:
-            _fit(view_box)
-        elif self.mode == ViewportMode.ONE_TO_ONE:
-            _set_one_to_one(view_box, image_shape, viewport_size, display_rect=display_rect)
+            _fit(view_box, display_rect=display_rect)
 
     def fit(self, view_box):
         self.mode = ViewportMode.FIT
-        _fit(view_box)
+        _fit(view_box, display_rect=self.last_display_rect)
 
     def set_fit_locked(self, view_box, enabled: bool):
         if enabled:
@@ -86,17 +84,15 @@ class ViewportController:
         return self.mode == ViewportMode.FIT
 
     def one_to_one(self, view_box, image_shape, viewport_size, display_rect=None):
-        self.mode = ViewportMode.ONE_TO_ONE
         _set_one_to_one(view_box, image_shape, viewport_size, display_rect=_display_rect(image_shape, display_rect))
+        self.mode = ViewportMode.USER
 
     def resize(self, view_box, image_shape, viewport_size, display_rect=None):
         if image_shape is None:
             return
         display_rect = _display_rect(tuple(int(v) for v in image_shape[:2]), display_rect or self.last_display_rect)
         if self.mode == ViewportMode.FIT:
-            _fit(view_box)
-        elif self.mode == ViewportMode.ONE_TO_ONE:
-            _set_one_to_one(view_box, tuple(int(v) for v in image_shape[:2]), viewport_size, display_rect=display_rect)
+            _fit(view_box, display_rect=display_rect)
 
 
 def _intent_from_policy(policy):
@@ -109,8 +105,12 @@ def _intent_from_policy(policy):
     return ViewportIntent.PRESERVE
 
 
-def _fit(view_box):
-    view_box.autoRange(padding=0)
+def _fit(view_box, *, display_rect=None):
+    if display_rect is None:
+        view_box.autoRange(padding=0)
+        return
+    x0, y0, x1, y1 = display_rect
+    view_box.setRange(xRange=(float(x0), float(x1)), yRange=(float(y0), float(y1)), padding=0)
 
 
 def _set_one_to_one(view_box, image_shape, viewport_size, *, display_rect=None):
