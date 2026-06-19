@@ -523,6 +523,7 @@ class ImageView2D(QtWidgets.QWidget):
         histogramRange: tuple[float, float],
         viewport_policy=ViewportPolicy.PRESERVE,
         rgb_already_windowed: bool = False,
+        shader_mapping=None,
         tile_residency_budget_bytes: int = 0,
     ) -> None:
         """Commit a first-class tiled presentation through this backend.
@@ -533,6 +534,7 @@ class ImageView2D(QtWidgets.QWidget):
         state and delta, not placeholder pixels.
         """
 
+        del shader_mapping  # PyQtGraph receives already materialized display pixels.
         tile_payloads = tile_state.active_payloads(tile_delta)
         dirty_tiles = None if tile_delta.force_refresh else ()
         placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)

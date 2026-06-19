@@ -49,6 +49,7 @@ class FakeVisual:
         self.levels = []
         self.geometry_calls = 0
         self.mapping_calls = 0
+        self.mappings = []
         self.textures = None
 
     def set_levels(self, levels):
@@ -68,7 +69,12 @@ class FakeVisual:
 
     def set_shader_mapping(self, mapping):
         self.mapping_calls += 1
-        return self.mapping_calls == 1
+        key = None if mapping is None else mapping.identity_key
+        previous = None if not self.mappings else self.mappings[-1][0]
+        changed = not self.mappings or previous != key
+        if changed:
+            self.mappings.append((key, mapping))
+        return changed
 
 
 class FakeSceneVisuals:
@@ -298,6 +304,62 @@ def test_new_atlas_page_inherits_current_levels_without_reuploading_old_geometry
     assert layer._visuals_by_page[1].levels[-1] == (10.0, 20.0)
     assert first_visual.geometry_calls == 1
     assert layer._visuals_by_page[1].geometry_calls == 1
+
+
+def test_mapping_only_update_is_uniform_across_pages_without_texture_or_vertex_uploads():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=4),
+    )
+    montage = SimpleNamespace(
+        indices=tuple(range(5)),
+        tile_width=2,
+        tile_height=2,
+        columns=5,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",) * 5)
+    delta = SimpleNamespace(planned_tiles=tuple(range(5)), near_tiles=(), near_tile_source_ids={})
+    first_mapping = ShaderMapping(component=ShaderComponent.REAL)
+    second_mapping = ShaderMapping(component=ShaderComponent.IMAG)
+
+    first = layer.update(
+        payloads={index: payload(index, float(index)) for index in range(5)},
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        shader_mapping=first_mapping,
+        tile_delta=delta,
+    )
+    geometry_calls = [visual.geometry_calls for visual in layer._visuals_by_page]
+    texture_updates = sum(
+        len(texture.updates)
+        for page in layer._pool.pages
+        for texture in (page.scalar_texture, page.color_texture)
+    )
+
+    second = layer.set_presentation_uniforms(
+        levels=(0.0, 4.0),
+        shader_mapping=second_mapping,
+    )
+
+    assert first.page_count == 2
+    assert second.texture_uploads == 0
+    assert second.vertex_uploads == 0
+    assert second.shader_uniform_updates == 2
+    assert [visual.geometry_calls for visual in layer._visuals_by_page] == geometry_calls
+    assert sum(
+        len(texture.updates)
+        for page in layer._pool.pages
+        for texture in (page.scalar_texture, page.color_texture)
+    ) == texture_updates
+    assert all(visual.mappings[-1][1] is second_mapping for visual in layer._visuals_by_page)
 
 
 def test_none_dirty_set_forces_refresh_even_when_sources_match():

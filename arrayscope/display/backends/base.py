@@ -108,6 +108,7 @@ class ImageViewMethodBackendAdapter:
             histogramRange=presentation.histogram_range,
             viewport_policy=presentation.viewport_policy,
             rgb_already_windowed=presentation.rgb_already_windowed,
+            shader_mapping=presentation.shader_mapping,
             tile_residency_budget_bytes=presentation.tile_residency_budget_bytes,
         )
 
