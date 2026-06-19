@@ -46,6 +46,11 @@ if TYPE_CHECKING:
 
 
 class ImageView2D(QtWidgets.QWidget):
+    # Backends that implement the typed tile-payload method can bypass CPU
+    # montage canvas composition.  Renderer orchestration checks this
+    # capability rather than branching on a backend name.
+    supports_direct_montage_tile_payloads = True
+
     rendering_backend_name = "pyqtgraph"
 
     # Emitted only for explicit user edits of the histogram/LUT levels.
