@@ -204,7 +204,8 @@ class TextureAtlasPool:
             count=requested_capacity,
             storage_mode=storage_mode,
         )
-        dirty = set() if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
+        dirty_all = dirty_tiles is None
+        dirty = set() if dirty_all else {int(tile) for tile in dirty_tiles}
         active = {int(tile_number) for tile_number, _payload in payload_items}
         uvs: dict[int, tuple[float, float, float, float]] = {}
         uploads = 0
@@ -225,7 +226,7 @@ class TextureAtlasPool:
             y1 = y0 + tile_h
             x1 = x0 + tile_w
             source_changed = self.source_ids.get(tile_number) != payload.source_id
-            should_upload = bool(newly_assigned or source_changed or tile_number in dirty)
+            should_upload = bool(dirty_all or newly_assigned or source_changed or tile_number in dirty)
             uvs[tile_number] = (x0 / atlas_w, y0 / atlas_h, x1 / atlas_w, y1 / atlas_h)
             if not should_upload:
                 skipped += 1

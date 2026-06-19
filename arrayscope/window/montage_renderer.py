@@ -1009,7 +1009,12 @@ class MontageRenderMixin:
             explicit_auto = bool(getattr(session, "force_auto", False))
             semantic_source = self._montage_level_source_for_session(session, allow_partial=explicit_auto)
             first_display_commit = not bool(session.display_committed)
-            montage_dirty_tiles = None if first_display_commit else dirty_tiles
+            # Tile source identities include document/view/operation revisions.
+            # New or changed items still upload through source/visibility checks,
+            # while a first commit for an already-resident cached montage can
+            # safely reuse its texture slots.  ``None`` remains the explicit
+            # force-refresh contract for callers without trusted identities.
+            montage_dirty_tiles = () if first_display_commit else dirty_tiles
             tile_payloads = _display_tile_payloads_for_session(session, tile_source_ids)
             if first_display_commit:
                 self._apply_full_display_image(

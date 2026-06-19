@@ -683,8 +683,11 @@ class VisPyImageView2D(ImageView2D):
         return result
 
     def eventFilter(self, obj, event):
-        if obj is self.graphicsView.viewport() and event.type() == QtCore.QEvent.Type.MouseMove:
-            self._update_vispy_roi_cursor(event)
+        if obj is self.graphicsView.viewport():
+            if event.type() == QtCore.QEvent.Type.MouseMove:
+                self._update_vispy_roi_cursor(event)
+            elif event.type() == QtCore.QEvent.Type.Leave:
+                self._clear_vispy_hover_feedback()
         return super().eventFilter(obj, event)
 
     def _clear_vispy_hover_feedback(self) -> None:
