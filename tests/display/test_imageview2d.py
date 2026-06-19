@@ -999,6 +999,50 @@ def test_imageview_inspection_tool_validation(qt_app):
     view.close()
 
 
+def test_native_roi_drag_is_reflected_in_shared_capture_state(qt_app):
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.interaction import PointerPhase
+
+    view = ImageView2D()
+    view.setImage(np.zeros((20, 20), dtype=float))
+    selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
+    item, _stored = view._roi_items[selection.id]
+
+    view._on_roi_item_change_started(selection.id)
+    item.setPos(3.0, 4.0)
+    view._on_roi_item_changed(selection.id, final=False)
+
+    assert view.interactionState().phase is PointerPhase.DRAGGING
+    assert view.interactionState().capture.object_id == selection.id
+    assert view.interactionState().drag_geometry is not None
+
+    view._on_roi_item_changed(selection.id, final=True)
+    assert view.interactionState().phase is PointerPhase.IDLE
+    view.close()
+
+
+def test_profile_drag_is_reflected_in_shared_capture_state(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.interaction import PointerPhase
+
+    view = ImageView2D()
+    view.setImage(np.zeros((20, 20), dtype=float))
+    view.setProfileMarker(5.0, 6.0, visible=True)
+
+    view._observe_profile_capture("vertical", (8.0, 6.0))
+
+    state = view.interactionState()
+    assert state.phase is PointerPhase.DRAGGING
+    assert state.capture.kind == "profile"
+    assert state.capture.part == "vertical"
+    assert state.drag_profile_position == (8.0, 6.0)
+
+    view._finish_profile_capture()
+    assert view.interactionState().phase is PointerPhase.IDLE
+    view.close()
+
+
 def test_imageview_preserves_view_range_for_same_shape_by_default(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 

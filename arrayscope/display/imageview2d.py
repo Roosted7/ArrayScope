@@ -21,6 +21,7 @@ from arrayscope.core.roi import (
     RoiKind,
     RoiSelection,
     close_polygon,
+    roi_bounding_rect,
     simplify_polyline,
 )
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
@@ -28,7 +29,12 @@ from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.histogram_controller import HistogramLevelPreviewController
 from arrayscope.display.image_upload import ensure_imageitem_array, rgb_display_for_levels
-from arrayscope.display.interaction import CursorIntent, DisplayInteractionController
+from arrayscope.display.interaction import (
+    CursorIntent,
+    DisplayInteractionController,
+    InteractionTarget,
+    PointerPhase,
+)
 from arrayscope.display.levels import finite_bounds
 from arrayscope.display.layers import ViewLayerOwner
 from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer, TileLayerUpdateStats
@@ -115,6 +121,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._evaluation_overlay = None
         self._roi_info_panel = None
         self.interaction_controller = DisplayInteractionController()
+        self._last_profile_marker_position: tuple[float, float] | None = None
         self._roi_items = {}
         self._montage_tile_overlay_item = None
         self._montage_tile_overlay_items = []
@@ -184,9 +191,12 @@ class ImageView2D(QtWidgets.QWidget):
         self._profile_vline.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
         self._profile_hline.setCursor(QtCore.Qt.CursorShape.SizeVerCursor)
         self._profile_handle.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-        self._profile_vline.sigPositionChanged.connect(self._on_profile_marker_changed)
-        self._profile_hline.sigPositionChanged.connect(self._on_profile_marker_changed)
-        self._profile_handle.sigPositionChanged.connect(self._on_profile_handle_changed)
+        self._profile_vline.sigPositionChanged.connect(lambda *_args: self._on_profile_marker_changed("vertical"))
+        self._profile_hline.sigPositionChanged.connect(lambda *_args: self._on_profile_marker_changed("horizontal"))
+        self._profile_handle.sigPositionChanged.connect(lambda *_args: self._on_profile_handle_changed("center"))
+        self._profile_vline.sigPositionChangeFinished.connect(self._finish_profile_capture)
+        self._profile_hline.sigPositionChangeFinished.connect(self._finish_profile_capture)
+        self._profile_handle.sigPositionChangeFinished.connect(self._finish_profile_capture)
         self._layer_owner.add_profile_marker_items(self._profile_vline, self._profile_hline, self._profile_handle)
         self.view.sigRangeChanged.connect(self._on_view_range_changed)
 
@@ -1117,6 +1127,7 @@ class ImageView2D(QtWidgets.QWidget):
             self.view.update()
         finally:
             self._profile_marker_updating = False
+        self._last_profile_marker_position = (float(x), float(y))
 
     def hideProfileMarker(self):
         """Hide the image-space profile marker."""
@@ -1148,7 +1159,7 @@ class ImageView2D(QtWidgets.QWidget):
         """Clear the callback called when the marker moves."""
         self._profile_marker_callback = None
 
-    def _on_profile_marker_changed(self, *_args):
+    def _on_profile_marker_changed(self, part="center"):
         if self._profile_marker_updating:
             return
         if self._profile_vline is None or self._profile_hline is None:
@@ -1164,10 +1175,11 @@ class ImageView2D(QtWidgets.QWidget):
             self._profile_handle.setPos(x, y)
         finally:
             self._profile_marker_updating = False
+        self._observe_profile_capture(str(part), (x, y))
         if self._profile_marker_callback is not None:
             self._profile_marker_callback(x, y)
 
-    def _on_profile_handle_changed(self, *_args):
+    def _on_profile_handle_changed(self, part="center"):
         if self._profile_marker_updating:
             return
         if self._profile_handle is None:
@@ -1185,8 +1197,30 @@ class ImageView2D(QtWidgets.QWidget):
             self.view.update()
         finally:
             self._profile_marker_updating = False
+        self._observe_profile_capture(str(part), (x, y))
         if self._profile_marker_callback is not None:
             self._profile_marker_callback(x, y)
+
+    def _observe_profile_capture(self, part: str, position: tuple[float, float]) -> None:
+        state = self.interaction_controller.state
+        target = InteractionTarget("profile", part=str(part))
+        if state.phase is not PointerPhase.DRAGGING or state.capture is None or state.capture.kind != "profile":
+            origin = self._last_profile_marker_position or position
+            self.interaction_controller.begin_capture(
+                target,
+                origin,
+                profile_position=origin,
+            )
+        self.interaction_controller.observe_profile_position(position)
+        self._last_profile_marker_position = (float(position[0]), float(position[1]))
+
+    def _finish_profile_capture(self, *_args) -> None:
+        state = self.interaction_controller.state
+        if state.capture is not None and state.capture.kind == "profile":
+            self.interaction_controller.end_capture()
+        position = self.profileMarkerPosition()
+        if position is not None:
+            self._last_profile_marker_position = position
 
     def _update_profile_line_bounds(self):
         if self.image is None:
@@ -1385,8 +1419,6 @@ class ImageView2D(QtWidgets.QWidget):
 
     @property
     def _drawing_active(self):
-        from arrayscope.display.interaction import PointerPhase
-
         return self.interaction_controller.state.phase is PointerPhase.DRAWING
 
     @property
@@ -1466,7 +1498,15 @@ class ImageView2D(QtWidgets.QWidget):
         item = item_for_roi(selection)
         self._roi_items[roi_id] = (item, selection)
         self._layer_owner.add_roi_item(roi_id, item)
-        item.sigRegionChangeFinished.connect(lambda _item=item, roi_id=roi_id: self._on_roi_item_changed(roi_id))
+        started = getattr(item, "sigRegionChangeStarted", None)
+        changed = getattr(item, "sigRegionChanged", None)
+        finished = getattr(item, "sigRegionChangeFinished", None)
+        if started is not None:
+            started.connect(lambda _item=item, roi_id=roi_id: self._on_roi_item_change_started(roi_id))
+        if changed is not None:
+            changed.connect(lambda _item=item, roi_id=roi_id: self._on_roi_item_changed(roi_id, final=False))
+        if finished is not None:
+            finished.connect(lambda _item=item, roi_id=roi_id: self._on_roi_item_changed(roi_id, final=True))
         self.roiCreated.emit(selection)
         return selection
 
@@ -1493,7 +1533,28 @@ class ImageView2D(QtWidgets.QWidget):
             item.setPen(pg.mkPen(selection.color + (255,), width=width))
         return roi_id in self._roi_items
 
-    def _on_roi_item_changed(self, roi_id):
+    def _on_roi_item_change_started(self, roi_id) -> None:
+        item_selection = self._roi_items.get(str(roi_id))
+        if item_selection is None:
+            return
+        _item, selection = item_selection
+        hover = self.interaction_controller.state.hover
+        target = hover if hover is not None and hover.kind == "roi" and hover.object_id == str(roi_id) else None
+        if target is None:
+            target = InteractionTarget(
+                "roi",
+                object_id=str(roi_id),
+                part="body",
+                geometry_kind=selection.geometry.kind.value,
+            )
+        anchor = _roi_geometry_anchor(selection.geometry)
+        self.interaction_controller.begin_capture(
+            target,
+            anchor,
+            roi_geometry=selection.geometry,
+        )
+
+    def _on_roi_item_changed(self, roi_id, *, final: bool = True):
         item_selection = self._roi_items.get(str(roi_id))
         if item_selection is None:
             return
@@ -1507,7 +1568,13 @@ class ImageView2D(QtWidgets.QWidget):
             color=selection.color,
         )
         self._roi_items[str(roi_id)] = (item, updated)
+        state = self.interaction_controller.state
+        if state.capture is None or state.capture.kind != "roi" or state.capture.object_id != str(roi_id):
+            self._on_roi_item_change_started(roi_id)
+        self.interaction_controller.observe_capture_geometry(geometry)
         self.roiChanged.emit(str(roi_id), geometry)
+        if final:
+            self.interaction_controller.end_capture()
 
     def _default_line_points(self):
         x, y, width, height = self._default_rect()
@@ -1678,3 +1745,13 @@ def _point_inside_view_range(view_range, x: float, y: float) -> bool:
     except Exception:
         return True
     return x0 <= float(x) <= x1 and y0 <= float(y) <= y1
+
+
+def _roi_geometry_anchor(geometry: RoiGeometry) -> tuple[float, float]:
+    bounds = roi_bounding_rect(geometry)
+    if bounds is not None:
+        return (
+            (float(bounds[0]) + float(bounds[2])) * 0.5,
+            (float(bounds[1]) + float(bounds[3])) * 0.5,
+        )
+    return (0.0, 0.0)
