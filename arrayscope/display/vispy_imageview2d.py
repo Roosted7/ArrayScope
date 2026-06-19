@@ -123,6 +123,9 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_overlay_count = 0
         self._vispy_profile_visuals: dict[str, object] = {}
         self._vispy_last_levels: tuple[float, float] = (0.0, 1.0)
+        self._last_vispy_tiled_levels_key = None
+        self._last_vispy_tiled_histogram_key = None
+        self._last_vispy_tiled_viewport_key = None
         self._vispy_main_data_id: int | None = None
         self._vispy_main_color_source_id: int | None = None
         self._vispy_main_scalar_source_id: int | None = None
@@ -175,6 +178,9 @@ class VisPyImageView2D(ImageView2D):
         self._last_vispy_tile_payloads = None
         self._last_vispy_tiled_source_key = None
         self._last_vispy_tiled_structure_key = None
+        self._last_vispy_tiled_levels_key = None
+        self._last_vispy_tiled_histogram_key = None
+        self._last_vispy_tiled_viewport_key = None
         self._montage_display_mode = "canvas"
         self.imageItem.setVisible(False)
         try:
@@ -285,14 +291,31 @@ class VisPyImageView2D(ImageView2D):
         applying = self._applying_presentation
         self._applying_presentation = True
         try:
+            level_key = (float(levels[0]), float(levels[1]))
             source_key = _tiled_source_key(montage_tile_payloads, montage_tile_source_ids)
             structure_key = _tiled_structure_key(
                 geometry,
-                levels=levels,
-                histogram_range=histogramRange,
-                viewport_policy=viewport_policy,
                 rgb_already_windowed=rgb_already_windowed,
             )
+            histogram_key = _tiled_histogram_key(histogramData, histogramPlotData, histogramRange)
+            viewport_key = (
+                structure_key,
+                str(getattr(viewport_policy, "value", viewport_policy)),
+            )
+            previous_source_key = getattr(self, "_last_vispy_tiled_source_key", None)
+            previous_structure_key = getattr(self, "_last_vispy_tiled_structure_key", None)
+            previous_levels_key = getattr(self, "_last_vispy_tiled_levels_key", None)
+            previous_histogram_key = getattr(self, "_last_vispy_tiled_histogram_key", None)
+            previous_viewport_key = getattr(self, "_last_vispy_tiled_viewport_key", None)
+            structure_changed = structure_key != previous_structure_key
+            levels_changed = level_key != previous_levels_key
+            data_unchanged = (
+                montage_tile_payloads is not None
+                and montage_dirty_tiles == ()
+                and source_key == previous_source_key
+                and not structure_changed
+            )
+
             self.image = img
             self.histogramSource = histogramData
             self.histogramPlotSource = histogramPlotData
@@ -303,41 +326,56 @@ class VisPyImageView2D(ImageView2D):
                 self._vispy_image.visible = False
             except Exception:
                 pass
-            clean_noop = (
-                montage_tile_payloads is not None
-                and montage_dirty_tiles == ()
-                and source_key == getattr(self, "_last_vispy_tiled_source_key", None)
-                and structure_key == getattr(self, "_last_vispy_tiled_structure_key", None)
-            )
-            if clean_noop:
+
+            if data_unchanged and not levels_changed:
                 from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
 
                 visible = len(montage_tile_payloads or {})
-                stats = TileLayerUpdateStats(visible_items=visible, items_updated=0, items_skipped=visible, rgb_window_tiles=0)
+                stats = TileLayerUpdateStats(
+                    visible_items=visible,
+                    items_updated=0,
+                    items_skipped=visible,
+                    rgb_window_tiles=0,
+                )
             else:
                 stats = self._update_vispy_tile_layer(
                     img,
                     histogram_data=histogramData,
                     geometry=geometry,
-                    levels=(float(levels[0]), float(levels[1])),
+                    levels=level_key,
                     rgb_already_windowed=rgb_already_windowed,
                     dirty_tiles=montage_dirty_tiles,
                     tile_source_ids=montage_tile_source_ids,
                     tile_payloads=montage_tile_payloads,
+                    force_levels=bool(data_unchanged and levels_changed),
                 )
             self._record_tile_layer_stats(stats)
-            structure_unchanged = structure_key == getattr(self, "_last_vispy_tiled_structure_key", None)
-            if not structure_unchanged:
-                self._update_histogram_for_vispy(histogramData, histogramPlotData, levels)
-                self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
+
+            # Histogram, levels, geometry, and viewport are separate concerns.
+            # A level-only change must not look like a full structural commit.
+            histogram_changed = histogram_key != previous_histogram_key or not data_unchanged
+            if histogram_changed:
+                self._update_histogram_for_vispy(histogramData, histogramPlotData, level_key)
                 self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+            if levels_changed:
+                self._sync_display_levels(level_key[0], level_key[1], update_image=False, emit_user=False)
+
+            montage_shape = None
+            if structure_changed:
                 self._update_profile_line_bounds()
                 self._updateAspectRatio()
                 montage_shape = self._sync_vispy_montage_bounds(geometry)
+            if viewport_key != previous_viewport_key:
+                if montage_shape is None:
+                    montage_shape = self._sync_vispy_montage_bounds(geometry)
                 self._apply_viewport_policy(montage_shape, viewport_policy, image_origin=(0.0, 0.0))
                 self._sync_vispy_camera_to_view()
+
             self._last_vispy_tiled_source_key = source_key
             self._last_vispy_tiled_structure_key = structure_key
+            self._last_vispy_tiled_levels_key = level_key
+            self._last_vispy_tiled_histogram_key = histogram_key
+            self._last_vispy_tiled_viewport_key = viewport_key
         finally:
             self._applying_presentation = applying
             self._finish_upload_timing()
@@ -1344,7 +1382,7 @@ def _tiled_source_key(tile_payloads, tile_source_ids):
     )
 
 
-def _tiled_structure_key(geometry, *, levels, histogram_range, viewport_policy, rgb_already_windowed):
+def _tiled_structure_key(geometry, *, rgb_already_windowed):
     montage = getattr(geometry, "montage", None)
     if montage is None:
         montage_key = None
@@ -1362,11 +1400,23 @@ def _tiled_structure_key(geometry, *, levels, histogram_range, viewport_policy, 
     return (
         tuple(int(value) for value in tuple(getattr(geometry, "display_shape", ()))[:2]),
         montage_key,
-        (float(levels[0]), float(levels[1])),
-        (float(histogram_range[0]), float(histogram_range[1])),
-        str(getattr(viewport_policy, "value", viewport_policy)),
         bool(rgb_already_windowed),
     )
+
+
+def _tiled_histogram_key(histogram_data, histogram_plot_data, histogram_range):
+    return (
+        _array_identity_key(histogram_data),
+        _array_identity_key(histogram_plot_data),
+        (float(histogram_range[0]), float(histogram_range[1])),
+    )
+
+
+def _array_identity_key(data):
+    if data is None:
+        return None
+    array = np.asarray(data)
+    return (id(data), tuple(int(value) for value in array.shape), str(array.dtype))
 
 
 def _set_visual_visible(visual, visible: bool) -> None:
