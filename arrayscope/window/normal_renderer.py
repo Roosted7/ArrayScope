@@ -30,10 +30,28 @@ from arrayscope.window.stage_warmup import schedule_stage_warmup
 
 
 class NormalImageRenderMixin:
+    def _interactive_render_cache_hit(self) -> bool:
+        """Return whether the current normal-image request is already cached."""
+
+        view_state = getattr(self, "view_state", None)
+        if view_state is None or view_state.image_axes is None or view_state.montage_axis is not None:
+            return False
+        evaluator = getattr(self, "operation_evaluator", None)
+        if evaluator is None:
+            return False
+        colormap_lut = None
+        if view_state.channel == ChannelMode.COMPLEX:
+            colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
+        shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
+        return evaluator.cached_image(
+            view_state,
+            colormap_lut=colormap_lut,
+            shader_display=shader_display,
+        ) is not None
+
     def update_image_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         if self.view_state.image_axes is None: # No image view for 1D data
             return
-        self._refresh_memory_policy(active_render=self.visible_evaluation_controller.is_busy())
         if self.view_state.montage_axis is not None:
             return self.update_montage_view(force_autolevel=force_autolevel, defer_side_panels=defer_side_panels)
         force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
@@ -49,7 +67,6 @@ class NormalImageRenderMixin:
         if hasattr(self.img_view, "clearMontageTileOverlays"):
             self.img_view.clearMontageTileOverlays()
             
-        al = True
         # reset the one-shot flag after using it
         if getattr(self, '_force_autolevel', False):
             self._force_autolevel = False
@@ -78,6 +95,7 @@ class NormalImageRenderMixin:
                 render_generation=render_generation,
             )
             return
+        self._refresh_memory_policy(active_render=self.visible_evaluation_controller.is_busy())
         planning_start = perf_counter()
         estimated_bytes = self._estimated_image_display_bytes(view_state)
         context = estimate_visible_render_context(

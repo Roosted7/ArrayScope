@@ -153,3 +153,53 @@ def test_direct_render_still_refreshes_side_panels(qtbot, monkeypatch):
         assert calls["inspection"] == 1
     finally:
         win.close()
+
+
+def test_cached_interactive_render_uses_zero_delay_without_cancelling_work(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=float).reshape(4, 5, 8))
+    qtbot.addWidget(win)
+    renders = []
+    cancellations = []
+    monkeypatch.setattr(win, "_interactive_render_cache_hit", lambda: True)
+    monkeypatch.setattr(
+        win,
+        "_cancel_render_dependent_work_for_interactive_change",
+        lambda: cancellations.append(True),
+    )
+    monkeypatch.setattr(win, "render", lambda **kwargs: renders.append(kwargs))
+    try:
+        win.request_render(reason="cached-slice", interactive=True)
+
+        assert renders == []
+        assert cancellations == []
+        qtbot.waitUntil(lambda: bool(renders), timeout=250)
+        assert renders[-1]["reason"] == "cached-slice"
+        assert win.render_coordinator.immediate_cache_flushes == 1
+    finally:
+        win.close()
+
+
+def test_cached_normal_image_render_skips_memory_policy_resample(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=4)
+        assert win.operation_evaluator.cached_image(
+            win.view_state,
+            colormap_lut=None,
+            shader_display=bool(win.img_view.rendering_capabilities.shader_windowing),
+        ) is not None
+        refreshes = []
+        monkeypatch.setattr(win, "_refresh_memory_policy", lambda **kwargs: refreshes.append(kwargs))
+
+        win.update_image_view()
+
+        assert refreshes == []
+    finally:
+        win.close()
