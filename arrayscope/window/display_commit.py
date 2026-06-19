@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from arrayscope.display.backends import RasterCommitMode, backend_adapter_for_view
+from arrayscope.display.scene import DisplayScene, display_scene_for_presentation
 from arrayscope.window.display_frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
 from arrayscope.window.render_model import DisplayPresentation, DisplayRasterPresentation, DisplayTiledPresentation
 
@@ -17,29 +18,37 @@ class DisplayCommitter:
     def commit_full(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         presentation = self._require_raster(presentation, "full")
         self._validate_presentation(presentation)
+        scene = display_scene_for_presentation(presentation)
         self.backend.present_raster(presentation, mode=RasterCommitMode.FULL)
-        self.backend.set_profile_bounds(_geometry_bounds(presentation.geometry))
-        return self._frame_for(presentation, key)
+        self.backend.set_profile_bounds(scene.bounds)
+        return self._frame_for(presentation, key, scene)
 
     def commit_fast(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         presentation = self._require_raster(presentation, "fast")
         self._validate_presentation(presentation)
         if self.backend.current_raster_shape() != tuple(presentation.geometry.display_shape):
             raise ValueError("fast display commit requires an existing image with the same display shape")
+        scene = display_scene_for_presentation(presentation)
         self.backend.present_raster(presentation, mode=RasterCommitMode.FAST)
-        self.backend.set_profile_bounds(_geometry_bounds(presentation.geometry))
-        return self._frame_for(presentation, key)
+        self.backend.set_profile_bounds(scene.bounds)
+        return self._frame_for(presentation, key, scene)
 
     def commit_tile_layer(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         self._validate_presentation(presentation)
+        scene = display_scene_for_presentation(presentation)
         if isinstance(presentation, DisplayTiledPresentation):
             self.backend.present_tiled(presentation)
         else:
             self.backend.present_raster(presentation, mode=RasterCommitMode.TILE_LAYER)
-        self.backend.set_profile_bounds(_geometry_bounds(presentation.geometry))
-        return self._frame_for(presentation, key)
+        self.backend.set_profile_bounds(scene.bounds)
+        return self._frame_for(presentation, key, scene)
 
-    def _frame_for(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
+    def _frame_for(
+        self,
+        presentation: DisplayPresentation,
+        key: DisplayFrameKey,
+        scene: DisplayScene,
+    ) -> CommittedDisplayFrame:
         if isinstance(presentation, DisplayTiledPresentation):
             data = None
             histogram_data = None
@@ -60,6 +69,7 @@ class DisplayCommitter:
             histogram_range=(float(presentation.histogram_range[0]), float(presentation.histogram_range[1])),
             key=key,
             value_source=value_source,
+            scene=scene,
         )
 
     def _validate_presentation(self, presentation: DisplayPresentation) -> None:
@@ -99,13 +109,3 @@ class DisplayCommitter:
             raise ValueError(f"{label} must be a pair of finite floats") from exc
         if not np.isfinite(low) or not np.isfinite(high) or high <= low:
             raise ValueError(f"{label} must be finite increasing bounds")
-
-
-def _geometry_bounds(geometry) -> tuple[float, float, float, float]:
-    montage = getattr(geometry, "montage", None)
-    if montage is None:
-        height, width = geometry.display_shape
-        return (0.0, 0.0, float(max(0, int(width) - 1)), float(max(0, int(height) - 1)))
-    full_width = montage.columns * montage.tile_width + max(0, montage.columns - 1) * montage.gap
-    full_height = montage.rows * montage.tile_height + max(0, montage.rows - 1) * montage.gap
-    return (0.0, 0.0, float(max(0, int(full_width) - 1)), float(max(0, int(full_height) - 1)))
