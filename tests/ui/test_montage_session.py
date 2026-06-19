@@ -400,6 +400,10 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
     assert set(session.rendered_tiles) == {0, 1}
     assert tuple(tile.montage_index for tile in additions) == (2, 3, 4)
 
+    state, delta = session.build_tile_presentation({index: ("tile-source", index) for index in range(8)})
+    assert delta.active_tiles == ()
+    assert state.active_payloads(delta) == {}
+
 
 def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
     session = _session()

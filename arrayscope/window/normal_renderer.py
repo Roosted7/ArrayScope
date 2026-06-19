@@ -115,6 +115,9 @@ class NormalImageRenderMixin:
         self._last_render_request_key = None
         self._last_render_error = ""
         self._last_render_completed_ms = None
+        if _should_clear_stale_visible_frame(previous_frame, _document_key(document), self.img_view):
+            self.img_view.clear()
+            self.img_view.setEvaluationOverlay(True, decision.overlay_text or "Updating view...")
         if decision.kind == RenderDecisionKind.REFUSE:
             self.operation_evaluator.note_render_refused(decision.reason)
             show_status_message(
@@ -282,3 +285,12 @@ def _choose_visible_render_decision(context):
     except (ImportError, AttributeError):
         chooser = _default_choose_visible_render_decision
     return chooser(context)
+
+
+def _should_clear_stale_visible_frame(previous_frame, document_key, image_view) -> bool:
+    if previous_frame is None:
+        return False
+    if getattr(image_view, "image", None) is None:
+        return False
+    previous_key = getattr(previous_frame, "key", None)
+    return getattr(previous_key, "document_key", None) != document_key

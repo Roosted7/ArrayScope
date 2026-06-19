@@ -64,7 +64,7 @@ def test_force_auto_overrides_absolute_window_for_channel_or_scale_changes():
     assert decision.levels is None
 
 
-def test_controller_relative_same_source_keeps_display_levels_stable_as_statistics_improve():
+def test_controller_relative_same_source_remaps_levels_as_statistics_improve():
     previous = window_levels.LevelSource(
         levels=(25.0, 75.0),
         histogram_range=(0.0, 100.0),
@@ -84,9 +84,58 @@ def test_controller_relative_same_source_keeps_display_levels_stable_as_statisti
 
     state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="relative")
 
-    assert state.display_levels == (25.0, 75.0)
+    assert state.display_levels == (100.0, 300.0)
     assert state.histogram_range == (0.0, 400.0)
     assert state.source_count == 2
+
+
+def test_controller_relative_same_source_does_not_downgrade_when_viewport_coverage_shrinks():
+    previous = window_levels.LevelSource(
+        levels=(100.0, 300.0),
+        histogram_range=(0.0, 400.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=4,
+        expected_count=4,
+        semantic_key="same",
+    )
+    candidate = window_levels.LevelSource(
+        levels=(100.0, 200.0),
+        histogram_range=(100.0, 200.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=1,
+        expected_count=4,
+        semantic_key="same",
+    )
+
+    state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="relative")
+
+    assert state.display_levels == (100.0, 300.0)
+    assert state.histogram_range == (0.0, 400.0)
+    assert state.source_rank == window_levels.LevelSourceRank.MONTAGE_COMPLETE
+    assert state.source_count == 4
+
+
+def test_controller_absolute_partial_source_updates_histogram_without_changing_levels():
+    previous = window_levels.LevelSource(
+        levels=(25.0, 75.0),
+        histogram_range=(0.0, 100.0),
+        rank=window_levels.LevelSourceRank.EXPLICIT_USER,
+        semantic_key="same",
+        mode=window_levels.LevelMode.USER_LOCKED,
+    )
+    candidate = window_levels.LevelSource(
+        levels=(200.0, 400.0),
+        histogram_range=(200.0, 400.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=1,
+        expected_count=4,
+        semantic_key="same",
+    )
+
+    state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="absolute")
+
+    assert state.display_levels == (25.0, 75.0)
+    assert state.histogram_range == (0.0, 400.0)
 
 
 def test_controller_absolute_same_source_keeps_numeric_levels_and_updates_histogram():

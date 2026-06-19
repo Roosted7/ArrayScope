@@ -736,6 +736,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
 
     def render(self, *, reason: str = "state", force_autolevel: bool = False, defer_side_panels: bool = False):
         render_start = perf_counter()
+        self._cancel_render_dependent_work_for_interactive_change()
         self._advance_render_generation(f"render:{reason}")
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._coerce_channel_for_current_dtype()

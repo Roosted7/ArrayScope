@@ -549,6 +549,64 @@ def test_vispy_direct_tiled_payloads_use_batched_gpu_layer(qt_app):
         view.close()
 
 
+def test_vispy_direct_tiled_hides_previous_windowed_main_visual(qt_app):
+    from arrayscope.core.view_state import ChannelMode, ViewState
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.slice_engine import make_shader_image_from_slab
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    class Request:
+        def __init__(self, view_state):
+            self.view_state = view_state
+            self.ranged_axes = ()
+
+    data = (np.arange(4, dtype=np.float32).reshape(2, 2) + 1j).astype(np.complex64)
+    state = ViewState.from_shape(data.shape).with_channel(ChannelMode.COMPLEX)
+    display = make_shader_image_from_slab(data, Request(state))
+    payload = DisplayTilePayload(
+        0,
+        0,
+        display.data,
+        display.histogram_data,
+        ("tile", 0),
+        texture_data=display.semantic_data,
+        texture_kind=display.texture_kind,
+        semantic_data=display.semantic_data,
+        semantic_histogram_data=display.histogram_data,
+        shader_mapping=display.shader_mapping,
+    )
+    view = VisPyImageView2D()
+    try:
+        view.setImagePresentation(
+            display.data,
+            histogramData=display.histogram_data,
+            levels=(0.0, 4.0),
+            histogramRange=(0.0, 4.0),
+            shader_mapping=display.shader_mapping,
+            texture_kind=display.texture_kind,
+            semantic_data=display.semantic_data,
+        )
+        assert view._vispy_windowed_image.visible
+
+        view.setMontageTileLayerPresentation(
+            np.zeros((2, 2), dtype=np.float32),
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=_single_tile_montage_geometry(),
+            levels=(0.0, 4.0),
+            histogramRange=(0.0, 4.0),
+            montage_dirty_tiles=None,
+            montage_tile_source_ids={0: ("tile", 0)},
+            montage_tile_payloads={0: payload},
+        )
+
+        assert not view._vispy_image.visible
+        assert not view._vispy_windowed_image.visible
+        assert view._vispy_gpu_montage_layer.last_stats.visible_items == 1
+    finally:
+        view.close()
+
+
 def test_vispy_direct_tiled_complex_display_images_render_nonblank(qt_app):
     from pyqtgraph.Qt import QtGui
     from arrayscope.core.view_state import ChannelMode, ViewState
@@ -683,6 +741,48 @@ def test_vispy_direct_tiled_clean_and_dirty_counters(qt_app):
         assert dirty.visible_bytes > 0
         assert dirty.tile_layer_texture_uploads >= 1
         assert dirty.tile_layer_texture_upload_bytes > 0
+    finally:
+        view.close()
+
+
+def test_vispy_direct_tiled_respects_delta_active_tiles(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta
+
+    view = VisPyImageView2D()
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2), 1.0, dtype=np.float32), None, ("tile", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2), 2.0, dtype=np.float32), None, ("tile", 1)),
+    }
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=(1,),
+        planned_tiles=(0, 1),
+        near_tiles=(0, 1),
+    )
+    try:
+        view.setMontageTileLayerPresentation(
+            np.zeros((2, 5), dtype=np.float32),
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=_montage_geometry(),
+            levels=(0.0, 2.0),
+            histogramRange=(0.0, 2.0),
+            montage_dirty_tiles=None,
+            montage_tile_source_ids={tile: payload.source_id for tile, payload in payloads.items()},
+            montage_tile_payloads=payloads,
+            tile_delta=delta,
+        )
+
+        timing = view.lastImageUploadTiming()
+        assert timing.tile_layer_visible_items == 1
+        assert timing.tile_layer_items_updated == 1
     finally:
         view.close()
 
@@ -933,6 +1033,90 @@ def test_vispy_first_class_tiled_shifted_window_reuses_resident_sources(qt_app):
         view.close()
 
 
+def test_vispy_first_class_tiled_loading_only_commit_hides_previous_active_tiles(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+    loaded = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    loading = DisplayGeometry(
+        view_state=loaded.view_state,
+        display_shape=(2, 5),
+        montage=loaded.montage,
+        montage_tile_states=(MontageTileState.LOADING, MontageTileState.LOADING),
+    )
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2), 1.0, dtype=np.float32), None, ("source", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2), 2.0, dtype=np.float32), None, ("source", 1)),
+    }
+    first_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+        near_tiles=(0, 1),
+    )
+    empty_delta = TilePresentationDelta(
+        structure_revision=2,
+        payload_revision=2,
+        visibility_revision=2,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=2,
+        active_tiles=(),
+        planned_tiles=(0, 1),
+        near_tiles=(0, 1),
+    )
+    view = VisPyImageView2D()
+    try:
+        view.setTiledMontagePresentation(
+            geometry=loaded,
+            tile_state=TilePresentationState(payloads),
+            tile_delta=first_delta,
+            histogramPlotData=None,
+            levels=(100.0, 200.0),
+            histogramRange=(0.0, 1000.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+        assert view.lastImageUploadTiming().tile_layer_active_pages > 0
+        assert tuple(float(value) for value in view.getLevels()) == (100.0, 200.0)
+        assert tuple(float(value) for value in view.getHistogramDataBounds()) == (0.0, 1000.0)
+
+        view.setTiledMontagePresentation(
+            geometry=loading,
+            tile_state=TilePresentationState({}),
+            tile_delta=empty_delta,
+            histogramPlotData=None,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+
+        timing = view.lastImageUploadTiming()
+        assert timing.tile_layer_visible_items == 0
+        assert timing.tile_layer_active_pages == 0
+        assert timing.tile_layer_resident_items == 2
+        assert not any(visual.visible for visual in view._vispy_gpu_montage_layer._visuals_by_page)
+        assert tuple(float(value) for value in view.getLevels()) == (100.0, 200.0)
+        assert tuple(float(value) for value in view.getHistogramDataBounds()) == (0.0, 1000.0)
+    finally:
+        view.close()
+
+
 def test_vispy_first_class_tiled_warms_loaded_near_sources_after_visible_commit(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -987,6 +1171,54 @@ def test_vispy_first_class_tiled_warms_loaded_near_sources_after_visible_commit(
         assert warm.items_updated == 2
         assert warm.resident_items == 3
         assert view.lastImageUploadTiming().visible_bytes == visible.visible_bytes
+    finally:
+        view.close()
+
+
+def test_vispy_direct_tiled_histogram_only_commit_refreshes_histogram(qt_app, monkeypatch):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload
+
+    view = VisPyImageView2D()
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2), 0.25, dtype=np.float32), None, ("tile", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2), 0.75, dtype=np.float32), None, ("tile", 1)),
+    }
+    sources = {tile: payload.source_id for tile, payload in payloads.items()}
+    placeholder = np.broadcast_to(np.zeros((1, 1), dtype=np.float32), (2, 5))
+    calls = []
+    try:
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=np.arange(4, dtype=np.float32),
+            geometry=_montage_geometry(),
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_dirty_tiles=None,
+            montage_tile_source_ids=sources,
+            montage_tile_payloads=payloads,
+        )
+        monkeypatch.setattr(view, "_update_histogram_for_vispy", lambda *args, **kwargs: calls.append(args))
+
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=np.arange(4, dtype=np.float32) + 10.0,
+            geometry=_montage_geometry(),
+            levels=(0.0, 1.0),
+            histogramRange=(10.0, 13.0),
+            montage_dirty_tiles=(),
+            montage_tile_source_ids=sources,
+            montage_tile_payloads=payloads,
+        )
+
+        timing = view.lastImageUploadTiming()
+        assert calls
+        assert timing.tile_layer_items_updated == 0
+        assert timing.tile_layer_items_skipped == 2
+        assert timing.tile_layer_texture_uploads == 0
+        assert tuple(float(value) for value in view.getHistogramDataBounds()) == (10.0, 13.0)
     finally:
         view.close()
 

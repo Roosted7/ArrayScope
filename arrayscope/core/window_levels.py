@@ -291,14 +291,29 @@ class WindowLevelController:
                 mode=mode,
             )
 
-        # Progressive statistics for an already-visible semantic frame are
-        # metadata improvements, not a new windowing request.  Re-expressing
-        # the current levels against every newly discovered min/max causes the
-        # image to visibly flash while montage tiles arrive or while scrolling
-        # changes the sampled subset.  Relative mapping is therefore performed
-        # only when the semantic source changes (the branch above).  For the
-        # same source, keep the numeric display window stable and expand the
-        # histogram domain monotonically as better statistics become available.
+        if mode == LevelMode.RELATIVE:
+            histogram = union_bounds(previous_state.histogram_range, candidate_state.histogram_range)
+            rank = max(previous_state.source_rank, candidate_state.source_rank)
+            count = max(previous_state.source_count, candidate_state.source_count)
+            expected = max(previous_state.expected_count, candidate_state.expected_count)
+            if histogram == previous_state.histogram_range and rank == previous_state.source_rank and count == previous_state.source_count:
+                return replace(previous_state, expected_count=expected, user_locked=False, mode=mode)
+            mapped = relative_levels(
+                previous_state.display_levels,
+                previous_state.histogram_range,
+                histogram,
+            )
+            return replace(
+                previous_state,
+                display_levels=normalize_bounds(mapped) or previous_state.display_levels,
+                histogram_range=histogram or previous_state.histogram_range,
+                source_rank=rank,
+                source_count=count,
+                expected_count=expected,
+                user_locked=False,
+                mode=mode,
+            )
+
         histogram = union_bounds(previous_state.histogram_range, candidate_state.histogram_range)
         return replace(
             previous_state,

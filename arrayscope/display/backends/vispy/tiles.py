@@ -18,7 +18,6 @@ from arrayscope.display.shader_mapping import (
     ShaderScale,
     TexturePlaneKind,
     normalize_lut_rgb,
-    pack_texture_data,
     shader_component_uniform,
 )
 from arrayscope.display.model.frame import DisplayTilePayload
@@ -366,12 +365,18 @@ class TextureAtlasPool:
         budget_bytes: int | None = None,
     ) -> tuple[dict[int, tuple[float, float, float, float]], GpuMontageLayerStats]:
         start = perf_counter()
-        payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
+        raw_payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
         storage_mode = (
-            _atlas_storage_mode(payload_items, rgb_already_windowed=rgb_already_windowed)
-            if payload_items
+            _atlas_storage_mode(raw_payload_items, rgb_already_windowed=rgb_already_windowed)
+            if raw_payload_items
             else (self.storage_mode or "scalar")
         )
+        payload_items = tuple(
+            (tile, payload)
+            for tile, payload in raw_payload_items
+            if _payload_supported_by_storage_mode(payload, storage_mode, rgb_already_windowed=rgb_already_windowed)
+        )
+        unsupported_items = len(raw_payload_items) - len(payload_items)
         tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
         requested_capacity = self.requested_capacity(
             active_count=len(payload_items),
@@ -400,7 +405,7 @@ class TextureAtlasPool:
         upload_bytes = 0
         complex_uploads = 0
         updated = 0
-        skipped = 0
+        skipped = int(unsupported_items)
         evictions_before = self.eviction_count
         evicted_near_before = self.evicted_near_count
         tile_h, tile_w = self.tile_shape or tile_shape
@@ -427,13 +432,21 @@ class TextureAtlasPool:
             )
             y0, x0 = page.offset_for_slot(slot)
             if scalar is not None:
-                page.scalar_texture.set_data(scalar, offset=(int(y0), int(x0)), copy=False)
+                page.scalar_texture.set_data(
+                    scalar,
+                    offset=(int(y0), int(x0)),
+                    copy=_upload_copy_required(scalar, payload, force=page.complex_is_atlas),
+                )
                 uploads += 1
                 upload_bytes += int(scalar.nbytes)
                 if page.complex_is_atlas:
                     complex_uploads += 1
             if color is not None:
-                page.color_texture.set_data(color, offset=(int(y0), int(x0)), copy=False)
+                page.color_texture.set_data(
+                    color,
+                    offset=(int(y0), int(x0)),
+                    copy=_upload_copy_required(color, payload),
+                )
                 uploads += 1
                 upload_bytes += int(color.nbytes)
             self.source_ids[resident_key] = payload.source_id
@@ -582,13 +595,21 @@ class TextureAtlasPool:
             )
             y0, x0 = page.offset_for_slot(slot)
             if scalar is not None:
-                page.scalar_texture.set_data(scalar, offset=(int(y0), int(x0)), copy=False)
+                page.scalar_texture.set_data(
+                    scalar,
+                    offset=(int(y0), int(x0)),
+                    copy=_upload_copy_required(scalar, payload, force=page.complex_is_atlas),
+                )
                 uploads += 1
                 upload_bytes += int(scalar.nbytes)
                 if page.complex_is_atlas:
                     complex_uploads += 1
             if color is not None:
-                page.color_texture.set_data(color, offset=(int(y0), int(x0)), copy=False)
+                page.color_texture.set_data(
+                    color,
+                    offset=(int(y0), int(x0)),
+                    copy=_upload_copy_required(color, payload),
+                )
                 uploads += 1
                 upload_bytes += int(color.nbytes)
             self.source_ids[resident_key] = payload.source_id
@@ -866,7 +887,7 @@ class GpuMontageLayer:
             visual.visible = page_index in active_pages
         for visual in self._visuals_by_page[len(self._pool.pages):]:
             visual.visible = False
-        self._visible_items = len(payloads)
+        self._visible_items = int(texture_stats.visible_items)
         self._last_stats = GpuMontageLayerStats(
             visible_items=texture_stats.visible_items,
             resident_items=texture_stats.resident_items,
@@ -1249,7 +1270,7 @@ def _payload_texture_data(
     texture = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
     texture_kind = _payload_texture_kind(payload)
     if texture_kind == TexturePlaneKind.COMPLEX_RG32F:
-        scalar = _fit_complex_rg(pack_texture_data(texture, TexturePlaneKind.COMPLEX_RG32F), (tile_h, tile_w)) if need_scalar else None
+        scalar = _fit_complex_rg(_complex_rg_texture(texture), (tile_h, tile_w)) if need_scalar else None
         color = np.zeros((tile_h, tile_w, 3), dtype=np.uint8) if need_color else None
         return scalar, color
     image = texture
@@ -1330,6 +1351,39 @@ def _fit_complex_rg(data, shape: tuple[int, int]) -> np.ndarray:
     if height > 0 and width > 0:
         out[:height, :width, :] = arr[:height, :width, :2]
     return out
+
+
+def _complex_rg_texture(data) -> np.ndarray:
+    arr = np.asarray(data)
+    if np.iscomplexobj(arr):
+        if arr.dtype != np.complex64 or not arr.flags.c_contiguous:
+            arr = np.ascontiguousarray(arr.astype(np.complex64, copy=False))
+        return arr.view(np.float32).reshape(arr.shape + (2,))
+    packed = np.asarray(arr, dtype=np.float32)
+    if packed.ndim < 3 or packed.shape[-1] != 2:
+        raise ValueError("complex RG32F texture data must be complex or have trailing size 2")
+    return np.ascontiguousarray(packed)
+
+
+def _upload_copy_required(staging: np.ndarray, payload: DisplayTilePayload, *, force: bool = False) -> bool:
+    """Ask VisPy to retain temporary staging planes before deferred GL upload."""
+
+    if force:
+        return True
+    try:
+        staging = np.asarray(staging)
+        for source in (
+            getattr(payload, "texture_data", None),
+            getattr(payload, "semantic_data", None),
+            getattr(payload, "image", None),
+            getattr(payload, "histogram_data", None),
+            getattr(payload, "semantic_histogram_data", None),
+        ):
+            if source is not None and np.shares_memory(staging, np.asarray(source)):
+                return False
+    except Exception:
+        return True
+    return True
 
 
 def _quad_buffers(montage, payloads, uvs, *, rgb_already_windowed: bool):
@@ -1440,7 +1494,7 @@ def _atlas_storage_mode(payload_items, *, rgb_already_windowed: bool) -> str:
             needs_scalar = needs_scalar or not bool(rgb_already_windowed)
         else:
             needs_scalar = True
-    if needs_complex and not needs_scalar and not needs_color:
+    if needs_complex:
         return "complex"
     if needs_scalar and needs_color:
         return "scalar_color"
@@ -1539,6 +1593,8 @@ def _shader_scale_uniform(scale) -> float:
 
 
 def _payload_supported_by_storage_mode(payload: DisplayTilePayload, storage_mode: str | None, *, rgb_already_windowed: bool) -> bool:
+    if not _payload_texture_matches_kind(payload):
+        return False
     mode = _normalize_storage_mode(storage_mode or "scalar")
     if _payload_texture_kind(payload) == TexturePlaneKind.COMPLEX_RG32F:
         return mode == "complex"
@@ -1561,6 +1617,25 @@ def _payload_texture_kind(payload: DisplayTilePayload) -> TexturePlaneKind:
     if texture.ndim == 3 and texture.shape[-1] in (3, 4):
         return TexturePlaneKind.RGB8
     return TexturePlaneKind.SCALAR_R32F
+
+
+def _payload_texture_matches_kind(payload: DisplayTilePayload) -> bool:
+    kind = _payload_texture_kind(payload)
+    texture = getattr(payload, "texture_data", None)
+    if texture is None:
+        texture = getattr(payload, "semantic_data", None)
+    if texture is None:
+        texture = getattr(payload, "image", None)
+    if texture is None:
+        return False
+    image = np.asarray(texture)
+    if image.ndim < 2:
+        return False
+    if kind == TexturePlaneKind.COMPLEX_RG32F:
+        return np.iscomplexobj(image) or (image.ndim == 3 and image.shape[-1] == 2)
+    if kind == TexturePlaneKind.RGB8:
+        return image.ndim == 3 and image.shape[-1] in (3, 4)
+    return image.ndim == 2 and not np.iscomplexobj(image)
 
 
 def _payload_gutter(payload: DisplayTilePayload) -> int:

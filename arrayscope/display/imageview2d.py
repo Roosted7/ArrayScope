@@ -467,9 +467,15 @@ class ImageView2D(QtWidgets.QWidget):
         self._applying_presentation = True
         try:
             self.image = img
-            self.histogramSource = histogramData
-            self.histogramPlotSource = histogramPlotData
-            self.setHistogramDataBounds(histogramRange)
+            loading_only = _is_tiled_loading_only_commit(
+                montage_tile_payloads,
+                histogramData=histogramData,
+                histogramPlotData=histogramPlotData,
+            )
+            if not loading_only:
+                self.histogramSource = histogramData
+                self.histogramPlotSource = histogramPlotData
+                self.setHistogramDataBounds(histogramRange)
             self._montage_display_mode = "tile_layer"
             self.imageItem.setVisible(False)
             stats = self._update_montage_tile_layer_items(
@@ -490,7 +496,8 @@ class ImageView2D(QtWidgets.QWidget):
                 histogramRange=histogramRange,
             )
             skip_histogram_upload = (
-                montage_dirty_tiles == ()
+                loading_only
+                or montage_dirty_tiles == ()
                 and self._montage_tile_layer_histogram_key == histogram_key
                 and getattr(self.histogramImageItem, "image", None) is not None
             )
@@ -506,9 +513,10 @@ class ImageView2D(QtWidgets.QWidget):
                     self._histogram_levels_for_display(levels),
                     role="histogram",
                 )
-            self._montage_tile_layer_histogram_key = histogram_key
-            self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
-            self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+            if not loading_only:
+                self._montage_tile_layer_histogram_key = histogram_key
+                self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
+                self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
             profile_start = perf_counter()
             self._update_profile_line_bounds()
             self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
@@ -1777,6 +1785,20 @@ def _tiled_montage_placeholder(display_shape, tile_payloads) -> np.ndarray:
         return np.broadcast_to(base, (height, width, 3))
     base = np.zeros((1, 1), dtype=np.float32)
     return np.broadcast_to(base, (height, width))
+
+
+def _is_tiled_loading_only_commit(
+    montage_tile_payloads,
+    *,
+    histogramData,
+    histogramPlotData,
+) -> bool:
+    return (
+        montage_tile_payloads is not None
+        and not dict(montage_tile_payloads)
+        and histogramData is None
+        and histogramPlotData is None
+    )
 
 
 def _point_inside_view_range(view_range, x: float, y: float) -> bool:
