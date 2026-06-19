@@ -22,6 +22,8 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(qt_app):
         "vispy_one_dirty_tile_commit",
         "pyqtgraph_pan_zoom_no_upload",
         "vispy_pan_zoom_no_upload",
+        "pyqtgraph_progressive_tile_stream",
+        "vispy_progressive_tile_stream",
     }
     for result in results:
         assert result.elapsed_ms >= 0.0
@@ -30,6 +32,7 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(qt_app):
         assert result.event_loop_drain_ms is None
         assert result.frame_count == 0
         assert result.ui_max_gap_ms is None
+        assert result.commit_count >= 1
         assert result.timing.mode
     assert_optional_perf_gates(results)
 
@@ -75,3 +78,18 @@ def test_vispy_dirty_and_pan_scenarios_have_deterministic_upload_counters(qt_app
     assert dirty.visible_bytes > 0
     assert pan.tile_layer_items_updated == 0
     assert pan.visible_bytes == 0
+
+
+def test_progressive_tile_stream_reports_aggregate_work(qt_app):
+    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
+
+    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
+    vispy_result = results["vispy_progressive_tile_stream"]
+    timing = vispy_result.timing
+
+    assert vispy_result.commit_count == 12
+    assert timing.tile_layer_visible_items == 96
+    assert timing.tile_layer_items_updated == 96
+    assert timing.tile_layer_storage_rebuilds == 1
+    assert timing.tile_layer_resident_items == 96
+    assert timing.tile_layer_texture_uploads > 0

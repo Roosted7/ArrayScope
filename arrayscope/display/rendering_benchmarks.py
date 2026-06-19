@@ -27,6 +27,7 @@ class RenderingBenchmarkResult:
     event_loop_drain_ms: float | None = None
     frame_count: int = 0
     ui_max_gap_ms: float | None = None
+    commit_count: int = 1
 
     @property
     def submission_ms(self) -> float:
@@ -98,6 +99,13 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
         view = view_type()
         try:
             results.append(_benchmark_pan_zoom_no_upload(view, measure_presented=measure_presented))
+        finally:
+            view.close()
+
+    for view_type in (ImageView2D, VisPyImageView2D):
+        view = view_type()
+        try:
+            results.append(_benchmark_progressive_tile_stream(view, measure_presented=measure_presented))
         finally:
             view.close()
 
@@ -278,6 +286,47 @@ def _benchmark_pan_zoom_no_upload(view, *, measure_presented: bool) -> Rendering
     return _result(view, "pan_zoom_no_upload", measurement)
 
 
+def _benchmark_progressive_tile_stream(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    """Measure UI-thread cost while tile batches arrive progressively."""
+
+    _placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(64, 64),
+        count=96,
+        columns=12,
+    )
+    batch_size = 8
+    timings: list[ImageUploadTiming] = []
+
+    def stream_batches():
+        for end in range(batch_size, len(payloads) + batch_size, batch_size):
+            end = min(end, len(payloads))
+            visible = {index: payloads[index] for index in range(end)}
+            visible_sources = {index: sources[index] for index in range(end)}
+            dirty_start = max(0, end - batch_size)
+            view.setTiledMontagePresentation(
+                geometry=geometry,
+                tile_payloads=visible,
+                histogramPlotData=None,
+                levels=(0.0, 1.0),
+                histogramRange=(0.0, 1.0),
+                rgb_already_windowed=False,
+                montage_dirty_tiles=None if end == batch_size else tuple(range(dirty_start, end)),
+                montage_tile_source_ids=visible_sources,
+            )
+            timings.append(view.lastImageUploadTiming())
+            if end >= len(payloads):
+                break
+
+    measurement = _measure_action(view, stream_batches, measure_presented=measure_presented)
+    return _result(
+        view,
+        "progressive_tile_stream",
+        measurement,
+        timing=_sum_upload_timings(timings),
+        commit_count=len(timings),
+    )
+
+
 def _direct_tile_layer_inputs(*, tile_shape=(32, 32), count=2, columns=2):
     tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
     gap = 1
@@ -309,18 +358,71 @@ def _direct_tile_layer_inputs(*, tile_shape=(32, 32), count=2, columns=2):
     return placeholder, None, geometry, sources, payloads
 
 
-def _result(view, scenario: str, measurement: _ActionMeasurement) -> RenderingBenchmarkResult:
+def _result(
+    view,
+    scenario: str,
+    measurement: _ActionMeasurement,
+    *,
+    timing: ImageUploadTiming | None = None,
+    commit_count: int = 1,
+) -> RenderingBenchmarkResult:
     backend = str(getattr(view, "rendering_backend_name", type(view).__name__))
     return RenderingBenchmarkResult(
         name=f"{backend}_{scenario}",
         backend=backend,
         scenario=scenario,
         elapsed_ms=float(measurement.submission_ms),
-        timing=view.lastImageUploadTiming(),
+        timing=view.lastImageUploadTiming() if timing is None else timing,
         first_frame_ms=measurement.first_frame_ms,
         event_loop_drain_ms=measurement.event_loop_drain_ms,
         frame_count=int(measurement.frame_count),
         ui_max_gap_ms=measurement.ui_max_gap_ms,
+        commit_count=max(1, int(commit_count)),
+    )
+
+
+def _sum_upload_timings(timings) -> ImageUploadTiming:
+    timings = tuple(timings)
+    if not timings:
+        return ImageUploadTiming(mode="progressive_tile_stream")
+
+    def total(field):
+        values = [getattr(timing, field) for timing in timings]
+        finite = [float(value) for value in values if value is not None]
+        return sum(finite) if finite else None
+
+    last = timings[-1]
+    return ImageUploadTiming(
+        total_ms=total("total_ms"),
+        visible_upload_ms=total("visible_upload_ms"),
+        histogram_upload_ms=total("histogram_upload_ms"),
+        histogram_bind_ms=total("histogram_bind_ms"),
+        histogram_recompute_ms=total("histogram_recompute_ms"),
+        level_sync_ms=total("level_sync_ms"),
+        rgb_window_ms=total("rgb_window_ms"),
+        tile_layer_upload_ms=total("tile_layer_upload_ms"),
+        tile_layer_rgb_window_ms=total("tile_layer_rgb_window_ms"),
+        profile_bounds_ms=total("profile_bounds_ms"),
+        visible_bytes=sum(int(timing.visible_bytes) for timing in timings),
+        visible_pixels=sum(int(timing.visible_pixels) for timing in timings),
+        histogram_bytes=sum(int(timing.histogram_bytes) for timing in timings),
+        histogram_pixels=sum(int(timing.histogram_pixels) for timing in timings),
+        fast_same_object=all(bool(timing.fast_same_object) for timing in timings),
+        mode="progressive_tile_stream",
+        tile_layer_visible_items=int(last.tile_layer_visible_items),
+        tile_layer_items_updated=sum(int(timing.tile_layer_items_updated) for timing in timings),
+        tile_layer_items_skipped=sum(int(timing.tile_layer_items_skipped) for timing in timings),
+        tile_layer_rgb_window_tiles=sum(int(timing.tile_layer_rgb_window_tiles) for timing in timings),
+        tile_layer_resident_items=int(last.tile_layer_resident_items),
+        tile_layer_storage_capacity=int(last.tile_layer_storage_capacity),
+        tile_layer_storage_rebuilds=sum(int(timing.tile_layer_storage_rebuilds) for timing in timings),
+        tile_layer_storage_evictions=sum(int(timing.tile_layer_storage_evictions) for timing in timings),
+        tile_layer_texture_uploads=sum(int(timing.tile_layer_texture_uploads) for timing in timings),
+        tile_layer_texture_upload_bytes=sum(int(timing.tile_layer_texture_upload_bytes) for timing in timings),
+        tile_layer_vertex_uploads=sum(int(timing.tile_layer_vertex_uploads) for timing in timings),
+        tile_layer_level_updates=sum(int(timing.tile_layer_level_updates) for timing in timings),
+        tile_layer_estimated_gpu_bytes=int(last.tile_layer_estimated_gpu_bytes),
+        tile_layer_cpu_shadow_bytes=int(last.tile_layer_cpu_shadow_bytes),
     )
 
 
@@ -448,6 +550,7 @@ def assert_optional_perf_gates(results: tuple[RenderingBenchmarkResult, ...]) ->
         "vispy_pan_zoom_no_upload",
         "vispy_one_dirty_tile_commit",
         "vispy_large_complex_tiled_initial",
+        "vispy_progressive_tile_stream",
     )
     missing_frames = [name for name in required if by_name[name].first_frame_ms is None]
     assert not missing_frames, (
@@ -505,6 +608,7 @@ def main() -> None:
         timing = result.timing
         print(
             f"{result.name}: submit={result.submission_ms:.3f} ms "
+            f"commits={result.commit_count} "
             f"first_frame={_format_optional_ms(result.first_frame_ms)} "
             f"ui_gap={_format_optional_ms(result.ui_max_gap_ms)} "
             f"frames={result.frame_count} "
@@ -513,7 +617,10 @@ def main() -> None:
             f"bytes={timing.visible_bytes} "
             f"items={timing.tile_layer_visible_items}/"
             f"{timing.tile_layer_items_updated}/"
-            f"{timing.tile_layer_items_skipped}"
+            f"{timing.tile_layer_items_skipped} "
+            f"resident={timing.tile_layer_resident_items}/"
+            f"{timing.tile_layer_storage_capacity} "
+            f"texture_uploads={timing.tile_layer_texture_uploads}"
         )
     assert_optional_perf_gates(results)
 
