@@ -52,7 +52,14 @@ class NormalImageRenderMixin:
             return
         if self.view_state.montage_axis is not None:
             return self.update_montage_view(force_autolevel=force_autolevel, defer_side_panels=defer_side_panels)
-        force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
+        user_levels = self._pending_display_levels_for_render()
+        if force_autolevel and user_levels is not None:
+            self._queue_display_levels(None)
+            user_levels = None
+        force_auto = bool(
+            force_autolevel
+            or (getattr(self, '_force_autolevel', False) and user_levels is None)
+        )
         window_mode = self._current_window_mode()
         # Capture presentation history before clearing montage/session state.
         previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
@@ -89,6 +96,7 @@ class NormalImageRenderMixin:
                 document_key=_document_key(document),
                 request_key=request_key,
                 render_generation=render_generation,
+                user_levels=user_levels,
             )
             return
         self._refresh_memory_policy(active_render=self.visible_evaluation_controller.is_busy())
@@ -166,6 +174,7 @@ class NormalImageRenderMixin:
                     document_key=_document_key(document),
                     request_key=preview_key,
                     render_generation=render_generation,
+                    user_levels=user_levels,
                 )
                 self.img_view.setImageStale(True)
                 self.img_view.setEvaluationOverlay(True, decision.overlay_text)
@@ -241,6 +250,7 @@ class NormalImageRenderMixin:
                 document_key=_document_key(document),
                 request_key=request_key,
                 render_generation=render_generation,
+                user_levels=user_levels,
             )
             schedule_stage_warmup(self, view_state)
             self._schedule_prefetch_nearby_slices(view_state, colormap_lut)

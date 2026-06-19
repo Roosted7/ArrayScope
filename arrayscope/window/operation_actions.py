@@ -560,7 +560,10 @@ class OperationActionsMixin:
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "View Recipe Error", f"Failed to load view recipe:\n{e}")
             return None
-        self.render(reason="view-recipe-load", force_autolevel=True)
+        self.render(
+            reason="view-recipe-load",
+            force_autolevel=self._pending_display_levels_for_render() is None,
+        )
         return file_path
 
     def _current_view_recipe(self):
@@ -596,11 +599,17 @@ class OperationActionsMixin:
         self.widgets["buttons"]["display"]["window_relative"].setChecked(settings.window_mode != "absolute")
         self.widgets["buttons"]["display"]["window_absolute"].setChecked(settings.window_mode == "absolute")
         self.widgets["buttons"]["display"]["live_profile"].setChecked(settings.live_profile)
-        if settings.levels is not None:
-            try:
-                self.img_view.setLevels(*settings.levels)
-            except Exception:
-                pass
+        if settings.colormap is None:
+            self._colormap_user_selected = False
+            self._apply_channel_colormap()
+        else:
+            self._set_display_colormap(settings.colormap, user_selected=True, request_render=False)
+        queued_levels = self._queue_display_levels(settings.levels)
+        if queued_levels is not None:
+            # _set_document and channel coercion intentionally request automatic
+            # levels for ordinary state changes.  A recipe's explicit levels are
+            # stronger and must reach the next semantic commit unchanged.
+            self._force_autolevel = False
         if settings.profile_visible:
             self._profile_dock_user_visible = True
             self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="view-recipe")

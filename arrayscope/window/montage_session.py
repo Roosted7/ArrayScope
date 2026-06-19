@@ -86,6 +86,7 @@ class MontageRenderSession:
     defer_side_panels: bool = False
     display_committed: bool = False
     applied_level_source: object | None = None
+    user_levels_override: tuple[float, float] | None = None
     pending_level_tiles: list[RenderedTile] = field(default_factory=list)
     pending_completed_tiles: list[tuple[MontageTile, object]] = field(default_factory=list)
     tile_compute_cache_hits: int = 0

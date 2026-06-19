@@ -47,7 +47,17 @@ def _frame(*, levels=(10.0, 20.0), histogram_range=(0.0, 100.0)):
     )
 
 
-def _input(payload, *, previous_frame=None, force_auto=False, kind=CommitKind.FULL_NORMAL, semantic_source=None, applied_level_source=None, window_mode="relative"):
+def _input(
+    payload,
+    *,
+    previous_frame=None,
+    force_auto=False,
+    kind=CommitKind.FULL_NORMAL,
+    semantic_source=None,
+    applied_level_source=None,
+    window_mode="relative",
+    user_levels=None,
+):
     return PresentationInput(
         payload=payload,
         context=_context(),
@@ -57,6 +67,7 @@ def _input(payload, *, previous_frame=None, force_auto=False, kind=CommitKind.FU
         commit_kind=kind,
         semantic_source=semantic_source,
         applied_level_source=applied_level_source,
+        user_levels=user_levels,
     )
 
 
@@ -78,6 +89,32 @@ def test_normal_absolute_level_reuse_uses_committed_frame():
 
     assert decision.levels == (25.0, 75.0)
     assert decision.histogram_range == (200.0, 300.0)
+
+
+def test_normal_explicit_restore_levels_are_committed_with_current_histogram_domain():
+    decision = decide_presentation(
+        _input(
+            _payload([[200, 300], [200, 300]]),
+            previous_frame=_frame(levels=(25, 75), histogram_range=(0, 100)),
+            user_levels=(210, 240),
+        )
+    )
+
+    assert decision.levels == (210.0, 240.0)
+    assert decision.histogram_range == (200.0, 300.0)
+    assert decision.level_source_rank == int(LevelSourceRank.EXPLICIT_USER)
+
+
+def test_explicit_auto_window_wins_over_queued_restore_levels():
+    decision = decide_presentation(
+        _input(
+            _payload([[200, 300], [200, 300]]),
+            force_auto=True,
+            user_levels=(210, 240),
+        )
+    )
+
+    assert decision.levels == (200.0, 300.0)
 
 
 def test_explicit_auto_window_accepts_partial_montage_source():
@@ -157,6 +194,30 @@ def test_user_locked_montage_levels_are_not_overridden_by_complete_source():
 
     assert decision.levels == (20.0, 40.0)
     assert decision.histogram_range == (0.0, 300.0)
+    assert decision.level_source_rank == int(LevelSourceRank.EXPLICIT_USER)
+
+
+def test_montage_restore_levels_bind_to_the_current_semantic_source():
+    partial = LevelSource(
+        (100.0, 200.0),
+        (100.0, 200.0),
+        LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=1,
+        expected_count=4,
+        semantic_key="levels",
+    )
+    decision = decide_presentation(
+        _input(
+            _payload(np.full((2, 2), 1000.0)),
+            kind=CommitKind.FULL_MONTAGE_INITIAL,
+            semantic_source=partial,
+            user_levels=(120.0, 140.0),
+        )
+    )
+
+    assert decision.levels == (120.0, 140.0)
+    assert decision.histogram_range == (100.0, 200.0)
+    assert decision.level_source_key == "levels"
     assert decision.level_source_rank == int(LevelSourceRank.EXPLICIT_USER)
 
 

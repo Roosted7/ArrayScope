@@ -4,7 +4,6 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui
 
 from arrayscope.app.errors import handle_ui_exception
-from arrayscope.display.colormaps import named_colormap
 from arrayscope.ui.icons import clear_label_icon, set_label_icon
 from arrayscope.ui.shortcuts import colormap_name_for_key
 
@@ -399,15 +398,7 @@ class DimensionControlMixin:
     def setColormap(self, colormap_name):
         """Set the colormap for the image view"""
         try:
-            colormap = named_colormap(colormap_name)
-            if colormap is None:
-                self.statusBar().showMessage(f"Unknown colormap: {colormap_name}", 3000)
-                return
-
-            # Apply colormap to the image view
-            self.img_view.setColorMap(colormap)
-            self.current_colormap = colormap_name
-            
+            self._set_display_colormap(colormap_name, user_selected=True, request_render=True)
         except Exception as e:
             handle_ui_exception("set colormap", e)
             self.statusBar().showMessage(f"Failed to set colormap {colormap_name}: {e}", 3000)

@@ -117,6 +117,7 @@ class PresentationInput:
     semantic_source: Any = None
     applied_level_source: Any = None
     level_bounds: tuple[float, float] | None = None
+    user_levels: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)

@@ -79,25 +79,32 @@ def _decide_normal_presentation(input: PresentationInput) -> PresentationDecisio
         or default_levels
         or fallback_level_source(input.previous_frame).histogram_range
     )
-    previous_levels = None if input.previous_frame is None else input.previous_frame.levels
-    previous_bounds = None if input.previous_frame is None else input.previous_frame.histogram_range
-    level_decision = choose_window_levels(
-        mode=input.window_mode,
-        previous_levels=previous_levels,
-        previous_bounds=previous_bounds,
-        current_bounds=current_bounds,
-        default_levels=default_levels or current_bounds,
-        force_auto=bool(input.force_auto),
-    )
-    levels = normalize_bounds(level_decision.levels) or current_bounds or fallback_level_source(input.previous_frame).levels
+    requested_levels = None if input.force_auto else normalize_bounds(input.user_levels)
+    if requested_levels is None:
+        previous_levels = None if input.previous_frame is None else input.previous_frame.levels
+        previous_bounds = None if input.previous_frame is None else input.previous_frame.histogram_range
+        level_decision = choose_window_levels(
+            mode=input.window_mode,
+            previous_levels=previous_levels,
+            previous_bounds=previous_bounds,
+            current_bounds=current_bounds,
+            default_levels=default_levels or current_bounds,
+            force_auto=bool(input.force_auto),
+        )
+        levels = normalize_bounds(level_decision.levels) or current_bounds or fallback_level_source(input.previous_frame).levels
+        rank = LevelSourceRank.PREVIOUS_COMMITTED
+    else:
+        levels = requested_levels
+        rank = LevelSourceRank.EXPLICIT_USER
     histogram_range = current_bounds or levels
     source = LevelSource(
         levels=levels,
         histogram_range=histogram_range,
-        rank=LevelSourceRank.PREVIOUS_COMMITTED,
+        rank=rank,
         source_count=1,
         expected_count=1,
         semantic_key=input.context.semantic_key,
+        mode=input.window_mode,
     )
     presentation = _presentation_for_payload(payload, levels=levels, histogram_range=histogram_range)
     return PresentationDecision(
@@ -118,11 +125,23 @@ def _decide_montage_presentation(input: PresentationInput) -> PresentationDecisi
     kind = CommitKind(input.commit_kind)
     explicit_auto = bool(input.force_auto or kind == CommitKind.EXPLICIT_AUTO_WINDOW)
     semantic = _valid_source(input.semantic_source)
-    previous_source = _effective_previous_source(input)
+    requested_levels = normalize_bounds(input.user_levels)
+    # A synthetic (0, 1) fallback is useful for an empty automatic frame, but
+    # it is not real histogram evidence.  Do not union it into a restored
+    # explicit window before the first montage statistics arrive.
+    if (
+        requested_levels is not None
+        and input.previous_frame is None
+        and _valid_source(input.applied_level_source) is None
+    ):
+        previous_source = None
+    else:
+        previous_source = _effective_previous_source(input)
     state = WindowLevelController().decide(
         previous=previous_source,
         candidate=semantic,
         explicit_auto=explicit_auto,
+        user_levels=requested_levels,
         mode=input.window_mode,
     )
     presentation = _presentation_for_payload(
