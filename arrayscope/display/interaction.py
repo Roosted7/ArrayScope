@@ -13,6 +13,7 @@ from enum import Enum
 from math import hypot
 from typing import Iterable
 
+from arrayscope.core.roi import RoiGeometry, RoiKind, translate_roi_geometry
 from arrayscope.display.overlay_hit_test import RoiHit, hit_test_roi
 
 
@@ -60,12 +61,30 @@ class DrawingResult:
 
 
 @dataclass(frozen=True)
+class DragResult:
+    target: InteractionTarget
+    origin: tuple[float, float]
+    point: tuple[float, float]
+    delta: tuple[float, float]
+    initial_geometry: RoiGeometry | None = None
+    geometry: RoiGeometry | None = None
+    initial_profile_position: tuple[float, float] | None = None
+    profile_position: tuple[float, float] | None = None
+
+
+@dataclass(frozen=True)
 class DisplayInteractionState:
     tool: str = "cursor"
     phase: PointerPhase = PointerPhase.IDLE
     pointer: tuple[float, float] | None = None
     hover: InteractionTarget | None = None
     capture: InteractionTarget | None = None
+    drag_origin: tuple[float, float] | None = None
+    drag_point: tuple[float, float] | None = None
+    drag_initial_geometry: RoiGeometry | None = None
+    drag_geometry: RoiGeometry | None = None
+    drag_initial_profile_position: tuple[float, float] | None = None
+    drag_profile_position: tuple[float, float] | None = None
     pending_draw_tool: str | None = None
     drawing_points: tuple[tuple[float, float], ...] = ()
     revision: int = 0
@@ -182,19 +201,100 @@ class DisplayInteractionController:
             hover=None,
         )
 
-    def begin_capture(self, target: InteractionTarget, point: tuple[float, float]) -> DisplayInteractionState:
+    def begin_capture(
+        self,
+        target: InteractionTarget,
+        point: tuple[float, float],
+        *,
+        roi_geometry: RoiGeometry | None = None,
+        profile_position: tuple[float, float] | None = None,
+    ) -> DisplayInteractionState:
         normalized = (float(point[0]), float(point[1]))
+        profile = None if profile_position is None else (float(profile_position[0]), float(profile_position[1]))
         return self._replace(
             phase=PointerPhase.DRAGGING,
             pointer=normalized,
             capture=target,
             hover=target,
+            drag_origin=normalized,
+            drag_point=normalized,
+            drag_initial_geometry=roi_geometry,
+            drag_geometry=roi_geometry,
+            drag_initial_profile_position=profile,
+            drag_profile_position=profile,
         )
 
-    def end_capture(self) -> InteractionTarget | None:
-        captured = self._state.capture
-        self._replace(phase=PointerPhase.IDLE, capture=None)
-        return captured
+    def update_capture(self, point: tuple[float, float]) -> DragResult | None:
+        state = self._state
+        if state.phase is not PointerPhase.DRAGGING or state.capture is None or state.drag_origin is None:
+            return None
+        normalized = (float(point[0]), float(point[1]))
+        dx = normalized[0] - state.drag_origin[0]
+        dy = normalized[1] - state.drag_origin[1]
+        geometry = state.drag_geometry
+        profile = state.drag_profile_position
+        if state.capture.kind == "roi" and state.drag_initial_geometry is not None:
+            geometry = drag_roi_geometry(
+                state.drag_initial_geometry,
+                state.capture,
+                origin=state.drag_origin,
+                point=normalized,
+            )
+        elif state.capture.kind == "profile" and state.drag_initial_profile_position is not None:
+            profile = drag_profile_position(
+                state.drag_initial_profile_position,
+                state.capture,
+                delta=(dx, dy),
+            )
+        self._replace(
+            pointer=normalized,
+            drag_point=normalized,
+            drag_geometry=geometry,
+            drag_profile_position=profile,
+        )
+        return self.drag_result()
+
+    def observe_capture_geometry(self, geometry: RoiGeometry) -> DragResult | None:
+        if self._state.phase is not PointerPhase.DRAGGING or self._state.capture is None:
+            return None
+        self._replace(drag_geometry=geometry)
+        return self.drag_result()
+
+    def observe_profile_position(self, position: tuple[float, float]) -> DragResult | None:
+        if self._state.phase is not PointerPhase.DRAGGING or self._state.capture is None:
+            return None
+        normalized = (float(position[0]), float(position[1]))
+        self._replace(drag_profile_position=normalized)
+        return self.drag_result()
+
+    def drag_result(self) -> DragResult | None:
+        state = self._state
+        if state.capture is None or state.drag_origin is None or state.drag_point is None:
+            return None
+        return DragResult(
+            target=state.capture,
+            origin=state.drag_origin,
+            point=state.drag_point,
+            delta=(state.drag_point[0] - state.drag_origin[0], state.drag_point[1] - state.drag_origin[1]),
+            initial_geometry=state.drag_initial_geometry,
+            geometry=state.drag_geometry,
+            initial_profile_position=state.drag_initial_profile_position,
+            profile_position=state.drag_profile_position,
+        )
+
+    def end_capture(self) -> DragResult | None:
+        result = self.drag_result()
+        self._replace(
+            phase=PointerPhase.IDLE,
+            capture=None,
+            drag_origin=None,
+            drag_point=None,
+            drag_initial_geometry=None,
+            drag_geometry=None,
+            drag_initial_profile_position=None,
+            drag_profile_position=None,
+        )
+        return result
 
     def _replace(self, **changes) -> DisplayInteractionState:
         candidate = replace(self._state, **changes)
@@ -237,6 +337,63 @@ def hit_test_display_overlays(
     return None
 
 
+def drag_roi_geometry(
+    geometry: RoiGeometry,
+    target: InteractionTarget,
+    *,
+    origin: tuple[float, float],
+    point: tuple[float, float],
+) -> RoiGeometry:
+    """Apply one semantic ROI drag independent of a graphics toolkit."""
+
+    dx = float(point[0]) - float(origin[0])
+    dy = float(point[1]) - float(origin[1])
+    if target.part != "handle":
+        return translate_roi_geometry(geometry, dx, dy)
+    if geometry.kind == RoiKind.RECTANGLE and geometry.rect is not None:
+        x, y, _width, _height = geometry.rect
+        return RoiGeometry(
+            kind=geometry.kind,
+            rect=(x, y, float(point[0]) - x, float(point[1]) - y),
+            line_width=geometry.line_width,
+            closed=geometry.closed,
+            image_axes=geometry.image_axes,
+        )
+    points = list(geometry.points)
+    index = target.handle_index
+    if index is None or index < 0 or index >= len(points):
+        return geometry
+    points[int(index)] = (float(point[0]), float(point[1]))
+    if geometry.kind == RoiKind.FREEHAND_POLYGON and len(points) > 1 and geometry.points[0] == geometry.points[-1]:
+        if int(index) == 0:
+            points[-1] = points[0]
+        elif int(index) == len(points) - 1:
+            points[0] = points[-1]
+    return RoiGeometry(
+        kind=geometry.kind,
+        points=tuple(points),
+        rect=geometry.rect,
+        line_width=geometry.line_width,
+        closed=geometry.closed,
+        image_axes=geometry.image_axes,
+    )
+
+
+def drag_profile_position(
+    position: tuple[float, float],
+    target: InteractionTarget,
+    *,
+    delta: tuple[float, float],
+) -> tuple[float, float]:
+    x, y = (float(position[0]), float(position[1]))
+    dx, dy = (float(delta[0]), float(delta[1]))
+    if target.part == "vertical":
+        return (x + dx, y)
+    if target.part == "horizontal":
+        return (x, y + dy)
+    return (x + dx, y + dy)
+
+
 def _roi_target(selection, geometry, hit: RoiHit) -> InteractionTarget:
     kind = getattr(getattr(geometry, "kind", None), "value", getattr(geometry, "kind", None))
     return InteractionTarget(
@@ -258,8 +415,11 @@ __all__ = [
     "CursorIntent",
     "DisplayInteractionController",
     "DisplayInteractionState",
+    "DragResult",
     "DrawingResult",
     "InteractionTarget",
     "PointerPhase",
+    "drag_profile_position",
+    "drag_roi_geometry",
     "hit_test_display_overlays",
 ]

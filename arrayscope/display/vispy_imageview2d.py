@@ -779,20 +779,20 @@ class VisPyImageView2D(ImageView2D):
             self._upsert_vispy_roi(current_id, selection.geometry, selection.color)
         return result
 
-    def _on_roi_item_changed(self, roi_id):
-        self._sync_roi_item_state(roi_id, emit=True)
+    def _on_roi_item_changed(self, roi_id, *, final: bool = True):
+        self._sync_roi_item_state(roi_id, emit=True, final=final)
 
     def _on_roi_item_live_changed(self, roi_id):
         self._sync_roi_item_state(roi_id, emit=True)
 
-    def _sync_roi_item_state(self, roi_id, *, emit: bool) -> None:
+    def _sync_roi_item_state(self, roi_id, *, emit: bool, final: bool = True) -> None:
         item_selection = self._roi_items.get(str(roi_id))
         if item_selection is None:
             self._remove_vispy_roi(roi_id)
             return
         _item, selection = item_selection
         if emit:
-            super()._on_roi_item_changed(roi_id)
+            super()._on_roi_item_changed(roi_id, final=final)
             item_selection = self._roi_items.get(str(roi_id))
             if item_selection is None:
                 self._remove_vispy_roi(roi_id)
