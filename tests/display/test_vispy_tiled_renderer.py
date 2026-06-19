@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from arrayscope.display.vispy_tiled_renderer import (
     AtlasCapacityError,
     TextureAtlasPool,
+    _atlas_reserve_count,
     _fit_color,
     _fit_scalar,
     _payload_textures,
@@ -79,6 +82,22 @@ def test_atlas_keeps_stable_slots_when_active_set_changes():
     assert second.atlas_evictions == 1
     assert 0 not in pool.source_ids
     assert pool.source_ids[2] == ("tile", 2, 30.0)
+
+
+def test_atlas_reserve_includes_pending_visible_tiles():
+    geometry = SimpleNamespace(
+        montage=SimpleNamespace(indices=tuple(range(6))),
+        montage_tile_states=(
+            "loaded",
+            "loading",
+            "unloaded",
+            "unloaded",
+            "skipped",
+            "unloaded",
+        ),
+    )
+
+    assert _atlas_reserve_count(geometry, minimum=1) == 5
 
 
 def test_atlas_reserve_avoids_progressive_reallocation():

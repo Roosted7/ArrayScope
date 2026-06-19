@@ -731,15 +731,29 @@ def _atlas_grid(*, tile_shape: tuple[int, int], capacity: int, max_texture_size:
 
 
 def _atlas_reserve_count(geometry, *, minimum: int) -> int:
+    """Reserve slots for the complete non-skipped visible montage set.
+
+    Progressive sessions begin with most tiles in ``unloaded`` state.  Counting
+    only loaded/loading tiles makes the atlas grow repeatedly as scheduling
+    advances, which discards otherwise reusable GPU residency.  Geometry is the
+    authoritative visibility plan, so reserve every planned slot except tiles
+    explicitly marked skipped.
+    """
+
+    montage = getattr(geometry, "montage", None)
+    indices = tuple(getattr(montage, "indices", ()) or ())
     states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
-    if not states:
+    if not indices and not states:
         return max(1, int(minimum))
-    active = 0
+
+    planned = max(len(indices), len(states))
+    skipped = 0
     for state in states:
         value = str(getattr(state, "value", state))
-        if value in {"loaded", "loading"}:
-            active += 1
-    return max(1, int(minimum), int(active))
+        if value == "skipped":
+            skipped += 1
+    expected = max(0, planned - skipped)
+    return max(1, int(minimum), int(expected))
 
 
 def _payload_mode(payload: DisplayTilePayload, *, rgb_already_windowed: bool) -> int:
