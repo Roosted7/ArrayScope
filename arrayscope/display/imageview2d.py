@@ -25,6 +25,7 @@ from arrayscope.core.roi import (
 )
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
+from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.histogram_controller import HistogramLevelPreviewController
 from arrayscope.display.image_upload import ensure_imageitem_array, rgb_display_for_levels
 from arrayscope.display.levels import finite_bounds
@@ -49,9 +50,9 @@ class ImageView2D(QtWidgets.QWidget):
     # Backends that implement the typed tile-payload method can bypass CPU
     # montage canvas composition.  Renderer orchestration checks this
     # capability rather than branching on a backend name.
-    supports_direct_montage_tile_payloads = True
-
     rendering_backend_name = "pyqtgraph"
+    rendering_capabilities = PYQTGRAPH_CAPABILITIES
+    supports_direct_montage_tile_payloads = rendering_capabilities.direct_montage_tile_payloads
 
     # Emitted only for explicit user edits of the histogram/LUT levels.
     userLevelsChanged = QtCore.Signal()

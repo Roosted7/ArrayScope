@@ -29,6 +29,7 @@ from arrayscope.display.montage import (
 )
 from arrayscope.display.slice_engine import DisplayImage, make_image_from_slab
 from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.operations.evaluator import EvaluationResult, _document_key, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked, stage_materialization_allowed_chunk_axes
 from arrayscope.operations.slabs import (
@@ -62,6 +63,7 @@ class MontageRenderMixin:
             patched_tiles=int(getattr(self, "_montage_patched_tiles_last_flush", 0) or 0),
             current_mode=str(getattr(self.img_view, "montageDisplayMode", lambda: "canvas")()),
             renderer_backend=getattr(self.img_view, "rendering_backend_name", "pyqtgraph"),
+            renderer_capabilities=image_view_backend_capabilities(self.img_view),
             very_slow_upload_ms=MONTAGE_VERY_SLOW_UPLOAD_MS,
         )
 
@@ -966,7 +968,8 @@ class MontageRenderMixin:
         self._retry_live_profile_after_montage_tile()
 
     def _direct_montage_tile_layer_presentation(self, session):
-        if not bool(getattr(self.img_view, "supports_direct_montage_tile_payloads", False)):
+        capabilities = image_view_backend_capabilities(self.img_view)
+        if not capabilities.direct_montage_tile_payloads:
             return None
         if not hasattr(self.img_view, "setMontageTileLayerPresentation"):
             return None
