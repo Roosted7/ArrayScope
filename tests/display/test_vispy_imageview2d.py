@@ -343,6 +343,59 @@ def test_vispy_direct_tiled_clean_and_dirty_counters(qt_app):
         view.close()
 
 
+def test_vispy_direct_tiled_level_change_skips_structural_refresh(qt_app, monkeypatch):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.window.display_frame import DisplayTilePayload
+
+    view = VisPyImageView2D()
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2), 0.25, dtype=np.float32), None, ("tile", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2), 0.75, dtype=np.float32), None, ("tile", 1)),
+    }
+    sources = {tile: payload.source_id for tile, payload in payloads.items()}
+    placeholder = np.broadcast_to(np.zeros((1, 1), dtype=np.float32), (2, 5))
+    try:
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=_montage_geometry(),
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_dirty_tiles=None,
+            montage_tile_source_ids=sources,
+            montage_tile_payloads=payloads,
+        )
+
+        def fail_structure(*_args, **_kwargs):
+            raise AssertionError("level-only commit repeated structural display work")
+
+        monkeypatch.setattr(view, "_update_profile_line_bounds", fail_structure)
+        monkeypatch.setattr(view, "_updateAspectRatio", fail_structure)
+        monkeypatch.setattr(view, "_sync_vispy_montage_bounds", fail_structure)
+        monkeypatch.setattr(view, "_apply_viewport_policy", fail_structure)
+        monkeypatch.setattr(view, "_update_histogram_for_vispy", fail_structure)
+
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=_montage_geometry(),
+            levels=(0.2, 0.8),
+            histogramRange=(0.0, 1.0),
+            montage_dirty_tiles=(),
+            montage_tile_source_ids=sources,
+            montage_tile_payloads=payloads,
+        )
+
+        timing = view.lastImageUploadTiming()
+        assert timing.tile_layer_items_updated == 0
+        assert timing.visible_bytes == 0
+        assert view._vispy_gpu_montage_layer._levels == (0.2, 0.8)
+    finally:
+        view.close()
+
+
 def test_vispy_direct_tiled_scalar_atlas_preserves_high_dynamic_range(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
