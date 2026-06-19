@@ -287,14 +287,37 @@ def _benchmark_pan_zoom_no_upload(view, *, measure_presented: bool) -> Rendering
 
 
 def _benchmark_progressive_tile_stream(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    """Measure UI-thread cost while tile batches arrive progressively."""
+    """Measure UI-thread cost while representative tile batches arrive."""
 
-    _placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(
+    return _benchmark_progressive_tile_stream_configured(
+        view,
         tile_shape=(64, 64),
         count=96,
         columns=12,
+        batch_size=8,
+        scenario="progressive_tile_stream",
+        measure_presented=measure_presented,
     )
-    batch_size = 8
+
+
+def _benchmark_progressive_tile_stream_configured(
+    view,
+    *,
+    tile_shape: tuple[int, int],
+    count: int,
+    columns: int,
+    batch_size: int,
+    scenario: str,
+    measure_presented: bool,
+) -> RenderingBenchmarkResult:
+    """Measure one complete progressive direct-tile presentation."""
+
+    _placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=tile_shape,
+        count=count,
+        columns=columns,
+    )
+    batch_size = max(1, int(batch_size))
     timings: list[ImageUploadTiming] = []
 
     def stream_batches():
@@ -320,7 +343,7 @@ def _benchmark_progressive_tile_stream(view, *, measure_presented: bool) -> Rend
     measurement = _measure_action(view, stream_batches, measure_presented=measure_presented)
     return _result(
         view,
-        "progressive_tile_stream",
+        scenario,
         measurement,
         timing=_sum_upload_timings(timings),
         commit_count=len(timings),
@@ -569,27 +592,74 @@ def assert_optional_perf_gates(results: tuple[RenderingBenchmarkResult, ...]) ->
         )
 
 
+def benchmark_large_progressive_montage(
+    *,
+    tile_shape: tuple[int, int] = (336, 336),
+    count: int = 272,
+    columns: int = 17,
+    batch_size: int = 8,
+    measure_presented: bool | None = None,
+) -> tuple[RenderingBenchmarkResult, ...]:
+    """Benchmark the production-scale direct tiled presentation path.
+
+    The defaults mirror the 30M-pixel montage from the motivating diagnostic
+    dump.  This is intentionally opt-in: the generated RGB plus scalar tile
+    payloads consume roughly 200 MiB before backend storage is counted.
+    """
+
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    if measure_presented is None:
+        measure_presented = os.environ.get("ARRAYSCOPE_BENCH_PRESENTED") == "1"
+    results = []
+    for view_type in (ImageView2D, VisPyImageView2D):
+        view = view_type()
+        try:
+            results.append(
+                _benchmark_progressive_tile_stream_configured(
+                    view,
+                    tile_shape=tile_shape,
+                    count=count,
+                    columns=columns,
+                    batch_size=batch_size,
+                    scenario="stress_large_progressive_tile_stream",
+                    measure_presented=bool(measure_presented),
+                )
+            )
+        finally:
+            view.close()
+    return tuple(results)
+
+
 def run_optional_stress_benchmark() -> tuple[RenderingBenchmarkResult, ...]:
     if os.environ.get("ARRAYSCOPE_RUN_STRESS") != "1":
         return ()
-    from pathlib import Path
+    tile_shape = (
+        _positive_env_int("ARRAYSCOPE_STRESS_TILE_HEIGHT", 336),
+        _positive_env_int("ARRAYSCOPE_STRESS_TILE_WIDTH", 336),
+    )
+    count = _positive_env_int("ARRAYSCOPE_STRESS_TILE_COUNT", 272)
+    columns = min(count, _positive_env_int("ARRAYSCOPE_STRESS_COLUMNS", 17))
+    batch_size = _positive_env_int("ARRAYSCOPE_STRESS_BATCH_SIZE", 8)
+    return benchmark_large_progressive_montage(
+        tile_shape=tile_shape,
+        count=count,
+        columns=columns,
+        batch_size=batch_size,
+    )
 
-    import nibabel as nib
 
-    source = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
-    if not source.exists():
-        raise FileNotFoundError(
-            "stress fixture not found: data/_WIPDelRec-tT2_20260223150234_14.nii"
-        )
-    data = np.asarray(nib.load(str(source)).get_fdata(dtype=np.float32))
-    if data.ndim < 3:
-        raise ValueError(f"stress fixture must be at least 3D, got {data.shape}")
-    slab = data
-    while slab.ndim > 3:
-        slab = slab[..., 0]
-    complex_data = np.fft.fftshift(np.fft.fftn(slab, axes=(0, 1)), axes=(0, 1)).astype(np.complex64)
-    del complex_data
-    return benchmark_rendering_backends()
+def _positive_env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return max(1, int(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
 
 
 def _format_optional_ms(value: float | None) -> str:
