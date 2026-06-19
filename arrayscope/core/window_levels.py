@@ -291,13 +291,18 @@ class WindowLevelController:
                 mode=mode,
             )
 
-        mapped = relative_levels(previous_state.display_levels, previous_state.histogram_range, candidate_state.histogram_range)
-        levels = normalize_bounds(mapped) or candidate_state.display_levels
-        histogram = candidate_state.histogram_range
-        return WindowLevelState(
-            semantic_key=previous_state.semantic_key,
-            display_levels=levels,
-            histogram_range=histogram,
+        # Progressive statistics for an already-visible semantic frame are
+        # metadata improvements, not a new windowing request.  Re-expressing
+        # the current levels against every newly discovered min/max causes the
+        # image to visibly flash while montage tiles arrive or while scrolling
+        # changes the sampled subset.  Relative mapping is therefore performed
+        # only when the semantic source changes (the branch above).  For the
+        # same source, keep the numeric display window stable and expand the
+        # histogram domain monotonically as better statistics become available.
+        histogram = union_bounds(previous_state.histogram_range, candidate_state.histogram_range)
+        return replace(
+            previous_state,
+            histogram_range=histogram or previous_state.histogram_range,
             source_rank=max(previous_state.source_rank, candidate_state.source_rank),
             source_count=max(previous_state.source_count, candidate_state.source_count),
             expected_count=max(previous_state.expected_count, candidate_state.expected_count),

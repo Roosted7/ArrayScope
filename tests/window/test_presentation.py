@@ -106,8 +106,8 @@ def test_progressive_montage_patch_accepts_partial_implicit_source_monotonically
         )
     )
 
-    assert decision.levels == (120.0, 180.0)
-    assert decision.histogram_range == (100.0, 200.0)
+    assert decision.levels == (2.0, 8.0)
+    assert decision.histogram_range == (0.0, 200.0)
 
 
 def test_progressive_montage_patch_accepts_complete_source():
@@ -121,7 +121,7 @@ def test_progressive_montage_patch_accepts_complete_source():
         )
     )
 
-    assert decision.levels == (60.0, 240.0)
+    assert decision.levels == (2.0, 8.0)
     assert decision.histogram_range == (0.0, 300.0)
 
 
@@ -136,8 +136,8 @@ def test_degenerate_complete_source_does_not_shrink_previous_levels():
         )
     )
 
-    assert decision.levels == (4.7, 5.3)
-    assert decision.histogram_range == (4.5, 5.5)
+    assert decision.levels == (2.0, 8.0)
+    assert decision.histogram_range == (0.0, 10.0)
 
 
 def test_user_locked_montage_levels_are_not_overridden_by_complete_source():
