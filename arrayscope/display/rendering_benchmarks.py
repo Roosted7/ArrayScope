@@ -113,6 +113,13 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
     for view_type in (ImageView2D, VisPyImageView2D):
         view = view_type()
         try:
+            results.append(_benchmark_tile_level_uniform_update(view, measure_presented=measure_presented))
+        finally:
+            view.close()
+
+    for view_type in (ImageView2D, VisPyImageView2D):
+        view = view_type()
+        try:
             results.append(_benchmark_clean_tile_flush(view, measure_presented=measure_presented))
         finally:
             view.close()
@@ -144,6 +151,12 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
             results.append(_benchmark_progressive_tile_stream(view, measure_presented=measure_presented))
         finally:
             view.close()
+
+    view = VisPyImageView2D()
+    try:
+        results.append(_benchmark_warm_residency_queue_scaling(view, measure_presented=measure_presented))
+    finally:
+        view.close()
 
     return tuple(results)
 
@@ -191,6 +204,39 @@ def _benchmark_complex_tile_level_preview(view, *, measure_presented: bool) -> R
         measure_presented=measure_presented,
     )
     return _result(view, "complex_tile_level_preview", measurement)
+
+
+def _benchmark_tile_level_uniform_update(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=24, columns=6)
+    view.setMontageTileLayerPresentation(
+        placeholder,
+        histogramData=None,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        rgb_already_windowed=False,
+        montage_dirty_tiles=None,
+        montage_tile_source_ids=sources,
+        montage_tile_payloads=payloads,
+    )
+    measurement = _measure_action(
+        view,
+        lambda: view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=geometry,
+            levels=(0.2, 0.9),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            montage_dirty_tiles=(),
+            montage_tile_source_ids=sources,
+            montage_tile_payloads=payloads,
+        ),
+        measure_presented=measure_presented,
+    )
+    return _result(view, "tile_level_uniform_update", measurement)
 
 
 def _benchmark_clean_tile_flush(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
@@ -400,6 +446,72 @@ def _benchmark_progressive_tile_stream_configured(
     )
 
 
+def _benchmark_warm_residency_queue_scaling(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    from arrayscope.display.backends.vispy.tiles import take_payload_batch
+
+    active_count = 8
+    total_count = 40
+    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(64, 64),
+        count=total_count,
+        columns=8,
+    )
+    active = {index: payloads[index] for index in range(active_count)}
+    state = TilePresentationState(payloads)
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=active,
+        active_tiles=tuple(range(active_count)),
+        planned_tiles=tuple(range(total_count)),
+        near_tiles=tuple(range(total_count)),
+        near_tile_source_ids=sources,
+        force_refresh=True,
+    )
+    view.setTiledMontagePresentation(
+        geometry=geometry,
+        tile_state=state,
+        tile_delta=delta,
+        histogramPlotData=None,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        rgb_already_windowed=False,
+        tile_residency_budget_bytes=512 * 1024 * 1024,
+    )
+    layer = getattr(view, "_vispy_gpu_montage_layer", None)
+    if layer is None:
+        raise RuntimeError("VisPy warm-residency benchmark requires a GPU montage layer")
+    warm_payloads = {index: payloads[index] for index in range(active_count, total_count)}
+    stats = []
+
+    def warm_batches():
+        remaining = dict(warm_payloads)
+        while remaining:
+            batch, remaining = take_payload_batch(remaining, max_items=4, max_bytes=8 * 1024 * 1024)
+            stats.append(
+                layer.warm_residency(
+                    payloads=batch,
+                    geometry=geometry,
+                    rgb_already_windowed=False,
+                    tile_delta=delta,
+                    tile_residency_budget_bytes=512 * 1024 * 1024,
+                )
+            )
+
+    measurement = _measure_action(view, warm_batches, measure_presented=measure_presented)
+    return _result(
+        view,
+        "warm_residency_queue_scaling",
+        measurement,
+        timing=_sum_gpu_stats(stats, mode="warm_residency_queue_scaling"),
+        commit_count=len(stats),
+    )
+
+
 def _direct_tile_layer_inputs(*, tile_shape=(32, 32), count=2, columns=2):
     tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
     gap = 1
@@ -513,6 +625,56 @@ def _sum_upload_timings(timings) -> ImageUploadTiming:
         tile_layer_shader_uniform_updates=sum(int(timing.tile_layer_shader_uniform_updates) for timing in timings),
         cpu_complex_prep_ms=total("cpu_complex_prep_ms"),
         tile_layer_capacity_warning=str(last.tile_layer_capacity_warning),
+    )
+
+
+def _sum_gpu_stats(stats, *, mode: str) -> ImageUploadTiming:
+    stats = tuple(stats)
+    if not stats:
+        return ImageUploadTiming(mode=mode)
+    last = stats[-1]
+
+    def total(field):
+        values = [getattr(stat, field) for stat in stats]
+        finite = [float(value) for value in values if value is not None]
+        return sum(finite) if finite else None
+
+    return ImageUploadTiming(
+        total_ms=total("upload_ms"),
+        tile_layer_upload_ms=total("upload_ms"),
+        visible_bytes=sum(int(stat.texture_upload_bytes) for stat in stats),
+        visible_pixels=0,
+        fast_same_object=False,
+        mode=mode,
+        tile_layer_visible_items=int(last.visible_items),
+        tile_layer_items_updated=sum(int(stat.items_updated) for stat in stats),
+        tile_layer_items_skipped=sum(int(stat.items_skipped) for stat in stats),
+        tile_layer_resident_items=int(last.resident_items),
+        tile_layer_storage_capacity=int(last.atlas_capacity),
+        tile_layer_storage_rebuilds=sum(int(stat.atlas_rebuilds) for stat in stats),
+        tile_layer_storage_evictions=sum(int(stat.atlas_evictions) for stat in stats),
+        tile_layer_texture_uploads=sum(int(stat.texture_uploads) for stat in stats),
+        tile_layer_texture_upload_bytes=sum(int(stat.texture_upload_bytes) for stat in stats),
+        tile_layer_vertex_uploads=sum(int(stat.vertex_uploads) for stat in stats),
+        tile_layer_level_updates=sum(int(stat.level_updates) for stat in stats),
+        tile_layer_estimated_gpu_bytes=int(last.estimated_gpu_bytes),
+        tile_layer_cpu_shadow_bytes=int(last.cpu_shadow_bytes),
+        tile_layer_page_count=int(last.page_count),
+        tile_layer_active_pages=int(last.active_pages),
+        tile_layer_device_max_texture_size=int(last.device_max_texture_size),
+        tile_layer_budget_bytes=int(last.budget_bytes),
+        tile_layer_near_resident_items=int(last.near_resident_items),
+        tile_layer_warm_resident_items=int(last.warm_resident_items),
+        tile_layer_evicted_near_items=sum(int(stat.evicted_near_items) for stat in stats),
+        tile_layer_lod_level=int(last.lod_level),
+        tile_layer_lod_factor=int(last.lod_factor),
+        tile_layer_source_texels_per_pixel=float(last.source_texels_per_pixel),
+        tile_layer_gutter_pixels=int(last.gutter_pixels),
+        tile_layer_mipmap_updates=sum(int(stat.mipmap_updates) for stat in stats),
+        tile_layer_mipmap_available=any(bool(stat.mipmap_available) for stat in stats),
+        tile_layer_complex_texture_uploads=sum(int(stat.complex_texture_uploads) for stat in stats),
+        tile_layer_shader_uniform_updates=sum(int(stat.shader_uniform_updates) for stat in stats),
+        tile_layer_capacity_warning=str(last.capacity_warning),
     )
 
 
@@ -638,9 +800,11 @@ def assert_optional_perf_gates(results: tuple[RenderingBenchmarkResult, ...]) ->
     required = (
         "vispy_clean_tile_flush",
         "vispy_pan_zoom_no_upload",
+        "vispy_tile_level_uniform_update",
         "vispy_one_dirty_tile_commit",
         "vispy_large_complex_tiled_initial",
         "vispy_progressive_tile_stream",
+        "vispy_warm_residency_queue_scaling",
     )
     missing_frames = [name for name in required if by_name[name].first_frame_ms is None]
     assert not missing_frames, (

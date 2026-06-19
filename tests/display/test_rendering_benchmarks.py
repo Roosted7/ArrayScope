@@ -16,6 +16,8 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(qt_app):
         "vispy_scalar_level_preview",
         "pyqtgraph_complex_tile_level_preview",
         "vispy_complex_tile_level_preview",
+        "pyqtgraph_tile_level_uniform_update",
+        "vispy_tile_level_uniform_update",
         "pyqtgraph_clean_tile_flush",
         "vispy_clean_tile_flush",
         "pyqtgraph_large_complex_tiled_initial",
@@ -26,6 +28,7 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(qt_app):
         "vispy_pan_zoom_no_upload",
         "pyqtgraph_progressive_tile_stream",
         "vispy_progressive_tile_stream",
+        "vispy_warm_residency_queue_scaling",
     }
     for result in results:
         assert result.elapsed_ms >= 0.0
@@ -79,7 +82,44 @@ def test_vispy_dirty_and_pan_scenarios_have_deterministic_upload_counters(qt_app
     assert dirty.tile_layer_items_skipped > 0
     assert dirty.visible_bytes > 0
     assert pan.tile_layer_items_updated == 0
+    assert pan.tile_layer_texture_uploads == 0
+    assert pan.tile_layer_texture_upload_bytes == 0
+    assert pan.tile_layer_vertex_uploads == 0
+    assert pan.tile_layer_level_updates == 0
+    assert pan.tile_layer_shader_uniform_updates == 0
     assert pan.visible_bytes == 0
+
+
+def test_vispy_level_only_tile_commit_updates_uniforms_without_uploads(qt_app):
+    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
+
+    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
+    timing = results["vispy_tile_level_uniform_update"].timing
+
+    assert timing.tile_layer_visible_items > 0
+    assert timing.tile_layer_items_updated == 0
+    assert timing.tile_layer_items_skipped == timing.tile_layer_visible_items
+    assert timing.tile_layer_texture_uploads == 0
+    assert timing.tile_layer_texture_upload_bytes == 0
+    assert timing.tile_layer_level_updates > 0
+    assert timing.tile_layer_shader_uniform_updates > 0
+    assert timing.visible_bytes == 0
+
+
+def test_warm_residency_queue_scaling_reports_batched_speculative_uploads(qt_app):
+    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
+
+    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
+    result = results["vispy_warm_residency_queue_scaling"]
+    timing = result.timing
+
+    assert result.commit_count == 8
+    assert timing.tile_layer_items_updated == 32
+    assert timing.tile_layer_resident_items == 40
+    assert timing.tile_layer_warm_resident_items == 32
+    assert timing.tile_layer_texture_uploads > 0
+    assert timing.tile_layer_texture_upload_bytes > 0
+    assert timing.tile_layer_near_resident_items == 40
 
 
 def test_progressive_tile_stream_reports_aggregate_work(qt_app):
