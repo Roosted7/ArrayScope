@@ -1349,12 +1349,10 @@ class _WindowedRgbVisual(Visual):
         float scalar = texture2D(u_scalar_texture, v_texcoord).r;
         float span = max(u_levels.y - u_levels.x, 1e-12);
         float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
-        float alpha = 1.0;
         if (scalar != scalar) {
-            intensity = 0.0;
-            alpha = 0.0;
+            discard;
         }
-        gl_FragColor = vec4(color * intensity, alpha);
+        gl_FragColor = vec4(color * intensity, 1.0);
     }
     """
 
@@ -1385,7 +1383,7 @@ class _WindowedRgbVisual(Visual):
         self.upload_count = 0
         self.level_update_count = 0
         super().__init__(vcode=self._vertex_shader, fcode=self._fragment_shader, **kwargs)
-        self.set_gl_state("translucent", cull_face=False)
+        self.set_gl_state(depth_test=False, cull_face=False, blend=False)
         self._draw_mode = "triangles"
         self.freeze()
 

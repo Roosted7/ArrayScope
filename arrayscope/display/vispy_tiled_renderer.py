@@ -445,23 +445,19 @@ class GpuWindowedTileVisual(Visual):
             float scalar = texture2D(u_scalar_texture, v_texcoord).r;
             float span = max(u_levels.y - u_levels.x, 1e-12);
             float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
-            float alpha = 1.0;
             if (scalar != scalar) {
-                intensity = 0.0;
-                alpha = 0.0;
+                discard;
             }
-            gl_FragColor = vec4(vec3(intensity), alpha);
+            gl_FragColor = vec4(vec3(intensity), 1.0);
         } else if (v_mode < 1.5) {
             float scalar = texture2D(u_scalar_texture, v_texcoord).r;
             vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
             float span = max(u_levels.y - u_levels.x, 1e-12);
             float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
-            float alpha = 1.0;
             if (scalar != scalar) {
-                intensity = 0.0;
-                alpha = 0.0;
+                discard;
             }
-            gl_FragColor = vec4(color * intensity, alpha);
+            gl_FragColor = vec4(color * intensity, 1.0);
         } else {
             vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
             gl_FragColor = vec4(color, 1.0);
@@ -482,7 +478,7 @@ class GpuWindowedTileVisual(Visual):
         self._scalar_texture = None
         self._color_texture = None
         self._levels = (0.0, 1.0)
-        self.set_gl_state("translucent", cull_face=False)
+        self.set_gl_state(depth_test=False, cull_face=False, blend=False)
         self._draw_mode = "triangles"
         self.freeze()
 
@@ -587,8 +583,12 @@ def _payload_texture_data(
 
 
 def _fit_scalar(data, shape: tuple[int, int]) -> np.ndarray:
-    out = np.zeros(shape, dtype=np.float32)
     arr = np.asarray(data, dtype=np.float32)
+    if tuple(arr.shape[:2]) == tuple(shape) and arr.ndim == 2 and arr.flags.c_contiguous:
+        # Gloo retains the array in its deferred command queue.  Reusing the
+        # immutable payload plane avoids another full tile copy before upload.
+        return arr
+    out = np.zeros(shape, dtype=np.float32)
     height = min(shape[0], int(arr.shape[0]))
     width = min(shape[1], int(arr.shape[1]))
     if height > 0 and width > 0:
@@ -597,14 +597,29 @@ def _fit_scalar(data, shape: tuple[int, int]) -> np.ndarray:
 
 
 def _fit_color(data, shape: tuple[int, int]) -> np.ndarray:
-    out = np.zeros(shape + (3,), dtype=np.uint8)
     arr = np.asarray(data)
+    if (
+        arr.dtype == np.uint8
+        and arr.ndim == 3
+        and arr.shape[-1] == 3
+        and tuple(arr.shape[:2]) == tuple(shape)
+        and arr.flags.c_contiguous
+    ):
+        return arr
     if np.issubdtype(arr.dtype, np.floating):
         if arr.size and float(np.nanmax(arr)) <= 1.0:
             arr = np.clip(arr * 255.0, 0.0, 255.0)
         arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
     else:
         arr = arr.astype(np.uint8, copy=False)
+    if (
+        arr.ndim == 3
+        and arr.shape[-1] == 3
+        and tuple(arr.shape[:2]) == tuple(shape)
+        and arr.flags.c_contiguous
+    ):
+        return arr
+    out = np.zeros(shape + (3,), dtype=np.uint8)
     height = min(shape[0], int(arr.shape[0]))
     width = min(shape[1], int(arr.shape[1]))
     if height > 0 and width > 0:

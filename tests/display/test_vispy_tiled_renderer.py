@@ -3,7 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from arrayscope.display.vispy_tiled_renderer import AtlasCapacityError, TextureAtlasPool, _payload_textures
+from arrayscope.display.vispy_tiled_renderer import (
+    AtlasCapacityError,
+    TextureAtlasPool,
+    _fit_color,
+    _fit_scalar,
+    _payload_textures,
+)
 from arrayscope.window.display_frame import DisplayTilePayload
 
 
@@ -208,3 +214,26 @@ def test_payload_texture_conversion_preserves_scalar_dynamic_range():
     assert scalar.dtype == np.float32
     assert color.dtype == np.uint8
     assert not np.any(color)
+
+
+def test_exact_payload_planes_are_reused_without_staging_copy():
+    scalar = np.arange(12, dtype=np.float32).reshape(3, 4)
+    color = np.arange(36, dtype=np.uint8).reshape(3, 4, 3)
+
+    assert _fit_scalar(scalar, (3, 4)) is scalar
+    assert _fit_color(color, (3, 4)) is color
+
+
+def test_noncontiguous_or_padded_payload_planes_get_safe_staging_arrays():
+    scalar = np.arange(24, dtype=np.float32).reshape(3, 8)[:, ::2]
+    color = np.arange(72, dtype=np.uint8).reshape(3, 8, 3)[:, ::2, :]
+
+    fitted_scalar = _fit_scalar(scalar, (3, 4))
+    fitted_color = _fit_color(color, (3, 4))
+
+    assert fitted_scalar.flags.c_contiguous
+    assert fitted_color.flags.c_contiguous
+    assert fitted_scalar is not scalar
+    assert fitted_color is not color
+    np.testing.assert_array_equal(fitted_scalar, scalar)
+    np.testing.assert_array_equal(fitted_color, color)
