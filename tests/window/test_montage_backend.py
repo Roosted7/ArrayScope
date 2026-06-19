@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from arrayscope.app.settings_state import MontageDisplayBackendChoice
+from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.window.montage_backend import choose_montage_backend
 
 
@@ -35,7 +36,27 @@ def test_auto_large_scalar_vispy_montage_uses_tile_layer_to_avoid_full_uploads()
 
     assert decision.backend == "tile_layer"
     assert decision.expected_tile_layer is True
-    assert "full texture uploads" in decision.reason
+    assert "full-surface uploads" in decision.reason
+
+
+def test_auto_policy_uses_capability_instead_of_backend_name():
+    data = np.zeros((1500, 1500), dtype=np.float32)
+    capabilities = ImageViewBackendCapabilities(
+        name="future-gpu-backend",
+        direct_montage_tile_payloads=True,
+        prefers_tiled_montages=True,
+        persistent_tile_residency=True,
+    )
+
+    decision = choose_montage_backend(
+        _geometry(),
+        data,
+        renderer_backend="pyqtgraph",
+        renderer_capabilities=capabilities,
+    )
+
+    assert decision.backend == "tile_layer"
+    assert "future-gpu-backend" in decision.reason
 
 
 def test_auto_preserves_vispy_tile_layer_mode():

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from arrayscope.app.settings_state import MontageDisplayBackendChoice, normalize_montage_display_backend_choice
+from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 
 
 LARGE_MONTAGE_CANVAS_PIXELS = 2_000_000
@@ -29,6 +30,7 @@ def choose_montage_backend(
     patched_tiles: int = 0,
     current_mode: str = "canvas",
     renderer_backend: str = "pyqtgraph",
+    renderer_capabilities: ImageViewBackendCapabilities | None = None,
     very_slow_upload_ms: float = 100.0,
 ) -> MontageBackendDecision:
     if getattr(geometry, "montage", None) is None:
@@ -40,6 +42,16 @@ def choose_montage_backend(
     large = pixels > LARGE_MONTAGE_CANVAS_PIXELS
     large_rgb = large and rgb_like
     renderer_backend = str(getattr(renderer_backend, "value", renderer_backend) or "pyqtgraph").lower()
+    prefers_tiled_montages = (
+        bool(renderer_capabilities.prefers_tiled_montages)
+        if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
+        else renderer_backend == "vispy"
+    )
+    renderer_name = (
+        str(renderer_capabilities.name)
+        if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
+        else renderer_backend
+    )
     current_is_tile_layer = str(current_mode) in {"tile_layer", "vispy_tile_layer"}
 
     if setting == MontageDisplayBackendChoice.TILE_LAYER:
@@ -57,10 +69,10 @@ def choose_montage_backend(
             f"RGB/complex montage canvas pixels {pixels} > {LARGE_MONTAGE_CANVAS_PIXELS}",
             expected_tile_layer=True,
         )
-    if large and renderer_backend == "vispy":
+    if large and prefers_tiled_montages:
         return MontageBackendDecision(
             "tile_layer",
-            f"VisPy montage canvas pixels {pixels} > {LARGE_MONTAGE_CANVAS_PIXELS}; avoid full texture uploads",
+            f"{renderer_name} prefers tiled montage pixels {pixels} > {LARGE_MONTAGE_CANVAS_PIXELS}; avoid full-surface uploads",
             expected_tile_layer=True,
         )
     if float(previous_upload_ms or 0.0) > float(very_slow_upload_ms):

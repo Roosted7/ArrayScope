@@ -28,6 +28,7 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
+from arrayscope.display.backend_contract import VISPY_CAPABILITIES
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.image_upload import rgb_display_for_levels
@@ -64,6 +65,8 @@ class VisPyImageView2D(ImageView2D):
     """
 
     rendering_backend_name = "vispy"
+    rendering_capabilities = VISPY_CAPABILITIES
+    supports_direct_montage_tile_payloads = rendering_capabilities.direct_montage_tile_payloads
 
     def setupUI(self):
         self._vispy_scene, self._vispy_visuals, self._vispy_transforms, self._vispy_panzoom_camera, self._vispy_gloo = _import_vispy()
