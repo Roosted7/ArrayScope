@@ -237,6 +237,43 @@ def test_vispy_raster_mapped_complex_level_change_updates_uniform_without_textur
         view.close()
 
 
+def test_gpu_mapped_visual_shader_supports_raw_complex_components():
+    from arrayscope.display.vispy_imageview2d import GpuMappedImageVisual
+
+    shader = GpuMappedImageVisual._fragment_shader
+
+    assert "uniform float u_component_mode" in shader
+    assert "float complex_component" in shader
+
+
+def test_gpu_mapped_visual_cached_complex_component_change_updates_uniform_without_upload():
+    from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping, TexturePlaneKind
+    from arrayscope.display.vispy_imageview2d import GpuMappedImageVisual
+
+    visual = object.__new__(GpuMappedImageVisual)
+    visual._scalar_texture = object()
+    visual.scalar_source_id = ("source", "complex_rg32f")
+    visual._mode = 2.0
+    visual._scale_mode = 0.0
+    visual._symlog_constant = 0.0
+    visual._component_mode = 0.0
+    visual.upload_count = 3
+    visual._set_lut_texture = lambda lut: None
+    visual.set_levels = lambda levels, count=True: setattr(visual, "_levels", tuple(float(value) for value in levels))
+
+    visual.set_mapped_data(
+        np.ones((2, 2), dtype=np.complex64),
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        levels=(0.0, 1.0),
+        source_id=("source", "complex_rg32f"),
+        shader_mapping=ShaderMapping(component=ShaderComponent.IMAG),
+    )
+
+    assert visual.upload_count == 3
+    assert visual._component_mode == 1.0
+    assert visual._levels == (0.0, 1.0)
+
+
 def test_vispy_complex_windowed_rgb_preserves_high_magnitude_scale(qt_app):
     from pyqtgraph.Qt import QtGui
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D

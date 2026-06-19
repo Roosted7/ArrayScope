@@ -105,6 +105,19 @@ def extract_component(data, component: ShaderComponent | str) -> np.ndarray:
     raise ValueError(f"unsupported shader component: {component!r}")
 
 
+def shader_component_uniform(component: ShaderComponent | str | None) -> float:
+    if component is None:
+        return 0.0
+    component = _coerce_enum(ShaderComponent, component)
+    return {
+        ShaderComponent.REAL: 0.0,
+        ShaderComponent.IMAG: 1.0,
+        ShaderComponent.ABS: 2.0,
+        ShaderComponent.ANGLE: 3.0,
+        ShaderComponent.COMPLEX_PHASE: 3.0,
+    }[component]
+
+
 def apply_scale(data, scale: ShaderScale | str, *, symlog_constant: float = 0.0) -> np.ndarray:
     scale = _coerce_enum(ShaderScale, scale)
     arr = np.asarray(data, dtype=np.float32)
@@ -249,6 +262,7 @@ __all__ = [
     "ShaderMapping",
     "TexturePlaneKind",
     "extract_component",
+    "shader_component_uniform",
     "apply_scale",
     "mapped_scalar",
     "window_intensity",
