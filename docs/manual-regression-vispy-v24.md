@@ -1,0 +1,67 @@
+# Manual regression checklist — VisPy v24 rendering review
+
+Run on at least Wayland/Intel integrated graphics and one discrete-GPU system.  Repeat the performance
+section with both PyQtGraph and VisPy selected.
+
+## Basic presentation
+
+- Open scalar, RGB, and complex 2D arrays; verify orientation, axis flips, fit, and 1:1.
+- Change channel/component, colormap, brightness/contrast, and histogram levels.
+- Verify level-only changes do not increment VisPy texture-upload counters.
+- Switch render backends repeatedly without stale pixels, levels, geometry, or crashes.
+
+## Tiled montage
+
+- Load a 272×336×336 or similarly large montage progressively.
+- Verify every tile identity while batches arrive and after panning away/back.
+- Confirm atlas rebuild count remains one for a stable planned visible set.
+- Zoom into a small region, pan elsewhere, then return; resident tiles should reappear without upload
+  unless pressure caused a reported eviction.
+- Verify loading/skipped overlays and tile gaps at all zoom levels.
+- Exercise scalar, already-windowed RGB, and complex/windowable RGB tile modes.
+- Confirm diagnostics show expected storage mode, resident/capacity, GPU bytes, zero CPU shadow bytes,
+  texture submissions, vertex submissions, rebuilds, and evictions.
+
+## Interaction parity
+
+- Live profile crosshair: center dot visible, hover highlight/cursor, real-time motion, aligned profile.
+- Rectangle ROI: body drag, bottom-right resize handle, handle hover/cursor/highlight, real-time outline.
+- Line ROI: both endpoint handles, line drag, endpoint resize, real-time outline and statistics.
+- Polyline/freehand: live drawing preview, vertex hover and drag where supported.
+- Verify a handle wins hit testing where it overlaps an ROI line/body.
+- Verify hover state clears when changing tools or leaving the canvas.
+- Verify pixel/status HUD follows the mouse and reports value plus dimensions/tile context.
+- Verify ROI information box remains above the VisPy canvas and updates type, mean, N, and other stats.
+- Pan/zoom while overlays exist; verify alignment and no lagging duplicate mirror.
+
+## Responsiveness
+
+- During initial progressive load, continuously open menus, drag docks, pan, zoom, and move an ROI.
+- Record diagnostics for maximum UI gap, first frame, commit time, upload bytes, and atlas rebuilds.
+- Run:
+
+  ```bash
+  ARRAYSCOPE_RUN_STRESS=1 \
+  ARRAYSCOPE_BENCH_PRESENTED=1 \
+  python -m arrayscope.display.rendering_benchmarks
+  ```
+
+- Repeat several times; compare medians and tail latency, not one run.
+- Check for frame pacing at monitor refresh rates with vsync on/off where the platform supports it.
+- Treat GPU utilization as supporting evidence only; correlate it with missed frames and submission
+  stalls.
+
+## Memory and lifetime
+
+- Repeat large montage load, backend switch, data reload, and window close cycles.
+- Observe process RSS and GPU allocation; verify no monotonic atlas/surface leak.
+- Test low GPU-memory pressure and oversized tile counts; failure must be graceful and diagnostics
+  must explain page/capacity limitations.
+- Modify/reload source data and verify source identities force the correct dirty tile uploads.
+
+## Platform-specific
+
+- Wayland: HUD/ROI panel must remain above the GL surface; no black/transparent stacking artifacts.
+- X11: verify mouse-transparent interaction surface and cursor changes.
+- Windows/macOS: verify OpenGL context recreation after hide/show, dock changes, and screen changes.
+- HiDPI: handles and hit targets remain screen-sized and crisp at multiple scale factors.

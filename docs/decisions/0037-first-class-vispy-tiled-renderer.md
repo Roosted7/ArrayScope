@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Backend ownership is refined by [0038 — Compose rendering backends behind shared presentation semantics](0038-render-backend-composition.md).
 
 ## Context
 
@@ -24,8 +24,9 @@ reads go through the committed value source, never through placeholder pixels.
 
 VisPy tiled montage rendering uses `arrayscope.display.vispy_tiled_renderer`:
 
-- visible tile payloads are packed into scalar and color texture atlases;
-- one batched visual draws all resident tile quads;
+- visible tile payloads use stable slots in mode-aware scalar and/or color texture atlases;
+- inactive tiles remain resident until LRU pressure requires their slots;
+- one batched visual draws the active tile quads;
 - level-only changes update shader uniforms;
 - clean commits skip texture and vertex uploads;
 - dirty commits upload only changed atlas regions;
@@ -58,5 +59,5 @@ not synchronously push camera state for every range-change signal.
 ## Future work
 
 - GPU-side complex scalar to phase/color generation.
-- Multi-page atlas residency with explicit viewport-near retention and eviction diagnostics.
+- Multi-page, byte-budgeted atlas residency with runtime device limits, explicit viewport-near retention, and eviction diagnostics.
 - Production perf gates on target GPU/compositor combinations after collecting stable baselines.
