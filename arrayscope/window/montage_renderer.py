@@ -966,7 +966,7 @@ class MontageRenderMixin:
         self._retry_live_profile_after_montage_tile()
 
     def _direct_montage_tile_layer_presentation(self, session):
-        if str(getattr(self.img_view, "rendering_backend_name", "pyqtgraph")) != "vispy":
+        if not bool(getattr(self.img_view, "supports_direct_montage_tile_payloads", False)):
             return None
         if not hasattr(self.img_view, "setMontageTileLayerPresentation"):
             return None
