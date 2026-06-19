@@ -126,7 +126,10 @@ def test_montage_render_session_delta_carries_near_sources_without_payloads():
     _state, delta = session.build_tile_presentation(source_ids)
 
     assert delta.near_tiles == (0, 1, 2, 3)
-    assert delta.near_tile_source_ids == source_ids
+    assert delta.near_tile_source_ids[0] == delta.upserts[0].source_id
+    assert {key: delta.near_tile_source_ids[key] for key in (1, 2, 3)} == {
+        key: source_ids[key] for key in (1, 2, 3)
+    }
     assert set(delta.upserts) == {0}
 
 

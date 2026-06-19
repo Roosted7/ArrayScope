@@ -7,6 +7,8 @@ import pytest
 
 from arrayscope.display.vispy_tiled_renderer import (
     AtlasCapacityError,
+    GpuDeviceLimits,
+    GpuMontageLayer,
     TextureAtlasPool,
     _atlas_reserve_count,
     _fit_color,
@@ -16,6 +18,7 @@ from arrayscope.display.vispy_tiled_renderer import (
     _quad_buffers,
     _resident_key,
     query_gpu_device_limits,
+    take_payload_batch,
 )
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, TexturePlaneKind
 from arrayscope.window.display_frame import DisplayTilePayload
@@ -36,6 +39,44 @@ class FakeTexture2D:
 
 class FakeGloo:
     Texture2D = FakeTexture2D
+
+
+class FakeVisual:
+    def __init__(self):
+        self.visible = False
+        self.levels = []
+        self.geometry_calls = 0
+        self.mapping_calls = 0
+        self.textures = None
+
+    def set_levels(self, levels):
+        levels = tuple(float(value) for value in levels)
+        changed = not self.levels or self.levels[-1] != levels
+        if changed:
+            self.levels.append(levels)
+        return changed
+
+    def set_geometry(self, vertices, texcoords, modes):
+        self.geometry_calls += 1
+
+    def set_textures(self, scalar, color):
+        changed = self.textures != (scalar, color)
+        self.textures = (scalar, color)
+        return changed
+
+    def set_shader_mapping(self, mapping):
+        self.mapping_calls += 1
+        return self.mapping_calls == 1
+
+
+class FakeSceneVisuals:
+    @staticmethod
+    def create_visual_node(_visual_type):
+        return lambda parent=None: FakeVisual()
+
+
+class FakeScene:
+    visuals = FakeSceneVisuals()
 
 
 def payload(tile_number: int, value: float, *, source_id=None) -> DisplayTilePayload:
@@ -165,6 +206,67 @@ def test_atlas_reserve_avoids_progressive_reallocation():
     assert pool.serial == serial
     assert (pool.scalar_texture, pool.color_texture) == textures
     assert pool.rebuild_count == 1
+
+
+def test_atlas_capacity_hint_grows_in_bounded_byte_chunks():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4096)
+
+    requested = pool.requested_capacity(
+        active_count=1,
+        reserve_count=1000,
+        storage_mode="complex",
+        tile_shape=(512, 512),
+    )
+
+    assert requested == 16
+    assert requested < 1000
+
+
+def test_new_atlas_page_inherits_current_levels_without_reuploading_old_geometry():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=4),
+    )
+    montage = SimpleNamespace(
+        indices=tuple(range(5)),
+        tile_width=2,
+        tile_height=2,
+        columns=5,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",) * 5)
+    delta = SimpleNamespace(planned_tiles=tuple(range(5)), near_tiles=(), near_tile_source_ids={})
+
+    layer.update(
+        payloads={index: payload(index, float(index)) for index in range(4)},
+        geometry=geometry,
+        levels=(10.0, 20.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=delta,
+    )
+    first_visual = layer._visuals_by_page[0]
+    assert first_visual.levels[-1] == (10.0, 20.0)
+    assert first_visual.geometry_calls == 1
+
+    layer.update(
+        payloads={index: payload(index, float(index)) for index in range(5)},
+        geometry=geometry,
+        levels=(10.0, 20.0),
+        dirty_tiles=(4,),
+        rgb_already_windowed=False,
+        tile_delta=delta,
+    )
+
+    assert len(layer._visuals_by_page) == 2
+    assert layer._visuals_by_page[1].levels[-1] == (10.0, 20.0)
+    assert first_visual.geometry_calls == 1
+    assert layer._visuals_by_page[1].geometry_calls == 1
 
 
 def test_none_dirty_set_forces_refresh_even_when_sources_match():
@@ -362,6 +464,37 @@ def test_atlas_eviction_prefers_far_inactive_tiles_before_near_tiles():
     assert ("tile", 1, 1.0) not in pool.source_ids.values()
 
 
+def test_near_base_source_identity_protects_wrapped_resident_payload():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+    base_zero = ("base", 0)
+    wrapped_zero = (base_zero, "texture_kind", "scalar_r32f", "shader", None, "lod", 1, 0, 0)
+    values = {
+        0: payload(0, 0.0, source_id=wrapped_zero),
+        1: payload(1, 1.0),
+        2: payload(2, 2.0),
+    }
+    pool.update_payloads(
+        values,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=3,
+    )
+
+    pool.update_payloads(
+        {2: values[2], 3: payload(3, 3.0)},
+        tile_shape=(2, 2),
+        dirty_tiles=(3,),
+        rgb_already_windowed=False,
+        reserve_count=3,
+        near_tiles=(0,),
+        near_tile_source_ids={0: base_zero},
+    )
+
+    assert wrapped_zero in pool.source_ids.values()
+    assert ("tile", 1, 1.0) not in pool.source_ids.values()
+
+
 def test_atlas_warms_loaded_near_payload_without_changing_active_slots():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     values = {index: payload(index, float(index)) for index in range(3)}
@@ -425,3 +558,31 @@ def test_device_limit_query_falls_back_when_gl_is_unavailable():
     assert limits.max_texture_size == 4096
     assert limits.source == "fallback"
     assert limits.warnings
+
+
+def test_speculative_payload_batches_are_bounded_by_items_and_bytes():
+    values = {index: payload(index, float(index)) for index in range(6)}
+
+    batch, remaining = take_payload_batch(values, max_items=3, max_bytes=33)
+
+    assert tuple(batch) == (0, 1)
+    assert tuple(remaining) == (2, 3, 4, 5)
+
+
+def test_quad_generation_iterates_active_payloads_not_the_complete_plan():
+    class Indices:
+        def __len__(self):
+            return 100_000
+
+        def __iter__(self):
+            raise AssertionError("complete montage population must not be scanned")
+
+    montage = SimpleNamespace(indices=Indices(), tile_width=2, tile_height=2, columns=100, rows=1000, gap=0)
+    vertices, _texcoords, _modes = _quad_buffers(
+        montage,
+        {12_345: payload(12_345, 1.0)},
+        {12_345: (0.0, 0.0, 1.0, 1.0)},
+        rgb_already_windowed=False,
+    )
+
+    assert vertices.shape == (6, 2)
