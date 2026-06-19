@@ -103,7 +103,7 @@ class TextureAtlasPage:
                 shape=self.atlas_shape + (channels,),
                 format="rg" if self.complex_is_atlas else "red",
                 internalformat="rg32f" if self.complex_is_atlas else "r32f",
-                interpolation="linear" if self.complex_is_atlas else "nearest",
+                interpolation="nearest",
                 wrapping="clamp_to_edge",
             )
         else:
@@ -992,9 +992,15 @@ class GpuWindowedTileVisual(Visual):
             float scalar = complex_component(z);
             scalar = map_scale(scalar);
             float span = max(u_levels.y - u_levels.x, 1e-12);
-            float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
-            float phase = atan(z.y, z.x);
-            float phase_index = clamp((phase + 3.141592653589793) / 6.283185307179586, 0.0, 1.0);
+            float phase_index;
+            float intensity = 1.0;
+            if (u_component_mode > 2.5) {
+                phase_index = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
+            } else {
+                intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
+                float phase = atan(z.y, z.x);
+                phase_index = clamp((phase + 3.141592653589793) / 6.283185307179586, 0.0, 1.0);
+            }
             vec3 color = texture2D(u_lut_texture, vec2(phase_index, 0.5)).rgb;
             if (scalar != scalar) {
                 discard;

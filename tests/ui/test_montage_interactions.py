@@ -577,6 +577,7 @@ def test_montage_loading_canvas_preserves_levels_until_first_real_tile(qtbot, mo
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (99.444444, 100.777778)
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (99.0, 101.0)
+        assert win._montage_session.applied_level_source.source_count == 1
 
         tile1 = win._montage_session.visible_tiles[1]
         calls[1]["on_done"](_tile_result(tile1, 200))
@@ -584,6 +585,53 @@ def test_montage_loading_canvas_preserves_levels_until_first_real_tile(qtbot, mo
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (121.888889, 190.555556)
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (99.0, 202.0)
+        assert win._montage_session.applied_level_source.source_count == 2
+
+        tile2 = win._montage_session.plan.tiles[2]
+        win._apply_montage_tile_result(win._montage_session, tile2, _tile_result(tile2, 300))
+        win._schedule_montage_canvas_commit(win._montage_session, force=True)
+        _process_events(qtbot)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (144.333333, 280.333333)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (99.0, 303.0)
+        assert win._montage_session.applied_level_source.source_count == 3
+    finally:
+        win.close()
+
+
+def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    tile_count = 6
+    win = ArrayScopeWindow(np.arange(2 * 2 * tile_count, dtype=np.float32).reshape(2, 2, tile_count))
+    qtbot.addWidget(win)
+    calls = []
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
+    try:
+        _process_events(qtbot)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=6, indices=tuple(range(tile_count)), text=":"))
+        win.update_montage_view()
+
+        session = win._montage_session
+        for index, tile in enumerate(session.plan.tiles):
+            win._apply_montage_tile_result(session, tile, _tile_result(tile, 100 * (index + 1)))
+        win._schedule_montage_canvas_commit(session, force=True)
+        _process_events(qtbot)
+
+        before_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
+        before_histogram = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+        assert session.applied_level_source.source_count == tile_count
+        assert session.applied_level_source.expected_count == tile_count
+
+        win.img_view.getView().setRange(xRange=(0.0, 2.0), yRange=(0.0, 2.0), padding=0)
+        win._run_montage_viewport_update()
+        _process_events(qtbot)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == before_levels
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == before_histogram
+        assert win._montage_session.applied_level_source.source_count == tile_count
+        assert win._montage_session.applied_level_source.expected_count == tile_count
     finally:
         win.close()
 

@@ -1270,6 +1270,18 @@ class VisPyImageView2D(ImageView2D):
             float(rect.top() + max(0.0, rect.height() - 1.0)),
         )
 
+    def _updateAspectRatio(self):
+        super()._updateAspectRatio()
+        camera = getattr(getattr(self, "_vispy_view", None), "camera", None)
+        if camera is not None:
+            camera.aspect = 1.0 if getattr(self, "displayMode", "square_pixels") == "square_pixels" else None
+            self._vispy_canvas.update()
+
+    def setFitLocked(self, enabled):
+        super().setFitLocked(enabled)
+        if self.image is not None:
+            self._sync_vispy_camera_to_view()
+
     def oneToOne(self):
         self.setDisplayMode("square_pixels")
         self.view.setMouseEnabled(x=True, y=True)
@@ -1658,9 +1670,17 @@ def _tiled_source_key(tile_payloads, tile_source_ids):
         return None
     ids = tile_source_ids or {}
     return tuple(
-        (int(tile), ids.get(int(tile), getattr(payload, "source_id", None)))
+        (
+            int(tile),
+            ids.get(int(tile), getattr(payload, "source_id", None)),
+            _shader_mapping_key(getattr(payload, "shader_mapping", None)),
+        )
         for tile, payload in sorted(dict(tile_payloads).items())
     )
+
+
+def _shader_mapping_key(mapping):
+    return None if mapping is None else getattr(mapping, "identity_key", mapping)
 
 
 def _tiled_structure_key(geometry, *, rgb_already_windowed):

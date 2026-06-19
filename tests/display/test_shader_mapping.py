@@ -5,6 +5,7 @@ from arrayscope.display.shader_mapping import (
     ShaderMapping,
     ShaderScale,
     TexturePlaneKind,
+    apply_phase_lut,
     apply_scale,
     cpu_display_rgba,
     extract_component,
@@ -67,6 +68,15 @@ def test_phase_lut_indices_are_deterministic_at_key_angles():
     np.testing.assert_array_equal(phase_lut_indices(data, 5), np.array([2, 3, 4]))
 
 
+def test_phase_lut_sampling_interpolates_colormap_like_gpu_shader():
+    lut = np.array([[0, 0, 0], [255, 0, 0]], dtype=np.uint8)
+
+    color, magnitude = apply_phase_lut(np.array([1 + 0j], dtype=np.complex64), lut)
+
+    np.testing.assert_array_equal(color, np.array([[128, 0, 0]], dtype=np.uint8))
+    np.testing.assert_allclose(magnitude, np.array([1.0], dtype=np.float32))
+
+
 def test_rg32f_pack_preserves_real_and_imag_float32_values():
     data = np.array([[1 + 2j, -3 - 4j]], dtype=np.complex64)
 
@@ -104,3 +114,26 @@ def test_phase_color_cpu_oracle_windows_scaled_magnitude():
     rgba = cpu_display_rgba(data, mapping)
 
     np.testing.assert_array_equal(rgba[0, :, 0], np.array([0, 127, 255], dtype=np.uint8))
+
+
+def test_phase_color_cpu_oracle_maps_angle_through_lut_levels_without_intensity_window():
+    data = np.array([[-1j, 1 + 0j, 1j]], dtype=np.complex64)
+    lut = np.array(
+        [
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        ],
+        dtype=np.uint8,
+    )
+    mapping = ShaderMapping(
+        component=ShaderComponent.ANGLE,
+        levels=(-np.pi / 2.0, np.pi / 2.0),
+        lut_data=lut,
+        display_mode="phase_color",
+    )
+
+    rgba = cpu_display_rgba(data, mapping)
+
+    np.testing.assert_array_equal(rgba[0, :, :3], lut)
+    np.testing.assert_array_equal(rgba[0, :, 3], np.array([255, 255, 255], dtype=np.uint8))

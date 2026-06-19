@@ -156,24 +156,26 @@ def phase_lut_indices(data, lut_size: int) -> np.ndarray:
 
 
 def apply_phase_lut(data, lut: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    lut_array = default_phase_lut() if lut is None else np.asarray(lut)
-    if lut_array.ndim != 2 or lut_array.shape[0] < 1 or lut_array.shape[1] < 3:
-        raise ValueError("phase LUT must have shape (N, 3) or (N, 4)")
-    indices = phase_lut_indices(data, int(lut_array.shape[0]))
-    color = lut_array[indices, :3]
-    if color.dtype != np.uint8:
-        max_value = 1.0 if np.issubdtype(color.dtype, np.floating) and color.size and np.nanmax(color) <= 1.0 else 255.0
-        color = np.clip(color.astype(np.float32) * (255.0 / max_value), 0.0, 255.0).astype(np.uint8)
+    lut_array = _lut_rgb_uint8(lut)
+    phase = extract_component(data, ShaderComponent.ANGLE)
+    position = (phase + np.pi) / (2.0 * np.pi)
+    position = np.nan_to_num(position, nan=0.0, posinf=0.0, neginf=0.0)
+    color = _sample_lut_rgb(lut_array, np.clip(position, 0.0, 1.0))
     return color.astype(np.uint8, copy=False), np.abs(np.asarray(data)).astype(np.float32, copy=False)
 
 
 def cpu_display_rgba(data, mapping: ShaderMapping) -> np.ndarray:
     if mapping.display_mode == ShaderDisplayMode.PHASE_COLOR:
-        color, _magnitude = apply_phase_lut(data, mapping.lut_data)
         scalar = mapped_scalar(data, mapping)
         levels = mapping.levels
-        intensity = np.ones_like(scalar, dtype=np.float32) if levels is None else window_intensity(scalar, levels)
-        rgb = np.clip(color.astype(np.float32) * intensity[..., np.newaxis], 0.0, 255.0).astype(np.uint8)
+        if mapping.component in {ShaderComponent.ANGLE, ShaderComponent.COMPLEX_PHASE}:
+            lut = _lut_rgb_uint8(mapping.lut_data)
+            lut_position = window_intensity(scalar, levels or (-np.pi, np.pi))
+            rgb = _sample_lut_rgb(lut, lut_position)
+        else:
+            color, _magnitude = apply_phase_lut(data, mapping.lut_data)
+            intensity = np.ones_like(scalar, dtype=np.float32) if levels is None else window_intensity(scalar, levels)
+            rgb = np.clip(color.astype(np.float32) * intensity[..., np.newaxis], 0.0, 255.0).astype(np.uint8)
         alpha = np.full(rgb.shape[:2] + (1,), 255, dtype=np.uint8)
         alpha[~np.isfinite(scalar), 0] = 0
         return np.concatenate((rgb, alpha), axis=-1)
@@ -245,6 +247,29 @@ def default_phase_lut(size: int = 256) -> np.ndarray:
         for channel, value in enumerate(choice):
             rgb[mask, channel] = value if np.isscalar(value) else value[mask]
     return np.clip(rgb * 255.0, 0.0, 255.0).astype(np.uint8)
+
+
+def _lut_rgb_uint8(lut: np.ndarray | None) -> np.ndarray:
+    lut_array = default_phase_lut() if lut is None else np.asarray(lut)
+    if lut_array.ndim != 2 or lut_array.shape[0] < 1 or lut_array.shape[1] < 3:
+        raise ValueError("phase LUT must have shape (N, 3) or (N, 4)")
+    color = lut_array[:, :3]
+    if color.dtype != np.uint8:
+        max_value = 1.0 if np.issubdtype(color.dtype, np.floating) and color.size and np.nanmax(color) <= 1.0 else 255.0
+        color = np.clip(color.astype(np.float32) * (255.0 / max_value), 0.0, 255.0).astype(np.uint8)
+    return color.astype(np.uint8, copy=False)
+
+
+def _sample_lut_rgb(lut: np.ndarray, position: np.ndarray) -> np.ndarray:
+    lut = np.asarray(lut, dtype=np.float32)
+    if lut.shape[0] == 1:
+        return np.broadcast_to(lut[0].astype(np.uint8), np.asarray(position).shape + (3,))
+    scaled = np.clip(np.asarray(position, dtype=np.float32), 0.0, 1.0) * float(lut.shape[0] - 1)
+    lower = np.floor(scaled).astype(np.int64)
+    upper = np.clip(lower + 1, 0, lut.shape[0] - 1)
+    weight = (scaled - lower.astype(np.float32))[..., np.newaxis]
+    color = lut[lower] * (1.0 - weight) + lut[upper] * weight
+    return np.clip(np.rint(color), 0.0, 255.0).astype(np.uint8)
 
 
 def _coerce_enum(enum_type, value):

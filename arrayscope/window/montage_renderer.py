@@ -128,7 +128,7 @@ class MontageRenderMixin:
         previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
 
         colormap_lut = None
-        if self.view_state.channel == ChannelMode.COMPLEX:
+        if self.view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
             colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         view_state = self.view_state
         document = self.document
@@ -206,6 +206,7 @@ class MontageRenderMixin:
             key=session_key,
             render_generation=render_generation,
             level_key=level_key,
+            level_expected_indices=tuple(int(index) for index in all_indices),
             plan=plan,
             view_state=view_state,
             document=document,
@@ -371,7 +372,7 @@ class MontageRenderMixin:
             return False
         viewport_plan = self._montage_viewport_plan(view_state)
         colormap_lut = None
-        if view_state.channel == ChannelMode.COMPLEX:
+        if view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
             colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         expected_key = montage_session_key(
             _document_key(self.document),
@@ -403,7 +404,7 @@ class MontageRenderMixin:
             shader_display=bool(getattr(session, "shader_display", False)),
         )
         session.tile_compute_cache_hits += len(cached_tiles)
-        expected_indices = tuple(tile.source_index for tile in session.plan.tiles)
+        expected_indices = self._montage_level_expected_indices(session)
         for rendered in cached_tiles[:4]:
             self._update_montage_level_bounds_from_rendered(
                 session.level_key,
@@ -458,6 +459,12 @@ class MontageRenderMixin:
             colormap_lut,
         )
 
+    def _montage_level_expected_indices(self, session) -> tuple[int, ...]:
+        expected = tuple(int(index) for index in getattr(session, "level_expected_indices", ()) or ())
+        if expected:
+            return expected
+        return tuple(int(tile.source_index) for tile in getattr(session.plan, "tiles", ()))
+
     def _empty_montage_level_stats(self, expected_indices) -> MontageLevelStats:
         tracker = self._montage_level_tracker()
         key = ("empty", tuple(int(index) for index in expected_indices))
@@ -490,7 +497,7 @@ class MontageRenderMixin:
         )
 
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
-        expected = tuple(tile.source_index for tile in session.plan.tiles)
+        expected = self._montage_level_expected_indices(session)
         return self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
 
     def _montage_level_bounds_for_session(self, session, *, allow_partial: bool = False):
@@ -503,11 +510,19 @@ class MontageRenderMixin:
         # and excludes zoom/pan.  WindowLevelController keeps updates monotonic.
         tracker = self._montage_level_tracker()
         stats = tracker.stats_for(session.level_key)
-        return None if stats is None else tracker.source_for_stats(session.level_key, stats)
+        if stats is None:
+            return None
+        if not allow_partial and stats.rank not in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
+            return None
+        return tracker.source_for_stats(session.level_key, stats)
 
-    def _montage_histogram_plot_data_for_session(self, session):
+    def _montage_histogram_plot_data_for_session(self, session, *, allow_partial: bool = False):
         tracker = self._montage_level_tracker()
         stats = tracker.stats_for(session.level_key)
+        if stats is None:
+            return None
+        if not allow_partial and stats.rank not in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
+            return None
         return tracker.histogram_data_for_stats(stats)
 
     def _montage_level_tracker(self) -> MontageLevelTracker:
@@ -537,7 +552,7 @@ class MontageRenderMixin:
         if not pending:
             return
         stats_start = perf_counter()
-        expected = tuple(tile.source_index for tile in session.plan.tiles)
+        expected = self._montage_level_expected_indices(session)
         processed = 0
         while pending and processed < 4:
             rendered = pending.pop(0)
@@ -1003,7 +1018,7 @@ class MontageRenderMixin:
         self._update_montage_level_bounds_from_rendered(
             session.level_key,
             rendered,
-            expected_indices=tuple(tile.source_index for tile in session.plan.tiles),
+            expected_indices=self._montage_level_expected_indices(session),
         )
         session.mark_loaded(rendered)
         patch_start = perf_counter()
@@ -1114,10 +1129,13 @@ class MontageRenderMixin:
             display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
             level_stats = self._montage_level_stats_for_session(session)
             complete = session.is_complete()
-            histogram_plot_data = self._montage_histogram_plot_data_for_session(session)
             explicit_auto = bool(getattr(session, "force_auto", False))
-            semantic_source = self._montage_level_source_for_session(session, allow_partial=explicit_auto)
             first_display_commit = not bool(session.display_committed)
+            first_level_update = bool(explicit_auto) or (
+                first_display_commit and self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
+            )
+            semantic_source = self._montage_level_source_for_session(session, allow_partial=first_level_update)
+            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=first_level_update)
             if newly_composed or first_display_commit:
                 self._apply_full_display_image(
                     display_image,
@@ -1141,6 +1159,7 @@ class MontageRenderMixin:
             else:
                 implicit_level_update = self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
                 semantic_source = self._montage_level_source_for_session(session, allow_partial=implicit_level_update)
+                histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=implicit_level_update)
                 self._apply_progressive_display_image(
                     display_image,
                     geometry=rendered_geometry,
@@ -1214,10 +1233,13 @@ class MontageRenderMixin:
         try:
             level_stats = self._montage_level_stats_for_session(session)
             complete = session.is_complete()
-            histogram_plot_data = self._montage_histogram_plot_data_for_session(session)
             explicit_auto = bool(getattr(session, "force_auto", False))
-            semantic_source = self._montage_level_source_for_session(session, allow_partial=explicit_auto)
             first_display_commit = not bool(session.display_committed)
+            first_level_update = bool(explicit_auto) or (
+                first_display_commit and self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
+            )
+            semantic_source = self._montage_level_source_for_session(session, allow_partial=first_level_update)
+            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=first_level_update)
             payload_start = perf_counter()
             previous_payloads = _previous_tiled_payloads(getattr(self, "_committed_display_frame", None))
             if previous_payloads:
@@ -1254,6 +1276,7 @@ class MontageRenderMixin:
             else:
                 implicit_level_update = self._should_autolevel_progressive_montage(session, level_stats, complete=complete)
                 semantic_source = self._montage_level_source_for_session(session, allow_partial=implicit_level_update)
+                histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=implicit_level_update)
                 self._apply_progressive_display_image(
                     display_image,
                     geometry=rendered_geometry,
@@ -1354,6 +1377,7 @@ class MontageRenderMixin:
         return dict(source_ids)
 
     def _should_autolevel_progressive_montage(self, session, stats: MontageLevelStats, *, complete: bool) -> bool:
+        del complete
         # Automatic montage levels are semantic and monotonic: when new tiles for
         # the same montage source arrive, the available source may improve/expand
         # levels.  It must not wait for full completion, and it must not depend on
@@ -1369,15 +1393,10 @@ class MontageRenderMixin:
         applied = getattr(session, "applied_level_source", None)
         applied_rank = int(getattr(applied, "rank", 0) or 0)
         applied_count = int(getattr(applied, "source_count", 0) or 0)
-        if int(stats.rank) < applied_rank:
+        same_semantic = getattr(applied, "semantic_key", None) == session.level_key
+        if same_semantic and int(stats.rank) < applied_rank:
             return False
-        if int(stats.rank) == applied_rank and len(stats.source_indices) <= applied_count:
-            return False
-        if not complete and not _should_apply_progressive_level_milestone(
-            len(stats.source_indices),
-            applied_count,
-            len(stats.expected_indices),
-        ):
+        if same_semantic and len(stats.source_indices) <= applied_count:
             return False
         return True
 
@@ -1560,20 +1579,6 @@ def _stage_fits_cache(candidate, memory_policy) -> bool:
     if estimated is None:
         return False
     return int(estimated) <= int(getattr(memory_policy, "stage_cache_budget_bytes", 0) or 0)
-
-
-def _should_apply_progressive_level_milestone(source_count: int, applied_count: int, expected_count: int) -> bool:
-    source_count = max(0, int(source_count))
-    applied_count = max(0, int(applied_count))
-    expected_count = max(0, int(expected_count))
-    if source_count <= applied_count:
-        return False
-    if expected_count and source_count >= expected_count:
-        return True
-    first = min(4, expected_count) if expected_count else 4
-    if applied_count <= 0:
-        return source_count >= first
-    return source_count >= max(applied_count + 8, applied_count * 2)
 
 
 def _montage_tile_result_batch_limit(window, *, interactive: bool) -> int:
