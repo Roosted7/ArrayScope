@@ -64,7 +64,7 @@ def test_force_auto_overrides_absolute_window_for_channel_or_scale_changes():
     assert decision.levels is None
 
 
-def test_controller_relative_same_source_maps_fractions_to_improved_bounds():
+def test_controller_relative_same_source_keeps_display_levels_stable_as_statistics_improve():
     previous = window_levels.LevelSource(
         levels=(25.0, 75.0),
         histogram_range=(0.0, 100.0),
@@ -84,8 +84,9 @@ def test_controller_relative_same_source_maps_fractions_to_improved_bounds():
 
     state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="relative")
 
-    assert state.display_levels == (250.0, 350.0)
-    assert state.histogram_range == (200.0, 400.0)
+    assert state.display_levels == (25.0, 75.0)
+    assert state.histogram_range == (0.0, 400.0)
+    assert state.source_count == 2
 
 
 def test_controller_absolute_same_source_keeps_numeric_levels_and_updates_histogram():
