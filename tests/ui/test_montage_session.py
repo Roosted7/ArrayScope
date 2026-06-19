@@ -350,3 +350,60 @@ def test_shader_mapping_change_reuses_texture_content_identity():
     assert second.source_id == first.source_id
     assert second.texture_data is first.texture_data
     assert second.shader_mapping == second_mapping
+
+
+def test_retarget_viewport_separates_draw_set_from_loaded_residency():
+    state = ViewState.from_shape((2, 2, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8)
+    session = MontageRenderSession(
+        session_id=1,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        plan=plan,
+        view_state=state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(1, 1),
+        view_range=((0.0, 1.0), (0.0, 1.0)),
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=plan.tiles[:2],
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    for tile in plan.tiles[:2]:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+
+    additions, changed = session.retarget_viewport(
+        view_range=((8.0, 9.0), (0.0, 1.0)),
+        viewport_shape=(1, 1),
+        coverage_margin_tiles=1,
+        near_margin_tiles=2,
+    )
+
+    assert changed
+    assert tuple(tile.montage_index for tile in session.visible_tiles) == (2, 3)
+    assert set(session.rendered_tiles) == {0, 1}
+    assert tuple(tile.montage_index for tile in additions) == (2, 3, 4)
+
+
+def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
+    session = _session()
+    session.visible_tiles = session.plan.tiles[:2]
+    session.loading_tiles = {2}
+    session.pending_tiles = [session.plan.tiles[2]]
+
+    additions, _changed = session.retarget_viewport(
+        view_range=((3.0, 4.0), (0.0, 1.0)),
+        viewport_shape=(1, 1),
+        coverage_margin_tiles=1,
+    )
+
+    assert 2 not in {tile.montage_index for tile in additions}

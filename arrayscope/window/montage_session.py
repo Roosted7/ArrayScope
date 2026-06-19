@@ -14,6 +14,7 @@ from arrayscope.display.montage import (
     MontageTileState,
     MontageViewportCanvas,
     RenderedTile,
+    montage_rect_for_viewport,
     patch_rendered_tile_into_canvas,
 )
 from arrayscope.display.shader_mapping import TexturePlaneKind
@@ -22,6 +23,24 @@ from arrayscope.window.display_frame import DisplayTilePayload, TilePresentation
 
 def _shader_mapping_key(mapping):
     return None if mapping is None else getattr(mapping, "identity_key", mapping)
+
+
+def _viewport_tiles(
+    plan: MontagePlan,
+    *,
+    view_range,
+    viewport_shape: tuple[int, int],
+    margin_tiles: int,
+) -> tuple[MontageTile, ...]:
+    rect = montage_rect_for_viewport(
+        plan,
+        view_range=view_range,
+        viewport_shape=viewport_shape,
+    )
+    return plan.tiles_intersecting(
+        ((rect[0], rect[2]), (rect[1], rect[3])),
+        margin_tiles=max(0, int(margin_tiles)),
+    )
 
 
 @dataclass
@@ -94,6 +113,71 @@ class MontageRenderSession:
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
+
+    def retarget_viewport(
+        self,
+        *,
+        view_range,
+        viewport_shape: tuple[int, int],
+        coverage_margin_tiles: int = 1,
+        near_margin_tiles: int = 2,
+    ) -> tuple[tuple[MontageTile, ...], bool]:
+        """Retarget draw and compute coverage without replacing the session.
+
+        The current draw set is kept separate from loaded payload ownership.
+        Tiles outside the viewport can therefore remain GPU-resident and be
+        reused when the user pans back.
+        """
+
+        self.view_range = view_range
+        self.viewport_shape = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
+        self._selected_lod_factor()
+        active = _viewport_tiles(
+            self.plan,
+            view_range=view_range,
+            viewport_shape=self.viewport_shape,
+            margin_tiles=0,
+        )
+        coverage = _viewport_tiles(
+            self.plan,
+            view_range=view_range,
+            viewport_shape=self.viewport_shape,
+            margin_tiles=max(0, int(coverage_margin_tiles)),
+        )
+        near = _viewport_tiles(
+            self.plan,
+            view_range=view_range,
+            viewport_shape=self.viewport_shape,
+            margin_tiles=max(0, int(near_margin_tiles)),
+        )
+        known = set(int(index) for index in self.rendered_tiles)
+        known.update(int(index) for index in self.loading_tiles)
+        known.update(int(index) for index in self.skipped_tiles)
+        known.update(int(index) for index in self.active_tile_requests)
+        known.update(int(tile.montage_index) for tile in self.pending_tiles)
+        additions = tuple(tile for tile in coverage if int(tile.montage_index) not in known)
+        active_numbers = tuple(int(tile.montage_index) for tile in active)
+        near_numbers = tuple(int(tile.montage_index) for tile in near)
+        presentation_changed = (
+            active_numbers != tuple(int(tile.montage_index) for tile in self.visible_tiles)
+            or near_numbers != self._last_near_tiles
+        )
+        self.visible_tiles = active
+        return additions, bool(presentation_changed)
+
+    def expand_viewport_coverage(
+        self,
+        *,
+        view_range,
+        viewport_shape: tuple[int, int],
+        margin_tiles: int = 1,
+    ) -> tuple[MontageTile, ...]:
+        additions, _changed = self.retarget_viewport(
+            view_range=view_range,
+            viewport_shape=viewport_shape,
+            coverage_margin_tiles=margin_tiles,
+        )
+        return additions
 
     def mark_loaded(self, rendered: RenderedTile) -> None:
         index = int(rendered.tile.montage_index)
@@ -280,7 +364,12 @@ class MontageRenderSession:
             if int(tile.montage_index) not in self.skipped_tiles
         )
         active = tuple(int(tile) for tile in planned if int(tile) in current_loaded)
-        near_candidates = self.plan.tiles_intersecting(self.view_range, margin_tiles=2)
+        near_candidates = _viewport_tiles(
+            self.plan,
+            view_range=self.view_range,
+            viewport_shape=self.viewport_shape,
+            margin_tiles=2,
+        )
         near = tuple(
             int(tile.montage_index)
             for tile in near_candidates
