@@ -18,7 +18,7 @@ from arrayscope.display.montage import (
     patch_rendered_tile_into_canvas,
 )
 from arrayscope.display.shader_mapping import TexturePlaneKind
-from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
 def _shader_mapping_key(mapping):

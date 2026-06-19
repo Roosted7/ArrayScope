@@ -124,12 +124,12 @@ source of array-view state.
   guttering duplicates edge texels for linear-filtered tile seams. LOD texture payloads never own
   hover, ROI, profile, or export semantics; exact semantic data and semantic histogram data stay with
   `DisplayTilePayload`.
-- `arrayscope.display.montage_tile_layer`: Qt display helper owned by `ImageView2D` for exact
+- `arrayscope.display.backends.pyqtgraph.tiles`: Qt display helper owned by `ImageView2D` for exact
   per-tile montage painting. It keeps per-item source, histogram, local-rect, level, and RGB-windowing
   state so known-clean tile-layer flushes skip pixel uploads entirely, dirty flushes update only the
   affected tile items, all-cached newly composed sessions can reuse unchanged rendered tile sources,
   and RGB/complex level changes reuse cached float32 tile bases.
-- `arrayscope.display.vispy_tiled_renderer`: VisPy display helper owned by `VisPyImageView2D` for
+- `arrayscope.display.backends.vispy.tiles`: VisPy display helper owned by `VisPyImageView2D` for
   first-class tiled montage painting. It applies revisioned `TilePresentationDelta` updates to
   persistent tiled state, assigns stable source-keyed atlas slots across multiple pages, and maps the
   current active tile numbers onto those resident source slots for drawing. Tile numbers are geometry,
@@ -149,20 +149,20 @@ source of array-view state.
   `arrayscope.display.profile_marker`: focused Qt display helpers for montage/loading overlays, ROI
   graphics item conversion, ROI info panels, and profile marker bounds. `ImageView2D` keeps the
   widget-facing API and delegates concrete helper ownership to these modules.
-- `arrayscope.window.presentation`: Qt-free display presentation decisions. It normalizes
+- `arrayscope.display.planning`: Qt-free display presentation decisions. It normalizes
   window/level bounds, keeps display levels separate from histogram/data ranges, accepts accumulated
   semantic montage tile coverage as provisional level sources, and is the only place that chooses
   committed display levels for normal, degraded, initial montage, progressive montage, and explicit
   Auto Window commits. Relative mode preserves level fractions across normal, montage, cached, and
   uncached semantic source changes; absolute mode preserves numeric levels while histogram metadata
   may improve.
-- `arrayscope.window.render_model`: Qt-free immutable request, payload, presentation-decision, and
+- `arrayscope.display.model.commit`: Qt-free immutable request, payload, presentation-decision, and
   commit-plan models used at the boundary between render orchestration and display mutation. Render
   orchestration provides a `PresentationInput`; presentation policy returns a `PresentationDecision`;
   Qt code only receives the decided `DisplayPresentation`. `DisplayRasterPresentation` owns raster
   pixels and `DisplayTiledPresentation` owns typed `DisplayTilePayload` mappings; they are distinct
   first-class variants, so core code never represents a tiled montage as a fake giant raster.
-- `arrayscope.window.display_commit`: the single gateway from a decided presentation to
+- `arrayscope.display.commit`: the single gateway from a decided presentation to
   `ImageView2D`. Window render code must not call image pixel or histogram setters directly.
   `DisplayCommitter` validates display shape, local histogram-source shape, optional sampled
   histogram plot sources, finite increasing levels/histogram ranges, and forwards montage dirty-tile
@@ -184,7 +184,7 @@ source of array-view state.
   nearby tiles after visible montage commits, schedules only on the prefetch lane, requires expensive
   operation stages to be cached or in-flight, and refuses paths that would recompute the same FFT once
   per predicted tile.
-- `arrayscope.window.display_frame`: committed display-frame keys and value source ownership for
+- `arrayscope.display.model.frame`: committed display-frame keys and value source ownership for
   hover/status. Tiled frames must not report values from placeholder arrays; they resolve values and
   tile-local regions through their `TiledValueSource`.
 - `arrayscope.window.montage_levels`: semantic montage histogram coverage tracking keyed by montage

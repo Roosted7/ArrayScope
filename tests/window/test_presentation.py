@@ -4,15 +4,15 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.window.display_frame import (
+from arrayscope.display.model.frame import (
     CommittedDisplayFrame,
     DisplayFrameKey,
     DisplayTilePayload,
     TilePresentationDelta,
     TilePresentationState,
 )
-from arrayscope.window.presentation import LevelSource, LevelSourceRank, decide_presentation
-from arrayscope.window.render_model import (
+from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation
+from arrayscope.display.model.commit import (
     CommitKind,
     DisplayPayload,
     DisplayTiledPresentation,

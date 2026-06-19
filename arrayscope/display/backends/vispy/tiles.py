@@ -14,7 +14,7 @@ import numpy as np
 
 from arrayscope.display.lod import inner_uv_for_gutter
 from arrayscope.display.shader_mapping import ShaderDisplayMode, ShaderScale, TexturePlaneKind, default_phase_lut, pack_texture_data
-from arrayscope.window.display_frame import DisplayTilePayload
+from arrayscope.display.model.frame import DisplayTilePayload
 
 try:
     from vispy.visuals import Visual

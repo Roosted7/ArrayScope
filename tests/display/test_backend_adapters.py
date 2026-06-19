@@ -14,8 +14,8 @@ from arrayscope.display.backends import (
 )
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
-from arrayscope.window.render_model import DisplayRasterPresentation, DisplayTiledPresentation
+from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
 
 
 class _FakeView:

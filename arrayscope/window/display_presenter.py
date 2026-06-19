@@ -17,11 +17,11 @@ from arrayscope.core.memory_policy import MiB, MemoryPolicy
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.ui.toasts import show_status_message
-from arrayscope.window.display_commit import DisplayCommitter
-from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
+from arrayscope.display.commit import DisplayCommitter
+from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
 from arrayscope.window.montage_backend import MontageBackendDecision, backend_warning_for_actual_commit
-from arrayscope.window.presentation import LevelSource, LevelSourceRank, decide_presentation, normalize_bounds
-from arrayscope.window.render_model import CommitKind, DisplayPayload, PresentationInput, RenderRequestContext
+from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation, normalize_bounds
+from arrayscope.display.model.commit import CommitKind, DisplayPayload, PresentationInput, RenderRequestContext
 from arrayscope.window.viewport_bridge import ViewportBridge
 
 

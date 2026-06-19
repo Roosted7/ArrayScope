@@ -25,7 +25,7 @@ a stable source identity. Committed frames own a `FrameValueSource`: canvas fram
 `CanvasValueSource`, and tiled frames use `TiledValueSource`. Hover/status and demand tile-region
 reads go through the committed value source, never through placeholder pixels.
 
-VisPy tiled montage rendering uses `arrayscope.display.vispy_tiled_renderer`:
+VisPy tiled montage rendering uses `arrayscope.display.backends.vispy.tiles`:
 
 - visible tile payloads apply revisioned `TilePresentationDelta` updates to persistent tiled state;
 - visible tile payloads use stable source-keyed slots in mode-aware scalar, complex `RG32F`, and/or

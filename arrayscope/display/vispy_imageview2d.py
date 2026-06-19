@@ -39,7 +39,7 @@ from arrayscope.display.shader_mapping import ShaderDisplayMode, ShaderScale, Te
 from arrayscope.display.viewport import ViewportPolicy
 
 if TYPE_CHECKING:
-    from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
 @dataclass
@@ -111,7 +111,7 @@ class VisPyImageView2D(ImageView2D):
         )
         self._vispy_windowed_image.visible = False
         self._vispy_windowed_image.transform = self._vispy_transforms.STTransform(translate=(0.0, 0.0, 0.0))
-        from arrayscope.display.vispy_tiled_renderer import create_gpu_montage_layer
+        from arrayscope.display.backends.vispy.tiles import create_gpu_montage_layer
 
         self._vispy_gpu_montage_layer = create_gpu_montage_layer(
             scene=self._vispy_scene,
@@ -417,7 +417,7 @@ class VisPyImageView2D(ImageView2D):
                 pass
 
             if data_unchanged and not levels_changed:
-                from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
+                from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
                 visible = len(montage_tile_payloads or {})
                 previous = getattr(getattr(self, "_vispy_gpu_montage_layer", None), "last_stats", None)
@@ -561,7 +561,7 @@ class VisPyImageView2D(ImageView2D):
         context = dict(getattr(self, "_vispy_pending_warm_tile_context", {}) or {})
         if not payloads:
             return
-        from arrayscope.display.vispy_tiled_renderer import take_payload_batch
+        from arrayscope.display.backends.vispy.tiles import take_payload_batch
 
         batch, remaining = take_payload_batch(payloads)
         self._vispy_pending_warm_tile_payloads = remaining
@@ -1310,7 +1310,7 @@ class VisPyImageView2D(ImageView2D):
         tile_residency_budget_bytes: int = 0,
         force_levels: bool = False,
     ):
-        from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
+        from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
         if geometry is None or getattr(geometry, "montage", None) is None:
             return TileLayerUpdateStats()
@@ -1456,7 +1456,7 @@ class VisPyImageView2D(ImageView2D):
         tile_residency_budget_bytes: int = 0,
         force_levels: bool = False,
     ):
-        from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
+        from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
         montage = geometry.montage
         if montage is None:
@@ -1491,7 +1491,7 @@ class VisPyImageView2D(ImageView2D):
                     tile_residency_budget_bytes=tile_residency_budget_bytes,
                 )
             except Exception as exc:
-                from arrayscope.display.vispy_tiled_renderer import AtlasCapacityError, GpuMontageLayerStats
+                from arrayscope.display.backends.vispy.tiles import AtlasCapacityError, GpuMontageLayerStats
 
                 if not isinstance(exc, AtlasCapacityError):
                     raise

@@ -264,7 +264,7 @@ def test_tile_layer_direct_payloads_avoid_canvas_slicing(qt_app):
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.window.display_frame import DisplayTilePayload
+    from arrayscope.display.model.frame import DisplayTilePayload
 
     view = ImageView2D()
     geometry = DisplayGeometry(

@@ -12,11 +12,11 @@ different path than tile completion.
 
 Introduce explicit display presentation boundaries:
 
-- `arrayscope.window.presentation` decides levels and histogram ranges before Qt
+- `arrayscope.display.planning` decides levels and histogram ranges before Qt
   is called.
-- `arrayscope.window.display_commit.DisplayCommitter` is the gateway that writes
+- `arrayscope.display.commit.DisplayCommitter` is the gateway that writes
   pixels, levels, histogram ranges, and viewport policy to `ImageView2D`.
-- `arrayscope.window.display_frame.CommittedDisplayFrame` records the committed
+- `arrayscope.display.model.frame.CommittedDisplayFrame` records the committed
   value source for hover/status.
 - `arrayscope.window.montage_levels.MontageLevelTracker` tracks semantic montage
   histogram coverage independently from viewport canvas pixels.

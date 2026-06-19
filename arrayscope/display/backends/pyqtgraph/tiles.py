@@ -9,7 +9,7 @@ from typing import Callable
 import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 
-from arrayscope.window.display_frame import DisplayTilePayload
+from arrayscope.display.model.frame import DisplayTilePayload
 
 from arrayscope.display.image_upload import rgb_display_for_levels
 

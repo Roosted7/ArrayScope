@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from arrayscope.display.vispy_tiled_renderer import (
+from arrayscope.display.backends.vispy.tiles import (
     AtlasCapacityError,
     GpuDeviceLimits,
     GpuMontageLayer,
@@ -21,7 +21,7 @@ from arrayscope.display.vispy_tiled_renderer import (
     take_payload_batch,
 )
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, TexturePlaneKind
-from arrayscope.window.display_frame import DisplayTilePayload
+from arrayscope.display.model.frame import DisplayTilePayload
 
 
 class FakeTexture2D:

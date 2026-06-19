@@ -6,8 +6,8 @@ import numpy as np
 
 from arrayscope.display.backends import RasterCommitMode, backend_adapter_for_view
 from arrayscope.display.scene import DisplayScene, display_scene_for_presentation
-from arrayscope.window.display_frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
-from arrayscope.window.render_model import DisplayPresentation, DisplayRasterPresentation, DisplayTiledPresentation
+from arrayscope.display.model.frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
+from arrayscope.display.model.commit import DisplayPresentation, DisplayRasterPresentation, DisplayTiledPresentation
 
 
 class DisplayCommitter:

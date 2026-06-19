@@ -48,7 +48,7 @@ fallback is diagnosed as potentially slow.
 Tile-layer presentation is stateful and dirty-aware. Presentation models carry optional dirty tile
 numbers: `None` means the tile state is unknown and visible loaded items should refresh, `()` means a
 known-clean flush, and non-empty tuples identify the loaded items whose pixels changed. `ImageView2D`
-delegates the per-item state to `arrayscope.display.montage_tile_layer`, which tracks item source
+delegates the per-item state to `arrayscope.display.backends.pyqtgraph.tiles`, which tracks item source
 identity, histogram identity, local canvas rect, levels, RGB-windowing policy, and cached display data.
 Known-clean commits skip tile image uploads and, when histogram source/range/levels are unchanged,
 skip histogram image upload as well.
