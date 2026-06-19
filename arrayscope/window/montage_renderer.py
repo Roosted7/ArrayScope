@@ -127,10 +127,9 @@ class MontageRenderMixin:
         window_mode = self._current_window_mode()
         previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
 
-        colormap_lut = None
-        if self.view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
-            colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         view_state = self.view_state
+        shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
+        colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
         document = self.document
         viewport_plan = self._montage_viewport_plan(view_state)
         all_indices = viewport_plan.all_indices
@@ -371,9 +370,10 @@ class MontageRenderMixin:
         if view_state.montage_axis is None:
             return False
         viewport_plan = self._montage_viewport_plan(view_state)
-        colormap_lut = None
-        if view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
-            colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
+        colormap_lut = self._evaluation_colormap_lut(
+            view_state,
+            shader_display=bool(capabilities.shader_windowing),
+        )
         expected_key = montage_session_key(
             _document_key(self.document),
             view_state,

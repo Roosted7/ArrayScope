@@ -36,6 +36,7 @@ from arrayscope.display.interaction import (
     PointerPhase,
 )
 from arrayscope.display.levels import finite_bounds
+from arrayscope.display.shader_mapping import default_gray_lut, normalize_lut_rgb
 from arrayscope.display.layers import ViewLayerOwner
 from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer, TileLayerUpdateStats
 from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
@@ -129,6 +130,9 @@ class ImageView2D(QtWidgets.QWidget):
         self._freehand_spacing = 1.0
         self.viewport_controller = ViewportController()
         self._viewport_applying = False
+        self._display_colormap = None
+        self._display_colormap_lut = default_gray_lut()
+        self._display_colormap_key = _array_content_key(self._display_colormap_lut)
         
         # Create the UI layout
         self.setupUI()
@@ -384,6 +388,8 @@ class ImageView2D(QtWidgets.QWidget):
             item.setImage(ensure_imageitem_array(data), autoLevels=False, levels=levels)
         elapsed = (perf_counter() - start) * 1000.0
         array = np.asarray(data)
+        if str(role) == "visible" and array.ndim == 2:
+            item.setLookupTable(self._display_colormap_lut)
         timing = self._upload_timing
         if str(role) == "histogram":
             self._record_upload_timing("histogram_upload_ms", elapsed)
@@ -1291,8 +1297,26 @@ class ImageView2D(QtWidgets.QWidget):
         return data[y_i, x_i]
         
     def setColorMap(self, colormap):
-        """Set the color map for the histogram"""
+        """Set one display colormap for the colorbar and all scalar surfaces."""
+
+        lut = normalize_lut_rgb(colormap.getLookupTable(0.0, 1.0, 256, alpha=False))
+        self._display_colormap = colormap
+        self._display_colormap_lut = lut
+        self._display_colormap_key = _array_content_key(lut)
         self.histogram.gradient.setColorMap(colormap)
+        image = getattr(self.imageItem, "image", None)
+        if image is not None and np.asarray(image).ndim == 2:
+            self.imageItem.setLookupTable(lut)
+        if self._montage_tile_layer is not None:
+            self._montage_tile_layer.set_lookup_table(lut)
+
+    def displayColorMapLookupTable(self) -> np.ndarray:
+        """Return the active frame-level RGB lookup table."""
+
+        return self._display_colormap_lut
+
+    def displayColorMapKey(self):
+        return self._display_colormap_key
         
     def setDisplayMode(self, mode):
         """Set the display mode.
@@ -1722,6 +1746,11 @@ def _coerce_viewport_policy(viewport_policy, auto_range):
         return viewport_policy
     return ViewportPolicy(str(viewport_policy))
 
+
+
+def _array_content_key(array: np.ndarray) -> tuple[object, ...]:
+    array = np.asarray(array)
+    return (tuple(int(value) for value in array.shape), array.dtype.str, array.tobytes())
 
 def _world_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, float, float]:
     height, width = tuple(int(value) for value in shape[:2])

@@ -218,6 +218,31 @@ def test_gpu_windowed_tile_mapping_tracks_component_uniform_without_texture_iden
     assert len(updates) == 2
 
 
+def test_gpu_windowed_tile_mapping_tracks_lut_without_texture_identity():
+    visual = object.__new__(GpuWindowedTileVisual)
+    visual._shader_mapping_key = None
+    visual._scale_mode = 0.0
+    visual._symlog_constant = 0.0
+    visual._component_mode = 0.0
+    visual._lut_key = None
+    visual._lut_texture = object()
+    visual._lut_default_phase = False
+    updates = []
+    uploaded_luts = []
+    visual.update = lambda: updates.append("update")
+    visual._set_lut_texture = lambda lut, key=None: uploaded_luts.append(np.array(lut, copy=True)) or True
+
+    first = ShaderMapping(lut_data=np.array([[0, 0, 0], [255, 255, 255]], dtype=np.uint8))
+    second = ShaderMapping(lut_data=np.array([[0, 0, 255], [255, 0, 0]], dtype=np.uint8))
+
+    assert visual.set_shader_mapping(first) is True
+    assert visual.set_shader_mapping(first) is False
+    assert visual.set_shader_mapping(second) is True
+    assert len(updates) == 2
+    assert len(uploaded_luts) == 2
+    np.testing.assert_array_equal(uploaded_luts[-1], second.lut_data)
+
+
 def test_atlas_reserve_avoids_progressive_reallocation():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
     pool.update_payloads(

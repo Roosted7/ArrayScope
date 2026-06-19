@@ -95,6 +95,14 @@ class MontageTileLayer:
     def states(self) -> dict[int, TileLayerItemState]:
         return self._states
 
+    def set_lookup_table(self, lut) -> None:
+        """Apply the frame colormap to every resident scalar tile item."""
+
+        for state in self._states.values():
+            image = getattr(state.item, "image", None)
+            if image is not None and np.asarray(image).ndim == 2:
+                state.item.setLookupTable(lut)
+
     def clear(self) -> None:
         for state in tuple(self._states.values()):
             self.layer_owner.remove_tile_item(state.tile_number)

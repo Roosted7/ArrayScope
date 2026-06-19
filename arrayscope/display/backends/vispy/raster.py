@@ -8,7 +8,7 @@ from arrayscope.display.shader_mapping import (
     ShaderDisplayMode,
     ShaderScale,
     TexturePlaneKind,
-    default_phase_lut,
+    normalize_lut_rgb,
     pack_texture_data,
     shader_component_uniform,
 )
@@ -89,15 +89,17 @@ class GpuMappedImageVisual(Visual):
             color = texture2D(u_lut_texture, vec2(phase_index, 0.5)).rgb;
         } else if (u_mode > 1.5) {
             scalar = complex_component(scalar_sample.rg);
-            color = vec3(1.0, 1.0, 1.0);
-        } else if (u_mode > 0.5) {
-            color = vec3(1.0, 1.0, 1.0);
         }
         scalar = map_scale(scalar);
         float span = max(u_levels.y - u_levels.x, 1e-12);
         float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
         if (scalar != scalar) {
             discard;
+        }
+        if (u_mode > 0.5 && u_mode < 2.5) {
+            color = texture2D(u_lut_texture, vec2(intensity, 0.5)).rgb;
+            gl_FragColor = vec4(color, 1.0);
+            return;
         }
         gl_FragColor = vec4(color * intensity, 1.0);
     }
@@ -124,6 +126,8 @@ class GpuMappedImageVisual(Visual):
         self._color_texture = None
         self._scalar_texture = None
         self._lut_texture = None
+        self._lut_key = None
+        self._shader_mapping_key = None
         self._shape = (0, 0)
         self._mode = 0.0
         self._scale_mode = 0.0
@@ -134,6 +138,7 @@ class GpuMappedImageVisual(Visual):
         self.scalar_source_id = None
         self.upload_count = 0
         self.level_update_count = 0
+        self.shader_uniform_update_count = 0
         super().__init__(vcode=self._vertex_shader, fcode=self._fragment_shader, **kwargs)
         self.set_gl_state(depth_test=False, cull_face=False, blend=False)
         self._draw_mode = "triangles"
@@ -209,10 +214,7 @@ class GpuMappedImageVisual(Visual):
             internal_format = "r32f"
             mode = 1.0
         if self._scalar_texture is not None and self.scalar_source_id == source_id and float(self._mode) == mode:
-            self._scale_mode = _shader_scale_uniform(getattr(shader_mapping, "scale", None))
-            self._symlog_constant = float(getattr(shader_mapping, "symlog_constant", 0.0) or 0.0)
-            self._component_mode = shader_component_uniform(getattr(shader_mapping, "component", None))
-            self._set_lut_texture(getattr(shader_mapping, "lut_data", None))
+            self.set_shader_mapping(shader_mapping)
             self.set_levels(levels, count=False)
             return
         data_array = np.array(data, copy=True) if copy else np.asarray(data)
@@ -242,24 +244,40 @@ class GpuMappedImageVisual(Visual):
             self._scalar_texture.set_data(data_array, copy=False)
         self._shape = tuple(int(size) for size in data_array.shape[:2])
         self._mode = mode
-        self._scale_mode = _shader_scale_uniform(getattr(shader_mapping, "scale", None))
-        self._symlog_constant = float(getattr(shader_mapping, "symlog_constant", 0.0) or 0.0)
-        self._component_mode = shader_component_uniform(getattr(shader_mapping, "component", None))
         self.color_source_id = None
         self.scalar_source_id = source_id
-        self._set_lut_texture(getattr(shader_mapping, "lut_data", None))
+        self._shader_mapping_key = None
+        self.set_shader_mapping(shader_mapping, count=False)
         self.upload_count += 1
         self.set_levels(levels, count=False)
 
-    def _set_lut_texture(self, lut_data) -> None:
-        lut = default_phase_lut() if lut_data is None else np.asarray(lut_data)
-        if lut.ndim != 2 or lut.shape[0] < 1 or lut.shape[1] < 3:
-            lut = default_phase_lut()
-        lut = lut[:, :3]
-        if lut.dtype != np.uint8:
-            if np.issubdtype(lut.dtype, np.floating) and lut.size and float(np.nanmax(lut)) <= 1.0:
-                lut = lut * 255.0
-            lut = np.clip(lut, 0, 255).astype(np.uint8)
+    def set_shader_mapping(self, mapping, *, count: bool = True) -> bool:
+        scale_mode = _shader_scale_uniform(getattr(mapping, "scale", None))
+        symlog_constant = float(getattr(mapping, "symlog_constant", 0.0) or 0.0)
+        component_mode = shader_component_uniform(getattr(mapping, "component", None))
+        display_mode = getattr(getattr(mapping, "display_mode", None), "value", getattr(mapping, "display_mode", None))
+        phase_default = bool(display_mode == ShaderDisplayMode.PHASE_COLOR.value or float(self._mode) > 2.5)
+        lut = normalize_lut_rgb(getattr(mapping, "lut_data", None), phase_default=phase_default)
+        lut_key = _array_content_key(lut)
+        mapping_key = (float(scale_mode), float(symlog_constant), float(component_mode), bool(phase_default), lut_key)
+        if mapping_key == getattr(self, "_shader_mapping_key", None):
+            return False
+        self._shader_mapping_key = mapping_key
+        self._scale_mode = scale_mode
+        self._symlog_constant = symlog_constant
+        self._component_mode = component_mode
+        self._set_lut_texture(lut, key=lut_key)
+        if count:
+            self.shader_uniform_update_count = int(getattr(self, "shader_uniform_update_count", 0)) + 1
+        self.update()
+        return True
+
+    def _set_lut_texture(self, lut_data, *, key=None) -> bool:
+        phase_default = float(getattr(self, "_mode", 0.0)) > 2.5
+        lut = normalize_lut_rgb(lut_data, phase_default=phase_default)
+        key = _array_content_key(lut) if key is None else key
+        if key == getattr(self, "_lut_key", None) and self._lut_texture is not None:
+            return False
         lut = np.ascontiguousarray(lut.reshape((1, lut.shape[0], 3)))
         if self._lut_texture is None or tuple(getattr(self._lut_texture, "shape", ())) != tuple(lut.shape):
             self._lut_texture = self._gloo.Texture2D(
@@ -271,6 +289,8 @@ class GpuMappedImageVisual(Visual):
             )
         else:
             self._lut_texture.set_data(lut, copy=False)
+        self._lut_key = key
+        return True
 
     def set_levels(self, levels, *, count: bool = True) -> None:
         self._levels = _normalize_levels(levels, self._levels)
@@ -321,6 +341,11 @@ class GpuMappedImageVisual(Visual):
         if axis == 1:
             return (0.0, float(self._shape[0]))
         return (0.0, 0.0)
+
+
+def _array_content_key(array: np.ndarray) -> tuple[object, ...]:
+    array = np.asarray(array)
+    return (tuple(int(value) for value in array.shape), array.dtype.str, array.tobytes())
 
 
 def _normalize_levels(levels, fallback):

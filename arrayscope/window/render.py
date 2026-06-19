@@ -37,6 +37,27 @@ def getNumberOfDecimalPlaces(number):
 
 
 class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRenderMixin, RenderPrefetchMixin, RenderResourceMixin):
+    def _active_display_colormap_lut(self):
+        view = getattr(self, "img_view", None)
+        getter = getattr(view, "displayColorMapLookupTable", None)
+        if callable(getter):
+            return getter()
+        return self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
+
+    def _evaluation_colormap_lut(self, view_state=None, *, shader_display: bool | None = None):
+        """Return a LUT only when CPU materialization genuinely depends on it."""
+
+        state = self.view_state if view_state is None else view_state
+        if state.channel != ChannelMode.COMPLEX:
+            return None
+        if shader_display is None:
+            from arrayscope.display.backend_contract import image_view_backend_capabilities
+
+            shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
+        if shader_display:
+            return None
+        return self._active_display_colormap_lut()
+
     def getPixel(self, pos):
         source = getattr(self.img_view, "histogramSource", None)
         if source is None:

@@ -6,7 +6,7 @@ the same formulas used by VisPy shader paths.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -89,6 +89,49 @@ class ShaderMapping:
             self.histogram_source_policy,
             float(self.symlog_constant),
         )
+
+
+def default_gray_lut(size: int = 256) -> np.ndarray:
+    """Return a linear grayscale RGB lookup table."""
+
+    values = np.linspace(0.0, 255.0, max(1, int(size)), dtype=np.float32)
+    values = np.clip(np.rint(values), 0.0, 255.0).astype(np.uint8)
+    return np.repeat(values[:, np.newaxis], 3, axis=1)
+
+
+def normalize_lut_rgb(lut: np.ndarray | None, *, phase_default: bool = False) -> np.ndarray:
+    """Normalize a lookup table to contiguous ``uint8`` RGB rows."""
+
+    default = default_phase_lut() if phase_default else default_gray_lut()
+    lut_array = default if lut is None else np.asarray(lut)
+    if lut_array.ndim != 2 or lut_array.shape[0] < 1 or lut_array.shape[1] < 3:
+        raise ValueError("LUT must have shape (N, 3) or (N, 4)")
+    color = lut_array[:, :3]
+    if color.dtype != np.uint8:
+        max_value = (
+            1.0
+            if np.issubdtype(color.dtype, np.floating)
+            and color.size
+            and float(np.nanmax(color)) <= 1.0
+            else 255.0
+        )
+        color = np.clip(np.asarray(color, dtype=np.float32) * (255.0 / max_value), 0.0, 255.0).astype(np.uint8)
+    return np.ascontiguousarray(color)
+
+
+def shader_mapping_with_lut(
+    mapping: ShaderMapping | None,
+    lut_data: np.ndarray,
+    *,
+    lut_identity: object | None = None,
+) -> ShaderMapping:
+    """Return ``mapping`` with one explicit frame-level display LUT."""
+
+    base = ShaderMapping() if mapping is None else mapping
+    if not isinstance(base, ShaderMapping):
+        raise TypeError("mapping must be a ShaderMapping instance or None")
+    lut = normalize_lut_rgb(lut_data)
+    return replace(base, lut_identity=lut_identity, lut_data=lut)
 
 
 def common_shader_mapping(mappings) -> ShaderMapping | None:
@@ -211,8 +254,9 @@ def cpu_display_rgba(data, mapping: ShaderMapping) -> np.ndarray:
     intensity = window_intensity(scalar, levels)
     alpha = np.full(intensity.shape + (1,), 255, dtype=np.uint8)
     alpha[~np.isfinite(scalar), 0] = 0
-    rgb = np.clip(intensity[..., np.newaxis] * 255.0, 0.0, 255.0).astype(np.uint8)
-    return np.concatenate((rgb, rgb, rgb, alpha), axis=-1)
+    lut = normalize_lut_rgb(mapping.lut_data, phase_default=False)
+    rgb = _sample_lut_rgb(lut, intensity)
+    return np.concatenate((rgb, alpha), axis=-1)
 
 
 def pack_texture_data(data, texture_kind: TexturePlaneKind | str) -> np.ndarray:
@@ -277,14 +321,7 @@ def default_phase_lut(size: int = 256) -> np.ndarray:
 
 
 def _lut_rgb_uint8(lut: np.ndarray | None) -> np.ndarray:
-    lut_array = default_phase_lut() if lut is None else np.asarray(lut)
-    if lut_array.ndim != 2 or lut_array.shape[0] < 1 or lut_array.shape[1] < 3:
-        raise ValueError("phase LUT must have shape (N, 3) or (N, 4)")
-    color = lut_array[:, :3]
-    if color.dtype != np.uint8:
-        max_value = 1.0 if np.issubdtype(color.dtype, np.floating) and color.size and np.nanmax(color) <= 1.0 else 255.0
-        color = np.clip(color.astype(np.float32) * (255.0 / max_value), 0.0, 255.0).astype(np.uint8)
-    return color.astype(np.uint8, copy=False)
+    return normalize_lut_rgb(lut, phase_default=True)
 
 
 def _sample_lut_rgb(lut: np.ndarray, position: np.ndarray) -> np.ndarray:
@@ -314,6 +351,9 @@ __all__ = [
     "ShaderMapping",
     "common_shader_mapping",
     "TexturePlaneKind",
+    "default_gray_lut",
+    "normalize_lut_rgb",
+    "shader_mapping_with_lut",
     "extract_component",
     "shader_component_uniform",
     "apply_scale",
