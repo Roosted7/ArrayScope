@@ -165,6 +165,17 @@ class VisPyImageView2D(ImageView2D):
         if state_signal is not None:
             state_signal.connect(lambda *_args: self._request_vispy_camera_sync())
 
+
+    def _display_overlay_parent(self):
+        return getattr(self, "_display_container", self.graphicsView)
+
+    def _map_scene_to_display_overlay(self, scene_pos):
+        local = self.graphicsView.mapFromScene(scene_pos)
+        parent = self._display_overlay_parent()
+        if parent is self.graphicsView:
+            return local
+        return self.graphicsView.mapTo(parent, local)
+
     def clearMontageTileLayer(self) -> None:
         for state in getattr(self, "_vispy_tile_visuals", {}).values():
             _set_visual_visible(state.image_visual, False)

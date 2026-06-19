@@ -1128,15 +1128,23 @@ class ImageView2D(QtWidgets.QWidget):
     def autoWindow(self):
         self.autoLevels()
 
+    def _display_overlay_parent(self):
+        """Widget that must remain above the active pixel-rendering surface."""
+
+        return self.graphicsView
+
+    def _map_scene_to_display_overlay(self, scene_pos):
+        return self.graphicsView.mapFromScene(scene_pos)
+
     def setHudWidget(self, widget):
         self._hud_widget = widget
         if widget is not None:
-            widget.setParent(self.graphicsView)
+            widget.setParent(self._display_overlay_parent())
             widget.hide()
 
     def setEvaluationOverlay(self, visible: bool, text: str = ""):
         if self._evaluation_overlay is None:
-            overlay = QtWidgets.QLabel(self.graphicsView)
+            overlay = QtWidgets.QLabel(self._display_overlay_parent())
             overlay.setObjectName("EvaluationOverlay")
             overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             overlay.setStyleSheet(
@@ -1176,7 +1184,7 @@ class ImageView2D(QtWidgets.QWidget):
                 self._roi_info_panel.hide()
             return
         if self._roi_info_panel is None:
-            self._roi_info_panel = MovableInfoPanel(self.graphicsView)
+            self._roi_info_panel = MovableInfoPanel(self._display_overlay_parent())
             self._roi_info_panel.move(12, 44)
         self._roi_info_panel.setText(text)
         self._roi_info_panel.adjustSize()
@@ -1190,7 +1198,7 @@ class ImageView2D(QtWidgets.QWidget):
     def showHudText(self, text, scene_pos):
         if self._hud_widget is None:
             return
-        local = self.graphicsView.mapFromScene(scene_pos)
+        local = self._map_scene_to_display_overlay(scene_pos)
         self._hud_widget.show_text_near(text, local)
 
     def hideHud(self):
