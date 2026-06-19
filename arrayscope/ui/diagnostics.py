@@ -487,6 +487,8 @@ def _montage_overview(snapshot) -> str:
     return (
         f"{snapshot.montage.loaded_tiles}/{snapshot.montage.visible_tiles} loaded, "
         f"pending {snapshot.montage.pending_tiles}, "
+        f"resident {snapshot.montage_timing.tile_layer_resident_items}/"
+        f"{snapshot.montage_timing.tile_layer_storage_capacity}, "
         f"updated {snapshot.montage_timing.tile_layer_items_updated}, "
         f"rgb tiles {snapshot.montage_timing.tile_layer_rgb_window_tiles}, "
         f"stage-backed {snapshot.montage.tile_compute_stage_backed}, "

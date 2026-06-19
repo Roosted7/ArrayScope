@@ -33,6 +33,8 @@ class GpuMontageLayerStats:
     items_updated: int = 0
     items_skipped: int = 0
     level_updates: int = 0
+    estimated_gpu_bytes: int = 0
+    cpu_shadow_bytes: int = 0
     upload_ms: float = 0.0
 
 
@@ -258,6 +260,8 @@ class TextureAtlasPool:
             texture_upload_bytes=upload_bytes,
             items_updated=updated,
             items_skipped=skipped,
+            estimated_gpu_bytes=self.estimated_gpu_bytes,
+            cpu_shadow_bytes=self.cpu_shadow_bytes,
             upload_ms=elapsed,
         )
 
@@ -339,6 +343,8 @@ class GpuMontageLayer:
             atlas_capacity=self._pool.capacity,
             level_updates=int(changed),
             items_skipped=self._visible_items,
+            estimated_gpu_bytes=self._pool.estimated_gpu_bytes,
+            cpu_shadow_bytes=self._pool.cpu_shadow_bytes,
         )
         return self._last_stats
 
@@ -413,6 +419,8 @@ class GpuMontageLayer:
             items_updated=texture_stats.items_updated,
             items_skipped=texture_stats.items_skipped,
             level_updates=level_updates,
+            estimated_gpu_bytes=texture_stats.estimated_gpu_bytes,
+            cpu_shadow_bytes=texture_stats.cpu_shadow_bytes,
             upload_ms=texture_stats.upload_ms,
         )
         return self._last_stats

@@ -319,6 +319,10 @@ def test_vispy_direct_tiled_clean_and_dirty_counters(qt_app):
         assert clean.tile_layer_items_updated == 0
         assert clean.tile_layer_items_skipped == 2
         assert clean.visible_bytes == 0
+        assert clean.tile_layer_resident_items >= 2
+        assert clean.tile_layer_storage_capacity >= 2
+        assert clean.tile_layer_estimated_gpu_bytes > 0
+        assert clean.tile_layer_cpu_shadow_bytes == 0
 
         dirty_payloads = dict(payloads)
         dirty_payloads[1] = DisplayTilePayload(
@@ -339,6 +343,8 @@ def test_vispy_direct_tiled_clean_and_dirty_counters(qt_app):
         assert dirty.tile_layer_items_updated == 1
         assert dirty.tile_layer_items_skipped == 1
         assert dirty.visible_bytes > 0
+        assert dirty.tile_layer_texture_uploads >= 1
+        assert dirty.tile_layer_texture_upload_bytes > 0
     finally:
         view.close()
 

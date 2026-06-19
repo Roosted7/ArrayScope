@@ -32,6 +32,16 @@ class ImageUploadTiming:
     tile_layer_items_updated: int = 0
     tile_layer_items_skipped: int = 0
     tile_layer_rgb_window_tiles: int = 0
+    tile_layer_resident_items: int = 0
+    tile_layer_storage_capacity: int = 0
+    tile_layer_storage_rebuilds: int = 0
+    tile_layer_storage_evictions: int = 0
+    tile_layer_texture_uploads: int = 0
+    tile_layer_texture_upload_bytes: int = 0
+    tile_layer_vertex_uploads: int = 0
+    tile_layer_level_updates: int = 0
+    tile_layer_estimated_gpu_bytes: int = 0
+    tile_layer_cpu_shadow_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -132,6 +142,16 @@ class MontageTimingDiagnostics:
     tile_layer_items_updated: int = 0
     tile_layer_items_skipped: int = 0
     tile_layer_rgb_window_tiles: int = 0
+    tile_layer_resident_items: int = 0
+    tile_layer_storage_capacity: int = 0
+    tile_layer_storage_rebuilds: int = 0
+    tile_layer_storage_evictions: int = 0
+    tile_layer_texture_uploads: int = 0
+    tile_layer_texture_upload_bytes: int = 0
+    tile_layer_vertex_uploads: int = 0
+    tile_layer_level_updates: int = 0
+    tile_layer_estimated_gpu_bytes: int = 0
+    tile_layer_cpu_shadow_bytes: int = 0
     coalesced_commits: int = 0
 
 
@@ -271,11 +291,14 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         (
             "Tile layer:\n"
             f"  visible={snapshot.montage_timing.tile_layer_visible_items} "
+            f"resident={snapshot.montage_timing.tile_layer_resident_items}/"
+            f"{snapshot.montage_timing.tile_layer_storage_capacity} "
             f"updated={snapshot.montage_timing.tile_layer_items_updated} "
             f"skipped={snapshot.montage_timing.tile_layer_items_skipped} "
             f"rgb_tiles={snapshot.montage_timing.tile_layer_rgb_window_tiles}\n"
             f"  rgb={_ms_text(snapshot.montage_timing.last_tile_layer_rgb_window_ms)} "
-            f"upload={_ms_text(snapshot.montage_timing.last_tile_layer_upload_ms)}"
+            f"upload={_ms_text(snapshot.montage_timing.last_tile_layer_upload_ms)} "
+            f"gpu={format_bytes(snapshot.montage_timing.tile_layer_estimated_gpu_bytes)}"
         ),
         (
             "Upload: "
@@ -514,10 +537,26 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         (
             "Tile layer items: "
             f"visible={snapshot.montage_timing.tile_layer_visible_items} "
+            f"resident={snapshot.montage_timing.tile_layer_resident_items}/"
+            f"{snapshot.montage_timing.tile_layer_storage_capacity} "
             f"updated={snapshot.montage_timing.tile_layer_items_updated} "
             f"skipped={snapshot.montage_timing.tile_layer_items_skipped}"
         ),
         f"Tile layer RGB window tiles: {snapshot.montage_timing.tile_layer_rgb_window_tiles}",
+        (
+            "Tile layer storage: "
+            f"rebuilds={snapshot.montage_timing.tile_layer_storage_rebuilds} "
+            f"evictions={snapshot.montage_timing.tile_layer_storage_evictions} "
+            f"gpu={format_bytes(snapshot.montage_timing.tile_layer_estimated_gpu_bytes)} "
+            f"cpu_shadow={format_bytes(snapshot.montage_timing.tile_layer_cpu_shadow_bytes)}"
+        ),
+        (
+            "Tile layer submissions: "
+            f"textures={snapshot.montage_timing.tile_layer_texture_uploads} "
+            f"bytes={format_bytes(snapshot.montage_timing.tile_layer_texture_upload_bytes)} "
+            f"vertices={snapshot.montage_timing.tile_layer_vertex_uploads} "
+            f"levels={snapshot.montage_timing.tile_layer_level_updates}"
+        ),
         _montage_prefetch_line("Montage prefetch", snapshot.montage_prefetch),
         f"Coalesced montage commits: {snapshot.montage_timing.coalesced_commits}",
         (
