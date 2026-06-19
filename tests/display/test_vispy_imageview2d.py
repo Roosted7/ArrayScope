@@ -238,7 +238,7 @@ def test_vispy_raster_mapped_complex_level_change_updates_uniform_without_textur
 
 
 def test_gpu_mapped_visual_shader_supports_raw_complex_components():
-    from arrayscope.display.vispy_imageview2d import GpuMappedImageVisual
+    from arrayscope.display.backends.vispy.raster import GpuMappedImageVisual
 
     shader = GpuMappedImageVisual._fragment_shader
 
@@ -248,7 +248,7 @@ def test_gpu_mapped_visual_shader_supports_raw_complex_components():
 
 def test_gpu_mapped_visual_cached_complex_component_change_updates_uniform_without_upload():
     from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping, TexturePlaneKind
-    from arrayscope.display.vispy_imageview2d import GpuMappedImageVisual
+    from arrayscope.display.backends.vispy.raster import GpuMappedImageVisual
 
     visual = object.__new__(GpuMappedImageVisual)
     visual._scalar_texture = object()

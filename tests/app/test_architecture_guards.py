@@ -181,6 +181,7 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/display/planning.py"),
         Path("arrayscope/display/commit.py"),
         Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
+        Path("arrayscope/display/backends/vispy/raster.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
         Path("arrayscope/window/montage_levels.py"),
         Path("arrayscope/window/montage_renderer.py"),
@@ -256,6 +257,7 @@ def test_display_semantics_live_in_display_package():
         Path("arrayscope/display/planning.py"),
         Path("arrayscope/display/commit.py"),
         Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
+        Path("arrayscope/display/backends/vispy/raster.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
     )
     legacy = (
