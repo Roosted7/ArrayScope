@@ -10,6 +10,7 @@ from arrayscope.display.backends.vispy.tiles import (
     GpuDeviceLimits,
     GpuMontageLayer,
     GpuWindowedTileVisual,
+    TextureAtlasPage,
     TextureAtlasPool,
     _atlas_reserve_count,
     _fit_color,
@@ -187,6 +188,8 @@ def test_gpu_windowed_tile_shader_supports_complex_components():
 
     assert "uniform float u_component_mode" in shader
     assert "float complex_component" in shader
+    assert "if (u_component_mode > 2.5)" in shader
+    assert "float intensity = 1.0;" in shader
 
 
 def test_gpu_windowed_tile_mapping_tracks_component_uniform_without_texture_identity():
@@ -555,6 +558,18 @@ def test_payload_texture_conversion_preserves_scalar_dynamic_range():
     assert scalar.dtype == np.float32
     assert color.dtype == np.uint8
     assert not np.any(color)
+
+
+def test_complex_atlas_samples_raw_values_without_linear_filtering():
+    page = TextureAtlasPage(
+        FakeGloo,
+        tile_shape=(2, 2),
+        capacity=2,
+        storage_mode="complex",
+        max_texture_size=16,
+    )
+
+    assert page.scalar_texture.kwargs["interpolation"] == "nearest"
 
 
 def test_exact_payload_planes_are_reused_without_staging_copy():

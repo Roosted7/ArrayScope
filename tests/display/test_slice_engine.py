@@ -232,15 +232,15 @@ def test_make_shader_image_from_slab_keeps_complex_texture_raw_and_histogram_sca
 
 
 @pytest.mark.parametrize(
-    ("channel", "component", "expected"),
+    ("channel", "component", "display_mode", "expected"),
     (
-        (ChannelMode.REAL, "real", lambda data: np.real(data)),
-        (ChannelMode.IMAG, "imag", lambda data: np.imag(data)),
-        (ChannelMode.ABS, "abs", lambda data: np.abs(data)),
-        (ChannelMode.ANGLE, "angle", lambda data: np.angle(data)),
+        (ChannelMode.REAL, "real", "scalar", lambda data: np.real(data)),
+        (ChannelMode.IMAG, "imag", "scalar", lambda data: np.imag(data)),
+        (ChannelMode.ABS, "abs", "scalar", lambda data: np.abs(data)),
+        (ChannelMode.ANGLE, "angle", "phase_color", lambda data: np.angle(data)),
     ),
 )
-def test_shader_complex_channels_share_raw_rg32f_texture(channel, component, expected):
+def test_shader_complex_channels_share_raw_rg32f_texture(channel, component, display_mode, expected):
     data = np.array([[1 + 2j, -3 + 4j]], dtype=np.complex64)
     state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=channel)
 
@@ -251,9 +251,22 @@ def test_shader_complex_channels_share_raw_rg32f_texture(channel, component, exp
     np.testing.assert_array_equal(image.data, data)
     np.testing.assert_allclose(image.histogram_data, expected(data))
     assert image.shader_mapping.component == component
-    assert image.shader_mapping.display_mode == "scalar"
+    assert image.shader_mapping.display_mode == display_mode
     if channel == ChannelMode.ANGLE:
         assert image.default_levels == (-np.pi, np.pi)
+
+
+def test_shader_angle_uses_phase_lut_identity_for_colorbar_consistency():
+    data = np.array([[1 + 0j, 1j]], dtype=np.complex64)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.ANGLE)
+    lut = np.array([[255, 0, 0], [0, 0, 255]], dtype=np.uint8)
+
+    image = make_shader_image_from_slab(data, _FakeImageRequest(state), colormap_lut=lut)
+
+    assert image.shader_mapping.display_mode == "phase_color"
+    assert image.shader_mapping.component == "angle"
+    np.testing.assert_array_equal(image.shader_mapping.lut_data, lut)
+    assert image.shader_mapping.lut_identity == (tuple(lut.shape), str(lut.dtype), lut.tobytes())
 
 
 def test_make_image_ndslice_reversed_axes_uses_image_axis_order():
@@ -327,8 +340,8 @@ def test_make_image_complex_returns_rgb_and_magnitude_histogram():
 
     assert image.data.shape == (2, 2, 3)
     np.testing.assert_array_equal(image.histogram_data, np.ones((2, 2)))
-    np.testing.assert_array_equal(image.data[0, 0], lut[127])
-    np.testing.assert_array_equal(image.data[0, 1], lut[255])
+    expected, _ = complex_to_rgb(data, colormap_lut=lut)
+    np.testing.assert_array_equal(image.data, expected)
     from arrayscope.display.shader_mapping import TexturePlaneKind
 
     assert image.texture_kind == TexturePlaneKind.COMPLEX_RG32F
@@ -350,8 +363,8 @@ def test_make_image_complex_rgb_uses_phase_for_color_and_magnitude_for_histogram
 
     assert image.data.shape == (2, 2, 3)
     np.testing.assert_array_equal(image.histogram_data, np.abs(data))
-    np.testing.assert_array_equal(image.data[0, 0], lut[1])
-    np.testing.assert_array_equal(image.data[1, 0], lut[3])
+    expected, _ = complex_to_rgb(data, colormap_lut=lut)
+    np.testing.assert_array_equal(image.data, expected)
 
 
 def test_complex_to_rgb_rejects_bad_lut_shape():

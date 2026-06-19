@@ -18,6 +18,19 @@ def _montage_geometry():
     )
 
 
+def _single_tile_montage_geometry():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.montage import MontageTileState
+
+    return DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":"),
+        display_shape=(2, 2),
+        montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,),
+    )
+
+
 def _shifted_montage_geometry():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -244,6 +257,8 @@ def test_gpu_mapped_visual_shader_supports_raw_complex_components():
 
     assert "uniform float u_component_mode" in shader
     assert "float complex_component" in shader
+    assert "if (u_component_mode > 2.5)" in shader
+    assert "gl_FragColor = vec4(color, 1.0);" in shader
 
 
 def test_gpu_mapped_visual_cached_complex_component_change_updates_uniform_without_upload():
@@ -629,6 +644,119 @@ def test_vispy_direct_tiled_clean_and_dirty_counters(qt_app):
         assert dirty.visible_bytes > 0
         assert dirty.tile_layer_texture_uploads >= 1
         assert dirty.tile_layer_texture_upload_bytes > 0
+    finally:
+        view.close()
+
+
+def test_vispy_direct_tiled_shader_mapping_change_updates_uniform_without_texture_upload(qt_app):
+    from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping, TexturePlaneKind
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload
+
+    texture = np.array([[1 + 2j, 3 + 4j], [5 + 6j, 7 + 8j]], dtype=np.complex64)
+    histogram = np.abs(texture).astype(np.float32)
+    source_id = ("complex-source", 0)
+    first = DisplayTilePayload(
+        0,
+        0,
+        texture,
+        histogram,
+        source_id,
+        texture_data=texture,
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        semantic_data=texture,
+        semantic_histogram_data=histogram,
+        shader_mapping=ShaderMapping(component=ShaderComponent.ABS),
+    )
+    second = DisplayTilePayload(
+        0,
+        0,
+        texture,
+        histogram,
+        source_id,
+        texture_data=texture,
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        semantic_data=texture,
+        semantic_histogram_data=histogram,
+        shader_mapping=ShaderMapping(component=ShaderComponent.IMAG),
+    )
+    placeholder = np.zeros((2, 2), dtype=np.float32)
+    view = VisPyImageView2D()
+    try:
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=_single_tile_montage_geometry(),
+            levels=(0.0, 10.0),
+            histogramRange=(0.0, 10.0),
+            rgb_already_windowed=False,
+            montage_dirty_tiles=None,
+            montage_tile_source_ids={0: source_id},
+            montage_tile_payloads={0: first},
+        )
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=_single_tile_montage_geometry(),
+            levels=(0.0, 10.0),
+            histogramRange=(0.0, 10.0),
+            rgb_already_windowed=False,
+            montage_dirty_tiles=(),
+            montage_tile_source_ids={0: source_id},
+            montage_tile_payloads={0: second},
+        )
+
+        timing = view.lastImageUploadTiming()
+        assert timing.tile_layer_texture_uploads == 0
+        assert timing.tile_layer_texture_upload_bytes == 0
+        assert timing.tile_layer_items_updated == 0
+        assert timing.tile_layer_shader_uniform_updates > 0
+    finally:
+        view.close()
+
+
+def test_vispy_direct_tiled_fit_syncs_camera_immediately(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload
+
+    geometry = _montage_geometry()
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.ones((2, 2), dtype=np.float32), None, ("tile", 0)),
+        1: DisplayTilePayload(1, 1, np.ones((2, 2), dtype=np.float32) * 2.0, None, ("tile", 1)),
+    }
+    placeholder = np.zeros((2, 5), dtype=np.float32)
+    view = VisPyImageView2D()
+    try:
+        view.resize(360, 240)
+        view.show()
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=geometry,
+            levels=(0.0, 2.0),
+            histogramRange=(0.0, 2.0),
+            rgb_already_windowed=False,
+            montage_dirty_tiles=None,
+            montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1)},
+            montage_tile_payloads=payloads,
+        )
+        view.getView().setRange(xRange=(1.0, 2.0), yRange=(0.0, 1.0), padding=0)
+        qt_app.processEvents()
+
+        view.setFitLocked(True)
+        x_range, y_range = view.getView().viewRange()
+        expected = ((0.0, 4.0), (0.0, 1.0))
+
+        np.testing.assert_allclose(x_range, expected[0], atol=1e-6)
+        np.testing.assert_allclose(y_range, expected[1], atol=1e-6)
+        assert view._vispy_view.camera.aspect is None
+        assert view._vispy_camera_key[:2] == expected
+
+        view.oneToOne()
+        assert view._vispy_view.camera.aspect == 1.0
     finally:
         view.close()
 

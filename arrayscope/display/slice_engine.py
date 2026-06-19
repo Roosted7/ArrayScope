@@ -184,7 +184,7 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None):
     channel = _channel_mode(state.channel)
     if np.iscomplexobj(image_data):
         component = _shader_component_for_channel(channel)
-        phase_color = channel == ChannelMode.COMPLEX
+        phase_color = channel in {ChannelMode.COMPLEX, ChannelMode.ANGLE}
         mapping = ShaderMapping(
             component=component,
             scale=_shader_scale(state.scale),

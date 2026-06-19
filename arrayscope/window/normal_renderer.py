@@ -40,7 +40,7 @@ class NormalImageRenderMixin:
         if evaluator is None:
             return False
         colormap_lut = None
-        if view_state.channel == ChannelMode.COMPLEX:
+        if view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
             colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
         return evaluator.cached_image(
@@ -72,7 +72,7 @@ class NormalImageRenderMixin:
             self._force_autolevel = False
 
         colormap_lut = None
-        if self.view_state.channel == ChannelMode.COMPLEX:
+        if self.view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
             colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         view_state = self.view_state
         document = self.document

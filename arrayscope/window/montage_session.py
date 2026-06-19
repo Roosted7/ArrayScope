@@ -49,6 +49,7 @@ class MontageRenderSession:
     key: object
     render_generation: int
     level_key: object
+    level_expected_indices: tuple[int, ...]
     plan: MontagePlan
     view_state: object
     document: object
