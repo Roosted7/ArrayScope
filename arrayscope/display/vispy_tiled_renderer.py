@@ -71,6 +71,9 @@ class AtlasCapacityError(RuntimeError):
     """Raised when one atlas page cannot contain the requested tile set."""
 
 
+_ATLAS_GROWTH_TARGET_BYTES = 32 * 1024 * 1024
+
+
 class TextureAtlasPage:
     def __init__(self, gloo, *, tile_shape: tuple[int, int], capacity: int, storage_mode: str, max_texture_size: int):
         self._gloo = gloo
@@ -299,6 +302,49 @@ class TextureAtlasPool:
         self.rebuild_count += 1
         return True
 
+    def requested_capacity(
+        self,
+        *,
+        active_count: int,
+        reserve_count: int,
+        storage_mode: str,
+        tile_shape: tuple[int, int],
+        budget_bytes: int | None = None,
+    ) -> int:
+        """Return a bounded, chunked atlas capacity target.
+
+        A multi-page atlas does not need to allocate the complete montage on
+        the first progressive commit.  Doing so can synchronously reserve
+        hundreds of MiB while only one or two tiles are useful.  Grow in
+        byte-sized page chunks instead; existing pages and their residency are
+        retained when another page is appended.
+        """
+
+        active_count = max(1, int(active_count))
+        reserve_count = max(active_count, int(reserve_count or active_count))
+        tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
+        bytes_per_slot = _storage_mode_bytes_per_pixel(storage_mode) * tile_h * tile_w
+        max_columns = max(1, self.max_texture_size // tile_w)
+        max_rows = max(1, self.max_texture_size // tile_h)
+        max_slots_per_page = max(1, int(max_columns * max_rows))
+        growth_slots = max(
+            1,
+            min(
+                max_slots_per_page,
+                int(_ATLAS_GROWTH_TARGET_BYTES // max(1, bytes_per_slot)),
+            ),
+        )
+        chunked = int(np.ceil(active_count / growth_slots)) * growth_slots
+        requested = max(active_count, min(reserve_count, chunked))
+        effective_budget = self.budget_bytes if budget_bytes is None else max(0, int(budget_bytes))
+        if effective_budget > 0:
+            budget_slots = max(0, effective_budget // max(1, bytes_per_slot))
+            # The active set is mandatory.  Returning active_count lets
+            # ensure_layout raise a precise capacity error when even it does
+            # not fit, while speculative reserve headroom is simply clamped.
+            requested = max(active_count, min(requested, budget_slots))
+        return max(1, int(requested))
+
     def update_payloads(
         self,
         payloads: dict[int, DisplayTilePayload],
@@ -319,12 +365,13 @@ class TextureAtlasPool:
             else (self.storage_mode or "scalar")
         )
         tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
-        bytes_per_slot = _storage_mode_bytes_per_pixel(storage_mode) * max(1, tile_h) * max(1, tile_w)
-        effective_budget = self.budget_bytes if budget_bytes is None else max(0, int(budget_bytes))
-        budget_slots = int(reserve_count or 0)
-        if effective_budget > 0:
-            budget_slots = max(len(payload_items), min(int(reserve_count or 0), effective_budget // max(1, bytes_per_slot)))
-        requested_capacity = max(len(payload_items), budget_slots, 1)
+        requested_capacity = self.requested_capacity(
+            active_count=len(payload_items),
+            reserve_count=max(len(payload_items), int(reserve_count or 0)),
+            storage_mode=storage_mode,
+            tile_shape=tile_shape,
+            budget_bytes=budget_bytes,
+        )
         rebuilt = self.ensure_layout(
             tile_shape=tile_shape,
             count=requested_capacity,
@@ -337,10 +384,7 @@ class TextureAtlasPool:
         active_keys = {_resident_key(payload) for _tile_number, payload in payload_items}
         self.active_resident_keys = set(active_keys)
         near = {int(tile) for tile in tuple(near_tiles or ())}
-        near_keys = {
-            _source_resident_key(source_id)
-            for _tile_number, source_id in sorted(dict(near_tile_source_ids or {}).items())
-        }
+        near_keys = self._near_resident_keys(near_tile_source_ids)
         near_keys.update(_resident_key(payload) for tile_number, payload in payload_items if int(tile_number) in near)
         uvs: dict[int, tuple[float, float, float, float]] = {}
         active_tile_slots: dict[int, tuple[int, int]] = {}
@@ -439,20 +483,51 @@ class TextureAtlasPool:
                 budget_bytes=self.budget_bytes,
                 warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
             )
-        if self.tile_shape is None or self.storage_mode is None or not self.pages:
-            self.ensure_layout(
-                tile_shape=tile_shape,
-                count=max(1, len(payloads)),
-                storage_mode=_atlas_storage_mode(tuple(sorted((int(key), value) for key, value in payloads.items())), rgb_already_windowed=rgb_already_windowed),
-                budget_bytes=budget_bytes,
+        payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
+        requested_mode = _atlas_storage_mode(payload_items, rgb_already_windowed=rgb_already_windowed)
+        if self.storage_mode is not None and self.storage_mode != requested_mode:
+            # Warm work must never replace the active atlas layout.  A later
+            # visible commit can deliberately switch storage modes.
+            return GpuMontageLayerStats(
+                resident_items=self.resident_count,
+                atlas_capacity=self.capacity,
+                items_skipped=len(payload_items),
+                estimated_gpu_bytes=self.estimated_gpu_bytes,
+                cpu_shadow_bytes=self.cpu_shadow_bytes,
+                page_count=len(self.pages),
+                device_max_texture_size=self.max_texture_size,
+                budget_bytes=self.budget_bytes,
+                warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
+                capacity_warning="warm payload storage mode differs from the active atlas",
             )
+        target_count = len(set(self.active_resident_keys).union(_resident_key(payload) for _tile, payload in payload_items))
+        tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
+        bytes_per_slot = _storage_mode_bytes_per_pixel(requested_mode) * tile_h * tile_w
+        effective_budget = self.budget_bytes if budget_bytes is None else max(0, int(budget_bytes))
+        if effective_budget > 0:
+            target_count = min(target_count, effective_budget // max(1, bytes_per_slot))
+        mandatory_count = max(1, len(self.active_resident_keys))
+        # Once a chunk is full, requesting one slot beyond current capacity
+        # advances to the next chunk.  The mandatory active set remains
+        # separate so speculative warm coverage is clamped by the budget.
+        growth_trigger = max(mandatory_count, min(target_count, max(1, self.capacity + 1)))
+        requested_capacity = self.requested_capacity(
+            active_count=growth_trigger,
+            reserve_count=max(1, target_count),
+            storage_mode=requested_mode,
+            tile_shape=tile_shape,
+            budget_bytes=budget_bytes,
+        )
+        self.ensure_layout(
+            tile_shape=tile_shape,
+            count=requested_capacity,
+            storage_mode=requested_mode,
+            budget_bytes=budget_bytes,
+        )
 
         if budget_bytes is not None:
             self.budget_bytes = max(0, int(budget_bytes))
-        near_keys = {
-            _source_resident_key(source_id)
-            for _tile_number, source_id in sorted(dict(near_tile_source_ids or {}).items())
-        }
+        near_keys = self._near_resident_keys(near_tile_source_ids)
         near_keys.update(_resident_key(payload) for payload in dict(payloads).values())
         uploads = 0
         upload_bytes = 0
@@ -463,7 +538,13 @@ class TextureAtlasPool:
         evicted_near_before = self.evicted_near_count
         tile_h, tile_w = self.tile_shape or tile_shape
 
-        for _tile_number, payload in sorted((int(key), value) for key, value in dict(payloads).items()):
+        # At most capacity-active distinct warm keys can coexist.  Limiting the
+        # batch prevents upload/evict/upload thrash when the near ring is larger
+        # than the configured GPU budget.
+        available_warm_keys = max(0, self.capacity - len(self.active_resident_keys))
+        new_warm_budget = available_warm_keys
+        deferred = 0
+        for _tile_number, payload in payload_items:
             if not _payload_supported_by_storage_mode(payload, self.storage_mode, rgb_already_windowed=rgb_already_windowed):
                 skipped += 1
                 continue
@@ -472,6 +553,12 @@ class TextureAtlasPool:
                 self._touch(resident_key)
                 skipped += 1
                 continue
+            if resident_key not in self.resident_slots and new_warm_budget <= 0:
+                skipped += 1
+                deferred += 1
+                continue
+            if resident_key not in self.resident_slots:
+                new_warm_budget -= 1
             page_index, slot, _newly_assigned = self._slot_for(
                 resident_key,
                 active_keys=set(self.active_resident_keys),
@@ -526,6 +613,11 @@ class TextureAtlasPool:
             mipmap_updates=0,
             mipmap_available=False,
             complex_texture_uploads=complex_uploads,
+            capacity_warning=(
+                f"deferred {deferred} warm tiles because the residency budget is full"
+                if deferred
+                else ""
+            ),
         )
 
     def _slot_for(self, resident_key: object, *, active_keys: set[object], near_keys: set[object]) -> tuple[int, int, bool]:
@@ -567,6 +659,17 @@ class TextureAtlasPool:
     def _touch(self, resident_key: object) -> None:
         self._clock += 1
         self.last_used[resident_key] = int(self._clock)
+
+    def _near_resident_keys(self, near_tile_source_ids) -> set[object]:
+        """Resolve base or complete source identities to current residents."""
+
+        requested = tuple(dict(near_tile_source_ids or {}).values())
+        exact = {_source_resident_key(source_id) for source_id in requested}
+        bases = {_base_texture_source_id(source_id) for source_id in requested}
+        for resident_key, source_id in self.source_ids.items():
+            if resident_key in exact or _base_texture_source_id(source_id) in bases:
+                exact.add(resident_key)
+        return exact
 
 
 class GpuMontageLayer:
@@ -629,6 +732,7 @@ class GpuMontageLayer:
         while len(self._visuals_by_page) < max(1, int(count)):
             visual = self._scene.visuals.create_visual_node(GpuWindowedTileVisual)(parent=self._parent)
             visual.visible = False
+            visual.set_levels(self._levels)
             self._visuals_by_page.append(visual)
 
     def update(
@@ -666,12 +770,15 @@ class GpuMontageLayer:
         self._ensure_visual_count(len(self._pool.pages))
         vertex_uploads = 0
         active_pages = set()
+        page_payloads_by_index: list[dict[int, DisplayTilePayload]] = [
+            {} for _page in self._pool.pages
+        ]
+        for tile, payload in payloads.items():
+            page_index, _slot = self._pool.tile_slots.get(int(tile), (-1, -1))
+            if 0 <= int(page_index) < len(page_payloads_by_index):
+                page_payloads_by_index[int(page_index)][int(tile)] = payload
         for page_index, page in enumerate(self._pool.pages):
-            page_payloads = {
-                int(tile): payload
-                for tile, payload in payloads.items()
-                if self._pool.tile_slots.get(int(tile), (-1, -1))[0] == page_index
-            }
+            page_payloads = page_payloads_by_index[page_index]
             visual = self._visuals_by_page[page_index]
             geometry_key = (
                 tuple(
@@ -679,6 +786,7 @@ class GpuMontageLayer:
                         int(key),
                         int(self._pool.tile_slots[int(key)][1]),
                         _payload_mode(payload, rgb_already_windowed=rgb_already_windowed),
+                        _payload_gutter(payload),
                     )
                     for key, payload in sorted(page_payloads.items())
                 ),
@@ -687,8 +795,8 @@ class GpuMontageLayer:
                 int(montage.columns),
                 int(montage.rows),
                 int(montage.gap),
-                self._pool.serial,
-                page_index,
+                id(page),
+                tuple(int(value) for value in page.atlas_shape),
             )
             if page_payloads:
                 active_pages.add(page_index)
@@ -707,17 +815,13 @@ class GpuMontageLayer:
         if levels != self._levels:
             self._levels = levels
             for visual in self._visuals_by_page:
-                visual.set_levels(levels)
-            level_updates = 1
+                level_updates += int(bool(visual.set_levels(levels)))
+        mapping_updates = 0
         for page_index, page in enumerate(self._pool.pages):
             visual = self._visuals_by_page[page_index]
-            page_payloads = {
-                int(tile): payload
-                for tile, payload in payloads.items()
-                if self._pool.tile_slots.get(int(tile), (-1, -1))[0] == page_index
-            }
+            page_payloads = page_payloads_by_index[page_index]
             visual.set_textures(page.scalar_texture, page.color_texture)
-            visual.set_shader_mapping(_payload_shader_mapping(page_payloads))
+            mapping_updates += int(bool(visual.set_shader_mapping(_payload_shader_mapping(page_payloads))))
             visual.visible = page_index in active_pages
         for visual in self._visuals_by_page[len(self._pool.pages):]:
             visual.visible = False
@@ -733,7 +837,7 @@ class GpuMontageLayer:
             vertex_uploads=vertex_uploads,
             items_updated=texture_stats.items_updated,
             items_skipped=texture_stats.items_skipped,
-            level_updates=level_updates,
+            level_updates=int(bool(level_updates)),
             estimated_gpu_bytes=texture_stats.estimated_gpu_bytes,
             cpu_shadow_bytes=texture_stats.cpu_shadow_bytes,
             upload_ms=texture_stats.upload_ms,
@@ -752,7 +856,7 @@ class GpuMontageLayer:
             mipmap_updates=texture_stats.mipmap_updates,
             mipmap_available=texture_stats.mipmap_available,
             complex_texture_uploads=texture_stats.complex_texture_uploads,
-            shader_uniform_updates=level_updates,
+            shader_uniform_updates=level_updates + mapping_updates,
         )
         return self._last_stats
 
@@ -892,6 +996,8 @@ class GpuWindowedTileVisual(Visual):
         self._scalar_texture = None
         self._color_texture = None
         self._lut_texture = None
+        self._lut_key = None
+        self._shader_mapping_key = None
         self._levels = (0.0, 1.0)
         self._scale_mode = 0.0
         self._symlog_constant = 0.0
@@ -927,15 +1033,28 @@ class GpuWindowedTileVisual(Visual):
         self._color_texture = color_texture
         self.update()
 
-    def set_levels(self, levels) -> None:
-        self._levels = _normalize_levels(levels, self._levels)
+    def set_levels(self, levels) -> bool:
+        levels = _normalize_levels(levels, self._levels)
+        if levels == self._levels:
+            return False
+        self._levels = levels
         self.update()
+        return True
 
-    def set_shader_mapping(self, mapping) -> None:
-        self._scale_mode = _shader_scale_uniform(getattr(mapping, "scale", None))
-        self._symlog_constant = float(getattr(mapping, "symlog_constant", 0.0) or 0.0)
-        self._set_lut_texture(getattr(mapping, "lut_data", None))
+    def set_shader_mapping(self, mapping) -> bool:
+        scale_mode = _shader_scale_uniform(getattr(mapping, "scale", None))
+        symlog_constant = float(getattr(mapping, "symlog_constant", 0.0) or 0.0)
+        lut = _normalized_lut(getattr(mapping, "lut_data", None))
+        lut_key = _array_content_key(lut)
+        mapping_key = (float(scale_mode), float(symlog_constant), lut_key)
+        if mapping_key == self._shader_mapping_key:
+            return False
+        self._shader_mapping_key = mapping_key
+        self._scale_mode = scale_mode
+        self._symlog_constant = symlog_constant
+        self._set_lut_texture(lut, key=lut_key)
         self.update()
+        return True
 
     def _prepare_transforms(self, view) -> None:
         view.view_program.vert["transform"] = view.transforms.get_transform()
@@ -957,16 +1076,11 @@ class GpuWindowedTileVisual(Visual):
         program["u_symlog_constant"] = float(self._symlog_constant)
         return True
 
-    def _set_lut_texture(self, lut_data) -> None:
-        lut = default_phase_lut() if lut_data is None else np.asarray(lut_data)
-        if lut.ndim != 2 or lut.shape[0] < 1 or lut.shape[1] < 3:
-            lut = default_phase_lut()
-        lut = lut[:, :3]
-        if lut.dtype != np.uint8:
-            if np.issubdtype(lut.dtype, np.floating) and lut.size and float(np.nanmax(lut)) <= 1.0:
-                lut = lut * 255.0
-            lut = np.clip(lut, 0, 255).astype(np.uint8)
-        lut = np.ascontiguousarray(lut.reshape((1, lut.shape[0], 3)))
+    def _set_lut_texture(self, lut_data, *, key=None) -> bool:
+        lut = _normalized_lut(lut_data)
+        key = _array_content_key(lut) if key is None else key
+        if key == self._lut_key and self._lut_texture is not None:
+            return False
         from vispy import gloo
 
         if self._lut_texture is None or tuple(getattr(self._lut_texture, "shape", ())) != tuple(lut.shape):
@@ -979,6 +1093,8 @@ class GpuWindowedTileVisual(Visual):
             )
         else:
             self._lut_texture.set_data(lut, copy=False)
+        self._lut_key = key
+        return True
 
     def _bounds(self, axis, view):
         del view
@@ -1150,10 +1266,12 @@ def _quad_buffers(montage, payloads, uvs, *, rgb_already_windowed: bool):
     tile_h = int(montage.tile_height)
     stride_x = tile_w + int(montage.gap)
     stride_y = tile_h + int(montage.gap)
-    for tile_number, source_index in enumerate(tuple(montage.indices)):
-        payload = payloads.get(int(tile_number))
+    tile_count = len(montage.indices)
+    for tile_number, payload in sorted((int(key), value) for key, value in dict(payloads).items()):
+        if tile_number < 0 or tile_number >= tile_count:
+            continue
         uv = uvs.get(int(tile_number))
-        if payload is None or uv is None:
+        if uv is None:
             continue
         row = int(tile_number) // int(montage.columns)
         col = int(tile_number) % int(montage.columns)
@@ -1171,6 +1289,57 @@ def _quad_buffers(montage, payloads, uvs, *, rgb_already_windowed: bool):
         np.asarray(texcoords, dtype=np.float32).reshape((-1, 2)),
         np.asarray(modes, dtype=np.float32).reshape((-1,)),
     )
+
+
+def take_payload_batch(
+    payloads,
+    *,
+    max_items: int = 4,
+    max_bytes: int = 8 * 1024 * 1024,
+) -> tuple[dict[int, DisplayTilePayload], dict[int, DisplayTilePayload]]:
+    """Split speculative upload work into a bounded UI-event-loop batch."""
+
+    max_items = max(1, int(max_items))
+    max_bytes = max(1, int(max_bytes))
+    batch: dict[int, DisplayTilePayload] = {}
+    remaining: dict[int, DisplayTilePayload] = {}
+    batch_bytes = 0
+    for tile, payload in dict(payloads or {}).items():
+        payload_bytes = _payload_upload_nbytes(payload)
+        fits_items = len(batch) < max_items
+        fits_bytes = not batch or batch_bytes + payload_bytes <= max_bytes
+        if fits_items and fits_bytes:
+            batch[int(tile)] = payload
+            batch_bytes += payload_bytes
+        else:
+            remaining[int(tile)] = payload
+    return batch, remaining
+
+
+def _payload_upload_nbytes(payload: DisplayTilePayload) -> int:
+    texture = payload.texture_data if payload.texture_data is not None else payload.image
+    total = int(np.asarray(texture).nbytes)
+    histogram = getattr(payload, "histogram_data", None)
+    if histogram is not None and histogram is not texture:
+        total += int(np.asarray(histogram).nbytes)
+    return max(1, total)
+
+
+def _normalized_lut(lut_data) -> np.ndarray:
+    lut = default_phase_lut() if lut_data is None else np.asarray(lut_data)
+    if lut.ndim != 2 or lut.shape[0] < 1 or lut.shape[1] < 3:
+        lut = default_phase_lut()
+    lut = lut[:, :3]
+    if lut.dtype != np.uint8:
+        if np.issubdtype(lut.dtype, np.floating) and lut.size and float(np.nanmax(lut)) <= 1.0:
+            lut = lut * 255.0
+        lut = np.clip(lut, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(lut.reshape((1, lut.shape[0], 3)))
+
+
+def _array_content_key(array: np.ndarray) -> tuple[object, ...]:
+    array = np.asarray(array)
+    return (tuple(int(value) for value in array.shape), array.dtype.str, hash(array.tobytes()))
 
 
 def _luminance(rgb: np.ndarray) -> np.ndarray:
@@ -1378,3 +1547,9 @@ def _source_resident_key(source_id: object) -> object:
     except Exception:
         return ("source-object", id(source_id))
     return ("source", source_id)
+
+
+def _base_texture_source_id(source_id: object) -> object:
+    if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
+        return source_id[0]
+    return source_id

@@ -550,29 +550,42 @@ class VisPyImageView2D(ImageView2D):
             timer.setSingleShot(True)
             timer.timeout.connect(self._process_vispy_warm_tile_residency)
             self._vispy_warm_tile_timer = timer
-        if not timer.isActive():
-            timer.start(0)
+        # Warm uploads are speculative.  Restarting a short quiet-period timer
+        # ensures they never compete with an active camera gesture or the
+        # first useful visible-tile commit.
+        timer.start(40)
 
     def _process_vispy_warm_tile_residency(self) -> None:
         payloads = dict(getattr(self, "_vispy_pending_warm_tile_payloads", {}) or {})
         context = dict(getattr(self, "_vispy_pending_warm_tile_context", {}) or {})
-        self._vispy_pending_warm_tile_payloads = {}
-        self._vispy_pending_warm_tile_context = {}
         if not payloads:
             return
+        from arrayscope.display.vispy_tiled_renderer import take_payload_batch
+
+        batch, remaining = take_payload_batch(payloads)
+        self._vispy_pending_warm_tile_payloads = remaining
+        self._vispy_pending_warm_tile_context = context if remaining else {}
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         if layer is None or not hasattr(layer, "warm_residency"):
+            self._vispy_pending_warm_tile_payloads = {}
+            self._vispy_pending_warm_tile_context = {}
             return
         try:
             self._last_vispy_warm_tile_stats = layer.warm_residency(
-                payloads=payloads,
+                payloads=batch,
                 geometry=context.get("geometry"),
                 rgb_already_windowed=bool(context.get("rgb_already_windowed", False)),
                 tile_delta=context.get("tile_delta"),
                 tile_residency_budget_bytes=int(context.get("tile_residency_budget_bytes", 0) or 0),
             )
         except Exception:
+            self._vispy_pending_warm_tile_payloads = {}
+            self._vispy_pending_warm_tile_context = {}
             return
+        if remaining:
+            timer = self._vispy_warm_tile_timer
+            if timer is not None:
+                timer.start(8)
 
     def _apply_histogram_preview_levels(self, levels) -> None:
         levels = (float(levels[0]), float(levels[1]))
@@ -1567,6 +1580,14 @@ class VisPyImageView2D(ImageView2D):
             pass
 
     def _request_vispy_camera_sync(self) -> None:
+        # A camera gesture has priority over speculative residency uploads.
+        # The next settled tiled presentation will enqueue the relevant near
+        # ring again, so discarding stale warm work is both safe and cheaper.
+        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
+        if warm_timer is not None and warm_timer.isActive():
+            warm_timer.stop()
+        self._vispy_pending_warm_tile_payloads = {}
+        self._vispy_pending_warm_tile_context = {}
         if getattr(self, "_vispy_camera_sync_pending", False):
             return
         self._vispy_camera_sync_pending = True

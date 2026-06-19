@@ -375,7 +375,20 @@ class MontageRenderSession:
             for tile in near_candidates
             if int(tile.montage_index) not in self.skipped_tiles
         )
-        near_source_ids = {int(tile): source_ids[int(tile)] for tile in near if int(tile) in source_ids}
+        # Residency is keyed by the complete texture-content identity carried
+        # by DisplayTilePayload.source_id, not the evaluator's base tile key.
+        # Supplying the base key here made inactive near-viewport tiles look
+        # unrelated to their resident atlas slots, so the LRU could evict the
+        # very tiles that warm residency was meant to protect.
+        near_source_ids = {
+            int(tile): (
+                current_payloads[int(tile)].source_id
+                if int(tile) in current_payloads
+                else source_ids[int(tile)]
+            )
+            for tile in near
+            if int(tile) in current_payloads or int(tile) in source_ids
+        }
 
         if upserts or removals:
             self.payload_revision += 1
