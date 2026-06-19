@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.display.lod import LodInfo
+from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 
 
 def array_value_at(data, y_i: int, x_i: int):
@@ -29,18 +31,47 @@ class DisplayTilePayload:
     image: np.ndarray
     histogram_data: np.ndarray | None
     source_id: object
+    texture_data: np.ndarray | None = None
+    texture_kind: TexturePlaneKind | None = None
+    semantic_data: np.ndarray | None = None
+    semantic_histogram_data: np.ndarray | None = None
+    source_shape: tuple[int, int] | None = None
+    lod: LodInfo | None = None
+    shader_mapping: ShaderMapping | None = None
 
     def __post_init__(self) -> None:
         image = np.asarray(self.image)
         if image.ndim < 2:
             raise ValueError("display tile payload image must be at least 2D")
+        texture = image if self.texture_data is None else np.asarray(self.texture_data)
+        if texture.ndim < 2:
+            raise ValueError("display tile payload texture data must be at least 2D")
         if self.histogram_data is not None:
             histogram = np.asarray(self.histogram_data)
             if tuple(histogram.shape[:2]) != tuple(image.shape[:2]):
                 raise ValueError("display tile payload histogram shape must match image shape")
+        semantic = image if self.semantic_data is None else np.asarray(self.semantic_data)
+        semantic_histogram = self.histogram_data if self.semantic_histogram_data is None else self.semantic_histogram_data
+        semantic_histogram = None if semantic_histogram is None else np.asarray(semantic_histogram)
+        source_shape = tuple(int(value) for value in (self.source_shape or image.shape[:2])[:2])
+        texture_kind = self.texture_kind
+        if texture_kind is None:
+            if texture.ndim == 3 and texture.shape[-1] in (3, 4):
+                texture_kind = TexturePlaneKind.RGB8
+            elif np.iscomplexobj(texture) or (texture.ndim == 3 and texture.shape[-1] == 2):
+                texture_kind = TexturePlaneKind.COMPLEX_RG32F
+            else:
+                texture_kind = TexturePlaneKind.SCALAR_R32F
+        elif not isinstance(texture_kind, TexturePlaneKind):
+            texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
         object.__setattr__(self, "tile_number", int(self.tile_number))
         object.__setattr__(self, "source_index", int(self.source_index))
         object.__setattr__(self, "image", image)
+        object.__setattr__(self, "texture_data", texture)
+        object.__setattr__(self, "texture_kind", texture_kind)
+        object.__setattr__(self, "semantic_data", semantic)
+        object.__setattr__(self, "semantic_histogram_data", semantic_histogram)
+        object.__setattr__(self, "source_shape", source_shape)
         if self.histogram_data is not None:
             object.__setattr__(self, "histogram_data", np.asarray(self.histogram_data))
 
@@ -54,9 +85,17 @@ class DisplayTilePayload:
 
     @property
     def nbytes(self) -> int:
-        total = int(np.asarray(self.image).nbytes)
+        total = int(np.asarray(self.texture_data if self.texture_data is not None else self.image).nbytes)
         if self.histogram_data is not None:
             total += int(np.asarray(self.histogram_data).nbytes)
+        if self.semantic_data is not None and self.semantic_data is not self.image and self.semantic_data is not self.texture_data:
+            total += int(np.asarray(self.semantic_data).nbytes)
+        if (
+            self.semantic_histogram_data is not None
+            and self.semantic_histogram_data is not self.histogram_data
+            and self.semantic_histogram_data is not self.semantic_data
+        ):
+            total += int(np.asarray(self.semantic_histogram_data).nbytes)
         return total
 
 
@@ -196,7 +235,11 @@ class TiledValueSource(FrameValueSource):
         payload = self.payloads.get(int(tile_number))
         if payload is None:
             return None
-        source = payload.histogram_data if payload.histogram_data is not None else payload.image
+        source = (
+            payload.semantic_histogram_data
+            if payload.semantic_histogram_data is not None
+            else (payload.semantic_data if payload.semantic_data is not None else payload.image)
+        )
         data = np.asarray(source)
         y_i = int(getattr(mapping, "local_y", -1))
         x_i = int(getattr(mapping, "local_x", -1))
@@ -211,8 +254,10 @@ class TiledValueSource(FrameValueSource):
         if payload is None:
             return None
         y_slice, x_slice = region
-        data = np.asarray(payload.image)[y_slice, x_slice, ...]
-        hist = None if payload.histogram_data is None else np.asarray(payload.histogram_data)[y_slice, x_slice]
+        semantic = payload.semantic_data if payload.semantic_data is not None else payload.image
+        data = np.asarray(semantic)[y_slice, x_slice, ...]
+        hist_source = payload.semantic_histogram_data if payload.semantic_histogram_data is not None else payload.histogram_data
+        hist = None if hist_source is None else np.asarray(hist_source)[y_slice, x_slice]
         return data, hist, "committed_tile_payload"
 
 

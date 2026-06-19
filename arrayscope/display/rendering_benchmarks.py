@@ -503,6 +503,15 @@ def _sum_upload_timings(timings) -> ImageUploadTiming:
         tile_layer_near_resident_items=int(last.tile_layer_near_resident_items),
         tile_layer_warm_resident_items=int(last.tile_layer_warm_resident_items),
         tile_layer_evicted_near_items=sum(int(timing.tile_layer_evicted_near_items) for timing in timings),
+        tile_layer_lod_level=int(last.tile_layer_lod_level),
+        tile_layer_lod_factor=int(last.tile_layer_lod_factor),
+        tile_layer_source_texels_per_pixel=float(last.tile_layer_source_texels_per_pixel),
+        tile_layer_gutter_pixels=int(last.tile_layer_gutter_pixels),
+        tile_layer_mipmap_updates=sum(int(timing.tile_layer_mipmap_updates) for timing in timings),
+        tile_layer_mipmap_available=any(bool(timing.tile_layer_mipmap_available) for timing in timings),
+        tile_layer_complex_texture_uploads=sum(int(timing.tile_layer_complex_texture_uploads) for timing in timings),
+        tile_layer_shader_uniform_updates=sum(int(timing.tile_layer_shader_uniform_updates) for timing in timings),
+        cpu_complex_prep_ms=total("cpu_complex_prep_ms"),
         tile_layer_capacity_warning=str(last.tile_layer_capacity_warning),
     )
 

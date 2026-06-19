@@ -33,6 +33,7 @@ class DisplayToolbar(QtWidgets.QToolBar):
 
         self.scale_combo = QtWidgets.QComboBox()
         self.scale_combo.addItem("Linear", "linear")
+        self.scale_combo.addItem("Log", "log")
         self.scale_combo.addItem("Symlog", "symlog")
         self.scale_combo.currentIndexChanged.connect(lambda _i: self.scaleChanged.emit(self.scale_combo.currentData()))
         self.addSeparator()

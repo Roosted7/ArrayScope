@@ -153,6 +153,90 @@ def test_vispy_complex_windowed_rgb_render_has_visible_signal(qt_app):
         view.close()
 
 
+def test_vispy_raster_complex_display_image_renders_color(qt_app):
+    from pyqtgraph.Qt import QtGui
+    from arrayscope.core.view_state import ChannelMode, ViewState
+    from arrayscope.display.slice_engine import make_image
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    y, x = np.mgrid[-1.0:1.0:48j, -1.0:1.0:48j]
+    complex_data = (x + 1j * y).astype(np.complex64)
+    state = ViewState.from_shape(complex_data.shape).with_channel(ChannelMode.COMPLEX)
+    display = make_image(complex_data, state)
+    levels = (float(np.nanmin(display.histogram_data)), float(np.nanmax(display.histogram_data)))
+
+    view = VisPyImageView2D()
+    try:
+        view.resize(360, 260)
+        view.show()
+        view.setImagePresentation(
+            display.data,
+            histogramData=display.histogram_data,
+            levels=levels,
+            histogramRange=levels,
+            rgb_already_windowed=display.rgb_already_windowed,
+            shader_mapping=display.shader_mapping,
+            texture_kind=display.texture_kind,
+            semantic_data=display.semantic_data,
+        )
+        for _ in range(20):
+            qt_app.processEvents()
+
+        pixmap = view.grab()
+        image = pixmap.toImage().convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+        pixels = np.frombuffer(image.bits(), dtype=np.uint8).reshape(image.height(), image.width(), 4)[..., :3]
+        center = pixels[pixels.shape[0] // 5 : pixels.shape[0] * 4 // 5, pixels.shape[1] // 5 : pixels.shape[1] * 4 // 5]
+        assert int(center.max()) > 32
+        assert float(center.mean()) > 5.0
+        assert len(np.unique(center.reshape((-1, 3))[:: max(1, len(center.reshape((-1, 3))) // 512)], axis=0)) > 4
+    finally:
+        view.close()
+
+
+def test_vispy_raster_mapped_complex_level_change_updates_uniform_without_texture_upload(qt_app):
+    from arrayscope.core.view_state import ChannelMode, ViewState
+    from arrayscope.display.slice_engine import make_shader_image_from_slab
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    class Request:
+        def __init__(self, view_state):
+            self.view_state = view_state
+            self.ranged_axes = ()
+
+    data = (np.arange(16, dtype=np.float32).reshape(4, 4) + 1j).astype(np.complex64)
+    state = ViewState.from_shape(data.shape).with_channel(ChannelMode.COMPLEX)
+    display = make_shader_image_from_slab(data, Request(state))
+
+    view = VisPyImageView2D()
+    try:
+        view.setImagePresentation(
+            display.data,
+            histogramData=display.histogram_data,
+            levels=(0.0, 16.0),
+            histogramRange=(0.0, 16.0),
+            shader_mapping=display.shader_mapping,
+            texture_kind=display.texture_kind,
+            semantic_data=display.semantic_data,
+        )
+        visual = view._vispy_windowed_image
+        assert visual.upload_count == 1
+
+        view.setImagePresentation(
+            display.data,
+            histogramData=display.histogram_data,
+            levels=(2.0, 8.0),
+            histogramRange=(0.0, 16.0),
+            shader_mapping=display.shader_mapping,
+            texture_kind=display.texture_kind,
+            semantic_data=display.semantic_data,
+        )
+
+        assert visual.upload_count == 1
+        assert visual.levels == (2.0, 8.0)
+    finally:
+        view.close()
+
+
 def test_vispy_complex_windowed_rgb_preserves_high_magnitude_scale(qt_app):
     from pyqtgraph.Qt import QtGui
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
@@ -325,6 +409,7 @@ def test_vispy_tile_layer_clean_flush_skips_existing_visual_uploads(qt_app):
 
 
 def test_vispy_direct_tiled_payloads_use_batched_gpu_layer(qt_app):
+    from pyqtgraph.Qt import QtGui
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
     from arrayscope.window.display_frame import DisplayTilePayload
 
@@ -339,6 +424,8 @@ def test_vispy_direct_tiled_payloads_use_batched_gpu_layer(qt_app):
     }
     placeholder = np.broadcast_to(np.zeros((1, 1, 3), dtype=np.uint8), (2, 5, 3))
     try:
+        view.resize(360, 240)
+        view.show()
         view.setMontageTileLayerPresentation(
             placeholder,
             histogramData=None,
@@ -358,6 +445,86 @@ def test_vispy_direct_tiled_payloads_use_batched_gpu_layer(qt_app):
         assert timing.tile_layer_rgb_window_tiles == 0
         assert not any(state.visible for state in view._vispy_tile_visuals.values())
         assert view._vispy_gpu_montage_layer.visual.visible
+        for _ in range(20):
+            qt_app.processEvents()
+        pixmap = view.grab()
+        assert not pixmap.isNull()
+        image = pixmap.toImage().convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+        pixels = np.frombuffer(image.bits(), dtype=np.uint8).reshape(image.height(), image.width(), 4)[..., :3]
+        center = pixels[pixels.shape[0] // 5 : pixels.shape[0] * 4 // 5, pixels.shape[1] // 5 : pixels.shape[1] * 4 // 5]
+        assert int(center.max()) > 16
+        assert float(center.mean()) > 2.0
+    finally:
+        view.close()
+
+
+def test_vispy_direct_tiled_complex_display_images_render_nonblank(qt_app):
+    from pyqtgraph.Qt import QtGui
+    from arrayscope.core.view_state import ChannelMode, ViewState
+    from arrayscope.display.slice_engine import make_image
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.window.display_frame import DisplayTilePayload
+
+    base = np.array([[1 + 0j, 1j], [-1 + 0j, -1j]], dtype=np.complex64)
+    state = ViewState.from_shape(base.shape).with_channel(ChannelMode.COMPLEX)
+    left = make_image(base, state)
+    right = make_image(base * (1.0 + 0.25j), state)
+    payloads = {
+        0: DisplayTilePayload(
+            tile_number=0,
+            source_index=0,
+            image=left.data,
+            histogram_data=left.histogram_data,
+            source_id=("complex", 0),
+            texture_data=left.semantic_data,
+            texture_kind=left.texture_kind,
+            semantic_data=left.semantic_data,
+            semantic_histogram_data=left.histogram_data,
+            shader_mapping=left.shader_mapping,
+        ),
+        1: DisplayTilePayload(
+            tile_number=1,
+            source_index=1,
+            image=right.data,
+            histogram_data=right.histogram_data,
+            source_id=("complex", 1),
+            texture_data=right.semantic_data,
+            texture_kind=right.texture_kind,
+            semantic_data=right.semantic_data,
+            semantic_histogram_data=right.histogram_data,
+            shader_mapping=right.shader_mapping,
+        ),
+    }
+    placeholder = np.zeros((2, 5, 3), dtype=np.uint8)
+    view = VisPyImageView2D()
+    try:
+        view.resize(360, 240)
+        view.show()
+        view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=_montage_geometry(),
+            levels=(0.0, float(np.nanmax(left.histogram_data))),
+            histogramRange=(0.0, float(np.nanmax(left.histogram_data))),
+            rgb_already_windowed=False,
+            montage_dirty_tiles=None,
+            montage_tile_source_ids={0: ("complex", 0), 1: ("complex", 1)},
+            montage_tile_payloads=payloads,
+        )
+        for _ in range(20):
+            qt_app.processEvents()
+
+        pixmap = view.grab()
+        image = pixmap.toImage().convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+        pixels = np.frombuffer(image.bits(), dtype=np.uint8).reshape(image.height(), image.width(), 4)[..., :3]
+        center = pixels[pixels.shape[0] // 5 : pixels.shape[0] * 4 // 5, pixels.shape[1] // 5 : pixels.shape[1] * 4 // 5]
+        assert int(center.max()) > 16
+        assert float(center.mean()) > 2.0
+        sampled = center.reshape((-1, 3))[:: max(1, len(center.reshape((-1, 3))) // 512)]
+        chroma = np.max(np.abs(sampled.astype(np.int16) - sampled.mean(axis=1, keepdims=True).astype(np.int16)), axis=1)
+        assert int(chroma.max()) > 16
+        assert int(np.count_nonzero(chroma > 16)) > 0
     finally:
         view.close()
 

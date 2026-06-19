@@ -15,6 +15,7 @@ from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
 from arrayscope.operations.evaluator import _document_key, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.render_plan import (
@@ -58,9 +59,10 @@ class NormalImageRenderMixin:
             colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         view_state = self.view_state
         document = self.document
-        request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document)
+        shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
+        request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document, shader_display=shader_display)
         render_generation = self._capture_render_generation()
-        cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut)
+        cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut, shader_display=shader_display)
         if cached is not None:
             self._last_render_was_degraded = False
             geometry = DisplayGeometry(view_state=view_state, display_shape=cached.data.shape[:2])
@@ -124,6 +126,7 @@ class NormalImageRenderMixin:
                     colormap_lut=colormap_lut,
                     cancellation_token=token,
                     degraded=True,
+                    shader_display=shader_display,
                     stage_cache=self.operation_evaluator.stage_cache,
                     stage_document_key=stage_document_key(document),
                     evaluation_context=context,
@@ -132,7 +135,7 @@ class NormalImageRenderMixin:
             def done_preview(result):
                 if not self._is_current_render_generation(render_generation):
                     return
-                if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut):
+                if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut, shader_display=shader_display):
                     return
                 self.operation_evaluator.note_render_degraded()
                 display_image = result.value
@@ -178,6 +181,7 @@ class NormalImageRenderMixin:
                     chunk_size=decision.chunk_size,
                     colormap_lut=colormap_lut,
                     cancellation_token=token,
+                    shader_display=shader_display,
                     stage_cache=self.operation_evaluator.stage_cache,
                     stage_document_key=stage_document_key(document),
                     evaluation_context=context,
@@ -187,6 +191,7 @@ class NormalImageRenderMixin:
                 view_state,
                 colormap_lut=colormap_lut,
                 cancellation_token=token,
+                shader_display=shader_display,
                 stage_cache=self.operation_evaluator.stage_cache,
                 stage_document_key=stage_document_key(document),
                 evaluation_context=context,
@@ -205,12 +210,12 @@ class NormalImageRenderMixin:
         def done(result):
             if not self._is_current_render_generation(render_generation):
                 return
-            if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut):
+            if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut, shader_display=shader_display):
                 return
             self._last_render_completed_ms = float(getattr(result, "eval_ms", 0.0) or 0.0)
             self._last_render_was_degraded = False
             self._degraded_rendered_view = None
-            display_image = self.operation_evaluator.store_image_result(view_state, colormap_lut, result)
+            display_image = self.operation_evaluator.store_image_result(view_state, colormap_lut, result, shader_display=shader_display)
             geometry = DisplayGeometry(view_state=view_state, display_shape=display_image.data.shape[:2])
             self._apply_display_image(
                 display_image,

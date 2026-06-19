@@ -12,6 +12,8 @@ from time import perf_counter
 
 import numpy as np
 
+from arrayscope.display.lod import inner_uv_for_gutter
+from arrayscope.display.shader_mapping import ShaderDisplayMode, ShaderScale, TexturePlaneKind, default_phase_lut, pack_texture_data
 from arrayscope.window.display_frame import DisplayTilePayload
 
 try:
@@ -44,6 +46,14 @@ class GpuMontageLayerStats:
     warm_resident_items: int = 0
     evicted_near_items: int = 0
     capacity_warning: str = ""
+    lod_level: int = 0
+    lod_factor: int = 1
+    source_texels_per_pixel: float = 0.0
+    gutter_pixels: int = 0
+    mipmap_updates: int = 0
+    mipmap_available: bool = False
+    complex_texture_uploads: int = 0
+    shader_uniform_updates: int = 0
 
 
 @dataclass(frozen=True)
@@ -74,14 +84,16 @@ class TextureAtlasPage:
         )
         tile_h, tile_w = self.tile_shape
         self.atlas_shape = (int(self.rows * tile_h), int(self.columns * tile_w))
-        self.scalar_is_atlas = self.storage_mode in {"scalar", "scalar_color"}
+        self.scalar_is_atlas = self.storage_mode in {"scalar", "scalar_color", "complex"}
+        self.complex_is_atlas = self.storage_mode == "complex"
         self.color_is_atlas = self.storage_mode in {"color", "scalar_color"}
         if self.scalar_is_atlas:
+            channels = 2 if self.complex_is_atlas else 1
             self.scalar_texture = self._gloo.Texture2D(
-                shape=self.atlas_shape + (1,),
-                format="red",
-                internalformat="r32f",
-                interpolation="nearest",
+                shape=self.atlas_shape + (channels,),
+                format="rg" if self.complex_is_atlas else "red",
+                internalformat="rg32f" if self.complex_is_atlas else "r32f",
+                interpolation="linear" if self.complex_is_atlas else "nearest",
                 wrapping="clamp_to_edge",
             )
         else:
@@ -113,7 +125,8 @@ class TextureAtlasPage:
     @property
     def estimated_gpu_bytes(self) -> int:
         pixels = int(self.atlas_shape[0]) * int(self.atlas_shape[1])
-        return pixels * (4 if self.scalar_is_atlas else 0) + pixels * (3 if self.color_is_atlas else 0)
+        scalar_bytes = 8 if self.complex_is_atlas else 4
+        return pixels * (scalar_bytes if self.scalar_is_atlas else 0) + pixels * (3 if self.color_is_atlas else 0)
 
     def uv_for_slot(self, slot: int) -> tuple[float, float, float, float]:
         tile_h, tile_w = self.tile_shape
@@ -124,7 +137,25 @@ class TextureAtlasPage:
         x0 = col * tile_w
         y1 = y0 + tile_h
         x1 = x0 + tile_w
-        return (x0 / atlas_w, y0 / atlas_h, x1 / atlas_w, y1 / atlas_h)
+        uv = (x0 / atlas_w, y0 / atlas_h, x1 / atlas_w, y1 / atlas_h)
+        gutter = 0
+        return uv
+
+    def uv_for_slot_with_gutter(self, slot: int, gutter: int = 0) -> tuple[float, float, float, float]:
+        u0, v0, u1, v1 = self.uv_for_slot(slot)
+        gutter = max(0, int(gutter))
+        if gutter == 0:
+            return u0, v0, u1, v1
+        tile_h, tile_w = self.tile_shape
+        local = inner_uv_for_gutter((tile_h, tile_w), gutter=gutter)
+        du = u1 - u0
+        dv = v1 - v0
+        return (
+            u0 + local[0] * du,
+            v0 + local[1] * dv,
+            u0 + local[2] * du,
+            v0 + local[3] * dv,
+        )
 
     def offset_for_slot(self, slot: int) -> tuple[int, int]:
         tile_h, tile_w = self.tile_shape
@@ -315,6 +346,7 @@ class TextureAtlasPool:
         active_tile_slots: dict[int, tuple[int, int]] = {}
         uploads = 0
         upload_bytes = 0
+        complex_uploads = 0
         updated = 0
         skipped = 0
         evictions_before = self.eviction_count
@@ -329,7 +361,7 @@ class TextureAtlasPool:
             self._touch(resident_key)
             source_changed = self.source_ids.get(resident_key) != payload.source_id
             should_upload = bool(dirty_all or newly_assigned or source_changed or tile_number in dirty)
-            uvs[tile_number] = page.uv_for_slot(slot)
+            uvs[tile_number] = page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload))
             if not should_upload:
                 skipped += 1
                 continue
@@ -346,6 +378,8 @@ class TextureAtlasPool:
                 page.scalar_texture.set_data(scalar, offset=(int(y0), int(x0)), copy=False)
                 uploads += 1
                 upload_bytes += int(scalar.nbytes)
+                if page.complex_is_atlas:
+                    complex_uploads += 1
             if color is not None:
                 page.color_texture.set_data(color, offset=(int(y0), int(x0)), copy=False)
                 uploads += 1
@@ -375,6 +409,13 @@ class TextureAtlasPool:
             near_resident_items=len(near_keys.intersection(self.source_ids)),
             warm_resident_items=max(0, self.resident_count - len(active)),
             evicted_near_items=self.evicted_near_count - evicted_near_before,
+            lod_level=_max_payload_lod_level(payloads),
+            lod_factor=_max_payload_lod_factor(payloads),
+            source_texels_per_pixel=float(_max_payload_lod_factor(payloads)),
+            gutter_pixels=_max_payload_gutter(payloads),
+            mipmap_updates=0,
+            mipmap_available=False,
+            complex_texture_uploads=complex_uploads,
         )
 
     def warm_payloads(
@@ -415,6 +456,7 @@ class TextureAtlasPool:
         near_keys.update(_resident_key(payload) for payload in dict(payloads).values())
         uploads = 0
         upload_bytes = 0
+        complex_uploads = 0
         updated = 0
         skipped = 0
         evictions_before = self.eviction_count
@@ -448,6 +490,8 @@ class TextureAtlasPool:
                 page.scalar_texture.set_data(scalar, offset=(int(y0), int(x0)), copy=False)
                 uploads += 1
                 upload_bytes += int(scalar.nbytes)
+                if page.complex_is_atlas:
+                    complex_uploads += 1
             if color is not None:
                 page.color_texture.set_data(color, offset=(int(y0), int(x0)), copy=False)
                 uploads += 1
@@ -475,6 +519,13 @@ class TextureAtlasPool:
             near_resident_items=len(near_keys.intersection(self.source_ids)),
             warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
             evicted_near_items=self.evicted_near_count - evicted_near_before,
+            lod_level=_max_payload_lod_level(payloads),
+            lod_factor=_max_payload_lod_factor(payloads),
+            source_texels_per_pixel=float(_max_payload_lod_factor(payloads)),
+            gutter_pixels=_max_payload_gutter(payloads),
+            mipmap_updates=0,
+            mipmap_available=False,
+            complex_texture_uploads=complex_uploads,
         )
 
     def _slot_for(self, resident_key: object, *, active_keys: set[object], near_keys: set[object]) -> tuple[int, int, bool]:
@@ -563,6 +614,7 @@ class GpuMontageLayer:
             resident_items=self._pool.resident_count,
             atlas_capacity=self._pool.capacity,
             level_updates=int(changed),
+            shader_uniform_updates=int(changed),
             items_skipped=self._visible_items,
             estimated_gpu_bytes=self._pool.estimated_gpu_bytes,
             cpu_shadow_bytes=self._pool.cpu_shadow_bytes,
@@ -603,7 +655,7 @@ class GpuMontageLayer:
         near_tile_source_ids = dict(getattr(tile_delta, "near_tile_source_ids", {}) or {})
         uvs, texture_stats = self._pool.update_payloads(
             payloads,
-            tile_shape=(int(montage.tile_height), int(montage.tile_width)),
+            tile_shape=_atlas_tile_shape_for_payloads(payloads, fallback=(int(montage.tile_height), int(montage.tile_width))),
             dirty_tiles=dirty_tiles,
             rgb_already_windowed=rgb_already_windowed,
             reserve_count=reserve_count,
@@ -659,7 +711,13 @@ class GpuMontageLayer:
             level_updates = 1
         for page_index, page in enumerate(self._pool.pages):
             visual = self._visuals_by_page[page_index]
+            page_payloads = {
+                int(tile): payload
+                for tile, payload in payloads.items()
+                if self._pool.tile_slots.get(int(tile), (-1, -1))[0] == page_index
+            }
             visual.set_textures(page.scalar_texture, page.color_texture)
+            visual.set_shader_mapping(_payload_shader_mapping(page_payloads))
             visual.visible = page_index in active_pages
         for visual in self._visuals_by_page[len(self._pool.pages):]:
             visual.visible = False
@@ -687,6 +745,14 @@ class GpuMontageLayer:
             warm_resident_items=texture_stats.warm_resident_items,
             evicted_near_items=texture_stats.evicted_near_items,
             capacity_warning=texture_stats.capacity_warning,
+            lod_level=texture_stats.lod_level,
+            lod_factor=texture_stats.lod_factor,
+            source_texels_per_pixel=texture_stats.source_texels_per_pixel,
+            gutter_pixels=texture_stats.gutter_pixels,
+            mipmap_updates=texture_stats.mipmap_updates,
+            mipmap_available=texture_stats.mipmap_available,
+            complex_texture_uploads=texture_stats.complex_texture_uploads,
+            shader_uniform_updates=level_updates,
         )
         return self._last_stats
 
@@ -705,7 +771,7 @@ class GpuMontageLayer:
         try:
             return self._pool.warm_payloads(
                 {int(key): value for key, value in dict(payloads or {}).items()},
-                tile_shape=(int(montage.tile_height), int(montage.tile_width)),
+                tile_shape=_atlas_tile_shape_for_payloads(payloads, fallback=(int(montage.tile_height), int(montage.tile_width))),
                 rgb_already_windowed=rgb_already_windowed,
                 near_tile_source_ids=dict(getattr(tile_delta, "near_tile_source_ids", {}) or {}),
                 budget_bytes=tile_residency_budget_bytes,
@@ -746,13 +812,27 @@ class GpuWindowedTileVisual(Visual):
     _fragment_shader = """
     uniform sampler2D u_scalar_texture;
     uniform sampler2D u_color_texture;
+    uniform sampler2D u_lut_texture;
     uniform vec2 u_levels;
+    uniform float u_scale_mode;
+    uniform float u_symlog_constant;
     varying vec2 v_texcoord;
     varying float v_mode;
+
+    float map_scale(float value) {
+        if (u_scale_mode > 1.5) {
+            return sign(value) * log(1.0 + abs(value) / pow(10.0, u_symlog_constant)) / log(10.0);
+        }
+        if (u_scale_mode > 0.5) {
+            return log(max(value, 0.0)) / log(10.0);
+        }
+        return value;
+    }
 
     void main() {
         if (v_mode < 0.5) {
             float scalar = texture2D(u_scalar_texture, v_texcoord).r;
+            scalar = map_scale(scalar);
             float span = max(u_levels.y - u_levels.x, 1e-12);
             float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
             if (scalar != scalar) {
@@ -762,15 +842,39 @@ class GpuWindowedTileVisual(Visual):
         } else if (v_mode < 1.5) {
             float scalar = texture2D(u_scalar_texture, v_texcoord).r;
             vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
+            scalar = map_scale(scalar);
             float span = max(u_levels.y - u_levels.x, 1e-12);
             float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
             if (scalar != scalar) {
                 discard;
             }
             gl_FragColor = vec4(color * intensity, 1.0);
-        } else {
+        } else if (v_mode < 2.5) {
             vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
             gl_FragColor = vec4(color, 1.0);
+        } else if (v_mode < 3.5) {
+            vec2 z = texture2D(u_scalar_texture, v_texcoord).rg;
+            float scalar = length(z);
+            scalar = map_scale(scalar);
+            float span = max(u_levels.y - u_levels.x, 1e-12);
+            float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
+            if (scalar != scalar) {
+                discard;
+            }
+            gl_FragColor = vec4(vec3(intensity), 1.0);
+        } else {
+            vec2 z = texture2D(u_scalar_texture, v_texcoord).rg;
+            float scalar = length(z);
+            scalar = map_scale(scalar);
+            float span = max(u_levels.y - u_levels.x, 1e-12);
+            float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
+            float phase = atan(z.y, z.x);
+            float phase_index = clamp((phase + 3.141592653589793) / 6.283185307179586, 0.0, 1.0);
+            vec3 color = texture2D(u_lut_texture, vec2(phase_index, 0.5)).rgb;
+            if (scalar != scalar) {
+                discard;
+            }
+            gl_FragColor = vec4(color * intensity, 1.0);
         }
     }
     """
@@ -787,7 +891,10 @@ class GpuWindowedTileVisual(Visual):
         self._bounds_xy = (0.0, 0.0, 0.0, 0.0)
         self._scalar_texture = None
         self._color_texture = None
+        self._lut_texture = None
         self._levels = (0.0, 1.0)
+        self._scale_mode = 0.0
+        self._symlog_constant = 0.0
         self.set_gl_state(depth_test=False, cull_face=False, blend=False)
         self._draw_mode = "triangles"
         self.freeze()
@@ -824,20 +931,54 @@ class GpuWindowedTileVisual(Visual):
         self._levels = _normalize_levels(levels, self._levels)
         self.update()
 
+    def set_shader_mapping(self, mapping) -> None:
+        self._scale_mode = _shader_scale_uniform(getattr(mapping, "scale", None))
+        self._symlog_constant = float(getattr(mapping, "symlog_constant", 0.0) or 0.0)
+        self._set_lut_texture(getattr(mapping, "lut_data", None))
+        self.update()
+
     def _prepare_transforms(self, view) -> None:
         view.view_program.vert["transform"] = view.transforms.get_transform()
 
     def _prepare_draw(self, view):
         if self._scalar_texture is None or self._color_texture is None:
             return False
+        if self._lut_texture is None:
+            self._set_lut_texture(None)
         program = view.view_program
         program["a_position"] = self._vertices
         program["a_texcoord"] = self._texcoords
         program["a_mode"] = self._modes
         program["u_scalar_texture"] = self._scalar_texture
         program["u_color_texture"] = self._color_texture
+        program["u_lut_texture"] = self._lut_texture
         program["u_levels"] = tuple(float(value) for value in self._levels)
+        program["u_scale_mode"] = float(self._scale_mode)
+        program["u_symlog_constant"] = float(self._symlog_constant)
         return True
+
+    def _set_lut_texture(self, lut_data) -> None:
+        lut = default_phase_lut() if lut_data is None else np.asarray(lut_data)
+        if lut.ndim != 2 or lut.shape[0] < 1 or lut.shape[1] < 3:
+            lut = default_phase_lut()
+        lut = lut[:, :3]
+        if lut.dtype != np.uint8:
+            if np.issubdtype(lut.dtype, np.floating) and lut.size and float(np.nanmax(lut)) <= 1.0:
+                lut = lut * 255.0
+            lut = np.clip(lut, 0, 255).astype(np.uint8)
+        lut = np.ascontiguousarray(lut.reshape((1, lut.shape[0], 3)))
+        from vispy import gloo
+
+        if self._lut_texture is None or tuple(getattr(self._lut_texture, "shape", ())) != tuple(lut.shape):
+            self._lut_texture = gloo.Texture2D(
+                lut,
+                format="rgb",
+                internalformat="rgb8",
+                interpolation="linear",
+                wrapping="clamp_to_edge",
+            )
+        else:
+            self._lut_texture.set_data(lut, copy=False)
 
     def _bounds(self, axis, view):
         del view
@@ -915,7 +1056,13 @@ def _payload_texture_data(
     need_color: bool,
 ):
     tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
-    image = np.asarray(payload.image)
+    texture = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
+    texture_kind = _payload_texture_kind(payload)
+    if texture_kind == TexturePlaneKind.COMPLEX_RG32F:
+        scalar = _fit_complex_rg(pack_texture_data(texture, TexturePlaneKind.COMPLEX_RG32F), (tile_h, tile_w)) if need_scalar else None
+        color = np.zeros((tile_h, tile_w, 3), dtype=np.uint8) if need_color else None
+        return scalar, color
+    image = texture
     if image.ndim == 3 and image.shape[-1] in (3, 4):
         color = _fit_color(image[..., :3], (tile_h, tile_w)) if need_color else None
         scalar = None
@@ -978,6 +1125,23 @@ def _fit_color(data, shape: tuple[int, int]) -> np.ndarray:
     return out
 
 
+def _fit_complex_rg(data, shape: tuple[int, int]) -> np.ndarray:
+    arr = np.asarray(data, dtype=np.float32)
+    if (
+        arr.ndim == 3
+        and arr.shape[-1] == 2
+        and tuple(arr.shape[:2]) == tuple(shape)
+        and arr.flags.c_contiguous
+    ):
+        return arr
+    out = np.zeros(shape + (2,), dtype=np.float32)
+    height = min(shape[0], int(arr.shape[0]))
+    width = min(shape[1], int(arr.shape[1]))
+    if height > 0 and width > 0:
+        out[:height, :width, :] = arr[:height, :width, :2]
+    return out
+
+
 def _quad_buffers(montage, payloads, uvs, *, rgb_already_windowed: bool):
     vertices = []
     texcoords = []
@@ -1000,11 +1164,7 @@ def _quad_buffers(montage, payloads, uvs, *, rgb_already_windowed: bool):
         u0, v0, u1, v1 = uv
         vertices.extend(((x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)))
         texcoords.extend(((u0, v0), (u1, v0), (u1, v1), (u0, v0), (u1, v1), (u0, v1)))
-        image = np.asarray(payload.image)
-        if image.ndim == 3 and image.shape[-1] in (3, 4):
-            mode = 2.0 if rgb_already_windowed else 1.0
-        else:
-            mode = 0.0
+        mode = float(_payload_mode(payload, rgb_already_windowed=rgb_already_windowed))
         modes.extend((mode,) * 6)
     return (
         np.asarray(vertices, dtype=np.float32).reshape((-1, 2)),
@@ -1032,14 +1192,21 @@ def _normalize_levels(levels, fallback):
 def _atlas_storage_mode(payload_items, *, rgb_already_windowed: bool) -> str:
     needs_scalar = False
     needs_color = False
+    needs_complex = False
     for _tile_number, payload in payload_items:
-        image = np.asarray(payload.image)
+        kind = _payload_texture_kind(payload)
+        if kind == TexturePlaneKind.COMPLEX_RG32F:
+            needs_complex = True
+            continue
+        image = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
         is_color = image.ndim == 3 and image.shape[-1] in (3, 4)
         if is_color:
             needs_color = True
             needs_scalar = needs_scalar or not bool(rgb_already_windowed)
         else:
             needs_scalar = True
+    if needs_complex and not needs_scalar and not needs_color:
+        return "complex"
     if needs_scalar and needs_color:
         return "scalar_color"
     if needs_color:
@@ -1049,7 +1216,7 @@ def _atlas_storage_mode(payload_items, *, rgb_already_windowed: bool) -> str:
 
 def _normalize_storage_mode(mode: str) -> str:
     mode = str(mode or "scalar_color")
-    if mode not in {"scalar", "color", "scalar_color"}:
+    if mode not in {"scalar", "color", "scalar_color", "complex"}:
         raise ValueError(f"unknown atlas storage mode: {mode}")
     return mode
 
@@ -1060,6 +1227,8 @@ def _storage_mode_bytes_per_pixel(mode: str) -> int:
         return 4
     if mode == "color":
         return 3
+    if mode == "complex":
+        return 8
     return 7
 
 
@@ -1109,21 +1278,85 @@ def _atlas_reserve_count(geometry, *, minimum: int) -> int:
 
 
 def _payload_mode(payload: DisplayTilePayload, *, rgb_already_windowed: bool) -> int:
-    image = np.asarray(payload.image)
+    if _payload_texture_kind(payload) == TexturePlaneKind.COMPLEX_RG32F:
+        mapping = getattr(payload, "shader_mapping", None)
+        display_mode = getattr(getattr(mapping, "display_mode", None), "value", getattr(mapping, "display_mode", None))
+        return 4 if display_mode == ShaderDisplayMode.PHASE_COLOR.value else 3
+    image = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
     if image.ndim == 3 and image.shape[-1] in (3, 4):
         return 2 if rgb_already_windowed else 1
     return 0
 
 
+def _payload_shader_mapping(payloads: dict[int, DisplayTilePayload]):
+    for payload in dict(payloads or {}).values():
+        mapping = getattr(payload, "shader_mapping", None)
+        if mapping is not None:
+            return mapping
+    return None
+
+
+def _shader_scale_uniform(scale) -> float:
+    if scale is None:
+        return 0.0
+    value = scale.value if isinstance(scale, ShaderScale) else getattr(scale, "value", scale)
+    if value == ShaderScale.LOG.value:
+        return 1.0
+    if value == ShaderScale.SYMLOG.value:
+        return 2.0
+    return 0.0
+
+
 def _payload_supported_by_storage_mode(payload: DisplayTilePayload, storage_mode: str | None, *, rgb_already_windowed: bool) -> bool:
     mode = _normalize_storage_mode(storage_mode or "scalar")
-    image = np.asarray(payload.image)
+    if _payload_texture_kind(payload) == TexturePlaneKind.COMPLEX_RG32F:
+        return mode == "complex"
+    image = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
     is_color = image.ndim == 3 and image.shape[-1] in (3, 4)
     if not is_color:
         return mode in {"scalar", "scalar_color"}
     if rgb_already_windowed:
         return mode in {"color", "scalar_color"}
     return mode == "scalar_color"
+
+
+def _payload_texture_kind(payload: DisplayTilePayload) -> TexturePlaneKind:
+    kind = getattr(payload, "texture_kind", None)
+    if kind is not None:
+        return kind if isinstance(kind, TexturePlaneKind) else TexturePlaneKind(getattr(kind, "value", kind))
+    texture = np.asarray(getattr(payload, "texture_data", None) if getattr(payload, "texture_data", None) is not None else payload.image)
+    if np.iscomplexobj(texture) or (texture.ndim == 3 and texture.shape[-1] == 2):
+        return TexturePlaneKind.COMPLEX_RG32F
+    if texture.ndim == 3 and texture.shape[-1] in (3, 4):
+        return TexturePlaneKind.RGB8
+    return TexturePlaneKind.SCALAR_R32F
+
+
+def _payload_gutter(payload: DisplayTilePayload) -> int:
+    lod = getattr(payload, "lod", None)
+    return 0 if lod is None else int(getattr(lod, "gutter", 0) or 0)
+
+
+def _max_payload_lod_level(payloads: dict[int, DisplayTilePayload]) -> int:
+    return max((int(getattr(getattr(payload, "lod", None), "level", 0) or 0) for payload in dict(payloads or {}).values()), default=0)
+
+
+def _max_payload_lod_factor(payloads: dict[int, DisplayTilePayload]) -> int:
+    return max((int(getattr(getattr(payload, "lod", None), "factor", 1) or 1) for payload in dict(payloads or {}).values()), default=1)
+
+
+def _max_payload_gutter(payloads: dict[int, DisplayTilePayload]) -> int:
+    return max((_payload_gutter(payload) for payload in dict(payloads or {}).values()), default=0)
+
+
+def _atlas_tile_shape_for_payloads(payloads: dict[int, DisplayTilePayload], *, fallback: tuple[int, int]) -> tuple[int, int]:
+    shapes = []
+    for payload in dict(payloads or {}).values():
+        texture = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
+        shapes.append(tuple(int(value) for value in texture.shape[:2]))
+    if not shapes:
+        return (max(1, int(fallback[0])), max(1, int(fallback[1])))
+    return (max(1, max(shape[0] for shape in shapes)), max(1, max(shape[1] for shape in shapes)))
 
 
 def _resident_key(payload: DisplayTilePayload) -> object:

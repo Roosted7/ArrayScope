@@ -24,6 +24,10 @@ class DisplayCommitter:
             viewport_policy=presentation.viewport_policy,
             rgb_already_windowed=presentation.rgb_already_windowed,
             image_origin=_image_origin(presentation.geometry),
+            shader_mapping=getattr(presentation, "shader_mapping", None),
+            texture_kind=getattr(presentation, "texture_kind", None),
+            semantic_data=getattr(presentation, "semantic_data", None),
+            lod=getattr(presentation, "lod", None),
         )
         self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)
@@ -42,6 +46,10 @@ class DisplayCommitter:
             histogramRange=presentation.histogram_range,
             rgb_already_windowed=presentation.rgb_already_windowed,
             image_origin=_image_origin(presentation.geometry),
+            shader_mapping=getattr(presentation, "shader_mapping", None),
+            texture_kind=getattr(presentation, "texture_kind", None),
+            semantic_data=getattr(presentation, "semantic_data", None),
+            lod=getattr(presentation, "lod", None),
         )
         self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)

@@ -54,6 +54,7 @@ apply_channel = slice_engine.apply_channel
 complex_to_rgb = slice_engine.complex_to_rgb
 make_image = slice_engine.make_image
 make_image_from_slab = slice_engine.make_image_from_slab
+make_shader_image_from_slab = slice_engine.make_shader_image_from_slab
 make_export_frame = slice_engine.make_export_frame
 make_line = slice_engine.make_line
 symlog = slice_engine.symlog
@@ -164,6 +165,17 @@ def test_make_image_complex_rgb_preserves_one_row_axis_range():
     np.testing.assert_array_equal(image.histogram_data, np.abs(data[[1], :]))
 
 
+def test_make_image_complex_log_histogram_uses_scaled_magnitude_for_levels():
+    data = np.array([[1 + 0j, 10j, 100 + 0j]], dtype=np.complex64)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX, scale=ScaleMode.LOG)
+
+    image = make_image(data, state)
+
+    np.testing.assert_allclose(image.histogram_data, np.log10(np.abs(data)))
+    np.testing.assert_array_equal(image.semantic_data, data)
+    assert image.shader_mapping.scale == "log"
+
+
 class _FakeImageRequest:
     def __init__(self, view_state, ranged_axes=()):
         self.view_state = view_state
@@ -190,6 +202,33 @@ def test_make_image_from_slab_preserves_one_column_axis_range():
 
     assert image.data.shape == (2, 1)
     np.testing.assert_array_equal(image.data, slab)
+
+
+def test_make_shader_image_from_slab_keeps_scalar_texture_unscaled_and_histogram_scaled():
+    data = np.array([[1.0, 10.0, 100.0]], dtype=np.float32)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.REAL, scale=ScaleMode.LOG)
+
+    image = make_shader_image_from_slab(data, _FakeImageRequest(state))
+
+    np.testing.assert_array_equal(image.data, data)
+    np.testing.assert_array_equal(image.semantic_data, data)
+    np.testing.assert_allclose(image.histogram_data, np.log10(data))
+    assert image.texture_kind == "scalar_r32f"
+    assert image.shader_mapping.scale == "log"
+
+
+def test_make_shader_image_from_slab_keeps_complex_texture_raw_and_histogram_scaled():
+    data = np.array([[1 + 0j, 10j, 100 + 0j]], dtype=np.complex64)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX, scale=ScaleMode.LOG)
+
+    image = make_shader_image_from_slab(data, _FakeImageRequest(state))
+
+    np.testing.assert_array_equal(image.data, data)
+    np.testing.assert_array_equal(image.semantic_data, data)
+    np.testing.assert_allclose(image.histogram_data, np.log10(np.abs(data)))
+    assert image.texture_kind == "complex_rg32f"
+    assert image.shader_mapping.display_mode == "phase_color"
+    assert image.shader_mapping.scale == "log"
 
 
 def test_make_image_ndslice_reversed_axes_uses_image_axis_order():
@@ -265,6 +304,12 @@ def test_make_image_complex_returns_rgb_and_magnitude_histogram():
     np.testing.assert_array_equal(image.histogram_data, np.ones((2, 2)))
     np.testing.assert_array_equal(image.data[0, 0], lut[127])
     np.testing.assert_array_equal(image.data[0, 1], lut[255])
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    assert image.texture_kind == TexturePlaneKind.COMPLEX_RG32F
+    assert image.semantic_data is not None
+    assert np.iscomplexobj(image.semantic_data)
+    assert len(np.unique(image.data.reshape((-1, 3)), axis=0)) > 1
 
 
 def test_make_image_complex_rgb_uses_phase_for_color_and_magnitude_for_histogram():

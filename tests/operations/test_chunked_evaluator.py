@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from arrayscope.core.view_state import ChannelMode, ViewState
+from arrayscope.core.view_state import ChannelMode, ScaleMode, ViewState
 from arrayscope.operations import fft_backend
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
@@ -68,6 +68,20 @@ def test_chunked_complex_rgb_matches_exact():
 
     np.testing.assert_array_equal(chunked.value.data, exact.value.data)
     np.testing.assert_allclose(chunked.value.histogram_data, exact.value.histogram_data)
+
+
+def test_chunked_shader_complex_keeps_raw_texture_and_scaled_histogram():
+    data = (np.arange(8 * 9 * 3, dtype=np.float32).reshape(8, 9, 3) + 1j).astype(np.complex64)
+    document = ArrayDocument(data)
+    state = ViewState.from_shape(data.shape).with_channel(ChannelMode.COMPLEX).with_scale(ScaleMode.LOG)
+
+    chunked = evaluate_image_snapshot_chunked(document, state, chunk_axis=0, chunk_size=3, shader_display=True)
+
+    assert chunked.value.texture_kind == "complex_rg32f"
+    assert np.iscomplexobj(chunked.value.data)
+    np.testing.assert_array_equal(chunked.value.data, data[:, :, 0])
+    np.testing.assert_array_equal(chunked.value.semantic_data, data[:, :, 0])
+    np.testing.assert_allclose(chunked.value.histogram_data, np.log10(np.abs(data[:, :, 0])))
 
 
 def test_chunked_evaluation_stops_when_cancelled_before_next_chunk(monkeypatch):

@@ -11,10 +11,13 @@ from arrayscope.display.vispy_tiled_renderer import (
     _atlas_reserve_count,
     _fit_color,
     _fit_scalar,
+    _payload_mode,
     _payload_textures,
+    _quad_buffers,
     _resident_key,
     query_gpu_device_limits,
 )
+from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, TexturePlaneKind
 from arrayscope.window.display_frame import DisplayTilePayload
 
 
@@ -54,6 +57,26 @@ def color_payload(tile_number: int, value: int, *, window_scalar=True) -> Displa
         image=image,
         histogram_data=scalar,
         source_id=("color", tile_number, value, bool(window_scalar)),
+    )
+
+
+def complex_payload(tile_number: int) -> DisplayTilePayload:
+    data = np.array([[1 + 0j, 1j], [-1 + 0j, -1j]], dtype=np.complex64)
+    histogram = np.abs(data).astype(np.float32)
+    return DisplayTilePayload(
+        tile_number=tile_number,
+        source_index=tile_number,
+        image=data,
+        histogram_data=histogram,
+        source_id=("complex", tile_number),
+        texture_data=data,
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        semantic_data=data,
+        semantic_histogram_data=histogram,
+        shader_mapping=ShaderMapping(
+            component=ShaderComponent.ABS,
+            display_mode=ShaderDisplayMode.PHASE_COLOR,
+        ),
     )
 
 
@@ -100,6 +123,21 @@ def test_atlas_reserve_includes_pending_visible_tiles():
     )
 
     assert _atlas_reserve_count(geometry, minimum=1) == 5
+
+
+def test_complex_payload_quad_buffers_use_phase_color_shader_mode():
+    montage = SimpleNamespace(indices=(0,), tile_width=2, tile_height=2, columns=1, rows=1, gap=0)
+    payload = complex_payload(0)
+
+    _vertices, _texcoords, modes = _quad_buffers(
+        montage,
+        {0: payload},
+        {0: (0.0, 0.0, 1.0, 1.0)},
+        rgb_already_windowed=False,
+    )
+
+    assert _payload_mode(payload, rgb_already_windowed=False) == 4
+    np.testing.assert_array_equal(modes, np.full((6,), 4.0, dtype=np.float32))
 
 
 def test_atlas_reserve_avoids_progressive_reallocation():

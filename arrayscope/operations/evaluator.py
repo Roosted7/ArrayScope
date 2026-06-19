@@ -30,7 +30,7 @@ from arrayscope.core.cache_status import (
     CacheStatus,
 )
 from arrayscope.display.montage import RenderedTilePayload
-from arrayscope.display.slice_engine import make_image, make_image_from_slab, make_line, make_line_from_slab, make_scalar_from_slab
+from arrayscope.display.slice_engine import make_image, make_image_from_slab, make_shader_image_from_slab, make_line, make_line_from_slab, make_scalar_from_slab
 
 
 DEFAULT_IMAGE_CACHE_BYTES = 256 * 1024 * 1024
@@ -233,9 +233,9 @@ class OperationEvaluator:
             self.last_status = cache_status_error(exc)
             raise
 
-    def image_key(self, view_state, *, colormap_lut=None, document=None):
+    def image_key(self, view_state, *, colormap_lut=None, document=None, shader_display: bool = False):
         document = self.document if document is None else document
-        return ("image", _document_key(document), _request_key(request_for_image(view_state)), _lut_key(colormap_lut))
+        return ("image", _document_key(document), _request_key(request_for_image(view_state)), _lut_key(colormap_lut), bool(shader_display))
 
     def line_key(self, view_state, *, document=None):
         document = self.document if document is None else document
@@ -249,7 +249,7 @@ class OperationEvaluator:
         document = self.document if document is None else document
         return ("export_frame", _document_key(document), _request_key(request_for_export_frame(view_state, frame_axis, frame_index)), _lut_key(colormap_lut))
 
-    def montage_tile_key(self, tile_state, *, montage_axis, source_index, colormap_lut=None, document=None):
+    def montage_tile_key(self, tile_state, *, montage_axis, source_index, colormap_lut=None, document=None, shader_display: bool = False):
         document = self.document if document is None else document
         return (
             "montage_tile",
@@ -258,18 +258,19 @@ class OperationEvaluator:
             int(source_index),
             _request_key(request_for_image(tile_state)),
             _lut_key(colormap_lut),
+            bool(shader_display),
         )
 
-    def cached_image(self, view_state, colormap_lut=None):
-        cached = self._image_cache.get(self.image_key(view_state, colormap_lut=colormap_lut))
+    def cached_image(self, view_state, colormap_lut=None, *, shader_display: bool = False):
+        cached = self._image_cache.get(self.image_key(view_state, colormap_lut=colormap_lut, shader_display=shader_display))
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
             self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.CACHED, "Using cached image view")
         return cached
 
-    def cached_montage_tile(self, tile_state, *, montage_axis, source_index, colormap_lut=None):
+    def cached_montage_tile(self, tile_state, *, montage_axis, source_index, colormap_lut=None, shader_display: bool = False):
         cached = self._tile_cache.get(
-            self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut)
+            self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut, shader_display=shader_display)
         )
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
@@ -313,9 +314,9 @@ class OperationEvaluator:
     def cached_tile_region_silent(self, request):
         return self._region_cache.get(self.tile_region_key(request))
 
-    def cached_montage_tile_silent(self, tile_state, *, montage_axis, source_index, colormap_lut=None):
+    def cached_montage_tile_silent(self, tile_state, *, montage_axis, source_index, colormap_lut=None, shader_display: bool = False):
         return self._tile_cache.get(
-            self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut)
+            self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut, shader_display=shader_display)
         )
 
     def store_tile_region_result(self, request, result):
@@ -337,8 +338,8 @@ class OperationEvaluator:
             evaluation_context=evaluation_context,
         )
 
-    def store_image_result(self, view_state, colormap_lut, result: EvaluationResult):
-        key = self.image_key(view_state, colormap_lut=colormap_lut)
+    def store_image_result(self, view_state, colormap_lut, result: EvaluationResult, *, shader_display: bool = False):
+        key = self.image_key(view_state, colormap_lut=colormap_lut, shader_display=shader_display)
         self._image_cache.last_eval_ms = result.eval_ms
         self._image_result = result.value
         self.last_region_plan = result.region_plan
@@ -381,14 +382,18 @@ class OperationEvaluator:
         self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.READY, _request_message("Export frame cached", result))
         return result.value
 
-    def store_montage_tile_result(self, tile, *, montage_axis, colormap_lut, result: EvaluationResult):
-        key = self.montage_tile_key(tile.view_state, montage_axis=montage_axis, source_index=tile.source_index, colormap_lut=colormap_lut)
+    def store_montage_tile_result(self, tile, *, montage_axis, colormap_lut, result: EvaluationResult, shader_display: bool = False):
+        key = self.montage_tile_key(tile.view_state, montage_axis=montage_axis, source_index=tile.source_index, colormap_lut=colormap_lut, shader_display=shader_display)
         value = RenderedTilePayload(
             image=result.value.data,
             histogram_data=result.value.histogram_data,
             eval_ms=result.eval_ms,
             slab_shape=result.slab_shape,
             slab_nbytes=result.slab_nbytes,
+            shader_mapping=getattr(result.value, "shader_mapping", None),
+            texture_kind=getattr(result.value, "texture_kind", None),
+            semantic_data=getattr(result.value, "semantic_data", None),
+            lod=getattr(result.value, "lod", None),
         )
         self._tile_cache.last_eval_ms = result.eval_ms
         self.last_region_plan = result.region_plan
@@ -613,6 +618,7 @@ def evaluate_image_snapshot(
     cancellation_token=None,
     *,
     degraded=False,
+    shader_display: bool = False,
     stage_cache=None,
     stage_document_key=None,
     evaluation_context=None,
@@ -631,7 +637,8 @@ def evaluate_image_snapshot(
         evaluation_context=evaluation_context,
     )
     _check_cancelled(cancellation_token)
-    value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
+    maker = make_shader_image_from_slab if bool(shader_display) else make_image_from_slab
+    value = maker(slab, request, colormap_lut=colormap_lut)
     _check_cancelled(cancellation_token)
     return EvaluationResult(
         value=value,

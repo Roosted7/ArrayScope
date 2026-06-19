@@ -248,6 +248,15 @@ class ImageView2D(QtWidgets.QWidget):
             "tile_layer_warm_resident_items": 0,
             "tile_layer_evicted_near_items": 0,
             "tile_layer_capacity_warning": "",
+            "tile_layer_lod_level": 0,
+            "tile_layer_lod_factor": 1,
+            "tile_layer_source_texels_per_pixel": 0.0,
+            "tile_layer_gutter_pixels": 0,
+            "tile_layer_mipmap_updates": 0,
+            "tile_layer_mipmap_available": False,
+            "tile_layer_complex_texture_uploads": 0,
+            "tile_layer_shader_uniform_updates": 0,
+            "cpu_complex_prep_ms": 0.0,
         }
 
     def _record_upload_timing(self, field: str, ms: float) -> None:
@@ -298,6 +307,15 @@ class ImageView2D(QtWidgets.QWidget):
             tile_layer_warm_resident_items=int(timing["tile_layer_warm_resident_items"]),
             tile_layer_evicted_near_items=int(timing["tile_layer_evicted_near_items"]),
             tile_layer_capacity_warning=str(timing["tile_layer_capacity_warning"]),
+            tile_layer_lod_level=int(timing["tile_layer_lod_level"]),
+            tile_layer_lod_factor=int(timing["tile_layer_lod_factor"]),
+            tile_layer_source_texels_per_pixel=float(timing["tile_layer_source_texels_per_pixel"]),
+            tile_layer_gutter_pixels=int(timing["tile_layer_gutter_pixels"]),
+            tile_layer_mipmap_updates=int(timing["tile_layer_mipmap_updates"]),
+            tile_layer_mipmap_available=bool(timing["tile_layer_mipmap_available"]),
+            tile_layer_complex_texture_uploads=int(timing["tile_layer_complex_texture_uploads"]),
+            tile_layer_shader_uniform_updates=int(timing["tile_layer_shader_uniform_updates"]),
+            cpu_complex_prep_ms=float(timing["cpu_complex_prep_ms"]),
         )
         self._upload_timing = None
 
@@ -565,6 +583,14 @@ class ImageView2D(QtWidgets.QWidget):
         timing["tile_layer_warm_resident_items"] = int(stats.warm_resident_items)
         timing["tile_layer_evicted_near_items"] = int(stats.evicted_near_items)
         timing["tile_layer_capacity_warning"] = str(stats.capacity_warning)
+        timing["tile_layer_lod_level"] = int(stats.lod_level)
+        timing["tile_layer_lod_factor"] = int(stats.lod_factor)
+        timing["tile_layer_source_texels_per_pixel"] = float(stats.source_texels_per_pixel)
+        timing["tile_layer_gutter_pixels"] = int(stats.gutter_pixels)
+        timing["tile_layer_mipmap_updates"] = int(stats.mipmap_updates)
+        timing["tile_layer_mipmap_available"] = bool(stats.mipmap_available)
+        timing["tile_layer_complex_texture_uploads"] = int(stats.complex_texture_uploads)
+        timing["tile_layer_shader_uniform_updates"] = int(stats.shader_uniform_updates)
 
     def _tile_layer_histogram_key(self, histogramData, histogramPlotData, *, levels, histogramRange):
         source = histogramPlotData if histogramPlotData is not None else histogramData
@@ -588,7 +614,8 @@ class ImageView2D(QtWidgets.QWidget):
     def setImage(self, img, autoRange=None, autoLevels=True, levels=None, 
                  pos=None, scale=None, transform=None, autoHistogramRange=True,
                  histogramData=None, histogramPlotData=None, viewport_policy=ViewportPolicy.PRESERVE,
-                 rgb_already_windowed: bool = False, image_origin: tuple[float, float] = (0.0, 0.0)):
+                 rgb_already_windowed: bool = False, image_origin: tuple[float, float] = (0.0, 0.0),
+                 shader_mapping=None, texture_kind=None, semantic_data: np.ndarray | None = None, lod=None):
         """
         Set the image to be displayed.
         
@@ -611,6 +638,7 @@ class ImageView2D(QtWidgets.QWidget):
         autoHistogramRange : bool
             Whether to auto-scale the histogram range
         """
+        del shader_mapping, texture_kind, semantic_data, lod
         if not isinstance(img, np.ndarray):
             raise TypeError("Image must be a numpy array")
         viewport_policy = _coerce_viewport_policy(viewport_policy, autoRange)
@@ -693,6 +721,10 @@ class ImageView2D(QtWidgets.QWidget):
         viewport_policy=ViewportPolicy.PRESERVE,
         rgb_already_windowed: bool = False,
         image_origin: tuple[float, float] = (0.0, 0.0),
+        shader_mapping=None,
+        texture_kind=None,
+        semantic_data: np.ndarray | None = None,
+        lod=None,
     ) -> None:
         """Set fully decided image pixels, levels, and histogram range."""
         self.setImage(
@@ -705,6 +737,10 @@ class ImageView2D(QtWidgets.QWidget):
             viewport_policy=viewport_policy,
             rgb_already_windowed=rgb_already_windowed,
             image_origin=image_origin,
+            shader_mapping=shader_mapping,
+            texture_kind=texture_kind,
+            semantic_data=semantic_data,
+            lod=lod,
         )
         self.setHistogramDataBounds(histogramRange)
         self.setHistogramRange(histogramRange[0], histogramRange[1])
@@ -719,6 +755,10 @@ class ImageView2D(QtWidgets.QWidget):
         histogramRange: tuple[float, float],
         rgb_already_windowed: bool = False,
         image_origin: tuple[float, float] = (0.0, 0.0),
+        shader_mapping=None,
+        texture_kind=None,
+        semantic_data: np.ndarray | None = None,
+        lod=None,
     ) -> None:
         """Fast same-shape update with explicit presentation state."""
         self.updateImageDataFast(
@@ -729,6 +769,10 @@ class ImageView2D(QtWidgets.QWidget):
             histogramRange=histogramRange,
             rgb_already_windowed=rgb_already_windowed,
             image_origin=image_origin,
+            shader_mapping=shader_mapping,
+            texture_kind=texture_kind,
+            semantic_data=semantic_data,
+            lod=lod,
         )
 
     def updateImageDataFast(
@@ -741,8 +785,13 @@ class ImageView2D(QtWidgets.QWidget):
         histogramRange: tuple[float, float] | None = None,
         rgb_already_windowed: bool = False,
         image_origin: tuple[float, float] = (0.0, 0.0),
+        shader_mapping=None,
+        texture_kind=None,
+        semantic_data: np.ndarray | None = None,
+        lod=None,
     ) -> None:
         """Replace same-shape pixel data without recomputing levels or viewport."""
+        del shader_mapping, texture_kind, semantic_data, lod
         if not isinstance(img, np.ndarray):
             raise TypeError("Image must be a numpy array")
         if self.image is None:

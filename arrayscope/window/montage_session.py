@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
 
 import numpy as np
 
+from arrayscope.display.lod import LodInfo, apply_tile_gutter, build_tile_lod_pyramid, select_lod_factor
 from arrayscope.display.montage import (
     MontagePlan,
     MontageTile,
@@ -15,6 +16,7 @@ from arrayscope.display.montage import (
     RenderedTile,
     patch_rendered_tile_into_canvas,
 )
+from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
@@ -80,6 +82,7 @@ class MontageRenderSession:
     level_revision: int = 0
     histogram_revision: int = 0
     viewport_revision: int = 0
+    tile_lod_factor: int = 1
     _last_active_tiles: tuple[int, ...] = ()
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
@@ -113,27 +116,150 @@ class MontageRenderSession:
         for stale in tuple(self.display_tile_payloads):
             if int(stale) not in loaded:
                 self.display_tile_payloads.pop(int(stale), None)
+        lod_factor = self._selected_lod_factor()
         for tile_number, rendered in self.rendered_tiles.items():
             tile_number = int(tile_number)
-            source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
-            image = np.asarray(rendered.image)
-            histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
+            base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
+            mapping = getattr(rendered, "shader_mapping", None)
+            texture_kind = getattr(rendered, "texture_kind", None)
+            exact_image = np.asarray(rendered.image)
+            exact_histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
+            semantic = getattr(rendered, "semantic_data", None)
+            semantic = exact_image if semantic is None else np.asarray(semantic)
+            lod = self._planned_lod_info(rendered, factor=lod_factor)
+            source_id = self._payload_source_id(base_source_id, texture_kind=texture_kind, mapping=mapping, lod=lod)
             previous = self.display_tile_payloads.get(tile_number)
             if (
                 previous is not None
                 and previous.source_id == source_id
-                and previous.image is image
-                and previous.histogram_data is histogram
+                and previous.image is exact_image
+                and previous.histogram_data is exact_histogram
             ):
                 continue
+            texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
+            del texture_histogram
             self.display_tile_payloads[tile_number] = DisplayTilePayload(
                 tile_number=tile_number,
                 source_index=int(rendered.tile.source_index),
-                image=image,
-                histogram_data=histogram,
+                image=exact_image,
+                histogram_data=exact_histogram,
                 source_id=source_id,
+                texture_data=texture_data,
+                texture_kind=texture_kind,
+                semantic_data=semantic,
+                semantic_histogram_data=exact_histogram,
+                source_shape=tuple(int(value) for value in exact_image.shape[:2]),
+                lod=lod,
+                shader_mapping=mapping,
             )
         return dict(self.display_tile_payloads)
+
+    def seed_display_tile_payloads(self, previous_payloads: dict[int, DisplayTilePayload], source_ids: dict[int, object]) -> None:
+        """Reuse materialized payload wrappers from a previous compatible tiled frame."""
+
+        if not previous_payloads or not self.rendered_tiles:
+            return
+        lod_factor = self._selected_lod_factor()
+        by_source = {payload.source_id: payload for payload in dict(previous_payloads).values()}
+        for tile_number, rendered in self.rendered_tiles.items():
+            tile_number = int(tile_number)
+            if tile_number in self.display_tile_payloads:
+                continue
+            base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
+            lod = self._planned_lod_info(rendered, factor=lod_factor)
+            source_id = self._payload_source_id(
+                base_source_id,
+                texture_kind=getattr(rendered, "texture_kind", None),
+                mapping=getattr(rendered, "shader_mapping", None),
+                lod=lod,
+            )
+            previous = by_source.get(source_id)
+            if previous is None:
+                continue
+            if int(previous.tile_number) == tile_number and int(previous.source_index) == int(rendered.tile.source_index):
+                self.display_tile_payloads[tile_number] = previous
+            else:
+                self.display_tile_payloads[tile_number] = replace(
+                    previous,
+                    tile_number=tile_number,
+                    source_index=int(rendered.tile.source_index),
+                )
+
+    def _payload_source_id(self, base_source_id, *, texture_kind, mapping, lod: LodInfo) -> tuple[object, ...]:
+        mapping_key = None if mapping is None else mapping.identity_key
+        return (
+            base_source_id,
+            "texture_kind",
+            None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
+            "shader",
+            mapping_key,
+            "lod",
+            int(lod.factor),
+            int(lod.level),
+            int(lod.gutter),
+        )
+
+    def _selected_lod_factor(self) -> int:
+        factor = select_lod_factor(
+            self.view_range,
+            self.viewport_shape,
+            self.plan.tile_shape,
+        )
+        self.tile_lod_factor = int(factor)
+        return int(factor)
+
+    def _planned_lod_info(self, rendered: RenderedTile, *, factor: int) -> LodInfo:
+        texture_kind = getattr(rendered, "texture_kind", None)
+        if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
+            texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
+        if texture_kind == TexturePlaneKind.COMPLEX_RG32F and getattr(rendered, "semantic_data", None) is not None:
+            source = np.asarray(rendered.semantic_data)
+        else:
+            source = np.asarray(rendered.image)
+        source_shape = tuple(int(value) for value in source.shape[:2])
+        if factor <= 1 or texture_kind == TexturePlaneKind.RGB8:
+            return LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
+        level = int(np.log2(max(1, int(factor))))
+        factor = 2**level
+        reduced_shape = (
+            max(1, int(np.ceil(source_shape[0] / factor))),
+            max(1, int(np.ceil(source_shape[1] / factor))),
+        )
+        texture_shape = (reduced_shape[0] + 2, reduced_shape[1] + 2)
+        return LodInfo(level=level, factor=factor, source_shape=source_shape, texture_shape=texture_shape, gutter=1)
+
+    def _texture_for_rendered_tile(self, rendered: RenderedTile, *, factor: int | None = None) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
+        if factor is None:
+            factor = self._selected_lod_factor()
+        texture_kind = getattr(rendered, "texture_kind", None)
+        if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
+            texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
+        if texture_kind == TexturePlaneKind.COMPLEX_RG32F and getattr(rendered, "semantic_data", None) is not None:
+            source = np.asarray(rendered.semantic_data)
+        else:
+            source = np.asarray(rendered.image)
+        histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
+        source_shape = tuple(int(value) for value in source.shape[:2])
+        if factor <= 1 or texture_kind == TexturePlaneKind.RGB8:
+            lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
+            return source, histogram, lod
+        pyramid = build_tile_lod_pyramid(source, max_level=int(np.log2(max(1, factor))))
+        level = min(len(pyramid) - 1, int(np.log2(max(1, factor))))
+        reduced = pyramid[level]
+        reduced_histogram = None
+        if histogram is not None:
+            hist_pyramid = build_tile_lod_pyramid(histogram, max_level=level)
+            reduced_histogram = hist_pyramid[min(level, len(hist_pyramid) - 1)]
+        guttered = apply_tile_gutter(reduced, gutter=1)
+        guttered_histogram = None if reduced_histogram is None else apply_tile_gutter(reduced_histogram, gutter=1)
+        lod = LodInfo(
+            level=level,
+            factor=2**level,
+            source_shape=source_shape,
+            texture_shape=tuple(int(value) for value in guttered.shape[:2]),
+            gutter=1,
+        )
+        return guttered, guttered_histogram, lod
 
     def build_tile_presentation(
         self,
