@@ -51,3 +51,28 @@ def test_gutter_duplicates_edge_texels_exactly():
 
 def test_inner_uv_for_gutter_excludes_border_pixels():
     assert inner_uv_for_gutter((4, 6), gutter=1) == (1 / 6, 1 / 4, 5 / 6, 3 / 4)
+
+
+def test_lod_selection_hysteresis_avoids_boundary_flapping():
+    previous = select_lod_factor(
+        ((0.0, 256.0), (0.0, 256.0)),
+        (128, 128),
+        (64, 64),
+        previous_factor=1,
+    )
+    stable = select_lod_factor(
+        ((0.0, 260.0), (0.0, 260.0)),
+        (128, 128),
+        (64, 64),
+        previous_factor=previous,
+    )
+    promoted = select_lod_factor(
+        ((0.0, 320.0), (0.0, 320.0)),
+        (128, 128),
+        (64, 64),
+        previous_factor=previous,
+    )
+
+    assert previous == 1
+    assert stable == 1
+    assert promoted == 2

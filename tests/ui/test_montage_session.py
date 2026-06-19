@@ -180,10 +180,10 @@ def test_lod_payload_does_not_reduce_display_ready_rgb_phase_tiles():
     assert payload.source_shape == (8, 8)
 
 
-def test_lod_payload_reduces_scalar_texture_and_histogram_together():
+def _zoomed_out_session(*, dtype=np.float32, rgb=False):
     state = ViewState.from_shape((8, 8, 1)).with_montage_axis(2, indices=(0,), text=":")
     plan = make_montage_plan(state, axis=2, indices=(0,), tile_shape=(8, 8), columns=1)
-    session = MontageRenderSession(
+    return MontageRenderSession(
         session_id=1,
         key="key",
         render_generation=1,
@@ -195,8 +195,8 @@ def test_lod_payload_reduces_scalar_texture_and_histogram_together():
         colormap_lut=None,
         viewport_shape=(2, 2),
         view_range=((0.0, 64.0), (0.0, 64.0)),
-        output_dtype=np.dtype(np.float32),
-        rgb=False,
+        output_dtype=np.dtype(dtype),
+        rgb=rgb,
         window_mode=None,
         force_auto=False,
         visible_tiles=plan.tiles,
@@ -205,10 +205,14 @@ def test_lod_payload_reduces_scalar_texture_and_histogram_together():
         skipped_tiles=set(),
         pending_tiles=[],
     )
+
+
+def test_zoomed_out_scalar_payload_keeps_exact_texture_on_ui_commit_path():
+    session = _zoomed_out_session()
     image = np.arange(8 * 8, dtype=np.float32).reshape(8, 8)
     histogram = image + 100.0
     rendered = RenderedTile(
-        plan.tiles[0],
+        session.plan.tiles[0],
         image,
         histogram,
         0.0,
@@ -221,42 +225,20 @@ def test_lod_payload_reduces_scalar_texture_and_histogram_together():
 
     payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
 
-    assert payload.lod.factor > 1
-    assert payload.image.shape[:2] == (8, 8)
-    assert payload.histogram_data.shape[:2] == (8, 8)
-    assert payload.texture_data.shape[:2] != payload.image.shape[:2]
+    assert session.desired_tile_lod_factor > 1
+    assert session.tile_lod_factor == 1
+    assert payload.lod.factor == 1
+    assert payload.texture_data is image
+    assert payload.texture_data.shape[:2] == payload.image.shape[:2]
     assert payload.semantic_data.shape[:2] == (8, 8)
     assert payload.semantic_histogram_data.shape[:2] == (8, 8)
 
 
-def test_lod_payload_reuses_clean_wrapper_without_rebuilding_pyramid(monkeypatch):
-    state = ViewState.from_shape((8, 8, 1)).with_montage_axis(2, indices=(0,), text=":")
-    plan = make_montage_plan(state, axis=2, indices=(0,), tile_shape=(8, 8), columns=1)
-    session = MontageRenderSession(
-        session_id=1,
-        key="key",
-        render_generation=1,
-        level_key="levels",
-        plan=plan,
-        view_state=state,
-        document=None,
-        montage_axis=2,
-        colormap_lut=None,
-        viewport_shape=(2, 2),
-        view_range=((0.0, 64.0), (0.0, 64.0)),
-        output_dtype=np.dtype(np.float32),
-        rgb=False,
-        window_mode=None,
-        force_auto=False,
-        visible_tiles=plan.tiles,
-        rendered_tiles={},
-        loading_tiles=set(),
-        skipped_tiles=set(),
-        pending_tiles=[],
-    )
+def test_zoomed_out_payload_reuses_clean_wrapper_without_cpu_lod_work():
+    session = _zoomed_out_session()
     image = np.arange(8 * 8, dtype=np.float32).reshape(8, 8)
     rendered = RenderedTile(
-        plan.tiles[0],
+        session.plan.tiles[0],
         image,
         image,
         0.0,
@@ -266,48 +248,18 @@ def test_lod_payload_reuses_clean_wrapper_without_rebuilding_pyramid(monkeypatch
         semantic_data=image,
     )
     session.mark_loaded(rendered)
+
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
-
-    def fail_rebuild(*_args, **_kwargs):
-        raise AssertionError("clean LOD payload rebuilt pyramid")
-
-    monkeypatch.setattr("arrayscope.window.montage_session.build_tile_lod_pyramid", fail_rebuild)
     second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
 
     assert second is first
 
 
-def test_lod_payload_seeds_from_previous_session_without_rebuilding_pyramid(monkeypatch):
-    state = ViewState.from_shape((8, 8, 1)).with_montage_axis(2, indices=(0,), text=":")
-    plan = make_montage_plan(state, axis=2, indices=(0,), tile_shape=(8, 8), columns=1)
-
-    def new_session():
-        return MontageRenderSession(
-            session_id=1,
-            key="key",
-            render_generation=1,
-            level_key="levels",
-            plan=plan,
-            view_state=state,
-            document=None,
-            montage_axis=2,
-            colormap_lut=None,
-            viewport_shape=(2, 2),
-            view_range=((0.0, 64.0), (0.0, 64.0)),
-            output_dtype=np.dtype(np.float32),
-            rgb=False,
-            window_mode=None,
-            force_auto=False,
-            visible_tiles=plan.tiles,
-            rendered_tiles={},
-            loading_tiles=set(),
-            skipped_tiles=set(),
-            pending_tiles=[],
-        )
-
+def test_exact_payload_seeds_from_previous_session_without_materialization():
+    first_session = _zoomed_out_session()
     image = np.arange(8 * 8, dtype=np.float32).reshape(8, 8)
     rendered = RenderedTile(
-        plan.tiles[0],
+        first_session.plan.tiles[0],
         image,
         image,
         0.0,
@@ -316,54 +268,25 @@ def test_lod_payload_seeds_from_previous_session_without_rebuilding_pyramid(monk
         texture_kind=TexturePlaneKind.SCALAR_R32F,
         semantic_data=image,
     )
-    first_session = new_session()
     first_session.mark_loaded(rendered)
     source_ids = {0: ("tile", 0)}
     first = first_session.snapshot_display_tile_payloads(source_ids)[0]
 
-    second_session = new_session()
+    second_session = _zoomed_out_session()
     second_session.mark_loaded(rendered)
     second_session.seed_display_tile_payloads({0: first}, source_ids)
-
-    def fail_rebuild(*_args, **_kwargs):
-        raise AssertionError("seeded LOD payload rebuilt pyramid")
-
-    monkeypatch.setattr("arrayscope.window.montage_session.build_tile_lod_pyramid", fail_rebuild)
     second = second_session.snapshot_display_tile_payloads(source_ids)[0]
 
     assert second is first
 
 
-def test_lod_payload_reduces_raw_complex_texture_and_preserves_exact_semantics():
-    state = ViewState.from_shape((8, 8, 1)).with_montage_axis(2, indices=(0,), text=":")
-    plan = make_montage_plan(state, axis=2, indices=(0,), tile_shape=(8, 8), columns=1)
-    session = MontageRenderSession(
-        session_id=1,
-        key="key",
-        render_generation=1,
-        level_key="levels",
-        plan=plan,
-        view_state=state,
-        document=None,
-        montage_axis=2,
-        colormap_lut=None,
-        viewport_shape=(2, 2),
-        view_range=((0.0, 64.0), (0.0, 64.0)),
-        output_dtype=np.dtype(np.complex64),
-        rgb=True,
-        window_mode=None,
-        force_auto=False,
-        visible_tiles=plan.tiles,
-        rendered_tiles={},
-        loading_tiles=set(),
-        skipped_tiles=set(),
-        pending_tiles=[],
-    )
+def test_zoomed_out_complex_payload_keeps_exact_semantics_and_texture():
+    session = _zoomed_out_session(dtype=np.complex64, rgb=True)
     real = np.arange(8 * 8, dtype=np.float32).reshape(8, 8)
     source = (real + 1j * (real + 100.0)).astype(np.complex64)
     histogram = np.log10(np.abs(source)).astype(np.float32)
     rendered = RenderedTile(
-        plan.tiles[0],
+        session.plan.tiles[0],
         source,
         histogram,
         0.0,
@@ -381,10 +304,49 @@ def test_lod_payload_reduces_raw_complex_texture_and_preserves_exact_semantics()
 
     payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
 
+    assert session.desired_tile_lod_factor > 1
     assert payload.texture_kind == TexturePlaneKind.COMPLEX_RG32F
-    assert payload.lod.factor > 1
+    assert payload.lod.factor == 1
     assert np.iscomplexobj(payload.texture_data)
-    assert payload.texture_data.shape[:2] != payload.image.shape[:2]
+    assert payload.texture_data.shape[:2] == payload.image.shape[:2]
     np.testing.assert_array_equal(payload.semantic_data, source)
     np.testing.assert_array_equal(payload.semantic_histogram_data, histogram)
     assert payload.source_shape == (8, 8)
+
+
+def test_shader_mapping_change_reuses_texture_content_identity():
+    session = _zoomed_out_session(dtype=np.complex64, rgb=True)
+    source = np.ones((8, 8), dtype=np.complex64)
+    histogram = np.ones((8, 8), dtype=np.float32)
+    first_mapping = ShaderMapping(
+        component=ShaderComponent.ABS,
+        scale=ShaderScale.LINEAR,
+        display_mode=ShaderDisplayMode.PHASE_COLOR,
+    )
+    second_mapping = ShaderMapping(
+        component=ShaderComponent.ABS,
+        scale=ShaderScale.LOG,
+        display_mode=ShaderDisplayMode.PHASE_COLOR,
+    )
+    first_rendered = RenderedTile(
+        session.plan.tiles[0], source, histogram, 0.0, source.shape, source.nbytes,
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        semantic_data=source,
+        shader_mapping=first_mapping,
+    )
+    session.mark_loaded(first_rendered)
+    first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+
+    second_rendered = RenderedTile(
+        session.plan.tiles[0], source, histogram, 0.0, source.shape, source.nbytes,
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        semantic_data=source,
+        shader_mapping=second_mapping,
+    )
+    session.mark_loaded(second_rendered)
+    second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+
+    assert second is not first
+    assert second.source_id == first.source_id
+    assert second.texture_data is first.texture_data
+    assert second.shader_mapping == second_mapping

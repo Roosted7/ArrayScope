@@ -30,6 +30,8 @@ def select_lod_factor(
     tile_shape: tuple[int, int],
     target_min: float = 1.0,
     target_max: float = 2.0,
+    previous_factor: int | None = None,
+    hysteresis: float = 0.15,
 ) -> int:
     """Choose a power-of-two source decimation factor for the current view."""
 
@@ -49,7 +51,20 @@ def select_lod_factor(
     factor = 1
     while texels_per_pixel / (factor * 2) >= float(target_min):
         factor *= 2
-    return max(1, int(factor))
+    factor = max(1, int(factor))
+    if previous_factor is None:
+        return factor
+    previous = max(1, int(previous_factor))
+    hysteresis = max(0.0, min(0.45, float(hysteresis)))
+    if factor > previous:
+        promote_at = 2.0 * previous * float(target_min) * (1.0 + hysteresis)
+        if texels_per_pixel < promote_at:
+            return previous
+    elif factor < previous:
+        demote_below = previous * float(target_min) * (1.0 - hysteresis)
+        if texels_per_pixel >= demote_below:
+            return previous
+    return factor
 
 
 def build_tile_lod_pyramid(data, *, max_level: int | None = None) -> tuple[np.ndarray, ...]:
