@@ -161,7 +161,7 @@ class DisplayFrameKey:
 
 @dataclass(frozen=True)
 class CommittedDisplayFrame:
-    data: np.ndarray
+    data: np.ndarray | None
     histogram_data: np.ndarray | None
     geometry: DisplayGeometry
     levels: tuple[float, float]
@@ -171,6 +171,8 @@ class CommittedDisplayFrame:
 
     def __post_init__(self) -> None:
         if self.value_source is None:
+            if self.data is None:
+                raise ValueError("a committed raster frame requires display data")
             object.__setattr__(
                 self,
                 "value_source",
@@ -180,3 +182,9 @@ class CommittedDisplayFrame:
                     geometry=self.geometry,
                 ),
             )
+        elif self.data is None and not isinstance(self.value_source, TiledValueSource):
+            raise ValueError("data-less committed frames require a tiled value source")
+
+    @property
+    def is_tiled(self) -> bool:
+        return isinstance(self.value_source, TiledValueSource)

@@ -64,7 +64,7 @@ def test_tile_region_provider_uses_committed_direct_tile_payload_before_canvas_p
     image = np.arange(6, dtype=float).reshape(2, 3) + 100.0
     histogram = image * 2.0
     frame = CommittedDisplayFrame(
-        data=placeholder,
+        data=None,
         histogram_data=None,
         geometry=geometry,
         levels=(0.0, 200.0),
