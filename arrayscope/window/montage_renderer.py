@@ -1087,10 +1087,20 @@ class MontageRenderMixin:
         return True
 
     def _montage_tile_source_ids(self, session) -> dict[int, object]:
-        source_ids = {}
+        source_ids = getattr(session, "tile_source_ids", None)
+        if source_ids is None:
+            source_ids = {}
+            session.tile_source_ids = source_ids
+        loaded = {int(tile_number) for tile_number in getattr(session, "rendered_tiles", {})}
+        for stale in tuple(source_ids):
+            if int(stale) not in loaded:
+                source_ids.pop(int(stale), None)
         for tile_number, rendered in getattr(session, "rendered_tiles", {}).items():
+            tile_number = int(tile_number)
+            if tile_number in source_ids:
+                continue
             try:
-                source_ids[int(tile_number)] = self.operation_evaluator.montage_tile_key(
+                source_ids[tile_number] = self.operation_evaluator.montage_tile_key(
                     rendered.tile.view_state,
                     montage_axis=session.montage_axis,
                     source_index=rendered.tile.source_index,
@@ -1100,7 +1110,7 @@ class MontageRenderMixin:
             except Exception:
                 image = getattr(rendered, "image", None)
                 histogram = getattr(rendered, "histogram_data", None)
-                source_ids[int(tile_number)] = (
+                source_ids[tile_number] = (
                     id(image),
                     tuple(np.shape(image)),
                     None if image is None else str(np.asarray(image).dtype),
@@ -1108,7 +1118,7 @@ class MontageRenderMixin:
                     None if histogram is None else tuple(np.shape(histogram)),
                     None if histogram is None else str(np.asarray(histogram).dtype),
                 )
-        return source_ids
+        return dict(source_ids)
 
     def _should_autolevel_progressive_montage(self, session, stats: MontageLevelStats, *, complete: bool) -> bool:
         # Automatic montage levels are semantic and monotonic: when new tiles for
@@ -1306,6 +1316,9 @@ def _montage_tile_layer_placeholder(session) -> np.ndarray:
 
 
 def _display_tile_payloads_for_session(session, source_ids: dict[int, object]) -> dict[int, DisplayTilePayload]:
+    snapshot = getattr(session, "snapshot_display_tile_payloads", None)
+    if callable(snapshot):
+        return snapshot(source_ids)
     payloads: dict[int, DisplayTilePayload] = {}
     for tile_number, rendered in getattr(session, "rendered_tiles", {}).items():
         tile_number = int(tile_number)
