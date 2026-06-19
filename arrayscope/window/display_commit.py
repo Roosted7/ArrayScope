@@ -4,88 +4,39 @@ from __future__ import annotations
 
 import numpy as np
 
+from arrayscope.display.backends import RasterCommitMode, backend_adapter_for_view
 from arrayscope.window.display_frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
 from arrayscope.window.render_model import DisplayPresentation, DisplayRasterPresentation, DisplayTiledPresentation
 
 
 class DisplayCommitter:
     def __init__(self, image_view):
-        self.image_view = image_view
+        self.backend = backend_adapter_for_view(image_view)
+        self.image_view = self.backend.view
 
     def commit_full(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         presentation = self._require_raster(presentation, "full")
         self._validate_presentation(presentation)
-        self.image_view.setImagePresentation(
-            presentation.data,
-            histogramData=presentation.histogram_data,
-            histogramPlotData=presentation.histogram_plot_data,
-            levels=presentation.levels,
-            histogramRange=presentation.histogram_range,
-            viewport_policy=presentation.viewport_policy,
-            rgb_already_windowed=presentation.rgb_already_windowed,
-            image_origin=_image_origin(presentation.geometry),
-            shader_mapping=getattr(presentation, "shader_mapping", None),
-            texture_kind=getattr(presentation, "texture_kind", None),
-            semantic_data=getattr(presentation, "semantic_data", None),
-            lod=getattr(presentation, "lod", None),
-        )
-        self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
+        self.backend.present_raster(presentation, mode=RasterCommitMode.FULL)
+        self.backend.set_profile_bounds(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)
 
     def commit_fast(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         presentation = self._require_raster(presentation, "fast")
         self._validate_presentation(presentation)
-        current = getattr(self.image_view, "image", None)
-        if current is None or tuple(np.shape(current)[:2]) != tuple(presentation.geometry.display_shape):
+        if self.backend.current_raster_shape() != tuple(presentation.geometry.display_shape):
             raise ValueError("fast display commit requires an existing image with the same display shape")
-        self.image_view.updateImagePresentationFast(
-            presentation.data,
-            histogramData=presentation.histogram_data,
-            histogramPlotData=presentation.histogram_plot_data,
-            levels=presentation.levels,
-            histogramRange=presentation.histogram_range,
-            rgb_already_windowed=presentation.rgb_already_windowed,
-            image_origin=_image_origin(presentation.geometry),
-            shader_mapping=getattr(presentation, "shader_mapping", None),
-            texture_kind=getattr(presentation, "texture_kind", None),
-            semantic_data=getattr(presentation, "semantic_data", None),
-            lod=getattr(presentation, "lod", None),
-        )
-        self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
+        self.backend.present_raster(presentation, mode=RasterCommitMode.FAST)
+        self.backend.set_profile_bounds(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)
 
     def commit_tile_layer(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         self._validate_presentation(presentation)
         if isinstance(presentation, DisplayTiledPresentation):
-            commit = getattr(self.image_view, "setTiledMontagePresentation", None)
-            if commit is None:
-                raise TypeError("image view does not implement first-class tiled presentation commits")
-            commit(
-                geometry=presentation.geometry,
-                tile_state=presentation.tile_state,
-                tile_delta=presentation.tile_delta,
-                histogramPlotData=presentation.histogram_plot_data,
-                levels=presentation.levels,
-                histogramRange=presentation.histogram_range,
-                viewport_policy=presentation.viewport_policy,
-                rgb_already_windowed=presentation.rgb_already_windowed,
-                tile_residency_budget_bytes=presentation.tile_residency_budget_bytes,
-            )
+            self.backend.present_tiled(presentation)
         else:
-            self.image_view.setMontageTileLayerPresentation(
-                presentation.data,
-                histogramData=presentation.histogram_data,
-                histogramPlotData=presentation.histogram_plot_data,
-                geometry=presentation.geometry,
-                levels=presentation.levels,
-                histogramRange=presentation.histogram_range,
-                viewport_policy=presentation.viewport_policy,
-                rgb_already_windowed=presentation.rgb_already_windowed,
-                montage_dirty_tiles=presentation.montage_dirty_tiles,
-                montage_tile_source_ids=presentation.montage_tile_source_ids,
-                montage_tile_payloads=None,
-            )
-        self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
+            self.backend.present_raster(presentation, mode=RasterCommitMode.TILE_LAYER)
+        self.backend.set_profile_bounds(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)
 
     def _frame_for(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
@@ -148,12 +99,6 @@ class DisplayCommitter:
             raise ValueError(f"{label} must be a pair of finite floats") from exc
         if not np.isfinite(low) or not np.isfinite(high) or high <= low:
             raise ValueError(f"{label} must be finite increasing bounds")
-
-
-def _image_origin(geometry) -> tuple[float, float]:
-    if getattr(geometry, "montage", None) is None:
-        return (0.0, 0.0)
-    return (float(getattr(geometry, "montage_origin_x", 0)), float(getattr(geometry, "montage_origin_y", 0)))
 
 
 def _geometry_bounds(geometry) -> tuple[float, float, float, float]:
