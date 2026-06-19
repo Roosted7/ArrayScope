@@ -495,6 +495,32 @@ def test_vispy_canvas_is_passive_for_pyqtgraph_interaction(qt_app):
         view.close()
 
 
+def test_vispy_widget_overlays_are_parented_above_gl_surface(qt_app):
+    from pyqtgraph.Qt import QtWidgets
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    class Hud(QtWidgets.QLabel):
+        def show_text_near(self, text, pos):
+            self.setText(str(text))
+            self.move(pos)
+            self.show()
+
+    view = VisPyImageView2D()
+    hud = Hud()
+    try:
+        view.setHudWidget(hud)
+        view.setEvaluationOverlay(True, "Rendering")
+        view.setRoiInfoText("Rectangle 1: n=4 mean=1")
+
+        assert hud.parentWidget() is view._display_container
+        assert view._evaluation_overlay.parentWidget() is view._display_container
+        assert view._roi_info_panel.parentWidget() is view._display_container
+        assert not view._evaluation_overlay.isHidden()
+        assert not view._roi_info_panel.isHidden()
+    finally:
+        view.close()
+
+
 def test_vispy_roi_visuals_mirror_pyqtgraph_rois(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
