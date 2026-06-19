@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import argparse
+import json
 import os
+from pathlib import Path
+import platform
+import sys
+import time
 from time import perf_counter
 
 import numpy as np
@@ -13,7 +19,7 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.montage import MontageTileState
-from arrayscope.window.display_frame import DisplayTilePayload
+from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,36 @@ class RenderingBenchmarkResult:
         """CPU time spent submitting the display update."""
 
         return float(self.elapsed_ms)
+
+
+@dataclass(frozen=True)
+class RenderingBenchmarkEnvironment:
+    os: str
+    platform: str
+    python: str
+    qt_api: str
+    qt_version: str
+    xdg_session_type: str
+    wayland_display: str
+    display: str
+    qt_qpa_platform: str
+    desktop_session: str
+    xdg_current_desktop: str
+    gpu_vendor: str = ""
+    gpu_renderer: str = ""
+    gpu_version: str = ""
+    gpu_max_texture_size: int = 0
+    gpu_max_texture_image_units: int = 0
+    gpu_limits_source: str = ""
+    gpu_limit_warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RenderingBenchmarkSample:
+    run: int
+    timestamp: float
+    environment: RenderingBenchmarkEnvironment
+    result: RenderingBenchmarkResult
 
 
 @dataclass(frozen=True)
@@ -324,17 +360,31 @@ def _benchmark_progressive_tile_stream_configured(
         for end in range(batch_size, len(payloads) + batch_size, batch_size):
             end = min(end, len(payloads))
             visible = {index: payloads[index] for index in range(end)}
-            visible_sources = {index: sources[index] for index in range(end)}
             dirty_start = max(0, end - batch_size)
+            upserts = visible if end == batch_size else {index: payloads[index] for index in range(dirty_start, end)}
+            state = TilePresentationState(visible)
+            delta = TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=end,
+                visibility_revision=end,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=1,
+                upserts=upserts,
+                active_tiles=tuple(range(end)),
+                planned_tiles=tuple(range(len(payloads))),
+                near_tiles=tuple(range(min(len(payloads), end + batch_size))),
+                force_refresh=end == batch_size,
+            )
             view.setTiledMontagePresentation(
                 geometry=geometry,
-                tile_payloads=visible,
+                tile_state=state,
+                tile_delta=delta,
                 histogramPlotData=None,
                 levels=(0.0, 1.0),
                 histogramRange=(0.0, 1.0),
                 rgb_already_windowed=False,
-                montage_dirty_tiles=None if end == batch_size else tuple(range(dirty_start, end)),
-                montage_tile_source_ids=visible_sources,
+                tile_residency_budget_bytes=512 * 1024 * 1024,
             )
             timings.append(view.lastImageUploadTiming())
             if end >= len(payloads):
@@ -446,6 +496,14 @@ def _sum_upload_timings(timings) -> ImageUploadTiming:
         tile_layer_level_updates=sum(int(timing.tile_layer_level_updates) for timing in timings),
         tile_layer_estimated_gpu_bytes=int(last.tile_layer_estimated_gpu_bytes),
         tile_layer_cpu_shadow_bytes=int(last.tile_layer_cpu_shadow_bytes),
+        tile_layer_page_count=int(last.tile_layer_page_count),
+        tile_layer_active_pages=int(last.tile_layer_active_pages),
+        tile_layer_device_max_texture_size=int(last.tile_layer_device_max_texture_size),
+        tile_layer_budget_bytes=int(last.tile_layer_budget_bytes),
+        tile_layer_near_resident_items=int(last.tile_layer_near_resident_items),
+        tile_layer_warm_resident_items=int(last.tile_layer_warm_resident_items),
+        tile_layer_evicted_near_items=sum(int(timing.tile_layer_evicted_near_items) for timing in timings),
+        tile_layer_capacity_warning=str(last.tile_layer_capacity_warning),
     )
 
 
@@ -649,6 +707,109 @@ def run_optional_stress_benchmark() -> tuple[RenderingBenchmarkResult, ...]:
     )
 
 
+def collect_benchmark_samples(
+    *,
+    runs: int = 1,
+    stress: bool = False,
+    measure_presented: bool | None = None,
+) -> tuple[RenderingBenchmarkSample, ...]:
+    samples = []
+    runs = max(1, int(runs))
+    for run in range(runs):
+        results = (
+            benchmark_large_progressive_montage(measure_presented=measure_presented)
+            if stress
+            else benchmark_rendering_backends(measure_presented=measure_presented)
+        )
+        environment = rendering_benchmark_environment(results)
+        timestamp = time.time()
+        samples.extend(
+            RenderingBenchmarkSample(
+                run=run,
+                timestamp=timestamp,
+                environment=environment,
+                result=result,
+            )
+            for result in results
+        )
+    return tuple(samples)
+
+
+def write_benchmark_jsonl(path, samples) -> None:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("a", encoding="utf-8") as handle:
+        for sample in samples:
+            handle.write(json.dumps(_sample_record(sample), sort_keys=True) + "\n")
+
+
+def rendering_benchmark_environment(results=()) -> RenderingBenchmarkEnvironment:
+    qt_api = ""
+    qt_version = ""
+    try:
+        from pyqtgraph.Qt import QT_LIB, QtCore
+
+        qt_api = str(QT_LIB)
+        qt_version = str(QtCore.QT_VERSION_STR)
+    except Exception:
+        pass
+    limits = _gpu_limits_from_results(results)
+    return RenderingBenchmarkEnvironment(
+        os=platform.system(),
+        platform=platform.platform(),
+        python=sys.version.split()[0],
+        qt_api=qt_api,
+        qt_version=qt_version,
+        xdg_session_type=os.environ.get("XDG_SESSION_TYPE", ""),
+        wayland_display=os.environ.get("WAYLAND_DISPLAY", ""),
+        display=os.environ.get("DISPLAY", ""),
+        qt_qpa_platform=os.environ.get("QT_QPA_PLATFORM", ""),
+        desktop_session=os.environ.get("DESKTOP_SESSION", ""),
+        xdg_current_desktop=os.environ.get("XDG_CURRENT_DESKTOP", ""),
+        gpu_vendor=str(getattr(limits, "vendor", "")),
+        gpu_renderer=str(getattr(limits, "renderer", "")),
+        gpu_version=str(getattr(limits, "version", "")),
+        gpu_max_texture_size=int(getattr(limits, "max_texture_size", 0) or 0),
+        gpu_max_texture_image_units=int(getattr(limits, "max_texture_image_units", 0) or 0),
+        gpu_limits_source=str(getattr(limits, "source", "")),
+        gpu_limit_warnings=tuple(getattr(limits, "warnings", ()) or ()),
+    )
+
+
+def _gpu_limits_from_results(results):
+    try:
+        from arrayscope.display.vispy_tiled_renderer import query_gpu_device_limits
+        from vispy import gloo
+
+        limits = query_gpu_device_limits(gloo)
+        if str(getattr(limits, "source", "")) != "fallback":
+            return limits
+    except Exception:
+        pass
+    for result in tuple(results or ()):
+        timing = getattr(result, "timing", None)
+        if timing is not None and int(getattr(timing, "tile_layer_device_max_texture_size", 0) or 0):
+            from arrayscope.display.vispy_tiled_renderer import GpuDeviceLimits
+
+            return GpuDeviceLimits(max_texture_size=int(timing.tile_layer_device_max_texture_size), source="benchmark_timing")
+    try:
+        from arrayscope.display.vispy_tiled_renderer import query_gpu_device_limits
+        from vispy import gloo
+
+        return query_gpu_device_limits(gloo)
+    except Exception:
+        from arrayscope.display.vispy_tiled_renderer import GpuDeviceLimits
+
+        return GpuDeviceLimits()
+
+
+def _sample_record(sample: RenderingBenchmarkSample) -> dict:
+    record = asdict(sample)
+    timing = record["result"]["timing"]
+    record["result"]["timing"] = timing
+    return record
+
+
 def _positive_env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -666,14 +827,26 @@ def _format_optional_ms(value: float | None) -> str:
     return "n/a" if value is None else f"{float(value):.3f}ms"
 
 
-def main() -> None:
+def main(argv: tuple[str, ...] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runs", type=int, default=1)
+    parser.add_argument("--jsonl", type=str, default="")
+    parser.add_argument("--stress", action="store_true")
+    parser.add_argument("--presented", action="store_true")
+    args = parser.parse_args(argv)
+
     from arrayscope.app.qt_binding import prefer_pyside6
 
     prefer_pyside6()
     import pyqtgraph as pg
 
     pg.mkQApp()
-    results = run_optional_stress_benchmark() or benchmark_rendering_backends()
+    stress = bool(args.stress or os.environ.get("ARRAYSCOPE_RUN_STRESS") == "1")
+    presented = bool(args.presented or os.environ.get("ARRAYSCOPE_BENCH_PRESENTED") == "1")
+    samples = collect_benchmark_samples(runs=args.runs, stress=stress, measure_presented=presented)
+    if args.jsonl:
+        write_benchmark_jsonl(args.jsonl, samples)
+    results = tuple(sample.result for sample in samples)
     for result in results:
         timing = result.timing
         print(

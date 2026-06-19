@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 
@@ -93,3 +95,20 @@ def test_progressive_tile_stream_reports_aggregate_work(qt_app):
     assert timing.tile_layer_storage_rebuilds == 1
     assert timing.tile_layer_resident_items == 96
     assert timing.tile_layer_texture_uploads > 0
+
+
+def test_benchmark_jsonl_writer_emits_mergeable_sample_records(qt_app, tmp_path):
+    from arrayscope.display.rendering_benchmarks import collect_benchmark_samples, write_benchmark_jsonl
+
+    samples = collect_benchmark_samples(runs=1, stress=False, measure_presented=False)
+    path = tmp_path / "rendering.jsonl"
+
+    write_benchmark_jsonl(path, samples[:1])
+
+    record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert record["run"] == 0
+    assert record["environment"]["os"]
+    assert "xdg_session_type" in record["environment"]
+    assert "gpu_max_texture_size" in record["environment"]
+    assert record["result"]["name"]
+    assert record["result"]["timing"]["mode"]

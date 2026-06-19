@@ -42,6 +42,14 @@ class ImageUploadTiming:
     tile_layer_level_updates: int = 0
     tile_layer_estimated_gpu_bytes: int = 0
     tile_layer_cpu_shadow_bytes: int = 0
+    tile_layer_page_count: int = 0
+    tile_layer_active_pages: int = 0
+    tile_layer_device_max_texture_size: int = 0
+    tile_layer_budget_bytes: int = 0
+    tile_layer_near_resident_items: int = 0
+    tile_layer_warm_resident_items: int = 0
+    tile_layer_evicted_near_items: int = 0
+    tile_layer_capacity_warning: str = ""
 
 
 @dataclass(frozen=True)
@@ -152,6 +160,14 @@ class MontageTimingDiagnostics:
     tile_layer_level_updates: int = 0
     tile_layer_estimated_gpu_bytes: int = 0
     tile_layer_cpu_shadow_bytes: int = 0
+    tile_layer_page_count: int = 0
+    tile_layer_active_pages: int = 0
+    tile_layer_device_max_texture_size: int = 0
+    tile_layer_budget_bytes: int = 0
+    tile_layer_near_resident_items: int = 0
+    tile_layer_warm_resident_items: int = 0
+    tile_layer_evicted_near_items: int = 0
+    tile_layer_capacity_warning: str = ""
     coalesced_commits: int = 0
 
 
@@ -298,7 +314,9 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"rgb_tiles={snapshot.montage_timing.tile_layer_rgb_window_tiles}\n"
             f"  rgb={_ms_text(snapshot.montage_timing.last_tile_layer_rgb_window_ms)} "
             f"upload={_ms_text(snapshot.montage_timing.last_tile_layer_upload_ms)} "
-            f"gpu={format_bytes(snapshot.montage_timing.tile_layer_estimated_gpu_bytes)}"
+            f"gpu={format_bytes(snapshot.montage_timing.tile_layer_estimated_gpu_bytes)} "
+            f"pages={snapshot.montage_timing.tile_layer_active_pages}/"
+            f"{snapshot.montage_timing.tile_layer_page_count}"
         ),
         (
             "Upload: "
@@ -547,9 +565,16 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             "Tile layer storage: "
             f"rebuilds={snapshot.montage_timing.tile_layer_storage_rebuilds} "
             f"evictions={snapshot.montage_timing.tile_layer_storage_evictions} "
+            f"pages={snapshot.montage_timing.tile_layer_active_pages}/"
+            f"{snapshot.montage_timing.tile_layer_page_count} "
+            f"near={snapshot.montage_timing.tile_layer_near_resident_items} "
+            f"warm={snapshot.montage_timing.tile_layer_warm_resident_items} "
             f"gpu={format_bytes(snapshot.montage_timing.tile_layer_estimated_gpu_bytes)} "
+            f"budget={format_bytes(snapshot.montage_timing.tile_layer_budget_bytes)} "
+            f"max_texture={snapshot.montage_timing.tile_layer_device_max_texture_size or 'n/a'} "
             f"cpu_shadow={format_bytes(snapshot.montage_timing.tile_layer_cpu_shadow_bytes)}"
         ),
+        f"Tile layer warning: {snapshot.montage_timing.tile_layer_capacity_warning or 'n/a'}",
         (
             "Tile layer submissions: "
             f"textures={snapshot.montage_timing.tile_layer_texture_uploads} "

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -57,6 +58,76 @@ class DisplayTilePayload:
         if self.histogram_data is not None:
             total += int(np.asarray(self.histogram_data).nbytes)
         return total
+
+
+@dataclass(frozen=True)
+class TilePresentationDelta:
+    structure_revision: int
+    payload_revision: int
+    visibility_revision: int
+    level_revision: int
+    histogram_revision: int
+    viewport_revision: int
+    upserts: Mapping[int, DisplayTilePayload] = field(default_factory=dict)
+    removals: tuple[int, ...] = ()
+    active_tiles: tuple[int, ...] = ()
+    planned_tiles: tuple[int, ...] = ()
+    near_tiles: tuple[int, ...] = ()
+    near_tile_source_ids: Mapping[int, object] = field(default_factory=dict)
+    force_refresh: bool = False
+
+    def __post_init__(self) -> None:
+        upserts = {int(key): _coerce_tile_payload(value) for key, value in dict(self.upserts).items()}
+        for key, payload in upserts.items():
+            if int(payload.tile_number) != int(key):
+                raise ValueError("tile delta upsert key must match payload tile_number")
+        removals = _unique_int_tuple(self.removals, "removals")
+        if set(removals).intersection(upserts):
+            raise ValueError("tile delta cannot remove and upsert the same tile")
+        active = _unique_int_tuple(self.active_tiles, "active_tiles")
+        planned = _unique_int_tuple(self.planned_tiles, "planned_tiles")
+        near = _unique_int_tuple(self.near_tiles, "near_tiles")
+        near_sources = {int(key): value for key, value in dict(self.near_tile_source_ids or {}).items()}
+        object.__setattr__(self, "structure_revision", int(self.structure_revision))
+        object.__setattr__(self, "payload_revision", int(self.payload_revision))
+        object.__setattr__(self, "visibility_revision", int(self.visibility_revision))
+        object.__setattr__(self, "level_revision", int(self.level_revision))
+        object.__setattr__(self, "histogram_revision", int(self.histogram_revision))
+        object.__setattr__(self, "viewport_revision", int(self.viewport_revision))
+        object.__setattr__(self, "upserts", upserts)
+        object.__setattr__(self, "removals", removals)
+        object.__setattr__(self, "active_tiles", active)
+        object.__setattr__(self, "planned_tiles", planned)
+        object.__setattr__(self, "near_tiles", near)
+        object.__setattr__(self, "near_tile_source_ids", near_sources)
+        object.__setattr__(self, "force_refresh", bool(self.force_refresh))
+
+
+@dataclass(frozen=True)
+class TilePresentationState:
+    payloads: Mapping[int, DisplayTilePayload] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        typed = {int(key): _coerce_tile_payload(value) for key, value in dict(self.payloads).items()}
+        for key, payload in typed.items():
+            if int(payload.tile_number) != int(key):
+                raise ValueError("tile state payload key must match tile_number")
+        object.__setattr__(self, "payloads", typed)
+
+    def apply_delta(self, delta: TilePresentationDelta) -> "TilePresentationState":
+        if not isinstance(delta, TilePresentationDelta):
+            raise TypeError("tile presentation state requires a TilePresentationDelta")
+        payloads = dict(self.payloads)
+        for tile_number in delta.removals:
+            payloads.pop(int(tile_number), None)
+        payloads.update(delta.upserts)
+        return TilePresentationState(payloads)
+
+    def active_payloads(self, delta: TilePresentationDelta) -> dict[int, DisplayTilePayload]:
+        return {int(tile): self.payloads[int(tile)] for tile in delta.active_tiles if int(tile) in self.payloads}
+
+    def near_payloads(self, delta: TilePresentationDelta) -> dict[int, DisplayTilePayload]:
+        return {int(tile): self.payloads[int(tile)] for tile in delta.near_tiles if int(tile) in self.payloads}
 
 
 class FrameValueSource:
@@ -149,6 +220,13 @@ def _coerce_tile_payload(payload) -> DisplayTilePayload:
     if not isinstance(payload, DisplayTilePayload):
         raise TypeError("tiled display presentations require DisplayTilePayload values")
     return payload
+
+
+def _unique_int_tuple(values, label: str) -> tuple[int, ...]:
+    normalized = tuple(int(value) for value in tuple(values or ()))
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f"tile delta {label} must not contain duplicates")
+    return normalized
 
 
 @dataclass(frozen=True)

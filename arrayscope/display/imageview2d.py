@@ -43,7 +43,7 @@ from arrayscope.display.roi_items import (
 from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
 
 if TYPE_CHECKING:
-    from arrayscope.window.display_frame import DisplayTilePayload
+    from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
 class ImageView2D(QtWidgets.QWidget):
@@ -240,6 +240,14 @@ class ImageView2D(QtWidgets.QWidget):
             "tile_layer_level_updates": 0,
             "tile_layer_estimated_gpu_bytes": 0,
             "tile_layer_cpu_shadow_bytes": 0,
+            "tile_layer_page_count": 0,
+            "tile_layer_active_pages": 0,
+            "tile_layer_device_max_texture_size": 0,
+            "tile_layer_budget_bytes": 0,
+            "tile_layer_near_resident_items": 0,
+            "tile_layer_warm_resident_items": 0,
+            "tile_layer_evicted_near_items": 0,
+            "tile_layer_capacity_warning": "",
         }
 
     def _record_upload_timing(self, field: str, ms: float) -> None:
@@ -282,6 +290,14 @@ class ImageView2D(QtWidgets.QWidget):
             tile_layer_level_updates=int(timing["tile_layer_level_updates"]),
             tile_layer_estimated_gpu_bytes=int(timing["tile_layer_estimated_gpu_bytes"]),
             tile_layer_cpu_shadow_bytes=int(timing["tile_layer_cpu_shadow_bytes"]),
+            tile_layer_page_count=int(timing["tile_layer_page_count"]),
+            tile_layer_active_pages=int(timing["tile_layer_active_pages"]),
+            tile_layer_device_max_texture_size=int(timing["tile_layer_device_max_texture_size"]),
+            tile_layer_budget_bytes=int(timing["tile_layer_budget_bytes"]),
+            tile_layer_near_resident_items=int(timing["tile_layer_near_resident_items"]),
+            tile_layer_warm_resident_items=int(timing["tile_layer_warm_resident_items"]),
+            tile_layer_evicted_near_items=int(timing["tile_layer_evicted_near_items"]),
+            tile_layer_capacity_warning=str(timing["tile_layer_capacity_warning"]),
         )
         self._upload_timing = None
 
@@ -386,6 +402,35 @@ class ImageView2D(QtWidgets.QWidget):
     ) -> None:
         if geometry is None or getattr(geometry, "montage", None) is None:
             raise ValueError("tile-layer presentation requires montage geometry")
+        self._apply_tile_layer_presentation(
+            img,
+            histogramData=histogramData,
+            histogramPlotData=histogramPlotData,
+            geometry=geometry,
+            levels=levels,
+            histogramRange=histogramRange,
+            viewport_policy=viewport_policy,
+            rgb_already_windowed=rgb_already_windowed,
+            montage_dirty_tiles=montage_dirty_tiles,
+            montage_tile_source_ids=montage_tile_source_ids,
+            montage_tile_payloads=montage_tile_payloads,
+        )
+
+    def _apply_tile_layer_presentation(
+        self,
+        img: np.ndarray,
+        *,
+        histogramData: np.ndarray | None,
+        histogramPlotData: np.ndarray | None,
+        geometry,
+        levels: tuple[float, float],
+        histogramRange: tuple[float, float],
+        viewport_policy=ViewportPolicy.PRESERVE,
+        rgb_already_windowed: bool = False,
+        montage_dirty_tiles: tuple[int, ...] | None = None,
+        montage_tile_source_ids: dict[int, object] | None = None,
+        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
+    ) -> None:
         self._start_upload_timing("tile_layer")
         applying = self._applying_presentation
         self._applying_presentation = True
@@ -446,26 +491,27 @@ class ImageView2D(QtWidgets.QWidget):
         self,
         *,
         geometry,
-        tile_payloads: dict[int, "DisplayTilePayload"],
+        tile_state: "TilePresentationState",
+        tile_delta: "TilePresentationDelta",
         histogramPlotData: np.ndarray | None,
         levels: tuple[float, float],
         histogramRange: tuple[float, float],
         viewport_policy=ViewportPolicy.PRESERVE,
         rgb_already_windowed: bool = False,
-        montage_dirty_tiles: tuple[int, ...] | None = None,
-        montage_tile_source_ids: dict[int, object] | None = None,
+        tile_residency_budget_bytes: int = 0,
     ) -> None:
         """Commit a first-class tiled presentation through this backend.
 
-        The legacy tile-layer API still receives a broadcast placeholder
-        because parts of the shared widget shell use ``self.image.shape`` for
-        geometry.  The placeholder is created only at the backend boundary and
-        owns one pixel, so core presentation state no longer pretends that a
-        full montage raster exists.
+        A small placeholder remains inside the widget shell because shared
+        image-view bookkeeping still expects ``self.image.shape``.  Core
+        presentation state and renderer upload decisions use the typed tile
+        state and delta, not placeholder pixels.
         """
 
+        tile_payloads = tile_state.active_payloads(tile_delta)
+        dirty_tiles = None if tile_delta.force_refresh else ()
         placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
-        self.setMontageTileLayerPresentation(
+        self._apply_tile_layer_presentation(
             placeholder,
             histogramData=None,
             histogramPlotData=histogramPlotData,
@@ -474,8 +520,8 @@ class ImageView2D(QtWidgets.QWidget):
             histogramRange=histogramRange,
             viewport_policy=viewport_policy,
             rgb_already_windowed=rgb_already_windowed,
-            montage_dirty_tiles=montage_dirty_tiles,
-            montage_tile_source_ids=montage_tile_source_ids,
+            montage_dirty_tiles=dirty_tiles,
+            montage_tile_source_ids={key: payload.source_id for key, payload in tile_payloads.items()},
             montage_tile_payloads=tile_payloads,
         )
 
@@ -511,6 +557,14 @@ class ImageView2D(QtWidgets.QWidget):
         timing["tile_layer_level_updates"] = int(stats.level_updates)
         timing["tile_layer_estimated_gpu_bytes"] = int(stats.estimated_gpu_bytes)
         timing["tile_layer_cpu_shadow_bytes"] = int(stats.cpu_shadow_bytes)
+        timing["tile_layer_page_count"] = int(stats.page_count)
+        timing["tile_layer_active_pages"] = int(stats.active_pages)
+        timing["tile_layer_device_max_texture_size"] = int(stats.device_max_texture_size)
+        timing["tile_layer_budget_bytes"] = int(stats.budget_bytes)
+        timing["tile_layer_near_resident_items"] = int(stats.near_resident_items)
+        timing["tile_layer_warm_resident_items"] = int(stats.warm_resident_items)
+        timing["tile_layer_evicted_near_items"] = int(stats.evicted_near_items)
+        timing["tile_layer_capacity_warning"] = str(stats.capacity_warning)
 
     def _tile_layer_histogram_key(self, histogramData, histogramPlotData, *, levels, histogramRange):
         source = histogramPlotData if histogramPlotData is not None else histogramData

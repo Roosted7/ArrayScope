@@ -153,7 +153,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Coalesced montage commits: 7" in text
     assert "Tile layer items: visible=50 resident=80/128 updated=1 skipped=49" in text
     assert "Tile layer RGB window tiles: 1" in text
-    assert "Tile layer storage: rebuilds=1 evictions=2 gpu=8.0 KiB cpu_shadow=0 B" in text
+    assert "Tile layer storage: rebuilds=1 evictions=2 pages=0/0 near=0 warm=0 gpu=8.0 KiB budget=0 B max_texture=n/a cpu_shadow=0 B" in text
     assert "Tile layer submissions: textures=3 bytes=4.0 KiB vertices=1 levels=1" in text
     assert "Upload: visible=1.0 KiB histogram=512 B same object=True" in text
     assert "Tile cache last session: cached=3 missing=4" in text

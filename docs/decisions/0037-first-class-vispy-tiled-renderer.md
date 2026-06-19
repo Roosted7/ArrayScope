@@ -24,9 +24,12 @@ reads go through the committed value source, never through placeholder pixels.
 
 VisPy tiled montage rendering uses `arrayscope.display.vispy_tiled_renderer`:
 
-- visible tile payloads use stable slots in mode-aware scalar and/or color texture atlases;
-- inactive tiles remain resident until LRU pressure requires their slots;
-- one batched visual draws the active tile quads;
+- visible tile payloads apply revisioned `TilePresentationDelta` updates to persistent tiled state;
+- visible tile payloads use stable source-keyed slots in mode-aware scalar and/or color texture atlas
+  pages, while active tile numbers only describe draw placement;
+- inactive tiles remain resident until byte-budgeted LRU pressure requires their slots;
+- viewport-near inactive sources are retained ahead of farther inactive sources;
+- one batched visual draws each active atlas page;
 - level-only changes update shader uniforms;
 - clean commits skip texture and vertex uploads;
 - dirty commits upload only changed atlas regions;
@@ -39,6 +42,11 @@ PyQtGraph tile-layer fallback continues to exist, but it consumes the same typed
 Large complex/RGB montage initial commits avoid CPU RGB windowing and per-tile VisPy visual creation.
 Clean VisPy tiled commits are now true no-op texture commits. The committed display value source is
 explicit, which simplifies hover/status and offscreen ROI/profile demand reads.
+
+GPU residency is intentionally keyed by semantic tile source identity, not by current montage tile
+number. Scrolling a tiled index window can move an already resident source into a different tile
+position; that requires vertex/geometry changes, but it must not require a texture upload unless the
+source payload changed or pressure evicted it.
 
 The renderer still receives CPU-prepared phase/color and scalar intensity tiles. Full GPU-side
 complex-to-phase/RGBA generation remains future work.
@@ -58,6 +66,5 @@ not synchronously push camera state for every range-change signal.
 
 ## Future work
 
-- GPU-side complex scalar to phase/color generation.
-- Multi-page, byte-budgeted atlas residency with runtime device limits, explicit viewport-near retention, and eviction diagnostics.
+- LOD tile pyramids and GPU-side complex scalar to phase/color generation.
 - Production perf gates on target GPU/compositor combinations after collecting stable baselines.

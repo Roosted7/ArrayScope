@@ -54,6 +54,14 @@ class TileLayerUpdateStats:
     level_updates: int = 0
     estimated_gpu_bytes: int = 0
     cpu_shadow_bytes: int = 0
+    page_count: int = 0
+    active_pages: int = 0
+    device_max_texture_size: int = 0
+    budget_bytes: int = 0
+    near_resident_items: int = 0
+    warm_resident_items: int = 0
+    evicted_near_items: int = 0
+    capacity_warning: str = ""
 
 
 class MontageTileLayer:
