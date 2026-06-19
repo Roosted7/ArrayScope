@@ -33,6 +33,7 @@ from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.image_upload import rgb_display_for_levels
+from arrayscope.display.interaction import CursorIntent, hit_test_display_overlays
 from arrayscope.display.overlay_hit_test import hit_test_roi, roi_handle_points
 from arrayscope.display.shader_mapping import ShaderDisplayMode, ShaderScale, TexturePlaneKind, default_phase_lut, pack_texture_data
 from arrayscope.display.viewport import ViewportPolicy
@@ -920,6 +921,7 @@ class VisPyImageView2D(ImageView2D):
         return super().eventFilter(obj, event)
 
     def _clear_vispy_hover_feedback(self) -> None:
+        self.interaction_controller.clear_hover()
         self._set_vispy_profile_hover_part(None)
         self._set_vispy_hovered_roi(None)
         viewport = self.graphicsView.viewport()
@@ -934,15 +936,22 @@ class VisPyImageView2D(ImageView2D):
             return
         scene_pos = self.graphicsView.mapToScene(event.pos())
         view_pos = self.view.mapSceneToView(scene_pos)
-        x = float(view_pos.x())
-        y = float(view_pos.y())
-        profile_part = self._vispy_profile_hit_for_point(x, y)
+        point = (float(view_pos.x()), float(view_pos.y()))
+        profile_position = self.profileMarkerPosition()
+        profile_bounds = self._current_profile_bounds() if profile_position is not None else None
+        target = hit_test_display_overlays(
+            point,
+            roi_selections=self.roiSelections(),
+            profile_position=profile_position,
+            profile_bounds=profile_bounds,
+            tolerance=self._vispy_handle_world_size(),
+        )
+        interaction = self.interaction_controller.set_hover(target, point=point)
+        profile_part = target.part if target is not None and target.kind == "profile" else None
+        roi_id = target.object_id if target is not None and target.kind == "roi" else None
         self._set_vispy_profile_hover_part(profile_part)
-        roi_hit = None if profile_part is not None else self._vispy_roi_hit_for_point(x, y)
-        self._set_vispy_hovered_roi(None if roi_hit is None else roi_hit[0])
-        cursor = self._cursor_for_vispy_profile_hit(profile_part)
-        if cursor is None and roi_hit is not None:
-            cursor = self._cursor_for_vispy_roi_hit(roi_hit[1], roi_hit[2])
+        self._set_vispy_hovered_roi(roi_id)
+        cursor = self._cursor_for_interaction_intent(interaction.cursor_intent)
         viewport = self.graphicsView.viewport()
         if cursor is None:
             if self._vispy_roi_cursor_active:
@@ -951,6 +960,20 @@ class VisPyImageView2D(ImageView2D):
             return
         viewport.setCursor(cursor)
         self._vispy_roi_cursor_active = True
+
+    @staticmethod
+    def _cursor_for_interaction_intent(intent: CursorIntent):
+        shapes = {
+            CursorIntent.CROSSHAIR: QtCore.Qt.CursorShape.CrossCursor,
+            CursorIntent.MOVE: QtCore.Qt.CursorShape.SizeAllCursor,
+            CursorIntent.OPEN_HAND: QtCore.Qt.CursorShape.OpenHandCursor,
+            CursorIntent.CLOSED_HAND: QtCore.Qt.CursorShape.ClosedHandCursor,
+            CursorIntent.RESIZE_HORIZONTAL: QtCore.Qt.CursorShape.SizeHorCursor,
+            CursorIntent.RESIZE_VERTICAL: QtCore.Qt.CursorShape.SizeVerCursor,
+            CursorIntent.RESIZE_DIAGONAL: QtCore.Qt.CursorShape.SizeFDiagCursor,
+        }
+        shape = shapes.get(CursorIntent(intent))
+        return None if shape is None else QtGui.QCursor(shape)
 
     def _vispy_roi_cursor_for_point(self, x: float, y: float):
         result = self._vispy_roi_hit_for_point(float(x), float(y))

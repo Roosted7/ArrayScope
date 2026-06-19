@@ -28,6 +28,7 @@ from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.histogram_controller import HistogramLevelPreviewController
 from arrayscope.display.image_upload import ensure_imageitem_array, rgb_display_for_levels
+from arrayscope.display.interaction import CursorIntent, DisplayInteractionController
 from arrayscope.display.levels import finite_bounds
 from arrayscope.display.layers import ViewLayerOwner
 from arrayscope.display.montage_tile_layer import MontageTileLayer, TileLayerUpdateStats
@@ -38,7 +39,6 @@ from arrayscope.display.roi_items import (
     default_roi_label,
     geometry_from_item,
     item_for_roi,
-    point_distance,
 )
 from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
 
@@ -114,14 +114,11 @@ class ImageView2D(QtWidgets.QWidget):
         self._hud_widget = None
         self._evaluation_overlay = None
         self._roi_info_panel = None
-        self._inspection_tool = "cursor"
+        self.interaction_controller = DisplayInteractionController()
         self._roi_items = {}
         self._montage_tile_overlay_item = None
         self._montage_tile_overlay_items = []
         self._roi_counter = 0
-        self._drawing_points = []
-        self._pending_roi_draw_tool = None
-        self._drawing_active = False
         self._freehand_spacing = 1.0
         self.viewport_controller = ViewportController()
         self._viewport_applying = False
@@ -1376,38 +1373,65 @@ class ImageView2D(QtWidgets.QWidget):
         if self._hud_widget is not None:
             self._hud_widget.hide()
 
+    @property
+    def _inspection_tool(self):
+        """Compatibility view of the shared interaction state."""
+
+        return self.interaction_controller.state.tool
+
+    @property
+    def _pending_roi_draw_tool(self):
+        return self.interaction_controller.state.pending_draw_tool
+
+    @property
+    def _drawing_active(self):
+        from arrayscope.display.interaction import PointerPhase
+
+        return self.interaction_controller.state.phase is PointerPhase.DRAWING
+
+    @property
+    def _drawing_points(self):
+        return self.interaction_controller.state.drawing_points
+
     def setInspectionTool(self, tool):
-        allowed = {"cursor", "profile", "roi_line", "roi_rectangle", "roi_polyline", "roi_freehand"}
-        if tool not in allowed:
-            raise ValueError(f"unknown inspection tool: {tool}")
-        self._inspection_tool = str(tool)
-        if tool in {"profile", "roi_line", "roi_rectangle"} or self._pending_roi_draw_tool is not None:
-            self.getView().setCursor(QtCore.Qt.CursorShape.CrossCursor)
-        else:
-            self.getView().unsetCursor()
+        state = self.interaction_controller.set_tool(tool)
+        self._apply_interaction_cursor(state.cursor_intent)
 
     def inspectionTool(self):
-        return self._inspection_tool
+        return self.interaction_controller.state.tool
+
+    def interactionState(self):
+        return self.interaction_controller.state
 
     def beginRoiDrawingOnce(self, tool):
-        if tool not in {"roi_polyline", "roi_freehand"}:
+        try:
+            state = self.interaction_controller.arm_drawing(tool)
+        except ValueError:
             return False
-        self._pending_roi_draw_tool = str(tool)
-        self._drawing_active = False
-        self._drawing_points = []
-        self._set_roi_drawing_preview(self._pending_roi_draw_tool, ())
-        self.getView().setCursor(QtCore.Qt.CursorShape.CrossCursor)
+        self._set_roi_drawing_preview(state.pending_draw_tool, ())
+        self._apply_interaction_cursor(state.cursor_intent)
         return True
 
     def cancelPendingRoiDrawing(self):
-        self._pending_roi_draw_tool = None
-        self._drawing_active = False
-        self._drawing_points = []
+        state = self.interaction_controller.cancel_drawing()
         self._set_roi_drawing_preview(None, ())
-        if self._inspection_tool in {"profile", "roi_line", "roi_rectangle"}:
-            self.getView().setCursor(QtCore.Qt.CursorShape.CrossCursor)
-        else:
+        self._apply_interaction_cursor(state.cursor_intent)
+
+    def _apply_interaction_cursor(self, intent: CursorIntent) -> None:
+        cursor_shapes = {
+            CursorIntent.CROSSHAIR: QtCore.Qt.CursorShape.CrossCursor,
+            CursorIntent.MOVE: QtCore.Qt.CursorShape.SizeAllCursor,
+            CursorIntent.OPEN_HAND: QtCore.Qt.CursorShape.OpenHandCursor,
+            CursorIntent.CLOSED_HAND: QtCore.Qt.CursorShape.ClosedHandCursor,
+            CursorIntent.RESIZE_HORIZONTAL: QtCore.Qt.CursorShape.SizeHorCursor,
+            CursorIntent.RESIZE_VERTICAL: QtCore.Qt.CursorShape.SizeVerCursor,
+            CursorIntent.RESIZE_DIAGONAL: QtCore.Qt.CursorShape.SizeFDiagCursor,
+        }
+        shape = cursor_shapes.get(CursorIntent(intent))
+        if shape is None:
             self.getView().unsetCursor()
+        else:
+            self.getView().setCursor(shape)
 
     def createRoi(self, kind, *, points=None, rect=None, line_width=1.0, label=None, color=None):
         kind = kind if isinstance(kind, RoiKind) else RoiKind(getattr(kind, "value", kind))
@@ -1568,37 +1592,35 @@ class ImageView2D(QtWidgets.QWidget):
         return True
 
     def _handle_roi_drawing_event(self, event):
-        if self._pending_roi_draw_tool is None and not self._drawing_active:
+        state = self.interaction_controller.state
+        if state.pending_draw_tool is None and not self._drawing_active:
             return False
-        tool = self._pending_roi_draw_tool
         event_type = event.type()
         if event_type == QtCore.QEvent.Type.MouseButtonPress and event.button() == QtCore.Qt.MouseButton.LeftButton:
             point = self._event_image_point(event)
-            if point is None:
+            if point is None or not self.interaction_controller.begin_drawing(point):
                 return False
-            self._drawing_active = True
-            self._drawing_points = [point]
-            self._set_roi_drawing_preview(tool, tuple(self._drawing_points))
+            state = self.interaction_controller.state
+            self._set_roi_drawing_preview(state.pending_draw_tool, state.drawing_points)
             return True
         if event_type == QtCore.QEvent.Type.MouseMove and self._drawing_active:
             point = self._event_image_point(event)
             if point is None:
                 return True
-            if not self._drawing_points or point_distance(self._drawing_points[-1], point) >= self._freehand_spacing:
-                self._drawing_points.append(point)
-                self._set_roi_drawing_preview(tool, tuple(self._drawing_points))
+            if self.interaction_controller.append_drawing_point(point, minimum_distance=self._freehand_spacing):
+                state = self.interaction_controller.state
+                self._set_roi_drawing_preview(state.pending_draw_tool, state.drawing_points)
             return True
         if event_type == QtCore.QEvent.Type.MouseButtonRelease and self._drawing_active:
-            points = tuple(self._drawing_points)
-            self._drawing_active = False
-            self._drawing_points = []
-            self._pending_roi_draw_tool = None
+            result = self.interaction_controller.finish_drawing()
             self._set_roi_drawing_preview(None, ())
-            if tool == "roi_freehand" and len(points) >= MIN_FREEHAND_POINTS:
-                self.createRoi(RoiKind.FREEHAND_POLYGON, points=points)
-            elif tool == "roi_polyline" and len(points) >= MIN_POLYLINE_POINTS:
-                self.createRoi(RoiKind.POLYLINE, points=points)
-            self.setInspectionTool(self._inspection_tool if self._inspection_tool in {"cursor", "profile"} else "cursor")
+            if result is not None:
+                if result.tool == "roi_freehand" and len(result.points) >= MIN_FREEHAND_POINTS:
+                    self.createRoi(RoiKind.FREEHAND_POLYGON, points=result.points)
+                elif result.tool == "roi_polyline" and len(result.points) >= MIN_POLYLINE_POINTS:
+                    self.createRoi(RoiKind.POLYLINE, points=result.points)
+            tool = self.interaction_controller.state.tool
+            self.setInspectionTool(tool if tool in {"cursor", "profile"} else "cursor")
             return True
         return False
 
