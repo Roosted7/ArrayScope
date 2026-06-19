@@ -157,12 +157,14 @@ def _presentation_for_payload(payload, *, levels, histogram_range):
         histogram_range=histogram_range,
         viewport_policy=payload.viewport_policy,
         rgb_already_windowed=payload.rgb_already_windowed,
-        montage_dirty_tiles=payload.montage_dirty_tiles,
-        montage_tile_source_ids=payload.montage_tile_source_ids,
     )
-    if payload.montage_tile_payloads is not None:
+    if payload.tile_state is not None or payload.tile_delta is not None:
+        if payload.tile_state is None or payload.tile_delta is None:
+            raise ValueError("tiled presentations require both tile_state and tile_delta")
         return DisplayTiledPresentation(
-            tile_payloads=dict(payload.montage_tile_payloads),
+            tile_state=payload.tile_state,
+            tile_delta=payload.tile_delta,
+            tile_residency_budget_bytes=int(payload.tile_residency_budget_bytes),
             histogram_plot_data=payload.histogram_plot_data,
             **common,
         )
@@ -170,6 +172,8 @@ def _presentation_for_payload(payload, *, levels, histogram_range):
         data=payload.data,
         histogram_data=payload.histogram_data,
         histogram_plot_data=payload.histogram_plot_data,
+        montage_dirty_tiles=payload.montage_dirty_tiles,
+        montage_tile_source_ids=payload.montage_tile_source_ids,
         **common,
     )
 

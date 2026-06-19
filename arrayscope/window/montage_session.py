@@ -15,7 +15,7 @@ from arrayscope.display.montage import (
     RenderedTile,
     patch_rendered_tile_into_canvas,
 )
-from arrayscope.window.display_frame import DisplayTilePayload
+from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
 @dataclass
@@ -73,6 +73,16 @@ class MontageRenderSession:
     repeated_expensive_stage_per_tile: bool = False
     tile_source_ids: dict[int, object] = field(default_factory=dict)
     display_tile_payloads: dict[int, DisplayTilePayload] = field(default_factory=dict)
+    tile_presentation_state: TilePresentationState = field(default_factory=TilePresentationState)
+    structure_revision: int = 0
+    payload_revision: int = 0
+    visibility_revision: int = 0
+    level_revision: int = 0
+    histogram_revision: int = 0
+    viewport_revision: int = 0
+    _last_active_tiles: tuple[int, ...] = ()
+    _last_planned_tiles: tuple[int, ...] = ()
+    _last_near_tiles: tuple[int, ...] = ()
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -124,6 +134,76 @@ class MontageRenderSession:
                 source_id=source_id,
             )
         return dict(self.display_tile_payloads)
+
+    def build_tile_presentation(
+        self,
+        source_ids: dict[int, object] | None,
+        *,
+        source_ids_trusted: bool = True,
+    ) -> tuple[TilePresentationState, TilePresentationDelta]:
+        source_ids = dict(source_ids or {})
+        previous_payloads = dict(self.tile_presentation_state.payloads)
+        current_payloads = self.snapshot_display_tile_payloads(source_ids)
+        current_loaded = set(current_payloads)
+        removals = tuple(sorted(int(tile) for tile in previous_payloads if int(tile) not in current_loaded))
+        upserts: dict[int, DisplayTilePayload] = {}
+        for tile_number, payload in sorted(current_payloads.items()):
+            previous = previous_payloads.get(int(tile_number))
+            if previous is payload:
+                continue
+            if (
+                previous is not None
+                and previous.source_id == payload.source_id
+                and previous.image is payload.image
+                and previous.histogram_data is payload.histogram_data
+            ):
+                continue
+            upserts[int(tile_number)] = payload
+
+        planned = tuple(
+            int(tile.montage_index)
+            for tile in tuple(self.visible_tiles)
+            if int(tile.montage_index) not in self.skipped_tiles
+        )
+        active = tuple(int(tile) for tile in planned if int(tile) in current_loaded)
+        near_candidates = self.plan.tiles_intersecting(self.view_range, margin_tiles=2)
+        near = tuple(
+            int(tile.montage_index)
+            for tile in near_candidates
+            if int(tile.montage_index) not in self.skipped_tiles
+        )
+        near_source_ids = {int(tile): source_ids[int(tile)] for tile in near if int(tile) in source_ids}
+
+        if upserts or removals:
+            self.payload_revision += 1
+        if active != self._last_active_tiles or planned != self._last_planned_tiles:
+            self.visibility_revision += 1
+        if near != self._last_near_tiles:
+            self.viewport_revision += 1
+        if planned != self._last_planned_tiles:
+            self.structure_revision += 1
+        self._last_active_tiles = active
+        self._last_planned_tiles = planned
+        self._last_near_tiles = near
+
+        delta = TilePresentationDelta(
+            structure_revision=self.structure_revision,
+            payload_revision=self.payload_revision,
+            visibility_revision=self.visibility_revision,
+            level_revision=self.level_revision,
+            histogram_revision=self.histogram_revision,
+            viewport_revision=self.viewport_revision,
+            upserts=upserts,
+            removals=removals,
+            active_tiles=active,
+            planned_tiles=planned,
+            near_tiles=near,
+            near_tile_source_ids=near_source_ids,
+            force_refresh=not bool(source_ids_trusted),
+        )
+        state = self.tile_presentation_state.apply_delta(delta)
+        self.tile_presentation_state = state
+        return state, delta
 
     def mark_loading(self, tile: MontageTile) -> None:
         index = int(tile.montage_index)

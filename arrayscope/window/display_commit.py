@@ -54,14 +54,14 @@ class DisplayCommitter:
                 raise TypeError("image view does not implement first-class tiled presentation commits")
             commit(
                 geometry=presentation.geometry,
-                tile_payloads=presentation.tile_payloads,
+                tile_state=presentation.tile_state,
+                tile_delta=presentation.tile_delta,
                 histogramPlotData=presentation.histogram_plot_data,
                 levels=presentation.levels,
                 histogramRange=presentation.histogram_range,
                 viewport_policy=presentation.viewport_policy,
                 rgb_already_windowed=presentation.rgb_already_windowed,
-                montage_dirty_tiles=presentation.montage_dirty_tiles,
-                montage_tile_source_ids=presentation.montage_tile_source_ids,
+                tile_residency_budget_bytes=presentation.tile_residency_budget_bytes,
             )
         else:
             self.image_view.setMontageTileLayerPresentation(
@@ -84,7 +84,7 @@ class DisplayCommitter:
         if isinstance(presentation, DisplayTiledPresentation):
             data = None
             histogram_data = None
-            value_source = TiledValueSource(presentation.tile_payloads)
+            value_source = TiledValueSource(presentation.tile_state.payloads)
         else:
             data = presentation.data
             histogram_data = presentation.histogram_data
@@ -107,9 +107,12 @@ class DisplayCommitter:
         if isinstance(presentation, DisplayTiledPresentation):
             if getattr(presentation.geometry, "montage", None) is None:
                 raise ValueError("tiled display presentation requires montage geometry")
-            for tile_number, payload in dict(presentation.tile_payloads).items():
+            for tile_number, payload in dict(presentation.tile_state.payloads).items():
                 if int(tile_number) != int(payload.tile_number):
                     raise ValueError("tile payload key must match tile_number")
+            for tile_number, payload in dict(presentation.tile_delta.upserts).items():
+                if int(tile_number) != int(payload.tile_number):
+                    raise ValueError("tile delta upsert key must match tile_number")
             if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
                 raise ValueError("histogram plot data must not be empty")
         else:

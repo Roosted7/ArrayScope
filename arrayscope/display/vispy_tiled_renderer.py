@@ -36,115 +36,49 @@ class GpuMontageLayerStats:
     estimated_gpu_bytes: int = 0
     cpu_shadow_bytes: int = 0
     upload_ms: float = 0.0
+    page_count: int = 0
+    active_pages: int = 0
+    device_max_texture_size: int = 0
+    budget_bytes: int = 0
+    near_resident_items: int = 0
+    warm_resident_items: int = 0
+    evicted_near_items: int = 0
+    capacity_warning: str = ""
+
+
+@dataclass(frozen=True)
+class GpuDeviceLimits:
+    max_texture_size: int = 4096
+    max_texture_image_units: int = 0
+    vendor: str = ""
+    renderer: str = ""
+    version: str = ""
+    source: str = "fallback"
+    warnings: tuple[str, ...] = ()
 
 
 class AtlasCapacityError(RuntimeError):
     """Raised when one atlas page cannot contain the requested tile set."""
 
 
-class TextureAtlasPool:
-    """One-page texture atlas with stable, LRU-managed tile residency.
-
-    ``source_id`` is treated as an immutable content identity.  A clean commit
-    can therefore reuse a resident slot even when it is the first commit of a
-    new viewport session.  Callers must change the source id or mark a tile
-    dirty when its pixels change.
-    """
-
-    def __init__(self, gloo, *, max_texture_size: int = 8192):
+class TextureAtlasPage:
+    def __init__(self, gloo, *, tile_shape: tuple[int, int], capacity: int, storage_mode: str, max_texture_size: int):
         self._gloo = gloo
-        self.max_texture_size = max(1, int(max_texture_size))
-        self.tile_shape: tuple[int, int] | None = None
-        self.capacity = 0
-        self.columns = 1
-        self.rows = 1
-        self.atlas_shape: tuple[int, int] = (1, 1)
-        self.scalar_texture = None
-        self.color_texture = None
-        self.storage_mode: str | None = None
-        self.scalar_is_atlas = False
-        self.color_is_atlas = False
-        self.slots: dict[int, int] = {}
-        self.slot_owners: list[int | None] = []
-        self.source_ids: dict[int, object] = {}
-        self.last_used: dict[int, int] = {}
-        self.serial = 0
-        self.rebuild_count = 0
-        self.eviction_count = 0
-        self._clock = 0
-
-    @property
-    def resident_count(self) -> int:
-        return len(self.source_ids)
-
-    @property
-    def cpu_shadow_bytes(self) -> int:
-        # Atlas storage is allocated by shape on the GPU.  Only per-tile
-        # staging arrays exist during a sub-upload.
-        return 0
-
-    @property
-    def estimated_gpu_bytes(self) -> int:
-        pixels = int(self.atlas_shape[0]) * int(self.atlas_shape[1])
-        return pixels * (4 if self.scalar_is_atlas else 0) + pixels * (3 if self.color_is_atlas else 0)
-
-    def ensure_layout(
-        self,
-        *,
-        tile_shape: tuple[int, int],
-        count: int,
-        storage_mode: str = "scalar_color",
-    ) -> bool:
-        tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
-        requested = max(1, int(count))
-        max_columns = self.max_texture_size // tile_w
-        max_rows = self.max_texture_size // tile_h
-        if max_columns < 1 or max_rows < 1:
-            raise AtlasCapacityError(
-                f"tile shape {(tile_h, tile_w)} exceeds atlas texture limit {self.max_texture_size}"
-            )
-        max_slots = int(max_columns * max_rows)
-        if requested > max_slots:
-            raise AtlasCapacityError(
-                f"{requested} tiles of shape {(tile_h, tile_w)} require more than one "
-                f"{self.max_texture_size}x{self.max_texture_size} atlas page (capacity {max_slots})"
-            )
-
-        storage_mode = _normalize_storage_mode(storage_mode)
-        shape_changed = self.tile_shape != (tile_h, tile_w)
-        mode_changed = self.storage_mode != storage_mode
-        if not shape_changed and not mode_changed and requested <= self.capacity:
-            return False
-
-        if shape_changed or mode_changed or self.capacity < 1:
-            target_capacity = requested
-        else:
-            # Amortise growth when no complete visibility estimate was
-            # available.  Normal montage commits pass a reserve count and hit
-            # the final size in one allocation.
-            target_capacity = max(requested, int(np.ceil(self.capacity * 1.5)))
-        target_capacity = min(max_slots, max(1, target_capacity))
-        columns, rows = _atlas_grid(
-            tile_shape=(tile_h, tile_w),
-            capacity=target_capacity,
-            max_texture_size=self.max_texture_size,
+        self.tile_shape = (int(tile_shape[0]), int(tile_shape[1]))
+        self.capacity = max(1, int(capacity))
+        self.storage_mode = _normalize_storage_mode(storage_mode)
+        self.columns, self.rows = _atlas_grid(
+            tile_shape=self.tile_shape,
+            capacity=self.capacity,
+            max_texture_size=max_texture_size,
         )
-        atlas_shape = (int(rows * tile_h), int(columns * tile_w))
-
-        self.tile_shape = (tile_h, tile_w)
-        self.capacity = int(target_capacity)
-        self.columns = int(columns)
-        self.rows = int(rows)
-        self.atlas_shape = atlas_shape
-        # Shape-only allocation avoids a full CPU shadow copy.  Allocate only
-        # the full-size texture planes actually used by this presentation; the
-        # other sampler receives a tiny initialized fallback texture.
-        self.storage_mode = storage_mode
-        self.scalar_is_atlas = storage_mode in {"scalar", "scalar_color"}
-        self.color_is_atlas = storage_mode in {"color", "scalar_color"}
+        tile_h, tile_w = self.tile_shape
+        self.atlas_shape = (int(self.rows * tile_h), int(self.columns * tile_w))
+        self.scalar_is_atlas = self.storage_mode in {"scalar", "scalar_color"}
+        self.color_is_atlas = self.storage_mode in {"color", "scalar_color"}
         if self.scalar_is_atlas:
             self.scalar_texture = self._gloo.Texture2D(
-                shape=atlas_shape + (1,),
+                shape=self.atlas_shape + (1,),
                 format="red",
                 internalformat="r32f",
                 interpolation="nearest",
@@ -160,7 +94,7 @@ class TextureAtlasPool:
             )
         if self.color_is_atlas:
             self.color_texture = self._gloo.Texture2D(
-                shape=atlas_shape + (3,),
+                shape=self.atlas_shape + (3,),
                 format="rgb",
                 internalformat="rgb8",
                 interpolation="nearest",
@@ -174,10 +108,162 @@ class TextureAtlasPool:
                 interpolation="nearest",
                 wrapping="clamp_to_edge",
             )
-        self.slots.clear()
-        self.slot_owners = [None] * self.capacity
-        self.source_ids.clear()
-        self.last_used.clear()
+        self.slot_owners: list[object | None] = [None] * self.capacity
+
+    @property
+    def estimated_gpu_bytes(self) -> int:
+        pixels = int(self.atlas_shape[0]) * int(self.atlas_shape[1])
+        return pixels * (4 if self.scalar_is_atlas else 0) + pixels * (3 if self.color_is_atlas else 0)
+
+    def uv_for_slot(self, slot: int) -> tuple[float, float, float, float]:
+        tile_h, tile_w = self.tile_shape
+        atlas_h, atlas_w = self.atlas_shape
+        row = int(slot) // int(self.columns)
+        col = int(slot) % int(self.columns)
+        y0 = row * tile_h
+        x0 = col * tile_w
+        y1 = y0 + tile_h
+        x1 = x0 + tile_w
+        return (x0 / atlas_w, y0 / atlas_h, x1 / atlas_w, y1 / atlas_h)
+
+    def offset_for_slot(self, slot: int) -> tuple[int, int]:
+        tile_h, tile_w = self.tile_shape
+        row = int(slot) // int(self.columns)
+        col = int(slot) % int(self.columns)
+        return int(row * tile_h), int(col * tile_w)
+
+
+class TextureAtlasPool:
+    """Multi-page texture atlas with stable, LRU-managed tile residency.
+
+    ``source_id`` is treated as an immutable content identity.  A clean commit
+    can therefore reuse a resident slot even when it is the first commit of a
+    new viewport session.  Callers must change the source id or mark a tile
+    dirty when its pixels change.
+    """
+
+    def __init__(self, gloo, *, limits: GpuDeviceLimits | None = None, max_texture_size: int | None = None, budget_bytes: int = 0):
+        self._gloo = gloo
+        self.device_limits = limits or GpuDeviceLimits(max_texture_size=max_texture_size or 4096)
+        self.max_texture_size = max(1, int(max_texture_size or self.device_limits.max_texture_size or 4096))
+        self.budget_bytes = max(0, int(budget_bytes))
+        self.tile_shape: tuple[int, int] | None = None
+        self.storage_mode: str | None = None
+        self.pages: list[TextureAtlasPage] = []
+        self.resident_slots: dict[object, tuple[int, int]] = {}
+        self.tile_slots: dict[int, tuple[int, int]] = {}
+        self.source_ids: dict[object, object] = {}
+        self.last_used: dict[object, int] = {}
+        self.active_resident_keys: set[object] = set()
+        self.serial = 0
+        self.rebuild_count = 0
+        self.eviction_count = 0
+        self.evicted_near_count = 0
+        self._clock = 0
+
+    @property
+    def resident_count(self) -> int:
+        return len(self.source_ids)
+
+    @property
+    def capacity(self) -> int:
+        return sum(int(page.capacity) for page in self.pages)
+
+    @property
+    def slots(self) -> dict[int, int]:
+        return {tile: page_index * 1_000_000 + slot for tile, (page_index, slot) in self.tile_slots.items()}
+
+    @property
+    def slot_owners(self) -> list[object | None]:
+        owners: list[object | None] = []
+        for page in self.pages:
+            owners.extend(page.slot_owners)
+        return owners
+
+    @property
+    def atlas_shape(self) -> tuple[int, int]:
+        return self.pages[0].atlas_shape if self.pages else (1, 1)
+
+    @property
+    def scalar_texture(self):
+        return self.pages[0].scalar_texture if self.pages else None
+
+    @property
+    def color_texture(self):
+        return self.pages[0].color_texture if self.pages else None
+
+    @property
+    def scalar_is_atlas(self) -> bool:
+        return bool(self.pages and self.pages[0].scalar_is_atlas)
+
+    @property
+    def color_is_atlas(self) -> bool:
+        return bool(self.pages and self.pages[0].color_is_atlas)
+
+    @property
+    def cpu_shadow_bytes(self) -> int:
+        # Atlas storage is allocated by shape on the GPU.  Only per-tile
+        # staging arrays exist during a sub-upload.
+        return 0
+
+    @property
+    def estimated_gpu_bytes(self) -> int:
+        return sum(int(page.estimated_gpu_bytes) for page in self.pages)
+
+    def ensure_layout(
+        self,
+        *,
+        tile_shape: tuple[int, int],
+        count: int,
+        storage_mode: str = "scalar_color",
+        budget_bytes: int | None = None,
+    ) -> bool:
+        tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
+        requested = max(1, int(count))
+        if budget_bytes is not None:
+            self.budget_bytes = max(0, int(budget_bytes))
+        max_columns = self.max_texture_size // tile_w
+        max_rows = self.max_texture_size // tile_h
+        if max_columns < 1 or max_rows < 1:
+            raise AtlasCapacityError(
+                f"tile shape {(tile_h, tile_w)} exceeds atlas texture limit {self.max_texture_size}"
+            )
+        max_slots_per_page = int(max_columns * max_rows)
+        bytes_per_slot = _storage_mode_bytes_per_pixel(storage_mode) * tile_h * tile_w
+        budget_slots = requested if self.budget_bytes <= 0 else self.budget_bytes // max(1, bytes_per_slot)
+        if requested > budget_slots:
+            raise AtlasCapacityError(
+                f"{requested} active tiles of shape {(tile_h, tile_w)} exceed tile residency budget "
+                f"{self.budget_bytes} bytes (capacity {budget_slots})"
+            )
+
+        storage_mode = _normalize_storage_mode(storage_mode)
+        shape_changed = self.tile_shape != (tile_h, tile_w)
+        mode_changed = self.storage_mode != storage_mode
+        if not shape_changed and not mode_changed and requested <= self.capacity:
+            return False
+
+        self.tile_shape = (tile_h, tile_w)
+        if shape_changed or mode_changed:
+            self.pages.clear()
+            self.resident_slots.clear()
+            self.tile_slots.clear()
+            self.source_ids.clear()
+            self.last_used.clear()
+            self.active_resident_keys.clear()
+        self.storage_mode = storage_mode
+        while self.capacity < requested:
+            remaining = requested - self.capacity
+            page_capacity = min(max_slots_per_page, remaining)
+            self.pages.append(
+                TextureAtlasPage(
+                    self._gloo,
+                    tile_shape=(tile_h, tile_w),
+                    capacity=page_capacity,
+                    storage_mode=storage_mode,
+                    max_texture_size=self.max_texture_size,
+                )
+            )
         self.serial += 1
         self.rebuild_count += 1
         return True
@@ -190,44 +276,60 @@ class TextureAtlasPool:
         dirty_tiles: tuple[int, ...] | None,
         rgb_already_windowed: bool,
         reserve_count: int | None = None,
+        near_tiles: tuple[int, ...] = (),
+        near_tile_source_ids: dict[int, object] | None = None,
+        budget_bytes: int | None = None,
     ) -> tuple[dict[int, tuple[float, float, float, float]], GpuMontageLayerStats]:
         start = perf_counter()
         payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
-        requested_capacity = max(len(payload_items), int(reserve_count or 0), 1)
         storage_mode = (
             _atlas_storage_mode(payload_items, rgb_already_windowed=rgb_already_windowed)
             if payload_items
             else (self.storage_mode or "scalar")
         )
+        tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
+        bytes_per_slot = _storage_mode_bytes_per_pixel(storage_mode) * max(1, tile_h) * max(1, tile_w)
+        effective_budget = self.budget_bytes if budget_bytes is None else max(0, int(budget_bytes))
+        budget_slots = int(reserve_count or 0)
+        if effective_budget > 0:
+            budget_slots = max(len(payload_items), min(int(reserve_count or 0), effective_budget // max(1, bytes_per_slot)))
+        requested_capacity = max(len(payload_items), budget_slots, 1)
         rebuilt = self.ensure_layout(
             tile_shape=tile_shape,
             count=requested_capacity,
             storage_mode=storage_mode,
+            budget_bytes=budget_bytes,
         )
         dirty_all = dirty_tiles is None
         dirty = set() if dirty_all else {int(tile) for tile in dirty_tiles}
         active = {int(tile_number) for tile_number, _payload in payload_items}
+        active_keys = {_resident_key(payload) for _tile_number, payload in payload_items}
+        self.active_resident_keys = set(active_keys)
+        near = {int(tile) for tile in tuple(near_tiles or ())}
+        near_keys = {
+            _source_resident_key(source_id)
+            for _tile_number, source_id in sorted(dict(near_tile_source_ids or {}).items())
+        }
+        near_keys.update(_resident_key(payload) for tile_number, payload in payload_items if int(tile_number) in near)
         uvs: dict[int, tuple[float, float, float, float]] = {}
+        active_tile_slots: dict[int, tuple[int, int]] = {}
         uploads = 0
         upload_bytes = 0
         updated = 0
         skipped = 0
         evictions_before = self.eviction_count
-        atlas_h, atlas_w = self.atlas_shape
+        evicted_near_before = self.evicted_near_count
         tile_h, tile_w = self.tile_shape or tile_shape
 
         for tile_number, payload in payload_items:
-            slot, newly_assigned = self._slot_for(tile_number, active_tiles=active)
-            self._touch(tile_number)
-            row = slot // self.columns
-            col = slot % self.columns
-            y0 = row * tile_h
-            x0 = col * tile_w
-            y1 = y0 + tile_h
-            x1 = x0 + tile_w
-            source_changed = self.source_ids.get(tile_number) != payload.source_id
+            resident_key = _resident_key(payload)
+            page_index, slot, newly_assigned = self._slot_for(resident_key, active_keys=active_keys, near_keys=near_keys)
+            active_tile_slots[int(tile_number)] = (int(page_index), int(slot))
+            page = self.pages[int(page_index)]
+            self._touch(resident_key)
+            source_changed = self.source_ids.get(resident_key) != payload.source_id
             should_upload = bool(dirty_all or newly_assigned or source_changed or tile_number in dirty)
-            uvs[tile_number] = (x0 / atlas_w, y0 / atlas_h, x1 / atlas_w, y1 / atlas_h)
+            uvs[tile_number] = page.uv_for_slot(slot)
             if not should_upload:
                 skipped += 1
                 continue
@@ -239,17 +341,19 @@ class TextureAtlasPool:
                 need_scalar=self.scalar_is_atlas,
                 need_color=self.color_is_atlas,
             )
+            y0, x0 = page.offset_for_slot(slot)
             if scalar is not None:
-                self.scalar_texture.set_data(scalar, offset=(int(y0), int(x0)), copy=False)
+                page.scalar_texture.set_data(scalar, offset=(int(y0), int(x0)), copy=False)
                 uploads += 1
                 upload_bytes += int(scalar.nbytes)
             if color is not None:
-                self.color_texture.set_data(color, offset=(int(y0), int(x0)), copy=False)
+                page.color_texture.set_data(color, offset=(int(y0), int(x0)), copy=False)
                 uploads += 1
                 upload_bytes += int(color.nbytes)
-            self.source_ids[tile_number] = payload.source_id
+            self.source_ids[resident_key] = payload.source_id
             updated += 1
 
+        self.tile_slots = active_tile_slots
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
         return uvs, GpuMontageLayerStats(
             visible_items=len(payload_items),
@@ -264,62 +368,176 @@ class TextureAtlasPool:
             estimated_gpu_bytes=self.estimated_gpu_bytes,
             cpu_shadow_bytes=self.cpu_shadow_bytes,
             upload_ms=elapsed,
+            page_count=len(self.pages),
+            active_pages=len({self.tile_slots[int(tile)][0] for tile in active if int(tile) in self.tile_slots}),
+            device_max_texture_size=self.max_texture_size,
+            budget_bytes=self.budget_bytes,
+            near_resident_items=len(near_keys.intersection(self.source_ids)),
+            warm_resident_items=max(0, self.resident_count - len(active)),
+            evicted_near_items=self.evicted_near_count - evicted_near_before,
         )
 
-    def _slot_for(self, tile_number: int, *, active_tiles: set[int]) -> tuple[int, bool]:
-        current = self.slots.get(int(tile_number))
+    def warm_payloads(
+        self,
+        payloads: dict[int, DisplayTilePayload],
+        *,
+        tile_shape: tuple[int, int],
+        rgb_already_windowed: bool,
+        near_tile_source_ids: dict[int, object] | None = None,
+        budget_bytes: int | None = None,
+    ) -> GpuMontageLayerStats:
+        start = perf_counter()
+        if not payloads:
+            return GpuMontageLayerStats(
+                resident_items=self.resident_count,
+                atlas_capacity=self.capacity,
+                estimated_gpu_bytes=self.estimated_gpu_bytes,
+                cpu_shadow_bytes=self.cpu_shadow_bytes,
+                page_count=len(self.pages),
+                device_max_texture_size=self.max_texture_size,
+                budget_bytes=self.budget_bytes,
+                warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
+            )
+        if self.tile_shape is None or self.storage_mode is None or not self.pages:
+            self.ensure_layout(
+                tile_shape=tile_shape,
+                count=max(1, len(payloads)),
+                storage_mode=_atlas_storage_mode(tuple(sorted((int(key), value) for key, value in payloads.items())), rgb_already_windowed=rgb_already_windowed),
+                budget_bytes=budget_bytes,
+            )
+
+        if budget_bytes is not None:
+            self.budget_bytes = max(0, int(budget_bytes))
+        near_keys = {
+            _source_resident_key(source_id)
+            for _tile_number, source_id in sorted(dict(near_tile_source_ids or {}).items())
+        }
+        near_keys.update(_resident_key(payload) for payload in dict(payloads).values())
+        uploads = 0
+        upload_bytes = 0
+        updated = 0
+        skipped = 0
+        evictions_before = self.eviction_count
+        evicted_near_before = self.evicted_near_count
+        tile_h, tile_w = self.tile_shape or tile_shape
+
+        for _tile_number, payload in sorted((int(key), value) for key, value in dict(payloads).items()):
+            if not _payload_supported_by_storage_mode(payload, self.storage_mode, rgb_already_windowed=rgb_already_windowed):
+                skipped += 1
+                continue
+            resident_key = _resident_key(payload)
+            if self.source_ids.get(resident_key) == payload.source_id:
+                self._touch(resident_key)
+                skipped += 1
+                continue
+            page_index, slot, _newly_assigned = self._slot_for(
+                resident_key,
+                active_keys=set(self.active_resident_keys),
+                near_keys=near_keys,
+            )
+            page = self.pages[int(page_index)]
+            scalar, color = _payload_texture_data(
+                payload,
+                tile_shape=(tile_h, tile_w),
+                rgb_already_windowed=rgb_already_windowed,
+                need_scalar=page.scalar_is_atlas,
+                need_color=page.color_is_atlas,
+            )
+            y0, x0 = page.offset_for_slot(slot)
+            if scalar is not None:
+                page.scalar_texture.set_data(scalar, offset=(int(y0), int(x0)), copy=False)
+                uploads += 1
+                upload_bytes += int(scalar.nbytes)
+            if color is not None:
+                page.color_texture.set_data(color, offset=(int(y0), int(x0)), copy=False)
+                uploads += 1
+                upload_bytes += int(color.nbytes)
+            self.source_ids[resident_key] = payload.source_id
+            self._touch(resident_key)
+            updated += 1
+
+        elapsed = (perf_counter() - start) * 1000.0 if updated else 0.0
+        return GpuMontageLayerStats(
+            resident_items=self.resident_count,
+            atlas_capacity=self.capacity,
+            atlas_evictions=self.eviction_count - evictions_before,
+            texture_uploads=uploads,
+            texture_upload_bytes=upload_bytes,
+            items_updated=updated,
+            items_skipped=skipped,
+            estimated_gpu_bytes=self.estimated_gpu_bytes,
+            cpu_shadow_bytes=self.cpu_shadow_bytes,
+            upload_ms=elapsed,
+            page_count=len(self.pages),
+            active_pages=len({page_index for page_index, _slot in self.tile_slots.values()}),
+            device_max_texture_size=self.max_texture_size,
+            budget_bytes=self.budget_bytes,
+            near_resident_items=len(near_keys.intersection(self.source_ids)),
+            warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
+            evicted_near_items=self.evicted_near_count - evicted_near_before,
+        )
+
+    def _slot_for(self, resident_key: object, *, active_keys: set[object], near_keys: set[object]) -> tuple[int, int, bool]:
+        current = self.resident_slots.get(resident_key)
         if current is not None:
-            return int(current), False
+            return int(current[0]), int(current[1]), False
 
-        try:
-            slot = self.slot_owners.index(None)
-        except ValueError:
-            candidates = [
-                owner
-                for owner in self.slot_owners
-                if owner is not None and int(owner) not in active_tiles
-            ]
-            if not candidates:
-                raise AtlasCapacityError(
-                    f"atlas has {self.capacity} slots but {len(active_tiles)} active tiles require residency"
-                )
-            victim = min(candidates, key=lambda owner: self.last_used.get(int(owner), -1))
-            slot = int(self.slots.pop(int(victim)))
-            self.source_ids.pop(int(victim), None)
-            self.last_used.pop(int(victim), None)
-            self.eviction_count += 1
+        for page_index, page in enumerate(self.pages):
+            try:
+                slot = page.slot_owners.index(None)
+            except ValueError:
+                continue
+            page.slot_owners[int(slot)] = resident_key
+            self.resident_slots[resident_key] = (int(page_index), int(slot))
+            return int(page_index), int(slot), True
 
-        previous = self.slot_owners[int(slot)]
-        if previous is not None and int(previous) != int(tile_number):
-            self.slots.pop(int(previous), None)
-            self.source_ids.pop(int(previous), None)
-            self.last_used.pop(int(previous), None)
-        self.slot_owners[int(slot)] = int(tile_number)
-        self.slots[int(tile_number)] = int(slot)
-        return int(slot), True
+        candidates = []
+        for page_index, page in enumerate(self.pages):
+            for slot, owner in enumerate(page.slot_owners):
+                if owner is not None and owner not in active_keys:
+                    candidates.append((0 if owner not in near_keys else 1, self.last_used.get(owner, -1), owner, int(page_index), int(slot)))
+        if not candidates:
+            raise AtlasCapacityError(
+                f"atlas has {self.capacity} slots but {len(active_keys)} active tiles require residency"
+            )
+        priority, _last, victim, page_index, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
+        del priority
+        self.resident_slots.pop(victim, None)
+        self.source_ids.pop(victim, None)
+        self.last_used.pop(victim, None)
+        self.eviction_count += 1
+        if victim in near_keys:
+            self.evicted_near_count += 1
+        page = self.pages[int(page_index)]
+        page.slot_owners[int(slot)] = resident_key
+        self.resident_slots[resident_key] = (int(page_index), int(slot))
+        return int(page_index), int(slot), True
 
-    def _touch(self, tile_number: int) -> None:
+    def _touch(self, resident_key: object) -> None:
         self._clock += 1
-        self.last_used[int(tile_number)] = int(self._clock)
+        self.last_used[resident_key] = int(self._clock)
 
 
 class GpuMontageLayer:
-    def __init__(self, *, scene, visuals, gloo, transforms, parent):
+    def __init__(self, *, scene, visuals, gloo, transforms, parent, limits: GpuDeviceLimits | None = None):
         self._scene = scene
         self._visuals = visuals
         self._gloo = gloo
         self._transforms = transforms
-        self._pool = TextureAtlasPool(gloo)
-        self._visual = scene.visuals.create_visual_node(GpuWindowedTileVisual)(parent=parent)
-        self._visual.visible = False
-        self._geometry_key: tuple[object, ...] | None = None
+        self._parent = parent
+        self._device_limits = limits or query_gpu_device_limits(gloo)
+        self._pool = TextureAtlasPool(gloo, limits=self._device_limits)
+        self._visuals_by_page: list[object] = []
+        self._geometry_keys: dict[int, tuple[object, ...]] = {}
         self._levels: tuple[float, float] = (0.0, 1.0)
         self._visible_items = 0
         self._last_stats = GpuMontageLayerStats()
+        self._ensure_visual_count(1)
 
     @property
     def visual(self):
-        return self._visual
+        self._ensure_visual_count(1)
+        return self._visuals_by_page[0]
 
     @property
     def last_stats(self) -> GpuMontageLayerStats:
@@ -328,8 +546,9 @@ class GpuMontageLayer:
     def clear(self) -> None:
         # Hiding a layer must not discard useful GPU residency.  A later
         # viewport/session can reuse the same source identities.
-        self._visual.visible = False
-        self._geometry_key = None
+        for visual in self._visuals_by_page:
+            visual.visible = False
+        self._geometry_keys.clear()
         self._visible_items = 0
 
     def set_levels(self, levels) -> GpuMontageLayerStats:
@@ -337,7 +556,8 @@ class GpuMontageLayer:
         changed = levels != self._levels
         self._levels = levels
         if changed:
-            self._visual.set_levels(levels)
+            for visual in self._visuals_by_page:
+                visual.set_levels(levels)
         self._last_stats = GpuMontageLayerStats(
             visible_items=self._visible_items,
             resident_items=self._pool.resident_count,
@@ -346,8 +566,18 @@ class GpuMontageLayer:
             items_skipped=self._visible_items,
             estimated_gpu_bytes=self._pool.estimated_gpu_bytes,
             cpu_shadow_bytes=self._pool.cpu_shadow_bytes,
+            page_count=len(self._pool.pages),
+            active_pages=sum(1 for visual in self._visuals_by_page if bool(getattr(visual, "visible", False))),
+            device_max_texture_size=self._pool.max_texture_size,
+            budget_bytes=self._pool.budget_bytes,
         )
         return self._last_stats
+
+    def _ensure_visual_count(self, count: int) -> None:
+        while len(self._visuals_by_page) < max(1, int(count)):
+            visual = self._scene.visuals.create_visual_node(GpuWindowedTileVisual)(parent=self._parent)
+            visual.visible = False
+            self._visuals_by_page.append(visual)
 
     def update(
         self,
@@ -357,57 +587,83 @@ class GpuMontageLayer:
         levels,
         dirty_tiles: tuple[int, ...] | None,
         rgb_already_windowed: bool,
+        tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
     ) -> GpuMontageLayerStats:
         montage = getattr(geometry, "montage", None)
         if montage is None:
             self.clear()
             return GpuMontageLayerStats()
         payloads = {int(key): value for key, value in dict(payloads or {}).items()}
-        reserve_count = _atlas_reserve_count(geometry, minimum=len(payloads))
+        reserve_count = max(
+            _atlas_reserve_count(geometry, minimum=len(payloads)),
+            len(tuple(getattr(tile_delta, "planned_tiles", ()) or ())),
+        )
+        near_tiles = tuple(getattr(tile_delta, "near_tiles", ()) or ())
+        near_tile_source_ids = dict(getattr(tile_delta, "near_tile_source_ids", {}) or {})
         uvs, texture_stats = self._pool.update_payloads(
             payloads,
             tile_shape=(int(montage.tile_height), int(montage.tile_width)),
             dirty_tiles=dirty_tiles,
             rgb_already_windowed=rgb_already_windowed,
             reserve_count=reserve_count,
+            near_tiles=near_tiles,
+            near_tile_source_ids=near_tile_source_ids,
+            budget_bytes=tile_residency_budget_bytes,
         )
-        geometry_key = (
-            tuple(
-                (
-                    int(key),
-                    int(self._pool.slots[int(key)]),
-                    _payload_mode(payload, rgb_already_windowed=rgb_already_windowed),
-                )
-                for key, payload in sorted(payloads.items())
-            ),
-            int(montage.tile_height),
-            int(montage.tile_width),
-            int(montage.columns),
-            int(montage.rows),
-            int(montage.gap),
-            self._pool.serial,
-        )
+        self._ensure_visual_count(len(self._pool.pages))
         vertex_uploads = 0
-        if geometry_key != self._geometry_key:
-            vertices, texcoords, modes = _quad_buffers(
-                montage,
-                payloads,
-                uvs,
-                rgb_already_windowed=rgb_already_windowed,
+        active_pages = set()
+        for page_index, page in enumerate(self._pool.pages):
+            page_payloads = {
+                int(tile): payload
+                for tile, payload in payloads.items()
+                if self._pool.tile_slots.get(int(tile), (-1, -1))[0] == page_index
+            }
+            visual = self._visuals_by_page[page_index]
+            geometry_key = (
+                tuple(
+                    (
+                        int(key),
+                        int(self._pool.tile_slots[int(key)][1]),
+                        _payload_mode(payload, rgb_already_windowed=rgb_already_windowed),
+                    )
+                    for key, payload in sorted(page_payloads.items())
+                ),
+                int(montage.tile_height),
+                int(montage.tile_width),
+                int(montage.columns),
+                int(montage.rows),
+                int(montage.gap),
+                self._pool.serial,
+                page_index,
             )
-            self._visual.set_geometry(vertices, texcoords, modes)
-            self._geometry_key = geometry_key
-            vertex_uploads = 1
+            if page_payloads:
+                active_pages.add(page_index)
+            if geometry_key != self._geometry_keys.get(page_index):
+                vertices, texcoords, modes = _quad_buffers(
+                    montage,
+                    page_payloads,
+                    uvs,
+                    rgb_already_windowed=rgb_already_windowed,
+                )
+                visual.set_geometry(vertices, texcoords, modes)
+                self._geometry_keys[page_index] = geometry_key
+                vertex_uploads += 1
         levels = _normalize_levels(levels, self._levels)
         level_updates = 0
         if levels != self._levels:
             self._levels = levels
-            self._visual.set_levels(levels)
+            for visual in self._visuals_by_page:
+                visual.set_levels(levels)
             level_updates = 1
-        if self._pool.scalar_texture is not None and self._pool.color_texture is not None:
-            self._visual.set_textures(self._pool.scalar_texture, self._pool.color_texture)
+        for page_index, page in enumerate(self._pool.pages):
+            visual = self._visuals_by_page[page_index]
+            visual.set_textures(page.scalar_texture, page.color_texture)
+            visual.visible = page_index in active_pages
+        for visual in self._visuals_by_page[len(self._pool.pages):]:
+            visual.visible = False
         self._visible_items = len(payloads)
-        self._visual.visible = bool(payloads)
         self._last_stats = GpuMontageLayerStats(
             visible_items=texture_stats.visible_items,
             resident_items=texture_stats.resident_items,
@@ -423,8 +679,53 @@ class GpuMontageLayer:
             estimated_gpu_bytes=texture_stats.estimated_gpu_bytes,
             cpu_shadow_bytes=texture_stats.cpu_shadow_bytes,
             upload_ms=texture_stats.upload_ms,
+            page_count=texture_stats.page_count,
+            active_pages=len(active_pages),
+            device_max_texture_size=texture_stats.device_max_texture_size,
+            budget_bytes=texture_stats.budget_bytes,
+            near_resident_items=texture_stats.near_resident_items,
+            warm_resident_items=texture_stats.warm_resident_items,
+            evicted_near_items=texture_stats.evicted_near_items,
+            capacity_warning=texture_stats.capacity_warning,
         )
         return self._last_stats
+
+    def warm_residency(
+        self,
+        *,
+        payloads: dict[int, DisplayTilePayload],
+        geometry,
+        rgb_already_windowed: bool,
+        tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
+    ) -> GpuMontageLayerStats:
+        montage = getattr(geometry, "montage", None)
+        if montage is None:
+            return GpuMontageLayerStats()
+        try:
+            return self._pool.warm_payloads(
+                {int(key): value for key, value in dict(payloads or {}).items()},
+                tile_shape=(int(montage.tile_height), int(montage.tile_width)),
+                rgb_already_windowed=rgb_already_windowed,
+                near_tile_source_ids=dict(getattr(tile_delta, "near_tile_source_ids", {}) or {}),
+                budget_bytes=tile_residency_budget_bytes,
+            )
+        except AtlasCapacityError as exc:
+            previous = self._last_stats
+            return GpuMontageLayerStats(
+                visible_items=int(previous.visible_items),
+                resident_items=self._pool.resident_count,
+                atlas_capacity=self._pool.capacity,
+                estimated_gpu_bytes=self._pool.estimated_gpu_bytes,
+                cpu_shadow_bytes=self._pool.cpu_shadow_bytes,
+                page_count=len(self._pool.pages),
+                active_pages=int(previous.active_pages),
+                device_max_texture_size=self._pool.max_texture_size,
+                budget_bytes=self._pool.budget_bytes,
+                near_resident_items=int(previous.near_resident_items),
+                warm_resident_items=max(0, self._pool.resident_count - len(self._pool.active_resident_keys)),
+                capacity_warning=str(exc),
+            )
 
 
 class GpuWindowedTileVisual(Visual):
@@ -547,8 +848,49 @@ class GpuWindowedTileVisual(Visual):
         return (0.0, 0.0)
 
 
-def create_gpu_montage_layer(*, scene, visuals, gloo, transforms, parent) -> GpuMontageLayer:
-    return GpuMontageLayer(scene=scene, visuals=visuals, gloo=gloo, transforms=transforms, parent=parent)
+def create_gpu_montage_layer(*, scene, visuals, gloo, transforms, parent, limits: GpuDeviceLimits | None = None) -> GpuMontageLayer:
+    return GpuMontageLayer(scene=scene, visuals=visuals, gloo=gloo, transforms=transforms, parent=parent, limits=limits)
+
+
+def query_gpu_device_limits(gloo) -> GpuDeviceLimits:
+    try:
+        gl = getattr(gloo, "gl", None)
+        if gl is None:
+            from vispy import gloo as vispy_gloo
+
+            gl = getattr(vispy_gloo, "gl", None)
+        if gl is None:
+            raise RuntimeError("VisPy GL module unavailable")
+
+        def get_integer(name: str, fallback: int = 0) -> int:
+            value = gl.glGetParameter(getattr(gl, name))
+            try:
+                return int(value)
+            except Exception:
+                return int(np.asarray(value).ravel()[0])
+
+        def get_string(name: str) -> str:
+            value = gl.glGetString(getattr(gl, name))
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return str(value or "")
+
+        max_texture = get_integer("GL_MAX_TEXTURE_SIZE", 4096)
+        max_units = get_integer("GL_MAX_TEXTURE_IMAGE_UNITS", 0)
+        return GpuDeviceLimits(
+            max_texture_size=max(1, int(max_texture)),
+            max_texture_image_units=max(0, int(max_units)),
+            vendor=get_string("GL_VENDOR"),
+            renderer=get_string("GL_RENDERER"),
+            version=get_string("GL_VERSION"),
+            source="opengl",
+        )
+    except Exception as exc:
+        return GpuDeviceLimits(
+            max_texture_size=4096,
+            source="fallback",
+            warnings=(f"OpenGL device limit query failed: {exc}",),
+        )
 
 
 def _payload_textures(payload: DisplayTilePayload, *, tile_shape: tuple[int, int], rgb_already_windowed: bool):
@@ -712,6 +1054,15 @@ def _normalize_storage_mode(mode: str) -> str:
     return mode
 
 
+def _storage_mode_bytes_per_pixel(mode: str) -> int:
+    mode = _normalize_storage_mode(mode)
+    if mode == "scalar":
+        return 4
+    if mode == "color":
+        return 3
+    return 7
+
+
 def _atlas_grid(*, tile_shape: tuple[int, int], capacity: int, max_texture_size: int) -> tuple[int, int]:
     tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
     capacity = max(1, int(capacity))
@@ -762,3 +1113,35 @@ def _payload_mode(payload: DisplayTilePayload, *, rgb_already_windowed: bool) ->
     if image.ndim == 3 and image.shape[-1] in (3, 4):
         return 2 if rgb_already_windowed else 1
     return 0
+
+
+def _payload_supported_by_storage_mode(payload: DisplayTilePayload, storage_mode: str | None, *, rgb_already_windowed: bool) -> bool:
+    mode = _normalize_storage_mode(storage_mode or "scalar")
+    image = np.asarray(payload.image)
+    is_color = image.ndim == 3 and image.shape[-1] in (3, 4)
+    if not is_color:
+        return mode in {"scalar", "scalar_color"}
+    if rgb_already_windowed:
+        return mode in {"color", "scalar_color"}
+    return mode == "scalar_color"
+
+
+def _resident_key(payload: DisplayTilePayload) -> object:
+    """Return the GPU residency identity for a semantic tile payload.
+
+    Tile numbers describe where content is drawn in the current montage plan.
+    They are not content identities: index scrolling can draw the same source
+    through a different tile number.  Residency is therefore keyed by
+    ``source_id`` whenever possible, with an object-id fallback for rare
+    unhashable identities.
+    """
+
+    return _source_resident_key(payload.source_id)
+
+
+def _source_resident_key(source_id: object) -> object:
+    try:
+        hash(source_id)
+    except Exception:
+        return ("source-object", id(source_id))
+    return ("source", source_id)

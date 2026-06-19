@@ -12,6 +12,8 @@ from arrayscope.display.vispy_tiled_renderer import (
     _fit_color,
     _fit_scalar,
     _payload_textures,
+    _resident_key,
+    query_gpu_device_limits,
 )
 from arrayscope.window.display_frame import DisplayTilePayload
 
@@ -80,8 +82,8 @@ def test_atlas_keeps_stable_slots_when_active_set_changes():
     assert second.items_updated == 1
     assert second.items_skipped == 1
     assert second.atlas_evictions == 1
-    assert 0 not in pool.source_ids
-    assert pool.source_ids[2] == ("tile", 2, 30.0)
+    assert ("tile", 0, 10.0) not in pool.source_ids.values()
+    assert ("tile", 2, 30.0) in pool.source_ids.values()
 
 
 def test_atlas_reserve_includes_pending_visible_tiles():
@@ -184,6 +186,36 @@ def test_atlas_retains_offscreen_payload_for_later_clean_reuse():
     assert reused.resident_items == 2
 
 
+def test_atlas_reuses_resident_source_when_tile_number_changes():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    sources = {index: ("source", index) for index in range(4)}
+    pool.update_payloads(
+        {index: payload(index, float(index), source_id=sources[index]) for index in range(4)},
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=4,
+    )
+
+    _uvs, reused = pool.update_payloads(
+        {
+            0: payload(0, 2.0, source_id=sources[2]),
+            1: payload(1, 3.0, source_id=sources[3]),
+        },
+        tile_shape=(2, 2),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        reserve_count=4,
+    )
+
+    assert reused.items_updated == 0
+    assert reused.items_skipped == 2
+    assert reused.texture_uploads == 0
+    assert reused.resident_items == 4
+    page_index, slot = pool.resident_slots[_resident_key(payload(0, 2.0, source_id=sources[2]))]
+    assert pool.slots[0] == page_index * 1_000_000 + slot
+
+
 def test_atlas_uses_shape_only_gpu_allocation_and_subuploads():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     pool.update_payloads(
@@ -246,8 +278,75 @@ def test_atlas_allocates_scalar_and_color_planes_for_windowable_rgb():
 
 def test_atlas_rejects_tile_set_that_requires_multiple_pages():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
-    with pytest.raises(AtlasCapacityError, match="more than one"):
-        pool.ensure_layout(tile_shape=(2, 2), count=5)
+    rebuilt = pool.ensure_layout(tile_shape=(2, 2), count=5, storage_mode="scalar")
+
+    assert rebuilt is True
+    assert len(pool.pages) == 2
+    assert pool.capacity == 5
+
+
+def test_atlas_rejects_active_set_that_exceeds_byte_budget():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16, budget_bytes=2 * 2 * 4)
+    with pytest.raises(AtlasCapacityError, match="budget"):
+        pool.update_payloads(
+            {0: payload(0, 0.0), 1: payload(1, 1.0)},
+            tile_shape=(2, 2),
+            dirty_tiles=None,
+            rgb_already_windowed=False,
+            reserve_count=2,
+        )
+
+
+def test_atlas_eviction_prefers_far_inactive_tiles_before_near_tiles():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+    values = {index: payload(index, float(index)) for index in range(4)}
+    pool.update_payloads(values, tile_shape=(2, 2), dirty_tiles=None, rgb_already_windowed=False, reserve_count=4)
+    pool.update_payloads(
+        {2: values[2], 3: values[3]},
+        tile_shape=(2, 2),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        reserve_count=4,
+        near_tiles=(0,),
+        near_tile_source_ids={0: values[0].source_id},
+    )
+    pool.update_payloads(
+        {2: values[2], 3: values[3], 4: payload(4, 4.0)},
+        tile_shape=(2, 2),
+        dirty_tiles=(4,),
+        rgb_already_windowed=False,
+        reserve_count=4,
+        near_tiles=(0,),
+        near_tile_source_ids={0: values[0].source_id},
+    )
+
+    assert ("tile", 0, 0.0) in pool.source_ids.values()
+    assert ("tile", 1, 1.0) not in pool.source_ids.values()
+
+
+def test_atlas_warms_loaded_near_payload_without_changing_active_slots():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    values = {index: payload(index, float(index)) for index in range(3)}
+    pool.update_payloads(
+        {0: values[0]},
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=3,
+    )
+    active_slots = dict(pool.slots)
+
+    warmed = pool.warm_payloads(
+        {1: values[1], 2: values[2]},
+        tile_shape=(2, 2),
+        rgb_already_windowed=False,
+        near_tile_source_ids={index: values[index].source_id for index in range(3)},
+    )
+
+    assert warmed.items_updated == 2
+    assert warmed.texture_uploads == 2
+    assert warmed.resident_items == 3
+    assert pool.slots == active_slots
 
 
 def test_payload_texture_conversion_preserves_scalar_dynamic_range():
@@ -280,3 +379,11 @@ def test_noncontiguous_or_padded_payload_planes_get_safe_staging_arrays():
     assert fitted_color is not color
     np.testing.assert_array_equal(fitted_scalar, scalar)
     np.testing.assert_array_equal(fitted_color, color)
+
+
+def test_device_limit_query_falls_back_when_gl_is_unavailable():
+    limits = query_gpu_device_limits(SimpleNamespace())
+
+    assert limits.max_texture_size == 4096
+    assert limits.source == "fallback"
+    assert limits.warnings

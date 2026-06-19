@@ -31,12 +31,13 @@ from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.imageview2d import _point_inside_view_range
+from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.overlay_hit_test import hit_test_roi, roi_handle_points
 from arrayscope.display.viewport import ViewportPolicy
 
 if TYPE_CHECKING:
-    from arrayscope.window.display_frame import DisplayTilePayload
+    from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
 @dataclass
@@ -131,6 +132,10 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_overlay_count = 0
         self._vispy_profile_visuals: dict[str, object] = {}
         self._vispy_last_levels: tuple[float, float] = (0.0, 1.0)
+        self._vispy_warm_tile_timer: QtCore.QTimer | None = None
+        self._vispy_pending_warm_tile_payloads: dict[int, object] = {}
+        self._vispy_pending_warm_tile_context: dict[str, object] = {}
+        self._last_vispy_warm_tile_stats = None
         self._last_vispy_tiled_levels_key = None
         self._last_vispy_tiled_histogram_key = None
         self._last_vispy_tiled_viewport_key = None
@@ -303,9 +308,44 @@ class VisPyImageView2D(ImageView2D):
         montage_dirty_tiles: tuple[int, ...] | None = None,
         montage_tile_source_ids: dict[int, object] | None = None,
         montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
+        tile_delta: "TilePresentationDelta | None" = None,
+        tile_residency_budget_bytes: int = 0,
     ) -> None:
         if geometry is None or getattr(geometry, "montage", None) is None:
             raise ValueError("tile-layer presentation requires montage geometry")
+        self._apply_vispy_tile_layer_presentation(
+            img,
+            histogramData=histogramData,
+            histogramPlotData=histogramPlotData,
+            geometry=geometry,
+            levels=levels,
+            histogramRange=histogramRange,
+            viewport_policy=viewport_policy,
+            rgb_already_windowed=rgb_already_windowed,
+            montage_dirty_tiles=montage_dirty_tiles,
+            montage_tile_source_ids=montage_tile_source_ids,
+            montage_tile_payloads=montage_tile_payloads,
+            tile_delta=tile_delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
+        )
+
+    def _apply_vispy_tile_layer_presentation(
+        self,
+        img: np.ndarray,
+        *,
+        histogramData: np.ndarray | None,
+        histogramPlotData: np.ndarray | None,
+        geometry,
+        levels: tuple[float, float],
+        histogramRange: tuple[float, float],
+        viewport_policy=ViewportPolicy.PRESERVE,
+        rgb_already_windowed: bool = False,
+        montage_dirty_tiles: tuple[int, ...] | None = None,
+        montage_tile_source_ids: dict[int, object] | None = None,
+        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
+        tile_delta: "TilePresentationDelta | None" = None,
+        tile_residency_budget_bytes: int = 0,
+    ) -> None:
         self._start_upload_timing("vispy_tile_layer")
         applying = self._applying_presentation
         self._applying_presentation = True
@@ -360,6 +400,12 @@ class VisPyImageView2D(ImageView2D):
                     storage_capacity=int(getattr(previous, "atlas_capacity", 0) or 0),
                     estimated_gpu_bytes=int(getattr(previous, "estimated_gpu_bytes", 0) or 0),
                     cpu_shadow_bytes=int(getattr(previous, "cpu_shadow_bytes", 0) or 0),
+                    page_count=int(getattr(previous, "page_count", 0) or 0),
+                    active_pages=int(getattr(previous, "active_pages", 0) or 0),
+                    device_max_texture_size=int(getattr(previous, "device_max_texture_size", 0) or 0),
+                    budget_bytes=int(getattr(previous, "budget_bytes", 0) or 0),
+                    near_resident_items=int(getattr(previous, "near_resident_items", 0) or 0),
+                    warm_resident_items=int(getattr(previous, "warm_resident_items", 0) or 0),
                 )
             else:
                 stats = self._update_vispy_tile_layer(
@@ -371,6 +417,8 @@ class VisPyImageView2D(ImageView2D):
                     dirty_tiles=montage_dirty_tiles,
                     tile_source_ids=montage_tile_source_ids,
                     tile_payloads=montage_tile_payloads,
+                    tile_delta=tile_delta,
+                    tile_residency_budget_bytes=tile_residency_budget_bytes,
                     force_levels=bool(data_unchanged and levels_changed),
                 )
             self._record_tile_layer_stats(stats)
@@ -404,6 +452,99 @@ class VisPyImageView2D(ImageView2D):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
+    def setTiledMontagePresentation(
+        self,
+        *,
+        geometry,
+        tile_state: "TilePresentationState",
+        tile_delta: "TilePresentationDelta",
+        histogramPlotData: np.ndarray | None,
+        levels: tuple[float, float],
+        histogramRange: tuple[float, float],
+        viewport_policy=ViewportPolicy.PRESERVE,
+        rgb_already_windowed: bool = False,
+        tile_residency_budget_bytes: int = 0,
+    ) -> None:
+        tile_payloads = tile_state.active_payloads(tile_delta)
+        warm_payloads = {
+            int(tile): payload
+            for tile, payload in tile_state.near_payloads(tile_delta).items()
+            if int(tile) not in tile_payloads
+        }
+        dirty_tiles = None if tile_delta.force_refresh else ()
+        placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
+        self._apply_vispy_tile_layer_presentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=histogramPlotData,
+            geometry=geometry,
+            levels=levels,
+            histogramRange=histogramRange,
+            viewport_policy=viewport_policy,
+            rgb_already_windowed=rgb_already_windowed,
+            montage_dirty_tiles=dirty_tiles,
+            montage_tile_source_ids={key: payload.source_id for key, payload in tile_payloads.items()},
+            montage_tile_payloads=tile_payloads,
+            tile_delta=tile_delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
+        )
+        self._schedule_vispy_warm_tile_residency(
+            warm_payloads,
+            geometry=geometry,
+            rgb_already_windowed=rgb_already_windowed,
+            tile_delta=tile_delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
+        )
+
+    def _schedule_vispy_warm_tile_residency(
+        self,
+        payloads,
+        *,
+        geometry,
+        rgb_already_windowed: bool,
+        tile_delta,
+        tile_residency_budget_bytes: int,
+    ) -> None:
+        payloads = {int(key): value for key, value in dict(payloads or {}).items()}
+        if not payloads:
+            return
+        self._vispy_pending_warm_tile_payloads = payloads
+        self._vispy_pending_warm_tile_context = {
+            "geometry": geometry,
+            "rgb_already_windowed": bool(rgb_already_windowed),
+            "tile_delta": tile_delta,
+            "tile_residency_budget_bytes": int(tile_residency_budget_bytes),
+        }
+        timer = self._vispy_warm_tile_timer
+        if timer is None:
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._process_vispy_warm_tile_residency)
+            self._vispy_warm_tile_timer = timer
+        if not timer.isActive():
+            timer.start(0)
+
+    def _process_vispy_warm_tile_residency(self) -> None:
+        payloads = dict(getattr(self, "_vispy_pending_warm_tile_payloads", {}) or {})
+        context = dict(getattr(self, "_vispy_pending_warm_tile_context", {}) or {})
+        self._vispy_pending_warm_tile_payloads = {}
+        self._vispy_pending_warm_tile_context = {}
+        if not payloads:
+            return
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        if layer is None or not hasattr(layer, "warm_residency"):
+            return
+        try:
+            self._last_vispy_warm_tile_stats = layer.warm_residency(
+                payloads=payloads,
+                geometry=context.get("geometry"),
+                rgb_already_windowed=bool(context.get("rgb_already_windowed", False)),
+                tile_delta=context.get("tile_delta"),
+                tile_residency_budget_bytes=int(context.get("tile_residency_budget_bytes", 0) or 0),
+            )
+        except Exception:
+            return
+
     def _apply_histogram_preview_levels(self, levels) -> None:
         levels = (float(levels[0]), float(levels[1]))
         started_timing = self._upload_timing is None
@@ -422,6 +563,8 @@ class VisPyImageView2D(ImageView2D):
                     dirty_tiles=(),
                     tile_source_ids=None,
                     tile_payloads=getattr(self, "_last_vispy_tile_payloads", None),
+                    tile_delta=None,
+                    tile_residency_budget_bytes=0,
                     force_levels=True,
                 )
                 self._record_tile_layer_stats(stats)
@@ -1054,6 +1197,8 @@ class VisPyImageView2D(ImageView2D):
         dirty_tiles,
         tile_source_ids,
         tile_payloads=None,
+        tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
         force_levels: bool = False,
     ):
         from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
@@ -1068,6 +1213,8 @@ class VisPyImageView2D(ImageView2D):
                 rgb_already_windowed=rgb_already_windowed,
                 dirty_tiles=dirty_tiles,
                 tile_source_ids=tile_source_ids,
+                tile_delta=tile_delta,
+                tile_residency_budget_bytes=tile_residency_budget_bytes,
                 force_levels=force_levels,
             )
         if img is None:
@@ -1196,6 +1343,8 @@ class VisPyImageView2D(ImageView2D):
         rgb_already_windowed: bool,
         dirty_tiles,
         tile_source_ids,
+        tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
         force_levels: bool = False,
     ):
         from arrayscope.display.montage_tile_layer import TileLayerUpdateStats
@@ -1222,13 +1371,34 @@ class VisPyImageView2D(ImageView2D):
         if force_levels and getattr(layer, "last_stats", None).visible_items:
             stats = layer.set_levels(levels)
         else:
-            stats = layer.update(
-                payloads=loaded_payloads,
-                geometry=geometry,
-                levels=levels,
-                dirty_tiles=dirty_tiles,
-                rgb_already_windowed=rgb_already_windowed,
-            )
+            try:
+                stats = layer.update(
+                    payloads=loaded_payloads,
+                    geometry=geometry,
+                    levels=levels,
+                    dirty_tiles=dirty_tiles,
+                    rgb_already_windowed=rgb_already_windowed,
+                    tile_delta=tile_delta,
+                    tile_residency_budget_bytes=tile_residency_budget_bytes,
+                )
+            except Exception as exc:
+                from arrayscope.display.vispy_tiled_renderer import AtlasCapacityError, GpuMontageLayerStats
+
+                if not isinstance(exc, AtlasCapacityError):
+                    raise
+                previous = getattr(layer, "last_stats", None)
+                stats = GpuMontageLayerStats(
+                    visible_items=len(loaded_payloads),
+                    resident_items=int(getattr(previous, "resident_items", 0) or 0),
+                    atlas_capacity=int(getattr(previous, "atlas_capacity", 0) or 0),
+                    estimated_gpu_bytes=int(getattr(previous, "estimated_gpu_bytes", 0) or 0),
+                    cpu_shadow_bytes=int(getattr(previous, "cpu_shadow_bytes", 0) or 0),
+                    page_count=int(getattr(previous, "page_count", 0) or 0),
+                    active_pages=int(getattr(previous, "active_pages", 0) or 0),
+                    device_max_texture_size=int(getattr(previous, "device_max_texture_size", 0) or 0),
+                    budget_bytes=int(tile_residency_budget_bytes),
+                    capacity_warning=str(exc),
+                )
         self._record_upload_timing("tile_layer_upload_ms", float(stats.upload_ms))
         timing = self._upload_timing
         if timing is not None:
@@ -1250,6 +1420,14 @@ class VisPyImageView2D(ImageView2D):
             level_updates=int(stats.level_updates),
             estimated_gpu_bytes=int(stats.estimated_gpu_bytes),
             cpu_shadow_bytes=int(stats.cpu_shadow_bytes),
+            page_count=int(getattr(stats, "page_count", 0)),
+            active_pages=int(getattr(stats, "active_pages", 0)),
+            device_max_texture_size=int(getattr(stats, "device_max_texture_size", 0)),
+            budget_bytes=int(getattr(stats, "budget_bytes", 0)),
+            near_resident_items=int(getattr(stats, "near_resident_items", 0)),
+            warm_resident_items=int(getattr(stats, "warm_resident_items", 0)),
+            evicted_near_items=int(getattr(stats, "evicted_near_items", 0)),
+            capacity_warning=str(getattr(stats, "capacity_warning", "")),
         )
 
     def _ensure_vispy_tile(self, tile_number: int, *, windowed_rgb: bool = False) -> _VisPyTileState:
@@ -1427,12 +1605,25 @@ class _WindowedRgbVisual(Visual):
         if tuple(color_array.shape[:2]) != tuple(scalar_array.shape[:2]):
             raise ValueError("windowed RGB color and scalar textures must have matching image shape")
         self._set_vertices(tuple(color_array.shape[:2]))
+        scalar_plane = scalar_array[..., np.newaxis]
         if self._color_texture is None or tuple(self._shape) != tuple(color_array.shape[:2]):
-            self._color_texture = self._gloo.Texture2D(color_array, interpolation="nearest", wrapping="clamp_to_edge")
-            self._scalar_texture = self._gloo.Texture2D(scalar_array, interpolation="nearest", wrapping="clamp_to_edge")
+            self._color_texture = self._gloo.Texture2D(
+                color_array,
+                format="rgb",
+                internalformat="rgb8",
+                interpolation="nearest",
+                wrapping="clamp_to_edge",
+            )
+            self._scalar_texture = self._gloo.Texture2D(
+                scalar_plane,
+                format="red",
+                internalformat="r32f",
+                interpolation="nearest",
+                wrapping="clamp_to_edge",
+            )
         else:
             self._color_texture.set_data(color_array, copy=False)
-            self._scalar_texture.set_data(scalar_array, copy=False)
+            self._scalar_texture.set_data(scalar_plane, copy=False)
         self._shape = tuple(int(size) for size in color_array.shape[:2])
         self.color_source_id = color_source_id
         self.scalar_source_id = scalar_source_id

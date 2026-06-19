@@ -14,13 +14,19 @@ section with both PyQtGraph and VisPy selected.
 
 - Load a 272×336×336 or similarly large montage progressively.
 - Verify every tile identity while batches arrive and after panning away/back.
-- Confirm atlas rebuild count remains one for a stable planned visible set.
+- Confirm atlas rebuild count remains bounded for a stable planned visible set and that page count
+  only grows when the visible/near plan exceeds the current page capacity.
 - Zoom into a small region, pan elsewhere, then return; resident tiles should reappear without upload
   unless pressure caused a reported eviction.
+- Narrow the montage index range to an overlapping subset and scroll that range; sources that remain
+  resident should redraw in their new tile positions with zero texture uploads.
+- Pan between nearby regions under pressure; viewport-near resident tiles should survive before
+  farther inactive tiles.
 - Verify loading/skipped overlays and tile gaps at all zoom levels.
 - Exercise scalar, already-windowed RGB, and complex/windowable RGB tile modes.
 - Confirm diagnostics show expected storage mode, resident/capacity, GPU bytes, zero CPU shadow bytes,
-  texture submissions, vertex submissions, rebuilds, and evictions.
+  texture submissions, vertex submissions, pages, active pages, derived budget, runtime max texture
+  size, near/warm resident counts, rebuilds, evictions, and capacity warnings.
 
 ## Interaction parity
 
@@ -43,10 +49,19 @@ section with both PyQtGraph and VisPy selected.
   ```bash
   ARRAYSCOPE_RUN_STRESS=1 \
   ARRAYSCOPE_BENCH_PRESENTED=1 \
-  python -m arrayscope.display.rendering_benchmarks
+  python -m arrayscope.display.rendering_benchmarks --presented --stress --runs 3 \
+    --jsonl artifacts/rendering-stress-local.jsonl
   ```
 
-- Repeat several times; compare medians and tail latency, not one run.
+- For baseline scenarios, run:
+
+  ```bash
+  python -m arrayscope.display.rendering_benchmarks --presented --runs 5 \
+    --jsonl artifacts/rendering-baseline-local.jsonl
+  ```
+
+- Repeat on each target OS/compositor/GPU class; merge JSONL samples and compare medians and tail
+  latency, not one run.
 - Check for frame pacing at monitor refresh rates with vsync on/off where the platform supports it.
 - Treat GPU utilization as supporting evidence only; correlate it with missed frames and submission
   stalls.
@@ -56,7 +71,7 @@ section with both PyQtGraph and VisPy selected.
 - Repeat large montage load, backend switch, data reload, and window close cycles.
 - Observe process RSS and GPU allocation; verify no monotonic atlas/surface leak.
 - Test low GPU-memory pressure and oversized tile counts; failure must be graceful and diagnostics
-  must explain page/capacity limitations.
+  must explain budget, page, device-limit, or capacity limitations.
 - Modify/reload source data and verify source identities force the correct dirty tile uploads.
 
 ## Platform-specific

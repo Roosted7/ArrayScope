@@ -6,6 +6,7 @@ import pytest
 from arrayscope.app.settings_state import MontageDisplayBackendChoice
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.window.montage_backend import choose_montage_backend
+from arrayscope.window.montage_renderer import _montage_viewport_update_delay_ms
 
 
 def _geometry():
@@ -66,6 +67,29 @@ def test_auto_preserves_vispy_tile_layer_mode():
 
     assert decision.backend == "tile_layer"
     assert "preserving" in decision.reason
+
+
+def test_persistent_tile_residency_uses_frame_cadence_viewport_updates():
+    capabilities = ImageViewBackendCapabilities(
+        name="vispy",
+        direct_montage_tile_payloads=True,
+        persistent_tile_residency=True,
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=capabilities,
+            montageDisplayMode=lambda: "vispy_tile_layer",
+        )
+    )
+    fallback = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
+            montageDisplayMode=lambda: "canvas",
+        )
+    )
+
+    assert _montage_viewport_update_delay_ms(window) == 16
+    assert _montage_viewport_update_delay_ms(fallback) == 120
 
 def test_auto_large_rgb_montage_uses_tile_layer():
     data = np.zeros((1500, 1500, 3), dtype=np.uint8)

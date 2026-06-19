@@ -99,10 +99,31 @@ def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes
 
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})
     second = session.snapshot_display_tile_payloads({0: ("tile", 0)})
+    state, delta = session.build_tile_presentation({0: ("tile", 0)})
+    clean_state, clean_delta = session.build_tile_presentation({0: ("tile", 0)})
 
     assert second[0] is first[0]
+    assert state.payloads[0] is first[0]
+    assert delta.upserts == {0: first[0]}
+    assert clean_state.payloads[0] is first[0]
+    assert clean_delta.upserts == {}
     replacement = np.full((2, 2), 3.0, dtype=np.float32)
     session.mark_loaded(RenderedTile(tile, replacement, replacement, 0.0, replacement.shape, replacement.nbytes))
-    third = session.snapshot_display_tile_payloads({0: ("tile", 0, "replacement")})
-    assert third[0] is not first[0]
-    assert third[0].image is replacement
+    third_state, third_delta = session.build_tile_presentation({0: ("tile", 0, "replacement")})
+    assert third_state.payloads[0] is not first[0]
+    assert third_state.payloads[0].image is replacement
+    assert third_delta.upserts[0] is third_state.payloads[0]
+
+
+def test_montage_render_session_delta_carries_near_sources_without_payloads():
+    session = _session()
+    tile = session.plan.tiles[0]
+    image = np.ones((2, 2), dtype=np.float32)
+    session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+
+    source_ids = {index: ("tile-source", index) for index in range(4)}
+    _state, delta = session.build_tile_presentation(source_ids)
+
+    assert delta.near_tiles == (0, 1, 2, 3)
+    assert delta.near_tile_source_ids == source_ids
+    assert set(delta.upserts) == {0}

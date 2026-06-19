@@ -13,6 +13,7 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.core.memory_policy import MiB, MemoryPolicy
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.ui.toasts import show_status_message
@@ -40,7 +41,8 @@ class DisplayPresentationMixin:
         montage_level_key=None,
         montage_dirty_tiles=None,
         montage_tile_source_ids=None,
-        montage_tile_payloads=None,
+        tile_state=None,
+        tile_delta=None,
     ):
         self._apply_full_display_image(
             display_image,
@@ -55,7 +57,8 @@ class DisplayPresentationMixin:
             montage_level_key=montage_level_key,
             montage_dirty_tiles=montage_dirty_tiles,
             montage_tile_source_ids=montage_tile_source_ids,
-            montage_tile_payloads=montage_tile_payloads,
+            tile_state=tile_state,
+            tile_delta=tile_delta,
         )
 
     def _apply_full_display_image(
@@ -78,7 +81,8 @@ class DisplayPresentationMixin:
         montage_level_key=None,
         montage_dirty_tiles=None,
         montage_tile_source_ids=None,
-        montage_tile_payloads=None,
+        tile_state=None,
+        tile_delta=None,
     ):
         commit_start = perf_counter()
         try:
@@ -102,7 +106,9 @@ class DisplayPresentationMixin:
                         histogram_plot_data=histogram_plot_data,
                         montage_dirty_tiles=montage_dirty_tiles,
                         montage_tile_source_ids=montage_tile_source_ids,
-                        montage_tile_payloads=montage_tile_payloads,
+                        tile_state=tile_state,
+                        tile_delta=tile_delta,
+                        tile_residency_budget_bytes=tile_residency_budget_bytes(self._memory_policy()),
                     ),
                     context=context,
                     previous_frame=previous_frame,
@@ -170,7 +176,8 @@ class DisplayPresentationMixin:
         montage_level_key=None,
         montage_dirty_tiles=None,
         montage_tile_source_ids=None,
-        montage_tile_payloads=None,
+        tile_state=None,
+        tile_delta=None,
     ):
         commit_start = perf_counter()
         try:
@@ -191,7 +198,9 @@ class DisplayPresentationMixin:
                         histogram_plot_data=histogram_plot_data,
                         montage_dirty_tiles=montage_dirty_tiles,
                         montage_tile_source_ids=montage_tile_source_ids,
-                        montage_tile_payloads=montage_tile_payloads,
+                        tile_state=tile_state,
+                        tile_delta=tile_delta,
+                        tile_residency_budget_bytes=tile_residency_budget_bytes(self._memory_policy()),
                     ),
                     context=context,
                     previous_frame=previous_frame,
@@ -374,3 +383,13 @@ class DisplayPresentationMixin:
         if frame is None or not self._is_level_history_frame_usable(frame):
             return
         self._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range or frame.histogram_range)
+
+
+def tile_residency_budget_bytes(policy: MemoryPolicy) -> int:
+    return int(
+        min(
+            int(getattr(policy, "visible_render_budget_bytes", 0) or 0),
+            max(64 * MiB, int(getattr(policy, "tile_cache_budget_bytes", 0) or 0) // 2),
+            int(getattr(policy, "user_render_cap_bytes", 0) or 0),
+        )
+    )

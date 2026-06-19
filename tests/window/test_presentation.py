@@ -4,7 +4,13 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey, DisplayTilePayload
+from arrayscope.window.display_frame import (
+    CommittedDisplayFrame,
+    DisplayFrameKey,
+    DisplayTilePayload,
+    TilePresentationDelta,
+    TilePresentationState,
+)
 from arrayscope.window.presentation import LevelSource, LevelSourceRank, decide_presentation
 from arrayscope.window.render_model import (
     CommitKind,
@@ -218,13 +224,26 @@ def test_typed_tile_payloads_create_first_class_tiled_presentation():
         montage_tile_states=("loaded",),
     )
     tile = DisplayTilePayload(0, 0, np.ones((2, 2), dtype=np.float32), None, ("tile", 0))
+    tile_state = TilePresentationState({0: tile})
+    tile_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts={0: tile},
+        active_tiles=(0,),
+        planned_tiles=(0,),
+        near_tiles=(0,),
+    )
     payload = DisplayPayload(
         image=DisplayImage(np.zeros((2, 2), dtype=np.float32)),
         geometry=geometry,
         viewport_policy=ViewportPolicy.PRESERVE,
-        montage_dirty_tiles=(0,),
-        montage_tile_source_ids={0: tile.source_id},
-        montage_tile_payloads={0: tile},
+        tile_state=tile_state,
+        tile_delta=tile_delta,
+        tile_residency_budget_bytes=64 * 1024 * 1024,
     )
 
     decision = decide_presentation(
@@ -233,6 +252,7 @@ def test_typed_tile_payloads_create_first_class_tiled_presentation():
 
     presentation = decision.display_presentation
     assert isinstance(presentation, DisplayTiledPresentation)
-    assert presentation.tile_payloads == {0: tile}
-    assert presentation.montage_dirty_tiles == (0,)
+    assert presentation.tile_state.payloads == {0: tile}
+    assert presentation.tile_delta.upserts == {0: tile}
+    assert presentation.tile_delta.active_tiles == (0,)
     assert not hasattr(presentation, "data")

@@ -119,12 +119,16 @@ source of array-view state.
   affected tile items, all-cached newly composed sessions can reuse unchanged rendered tile sources,
   and RGB/complex level changes reuse cached float32 tile bases.
 - `arrayscope.display.vispy_tiled_renderer`: VisPy display helper owned by `VisPyImageView2D` for
-  first-class tiled montage painting. It assigns stable atlas slots, retains inactive tiles as
-  GPU-resident until LRU pressure requires eviction, allocates only the scalar/color planes required
-  by the presentation, and uses tile-sized staging arrays rather than full CPU shadow atlases. One
-  batched visual draws the active tile quads; level-only changes update uniforms, clean commits skip
-  texture uploads, and dirty commits upload only changed atlas regions. The current implementation is
-  one page; multi-page, byte-budgeted residency remains future work.
+  first-class tiled montage painting. It applies revisioned `TilePresentationDelta` updates to
+  persistent tiled state, assigns stable source-keyed atlas slots across multiple pages, and maps the
+  current active tile numbers onto those resident source slots for drawing. Tile numbers are geometry,
+  not GPU content identity: shifted index windows must reuse already-resident semantic sources without
+  re-uploading pixels. Inactive tiles remain GPU-resident until byte-budgeted LRU pressure requires
+  eviction, and viewport-near resident sources are protected ahead of farther inactive sources. It
+  queries runtime texture limits, allocates only the scalar/color planes required by the presentation,
+  and uses tile-sized staging arrays rather than full CPU shadow atlases. One batched visual draws
+  each active page; level-only changes update uniforms, clean commits skip texture uploads, and dirty
+  commits upload only changed atlas regions.
 - `arrayscope.display.overlay_hit_test`: Qt-free ROI/profile handle and outline hit testing shared by
   backend visual adapters. Interaction semantics must move here or into a future shared interaction
   controller rather than being reimplemented by each graphics library.
@@ -274,14 +278,18 @@ split: preview updates are throttled to the visible display path, while the sema
 emitted once on drag finish. PyQtGraph may re-window its visible RGB tile items from bounded retained
 float bases; VisPy changes shader uniforms without uploading clean tile pixels.
 
-Progressive tiled commits are coalesced when upload is slow and carry dirty-tile semantics plus stable
-source identities. `None` means full/unknown refresh, `()` means a known-clean flush, and a non-empty
-tuple identifies changed loaded tiles. The VisPy atlas keeps stable slot ownership and separates active
-draw visibility from retained GPU residency. It reserves the complete non-skipped visible plan so an
-initial progressive stream does not repeatedly rebuild storage. Diagnostics report visible, resident,
-capacity, updated/skipped, texture and vertex submissions, uploaded bytes, storage rebuilds/evictions,
-estimated GPU bytes, and CPU shadow bytes. Clean commits and pan/zoom-only updates should report zero
-texture uploads.
+Progressive tiled commits are coalesced when upload is slow and carry a revisioned
+`TilePresentationDelta`: upserts, removals, active tiles, planned visible tiles, viewport-near tiles,
+and level/histogram/viewport revisions. The committed `TilePresentationState` owns semantic payloads
+for hover, ROI, and profile reads; renderers apply only the delta needed for upload and draw state.
+The VisPy atlas keeps stable source-keyed slot ownership and separates active draw visibility from
+retained GPU residency. It reserves the complete non-skipped visible plan when budget allows, falls
+back to active capacity when the plan is larger than the derived budget, and evicts far inactive
+sources before viewport-near inactive sources. Diagnostics report visible, resident, capacity, pages,
+active pages, budget, device texture limit, near/warm residency, updated/skipped, texture and vertex
+submissions, uploaded bytes, storage rebuilds/evictions, estimated GPU bytes, CPU shadow bytes, and
+capacity warnings. Clean commits, pan/zoom-only updates, and shifted active tile windows whose sources
+are already resident should report zero texture uploads.
 
 Predictive compute is stage-aware and governor-admitted. Stage warmup runs only while visible work is
 idle and only when a retained cacheable candidate fits the stage-cache budget. Rendered tile and

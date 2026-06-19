@@ -44,7 +44,7 @@ from arrayscope.window.montage_levels import MontageLevelStats, MontageLevelTrac
 from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.window.presentation import LevelSourceRank, fallback_level_source
-from arrayscope.window.render_model import CommitKind, DisplayTilePayload
+from arrayscope.window.render_model import CommitKind
 
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
@@ -1009,13 +1009,10 @@ class MontageRenderMixin:
             explicit_auto = bool(getattr(session, "force_auto", False))
             semantic_source = self._montage_level_source_for_session(session, allow_partial=explicit_auto)
             first_display_commit = not bool(session.display_committed)
-            # Tile source identities include document/view/operation revisions.
-            # New or changed items still upload through source/visibility checks,
-            # while a first commit for an already-resident cached montage can
-            # safely reuse its texture slots.  ``None`` remains the explicit
-            # force-refresh contract for callers without trusted identities.
-            montage_dirty_tiles = () if first_display_commit else dirty_tiles
-            tile_payloads = _display_tile_payloads_for_session(session, tile_source_ids)
+            tile_state, tile_delta = session.build_tile_presentation(
+                tile_source_ids,
+                source_ids_trusted=bool(getattr(session, "tile_source_ids_trusted", True)),
+            )
             if first_display_commit:
                 self._apply_full_display_image(
                     display_image,
@@ -1032,9 +1029,8 @@ class MontageRenderMixin:
                     request_key=session.key,
                     render_generation=session.render_generation,
                     montage_level_key=session.level_key,
-                    montage_dirty_tiles=montage_dirty_tiles,
-                    montage_tile_source_ids=tile_source_ids,
-                    montage_tile_payloads=tile_payloads,
+                    tile_state=tile_state,
+                    tile_delta=tile_delta,
                 )
                 session.display_committed = True
             else:
@@ -1055,9 +1051,8 @@ class MontageRenderMixin:
                     request_key=session.key,
                     render_generation=session.render_generation,
                     montage_level_key=session.level_key,
-                    montage_dirty_tiles=montage_dirty_tiles,
-                    montage_tile_source_ids=tile_source_ids,
-                    montage_tile_payloads=tile_payloads,
+                    tile_state=tile_state,
+                    tile_delta=tile_delta,
                 )
             overlay_start = perf_counter()
             rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
@@ -1096,33 +1091,47 @@ class MontageRenderMixin:
         if source_ids is None:
             source_ids = {}
             session.tile_source_ids = source_ids
-        loaded = {int(tile_number) for tile_number in getattr(session, "rendered_tiles", {})}
+        trusted = True
+        plan_tiles = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        }
         for stale in tuple(source_ids):
-            if int(stale) not in loaded:
+            if int(stale) not in plan_tiles:
                 source_ids.pop(int(stale), None)
-        for tile_number, rendered in getattr(session, "rendered_tiles", {}).items():
-            tile_number = int(tile_number)
-            if tile_number in source_ids:
+        for tile_number, tile in sorted(plan_tiles.items()):
+            if int(tile_number) in source_ids:
                 continue
             try:
                 source_ids[tile_number] = self.operation_evaluator.montage_tile_key(
-                    rendered.tile.view_state,
+                    tile.view_state,
                     montage_axis=session.montage_axis,
-                    source_index=rendered.tile.source_index,
+                    source_index=tile.source_index,
                     colormap_lut=session.colormap_lut,
                     document=session.document,
                 )
             except Exception:
-                image = getattr(rendered, "image", None)
-                histogram = getattr(rendered, "histogram_data", None)
-                source_ids[tile_number] = (
-                    id(image),
-                    tuple(np.shape(image)),
-                    None if image is None else str(np.asarray(image).dtype),
-                    id(histogram),
-                    None if histogram is None else tuple(np.shape(histogram)),
-                    None if histogram is None else str(np.asarray(histogram).dtype),
-                )
+                trusted = False
+                rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
+                if rendered is None:
+                    source_ids[tile_number] = (
+                        "planned_tile",
+                        int(getattr(tile, "montage_index", tile_number)),
+                        int(getattr(tile, "source_index", tile_number)),
+                        id(getattr(tile, "view_state", None)),
+                    )
+                else:
+                    image = getattr(rendered, "image", None)
+                    histogram = getattr(rendered, "histogram_data", None)
+                    source_ids[tile_number] = (
+                        id(image),
+                        tuple(np.shape(image)),
+                        None if image is None else str(np.asarray(image).dtype),
+                        id(histogram),
+                        None if histogram is None else tuple(np.shape(histogram)),
+                        None if histogram is None else str(np.asarray(histogram).dtype),
+                    )
+        session.tile_source_ids_trusted = bool(trusted)
         return dict(source_ids)
 
     def _should_autolevel_progressive_montage(self, session, stats: MontageLevelStats, *, complete: bool) -> bool:
@@ -1271,7 +1280,7 @@ class MontageRenderMixin:
             timer.setSingleShot(True)
             timer.timeout.connect(self._run_montage_viewport_update)
             self._montage_viewport_update_timer = timer
-        timer.start(120)
+        timer.start(_montage_viewport_update_delay_ms(self))
 
     def _run_montage_viewport_update(self) -> None:
         if getattr(self, "_closing", False):
@@ -1318,23 +1327,6 @@ def _montage_tile_layer_placeholder(session) -> np.ndarray:
         return np.broadcast_to(base, (height, width, 3))
     base = np.zeros((1, 1), dtype=np.float32)
     return np.broadcast_to(base, (height, width))
-
-
-def _display_tile_payloads_for_session(session, source_ids: dict[int, object]) -> dict[int, DisplayTilePayload]:
-    snapshot = getattr(session, "snapshot_display_tile_payloads", None)
-    if callable(snapshot):
-        return snapshot(source_ids)
-    payloads: dict[int, DisplayTilePayload] = {}
-    for tile_number, rendered in getattr(session, "rendered_tiles", {}).items():
-        tile_number = int(tile_number)
-        payloads[tile_number] = DisplayTilePayload(
-            tile_number=tile_number,
-            source_index=int(rendered.tile.source_index),
-            image=np.asarray(rendered.image),
-            histogram_data=None if rendered.histogram_data is None else np.asarray(rendered.histogram_data),
-            source_id=source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image))),
-        )
-    return payloads
 
 
 def _lead_direct_tiles(tiles, *, count: int = 1):
@@ -1385,6 +1377,21 @@ def _montage_tile_result_budget_ms(window, *, interactive: bool) -> float:
     if feedback is None:
         return 4.0 if interactive else 8.0
     return float(feedback.work_budget_ms("montage_tile_result", interactive=interactive))
+
+
+def _montage_viewport_update_delay_ms(window) -> int:
+    try:
+        capabilities = image_view_backend_capabilities(window.img_view)
+    except Exception:
+        capabilities = None
+    mode = ""
+    try:
+        mode = str(window.img_view.montageDisplayMode())
+    except Exception:
+        mode = ""
+    if bool(getattr(capabilities, "persistent_tile_residency", False)) and "tile_layer" in mode:
+        return 16
+    return 120
 
 
 def _montage_commit_interval_ms(window, *, force: bool) -> int:
