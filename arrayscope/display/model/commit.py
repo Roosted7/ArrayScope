@@ -13,7 +13,7 @@ from arrayscope.display.lod import LodInfo
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.window.display_frame import (
+from arrayscope.display.model.frame import (
     CanvasValueSource,
     CommittedDisplayFrame,
     DisplayFrameKey,

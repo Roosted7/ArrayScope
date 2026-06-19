@@ -56,8 +56,8 @@ from arrayscope.window.montage_viewport import (
     montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
 )
 from arrayscope.window.montage_session import MontageRenderSession
-from arrayscope.window.presentation import LevelSourceRank, fallback_level_source
-from arrayscope.window.render_model import CommitKind
+from arrayscope.display.planning import LevelSourceRank, fallback_level_source
+from arrayscope.display.model.commit import CommitKind
 
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0

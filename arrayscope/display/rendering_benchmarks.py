@@ -19,7 +19,7 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.montage import MontageTileState
-from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
 @dataclass(frozen=True)
@@ -787,7 +787,7 @@ def rendering_benchmark_environment(results=()) -> RenderingBenchmarkEnvironment
 
 def _gpu_limits_from_results(results):
     try:
-        from arrayscope.display.vispy_tiled_renderer import query_gpu_device_limits
+        from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
         from vispy import gloo
 
         limits = query_gpu_device_limits(gloo)
@@ -798,16 +798,16 @@ def _gpu_limits_from_results(results):
     for result in tuple(results or ()):
         timing = getattr(result, "timing", None)
         if timing is not None and int(getattr(timing, "tile_layer_device_max_texture_size", 0) or 0):
-            from arrayscope.display.vispy_tiled_renderer import GpuDeviceLimits
+            from arrayscope.display.backends.vispy.tiles import GpuDeviceLimits
 
             return GpuDeviceLimits(max_texture_size=int(timing.tile_layer_device_max_texture_size), source="benchmark_timing")
     try:
-        from arrayscope.display.vispy_tiled_renderer import query_gpu_device_limits
+        from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
         from vispy import gloo
 
         return query_gpu_device_limits(gloo)
     except Exception:
-        from arrayscope.display.vispy_tiled_renderer import GpuDeviceLimits
+        from arrayscope.display.backends.vispy.tiles import GpuDeviceLimits
 
         return GpuDeviceLimits()
 

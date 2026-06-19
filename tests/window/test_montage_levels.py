@@ -5,7 +5,7 @@ from arrayscope.window.montage_levels import (
     PROVISIONAL_TILE_SAMPLE_LIMIT,
     MontageLevelTracker,
 )
-from arrayscope.window.presentation import LevelSourceRank
+from arrayscope.display.planning import LevelSourceRank
 
 
 def test_montage_level_tracker_reuses_overlap_and_excludes_removed_indices():

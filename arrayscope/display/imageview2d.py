@@ -31,7 +31,7 @@ from arrayscope.display.image_upload import ensure_imageitem_array, rgb_display_
 from arrayscope.display.interaction import CursorIntent, DisplayInteractionController
 from arrayscope.display.levels import finite_bounds
 from arrayscope.display.layers import ViewLayerOwner
-from arrayscope.display.montage_tile_layer import MontageTileLayer, TileLayerUpdateStats
+from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer, TileLayerUpdateStats
 from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
 from arrayscope.display.profile_marker import ProfileMarkerOwner
 from arrayscope.display.roi_items import (
@@ -43,7 +43,7 @@ from arrayscope.display.roi_items import (
 from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
 
 if TYPE_CHECKING:
-    from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
 class ImageView2D(QtWidgets.QWidget):

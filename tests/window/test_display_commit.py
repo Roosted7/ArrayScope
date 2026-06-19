@@ -8,9 +8,9 @@ from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.display.shader_mapping import TexturePlaneKind
-from arrayscope.window.display_commit import DisplayCommitter
-from arrayscope.window.display_frame import DisplayFrameKey, DisplayTilePayload, TilePresentationDelta, TilePresentationState, TiledValueSource
-from arrayscope.window.render_model import DisplayTiledPresentation
+from arrayscope.display.commit import DisplayCommitter
+from arrayscope.display.model.frame import DisplayFrameKey, DisplayTilePayload, TilePresentationDelta, TilePresentationState, TiledValueSource
+from arrayscope.display.model.commit import DisplayTiledPresentation
 
 
 def _presentation():

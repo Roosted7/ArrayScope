@@ -176,10 +176,12 @@ def test_window_render_does_not_own_presentation_policy():
 
 def test_display_presentation_boundary_modules_exist():
     for rel in (
-        Path("arrayscope/window/display_frame.py"),
-        Path("arrayscope/window/display_commit.py"),
-        Path("arrayscope/window/render_model.py"),
-        Path("arrayscope/window/presentation.py"),
+        Path("arrayscope/display/model/frame.py"),
+        Path("arrayscope/display/model/commit.py"),
+        Path("arrayscope/display/planning.py"),
+        Path("arrayscope/display/commit.py"),
+        Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
+        Path("arrayscope/display/backends/vispy/tiles.py"),
         Path("arrayscope/window/montage_levels.py"),
         Path("arrayscope/window/montage_renderer.py"),
         Path("arrayscope/window/normal_renderer.py"),
@@ -197,7 +199,7 @@ def test_display_presenter_does_not_infer_windowed_rgb_from_array_rank():
 
 def test_imageview2d_owns_internal_montage_tile_layer_path():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
-    layer_text = (ROOT / "arrayscope" / "display" / "montage_tile_layer.py").read_text()
+    layer_text = (ROOT / "arrayscope" / "display" / "backends" / "pyqtgraph" / "tiles.py").read_text()
     assert "setMontageTileLayerPresentation" in text
     assert "MontageTileLayer" in text
     assert "TileLayerItemState" in layer_text
@@ -245,6 +247,29 @@ def test_predictive_compute_modules_exist():
         Path("arrayscope/operations/chunked_stage.py"),
     ):
         assert (ROOT / rel).exists()
+
+
+def test_display_semantics_live_in_display_package():
+    canonical = (
+        Path("arrayscope/display/model/frame.py"),
+        Path("arrayscope/display/model/commit.py"),
+        Path("arrayscope/display/planning.py"),
+        Path("arrayscope/display/commit.py"),
+        Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
+        Path("arrayscope/display/backends/vispy/tiles.py"),
+    )
+    legacy = (
+        Path("arrayscope/window/display_frame.py"),
+        Path("arrayscope/window/render_model.py"),
+        Path("arrayscope/window/presentation.py"),
+        Path("arrayscope/window/display_commit.py"),
+        Path("arrayscope/display/montage_tile_layer.py"),
+        Path("arrayscope/display/vispy_tiled_renderer.py"),
+    )
+    for rel in canonical:
+        assert (ROOT / rel).exists()
+    for rel in legacy:
+        assert not (ROOT / rel).exists()
 
 
 def test_histogram_imageitem_binding_is_centralized():

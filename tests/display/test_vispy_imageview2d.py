@@ -411,7 +411,7 @@ def test_vispy_tile_layer_clean_flush_skips_existing_visual_uploads(qt_app):
 def test_vispy_direct_tiled_payloads_use_batched_gpu_layer(qt_app):
     from pyqtgraph.Qt import QtGui
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-    from arrayscope.window.display_frame import DisplayTilePayload
+    from arrayscope.display.model.frame import DisplayTilePayload
 
     view = VisPyImageView2D()
     left = np.full((2, 2, 3), 180, dtype=np.uint8)
@@ -463,7 +463,7 @@ def test_vispy_direct_tiled_complex_display_images_render_nonblank(qt_app):
     from arrayscope.core.view_state import ChannelMode, ViewState
     from arrayscope.display.slice_engine import make_image
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-    from arrayscope.window.display_frame import DisplayTilePayload
+    from arrayscope.display.model.frame import DisplayTilePayload
 
     base = np.array([[1 + 0j, 1j], [-1 + 0j, -1j]], dtype=np.complex64)
     state = ViewState.from_shape(base.shape).with_channel(ChannelMode.COMPLEX)
@@ -531,7 +531,7 @@ def test_vispy_direct_tiled_complex_display_images_render_nonblank(qt_app):
 
 def test_vispy_direct_tiled_clean_and_dirty_counters(qt_app):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-    from arrayscope.window.display_frame import DisplayTilePayload
+    from arrayscope.display.model.frame import DisplayTilePayload
 
     view = VisPyImageView2D()
     payloads = {
@@ -598,7 +598,7 @@ def test_vispy_direct_tiled_clean_and_dirty_counters(qt_app):
 
 def test_vispy_first_class_tiled_new_semantic_state_reuses_resident_textures(qt_app):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-    from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = VisPyImageView2D()
     payloads = {
@@ -651,7 +651,7 @@ def test_vispy_first_class_tiled_shifted_window_reuses_resident_sources(qt_app):
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.montage import MontageTileState
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-    from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     geometry = DisplayGeometry(
         view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
@@ -734,7 +734,7 @@ def test_vispy_first_class_tiled_warms_loaded_near_sources_after_visible_commit(
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.montage import MontageTileState
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-    from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     geometry = DisplayGeometry(
         view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"),
@@ -789,7 +789,7 @@ def test_vispy_first_class_tiled_warms_loaded_near_sources_after_visible_commit(
 
 def test_vispy_direct_tiled_level_change_skips_structural_refresh(qt_app, monkeypatch):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-    from arrayscope.window.display_frame import DisplayTilePayload
+    from arrayscope.display.model.frame import DisplayTilePayload
 
     view = VisPyImageView2D()
     payloads = {
@@ -845,7 +845,7 @@ def test_vispy_direct_tiled_scalar_atlas_preserves_high_dynamic_range(qt_app):
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.montage import MontageTileState
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-    from arrayscope.window.display_frame import DisplayTilePayload
+    from arrayscope.display.model.frame import DisplayTilePayload
 
     view = VisPyImageView2D()
     geometry = DisplayGeometry(

@@ -16,7 +16,7 @@ import numpy as np
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities, image_view_backend_capabilities
 
 if TYPE_CHECKING:
-    from arrayscope.window.render_model import DisplayRasterPresentation, DisplayTiledPresentation
+    from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
 
 
 class RasterCommitMode(Enum):

@@ -7,7 +7,7 @@ from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.evaluator import EvaluationResult, OperationEvaluator, _document_key
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.tile_regions import TileRegionRequest
-from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey
+from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayFrameKey
 from arrayscope.window.tile_data_provider import TileDataProvider
 
 
@@ -56,7 +56,7 @@ def test_tile_region_provider_uses_committed_canvas_before_evaluation():
 
 def test_tile_region_provider_uses_committed_direct_tile_payload_before_canvas_placeholder():
     _data, state, plan, document, evaluator = _setup()
-    from arrayscope.window.display_frame import DisplayTilePayload, TiledValueSource
+    from arrayscope.display.model.frame import DisplayTilePayload, TiledValueSource
 
     tile = plan.tiles[1]
     placeholder = np.full((2, 7), -1.0, dtype=float)

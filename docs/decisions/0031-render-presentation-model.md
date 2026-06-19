@@ -10,9 +10,9 @@ view because it re-entered rendering through a different cached-tile path.
 
 ## Decision
 
-Add `arrayscope.window.render_model` as the Qt-free boundary model for visible display commits. Render
+Add `arrayscope.display.model.commit` as the Qt-free boundary model for visible display commits. Render
 orchestration now builds a `PresentationInput` with the display payload, committed previous frame,
-commit kind, semantic montage level source, and render request context. `arrayscope.window.presentation`
+commit kind, semantic montage level source, and render request context. `arrayscope.display.planning`
 owns `decide_presentation()`, which returns the one `PresentationDecision` used by `DisplayCommitter`.
 
 `DisplayCommitter` remains the only writer to `ImageView2D` and now validates shape compatibility and

@@ -6,8 +6,8 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.scene import DisplayLayout, DisplayStorage, display_scene_for_geometry, display_scene_for_presentation
 from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
-from arrayscope.window.render_model import DisplayRasterPresentation, DisplayTiledPresentation
+from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
 
 
 def test_normal_raster_is_one_region_scene():

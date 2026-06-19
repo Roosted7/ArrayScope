@@ -19,7 +19,7 @@ from arrayscope.operations.evaluator import (
 from arrayscope.operations.render_plan import choose_visible_render_decision
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.ui.toasts import show_status_message
-from arrayscope.window.display_frame import CommittedDisplayFrame, TiledValueSource
+from arrayscope.display.model.frame import CommittedDisplayFrame, TiledValueSource
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode

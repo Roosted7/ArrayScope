@@ -16,8 +16,8 @@ from arrayscope.core.window_levels import (
     normalize_bounds,
 )
 from arrayscope.display.levels import finite_bounds
-from arrayscope.window.display_frame import CommittedDisplayFrame
-from arrayscope.window.render_model import (
+from arrayscope.display.model.frame import CommittedDisplayFrame
+from arrayscope.display.model.commit import (
     CommitKind,
     DisplayRasterPresentation,
     DisplayTiledPresentation,
