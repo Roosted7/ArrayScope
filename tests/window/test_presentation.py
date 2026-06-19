@@ -1,12 +1,18 @@
 import numpy as np
 
 from arrayscope.core.view_state import ViewState
-from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey
+from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey, DisplayTilePayload
 from arrayscope.window.presentation import LevelSource, LevelSourceRank, decide_presentation
-from arrayscope.window.render_model import CommitKind, DisplayPayload, PresentationInput, RenderRequestContext
+from arrayscope.window.render_model import (
+    CommitKind,
+    DisplayPayload,
+    DisplayTiledPresentation,
+    PresentationInput,
+    RenderRequestContext,
+)
 
 
 def _geometry(shape=(2, 2)):
@@ -201,3 +207,32 @@ def test_montage_dirty_tiles_pass_through_presentation():
     )
 
     assert decision.display_presentation.montage_dirty_tiles == (3,)
+
+
+def test_typed_tile_payloads_create_first_class_tiled_presentation():
+    state = ViewState.from_shape((2, 2, 1)).with_image_axes(0, 1).with_montage_axis(2, columns=1, indices=(0,))
+    geometry = DisplayGeometry(
+        view_state=state,
+        display_shape=(2, 2),
+        montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0),
+        montage_tile_states=("loaded",),
+    )
+    tile = DisplayTilePayload(0, 0, np.ones((2, 2), dtype=np.float32), None, ("tile", 0))
+    payload = DisplayPayload(
+        image=DisplayImage(np.zeros((2, 2), dtype=np.float32)),
+        geometry=geometry,
+        viewport_policy=ViewportPolicy.PRESERVE,
+        montage_dirty_tiles=(0,),
+        montage_tile_source_ids={0: tile.source_id},
+        montage_tile_payloads={0: tile},
+    )
+
+    decision = decide_presentation(
+        _input(payload, kind=CommitKind.FULL_MONTAGE_INITIAL)
+    )
+
+    presentation = decision.display_presentation
+    assert isinstance(presentation, DisplayTiledPresentation)
+    assert presentation.tile_payloads == {0: tile}
+    assert presentation.montage_dirty_tiles == (0,)
+    assert not hasattr(presentation, "data")

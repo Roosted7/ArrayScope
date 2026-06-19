@@ -17,7 +17,7 @@ from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.display_commit import DisplayCommitter
-from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey
+from arrayscope.window.display_frame import CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
 from arrayscope.window.montage_backend import MontageBackendDecision, backend_warning_for_actual_commit
 from arrayscope.window.presentation import LevelSource, LevelSourceRank, decide_presentation, normalize_bounds
 from arrayscope.window.render_model import CommitKind, DisplayPayload, PresentationInput, RenderRequestContext
@@ -287,7 +287,10 @@ class DisplayPresentationMixin:
             return False
         if len(display_shape) != 2 or display_shape[0] < 1 or display_shape[1] < 1:
             return False
-        if tuple(np.shape(frame.data)[:2]) != display_shape:
+        if frame.data is None:
+            if not isinstance(frame.value_source, TiledValueSource):
+                return False
+        elif tuple(np.shape(frame.data)[:2]) != display_shape:
             return False
         if frame.histogram_data is not None and tuple(np.shape(frame.histogram_data)[:2]) != display_shape:
             return False

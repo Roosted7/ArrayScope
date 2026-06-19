@@ -442,6 +442,43 @@ class ImageView2D(QtWidgets.QWidget):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
+    def setTiledMontagePresentation(
+        self,
+        *,
+        geometry,
+        tile_payloads: dict[int, "DisplayTilePayload"],
+        histogramPlotData: np.ndarray | None,
+        levels: tuple[float, float],
+        histogramRange: tuple[float, float],
+        viewport_policy=ViewportPolicy.PRESERVE,
+        rgb_already_windowed: bool = False,
+        montage_dirty_tiles: tuple[int, ...] | None = None,
+        montage_tile_source_ids: dict[int, object] | None = None,
+    ) -> None:
+        """Commit a first-class tiled presentation through this backend.
+
+        The legacy tile-layer API still receives a broadcast placeholder
+        because parts of the shared widget shell use ``self.image.shape`` for
+        geometry.  The placeholder is created only at the backend boundary and
+        owns one pixel, so core presentation state no longer pretends that a
+        full montage raster exists.
+        """
+
+        placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
+        self.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=histogramPlotData,
+            geometry=geometry,
+            levels=levels,
+            histogramRange=histogramRange,
+            viewport_policy=viewport_policy,
+            rgb_already_windowed=rgb_already_windowed,
+            montage_dirty_tiles=montage_dirty_tiles,
+            montage_tile_source_ids=montage_tile_source_ids,
+            montage_tile_payloads=tile_payloads,
+        )
+
     def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None) -> TileLayerUpdateStats:
         if self._montage_tile_layer is None:
             return TileLayerUpdateStats()
@@ -1495,6 +1532,17 @@ def _world_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, float
     x0 = float(origin[0])
     y0 = float(origin[1])
     return (x0, y0, x0 + float(max(0, width - 1)), y0 + float(max(0, height - 1)))
+
+
+def _tiled_montage_placeholder(display_shape, tile_payloads) -> np.ndarray:
+    height, width = (max(1, int(value)) for value in tuple(display_shape)[:2])
+    sample = next(iter(dict(tile_payloads or {}).values()), None)
+    sample_image = None if sample is None else np.asarray(sample.image)
+    if sample_image is not None and sample_image.ndim == 3 and sample_image.shape[-1] in (3, 4):
+        base = np.zeros((1, 1, 3), dtype=np.uint8)
+        return np.broadcast_to(base, (height, width, 3))
+    base = np.zeros((1, 1), dtype=np.float32)
+    return np.broadcast_to(base, (height, width))
 
 
 def _point_inside_view_range(view_range, x: float, y: float) -> bool:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from arrayscope.window.display_frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
-from arrayscope.window.presentation import DisplayPresentation
+from arrayscope.window.render_model import DisplayPresentation, DisplayRasterPresentation, DisplayTiledPresentation
 
 
 class DisplayCommitter:
@@ -13,6 +13,7 @@ class DisplayCommitter:
         self.image_view = image_view
 
     def commit_full(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
+        presentation = self._require_raster(presentation, "full")
         self._validate_presentation(presentation)
         self.image_view.setImagePresentation(
             presentation.data,
@@ -28,6 +29,7 @@ class DisplayCommitter:
         return self._frame_for(presentation, key)
 
     def commit_fast(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
+        presentation = self._require_raster(presentation, "fast")
         self._validate_presentation(presentation)
         current = getattr(self.image_view, "image", None)
         if current is None or tuple(np.shape(current)[:2]) != tuple(presentation.geometry.display_shape):
@@ -46,34 +48,54 @@ class DisplayCommitter:
 
     def commit_tile_layer(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         self._validate_presentation(presentation)
-        self.image_view.setMontageTileLayerPresentation(
-            presentation.data,
-            histogramData=presentation.histogram_data,
-            histogramPlotData=presentation.histogram_plot_data,
-            geometry=presentation.geometry,
-            levels=presentation.levels,
-            histogramRange=presentation.histogram_range,
-            viewport_policy=presentation.viewport_policy,
-            rgb_already_windowed=presentation.rgb_already_windowed,
-            montage_dirty_tiles=presentation.montage_dirty_tiles,
-            montage_tile_source_ids=presentation.montage_tile_source_ids,
-            montage_tile_payloads=presentation.montage_tile_payloads,
-        )
+        if isinstance(presentation, DisplayTiledPresentation):
+            commit = getattr(self.image_view, "setTiledMontagePresentation", None)
+            if commit is None:
+                raise TypeError("image view does not implement first-class tiled presentation commits")
+            commit(
+                geometry=presentation.geometry,
+                tile_payloads=presentation.tile_payloads,
+                histogramPlotData=presentation.histogram_plot_data,
+                levels=presentation.levels,
+                histogramRange=presentation.histogram_range,
+                viewport_policy=presentation.viewport_policy,
+                rgb_already_windowed=presentation.rgb_already_windowed,
+                montage_dirty_tiles=presentation.montage_dirty_tiles,
+                montage_tile_source_ids=presentation.montage_tile_source_ids,
+            )
+        else:
+            self.image_view.setMontageTileLayerPresentation(
+                presentation.data,
+                histogramData=presentation.histogram_data,
+                histogramPlotData=presentation.histogram_plot_data,
+                geometry=presentation.geometry,
+                levels=presentation.levels,
+                histogramRange=presentation.histogram_range,
+                viewport_policy=presentation.viewport_policy,
+                rgb_already_windowed=presentation.rgb_already_windowed,
+                montage_dirty_tiles=presentation.montage_dirty_tiles,
+                montage_tile_source_ids=presentation.montage_tile_source_ids,
+                montage_tile_payloads=None,
+            )
         self.image_view.setProfileMarkerBoundsRect(_geometry_bounds(presentation.geometry))
         return self._frame_for(presentation, key)
 
     def _frame_for(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
-        if presentation.montage_tile_payloads is not None:
-            value_source = TiledValueSource(presentation.montage_tile_payloads)
+        if isinstance(presentation, DisplayTiledPresentation):
+            data = None
+            histogram_data = None
+            value_source = TiledValueSource(presentation.tile_payloads)
         else:
+            data = presentation.data
+            histogram_data = presentation.histogram_data
             value_source = CanvasValueSource(
                 data=presentation.data,
                 histogram_data=presentation.histogram_data,
                 geometry=presentation.geometry,
             )
         return CommittedDisplayFrame(
-            data=presentation.data,
-            histogram_data=presentation.histogram_data,
+            data=data,
+            histogram_data=histogram_data,
             geometry=presentation.geometry,
             levels=(float(presentation.levels[0]), float(presentation.levels[1])),
             histogram_range=(float(presentation.histogram_range[0]), float(presentation.histogram_range[1])),
@@ -82,15 +104,29 @@ class DisplayCommitter:
         )
 
     def _validate_presentation(self, presentation: DisplayPresentation) -> None:
-        shape = tuple(np.shape(presentation.data)[:2])
-        if shape != tuple(presentation.geometry.display_shape):
-            raise ValueError(f"display data shape {shape} does not match geometry {presentation.geometry.display_shape}")
-        if presentation.histogram_data is not None and tuple(np.shape(presentation.histogram_data)[:2]) != shape:
-            raise ValueError("histogram data shape does not match display data shape")
-        if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
-            raise ValueError("histogram plot data must not be empty")
+        if isinstance(presentation, DisplayTiledPresentation):
+            if getattr(presentation.geometry, "montage", None) is None:
+                raise ValueError("tiled display presentation requires montage geometry")
+            for tile_number, payload in dict(presentation.tile_payloads).items():
+                if int(tile_number) != int(payload.tile_number):
+                    raise ValueError("tile payload key must match tile_number")
+            if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
+                raise ValueError("histogram plot data must not be empty")
+        else:
+            shape = tuple(np.shape(presentation.data)[:2])
+            if shape != tuple(presentation.geometry.display_shape):
+                raise ValueError(f"display data shape {shape} does not match geometry {presentation.geometry.display_shape}")
+            if presentation.histogram_data is not None and tuple(np.shape(presentation.histogram_data)[:2]) != shape:
+                raise ValueError("histogram data shape does not match display data shape")
+            if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
+                raise ValueError("histogram plot data must not be empty")
         self._validate_bounds("levels", presentation.levels)
         self._validate_bounds("histogram range", presentation.histogram_range)
+
+    def _require_raster(self, presentation: DisplayPresentation, commit_kind: str) -> DisplayRasterPresentation:
+        if not isinstance(presentation, DisplayRasterPresentation):
+            raise TypeError(f"{commit_kind} display commit requires a raster presentation")
+        return presentation
 
     def _validate_bounds(self, label: str, bounds) -> None:
         try:

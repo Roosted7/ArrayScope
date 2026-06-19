@@ -17,7 +17,13 @@ from arrayscope.core.window_levels import (
 )
 from arrayscope.display.levels import finite_bounds
 from arrayscope.window.display_frame import CommittedDisplayFrame
-from arrayscope.window.render_model import CommitKind, DisplayPresentation, PresentationDecision, PresentationInput
+from arrayscope.window.render_model import (
+    CommitKind,
+    DisplayRasterPresentation,
+    DisplayTiledPresentation,
+    PresentationDecision,
+    PresentationInput,
+)
 
 
 def display_data_bounds(data, histogram_data=None) -> tuple[float, float] | None:
@@ -92,19 +98,7 @@ def _decide_normal_presentation(input: PresentationInput) -> PresentationDecisio
         expected_count=1,
         semantic_key=input.context.semantic_key,
     )
-    presentation = DisplayPresentation(
-        data=payload.data,
-        histogram_data=payload.histogram_data,
-        histogram_plot_data=payload.histogram_plot_data,
-        geometry=payload.geometry,
-        levels=levels,
-        histogram_range=histogram_range,
-        viewport_policy=payload.viewport_policy,
-        rgb_already_windowed=payload.rgb_already_windowed,
-        montage_dirty_tiles=payload.montage_dirty_tiles,
-        montage_tile_source_ids=payload.montage_tile_source_ids,
-        montage_tile_payloads=payload.montage_tile_payloads,
-    )
+    presentation = _presentation_for_payload(payload, levels=levels, histogram_range=histogram_range)
     return PresentationDecision(
         display_presentation=presentation,
         levels=levels,
@@ -130,18 +124,10 @@ def _decide_montage_presentation(input: PresentationInput) -> PresentationDecisi
         explicit_auto=explicit_auto,
         mode=input.window_mode,
     )
-    presentation = DisplayPresentation(
-        data=payload.data,
-        histogram_data=payload.histogram_data,
-        histogram_plot_data=payload.histogram_plot_data,
-        geometry=payload.geometry,
+    presentation = _presentation_for_payload(
+        payload,
         levels=state.display_levels,
         histogram_range=state.histogram_range,
-        viewport_policy=payload.viewport_policy,
-        rgb_already_windowed=payload.rgb_already_windowed,
-        montage_dirty_tiles=payload.montage_dirty_tiles,
-        montage_tile_source_ids=payload.montage_tile_source_ids,
-        montage_tile_payloads=payload.montage_tile_payloads,
     )
     source = state.as_level_source()
     return PresentationDecision(
@@ -162,6 +148,30 @@ def _effective_previous_source(input: PresentationInput) -> LevelSource | None:
     if applied is not None:
         return applied
     return fallback_level_source(input.previous_frame)
+
+
+def _presentation_for_payload(payload, *, levels, histogram_range):
+    common = dict(
+        geometry=payload.geometry,
+        levels=levels,
+        histogram_range=histogram_range,
+        viewport_policy=payload.viewport_policy,
+        rgb_already_windowed=payload.rgb_already_windowed,
+        montage_dirty_tiles=payload.montage_dirty_tiles,
+        montage_tile_source_ids=payload.montage_tile_source_ids,
+    )
+    if payload.montage_tile_payloads is not None:
+        return DisplayTiledPresentation(
+            tile_payloads=dict(payload.montage_tile_payloads),
+            histogram_plot_data=payload.histogram_plot_data,
+            **common,
+        )
+    return DisplayRasterPresentation(
+        data=payload.data,
+        histogram_data=payload.histogram_data,
+        histogram_plot_data=payload.histogram_plot_data,
+        **common,
+    )
 
 
 def _valid_source(source) -> LevelSource | None:

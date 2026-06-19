@@ -19,7 +19,7 @@ from arrayscope.operations.evaluator import (
 from arrayscope.operations.render_plan import choose_visible_render_decision
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.ui.toasts import show_status_message
-from arrayscope.window.display_frame import CommittedDisplayFrame
+from arrayscope.window.display_frame import CommittedDisplayFrame, TiledValueSource
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
@@ -113,7 +113,10 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             return False
         if frame.geometry != getattr(self, "display_geometry", None):
             return False
-        if tuple(np.shape(frame.data)[:2]) != tuple(frame.geometry.display_shape):
+        if frame.data is None:
+            if not isinstance(frame.value_source, TiledValueSource):
+                return False
+        elif tuple(np.shape(frame.data)[:2]) != tuple(frame.geometry.display_shape):
             return False
         if frame.histogram_data is not None and tuple(np.shape(frame.histogram_data)[:2]) != tuple(frame.geometry.display_shape):
             return False

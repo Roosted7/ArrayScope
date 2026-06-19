@@ -78,7 +78,6 @@ class DisplayRasterPresentation:
     rgb_already_windowed: bool = False
     montage_dirty_tiles: tuple[int, ...] | None = None
     montage_tile_source_ids: dict[int, object] | None = None
-    montage_tile_payloads: dict[int, DisplayTilePayload] | None = None
 
 
 @dataclass(frozen=True)
@@ -93,20 +92,8 @@ class DisplayTiledPresentation:
     montage_tile_source_ids: dict[int, object] | None = None
     rgb_already_windowed: bool = False
 
-    @property
-    def data(self) -> np.ndarray:
-        height, width = (max(1, int(value)) for value in self.geometry.display_shape)
-        sample = next(iter(self.tile_payloads.values()), None)
-        if sample is not None and np.asarray(sample.image).ndim == 3:
-            return np.broadcast_to(np.zeros((1, 1, 3), dtype=np.uint8), (height, width, 3))
-        return np.broadcast_to(np.zeros((1, 1), dtype=np.float32), (height, width))
 
-    @property
-    def histogram_data(self) -> np.ndarray | None:
-        return None
-
-
-DisplayPresentation = DisplayRasterPresentation
+DisplayPresentation = DisplayRasterPresentation | DisplayTiledPresentation
 
 
 @dataclass(frozen=True)
