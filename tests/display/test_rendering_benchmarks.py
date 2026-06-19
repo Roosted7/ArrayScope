@@ -7,7 +7,7 @@ pytest.importorskip("vispy")
 def test_rendering_backend_benchmarks_report_expected_scenarios(qt_app):
     from arrayscope.display.rendering_benchmarks import assert_optional_perf_gates, benchmark_rendering_backends
 
-    results = benchmark_rendering_backends()
+    results = benchmark_rendering_backends(measure_presented=False)
 
     assert {result.name for result in results} == {
         "pyqtgraph_scalar_level_preview",
@@ -25,6 +25,11 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(qt_app):
     }
     for result in results:
         assert result.elapsed_ms >= 0.0
+        assert result.submission_ms == result.elapsed_ms
+        assert result.first_frame_ms is None
+        assert result.event_loop_drain_ms is None
+        assert result.frame_count == 0
+        assert result.ui_max_gap_ms is None
         assert result.timing.mode
     assert_optional_perf_gates(results)
 
@@ -32,7 +37,7 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(qt_app):
 def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(qt_app):
     from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
 
-    results = {result.name: result for result in benchmark_rendering_backends()}
+    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
     pyqtgraph = results["pyqtgraph_complex_tile_level_preview"].timing
     vispy = results["vispy_complex_tile_level_preview"].timing
 
@@ -48,7 +53,7 @@ def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(qt_app):
 def test_vispy_clean_tile_flush_skips_existing_visuals(qt_app):
     from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
 
-    results = {result.name: result for result in benchmark_rendering_backends()}
+    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
     vispy = results["vispy_clean_tile_flush"].timing
 
     assert vispy.tile_layer_visible_items > 0
@@ -61,7 +66,7 @@ def test_vispy_clean_tile_flush_skips_existing_visuals(qt_app):
 def test_vispy_dirty_and_pan_scenarios_have_deterministic_upload_counters(qt_app):
     from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
 
-    results = {result.name: result for result in benchmark_rendering_backends()}
+    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
     dirty = results["vispy_one_dirty_tile_commit"].timing
     pan = results["vispy_pan_zoom_no_upload"].timing
 
