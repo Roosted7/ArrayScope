@@ -8,11 +8,14 @@ from arrayscope.display.shader_mapping import (
     apply_phase_lut,
     apply_scale,
     cpu_display_rgba,
+    default_gray_lut,
     extract_component,
     mapped_scalar,
+    normalize_lut_rgb,
     pack_texture_data,
     phase_lut_indices,
     shader_component_uniform,
+    shader_mapping_with_lut,
     window_intensity,
 )
 
@@ -136,4 +139,57 @@ def test_phase_color_cpu_oracle_maps_angle_through_lut_levels_without_intensity_
     rgba = cpu_display_rgba(data, mapping)
 
     np.testing.assert_array_equal(rgba[0, :, :3], lut)
+    np.testing.assert_array_equal(rgba[0, :, 3], np.array([255, 255, 255], dtype=np.uint8))
+
+
+def test_default_gray_lut_and_float_rgba_normalization_are_canonical_uint8_rgb():
+    gray = default_gray_lut(3)
+    np.testing.assert_array_equal(
+        gray,
+        np.array([[0, 0, 0], [128, 128, 128], [255, 255, 255]], dtype=np.uint8),
+    )
+
+    normalized = normalize_lut_rgb(
+        np.array([[0.0, 0.5, 1.0, 0.25], [1.0, 0.0, 0.5, 1.0]], dtype=np.float32)
+    )
+
+    assert normalized.flags.c_contiguous
+    assert normalized.dtype == np.uint8
+    np.testing.assert_array_equal(
+        normalized,
+        np.array([[0, 127, 255], [255, 0, 127]], dtype=np.uint8),
+    )
+
+
+def test_shader_mapping_with_lut_preserves_semantics_and_replaces_only_lut_state():
+    base = ShaderMapping(
+        component=ShaderComponent.IMAG,
+        scale=ShaderScale.LOG,
+        levels=(2.0, 8.0),
+        histogram_source_policy="semantic",
+    )
+    lut = np.array([[0, 0, 255], [255, 0, 0]], dtype=np.uint8)
+
+    mapped = shader_mapping_with_lut(base, lut, lut_identity=("display-lut", 7))
+
+    assert mapped.component == base.component
+    assert mapped.scale == base.scale
+    assert mapped.levels == base.levels
+    assert mapped.histogram_source_policy == base.histogram_source_policy
+    assert mapped.lut_identity == ("display-lut", 7)
+    np.testing.assert_array_equal(mapped.lut_data, lut)
+    assert base.lut_data is None
+
+
+def test_scalar_cpu_oracle_uses_the_frame_lut_instead_of_implicit_grayscale():
+    data = np.array([[0.0, 0.5, 1.0]], dtype=np.float32)
+    lut = np.array([[0, 0, 255], [255, 0, 0]], dtype=np.uint8)
+    mapping = ShaderMapping(levels=(0.0, 1.0), lut_data=lut)
+
+    rgba = cpu_display_rgba(data, mapping)
+
+    np.testing.assert_array_equal(
+        rgba[0, :, :3],
+        np.array([[0, 0, 255], [128, 0, 128], [255, 0, 0]], dtype=np.uint8),
+    )
     np.testing.assert_array_equal(rgba[0, :, 3], np.array([255, 255, 255], dtype=np.uint8))

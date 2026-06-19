@@ -17,7 +17,7 @@ from arrayscope.display.shader_mapping import (
     ShaderDisplayMode,
     ShaderScale,
     TexturePlaneKind,
-    default_phase_lut,
+    normalize_lut_rgb,
     pack_texture_data,
     shader_component_uniform,
 )
@@ -997,7 +997,8 @@ class GpuWindowedTileVisual(Visual):
             if (scalar != scalar) {
                 discard;
             }
-            gl_FragColor = vec4(vec3(intensity), 1.0);
+            vec3 color = texture2D(u_lut_texture, vec2(intensity, 0.5)).rgb;
+            gl_FragColor = vec4(color, 1.0);
         } else if (v_mode < 1.5) {
             float scalar = texture2D(u_scalar_texture, v_texcoord).r;
             vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
@@ -1020,7 +1021,8 @@ class GpuWindowedTileVisual(Visual):
             if (scalar != scalar) {
                 discard;
             }
-            gl_FragColor = vec4(vec3(intensity), 1.0);
+            vec3 color = texture2D(u_lut_texture, vec2(intensity, 0.5)).rgb;
+            gl_FragColor = vec4(color, 1.0);
         } else {
             vec2 z = texture2D(u_scalar_texture, v_texcoord).rg;
             float scalar = complex_component(z);
@@ -1058,6 +1060,7 @@ class GpuWindowedTileVisual(Visual):
         self._color_texture = None
         self._lut_texture = None
         self._lut_key = None
+        self._lut_default_phase = False
         self._shader_mapping_key = None
         self._levels = (0.0, 1.0)
         self._scale_mode = 0.0
@@ -1107,15 +1110,18 @@ class GpuWindowedTileVisual(Visual):
         scale_mode = _shader_scale_uniform(getattr(mapping, "scale", None))
         symlog_constant = float(getattr(mapping, "symlog_constant", 0.0) or 0.0)
         component_mode = shader_component_uniform(getattr(mapping, "component", None))
-        lut = _normalized_lut(getattr(mapping, "lut_data", None))
+        display_mode = getattr(getattr(mapping, "display_mode", None), "value", getattr(mapping, "display_mode", None))
+        phase_default = bool(display_mode == ShaderDisplayMode.PHASE_COLOR.value)
+        lut = _normalized_lut(getattr(mapping, "lut_data", None), phase_default=phase_default)
         lut_key = _array_content_key(lut)
-        mapping_key = (float(scale_mode), float(symlog_constant), float(component_mode), lut_key)
+        mapping_key = (float(scale_mode), float(symlog_constant), float(component_mode), phase_default, lut_key)
         if mapping_key == self._shader_mapping_key:
             return False
         self._shader_mapping_key = mapping_key
         self._scale_mode = scale_mode
         self._symlog_constant = symlog_constant
         self._component_mode = component_mode
+        self._lut_default_phase = phase_default
         self._set_lut_texture(lut, key=lut_key)
         self.update()
         return True
@@ -1127,7 +1133,7 @@ class GpuWindowedTileVisual(Visual):
         if self._scalar_texture is None or self._color_texture is None:
             return False
         if self._lut_texture is None:
-            self._set_lut_texture(None)
+            self._set_lut_texture(None, phase_default=self._lut_default_phase)
         program = view.view_program
         program["a_position"] = self._vertices
         program["a_texcoord"] = self._texcoords
@@ -1141,23 +1147,26 @@ class GpuWindowedTileVisual(Visual):
         program["u_component_mode"] = float(self._component_mode)
         return True
 
-    def _set_lut_texture(self, lut_data, *, key=None) -> bool:
-        lut = _normalized_lut(lut_data)
+    def _set_lut_texture(self, lut_data, *, key=None, phase_default: bool | None = None) -> bool:
+        if phase_default is None:
+            phase_default = bool(getattr(self, "_lut_default_phase", False))
+        lut = _normalized_lut(lut_data, phase_default=phase_default)
         key = _array_content_key(lut) if key is None else key
         if key == self._lut_key and self._lut_texture is not None:
             return False
+        lut_texture_data = np.ascontiguousarray(lut.reshape((1, lut.shape[0], 3)))
         from vispy import gloo
 
-        if self._lut_texture is None or tuple(getattr(self._lut_texture, "shape", ())) != tuple(lut.shape):
+        if self._lut_texture is None or tuple(getattr(self._lut_texture, "shape", ())) != tuple(lut_texture_data.shape):
             self._lut_texture = gloo.Texture2D(
-                lut,
+                lut_texture_data,
                 format="rgb",
                 internalformat="rgb8",
                 interpolation="linear",
                 wrapping="clamp_to_edge",
             )
         else:
-            self._lut_texture.set_data(lut, copy=False)
+            self._lut_texture.set_data(lut_texture_data, copy=False)
         self._lut_key = key
         return True
 
@@ -1390,21 +1399,13 @@ def _payload_upload_nbytes(payload: DisplayTilePayload) -> int:
     return max(1, total)
 
 
-def _normalized_lut(lut_data) -> np.ndarray:
-    lut = default_phase_lut() if lut_data is None else np.asarray(lut_data)
-    if lut.ndim != 2 or lut.shape[0] < 1 or lut.shape[1] < 3:
-        lut = default_phase_lut()
-    lut = lut[:, :3]
-    if lut.dtype != np.uint8:
-        if np.issubdtype(lut.dtype, np.floating) and lut.size and float(np.nanmax(lut)) <= 1.0:
-            lut = lut * 255.0
-        lut = np.clip(lut, 0, 255).astype(np.uint8)
-    return np.ascontiguousarray(lut.reshape((1, lut.shape[0], 3)))
+def _normalized_lut(lut_data, *, phase_default: bool = False) -> np.ndarray:
+    return normalize_lut_rgb(lut_data, phase_default=phase_default)
 
 
 def _array_content_key(array: np.ndarray) -> tuple[object, ...]:
     array = np.asarray(array)
-    return (tuple(int(value) for value in array.shape), array.dtype.str, hash(array.tobytes()))
+    return (tuple(int(value) for value in array.shape), array.dtype.str, array.tobytes())
 
 
 def _luminance(rgb: np.ndarray) -> np.ndarray:

@@ -37,7 +37,7 @@ from arrayscope.display.backends.vispy.raster import (
     _contiguous_scalar,
     _normalize_levels,
 )
-from arrayscope.display.shader_mapping import TexturePlaneKind, common_shader_mapping
+from arrayscope.display.shader_mapping import TexturePlaneKind, common_shader_mapping, shader_mapping_with_lut
 from arrayscope.display.viewport import ViewportPolicy
 
 if TYPE_CHECKING:
@@ -142,11 +142,16 @@ class VisPyImageView2D(ImageView2D):
         self._last_vispy_warm_tile_stats = None
         self._last_vispy_tiled_levels_key = None
         self._last_vispy_tiled_mapping_key = None
+        self._last_vispy_tiled_source_shader_mapping = None
+        self._last_vispy_tiled_shader_mapping = None
         self._last_vispy_tiled_histogram_key = None
         self._last_vispy_tiled_viewport_key = None
         self._vispy_main_data_id: int | None = None
         self._vispy_main_color_source_id: int | None = None
         self._vispy_main_scalar_source_id: int | None = None
+        self._last_vispy_main_source_shader_mapping = None
+        self._last_vispy_main_shader_mapping = None
+        self._last_vispy_main_texture_kind = None
         self._vispy_display_shape: tuple[int, int] = (1, 1)
         self._vispy_roi_cursor_active = False
         self._vispy_camera_sync_pending = False
@@ -209,6 +214,7 @@ class VisPyImageView2D(ImageView2D):
         self._last_vispy_tiled_structure_key = None
         self._last_vispy_tiled_levels_key = None
         self._last_vispy_tiled_mapping_key = None
+        self._last_vispy_tiled_source_shader_mapping = None
         self._last_vispy_tiled_shader_mapping = None
         self._last_vispy_tiled_histogram_key = None
         self._last_vispy_tiled_viewport_key = None
@@ -219,6 +225,64 @@ class VisPyImageView2D(ImageView2D):
         except Exception:
             pass
         _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
+
+    def setColorMap(self, colormap):
+        """Update the shared colorbar/render-surface LUT without re-uploading pixels."""
+
+        super().setColorMap(colormap)
+        self._apply_vispy_native_colormap()
+        texture_kind = getattr(self, "_last_vispy_main_texture_kind", None)
+        if texture_kind in {TexturePlaneKind.SCALAR_R32F, TexturePlaneKind.COMPLEX_RG32F}:
+            mapping = self._display_shader_mapping(getattr(self, "_last_vispy_main_source_shader_mapping", None))
+            self._last_vispy_main_shader_mapping = mapping
+            visual = getattr(self, "_vispy_windowed_image", None)
+            if visual is not None:
+                visual.set_shader_mapping(mapping)
+        if getattr(self, "_montage_display_mode", "") == "vispy_tile_layer":
+            mapping = self._display_shader_mapping(getattr(self, "_last_vispy_tiled_source_shader_mapping", None))
+            self._last_vispy_tiled_shader_mapping = mapping
+            self._last_vispy_tiled_mapping_key = _shader_mapping_key(mapping)
+            layer = getattr(self, "_vispy_gpu_montage_layer", None)
+            if layer is not None:
+                layer.set_shader_mapping(mapping)
+        canvas = getattr(self, "_vispy_canvas", None)
+        if canvas is not None:
+            canvas.update()
+
+    def _display_shader_mapping(self, mapping):
+        return shader_mapping_with_lut(
+            mapping,
+            self.displayColorMapLookupTable(),
+            lut_identity=self.displayColorMapKey(),
+        )
+
+    def _apply_vispy_native_colormap(self) -> None:
+        try:
+            from vispy.color import Colormap
+
+            lut = np.asarray(self.displayColorMapLookupTable(), dtype=np.float32) / 255.0
+            colormap = Colormap(lut)
+            self._vispy_native_colormap = colormap
+            image = getattr(self, "_vispy_image", None)
+            if image is not None:
+                image.cmap = colormap
+            for state in getattr(self, "_vispy_tile_visuals", {}).values():
+                visual = getattr(state, "image_visual", None)
+                if visual is not None and len(tuple(getattr(state, "data_shape", ()) or ())) == 2:
+                    visual.cmap = colormap
+        except Exception:
+            pass
+
+    def _apply_vispy_colormap_to_visual(self, visual) -> None:
+        colormap = getattr(self, "_vispy_native_colormap", None)
+        if colormap is None:
+            self._apply_vispy_native_colormap()
+            colormap = getattr(self, "_vispy_native_colormap", None)
+        if colormap is not None:
+            try:
+                visual.cmap = colormap
+            except Exception:
+                pass
 
     def setImage(
         self,
@@ -393,6 +457,8 @@ class VisPyImageView2D(ImageView2D):
                     getattr(payload, "shader_mapping", None)
                     for payload in montage_tile_payloads.values()
                 )
+            source_shader_mapping = shader_mapping
+            shader_mapping = self._display_shader_mapping(source_shader_mapping)
             level_key = (float(levels[0]), float(levels[1]))
             mapping_key = _shader_mapping_key(shader_mapping)
             source_key = _tiled_source_key(montage_tile_payloads, montage_tile_source_ids)
@@ -495,6 +561,7 @@ class VisPyImageView2D(ImageView2D):
             self._last_vispy_tiled_structure_key = structure_key
             self._last_vispy_tiled_levels_key = level_key
             self._last_vispy_tiled_mapping_key = mapping_key
+            self._last_vispy_tiled_source_shader_mapping = source_shader_mapping
             self._last_vispy_tiled_shader_mapping = shader_mapping
             self._last_vispy_tiled_histogram_key = histogram_key
             self._last_vispy_tiled_viewport_key = viewport_key
@@ -666,6 +733,11 @@ class VisPyImageView2D(ImageView2D):
         del lod
         texture_kind = _coerce_texture_kind(texture_kind)
         if texture_kind in {TexturePlaneKind.COMPLEX_RG32F, TexturePlaneKind.SCALAR_R32F} and semantic_data is not None:
+            source_shader_mapping = shader_mapping
+            shader_mapping = self._display_shader_mapping(source_shader_mapping)
+            self._last_vispy_main_source_shader_mapping = source_shader_mapping
+            self._last_vispy_main_shader_mapping = shader_mapping
+            self._last_vispy_main_texture_kind = texture_kind
             data = self._upload_vispy_mapped_image(
                 semantic_data,
                 texture_kind=texture_kind,
@@ -680,6 +752,9 @@ class VisPyImageView2D(ImageView2D):
             self._vispy_image.visible = False
             self._vispy_windowed_image.visible = True
         elif self._should_use_windowed_rgb(img, histogramData, rgb_already_windowed=rgb_already_windowed):
+            self._last_vispy_main_source_shader_mapping = None
+            self._last_vispy_main_shader_mapping = None
+            self._last_vispy_main_texture_kind = None
             data = self._upload_vispy_windowed_rgb(
                 img,
                 histogramData,
@@ -693,6 +768,9 @@ class VisPyImageView2D(ImageView2D):
             self._vispy_image.visible = False
             self._vispy_windowed_image.visible = True
         else:
+            self._last_vispy_main_source_shader_mapping = None
+            self._last_vispy_main_shader_mapping = None
+            self._last_vispy_main_texture_kind = None
             data = self._vispy_display_data(img, histogramData, levels, rgb_already_windowed=rgb_already_windowed)
             previous = self._vispy_main_data_id
             same_object = previous == id(data)
@@ -700,10 +778,7 @@ class VisPyImageView2D(ImageView2D):
             self._vispy_main_data_id = id(data)
             if data.ndim == 2:
                 self._vispy_image.clim = (float(levels[0]), float(levels[1]))
-                try:
-                    self._vispy_image.cmap = "grays"
-                except Exception:
-                    pass
+                self._apply_vispy_native_colormap()
             self._vispy_image.transform = self._vispy_transforms.STTransform(translate=(float(image_origin[0]), float(image_origin[1]), 0.0))
             self._vispy_image.visible = True
             _set_visual_visible(self._vispy_windowed_image, False)
@@ -1458,10 +1533,7 @@ class VisPyImageView2D(ImageView2D):
                 state.visual.set_data(tile_data, copy=False)
                 if tile_data.ndim == 2:
                     state.visual.clim = level_tuple
-                    try:
-                        state.visual.cmap = "grays"
-                    except Exception:
-                        pass
+                    self._apply_vispy_colormap_to_visual(state.visual)
             state.visual.transform = self._vispy_transforms.STTransform(translate=(float(x0 + max(0, -cx0)), float(y0 + max(0, -cy0)), 0.0))
             state.visual.visible = True
             state.source_id = source_id

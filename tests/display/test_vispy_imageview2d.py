@@ -273,7 +273,11 @@ def test_gpu_mapped_visual_cached_complex_component_change_updates_uniform_witho
     visual._symlog_constant = 0.0
     visual._component_mode = 0.0
     visual.upload_count = 3
-    visual._set_lut_texture = lambda lut: None
+    visual._lut_key = None
+    visual._shader_mapping_key = None
+    visual.shader_uniform_update_count = 0
+    visual.update = lambda: None
+    visual._set_lut_texture = lambda lut, key=None: False
     visual.set_levels = lambda levels, count=True: setattr(visual, "_levels", tuple(float(value) for value in levels))
 
     visual.set_mapped_data(
@@ -287,6 +291,41 @@ def test_gpu_mapped_visual_cached_complex_component_change_updates_uniform_witho
     assert visual.upload_count == 3
     assert visual._component_mode == 1.0
     assert visual._levels == (0.0, 1.0)
+
+
+def test_gpu_mapped_visual_lut_change_is_uniform_only_for_cached_scalar_source():
+    from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
+    from arrayscope.display.backends.vispy.raster import GpuMappedImageVisual
+
+    visual = object.__new__(GpuMappedImageVisual)
+    visual._scalar_texture = object()
+    visual.scalar_source_id = ("source", "scalar_r32f")
+    visual._mode = 1.0
+    visual._scale_mode = 0.0
+    visual._symlog_constant = 0.0
+    visual._component_mode = 0.0
+    visual._lut_key = None
+    visual._shader_mapping_key = None
+    visual.upload_count = 4
+    visual.shader_uniform_update_count = 0
+    visual.update = lambda: None
+    uploaded_luts = []
+    visual._set_lut_texture = lambda lut, key=None: uploaded_luts.append(np.array(lut, copy=True)) or True
+    visual.set_levels = lambda levels, count=True: setattr(visual, "_levels", tuple(float(value) for value in levels))
+
+    mapping = ShaderMapping(lut_data=np.array([[0, 0, 255], [255, 0, 0]], dtype=np.uint8))
+    visual.set_mapped_data(
+        np.ones((2, 2), dtype=np.float32),
+        texture_kind=TexturePlaneKind.SCALAR_R32F,
+        levels=(0.0, 1.0),
+        source_id=("source", "scalar_r32f"),
+        shader_mapping=mapping,
+    )
+
+    assert visual.upload_count == 4
+    assert visual.shader_uniform_update_count == 1
+    assert len(uploaded_luts) == 1
+    np.testing.assert_array_equal(uploaded_luts[0], mapping.lut_data)
 
 
 def test_vispy_complex_windowed_rgb_preserves_high_magnitude_scale(qt_app):

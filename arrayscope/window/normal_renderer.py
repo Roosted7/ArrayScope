@@ -39,10 +39,8 @@ class NormalImageRenderMixin:
         evaluator = getattr(self, "operation_evaluator", None)
         if evaluator is None:
             return False
-        colormap_lut = None
-        if view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
-            colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
+        colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
         return evaluator.cached_image(
             view_state,
             colormap_lut=colormap_lut,
@@ -71,12 +69,10 @@ class NormalImageRenderMixin:
         if getattr(self, '_force_autolevel', False):
             self._force_autolevel = False
 
-        colormap_lut = None
-        if self.view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
-            colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         view_state = self.view_state
         document = self.document
         shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
+        colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
         request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document, shader_display=shader_display)
         render_generation = self._capture_render_generation()
         cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut, shader_display=shader_display)
