@@ -6,7 +6,16 @@ import pytest
 from arrayscope.app.settings_state import MontageDisplayBackendChoice
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.window.montage_backend import choose_montage_backend
-from arrayscope.window.montage_renderer import _base_tile_source_id, _limited_payload_cache, _montage_viewport_update_delay_ms, _payload_lod_matches
+from arrayscope.window.montage_payload_cache import (
+    base_tile_source_id as _base_tile_source_id,
+    limited_payload_cache as _limited_payload_cache,
+    payload_lod_matches as _payload_lod_matches,
+)
+from arrayscope.window.montage_viewport import (
+    MontageViewportPlan,
+    montage_session_key,
+    montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
+)
 
 
 def _geometry():
@@ -69,7 +78,7 @@ def test_auto_preserves_vispy_tile_layer_mode():
     assert "preserving" in decision.reason
 
 
-def test_persistent_tile_residency_uses_frame_cadence_viewport_updates():
+def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
     capabilities = ImageViewBackendCapabilities(
         name="vispy",
         direct_montage_tile_payloads=True,
@@ -88,7 +97,7 @@ def test_persistent_tile_residency_uses_frame_cadence_viewport_updates():
         )
     )
 
-    assert _montage_viewport_update_delay_ms(window) == 16
+    assert _montage_viewport_update_delay_ms(window) == 90
     assert _montage_viewport_update_delay_ms(fallback) == 120
 
 
@@ -170,3 +179,31 @@ def test_stage_wait_release_falls_back_to_direct_tile_evaluation():
     assert session.tile_stage_keys == {}
     assert [tile.montage_index for tile in session.pending_tiles] == [3]
     assert session.loading_tiles == {3}
+
+
+def test_montage_session_key_excludes_transient_viewport_range():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+
+    state = ViewState.from_shape((4, 4, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=3)
+    first = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan, ((0, 10), (0, 10)), True, True)
+    second = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan, ((10, 20), (0, 10)), True, True)
+
+    assert montage_session_key("doc", state, first, None) == montage_session_key("doc", state, second, None)
+
+
+def test_montage_session_key_changes_with_population_or_layout():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+
+    state = ViewState.from_shape((4, 4, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
+    plan3 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=3)
+    plan2 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=2)
+    base = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan3, None, True, True)
+    changed_population = MontageViewportPlan(2, tuple(range(5)), (100, 100), (4, 4), plan3, None, True, True)
+    changed_layout = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan2, None, True, True)
+
+    key = montage_session_key("doc", state, base, None)
+    assert key != montage_session_key("doc", state, changed_population, None)
+    assert key != montage_session_key("doc", state, changed_layout, None)

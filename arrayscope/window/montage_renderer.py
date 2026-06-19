@@ -20,7 +20,6 @@ from arrayscope.core.memory_budget import estimate_display_image_bytes, format_b
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.imageview2d import MontageTileOverlay
-from arrayscope.display.lod import select_lod_factor
 from arrayscope.display.montage import (
     MontageTileState,
     RenderedTile,
@@ -43,7 +42,19 @@ from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.window.montage_levels import MontageLevelStats, MontageLevelTracker, montage_level_key
+from arrayscope.window.montage_payload_cache import (
+    base_tile_source_id as _base_tile_source_id,
+    limited_payload_cache as _limited_payload_cache,
+    payload_lod_matches as _payload_lod_matches,
+    previous_tiled_payloads as _previous_tiled_payloads,
+    previous_tiled_payloads_by_base_source as _previous_tiled_payloads_by_base_source,
+)
 from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
+from arrayscope.window.montage_viewport import (
+    MontageViewportPlan,
+    montage_session_key,
+    montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
+)
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.window.presentation import LevelSourceRank, fallback_level_source
 from arrayscope.window.render_model import CommitKind
@@ -69,6 +80,42 @@ class MontageRenderMixin:
             very_slow_upload_ms=MONTAGE_VERY_SLOW_UPLOAD_MS,
         )
 
+    def _montage_viewport_plan(self, view_state) -> MontageViewportPlan:
+        axis = view_state.montage_axis
+        if axis is None:
+            raise ValueError("montage viewport planning requires an active montage axis")
+        all_indices = tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
+        viewport_size = self.img_view.graphicsView.viewport().size()
+        viewport_shape = (max(1, viewport_size.height()), max(1, viewport_size.width()))
+        tile_shape = self._montage_tile_shape(view_state)
+        columns = view_state.montage_columns
+        if columns is None and all_indices:
+            columns = optimal_montage_columns(len(all_indices), tile_shape, viewport_shape)
+        plan = make_montage_plan(
+            view_state,
+            axis=axis,
+            indices=all_indices,
+            tile_shape=tile_shape,
+            columns=columns,
+            viewport_shape=viewport_shape,
+        )
+        current_range = (
+            self._current_montage_global_view_range()
+            if getattr(self.img_view, "image", None) is not None
+            else None
+        )
+        capabilities = image_view_backend_capabilities(self.img_view)
+        return MontageViewportPlan(
+            axis=int(axis),
+            all_indices=all_indices,
+            viewport_shape=viewport_shape,
+            tile_shape=tile_shape,
+            plan=plan,
+            view_range=current_range,
+            shader_display=bool(capabilities.shader_windowing),
+            persistent_tile_residency=bool(capabilities.persistent_tile_residency),
+        )
+
     def update_montage_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         axis = self.view_state.montage_axis
         if axis is None or self.view_state.image_axes is None or axis in self.view_state.image_axes:
@@ -85,25 +132,18 @@ class MontageRenderMixin:
             colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         view_state = self.view_state
         document = self.document
-        all_indices = tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
-        viewport_size = self.img_view.graphicsView.viewport().size()
-        viewport_shape = (max(1, viewport_size.height()), max(1, viewport_size.width()))
-        tile_shape = self._montage_tile_shape(view_state)
-        columns = view_state.montage_columns
-        if columns is None and all_indices:
-            columns = optimal_montage_columns(len(all_indices), tile_shape, viewport_shape)
-        plan = make_montage_plan(
-            view_state,
-            axis=axis,
-            indices=all_indices,
-            tile_shape=tile_shape,
-            columns=columns,
-            viewport_shape=viewport_shape,
-        )
-        current_range = self._current_montage_global_view_range() if getattr(self.img_view, "image", None) is not None else None
+        viewport_plan = self._montage_viewport_plan(view_state)
+        all_indices = viewport_plan.all_indices
+        viewport_shape = viewport_plan.viewport_shape
+        tile_shape = viewport_plan.tile_shape
+        plan = viewport_plan.plan
+        current_range = viewport_plan.view_range
         canvas_rect = montage_rect_for_viewport(plan, view_range=current_range, viewport_shape=viewport_shape)
-        candidate_tiles = plan.tiles_intersecting(((canvas_rect[0], canvas_rect[2]), (canvas_rect[1], canvas_rect[3])), margin_tiles=0)
-        shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
+        display_tiles = viewport_plan.candidate_tiles(margin_tiles=0)
+        candidate_tiles = viewport_plan.candidate_tiles(
+            margin_tiles=1 if viewport_plan.persistent_tile_residency else 0
+        )
+        shader_display = viewport_plan.shader_display
         output_dtype = np.uint8 if view_state.channel == ChannelMode.COMPLEX and not shader_display else getattr(document.base_data, "dtype", np.dtype(float))
         canvas_estimate = estimate_display_image_bytes(
             (max(1, int(canvas_rect[3]) - int(canvas_rect[1])), max(1, int(canvas_rect[2]) - int(canvas_rect[0]))),
@@ -124,14 +164,14 @@ class MontageRenderMixin:
             histogram=True,
         )
         if single_estimate > policy.single_tile_budget_bytes:
-            visible_tiles = ()
+            compute_tiles = ()
             skipped_tiles = tuple(candidate_tiles)
             skipped_count = len(skipped_tiles)
         else:
-            visible_tiles = tuple(candidate_tiles)
+            compute_tiles = tuple(candidate_tiles)
             skipped_tiles = ()
             skipped_count = 0
-        if not visible_tiles and not skipped_tiles:
+        if not compute_tiles and not skipped_tiles:
             show_status_message(
                 self,
                 f"Montage tile would allocate {format_bytes(single_estimate)}. Zoom out less or reduce tile size/range.",
@@ -145,62 +185,19 @@ class MontageRenderMixin:
                 budget_bytes=policy.single_tile_budget_bytes,
                 tile_shape=tile_shape,
             )
-        cached_tiles = []
-        missing_tiles = []
-        selected_lod_factor = select_lod_factor(current_range, viewport_shape, plan.tile_shape)
-        previous_payloads = {
-            key: payload
-            for key, payload in dict(getattr(self, "_montage_recent_tile_payloads_by_base_source", {}) or {}).items()
-            if _payload_lod_matches(payload, selected_lod_factor)
-        }
-        previous_payloads.update(
-            {
-                key: payload
-                for key, payload in _previous_tiled_payloads_by_base_source(getattr(self, "_committed_display_frame", None)).items()
-                if _payload_lod_matches(payload, selected_lod_factor)
-            }
+        cached_tiles, missing_tiles = self._resolve_montage_tiles_from_cache(
+            compute_tiles,
+            document=document,
+            axis=axis,
+            colormap_lut=colormap_lut,
+            shader_display=shader_display,
         )
-        for tile in visible_tiles:
-            tile_cache_start = perf_counter()
-            cached = self.operation_evaluator.cached_montage_tile(
-                tile.view_state,
-                montage_axis=axis,
-                source_index=tile.source_index,
-                colormap_lut=colormap_lut,
-                shader_display=shader_display,
-            )
-            self._last_montage_tile_cache_lookup_ms = (perf_counter() - tile_cache_start) * 1000.0
-            self._last_montage_tile_cache_hit = cached is not None
-            if cached is None:
-                tile_key = self.operation_evaluator.montage_tile_key(
-                    tile.view_state,
-                    montage_axis=axis,
-                    source_index=tile.source_index,
-                    colormap_lut=colormap_lut,
-                    document=document,
-                    shader_display=shader_display,
-                )
-                previous_payload = previous_payloads.get(tile_key)
-                if previous_payload is None:
-                    missing_tiles.append(tile)
-                else:
-                    cached_tiles.append(_rendered_tile_from_previous_payload(tile, previous_payload))
-            else:
-                cached_tiles.append(cached.bind(tile) if hasattr(cached, "bind") else cached.payload().bind(tile))
         self._montage_cached_tiles_last_session = len(cached_tiles)
         self._montage_missing_tiles_last_session = len(missing_tiles)
         render_generation = self._capture_render_generation()
         stage_plan = self._plan_montage_stages(document, missing_tiles)
         pending_tiles = [tile for tile in missing_tiles if int(tile.montage_index) not in stage_plan["waiting_indices"]]
-        session_key = (
-            "montage_tiles",
-            _document_key(document),
-            view_state,
-            tuple(tile.source_index for tile in candidate_tiles),
-            colormap_lut.tobytes() if colormap_lut is not None else None,
-            viewport_shape if view_state.montage_columns is None else None,
-            bool(shader_display),
-        )
+        session_key = montage_session_key(_document_key(document), view_state, viewport_plan, colormap_lut)
         level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
         session_id = int(getattr(self, "_montage_session_id", 0)) + 1
         self._montage_session_id = session_id
@@ -220,7 +217,7 @@ class MontageRenderMixin:
             rgb=view_state.channel == ChannelMode.COMPLEX,
             window_mode=window_mode,
             force_auto=force_auto,
-            visible_tiles=tuple(visible_tiles),
+            visible_tiles=tuple(display_tiles),
             rendered_tiles={int(rendered.tile.montage_index): rendered for rendered in cached_tiles},
             loading_tiles={int(tile.montage_index) for tile in missing_tiles},
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
@@ -272,6 +269,186 @@ class MontageRenderMixin:
         self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
         self._schedule_montage_attached_stage_waits(session)
         self._schedule_montage_tiles(session)
+
+    def _resolve_montage_tiles_from_cache(
+        self,
+        tiles,
+        *,
+        document,
+        axis: int,
+        colormap_lut,
+        shader_display: bool,
+    ) -> tuple[list[RenderedTile], list[object]]:
+        """Resolve only the supplied tiles from semantic CPU caches."""
+
+        selected_lod_factor = 1
+        previous_payloads = {
+            key: payload
+            for key, payload in dict(getattr(self, "_montage_recent_tile_payloads_by_base_source", {}) or {}).items()
+            if _payload_lod_matches(payload, selected_lod_factor)
+        }
+        previous_payloads.update(
+            {
+                key: payload
+                for key, payload in _previous_tiled_payloads_by_base_source(
+                    getattr(self, "_committed_display_frame", None)
+                ).items()
+                if _payload_lod_matches(payload, selected_lod_factor)
+            }
+        )
+        cached_tiles: list[RenderedTile] = []
+        missing_tiles: list[object] = []
+        total_lookup_ms = 0.0
+        last_hit = False
+        tile_tuple = tuple(tiles)
+        for tile in tile_tuple:
+            tile_cache_start = perf_counter()
+            cached = self.operation_evaluator.cached_montage_tile(
+                tile.view_state,
+                montage_axis=axis,
+                source_index=tile.source_index,
+                colormap_lut=colormap_lut,
+                shader_display=shader_display,
+            )
+            total_lookup_ms += (perf_counter() - tile_cache_start) * 1000.0
+            last_hit = cached is not None
+            if cached is None:
+                tile_key = self.operation_evaluator.montage_tile_key(
+                    tile.view_state,
+                    montage_axis=axis,
+                    source_index=tile.source_index,
+                    colormap_lut=colormap_lut,
+                    document=document,
+                    shader_display=shader_display,
+                )
+                previous_payload = previous_payloads.get(tile_key)
+                if previous_payload is None:
+                    missing_tiles.append(tile)
+                else:
+                    cached_tiles.append(_rendered_tile_from_previous_payload(tile, previous_payload))
+            else:
+                cached_tiles.append(cached.bind(tile) if hasattr(cached, "bind") else cached.payload().bind(tile))
+        self._last_montage_tile_cache_lookup_ms = total_lookup_ms
+        self._last_montage_tile_cache_hit = last_hit if tile_tuple else False
+        return cached_tiles, missing_tiles
+
+    def _merge_montage_stage_plan(self, session: MontageRenderSession, stage_plan) -> None:
+        session.tile_stage_keys.update(stage_plan["tile_stage_keys"])
+        for key, waiting in dict(stage_plan["stage_waiting_tiles"]).items():
+            existing = session.stage_waiting_tiles.setdefault(key, [])
+            existing_numbers = {int(tile.montage_index) for tile in existing}
+            existing.extend(tile for tile in waiting if int(tile.montage_index) not in existing_numbers)
+        session.attached_stage_requests.update(stage_plan["attached_stage_keys"])
+        session.stage_values.update(stage_plan["stage_values"])
+        session.tile_compute_waiting_for_stage += len(stage_plan["waiting_indices"])
+        session.stage_backed_tiles_pending += len(stage_plan["waiting_indices"])
+        session.lead_direct_tiles += int(stage_plan["lead_direct_tiles"])
+        if stage_plan["retained_stage_index"] is not None:
+            session.retained_stage_index = stage_plan["retained_stage_index"]
+        if stage_plan["retained_stage_decision"]:
+            session.retained_stage_decision = stage_plan["retained_stage_decision"]
+        session.repeated_expensive_stage_per_tile = bool(
+            session.repeated_expensive_stage_per_tile
+            or stage_plan["repeated_expensive_stage_per_tile"]
+        )
+
+    def _try_update_montage_viewport_only(self) -> bool:
+        """Retarget a persistent tiled session without restarting evaluation."""
+
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+            return False
+        capabilities = image_view_backend_capabilities(self.img_view)
+        try:
+            display_mode = str(self.img_view.montageDisplayMode())
+        except Exception:
+            display_mode = ""
+        if not bool(capabilities.persistent_tile_residency) or "tile_layer" not in display_mode:
+            return False
+
+        view_state = self.view_state
+        if view_state.montage_axis is None:
+            return False
+        viewport_plan = self._montage_viewport_plan(view_state)
+        colormap_lut = None
+        if view_state.channel == ChannelMode.COMPLEX:
+            colormap_lut = self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
+        expected_key = montage_session_key(
+            _document_key(self.document),
+            view_state,
+            viewport_plan,
+            colormap_lut,
+        )
+        if session.key != expected_key:
+            return False
+
+        additions, presentation_changed = session.retarget_viewport(
+            view_range=viewport_plan.view_range,
+            viewport_shape=viewport_plan.viewport_shape,
+            coverage_margin_tiles=1,
+            near_margin_tiles=2,
+        )
+        if not additions:
+            if presentation_changed:
+                self._schedule_montage_canvas_commit(session, force=False)
+            else:
+                schedule_near_viewport_montage_prefetch(self, session)
+            return True
+
+        cached_tiles, missing_tiles = self._resolve_montage_tiles_from_cache(
+            additions,
+            document=session.document,
+            axis=session.montage_axis,
+            colormap_lut=session.colormap_lut,
+            shader_display=bool(getattr(session, "shader_display", False)),
+        )
+        session.tile_compute_cache_hits += len(cached_tiles)
+        expected_indices = tuple(tile.source_index for tile in session.plan.tiles)
+        for rendered in cached_tiles[:4]:
+            self._update_montage_level_bounds_from_rendered(
+                session.level_key,
+                rendered,
+                expected_indices=expected_indices,
+            )
+            session.mark_loaded(rendered)
+        for rendered in cached_tiles[4:]:
+            session.pending_level_tiles.append(rendered)
+            session.mark_loaded(rendered)
+        if cached_tiles[4:]:
+            self._montage_pending_level_tiles_last_session = len(session.pending_level_tiles)
+        for tile in missing_tiles:
+            session.mark_loading(tile)
+
+        stage_plan = self._plan_montage_stages(session.document, missing_tiles)
+        self._merge_montage_stage_plan(session, stage_plan)
+        waiting = {int(index) for index in stage_plan["waiting_indices"]}
+        queued = {int(tile.montage_index) for tile in session.pending_tiles}
+        for tile in missing_tiles:
+            index = int(tile.montage_index)
+            if index not in waiting and index not in queued:
+                session.pending_tiles.append(tile)
+                queued.add(index)
+
+        self._montage_cached_tiles_last_session = len(cached_tiles)
+        self._montage_missing_tiles_last_session = len(missing_tiles)
+        if presentation_changed or cached_tiles:
+            self._schedule_montage_canvas_commit(session, force=False)
+        if cached_tiles:
+            self._schedule_montage_cached_level_stats(session)
+        if not missing_tiles:
+            schedule_near_viewport_montage_prefetch(self, session)
+            return True
+
+        self.prefetch_evaluation_controller.cancel_prefetch()
+        self.operation_evaluator.last_status = CacheStatusSnapshot(
+            CacheStatus.COMPUTING,
+            "Extending montage viewport",
+        )
+        self._schedule_montage_session_slow_overlay(session)
+        self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
+        self._schedule_montage_attached_stage_waits(session)
+        self._schedule_montage_tiles(session)
+        return True
 
     def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
         return montage_level_key(
@@ -1335,7 +1512,8 @@ class MontageRenderMixin:
         self._montage_viewport_update_running = True
         self._montage_viewport_update_pending = False
         try:
-            self.update_montage_view()
+            if not self._try_update_montage_viewport_only():
+                self.update_montage_view()
         finally:
             self._montage_viewport_update_running = False
         if getattr(self, "_montage_viewport_update_pending", False) and self.view_state.montage_axis is not None:
@@ -1421,44 +1599,6 @@ def _montage_tile_result_budget_ms(window, *, interactive: bool) -> float:
     return float(feedback.work_budget_ms("montage_tile_result", interactive=interactive))
 
 
-def _previous_tiled_payloads(frame) -> dict[int, object]:
-    source = None if frame is None else getattr(frame, "value_source", None)
-    payloads = getattr(source, "payloads", None)
-    return {} if payloads is None else dict(payloads)
-
-
-def _previous_tiled_payloads_by_base_source(frame) -> dict[object, object]:
-    return {
-        _base_tile_source_id(payload.source_id): payload
-        for payload in _previous_tiled_payloads(frame).values()
-        if _base_tile_source_id(payload.source_id) is not None
-    }
-
-
-def _limited_payload_cache(existing, payloads, *, limit: int = 4096) -> dict[object, object]:
-    cache = dict(existing or {})
-    for payload in dict(payloads or {}).values():
-        key = _base_tile_source_id(payload.source_id)
-        if key is not None:
-            cache[key] = payload
-    if len(cache) <= int(limit):
-        return cache
-    items = tuple(cache.items())[-int(limit) :]
-    return dict(items)
-
-
-def _base_tile_source_id(source_id) -> object | None:
-    if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
-        return source_id[0]
-    return source_id
-
-
-def _payload_lod_matches(payload, factor: int) -> bool:
-    lod = getattr(payload, "lod", None)
-    payload_factor = int(getattr(lod, "factor", 1) or 1)
-    return payload_factor == max(1, int(factor))
-
-
 def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
     image = np.asarray(payload.image)
     histogram = None if payload.histogram_data is None else np.asarray(payload.histogram_data)
@@ -1476,21 +1616,6 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         semantic_data=semantic,
         lod=getattr(payload, "lod", None),
     )
-
-
-def _montage_viewport_update_delay_ms(window) -> int:
-    try:
-        capabilities = image_view_backend_capabilities(window.img_view)
-    except Exception:
-        capabilities = None
-    mode = ""
-    try:
-        mode = str(window.img_view.montageDisplayMode())
-    except Exception:
-        mode = ""
-    if bool(getattr(capabilities, "persistent_tile_residency", False)) and "tile_layer" in mode:
-        return 16
-    return 120
 
 
 def _montage_commit_interval_ms(window, *, force: bool) -> int:
