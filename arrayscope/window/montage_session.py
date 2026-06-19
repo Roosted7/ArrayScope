@@ -15,6 +15,7 @@ from arrayscope.display.montage import (
     RenderedTile,
     patch_rendered_tile_into_canvas,
 )
+from arrayscope.window.display_frame import DisplayTilePayload
 
 
 @dataclass
@@ -70,6 +71,8 @@ class MontageRenderSession:
     retained_stage_index: int | None = None
     retained_stage_decision: str = ""
     repeated_expensive_stage_per_tile: bool = False
+    tile_source_ids: dict[int, object] = field(default_factory=dict)
+    display_tile_payloads: dict[int, DisplayTilePayload] = field(default_factory=dict)
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -77,11 +80,50 @@ class MontageRenderSession:
     def mark_loaded(self, rendered: RenderedTile) -> None:
         index = int(rendered.tile.montage_index)
         self.rendered_tiles[index] = rendered
+        # A replacement tile must be assigned a fresh semantic source identity
+        # and presentation payload on the next commit.  Other loaded tiles keep
+        # their cached wrappers across progressive batches.
+        self.tile_source_ids.pop(index, None)
+        self.display_tile_payloads.pop(index, None)
         self.active_tile_requests.discard(index)
         self.loading_tiles.discard(index)
         self.skipped_tiles.discard(index)
         self.pending_tiles = [tile for tile in self.pending_tiles if int(tile.montage_index) != index]
         self.mark_tile_state(rendered.tile, MontageTileState.LOADED)
+
+    def snapshot_display_tile_payloads(self, source_ids: dict[int, object]) -> dict[int, DisplayTilePayload]:
+        """Return immutable-by-convention payload wrappers for loaded tiles.
+
+        Arrays are not copied.  Stable wrappers are retained across progressive
+        commits, avoiding repeated dataclass construction and dtype/shape
+        normalization for every tile already on screen.
+        """
+
+        loaded = {int(index) for index in self.rendered_tiles}
+        for stale in tuple(self.display_tile_payloads):
+            if int(stale) not in loaded:
+                self.display_tile_payloads.pop(int(stale), None)
+        for tile_number, rendered in self.rendered_tiles.items():
+            tile_number = int(tile_number)
+            source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
+            image = np.asarray(rendered.image)
+            histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
+            previous = self.display_tile_payloads.get(tile_number)
+            if (
+                previous is not None
+                and previous.source_id == source_id
+                and previous.image is image
+                and previous.histogram_data is histogram
+            ):
+                continue
+            self.display_tile_payloads[tile_number] = DisplayTilePayload(
+                tile_number=tile_number,
+                source_index=int(rendered.tile.source_index),
+                image=image,
+                histogram_data=histogram,
+                source_id=source_id,
+            )
+        return dict(self.display_tile_payloads)
 
     def mark_loading(self, tile: MontageTile) -> None:
         index = int(tile.montage_index)

@@ -87,3 +87,22 @@ def test_montage_render_session_patches_existing_canvas_in_place():
     assert patched.tile_states[1] == MontageTileState.LOADED
     assert session.consume_dirty_rects() == ((3, 0, 5, 2),)
     np.testing.assert_array_equal(patched.data[0:2, 3:5], np.full((2, 2), 5, dtype=np.float32))
+
+
+def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes():
+    session = _session()
+    tile = session.plan.tiles[0]
+    image = np.ones((2, 2), dtype=np.float32)
+    histogram = image * 2.0
+    first_rendered = RenderedTile(tile, image, histogram, 0.0, image.shape, image.nbytes)
+    session.mark_loaded(first_rendered)
+
+    first = session.snapshot_display_tile_payloads({0: ("tile", 0)})
+    second = session.snapshot_display_tile_payloads({0: ("tile", 0)})
+
+    assert second[0] is first[0]
+    replacement = np.full((2, 2), 3.0, dtype=np.float32)
+    session.mark_loaded(RenderedTile(tile, replacement, replacement, 0.0, replacement.shape, replacement.nbytes))
+    third = session.snapshot_display_tile_payloads({0: ("tile", 0, "replacement")})
+    assert third[0] is not first[0]
+    assert third[0].image is replacement
