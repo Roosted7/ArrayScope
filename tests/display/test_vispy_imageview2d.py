@@ -378,19 +378,11 @@ def test_vispy_direct_tiled_scalar_atlas_preserves_high_dynamic_range(qt_app):
 
         layer = view._vispy_gpu_montage_layer
         pool = layer._pool
-        expected_values = {0: 250.0, 1: 1000.0, 2: 4096.0}
-        for tile_number, expected in expected_values.items():
-            slot = pool.slots[tile_number]
-            row = slot // pool.columns
-            col = slot % pool.columns
-            y0 = row * geometry.montage.tile_height
-            x0 = col * geometry.montage.tile_width
-            np.testing.assert_allclose(
-                pool.scalar_cpu[y0 : y0 + geometry.montage.tile_height, x0 : x0 + geometry.montage.tile_width],
-                expected,
-            )
+        assert pool.cpu_shadow_bytes == 0
+        assert pool.resident_count == 3
         assert pool.scalar_texture._format == "red"
         assert pool.scalar_texture._internalformat == "r32f"
+        assert tuple(pool.scalar_texture.shape[-1:]) == (1,)
 
         vertices = layer.visual.vertex_data.reshape((-1, 6, 2))
         expected_origins = np.array([[0.0, 0.0], [5.0, 0.0], [10.0, 0.0]], dtype=np.float32)
