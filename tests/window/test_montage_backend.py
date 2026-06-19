@@ -6,7 +6,7 @@ import pytest
 from arrayscope.app.settings_state import MontageDisplayBackendChoice
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.window.montage_backend import choose_montage_backend
-from arrayscope.window.montage_renderer import _montage_viewport_update_delay_ms
+from arrayscope.window.montage_renderer import _base_tile_source_id, _limited_payload_cache, _montage_viewport_update_delay_ms, _payload_lod_matches
 
 
 def _geometry():
@@ -90,6 +90,25 @@ def test_persistent_tile_residency_uses_frame_cadence_viewport_updates():
 
     assert _montage_viewport_update_delay_ms(window) == 16
     assert _montage_viewport_update_delay_ms(fallback) == 120
+
+
+def test_recent_payload_cache_is_keyed_by_semantic_source_identity():
+    payload = SimpleNamespace(source_id=(("montage_tile", "doc", 2), "texture_kind", "complex_rg32f", "shader", None, "lod", 4, 2, 1))
+    other = SimpleNamespace(source_id=("plain", 1))
+
+    cache = _limited_payload_cache({}, {0: payload, 1: other}, limit=8)
+
+    assert _base_tile_source_id(payload.source_id) == ("montage_tile", "doc", 2)
+    assert cache[("montage_tile", "doc", 2)] is payload
+    assert cache[("plain", 1)] is other
+
+
+def test_recent_payload_cache_requires_matching_lod_factor():
+    lod4 = SimpleNamespace(factor=4)
+    lod1 = SimpleNamespace(factor=1)
+
+    assert _payload_lod_matches(SimpleNamespace(lod=lod4), 4)
+    assert not _payload_lod_matches(SimpleNamespace(lod=lod1), 4)
 
 def test_auto_large_rgb_montage_uses_tile_layer():
     data = np.zeros((1500, 1500, 3), dtype=np.uint8)

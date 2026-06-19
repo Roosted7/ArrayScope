@@ -136,14 +136,10 @@ class MontageLevelTracker:
 
 
 def _sample_tile_stats(values, source_index: int, *, refined: bool) -> TileLevelStats | None:
-    sample = _finite_sample(values, limit=REFINED_TILE_SAMPLE_LIMIT if refined else PROVISIONAL_TILE_SAMPLE_LIMIT)
-    if sample.size == 0:
-        return None
-    low = float(np.min(sample))
-    high = float(np.max(sample))
-    bounds = normalize_bounds((low, high))
+    bounds = _finite_bounds(values)
     if bounds is None:
         return None
+    sample = _finite_sample(values, limit=REFINED_TILE_SAMPLE_LIMIT if refined else PROVISIONAL_TILE_SAMPLE_LIMIT)
     return TileLevelStats(
         source_index=int(source_index),
         bounds=bounds,
@@ -157,14 +153,45 @@ def _finite_sample(values, *, limit: int) -> np.ndarray:
     if array.size == 0:
         return np.asarray((), dtype=np.float32)
     flat = array.reshape(-1)
-    if flat.size > EXACT_TILE_SAMPLE_LIMIT:
-        step = max(1, int(math.ceil(flat.size / max(1, int(limit)))))
-        flat = flat[::step]
     finite = flat[np.isfinite(flat)]
     if finite.size > int(limit):
-        step = max(1, int(math.ceil(finite.size / max(1, int(limit)))))
-        finite = finite[::step][: int(limit)]
+        finite = _sparse_even_random_sample(finite, limit=int(limit))
     return np.asarray(finite, dtype=np.float32)
+
+
+def _finite_bounds(values) -> tuple[float, float] | None:
+    array = np.asarray(values)
+    if array.size == 0:
+        return None
+    flat = array.reshape(-1)
+    finite = flat[np.isfinite(flat)]
+    if finite.size == 0:
+        return None
+    return normalize_bounds((float(np.min(finite)), float(np.max(finite))))
+
+
+def _sparse_even_random_sample(finite: np.ndarray, *, limit: int) -> np.ndarray:
+    limit = max(1, int(limit))
+    values = np.asarray(finite)
+    if values.size <= limit:
+        return values
+    even_count = max(1, limit // 2)
+    random_count = max(0, limit - even_count)
+    even_indices = np.linspace(0, values.size - 1, even_count, dtype=np.int64)
+    if random_count:
+        rng = np.random.default_rng(_sample_seed(values.size, limit))
+        random_indices = rng.choice(values.size, size=min(random_count, values.size), replace=False)
+        indices = np.unique(np.concatenate((even_indices, random_indices)))
+    else:
+        indices = np.unique(even_indices)
+    if indices.size < limit:
+        filler = np.linspace(0, values.size - 1, limit, dtype=np.int64)
+        indices = np.unique(np.concatenate((indices, filler)))
+    return values[np.sort(indices)[:limit]]
+
+
+def _sample_seed(size: int, limit: int) -> int:
+    return int((int(size) * 1_103_515_245 + int(limit) * 12_345) & 0xFFFFFFFF)
 
 
 def _union_tile_bounds(stats: Iterable[TileLevelStats]) -> tuple[float, float] | None:

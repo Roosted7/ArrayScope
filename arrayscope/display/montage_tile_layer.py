@@ -62,6 +62,14 @@ class TileLayerUpdateStats:
     warm_resident_items: int = 0
     evicted_near_items: int = 0
     capacity_warning: str = ""
+    lod_level: int = 0
+    lod_factor: int = 1
+    source_texels_per_pixel: float = 0.0
+    gutter_pixels: int = 0
+    mipmap_updates: int = 0
+    mipmap_available: bool = False
+    complex_texture_uploads: int = 0
+    shader_uniform_updates: int = 0
 
 
 class MontageTileLayer:

@@ -174,6 +174,10 @@ def _presentation_for_payload(payload, *, levels, histogram_range):
         histogram_plot_data=payload.histogram_plot_data,
         montage_dirty_tiles=payload.montage_dirty_tiles,
         montage_tile_source_ids=payload.montage_tile_source_ids,
+        shader_mapping=getattr(payload.image, "shader_mapping", None),
+        texture_kind=getattr(payload.image, "texture_kind", None),
+        semantic_data=getattr(payload.image, "semantic_data", None),
+        lod=getattr(payload.image, "lod", None),
         **common,
     )
 

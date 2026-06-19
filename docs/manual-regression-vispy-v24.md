@@ -23,10 +23,20 @@ section with both PyQtGraph and VisPy selected.
 - Pan between nearby regions under pressure; viewport-near resident tiles should survive before
   farther inactive tiles.
 - Verify loading/skipped overlays and tile gaps at all zoom levels.
-- Exercise scalar, already-windowed RGB, and complex/windowable RGB tile modes.
+- Exercise scalar, already-windowed RGB, CPU display-ready RGB, and raw complex `RG32F` tile modes.
+- For raw complex raster and tiled montage, verify phase color diversity, LUT changes, and
+  linear/log/symlog level changes without texture re-upload.
+- Zoom far out until tiled LOD is selected, then pan and zoom repeatedly. Verify diagnostics keep the
+  expected nonzero LOD level/factor and do not intermittently fall back to level 0 unless the view is
+  actually zoomed in.
+- Check tile seams under linear filtering; gutters should prevent neighboring-tile color bleed.
+- Pan across an already resident montage region. Tiles that were visible or warmed recently should
+  appear immediately without dropping out, showing loading overlays, or scheduling redundant renders.
 - Confirm diagnostics show expected storage mode, resident/capacity, GPU bytes, zero CPU shadow bytes,
   texture submissions, vertex submissions, pages, active pages, derived budget, runtime max texture
   size, near/warm resident counts, rebuilds, evictions, and capacity warnings.
+  Also check tile payload build time, LOD level/factor, gutter pixels, mipmap fallback status, complex
+  texture upload count, and shader uniform update count.
 
 ## Interaction parity
 
@@ -50,14 +60,14 @@ section with both PyQtGraph and VisPy selected.
   ARRAYSCOPE_RUN_STRESS=1 \
   ARRAYSCOPE_BENCH_PRESENTED=1 \
   python -m arrayscope.display.rendering_benchmarks --presented --stress --runs 3 \
-    --jsonl artifacts/rendering-stress-local.jsonl
+    --jsonl tests/artifacts/rendering-stress-local.jsonl
   ```
 
 - For baseline scenarios, run:
 
   ```bash
   python -m arrayscope.display.rendering_benchmarks --presented --runs 5 \
-    --jsonl artifacts/rendering-baseline-local.jsonl
+    --jsonl tests/artifacts/rendering-baseline-local.jsonl
   ```
 
 - Repeat on each target OS/compositor/GPU class; merge JSONL samples and compare medians and tail

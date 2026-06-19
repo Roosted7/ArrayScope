@@ -18,6 +18,15 @@ from arrayscope.window.panels import PanelManager
 from arrayscope.window.domain import Domain
 
 
+def _scale_value_for_button(window, button) -> str:
+    processing = window.widgets['buttons']['processing']
+    if button is processing.get('symlog'):
+        return "symlog"
+    if button is processing.get('log'):
+        return "log"
+    return "linear"
+
+
 class DisplayControlBuildMixin:
     def _build_window_ui(self, data, filepath):
         self._create_widget_registry(data)
@@ -45,7 +54,7 @@ class DisplayControlBuildMixin:
                     'angle': QtWidgets.QRadioButton('angle', enabled=self._current_is_complex()),
                 },
                 'processing': {
-                    #'log': QtWidgets.QRadioButton('log', checkable=True),
+                    'log': QtWidgets.QRadioButton('log', checkable=True),
                     'linear': QtWidgets.QRadioButton('linear', checkable=True, checked=True),
                     'symlog': QtWidgets.QRadioButton('symlog', checkable=True),
                     #'asinh': QtWidgets.QRadioButton('asinh', checkable=True)
@@ -87,7 +96,7 @@ class DisplayControlBuildMixin:
         self._update_channel_controls()
             
         self.scale_button_group = QtWidgets.QButtonGroup()
-        #self.scale_button_group.addButton(self.widgets['buttons']['processing']['log'])
+        self.scale_button_group.addButton(self.widgets['buttons']['processing']['log'])
         self.scale_button_group.addButton(self.widgets['buttons']['processing']['linear'])
         self.scale_button_group.addButton(self.widgets['buttons']['processing']['symlog'])
         #self.scale_button_group.addButton(self.widgets['buttons']['processing']['asinh'])
@@ -274,7 +283,7 @@ class DisplayControlBuildMixin:
             processing_layout.addWidget(btn)
             # When a processing button is pressed while already active, force auto-level
             btn.pressed.connect(lambda b=btn: self._processing_pressed(b))
-            btn.clicked.connect(lambda checked=False, b=btn: self._on_scale_clicked("symlog" if b is self.widgets['buttons']['processing']['symlog'] else "linear"))
+            btn.clicked.connect(lambda checked=False, b=btn: self._on_scale_clicked(_scale_value_for_button(self, b)))
         
         processing_group.setLayout(processing_layout)
         controls_layout.addWidget(processing_group)

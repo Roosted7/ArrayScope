@@ -147,6 +147,7 @@ def test_channel_scale_and_axis_flags_are_validated_and_updated():
     assert updated.scale == ScaleMode.SYMLOG
     assert updated.axis_flipped == (True, False)
     assert updated.axis_fftshifted == (False, True)
+    assert state.with_scale(ScaleMode.LOG).scale == ScaleMode.LOG
 
 
 def test_for_shape_preserves_surviving_flags_and_clamps_slices():

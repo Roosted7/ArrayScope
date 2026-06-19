@@ -29,6 +29,7 @@ class ChannelMode(_ValueEnum):
 
 class ScaleMode(_ValueEnum):
     LINEAR = "linear"
+    LOG = "log"
     SYMLOG = "symlog"
 
 

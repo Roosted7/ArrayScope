@@ -8,7 +8,7 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.display.slice_engine import make_image_from_slab
+from arrayscope.display.slice_engine import make_image_from_slab, make_shader_image_from_slab
 from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.slabs import evaluate_slab_from_stage, plan_slab, request_for_image
 
@@ -43,6 +43,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
 
     decisions = []
     scheduled = 0
+    shader_display = bool(getattr(session, "shader_display", False))
     for tile in _candidate_tiles(session):
         if scheduled >= int(max_tiles):
             break
@@ -52,12 +53,14 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             source_index=tile.source_index,
             colormap_lut=session.colormap_lut,
             document=session.document,
+            shader_display=shader_display,
         )
         if window.operation_evaluator.cached_montage_tile(
             tile.view_state,
             montage_axis=session.montage_axis,
             source_index=tile.source_index,
             colormap_lut=session.colormap_lut,
+            shader_display=shader_display,
         ) is not None:
             decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "hit", tile_key=tile_key))
             continue
@@ -83,7 +86,8 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                     candidate,
                     evaluation_context=context,
                 )
-                display_image = make_image_from_slab(slab, request, colormap_lut=session.colormap_lut)
+                maker = make_shader_image_from_slab if shader_display else make_image_from_slab
+                display_image = maker(slab, request, colormap_lut=session.colormap_lut)
                 return EvaluationResult(
                     value=display_image,
                     eval_ms=(perf_counter() - start) * 1000.0,
@@ -98,6 +102,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                 stage_cache=window.operation_evaluator.stage_cache,
                 stage_document_key=stage_document_key(session.document),
                 evaluation_context=context,
+                shader_display=shader_display,
             )
 
         def done(result, tile=tile, session_id=session.session_id, session_key=session.key):
@@ -109,6 +114,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                 montage_axis=session.montage_axis,
                 colormap_lut=session.colormap_lut,
                 result=result,
+                shader_display=shader_display,
             )
             window.operation_evaluator.prefetch_stored += 1
 

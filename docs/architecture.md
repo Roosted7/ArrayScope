@@ -113,6 +113,17 @@ source of array-view state.
   helpers for histogram preview/final level interaction, ImageItem upload preparation, and shared
   RGB/complex windowing. Histogram level drags update display pixels as a throttled preview, while
   `userLevelsChanged` remains the semantic final user edit signal emitted on drag finish.
+- `arrayscope.display.shader_mapping`: pure NumPy shader-equivalent display mapping model. VisPy
+  raster and tiled paths can upload raw scalar `float32` or raw complex `complex64`/`RG32F` texture
+  planes, then apply component extraction, phase LUT color, linear/log/symlog scale, and
+  window/level mapping in shader code. PyQtGraph remains CPU display-prepared and uses the same pure
+  mapping functions as the oracle/fallback path. Histograms and levels are computed from semantic
+  CPU samples of the same scalar field the shader windows, not from rendered RGB pixels.
+- `arrayscope.display.lod`: CPU-side montage tile LOD helpers. LOD selection is based on current
+  view range and viewport size; finite-aware 2x2 reduction builds uploaded texture planes, and
+  guttering duplicates edge texels for linear-filtered tile seams. LOD texture payloads never own
+  hover, ROI, profile, or export semantics; exact semantic data and semantic histogram data stay with
+  `DisplayTilePayload`.
 - `arrayscope.display.montage_tile_layer`: Qt display helper owned by `ImageView2D` for exact
   per-tile montage painting. It keeps per-item source, histogram, local-rect, level, and RGB-windowing
   state so known-clean tile-layer flushes skip pixel uploads entirely, dirty flushes update only the
@@ -125,10 +136,12 @@ source of array-view state.
   not GPU content identity: shifted index windows must reuse already-resident semantic sources without
   re-uploading pixels. Inactive tiles remain GPU-resident until byte-budgeted LRU pressure requires
   eviction, and viewport-near resident sources are protected ahead of farther inactive sources. It
-  queries runtime texture limits, allocates only the scalar/color planes required by the presentation,
-  and uses tile-sized staging arrays rather than full CPU shadow atlases. One batched visual draws
-  each active page; level-only changes update uniforms, clean commits skip texture uploads, and dirty
-  commits upload only changed atlas regions.
+  queries runtime texture limits, allocates only the scalar, complex RG, or color planes required by
+  the presentation, and uses tile-sized staging arrays rather than full CPU shadow atlases. One
+  batched visual draws each active page; level/scale/LUT changes update uniforms, clean commits skip
+  texture uploads, and dirty commits upload only changed atlas regions. Cached tiled sessions can seed
+  materialized payload wrappers from the previous committed tiled frame so GPU-resident LOD textures
+  do not rebuild CPU pyramids just to confirm that no upload is needed.
 - `arrayscope.display.overlay_hit_test`: Qt-free ROI/profile handle and outline hit testing shared by
   backend visual adapters. Interaction semantics must move here or into a future shared interaction
   controller rather than being reimplemented by each graphics library.

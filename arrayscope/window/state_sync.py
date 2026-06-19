@@ -37,6 +37,8 @@ class StateSyncMixin:
         if self.view_state.channel.value in channel_buttons:
             channel_buttons[self.view_state.channel.value].setChecked(True)
         self.widgets['buttons']['processing']['linear'].setChecked(self.view_state.scale == ScaleMode.LINEAR)
+        if 'log' in self.widgets['buttons']['processing']:
+            self.widgets['buttons']['processing']['log'].setChecked(self.view_state.scale == ScaleMode.LOG)
         self.widgets['buttons']['processing']['symlog'].setChecked(self.view_state.scale == ScaleMode.SYMLOG)
         if hasattr(self, "dimension_strip"):
             self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
@@ -146,7 +148,13 @@ class StateSyncMixin:
         return True
 
     def _on_scale_clicked(self, scale):
-        self._set_view_state(self.view_state.with_scale(ScaleMode.SYMLOG if scale == "symlog" else ScaleMode.LINEAR))
+        if scale == "symlog":
+            mode = ScaleMode.SYMLOG
+        elif scale == "log":
+            mode = ScaleMode.LOG
+        else:
+            mode = ScaleMode.LINEAR
+        self._set_view_state(self.view_state.with_scale(mode))
         self._force_autolevel = True
         self.render(reason="scale", force_autolevel=True)
 

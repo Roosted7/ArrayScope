@@ -28,6 +28,7 @@ def evaluate_image_snapshot_chunked(
     chunk_size: int,
     colormap_lut=None,
     cancellation_token=None,
+    shader_display: bool = False,
     stage_cache=None,
     stage_document_key=None,
     evaluation_context=None,
@@ -42,6 +43,7 @@ def evaluate_image_snapshot_chunked(
             view_state,
             colormap_lut=colormap_lut,
             cancellation_token=cancellation_token,
+            shader_display=shader_display,
             stage_cache=stage_cache,
             stage_document_key=stage_document_key,
             evaluation_context=evaluation_context,
@@ -64,6 +66,7 @@ def evaluate_image_snapshot_chunked(
             view_state,
             colormap_lut=colormap_lut,
             cancellation_token=cancellation_token,
+            shader_display=shader_display,
             stage_cache=stage_cache,
             stage_document_key=stage_document_key,
             evaluation_context=evaluation_context,
@@ -84,6 +87,7 @@ def evaluate_image_snapshot_chunked(
             chunk_state,
             colormap_lut=colormap_lut,
             cancellation_token=cancellation_token,
+            shader_display=shader_display,
             stage_cache=stage_cache,
             stage_document_key=stage_document_key,
             evaluation_context=evaluation_context,
@@ -107,7 +111,16 @@ def evaluate_image_snapshot_chunked(
         _check_cancelled(cancellation_token)
 
     _check_cancelled(cancellation_token)
-    display = DisplayImage(data=out_data, histogram_data=out_hist, default_levels=image.default_levels)
+    display = DisplayImage(
+        data=out_data,
+        histogram_data=out_hist,
+        default_levels=image.default_levels,
+        rgb_already_windowed=image.rgb_already_windowed,
+        shader_mapping=image.shader_mapping,
+        texture_kind=image.texture_kind,
+        semantic_data=out_data if image.semantic_data is not None else None,
+        lod=image.lod,
+    )
     return EvaluationResult(
         value=display,
         eval_ms=(perf_counter() - start_time) * 1000.0,
@@ -125,7 +138,18 @@ def _assign_axis(output, chunk, axis, start, stop):
     output[tuple(index)] = chunk
 
 
-def _evaluate_image_snapshot(evaluate, document, view_state, *, colormap_lut, cancellation_token, stage_cache, stage_document_key, evaluation_context):
+def _evaluate_image_snapshot(
+    evaluate,
+    document,
+    view_state,
+    *,
+    colormap_lut,
+    cancellation_token,
+    shader_display,
+    stage_cache,
+    stage_document_key,
+    evaluation_context,
+):
     kwargs = {
         "colormap_lut": colormap_lut,
         "cancellation_token": cancellation_token,
@@ -135,6 +159,7 @@ def _evaluate_image_snapshot(evaluate, document, view_state, *, colormap_lut, ca
         kwargs["stage_document_key"] = stage_document_key
     if evaluation_context is not None:
         kwargs["evaluation_context"] = evaluation_context
+    kwargs["shader_display"] = bool(shader_display)
     return evaluate(document, view_state, **kwargs)
 
 

@@ -10,6 +10,8 @@ import numpy as np
 
 from arrayscope.core.memory_budget import estimate_viewport_canvas_bytes, format_bytes
 from arrayscope.display.geometry import MontageGeometry
+from arrayscope.display.lod import LodInfo
+from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 from arrayscope.display.slice_engine import DisplayImage
 
 
@@ -195,11 +197,17 @@ class RenderedTilePayload:
     eval_ms: float
     slab_shape: tuple[int, ...]
     slab_nbytes: int | None
+    shader_mapping: ShaderMapping | None = None
+    texture_kind: TexturePlaneKind | None = None
+    semantic_data: np.ndarray | None = None
+    lod: LodInfo | None = None
 
     def nbytes(self) -> int:
         total = int(self.image.nbytes)
         if isinstance(self.histogram_data, np.ndarray):
             total += int(self.histogram_data.nbytes)
+        if isinstance(self.semantic_data, np.ndarray) and self.semantic_data is not self.image:
+            total += int(self.semantic_data.nbytes)
         return total
 
     def bind(self, tile: MontageTile) -> "RenderedTile":
@@ -210,6 +218,10 @@ class RenderedTilePayload:
             eval_ms=self.eval_ms,
             slab_shape=self.slab_shape,
             slab_nbytes=self.slab_nbytes,
+            shader_mapping=self.shader_mapping,
+            texture_kind=self.texture_kind,
+            semantic_data=self.semantic_data,
+            lod=self.lod,
         )
 
 
@@ -221,11 +233,17 @@ class RenderedTile:
     eval_ms: float
     slab_shape: tuple[int, ...]
     slab_nbytes: int | None
+    shader_mapping: ShaderMapping | None = None
+    texture_kind: TexturePlaneKind | None = None
+    semantic_data: np.ndarray | None = None
+    lod: LodInfo | None = None
 
     def nbytes(self) -> int:
         total = int(self.image.nbytes)
         if isinstance(self.histogram_data, np.ndarray):
             total += int(self.histogram_data.nbytes)
+        if isinstance(self.semantic_data, np.ndarray) and self.semantic_data is not self.image:
+            total += int(self.semantic_data.nbytes)
         return total
 
     def payload(self) -> RenderedTilePayload:
@@ -235,6 +253,10 @@ class RenderedTile:
             eval_ms=self.eval_ms,
             slab_shape=self.slab_shape,
             slab_nbytes=self.slab_nbytes,
+            shader_mapping=self.shader_mapping,
+            texture_kind=self.texture_kind,
+            semantic_data=self.semantic_data,
+            lod=self.lod,
         )
 
 
