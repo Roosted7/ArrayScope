@@ -752,8 +752,6 @@ class VisPyImageView2D(ImageView2D):
 
     def createRoi(self, kind, *, points=None, rect=None, line_width=1.0, label=None, color=None):
         selection = super().createRoi(kind, points=points, rect=rect, line_width=line_width, label=label, color=color)
-        item, _selection = self._roi_items[selection.id]
-        item.sigRegionChanged.connect(lambda _item=item, roi_id=selection.id: self._on_roi_item_live_changed(roi_id))
         self._upsert_vispy_roi(selection.id, selection.geometry, selection.color)
         return selection
 
@@ -781,9 +779,6 @@ class VisPyImageView2D(ImageView2D):
 
     def _on_roi_item_changed(self, roi_id, *, final: bool = True):
         self._sync_roi_item_state(roi_id, emit=True, final=final)
-
-    def _on_roi_item_live_changed(self, roi_id):
-        self._sync_roi_item_state(roi_id, emit=True)
 
     def _sync_roi_item_state(self, roi_id, *, emit: bool, final: bool = True) -> None:
         item_selection = self._roi_items.get(str(roi_id))
