@@ -43,6 +43,7 @@ class DisplayPresentationMixin:
         montage_tile_source_ids=None,
         tile_state=None,
         tile_delta=None,
+        user_levels=None,
     ):
         self._apply_full_display_image(
             display_image,
@@ -59,6 +60,7 @@ class DisplayPresentationMixin:
             montage_tile_source_ids=montage_tile_source_ids,
             tile_state=tile_state,
             tile_delta=tile_delta,
+            user_levels=user_levels,
         )
 
     def _apply_full_display_image(
@@ -83,6 +85,7 @@ class DisplayPresentationMixin:
         montage_tile_source_ids=None,
         tile_state=None,
         tile_delta=None,
+        user_levels=None,
     ):
         commit_start = perf_counter()
         try:
@@ -118,6 +121,7 @@ class DisplayPresentationMixin:
                     semantic_source=semantic_source,
                     applied_level_source=applied_level_source,
                     level_bounds=normalize_bounds(level_bounds),
+                    user_levels=normalize_bounds(user_levels),
                 )
             )
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
@@ -135,6 +139,7 @@ class DisplayPresentationMixin:
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
             self._set_committed_display_frame(frame)
+            self._consume_pending_display_levels(user_levels)
             self._note_display_level_source(decision)
             if defer_side_panels:
                 self._deferred_side_panel_refresh_pending = True
@@ -178,6 +183,7 @@ class DisplayPresentationMixin:
         montage_tile_source_ids=None,
         tile_state=None,
         tile_delta=None,
+        user_levels=None,
     ):
         commit_start = perf_counter()
         try:
@@ -210,6 +216,7 @@ class DisplayPresentationMixin:
                     semantic_source=semantic_source,
                     applied_level_source=applied_level_source,
                     level_bounds=normalize_bounds(level_bounds),
+                    user_levels=normalize_bounds(user_levels),
                 )
             )
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
@@ -236,6 +243,7 @@ class DisplayPresentationMixin:
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
             self._set_committed_display_frame(frame)
+            self._consume_pending_display_levels(user_levels)
             self._note_display_level_source(decision)
             self.apply_axis_flips()
             self.img_view.setImageStale(False)
@@ -352,6 +360,28 @@ class DisplayPresentationMixin:
     def _set_committed_display_frame(self, frame: CommittedDisplayFrame) -> None:
         self._committed_display_request_key = frame.key.request_key
         self._committed_display_frame = frame
+
+    def _queue_display_levels(self, levels) -> tuple[float, float] | None:
+        """Queue exact levels for the next successful semantic presentation.
+
+        Recipe restoration can precede asynchronous evaluation.  Writing the
+        histogram widget immediately races that evaluation and produces a brief
+        old/new/automatic-level flash.  A queued override instead travels with
+        the render request and is consumed only after a frame is committed.
+        """
+
+        normalized = normalize_bounds(levels)
+        self._pending_display_levels = normalized
+        return normalized
+
+    def _pending_display_levels_for_render(self) -> tuple[float, float] | None:
+        return normalize_bounds(getattr(self, "_pending_display_levels", None))
+
+    def _consume_pending_display_levels(self, applied_levels) -> None:
+        applied = normalize_bounds(applied_levels)
+        pending = self._pending_display_levels_for_render()
+        if applied is not None and pending == applied:
+            self._pending_display_levels = None
 
     def _on_display_levels_changed(self) -> None:
         try:

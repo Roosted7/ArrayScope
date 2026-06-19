@@ -8,7 +8,8 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.view_state import ChannelMode
-from arrayscope.display.colormaps import gray_colormap, phase_colormap
+from arrayscope.display.colormaps import named_colormap, phase_colormap
+from arrayscope.display.colormap_policy import resolved_colormap_name
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import (
     _document_key,
@@ -457,10 +458,36 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         return phase_colormap()
 
     def _apply_channel_colormap(self):
-        if self.view_state.channel in (ChannelMode.COMPLEX, ChannelMode.ANGLE):
-            self.img_view.setColorMap(self._phase_colormap())
-        else:
-            self.img_view.setColorMap(gray_colormap())
+        name = resolved_colormap_name(
+            self.view_state.channel,
+            getattr(self, "current_colormap", None),
+            user_selected=bool(getattr(self, "_colormap_user_selected", False)),
+        )
+        self._set_display_colormap(
+            name,
+            user_selected=bool(getattr(self, "_colormap_user_selected", False)),
+            request_render=False,
+        )
+
+    def _set_display_colormap(self, name, *, user_selected: bool, request_render: bool) -> str:
+        """Apply one named LUT to the colorbar and every rendering strategy."""
+
+        colormap = named_colormap(str(name))
+        if colormap is None:
+            raise ValueError(f"unknown colormap: {name}")
+        key_getter = getattr(self.img_view, "displayColorMapKey", None)
+        previous_key = key_getter() if callable(key_getter) else None
+        self.img_view.setColorMap(colormap)
+        self.current_colormap = str(name)
+        self._colormap_user_selected = bool(user_selected)
+        current_key = key_getter() if callable(key_getter) else None
+
+        # Shader-backed paths update uniforms in setColorMap.  Only the legacy
+        # CPU complex path bakes the LUT into RGB pixels and therefore needs a
+        # new materialization/cache key.
+        if request_render and previous_key != current_key and self._evaluation_colormap_lut() is not None:
+            self.render(reason="colormap")
+        return self.current_colormap
 
     def _viewport_policy_for_display_shape(self, display_shape):
         display_shape = tuple(int(size) for size in display_shape)

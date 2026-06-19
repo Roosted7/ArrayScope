@@ -121,7 +121,14 @@ class MontageRenderMixin:
         if axis is None or self.view_state.image_axes is None or axis in self.view_state.image_axes:
             return
         policy = self._refresh_memory_policy(active_render=self._montage_render_active())
-        force_auto = force_autolevel or getattr(self, '_force_autolevel', False)
+        user_levels = self._pending_display_levels_for_render()
+        if force_autolevel and user_levels is not None:
+            self._queue_display_levels(None)
+            user_levels = None
+        force_auto = bool(
+            force_autolevel
+            or (getattr(self, '_force_autolevel', False) and user_levels is None)
+        )
         if getattr(self, '_force_autolevel', False):
             self._force_autolevel = False
         window_mode = self._current_window_mode()
@@ -228,6 +235,7 @@ class MontageRenderMixin:
             stage_values=stage_plan["stage_values"],
             defer_side_panels=bool(defer_side_panels),
             applied_level_source=None if previous_frame is None else fallback_level_source(previous_frame),
+            user_levels_override=user_levels,
             tile_compute_cache_hits=len(cached_tiles),
             tile_compute_waiting_for_stage=len(stage_plan["waiting_indices"]),
             lead_direct_tiles=stage_plan["lead_direct_tiles"],
@@ -1154,6 +1162,7 @@ class MontageRenderMixin:
                     montage_level_key=session.level_key,
                     montage_dirty_tiles=dirty_tiles,
                     montage_tile_source_ids=tile_source_ids,
+                    user_levels=session.user_levels_override,
                 )
                 session.display_committed = True
             else:
@@ -1177,6 +1186,7 @@ class MontageRenderMixin:
                     montage_level_key=session.level_key,
                     montage_dirty_tiles=dirty_tiles,
                     montage_tile_source_ids=tile_source_ids,
+                    user_levels=session.user_levels_override,
                 )
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
@@ -1271,6 +1281,7 @@ class MontageRenderMixin:
                     montage_level_key=session.level_key,
                     tile_state=tile_state,
                     tile_delta=tile_delta,
+                    user_levels=session.user_levels_override,
                 )
                 session.display_committed = True
             else:
@@ -1294,6 +1305,7 @@ class MontageRenderMixin:
                     montage_level_key=session.level_key,
                     tile_state=tile_state,
                     tile_delta=tile_delta,
+                    user_levels=session.user_levels_override,
                 )
             overlay_start = perf_counter()
             rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)

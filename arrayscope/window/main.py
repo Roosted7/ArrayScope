@@ -107,6 +107,8 @@ class ArrayScopeWindow(
         initial_channel = ChannelMode.COMPLEX if np.issubdtype(self.data.dtype, np.complexfloating) else ChannelMode.REAL
         self.view_state = ViewState.from_shape(self.data.shape).with_channel(initial_channel)
         self._channel_user_selected = False
+        self.current_colormap = None
+        self._colormap_user_selected = False
         self._force_autolevel = False
         self._filepath = filepath
         self._dataset_path = dataset_path
@@ -137,6 +139,7 @@ class ArrayScopeWindow(
         self.interaction_mode = InteractionMode.CURSOR
                 
         self._build_window_ui(data, filepath)
+        self._apply_channel_colormap()
         
         if complex_dim is not None: # user requested combining as complex
             if complex_dim < 0 or complex_dim >= data.ndim:
