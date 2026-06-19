@@ -98,14 +98,17 @@ source of array-view state.
 - `arrayscope.core.compare`: minimal compatible-layer model used by ROI histogram comparisons.
 - `arrayscope.core.window_levels`: decides image window/level reuse or auto-level behavior.
 - `arrayscope.display.ImageView2D`, `arrayscope.ui`, and `arrayscope.ui.docks`: Qt display and controls only.
-  Progressive montage uses explicit `ImageView2D` presentation APIs for same-shape pixel updates that
-  preserve caller-decided levels, histogram range, transform, and viewport instead of letting the
-  widget infer semantic display state from partial tile pixels. Complex/RGB windowability is explicit
-  display metadata; RGB array rank alone does not mean pixels are already windowed. Large or slow
-  montage commits may use an exact tile-layer display path. PyQtGraph tile-layer fallback paints
-  typed payloads with per-tile `ImageItem`s; VisPy tile-layer mode paints typed payloads with a
-  batched atlas visual. The committed frame's `FrameValueSource`, not a full-canvas placeholder,
-  owns hover/value semantics.
+  Progressive montage uses explicit raster or tiled presentation APIs that preserve caller-decided
+  levels, histogram range, transform, and viewport instead of asking a widget to infer semantic state
+  from partial pixels. Complex/RGB windowability is explicit display metadata; RGB array rank alone
+  does not mean pixels are already windowed. PyQtGraph paints typed tiled payloads with per-tile
+  `ImageItem`s; VisPy paints the same payload contract with a batched atlas visual. The committed
+  frame's `FrameValueSource`, never a compatibility placeholder, owns hover/value semantics.
+- `arrayscope.display.backend_contract`: backend capability declarations used by presentation planning.
+  Shared code asks whether a backend supports direct tiled payloads, persistent residency, shader
+  windowing, or native pointer interaction; it does not branch on backend class names. The intended
+  long-term shape is a shared widget/interaction shell composed with a thin pixel-rendering backend,
+  as recorded in ADR 0038.
 - `arrayscope.display.histogram_controller` and `arrayscope.display.image_upload`: focused display
   helpers for histogram preview/final level interaction, ImageItem upload preparation, and shared
   RGB/complex windowing. Histogram level drags update display pixels as a throttled preview, while
@@ -116,10 +119,15 @@ source of array-view state.
   affected tile items, all-cached newly composed sessions can reuse unchanged rendered tile sources,
   and RGB/complex level changes reuse cached float32 tile bases.
 - `arrayscope.display.vispy_tiled_renderer`: VisPy display helper owned by `VisPyImageView2D` for
-  first-class tiled montage painting. It stores visible tile payloads in scalar and color texture
-  atlases, draws all resident tiles through one batched visual, updates shader uniforms for
-  level-only changes, skips texture uploads for clean commits, and uploads only dirty tile atlas
-  regions when tile data changes.
+  first-class tiled montage painting. It assigns stable atlas slots, retains inactive tiles as
+  GPU-resident until LRU pressure requires eviction, allocates only the scalar/color planes required
+  by the presentation, and uses tile-sized staging arrays rather than full CPU shadow atlases. One
+  batched visual draws the active tile quads; level-only changes update uniforms, clean commits skip
+  texture uploads, and dirty commits upload only changed atlas regions. The current implementation is
+  one page; multi-page, byte-budgeted residency remains future work.
+- `arrayscope.display.overlay_hit_test`: Qt-free ROI/profile handle and outline hit testing shared by
+  backend visual adapters. Interaction semantics must move here or into a future shared interaction
+  controller rather than being reimplemented by each graphics library.
 - `arrayscope.display.overlays`, `arrayscope.display.roi_items`, and
   `arrayscope.display.profile_marker`: focused Qt display helpers for montage/loading overlays, ROI
   graphics item conversion, ROI info panels, and profile marker bounds. `ImageView2D` keeps the
@@ -134,10 +142,9 @@ source of array-view state.
 - `arrayscope.window.render_model`: Qt-free immutable request, payload, presentation-decision, and
   commit-plan models used at the boundary between render orchestration and display mutation. Render
   orchestration provides a `PresentationInput`; presentation policy returns a `PresentationDecision`;
-  Qt code only receives the decided `DisplayPresentation`. Raster/canvas display is represented by
-  `DisplayRasterPresentation`; direct montage tile display uses typed `DisplayTilePayload` values and
-  `DisplayTiledPresentation`-style metadata so renderers do not infer tile data from generic objects
-  or full-canvas placeholders.
+  Qt code only receives the decided `DisplayPresentation`. `DisplayRasterPresentation` owns raster
+  pixels and `DisplayTiledPresentation` owns typed `DisplayTilePayload` mappings; they are distinct
+  first-class variants, so core code never represents a tiled montage as a fake giant raster.
 - `arrayscope.window.display_commit`: the single gateway from a decided presentation to
   `ImageView2D`. Window render code must not call image pixel or histogram setters directly.
   `DisplayCommitter` validates display shape, local histogram-source shape, optional sampled
@@ -149,9 +156,10 @@ source of array-view state.
   Menu code opens the diagnostics dialog only; it does not assemble scheduler, cache, render, montage,
   operation, or upload timing snapshots.
 - `arrayscope.window.montage_backend`: explicit montage display backend policy. The Performance menu
-  stores Auto, Tile layer, or Canvas fallback. Auto keeps small/scalar montages on canvas, sends large
-  RGB/complex montages and slow upload paths to tile-layer painting, and records the chosen backend,
-  reason, fallback, and any warning in diagnostics.
+  stores Auto, Tile layer, or Canvas fallback. Auto always sends large RGB/complex and previously slow
+  upload paths to tiled painting; a backend that declares a tiled-montage preference also receives
+  large scalar montages through that path. The chosen backend, reason, fallback, and any warning are
+  recorded in diagnostics.
 - `arrayscope.window.stage_warmup`: idle-only reusable stage warmup. It uses the stage-cache budget,
   schedules on the stage lane with a stage `EvaluationContext`, attaches to existing singleflight
   requests, and records the latest warmup decision for diagnostics.
@@ -226,15 +234,17 @@ slice controls immediately, then calls `request_render(..., interactive=True)`. 
 cancels stale visible/profile/ROI/pixel/prefetch work, and refreshes side panels once the interaction
 burst is quiet.
 
-Progressive montage rendering has a narrower commit path than full image rendering. The initial
-montage viewport composes a bounded canvas, then completed tiles patch that session-owned canvas in
-place and flush to screen at a frame cadence. The session canvas is render-session state only; it is
-not the hover/status value source until a successful display commit records a committed display frame.
-Progressive commits update pixels, display geometry, axis flips, viewport preservation, the committed
-display frame, and montage loading/skipped overlays; side panels and expensive dock/profile/ROI
-refreshes run only on full commits or after the interaction burst is quiet. Montage tile evaluation
-uses a dedicated `montage` scheduler lane sized by `ComputePolicy` (auto uses roughly half the CPU,
-capped, with one FFT worker per tile). Shared expanded operation stages use a
+Progressive montage rendering has a narrower commit path than full image rendering. Presentation
+policy chooses a raster canvas or a direct tiled presentation. Raster sessions patch a bounded
+session-owned canvas. Tiled sessions retain typed payload/source wrappers and progressively commit the
+currently loaded mapping; renderer compatibility placeholders are created only inside the legacy
+widget shell. A successful commit records a `CanvasValueSource` or `TiledValueSource` as the semantic
+hover/ROI/profile source. Progressive commits update the selected pixel representation, display
+geometry, axis flips, viewport preservation, committed frame, and loading/skipped overlays; side
+panels and expensive dock/profile/ROI refreshes run only on full commits or after the interaction
+burst is quiet. Montage tile evaluation uses a dedicated `montage` scheduler lane sized by
+`ComputePolicy` (auto uses roughly half the CPU, capped, with one FFT worker per tile). Shared expanded
+operation stages use a
 separate max-1 `stage` lane and are materialized before most cold dependent tiles are rendered; one
 lead visible tile may render directly while a cold stage warms so the montage does not appear frozen
 behind a single reusable-stage job. If an attached stage is no longer cached or in-flight, waiting
@@ -260,23 +270,18 @@ profile-bound updates so runtime diagnostics can distinguish slow evaluation fro
 Histogram image-item binding is idempotent: pyqtgraph connects image-change signals in
 `setImageItem()`, so ArrayScope routes all histogram item switches through one helper and explicitly
 refreshes the histogram plot once per committed state. User histogram drags have a preview/final
-split: preview updates are throttled to the visible display path, tile-layer mode re-windows visible
-tile items only, and the semantic level state is emitted once on drag finish. Progressive montage commits are coalesced to
-the latest state when upload is slow. For large canvases or previously slow uploads, montage display
-switches to exact tile-layer painting; the committed canvas and geometry still own hover/status,
-histogram source, and level semantics. Tile-layer presentations carry dirty-tile metadata and
-per-rendered-tile source identities: `None` means full/unknown refresh, `()` means a known-clean flush
-that must skip tile image data uploads when item state is unchanged, and non-empty tuples update only
-those dirty loaded tiles plus newly visible or missing items. Source identities are derived from the
-rendered tile cache payload rather than the transient composed canvas, so an all-cached montage session
-can avoid re-uploading and re-windowing the same tile items even when the viewport canvas is rebuilt.
-Tile-layer diagnostics report visible, updated, skipped, and RGB-windowed item counts. They also
-split aggregate upload/windowing timings from tile-layer-specific upload and RGB-windowing timings so
-hot clean tile-layer commits can be verified as zero pixel-upload work.
-Tile-layer RGB source bases are a bounded helper cache, not a second rendered-tile cache: older
-float32 bases may be pruned while the displayed tile image remains intact. Clean unchanged-level
-commits still skip uploads; level-changing presentation commits re-window from retained bases or from
-the current canvas for pruned tiles.
+split: preview updates are throttled to the visible display path, while the semantic level state is
+emitted once on drag finish. PyQtGraph may re-window its visible RGB tile items from bounded retained
+float bases; VisPy changes shader uniforms without uploading clean tile pixels.
+
+Progressive tiled commits are coalesced when upload is slow and carry dirty-tile semantics plus stable
+source identities. `None` means full/unknown refresh, `()` means a known-clean flush, and a non-empty
+tuple identifies changed loaded tiles. The VisPy atlas keeps stable slot ownership and separates active
+draw visibility from retained GPU residency. It reserves the complete non-skipped visible plan so an
+initial progressive stream does not repeatedly rebuild storage. Diagnostics report visible, resident,
+capacity, updated/skipped, texture and vertex submissions, uploaded bytes, storage rebuilds/evictions,
+estimated GPU bytes, and CPU shadow bytes. Clean commits and pan/zoom-only updates should report zero
+texture uploads.
 
 Predictive compute is stage-aware and governor-admitted. Stage warmup runs only while visible work is
 idle and only when a retained cacheable candidate fits the stage-cache budget. Rendered tile and

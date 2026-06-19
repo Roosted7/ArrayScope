@@ -79,6 +79,19 @@ Rules:
   beyond nearby-slice/profile prefetch.
 * Consider zarr/dask later, but do not introduce them before the internal lazy evaluator is clean.
 
+* Replace full active-tile mappings with revisioned tile deltas (`upserts`, `removals`, visibility,
+  levels, histogram, and viewport revisions) so progressive commits scale with changed tiles.
+* Add multi-page GPU atlas residency with queried device limits, explicit byte budgets, viewport-near
+  hysteresis, and page/slot eviction diagnostics.
+* Add guttered tile pyramids or mip levels selected near one to two source texels per display pixel;
+  keep full-resolution value semantics for hover, ROI, profile, and export.
+* Add a complex `RG32F` display path so component, phase/magnitude, LUT, log/symlog, brightness, and
+  contrast can be shader/uniform operations without repeated CPU RGB preparation.
+* Extract one backend-neutral pointer/ROI/profile interaction state machine, then render its semantic
+  overlay state through PyQtGraph or VisPy adapters.
+* Maintain a production rendering matrix by OS/compositor/GPU class using first-frame latency, UI gap,
+  upload bytes, storage rebuilds, and tail latency rather than setter time or GPU utilization alone.
+
 ## IO / MRI ideas
 
 * Add BART `.cfl/.hdr` write/export.
