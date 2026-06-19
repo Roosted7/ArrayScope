@@ -1366,6 +1366,18 @@ class VisPyImageView2D(ImageView2D):
             float(rect.top() + max(0.0, rect.height() - 1.0)),
         )
 
+    def _current_image_viewport_rect(self):
+        bounds = getattr(self, "_vispy_bounds_item", None)
+        if bounds is None:
+            return super()._current_image_viewport_rect()
+        rect = bounds.rect()
+        return (
+            float(rect.left()),
+            float(rect.top()),
+            float(rect.left() + max(1.0, rect.width())),
+            float(rect.top() + max(1.0, rect.height())),
+        )
+
     def _updateAspectRatio(self):
         super()._updateAspectRatio()
         camera = getattr(getattr(self, "_vispy_view", None), "camera", None)
@@ -1388,10 +1400,16 @@ class VisPyImageView2D(ImageView2D):
                     self.view,
                     getattr(self, "_vispy_display_shape", self.image.shape[:2]),
                     self.graphicsView.viewport().size(),
-                    display_rect=self._current_image_world_rect(),
+                    display_rect=self._current_image_viewport_rect(),
                 )
             finally:
                 self._viewport_applying = False
+            self._sync_vispy_camera_to_view()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.image is not None and self.viewport_controller.is_fit_locked():
+            self._sync_vispy_camera_to_view()
 
     def _update_histogram_for_vispy(self, histogramData, histogramPlotData, levels) -> None:
         plot_data = self._histogram_plot_data(histogramData)

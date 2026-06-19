@@ -787,7 +787,7 @@ def test_vispy_direct_tiled_fit_syncs_camera_immediately(qt_app):
 
         view.setFitLocked(True)
         x_range, y_range = view.getView().viewRange()
-        expected = ((0.0, 4.0), (0.0, 1.0))
+        expected = ((0.0, 5.0), (0.0, 2.0))
 
         np.testing.assert_allclose(x_range, expected[0], atol=1e-6)
         np.testing.assert_allclose(y_range, expected[1], atol=1e-6)

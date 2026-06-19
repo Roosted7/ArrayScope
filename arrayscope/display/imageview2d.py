@@ -1349,7 +1349,7 @@ class ImageView2D(QtWidgets.QWidget):
         if self.image is not None:
             self._viewport_applying = True
             try:
-                self.viewport_controller.one_to_one(self.view, self.image.shape[:2], self.graphicsView.viewport().size(), display_rect=self._current_image_world_rect())
+                self.viewport_controller.one_to_one(self.view, self.image.shape[:2], self.graphicsView.viewport().size(), display_rect=self._current_image_viewport_rect())
             finally:
                 self._viewport_applying = False
 
@@ -1633,7 +1633,7 @@ class ImageView2D(QtWidgets.QWidget):
             self.view.setAspectLocked(False)
 
     def _apply_viewport_policy(self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0)):
-        display_rect = _world_rect_for_shape(image_shape, image_origin)
+        display_rect = _viewport_rect_for_shape(image_shape, image_origin)
         self._viewport_applying = True
         try:
             self.viewport_controller.apply_after_image(
@@ -1657,7 +1657,7 @@ class ImageView2D(QtWidgets.QWidget):
             if self.image is not None:
                 self._viewport_applying = True
                 try:
-                    self.viewport_controller.resize(self.view, self.image.shape[:2], event.size(), display_rect=self._current_image_world_rect())
+                    self.viewport_controller.resize(self.view, self.image.shape[:2], event.size(), display_rect=self._current_image_viewport_rect())
                 finally:
                     self._viewport_applying = False
         if (
@@ -1678,6 +1678,12 @@ class ImageView2D(QtWidgets.QWidget):
             return None
         pos = self.imageItem.pos()
         return _world_rect_for_shape(self.image.shape[:2], (float(pos.x()), float(pos.y())))
+
+    def _current_image_viewport_rect(self):
+        if self.image is None:
+            return None
+        pos = self.imageItem.pos()
+        return _viewport_rect_for_shape(self.image.shape[:2], (float(pos.x()), float(pos.y())))
 
     def _handle_context_menu_event(self, event):
         if event.type() != QtCore.QEvent.Type.MouseButtonPress or event.button() != QtCore.Qt.MouseButton.RightButton:
@@ -1747,16 +1753,27 @@ def _coerce_viewport_policy(viewport_policy, auto_range):
     return ViewportPolicy(str(viewport_policy))
 
 
-
-def _array_content_key(array: np.ndarray) -> tuple[object, ...]:
-    array = np.asarray(array)
-    return (tuple(int(value) for value in array.shape), array.dtype.str, array.tobytes())
-
 def _world_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, float, float]:
+    """Pixel-center bounds used by semantic hit testing and overlays."""
+
     height, width = tuple(int(value) for value in shape[:2])
     x0 = float(origin[0])
     y0 = float(origin[1])
     return (x0, y0, x0 + float(max(0, width - 1)), y0 + float(max(0, height - 1)))
+
+
+def _viewport_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, float, float]:
+    """Pixel-edge bounds used to frame the complete rendered surface."""
+
+    height, width = tuple(int(value) for value in shape[:2])
+    x0 = float(origin[0])
+    y0 = float(origin[1])
+    return (x0, y0, x0 + float(max(1, width)), y0 + float(max(1, height)))
+
+
+def _array_content_key(array: np.ndarray) -> tuple[object, ...]:
+    array = np.asarray(array)
+    return (tuple(int(value) for value in array.shape), array.dtype.str, array.tobytes())
 
 
 def _tiled_montage_placeholder(display_shape, tile_payloads) -> np.ndarray:

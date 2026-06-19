@@ -59,12 +59,18 @@ class ViewportController:
         if intent == ViewportIntent.RESET_FOR_NEW_SHAPE or previous_shape is None:
             if self.mode == ViewportMode.USER and previous_shape is not None:
                 _preserve_center_for_shape(view_box, image_shape, display_rect=display_rect)
+            elif self.mode == ViewportMode.FIT:
+                # Fit is a persistent interaction mode, not a one-shot range.
+                # Do not silently demote it when a slice/montage changes shape.
+                _fit(view_box, display_rect=display_rect)
             else:
                 self.mode = ViewportMode.AUTO_UNTOUCHED
                 _fit(view_box, display_rect=display_rect)
             return
 
         if rect_changed_only and intent == ViewportIntent.PRESERVE:
+            if self.mode == ViewportMode.FIT:
+                _fit(view_box, display_rect=display_rect)
             return
 
         if self.mode == ViewportMode.FIT and shape_changed:
@@ -141,6 +147,6 @@ def _preserve_center_for_shape(view_box, image_shape, *, display_rect=None):
 def _display_rect(image_shape, display_rect=None) -> tuple[float, float, float, float]:
     height, width = tuple(int(v) for v in image_shape[:2])
     if display_rect is None:
-        return (0.0, 0.0, float(max(0, width - 1)), float(max(0, height - 1)))
+        return (0.0, 0.0, float(max(1, width)), float(max(1, height)))
     x0, y0, x1, y1 = display_rect
     return (float(x0), float(y0), float(x1), float(y1))

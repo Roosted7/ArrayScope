@@ -33,7 +33,7 @@ def test_viewport_controller_fits_first_image():
 
     assert controller.mode == ViewportMode.AUTO_UNTOUCHED
     assert view.fit_count == 0
-    assert view.viewRange() == [[0.0, 9.0], [0.0, 7.0]]
+    assert view.viewRange() == [[0.0, 10.0], [0.0, 8.0]]
 
 
 def test_viewport_controller_one_to_one_uses_viewport_pixels():
@@ -89,3 +89,45 @@ def test_viewport_controller_one_to_one_does_not_reapply_after_image_change():
 
     assert controller.mode == ViewportMode.USER
     assert view.viewRange() == [[100, 120], [200, 220]]
+
+
+def test_fit_lock_survives_shape_reset_and_tracks_new_full_bounds():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(view, (8, 10), _size(100, 80), policy=ViewportPolicy.PRESERVE)
+    controller.set_fit_locked(view, True)
+
+    controller.apply_after_image(
+        view,
+        (12, 20),
+        _size(100, 80),
+        policy=ViewportPolicy.RESET_FOR_NEW_SHAPE,
+        display_rect=(5.0, 7.0, 25.0, 19.0),
+    )
+
+    assert controller.mode == ViewportMode.FIT
+    assert controller.is_fit_locked()
+    assert view.viewRange() == [[5.0, 25.0], [7.0, 19.0]]
+
+
+def test_fit_lock_tracks_origin_only_display_rect_changes():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(
+        view,
+        (8, 10),
+        _size(100, 80),
+        policy=ViewportPolicy.FIT_ONCE,
+        display_rect=(0.0, 0.0, 10.0, 8.0),
+    )
+
+    controller.apply_after_image(
+        view,
+        (8, 10),
+        _size(100, 80),
+        policy=ViewportPolicy.PRESERVE,
+        display_rect=(0.0, 100.0, 10.0, 108.0),
+    )
+
+    assert controller.mode == ViewportMode.FIT
+    assert view.viewRange() == [[0.0, 10.0], [100.0, 108.0]]
