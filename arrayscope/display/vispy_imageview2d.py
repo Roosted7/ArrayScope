@@ -31,6 +31,7 @@ from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.image_upload import rgb_display_for_levels
+from arrayscope.display.overlay_hit_test import hit_test_roi, roi_handle_points
 from arrayscope.display.viewport import ViewportPolicy
 
 if TYPE_CHECKING:
@@ -116,6 +117,10 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_tile_visuals: dict[int, _VisPyTileState] = {}
         self._vispy_roi_visuals: dict[str, object] = {}
         self._vispy_roi_handle_visuals: dict[str, object] = {}
+        self._vispy_selected_roi_id: str | None = None
+        self._vispy_hovered_roi_id: str | None = None
+        self._vispy_profile_hover_part: str | None = None
+        self._vispy_roi_drawing_preview = None
         self._vispy_overlay_visuals: list[object] = []
         self._vispy_overlay_mesh = None
         self._vispy_overlay_lines = None
@@ -511,12 +516,16 @@ class VisPyImageView2D(ImageView2D):
         selection = super().createRoi(kind, points=points, rect=rect, line_width=line_width, label=label, color=color)
         item, _selection = self._roi_items[selection.id]
         item.sigRegionChanged.connect(lambda _item=item, roi_id=selection.id: self._on_roi_item_live_changed(roi_id))
-        self._upsert_vispy_roi(selection.id, selection.geometry, selection.color, width=2)
+        self._upsert_vispy_roi(selection.id, selection.geometry, selection.color)
         return selection
 
     def removeRoi(self, roi_id):
         removed = super().removeRoi(roi_id)
         if removed:
+            if self._vispy_selected_roi_id == str(roi_id):
+                self._vispy_selected_roi_id = None
+            if self._vispy_hovered_roi_id == str(roi_id):
+                self._vispy_hovered_roi_id = None
             self._remove_vispy_roi(roi_id)
         return removed
 
@@ -527,9 +536,9 @@ class VisPyImageView2D(ImageView2D):
 
     def highlightRoi(self, roi_id):
         result = super().highlightRoi(roi_id)
+        self._vispy_selected_roi_id = str(roi_id) if result else None
         for current_id, (_item, selection) in self._roi_items.items():
-            width = 4 if current_id == str(roi_id) else 2
-            self._upsert_vispy_roi(current_id, selection.geometry, selection.color, width=width)
+            self._upsert_vispy_roi(current_id, selection.geometry, selection.color)
         return result
 
     def _on_roi_item_changed(self, roi_id):
@@ -551,19 +560,23 @@ class VisPyImageView2D(ImageView2D):
                 self._remove_vispy_roi(roi_id)
                 return
             _item, selection = item_selection
-        self._upsert_vispy_roi(selection.id, selection.geometry, selection.color, width=2)
+        self._upsert_vispy_roi(selection.id, selection.geometry, selection.color)
 
-    def _upsert_vispy_roi(self, roi_id, geometry, color, *, width: int = 2) -> None:
+    def _upsert_vispy_roi(self, roi_id, geometry, color, *, width: float | None = None) -> None:
         points = _vispy_roi_points(geometry)
         if points is None:
             self._remove_vispy_roi(roi_id)
             return
+        roi_id = str(roi_id)
+        if width is None:
+            width = self._vispy_roi_width(roi_id)
+        line_color = self._vispy_roi_color(roi_id, color)
         visual = self._vispy_roi_visuals.get(str(roi_id))
         if visual is None:
             visual = self._vispy_visuals.Line(
                 points,
                 parent=self._vispy_view.scene,
-                color=_vispy_color(color),
+                color=line_color,
                 width=float(width),
                 method="agg",
             )
@@ -574,7 +587,7 @@ class VisPyImageView2D(ImageView2D):
                 pass
             self._vispy_roi_visuals[str(roi_id)] = visual
         else:
-            visual.set_data(pos=points, color=_vispy_color(color), width=float(width))
+            visual.set_data(pos=points, color=line_color, width=float(width))
             visual.order = 10_000
         visual.visible = True
         self._upsert_vispy_roi_handles(roi_id, geometry, color)
@@ -598,47 +611,81 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_canvas.update()
 
     def _upsert_vispy_roi_handles(self, roi_id, geometry, color) -> None:
-        points = _vispy_roi_handle_points(geometry)
-        existing = self._vispy_roi_handle_visuals.pop(str(roi_id), ())
+        roi_id = str(roi_id)
+        points = np.asarray(roi_handle_points(geometry), dtype=np.float32).reshape((-1, 2))
+        existing = self._vispy_roi_handle_visuals.get(roi_id, ())
         if existing is None or not isinstance(existing, (list, tuple)):
             existing = (existing,)
-        for handle in tuple(existing):
-            if handle is None:
-                continue
-            try:
-                handle.parent = None
-            except Exception:
-                _set_visual_visible(handle, False)
-        if points is None:
+        marker = existing[0] if existing else None
+        for stale in tuple(existing[1:]):
+            if stale is not None:
+                try:
+                    stale.parent = None
+                except Exception:
+                    _set_visual_visible(stale, False)
+        if not len(points):
+            if marker is not None:
+                _set_visual_visible(marker, False)
+            self._vispy_roi_handle_visuals.pop(roi_id, None)
             return
-        size = self._vispy_handle_world_size()
-        handles = []
-        for x, y in np.asarray(points, dtype=np.float32):
-            handle = self._vispy_visuals.Rectangle(
-                center=(float(x), float(y)),
-                width=float(size),
-                height=float(size),
-                parent=self._vispy_view.scene,
-                color=(0.0, 0.0, 0.0, 0.0),
-                border_color=_vispy_color((200, 200, 220)),
-            )
-            handle.order = 10_001
-            handle.visible = True
-            handles.append(handle)
-        self._vispy_roi_handle_visuals[str(roi_id)] = handles
+        if marker is None or not hasattr(marker, "set_data"):
+            marker = self._vispy_visuals.Markers(parent=self._vispy_view.scene)
+        selected = roi_id == self._vispy_selected_roi_id
+        hovered = roi_id == self._vispy_hovered_roi_id
+        marker.set_data(
+            points,
+            symbol="square",
+            size=12.0 if selected or hovered else 10.0,
+            face_color=(0.05, 0.05, 0.05, 0.75),
+            edge_color=_vispy_color((255, 255, 255) if hovered else color),
+            edge_width=2.0 if selected or hovered else 1.25,
+        )
+        marker.order = 10_001
+        marker.visible = True
+        self._vispy_roi_handle_visuals[roi_id] = [marker]
+
+    def _vispy_roi_width(self, roi_id: str) -> float:
+        if str(roi_id) == self._vispy_selected_roi_id:
+            return 4.0
+        if str(roi_id) == self._vispy_hovered_roi_id:
+            return 3.25
+        return 2.0
+
+    def _vispy_roi_color(self, roi_id: str, color):
+        if str(roi_id) == self._vispy_hovered_roi_id:
+            rgb = tuple(min(255, int(value) + 70) for value in tuple(color or (255, 255, 0))[:3])
+            return _vispy_color(rgb)
+        return _vispy_color(color)
 
     def _vispy_handle_world_size(self) -> float:
+        """World-space radius corresponding to an eight-pixel hit target."""
+
         try:
             x_range, y_range = self.view.viewRange()
-            span = min(abs(float(x_range[1]) - float(x_range[0])), abs(float(y_range[1]) - float(y_range[0])))
+            viewport = self.graphicsView.viewport()
+            x_per_pixel = abs(float(x_range[1]) - float(x_range[0])) / max(1, int(viewport.width()))
+            y_per_pixel = abs(float(y_range[1]) - float(y_range[0])) / max(1, int(viewport.height()))
+            return max(x_per_pixel, y_per_pixel) * 8.0
         except Exception:
-            span = 100.0
-        return max(1.5, min(5.0, span * 0.025))
+            return 2.0
+
+    def setInspectionTool(self, tool):
+        result = super().setInspectionTool(tool)
+        self._clear_vispy_hover_feedback()
+        return result
 
     def eventFilter(self, obj, event):
         if obj is self.graphicsView.viewport() and event.type() == QtCore.QEvent.Type.MouseMove:
             self._update_vispy_roi_cursor(event)
         return super().eventFilter(obj, event)
+
+    def _clear_vispy_hover_feedback(self) -> None:
+        self._set_vispy_profile_hover_part(None)
+        self._set_vispy_hovered_roi(None)
+        viewport = self.graphicsView.viewport()
+        if self._vispy_roi_cursor_active:
+            viewport.unsetCursor()
+            self._vispy_roi_cursor_active = False
 
     def _update_vispy_roi_cursor(self, event) -> None:
         if self._pending_roi_draw_tool is not None or self._drawing_active:
@@ -647,9 +694,15 @@ class VisPyImageView2D(ImageView2D):
             return
         scene_pos = self.graphicsView.mapToScene(event.pos())
         view_pos = self.view.mapSceneToView(scene_pos)
-        cursor = self._vispy_profile_cursor_for_point(float(view_pos.x()), float(view_pos.y()))
-        if cursor is None:
-            cursor = self._vispy_roi_cursor_for_point(float(view_pos.x()), float(view_pos.y()))
+        x = float(view_pos.x())
+        y = float(view_pos.y())
+        profile_part = self._vispy_profile_hit_for_point(x, y)
+        self._set_vispy_profile_hover_part(profile_part)
+        roi_hit = None if profile_part is not None else self._vispy_roi_hit_for_point(x, y)
+        self._set_vispy_hovered_roi(None if roi_hit is None else roi_hit[0])
+        cursor = self._cursor_for_vispy_profile_hit(profile_part)
+        if cursor is None and roi_hit is not None:
+            cursor = self._cursor_for_vispy_roi_hit(roi_hit[1], roi_hit[2])
         viewport = self.graphicsView.viewport()
         if cursor is None:
             if self._vispy_roi_cursor_active:
@@ -660,41 +713,81 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_roi_cursor_active = True
 
     def _vispy_roi_cursor_for_point(self, x: float, y: float):
-        for _roi_id, (_item, selection) in reversed(tuple(self._roi_items.items())):
-            kind = str(getattr(getattr(selection.geometry, "kind", ""), "value", getattr(selection.geometry, "kind", "")))
-            if kind != "rectangle" or selection.geometry.rect is None:
-                continue
-            rect = tuple(float(value) for value in selection.geometry.rect)
-            handle_point = _vispy_roi_handle_points(selection.geometry)
-            tolerance = self._vispy_handle_world_size()
-            if handle_point is not None and len(handle_point):
-                hx, hy = (float(handle_point[0][0]), float(handle_point[0][1]))
-                if abs(float(x) - hx) <= tolerance and abs(float(y) - hy) <= tolerance:
-                    return QtGui.QCursor(QtCore.Qt.CursorShape.SizeFDiagCursor)
-            rx, ry, width, height = rect
-            x0, x1 = sorted((rx, rx + width))
-            y0, y1 = sorted((ry, ry + height))
-            if x0 <= float(x) <= x1 and y0 <= float(y) <= y1:
-                return QtGui.QCursor(QtCore.Qt.CursorShape.SizeAllCursor)
+        result = self._vispy_roi_hit_for_point(float(x), float(y))
+        if result is None:
+            return None
+        _roi_id, hit, geometry = result
+        return self._cursor_for_vispy_roi_hit(hit, geometry)
+
+    def _vispy_roi_hit_for_point(self, x: float, y: float):
+        tolerance = self._vispy_handle_world_size()
+        for roi_id, (_item, selection) in reversed(tuple(self._roi_items.items())):
+            hit = hit_test_roi(selection.geometry, (float(x), float(y)), tolerance=tolerance)
+            if hit is not None:
+                return str(roi_id), hit, selection.geometry
         return None
 
+    def _cursor_for_vispy_roi_hit(self, hit, geometry):
+        kind = str(getattr(getattr(geometry, "kind", ""), "value", getattr(geometry, "kind", "")))
+        if hit.part == "handle" and kind == "rectangle":
+            return QtGui.QCursor(QtCore.Qt.CursorShape.SizeFDiagCursor)
+        return QtGui.QCursor(QtCore.Qt.CursorShape.SizeAllCursor)
+
+    def _set_vispy_hovered_roi(self, roi_id: str | None) -> None:
+        roi_id = None if roi_id is None else str(roi_id)
+        previous = self._vispy_hovered_roi_id
+        if previous == roi_id:
+            return
+        self._vispy_hovered_roi_id = roi_id
+        for current in (previous, roi_id):
+            item_selection = self._roi_items.get(str(current)) if current is not None else None
+            if item_selection is None:
+                continue
+            _item, selection = item_selection
+            self._upsert_vispy_roi(selection.id, selection.geometry, selection.color)
+
     def _vispy_profile_cursor_for_point(self, x: float, y: float):
+        return self._cursor_for_vispy_profile_hit(self._vispy_profile_hit_for_point(float(x), float(y)))
+
+    def _vispy_profile_hit_for_point(self, x: float, y: float) -> str | None:
         if not bool(getattr(self, "_profile_marker_requested_visible", False)):
             return None
         position = self.profileMarkerPosition()
         if position is None:
             return None
         px, py = (float(position[0]), float(position[1]))
-        tolerance = max(1.5, self._vispy_handle_world_size())
+        tolerance = self._vispy_handle_world_size()
         if abs(float(x) - px) <= tolerance and abs(float(y) - py) <= tolerance:
-            return QtGui.QCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+            return "center"
+        x0, y0, x1, y1 = self._current_profile_bounds()
+        if min(y0, y1) <= float(y) <= max(y0, y1) and abs(float(x) - px) <= tolerance:
+            return "vertical"
+        if min(x0, x1) <= float(x) <= max(x0, x1) and abs(float(y) - py) <= tolerance:
+            return "horizontal"
         return None
+
+    def _cursor_for_vispy_profile_hit(self, part: str | None):
+        if part == "center":
+            return QtGui.QCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        if part == "vertical":
+            return QtGui.QCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+        if part == "horizontal":
+            return QtGui.QCursor(QtCore.Qt.CursorShape.SizeVerCursor)
+        return None
+
+    def _set_vispy_profile_hover_part(self, part: str | None) -> None:
+        part = None if part is None else str(part)
+        if part == self._vispy_profile_hover_part:
+            return
+        self._vispy_profile_hover_part = part
+        self._sync_vispy_profile_marker()
 
     def setProfileMarker(self, x, y, visible=True):
         super().setProfileMarker(x, y, visible=visible)
         self._sync_vispy_profile_marker()
 
     def hideProfileMarker(self):
+        self._vispy_profile_hover_part = None
         super().hideProfileMarker()
         for visual in getattr(self, "_vispy_profile_visuals", {}).values():
             _set_visual_visible(visual, False)
@@ -726,12 +819,15 @@ class VisPyImageView2D(ImageView2D):
                 _set_visual_visible(visual, False)
             return
         x0, y0, x1, y1 = self._current_profile_bounds()
-        self._upsert_vispy_line("profile_v", np.asarray([[x, y0], [x, y1]], dtype=np.float32), (230, 60, 30), width=1.5)
-        self._upsert_vispy_line("profile_h", np.asarray([[x0, y], [x1, y]], dtype=np.float32), (230, 60, 30), width=1.5)
+        hovered = self._vispy_profile_hover_part is not None
+        line_color = (255, 125, 55) if hovered else (230, 60, 30)
+        line_width = 2.5 if hovered else 1.5
+        self._upsert_vispy_line("profile_v", np.asarray([[x, y0], [x, y1]], dtype=np.float32), line_color, width=line_width)
+        self._upsert_vispy_line("profile_h", np.asarray([[x0, y], [x1, y]], dtype=np.float32), line_color, width=line_width)
         marker = max(0.8, min(float(x1 - x0), float(y1 - y0)) * 0.025)
-        self._upsert_vispy_line("profile_handle_x", np.asarray([[x - marker, y], [x + marker, y]], dtype=np.float32), (230, 60, 30), width=2.0)
-        self._upsert_vispy_line("profile_handle_y", np.asarray([[x, y - marker], [x, y + marker]], dtype=np.float32), (230, 60, 30), width=2.0)
-        self._upsert_vispy_profile_dot(x, y)
+        self._upsert_vispy_line("profile_handle_x", np.asarray([[x - marker, y], [x + marker, y]], dtype=np.float32), line_color, width=3.0 if hovered else 2.0)
+        self._upsert_vispy_line("profile_handle_y", np.asarray([[x, y - marker], [x, y + marker]], dtype=np.float32), line_color, width=3.0 if hovered else 2.0)
+        self._upsert_vispy_profile_dot(x, y, hovered=hovered)
         self._vispy_canvas.update()
 
     def _upsert_vispy_line(self, key: str, points, color, *, width: float, order: int = 10_000):
@@ -751,7 +847,7 @@ class VisPyImageView2D(ImageView2D):
         visual.visible = True
         return visual
 
-    def _upsert_vispy_profile_dot(self, x: float, y: float) -> None:
+    def _upsert_vispy_profile_dot(self, x: float, y: float, *, hovered: bool = False) -> None:
         visual = self._vispy_profile_visuals.get("profile_handle_dot")
         if visual is None:
             visual = self._vispy_visuals.Markers(parent=self._vispy_view.scene)
@@ -759,13 +855,42 @@ class VisPyImageView2D(ImageView2D):
         visual.set_data(
             np.asarray([[float(x), float(y)]], dtype=np.float32),
             symbol="disc",
-            size=9.0,
-            face_color=_vispy_color((230, 60, 30)),
+            size=12.0 if hovered else 9.0,
+            face_color=_vispy_color((255, 125, 55) if hovered else (230, 60, 30)),
             edge_color=_vispy_color((255, 255, 255)),
-            edge_width=1.0,
+            edge_width=2.0 if hovered else 1.0,
         )
         visual.order = 10_002
         visual.visible = True
+
+    def _set_roi_drawing_preview(self, tool, points) -> None:
+        if tool is not None:
+            self._clear_vispy_hover_feedback()
+        points = np.asarray(tuple(points or ()), dtype=np.float32).reshape((-1, 2))
+        visual = getattr(self, "_vispy_roi_drawing_preview", None)
+        if tool is None or len(points) < 2:
+            _set_visual_visible(visual, False)
+            if visual is not None:
+                self._vispy_canvas.update()
+            return
+        if visual is None:
+            visual = self._vispy_visuals.Line(
+                points,
+                parent=self._vispy_view.scene,
+                color=_vispy_color((255, 190, 60)),
+                width=2.5,
+                method="agg",
+            )
+            visual.order = 10_003
+            try:
+                visual.set_gl_state("translucent", depth_test=False)
+            except Exception:
+                pass
+            self._vispy_roi_drawing_preview = visual
+        else:
+            visual.set_data(pos=points, color=_vispy_color((255, 190, 60)), width=2.5)
+        visual.visible = True
+        self._vispy_canvas.update()
 
     def setMontageTileOverlays(self, overlays):
         overlays = tuple(overlays or ())
@@ -1471,22 +1596,6 @@ def _vispy_roi_points(geometry):
             ],
             dtype=np.float32,
         )
-    points = tuple(getattr(geometry, "points", ()) or ())
-    if kind == "line" and len(points) >= 2:
-        return np.asarray(points[:2], dtype=np.float32)
-    if kind in {"polyline", "freehand_polygon"} and len(points) >= 2:
-        return np.asarray(points, dtype=np.float32)
-    return None
-
-
-def _vispy_roi_handle_points(geometry):
-    kind = str(getattr(getattr(geometry, "kind", ""), "value", getattr(geometry, "kind", "")))
-    if kind == "rectangle":
-        rect = getattr(geometry, "rect", None)
-        if rect is None:
-            return None
-        x, y, width, height = (float(value) for value in rect)
-        return np.asarray([[x + width, y + height]], dtype=np.float32)
     points = tuple(getattr(geometry, "points", ()) or ())
     if kind == "line" and len(points) >= 2:
         return np.asarray(points[:2], dtype=np.float32)
