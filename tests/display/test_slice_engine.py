@@ -231,6 +231,31 @@ def test_make_shader_image_from_slab_keeps_complex_texture_raw_and_histogram_sca
     assert image.shader_mapping.scale == "log"
 
 
+@pytest.mark.parametrize(
+    ("channel", "component", "expected"),
+    (
+        (ChannelMode.REAL, "real", lambda data: np.real(data)),
+        (ChannelMode.IMAG, "imag", lambda data: np.imag(data)),
+        (ChannelMode.ABS, "abs", lambda data: np.abs(data)),
+        (ChannelMode.ANGLE, "angle", lambda data: np.angle(data)),
+    ),
+)
+def test_shader_complex_channels_share_raw_rg32f_texture(channel, component, expected):
+    data = np.array([[1 + 2j, -3 + 4j]], dtype=np.complex64)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=channel)
+
+    image = make_shader_image_from_slab(data, _FakeImageRequest(state))
+
+    assert image.texture_kind == "complex_rg32f"
+    assert np.iscomplexobj(image.data)
+    np.testing.assert_array_equal(image.data, data)
+    np.testing.assert_allclose(image.histogram_data, expected(data))
+    assert image.shader_mapping.component == component
+    assert image.shader_mapping.display_mode == "scalar"
+    if channel == ChannelMode.ANGLE:
+        assert image.default_levels == (-np.pi, np.pi)
+
+
 def test_make_image_ndslice_reversed_axes_uses_image_axis_order():
     data = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
     state = state_for(

@@ -13,7 +13,14 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.display.lod import inner_uv_for_gutter
-from arrayscope.display.shader_mapping import ShaderDisplayMode, ShaderScale, TexturePlaneKind, default_phase_lut, pack_texture_data
+from arrayscope.display.shader_mapping import (
+    ShaderDisplayMode,
+    ShaderScale,
+    TexturePlaneKind,
+    default_phase_lut,
+    pack_texture_data,
+    shader_component_uniform,
+)
 from arrayscope.display.model.frame import DisplayTilePayload
 
 try:
@@ -920,8 +927,22 @@ class GpuWindowedTileVisual(Visual):
     uniform vec2 u_levels;
     uniform float u_scale_mode;
     uniform float u_symlog_constant;
+    uniform float u_component_mode;
     varying vec2 v_texcoord;
     varying float v_mode;
+
+    float complex_component(vec2 z) {
+        if (u_component_mode > 2.5) {
+            return atan(z.y, z.x);
+        }
+        if (u_component_mode > 1.5) {
+            return length(z);
+        }
+        if (u_component_mode > 0.5) {
+            return z.y;
+        }
+        return z.x;
+    }
 
     float map_scale(float value) {
         if (u_scale_mode > 1.5) {
@@ -958,7 +979,7 @@ class GpuWindowedTileVisual(Visual):
             gl_FragColor = vec4(color, 1.0);
         } else if (v_mode < 3.5) {
             vec2 z = texture2D(u_scalar_texture, v_texcoord).rg;
-            float scalar = length(z);
+            float scalar = complex_component(z);
             scalar = map_scale(scalar);
             float span = max(u_levels.y - u_levels.x, 1e-12);
             float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
@@ -968,7 +989,7 @@ class GpuWindowedTileVisual(Visual):
             gl_FragColor = vec4(vec3(intensity), 1.0);
         } else {
             vec2 z = texture2D(u_scalar_texture, v_texcoord).rg;
-            float scalar = length(z);
+            float scalar = complex_component(z);
             scalar = map_scale(scalar);
             float span = max(u_levels.y - u_levels.x, 1e-12);
             float intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
@@ -1001,6 +1022,7 @@ class GpuWindowedTileVisual(Visual):
         self._levels = (0.0, 1.0)
         self._scale_mode = 0.0
         self._symlog_constant = 0.0
+        self._component_mode = 0.0
         self.set_gl_state(depth_test=False, cull_face=False, blend=False)
         self._draw_mode = "triangles"
         self.freeze()
@@ -1044,14 +1066,16 @@ class GpuWindowedTileVisual(Visual):
     def set_shader_mapping(self, mapping) -> bool:
         scale_mode = _shader_scale_uniform(getattr(mapping, "scale", None))
         symlog_constant = float(getattr(mapping, "symlog_constant", 0.0) or 0.0)
+        component_mode = shader_component_uniform(getattr(mapping, "component", None))
         lut = _normalized_lut(getattr(mapping, "lut_data", None))
         lut_key = _array_content_key(lut)
-        mapping_key = (float(scale_mode), float(symlog_constant), lut_key)
+        mapping_key = (float(scale_mode), float(symlog_constant), float(component_mode), lut_key)
         if mapping_key == self._shader_mapping_key:
             return False
         self._shader_mapping_key = mapping_key
         self._scale_mode = scale_mode
         self._symlog_constant = symlog_constant
+        self._component_mode = component_mode
         self._set_lut_texture(lut, key=lut_key)
         self.update()
         return True
@@ -1074,6 +1098,7 @@ class GpuWindowedTileVisual(Visual):
         program["u_levels"] = tuple(float(value) for value in self._levels)
         program["u_scale_mode"] = float(self._scale_mode)
         program["u_symlog_constant"] = float(self._symlog_constant)
+        program["u_component_mode"] = float(self._component_mode)
         return True
 
     def _set_lut_texture(self, lut_data, *, key=None) -> bool:

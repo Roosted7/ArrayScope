@@ -182,22 +182,30 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None):
     image_data = _ensure_image_rank(image_data)
 
     channel = _channel_mode(state.channel)
-    if channel == ChannelMode.COMPLEX and np.iscomplexobj(image_data):
+    if np.iscomplexobj(image_data):
+        component = _shader_component_for_channel(channel)
+        phase_color = channel == ChannelMode.COMPLEX
         mapping = ShaderMapping(
-            component=ShaderComponent.ABS,
+            component=component,
             scale=_shader_scale(state.scale),
-            display_mode=ShaderDisplayMode.PHASE_COLOR,
-            lut_identity=_lut_identity(colormap_lut),
-            lut_data=colormap_lut,
+            display_mode=ShaderDisplayMode.PHASE_COLOR if phase_color else ShaderDisplayMode.SCALAR,
+            lut_identity=_lut_identity(colormap_lut) if phase_color else None,
+            lut_data=colormap_lut if phase_color else None,
         )
-        histogram_data = apply_shader_scale(extract_component(image_data, ShaderComponent.ABS), mapping.scale)
+        histogram_data = apply_shader_scale(
+            extract_component(image_data, component),
+            mapping.scale,
+            symlog_constant=mapping.symlog_constant,
+        )
+        complex_data = np.ascontiguousarray(image_data.astype(np.complex64, copy=False))
         return DisplayImage(
-            data=np.ascontiguousarray(image_data.astype(np.complex64, copy=False)),
+            data=complex_data,
             histogram_data=histogram_data,
+            default_levels=(-np.pi, np.pi) if channel == ChannelMode.ANGLE else None,
             rgb_already_windowed=False,
             shader_mapping=mapping,
             texture_kind=TexturePlaneKind.COMPLEX_RG32F,
-            semantic_data=np.ascontiguousarray(image_data.astype(np.complex64, copy=False)),
+            semantic_data=complex_data,
         )
 
     default_levels = None
@@ -313,7 +321,7 @@ def _shader_component_for_channel(channel) -> ShaderComponent:
     channel = _channel_mode(channel)
     if channel == ChannelMode.IMAG:
         return ShaderComponent.IMAG
-    if channel == ChannelMode.ABS:
+    if channel in {ChannelMode.COMPLEX, ChannelMode.ABS}:
         return ShaderComponent.ABS
     if channel == ChannelMode.ANGLE:
         return ShaderComponent.ANGLE

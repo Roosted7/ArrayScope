@@ -9,6 +9,7 @@ from arrayscope.display.backends.vispy.tiles import (
     AtlasCapacityError,
     GpuDeviceLimits,
     GpuMontageLayer,
+    GpuWindowedTileVisual,
     TextureAtlasPool,
     _atlas_reserve_count,
     _fit_color,
@@ -179,6 +180,33 @@ def test_complex_payload_quad_buffers_use_phase_color_shader_mode():
 
     assert _payload_mode(payload, rgb_already_windowed=False) == 4
     np.testing.assert_array_equal(modes, np.full((6,), 4.0, dtype=np.float32))
+
+
+def test_gpu_windowed_tile_shader_supports_complex_components():
+    shader = GpuWindowedTileVisual._fragment_shader
+
+    assert "uniform float u_component_mode" in shader
+    assert "float complex_component" in shader
+
+
+def test_gpu_windowed_tile_mapping_tracks_component_uniform_without_texture_identity():
+    visual = object.__new__(GpuWindowedTileVisual)
+    visual._shader_mapping_key = None
+    visual._scale_mode = 0.0
+    visual._symlog_constant = 0.0
+    visual._component_mode = 0.0
+    visual._lut_key = None
+    visual._lut_texture = object()
+    updates = []
+    visual.update = lambda: updates.append("update")
+    visual._set_lut_texture = lambda lut, key=None: False
+
+    assert visual.set_shader_mapping(ShaderMapping(component=ShaderComponent.REAL)) is True
+    assert visual._component_mode == 0.0
+    assert visual.set_shader_mapping(ShaderMapping(component=ShaderComponent.REAL)) is False
+    assert visual.set_shader_mapping(ShaderMapping(component=ShaderComponent.IMAG)) is True
+    assert visual._component_mode == 1.0
+    assert len(updates) == 2
 
 
 def test_atlas_reserve_avoids_progressive_reallocation():

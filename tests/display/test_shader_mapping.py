@@ -11,6 +11,7 @@ from arrayscope.display.shader_mapping import (
     mapped_scalar,
     pack_texture_data,
     phase_lut_indices,
+    shader_component_uniform,
     window_intensity,
 )
 
@@ -22,6 +23,14 @@ def test_component_extraction_matches_numpy_for_complex_values():
     np.testing.assert_allclose(extract_component(data, ShaderComponent.IMAG), np.imag(data))
     np.testing.assert_allclose(extract_component(data, ShaderComponent.ABS), np.abs(data))
     np.testing.assert_allclose(extract_component(data, ShaderComponent.ANGLE), np.angle(data))
+
+
+def test_shader_component_uniform_matches_component_order():
+    assert shader_component_uniform(ShaderComponent.REAL) == 0.0
+    assert shader_component_uniform("imag") == 1.0
+    assert shader_component_uniform(ShaderComponent.ABS) == 2.0
+    assert shader_component_uniform(ShaderComponent.ANGLE) == 3.0
+    assert shader_component_uniform(ShaderComponent.COMPLEX_PHASE) == 3.0
 
 
 def test_scale_oracle_handles_linear_log_symlog_and_nonfinite_values():

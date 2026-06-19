@@ -35,7 +35,14 @@ from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import CursorIntent, hit_test_display_overlays
 from arrayscope.display.overlay_hit_test import hit_test_roi, roi_handle_points
-from arrayscope.display.shader_mapping import ShaderDisplayMode, ShaderScale, TexturePlaneKind, default_phase_lut, pack_texture_data
+from arrayscope.display.shader_mapping import (
+    ShaderDisplayMode,
+    ShaderScale,
+    TexturePlaneKind,
+    default_phase_lut,
+    pack_texture_data,
+    shader_component_uniform,
+)
 from arrayscope.display.viewport import ViewportPolicy
 
 if TYPE_CHECKING:
@@ -1665,7 +1672,21 @@ class GpuMappedImageVisual(Visual):
     uniform float u_mode;
     uniform float u_scale_mode;
     uniform float u_symlog_constant;
+    uniform float u_component_mode;
     varying vec2 v_texcoord;
+
+    float complex_component(vec2 z) {
+        if (u_component_mode > 2.5) {
+            return atan(z.y, z.x);
+        }
+        if (u_component_mode > 1.5) {
+            return length(z);
+        }
+        if (u_component_mode > 0.5) {
+            return z.y;
+        }
+        return z.x;
+    }
 
     float map_scale(float value) {
         if (u_scale_mode > 1.5) {
@@ -1683,12 +1704,12 @@ class GpuMappedImageVisual(Visual):
         vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
         if (u_mode > 2.5) {
             vec2 z = scalar_sample.rg;
-            scalar = length(z);
+            scalar = complex_component(z);
             float phase = atan(z.y, z.x);
             float phase_index = clamp((phase + 3.141592653589793) / 6.283185307179586, 0.0, 1.0);
             color = texture2D(u_lut_texture, vec2(phase_index, 0.5)).rgb;
         } else if (u_mode > 1.5) {
-            scalar = length(scalar_sample.rg);
+            scalar = complex_component(scalar_sample.rg);
             color = vec3(1.0, 1.0, 1.0);
         } else if (u_mode > 0.5) {
             color = vec3(1.0, 1.0, 1.0);
@@ -1728,6 +1749,7 @@ class GpuMappedImageVisual(Visual):
         self._mode = 0.0
         self._scale_mode = 0.0
         self._symlog_constant = 0.0
+        self._component_mode = 0.0
         self._levels = (0.0, 1.0)
         self.color_source_id = None
         self.scalar_source_id = None
@@ -1780,6 +1802,7 @@ class GpuMappedImageVisual(Visual):
         self._mode = 0.0
         self._scale_mode = 0.0
         self._symlog_constant = 0.0
+        self._component_mode = 0.0
         self.color_source_id = color_source_id
         self.scalar_source_id = scalar_source_id
         self.upload_count += 1
@@ -1809,6 +1832,7 @@ class GpuMappedImageVisual(Visual):
         if self._scalar_texture is not None and self.scalar_source_id == source_id and float(self._mode) == mode:
             self._scale_mode = _shader_scale_uniform(getattr(shader_mapping, "scale", None))
             self._symlog_constant = float(getattr(shader_mapping, "symlog_constant", 0.0) or 0.0)
+            self._component_mode = shader_component_uniform(getattr(shader_mapping, "component", None))
             self._set_lut_texture(getattr(shader_mapping, "lut_data", None))
             self.set_levels(levels, count=False)
             return
@@ -1841,6 +1865,7 @@ class GpuMappedImageVisual(Visual):
         self._mode = mode
         self._scale_mode = _shader_scale_uniform(getattr(shader_mapping, "scale", None))
         self._symlog_constant = float(getattr(shader_mapping, "symlog_constant", 0.0) or 0.0)
+        self._component_mode = shader_component_uniform(getattr(shader_mapping, "component", None))
         self.color_source_id = None
         self.scalar_source_id = source_id
         self._set_lut_texture(getattr(shader_mapping, "lut_data", None))
@@ -1907,6 +1932,7 @@ class GpuMappedImageVisual(Visual):
         program["u_mode"] = float(self._mode)
         program["u_scale_mode"] = float(self._scale_mode)
         program["u_symlog_constant"] = float(self._symlog_constant)
+        program["u_component_mode"] = float(self._component_mode)
         return True
 
     def _bounds(self, axis, view):
