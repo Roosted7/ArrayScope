@@ -7,7 +7,7 @@ from time import monotonic
 
 import numpy as np
 
-from arrayscope.display.lod import LodInfo, apply_tile_gutter, build_tile_lod_pyramid, select_lod_factor
+from arrayscope.display.lod import LodInfo, select_lod_factor
 from arrayscope.display.montage import (
     MontagePlan,
     MontageTile,
@@ -18,6 +18,10 @@ from arrayscope.display.montage import (
 )
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.window.display_frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+
+def _shader_mapping_key(mapping):
+    return None if mapping is None else getattr(mapping, "identity_key", mapping)
 
 
 @dataclass
@@ -83,6 +87,7 @@ class MontageRenderSession:
     histogram_revision: int = 0
     viewport_revision: int = 0
     tile_lod_factor: int = 1
+    desired_tile_lod_factor: int = 1
     _last_active_tiles: tuple[int, ...] = ()
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
@@ -134,6 +139,7 @@ class MontageRenderSession:
                 and previous.source_id == source_id
                 and previous.image is exact_image
                 and previous.histogram_data is exact_histogram
+                and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
             ):
                 continue
             texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
@@ -186,13 +192,16 @@ class MontageRenderSession:
                 )
 
     def _payload_source_id(self, base_source_id, *, texture_kind, mapping, lod: LodInfo) -> tuple[object, ...]:
-        mapping_key = None if mapping is None else mapping.identity_key
+        del mapping
         return (
             base_source_id,
             "texture_kind",
             None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
+            # Shader uniforms do not change texture content.  Keeping this
+            # compatibility marker avoids invalidating existing source-key
+            # parsing while preventing level/LUT changes from re-uploading.
             "shader",
-            mapping_key,
+            None,
             "lod",
             int(lod.factor),
             int(lod.level),
@@ -200,15 +209,22 @@ class MontageRenderSession:
         )
 
     def _selected_lod_factor(self) -> int:
-        factor = select_lod_factor(
+        desired = select_lod_factor(
             self.view_range,
             self.viewport_shape,
             self.plan.tile_shape,
+            previous_factor=self.desired_tile_lod_factor,
         )
-        self.tile_lod_factor = int(factor)
-        return int(factor)
+        self.desired_tile_lod_factor = int(desired)
+        # CPU pyramid construction used to happen synchronously from
+        # snapshot_display_tile_payloads(), which is a UI commit path.  Until a
+        # worker/GPU LOD cache can retain adjacent levels, keep the exact texture
+        # resident and let hardware filtering handle zoomed-out sampling.
+        self.tile_lod_factor = 1
+        return 1
 
     def _planned_lod_info(self, rendered: RenderedTile, *, factor: int) -> LodInfo:
+        del factor
         texture_kind = getattr(rendered, "texture_kind", None)
         if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
             texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
@@ -217,20 +233,10 @@ class MontageRenderSession:
         else:
             source = np.asarray(rendered.image)
         source_shape = tuple(int(value) for value in source.shape[:2])
-        if factor <= 1 or texture_kind == TexturePlaneKind.RGB8:
-            return LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
-        level = int(np.log2(max(1, int(factor))))
-        factor = 2**level
-        reduced_shape = (
-            max(1, int(np.ceil(source_shape[0] / factor))),
-            max(1, int(np.ceil(source_shape[1] / factor))),
-        )
-        texture_shape = (reduced_shape[0] + 2, reduced_shape[1] + 2)
-        return LodInfo(level=level, factor=factor, source_shape=source_shape, texture_shape=texture_shape, gutter=1)
+        return LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
 
     def _texture_for_rendered_tile(self, rendered: RenderedTile, *, factor: int | None = None) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
-        if factor is None:
-            factor = self._selected_lod_factor()
+        del factor
         texture_kind = getattr(rendered, "texture_kind", None)
         if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
             texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
@@ -240,26 +246,8 @@ class MontageRenderSession:
             source = np.asarray(rendered.image)
         histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
         source_shape = tuple(int(value) for value in source.shape[:2])
-        if factor <= 1 or texture_kind == TexturePlaneKind.RGB8:
-            lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
-            return source, histogram, lod
-        pyramid = build_tile_lod_pyramid(source, max_level=int(np.log2(max(1, factor))))
-        level = min(len(pyramid) - 1, int(np.log2(max(1, factor))))
-        reduced = pyramid[level]
-        reduced_histogram = None
-        if histogram is not None:
-            hist_pyramid = build_tile_lod_pyramid(histogram, max_level=level)
-            reduced_histogram = hist_pyramid[min(level, len(hist_pyramid) - 1)]
-        guttered = apply_tile_gutter(reduced, gutter=1)
-        guttered_histogram = None if reduced_histogram is None else apply_tile_gutter(reduced_histogram, gutter=1)
-        lod = LodInfo(
-            level=level,
-            factor=2**level,
-            source_shape=source_shape,
-            texture_shape=tuple(int(value) for value in guttered.shape[:2]),
-            gutter=1,
-        )
-        return guttered, guttered_histogram, lod
+        lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
+        return source, histogram, lod
 
     def build_tile_presentation(
         self,
