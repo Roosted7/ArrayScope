@@ -43,7 +43,7 @@ def _make_data():
 def _clear_arrayscope_settings():
     from pyqtgraph.Qt import QtCore
 
-    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings = QtCore.QSettings()
     settings.clear()
     settings.sync()
 
@@ -192,7 +192,7 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
     from arrayscope.display.imageview2d import MontageTileOverlay
     from arrayscope.window import ArrayScopeWindow
 
-    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings = QtCore.QSettings()
     settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
     settings.sync()
 

@@ -63,7 +63,7 @@ class ArrayScopeWindow(
     def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
         super(ArrayScopeWindow, self).__init__()
         self.resize(600,800)
-        self._settings = Qt.QtCore.QSettings("ArrayScope", "ArrayScope")
+        self._settings = Qt.QtCore.QSettings()
         self.app_settings = self._load_app_settings()
         self._apply_theme_choice(self.app_settings.theme, persist=False)
         self._apply_performance_settings(persist=False)

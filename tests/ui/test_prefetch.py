@@ -15,7 +15,7 @@ def _process_events(qtbot, count=8):
 def _clear_arrayscope_settings():
     from pyqtgraph.Qt import QtCore
 
-    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings = QtCore.QSettings()
     settings.clear()
     settings.sync()
 

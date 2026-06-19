@@ -19,4 +19,6 @@ def qt_app():
     import pyqtgraph as pg
 
     app = pg.mkQApp()
+    app.setOrganizationName("ArrayScopeTests")
+    app.setApplicationName("ArrayScopeTests")
     yield app

@@ -49,11 +49,36 @@ def test_toolbar_fit_and_one_to_one_are_viewport_commands(qtbot):
         win.render = fail_render
         win.display_toolbar.one_to_one_action.trigger()
         _process_events(qtbot, count=20)
-        assert win.img_view.viewport_controller.mode == ViewportMode.ONE_TO_ONE
+        assert win.img_view.viewport_controller.mode == ViewportMode.USER
         win.display_toolbar.fit_action.trigger()
         _process_events(qtbot, count=20)
         assert win.img_view.viewport_controller.mode == ViewportMode.FIT
         assert not hasattr(win.display_toolbar, "aspect_combo")
+    finally:
+        win.close()
+
+
+def test_one_to_one_is_one_shot_and_slice_updates_preserve_user_view(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.display.viewport import ViewportMode
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(10 * 12 * 5, dtype=float).reshape(10, 12, 5))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.display_toolbar.one_to_one_action.trigger()
+        _process_events(qtbot, count=10)
+        assert win.img_view.viewport_controller.mode == ViewportMode.USER
+
+        view = win.img_view.getView()
+        view.setRange(xRange=(2.0, 7.0), yRange=(3.0, 8.0), padding=0)
+        before = view.viewRange()
+
+        win._on_slice_index_changed(2, 3)
+        _process_events(qtbot, count=30)
+
+        np.testing.assert_allclose(view.viewRange(), before, atol=1e-9)
     finally:
         win.close()
 
@@ -66,7 +91,7 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
-    settings = QtCore.QSettings("ArrayScope", "ArrayScope")
+    settings = QtCore.QSettings()
     settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
     settings.sync()
 
