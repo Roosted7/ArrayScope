@@ -1560,6 +1560,7 @@ class ImageView2D(QtWidgets.QWidget):
             return
         item, selection = item_selection
         geometry = geometry_from_item(item, selection.geometry)
+        changed = geometry != selection.geometry
         updated = RoiSelection(
             id=selection.id,
             label=selection.label,
@@ -1572,7 +1573,8 @@ class ImageView2D(QtWidgets.QWidget):
         if state.capture is None or state.capture.kind != "roi" or state.capture.object_id != str(roi_id):
             self._on_roi_item_change_started(roi_id)
         self.interaction_controller.observe_capture_geometry(geometry)
-        self.roiChanged.emit(str(roi_id), geometry)
+        if changed:
+            self.roiChanged.emit(str(roi_id), geometry)
         if final:
             self.interaction_controller.end_capture()
 

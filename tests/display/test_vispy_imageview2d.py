@@ -1014,7 +1014,7 @@ def test_vispy_roi_visuals_update_during_live_region_changes(qt_app):
         item.setPos(5.0, 7.0)
         qt_app.processEvents()
 
-        assert changed
+        assert len(changed) == 1
         live_selection = dict((roi.id, roi) for roi in view.roiSelections())[selection.id]
         assert live_selection.geometry.rect[:2] == (5.0, 7.0)
         assert view._vispy_roi_visuals[selection.id].visible
