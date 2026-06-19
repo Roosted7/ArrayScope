@@ -79,6 +79,7 @@ class AtlasCapacityError(RuntimeError):
 
 
 _ATLAS_GROWTH_TARGET_BYTES = 32 * 1024 * 1024
+_UNSET = object()
 
 
 class TextureAtlasPage:
@@ -691,6 +692,8 @@ class GpuMontageLayer:
         self._visuals_by_page: list[object] = []
         self._geometry_keys: dict[int, tuple[object, ...]] = {}
         self._levels: tuple[float, float] = (0.0, 1.0)
+        self._shader_mapping = None
+        self._shader_mapping_key = None
         self._visible_items = 0
         self._last_stats = GpuMontageLayerStats()
         self._ensure_visual_count(1)
@@ -713,18 +716,34 @@ class GpuMontageLayer:
         self._visible_items = 0
 
     def set_levels(self, levels) -> GpuMontageLayerStats:
-        levels = _normalize_levels(levels, self._levels)
-        changed = levels != self._levels
-        self._levels = levels
-        if changed:
-            for visual in self._visuals_by_page:
-                visual.set_levels(levels)
+        return self.set_presentation_uniforms(levels=levels)
+
+    def set_shader_mapping(self, mapping) -> GpuMontageLayerStats:
+        return self.set_presentation_uniforms(shader_mapping=mapping)
+
+    def set_presentation_uniforms(self, *, levels=_UNSET, shader_mapping=_UNSET) -> GpuMontageLayerStats:
+        level_updates = 0
+        mapping_updates = 0
+        if levels is not _UNSET:
+            normalized = _normalize_levels(levels, self._levels)
+            if normalized != self._levels:
+                self._levels = normalized
+                for visual in self._visuals_by_page:
+                    level_updates += int(bool(visual.set_levels(normalized)))
+        if shader_mapping is not _UNSET:
+            mapping_key = _mapping_identity_key(shader_mapping)
+            if mapping_key != self._shader_mapping_key:
+                self._shader_mapping = shader_mapping
+                self._shader_mapping_key = mapping_key
+                for visual in self._visuals_by_page:
+                    mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
+        previous = self._last_stats
         self._last_stats = GpuMontageLayerStats(
             visible_items=self._visible_items,
             resident_items=self._pool.resident_count,
             atlas_capacity=self._pool.capacity,
-            level_updates=int(changed),
-            shader_uniform_updates=int(changed),
+            level_updates=int(bool(level_updates)),
+            shader_uniform_updates=level_updates + mapping_updates,
             items_skipped=self._visible_items,
             estimated_gpu_bytes=self._pool.estimated_gpu_bytes,
             cpu_shadow_bytes=self._pool.cpu_shadow_bytes,
@@ -732,6 +751,14 @@ class GpuMontageLayer:
             active_pages=sum(1 for visual in self._visuals_by_page if bool(getattr(visual, "visible", False))),
             device_max_texture_size=self._pool.max_texture_size,
             budget_bytes=self._pool.budget_bytes,
+            near_resident_items=int(getattr(previous, "near_resident_items", 0) or 0),
+            warm_resident_items=max(0, self._pool.resident_count - len(self._pool.active_resident_keys)),
+            capacity_warning=str(getattr(previous, "capacity_warning", "") or ""),
+            lod_level=int(getattr(previous, "lod_level", 0) or 0),
+            lod_factor=int(getattr(previous, "lod_factor", 1) or 1),
+            source_texels_per_pixel=float(getattr(previous, "source_texels_per_pixel", 0.0) or 0.0),
+            gutter_pixels=int(getattr(previous, "gutter_pixels", 0) or 0),
+            mipmap_available=bool(getattr(previous, "mipmap_available", False)),
         )
         return self._last_stats
 
@@ -740,6 +767,7 @@ class GpuMontageLayer:
             visual = self._scene.visuals.create_visual_node(GpuWindowedTileVisual)(parent=self._parent)
             visual.visible = False
             visual.set_levels(self._levels)
+            visual.set_shader_mapping(self._shader_mapping)
             self._visuals_by_page.append(visual)
 
     def update(
@@ -750,6 +778,7 @@ class GpuMontageLayer:
         levels,
         dirty_tiles: tuple[int, ...] | None,
         rgb_already_windowed: bool,
+        shader_mapping=None,
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
     ) -> GpuMontageLayerStats:
@@ -823,12 +852,17 @@ class GpuMontageLayer:
             self._levels = levels
             for visual in self._visuals_by_page:
                 level_updates += int(bool(visual.set_levels(levels)))
+        mapping_key = _mapping_identity_key(shader_mapping)
+        mapping_changed = mapping_key != self._shader_mapping_key
+        if mapping_changed:
+            self._shader_mapping = shader_mapping
+            self._shader_mapping_key = mapping_key
         mapping_updates = 0
         for page_index, page in enumerate(self._pool.pages):
             visual = self._visuals_by_page[page_index]
-            page_payloads = page_payloads_by_index[page_index]
             visual.set_textures(page.scalar_texture, page.color_texture)
-            mapping_updates += int(bool(visual.set_shader_mapping(_payload_shader_mapping(page_payloads))))
+            if mapping_changed:
+                mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
             visual.visible = page_index in active_pages
         for visual in self._visuals_by_page[len(self._pool.pages):]:
             visual.visible = False
@@ -1488,12 +1522,8 @@ def _payload_mode(payload: DisplayTilePayload, *, rgb_already_windowed: bool) ->
     return 0
 
 
-def _payload_shader_mapping(payloads: dict[int, DisplayTilePayload]):
-    for payload in dict(payloads or {}).values():
-        mapping = getattr(payload, "shader_mapping", None)
-        if mapping is not None:
-            return mapping
-    return None
+def _mapping_identity_key(mapping):
+    return None if mapping is None else getattr(mapping, "identity_key", mapping)
 
 
 def _shader_scale_uniform(scale) -> float:

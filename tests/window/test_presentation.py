@@ -3,6 +3,7 @@ import numpy as np
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.slice_engine import DisplayImage
+from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.display.model.frame import (
     CommittedDisplayFrame,
@@ -256,3 +257,84 @@ def test_typed_tile_payloads_create_first_class_tiled_presentation():
     assert presentation.tile_delta.upserts == {0: tile}
     assert presentation.tile_delta.active_tiles == (0,)
     assert not hasattr(presentation, "data")
+
+
+def test_tiled_presentation_owns_one_explicit_shader_mapping():
+    state = ViewState.from_shape((2, 2, 2)).with_image_axes(0, 1).with_montage_axis(2, columns=2, indices=(0, 1))
+    geometry = DisplayGeometry(
+        view_state=state,
+        display_shape=(2, 4),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=0),
+        montage_tile_states=("loaded", "loaded"),
+    )
+    mapping = ShaderMapping(component=ShaderComponent.IMAG)
+    tiles = {
+        index: DisplayTilePayload(
+            index,
+            index,
+            np.ones((2, 2), dtype=np.float32),
+            None,
+            ("tile", index),
+            shader_mapping=mapping,
+        )
+        for index in range(2)
+    }
+    tile_state = TilePresentationState(tiles)
+    tile_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=tiles,
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+    )
+    payload = DisplayPayload(
+        image=DisplayImage(np.zeros((2, 4), dtype=np.float32)),
+        geometry=geometry,
+        viewport_policy=ViewportPolicy.PRESERVE,
+        tile_state=tile_state,
+        tile_delta=tile_delta,
+    )
+
+    presentation = decide_presentation(_input(payload, kind=CommitKind.FULL_MONTAGE_INITIAL)).display_presentation
+
+    assert presentation.shader_mapping is mapping
+
+
+def test_tiled_presentation_rejects_conflicting_payload_shader_mappings():
+    state = ViewState.from_shape((2, 2, 2)).with_image_axes(0, 1).with_montage_axis(2, columns=2, indices=(0, 1))
+    geometry = DisplayGeometry(
+        view_state=state,
+        display_shape=(2, 4),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=0),
+        montage_tile_states=("loaded", "loaded"),
+    )
+    tiles = {
+        0: DisplayTilePayload(0, 0, np.ones((2, 2), dtype=np.float32), None, ("tile", 0), shader_mapping=ShaderMapping(component=ShaderComponent.REAL)),
+        1: DisplayTilePayload(1, 1, np.ones((2, 2), dtype=np.float32), None, ("tile", 1), shader_mapping=ShaderMapping(component=ShaderComponent.IMAG)),
+    }
+    tile_state = TilePresentationState(tiles)
+    tile_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=tiles,
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+    )
+    payload = DisplayPayload(
+        image=DisplayImage(np.zeros((2, 4), dtype=np.float32)),
+        geometry=geometry,
+        viewport_policy=ViewportPolicy.PRESERVE,
+        tile_state=tile_state,
+        tile_delta=tile_delta,
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "conflicting shader mappings"):
+        decide_presentation(_input(payload, kind=CommitKind.FULL_MONTAGE_INITIAL))

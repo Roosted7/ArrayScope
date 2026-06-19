@@ -37,7 +37,7 @@ from arrayscope.display.backends.vispy.raster import (
     _contiguous_scalar,
     _normalize_levels,
 )
-from arrayscope.display.shader_mapping import TexturePlaneKind
+from arrayscope.display.shader_mapping import TexturePlaneKind, common_shader_mapping
 from arrayscope.display.viewport import ViewportPolicy
 
 if TYPE_CHECKING:
@@ -141,6 +141,7 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_pending_warm_tile_context: dict[str, object] = {}
         self._last_vispy_warm_tile_stats = None
         self._last_vispy_tiled_levels_key = None
+        self._last_vispy_tiled_mapping_key = None
         self._last_vispy_tiled_histogram_key = None
         self._last_vispy_tiled_viewport_key = None
         self._vispy_main_data_id: int | None = None
@@ -207,6 +208,8 @@ class VisPyImageView2D(ImageView2D):
         self._last_vispy_tiled_source_key = None
         self._last_vispy_tiled_structure_key = None
         self._last_vispy_tiled_levels_key = None
+        self._last_vispy_tiled_mapping_key = None
+        self._last_vispy_tiled_shader_mapping = None
         self._last_vispy_tiled_histogram_key = None
         self._last_vispy_tiled_viewport_key = None
         self._montage_display_mode = "canvas"
@@ -340,6 +343,7 @@ class VisPyImageView2D(ImageView2D):
         montage_dirty_tiles: tuple[int, ...] | None = None,
         montage_tile_source_ids: dict[int, object] | None = None,
         montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
+        shader_mapping=None,
         tile_delta: "TilePresentationDelta | None" = None,
         tile_residency_budget_bytes: int = 0,
     ) -> None:
@@ -357,6 +361,7 @@ class VisPyImageView2D(ImageView2D):
             montage_dirty_tiles=montage_dirty_tiles,
             montage_tile_source_ids=montage_tile_source_ids,
             montage_tile_payloads=montage_tile_payloads,
+            shader_mapping=shader_mapping,
             tile_delta=tile_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes,
         )
@@ -375,6 +380,7 @@ class VisPyImageView2D(ImageView2D):
         montage_dirty_tiles: tuple[int, ...] | None = None,
         montage_tile_source_ids: dict[int, object] | None = None,
         montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
+        shader_mapping=None,
         tile_delta: "TilePresentationDelta | None" = None,
         tile_residency_budget_bytes: int = 0,
     ) -> None:
@@ -382,7 +388,13 @@ class VisPyImageView2D(ImageView2D):
         applying = self._applying_presentation
         self._applying_presentation = True
         try:
+            if shader_mapping is None and montage_tile_payloads:
+                shader_mapping = common_shader_mapping(
+                    getattr(payload, "shader_mapping", None)
+                    for payload in montage_tile_payloads.values()
+                )
             level_key = (float(levels[0]), float(levels[1]))
+            mapping_key = _shader_mapping_key(shader_mapping)
             source_key = _tiled_source_key(montage_tile_payloads, montage_tile_source_ids)
             structure_key = _tiled_structure_key(
                 geometry,
@@ -396,10 +408,12 @@ class VisPyImageView2D(ImageView2D):
             previous_source_key = getattr(self, "_last_vispy_tiled_source_key", None)
             previous_structure_key = getattr(self, "_last_vispy_tiled_structure_key", None)
             previous_levels_key = getattr(self, "_last_vispy_tiled_levels_key", None)
+            previous_mapping_key = getattr(self, "_last_vispy_tiled_mapping_key", None)
             previous_histogram_key = getattr(self, "_last_vispy_tiled_histogram_key", None)
             previous_viewport_key = getattr(self, "_last_vispy_tiled_viewport_key", None)
             structure_changed = structure_key != previous_structure_key
             levels_changed = level_key != previous_levels_key
+            mapping_changed = mapping_key != previous_mapping_key
             data_unchanged = (
                 montage_tile_payloads is not None
                 and montage_dirty_tiles == ()
@@ -418,7 +432,7 @@ class VisPyImageView2D(ImageView2D):
             except Exception:
                 pass
 
-            if data_unchanged and not levels_changed:
+            if data_unchanged and not levels_changed and not mapping_changed:
                 from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
                 visible = len(montage_tile_payloads or {})
@@ -449,9 +463,11 @@ class VisPyImageView2D(ImageView2D):
                     dirty_tiles=montage_dirty_tiles,
                     tile_source_ids=montage_tile_source_ids,
                     tile_payloads=montage_tile_payloads,
+                    shader_mapping=shader_mapping,
                     tile_delta=tile_delta,
                     tile_residency_budget_bytes=tile_residency_budget_bytes,
                     force_levels=bool(data_unchanged and levels_changed),
+                    force_mapping=bool(data_unchanged and mapping_changed),
                 )
             self._record_tile_layer_stats(stats)
 
@@ -478,6 +494,8 @@ class VisPyImageView2D(ImageView2D):
             self._last_vispy_tiled_source_key = source_key
             self._last_vispy_tiled_structure_key = structure_key
             self._last_vispy_tiled_levels_key = level_key
+            self._last_vispy_tiled_mapping_key = mapping_key
+            self._last_vispy_tiled_shader_mapping = shader_mapping
             self._last_vispy_tiled_histogram_key = histogram_key
             self._last_vispy_tiled_viewport_key = viewport_key
         finally:
@@ -495,6 +513,7 @@ class VisPyImageView2D(ImageView2D):
         histogramRange: tuple[float, float],
         viewport_policy=ViewportPolicy.PRESERVE,
         rgb_already_windowed: bool = False,
+        shader_mapping=None,
         tile_residency_budget_bytes: int = 0,
     ) -> None:
         tile_payloads = tile_state.active_payloads(tile_delta)
@@ -517,6 +536,7 @@ class VisPyImageView2D(ImageView2D):
             montage_dirty_tiles=dirty_tiles,
             montage_tile_source_ids={key: payload.source_id for key, payload in tile_payloads.items()},
             montage_tile_payloads=tile_payloads,
+            shader_mapping=shader_mapping,
             tile_delta=tile_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes,
         )
@@ -608,6 +628,7 @@ class VisPyImageView2D(ImageView2D):
                     dirty_tiles=(),
                     tile_source_ids=None,
                     tile_payloads=getattr(self, "_last_vispy_tile_payloads", None),
+                    shader_mapping=getattr(self, "_last_vispy_tiled_shader_mapping", None),
                     tile_delta=None,
                     tile_residency_budget_bytes=0,
                     force_levels=True,
@@ -1315,9 +1336,11 @@ class VisPyImageView2D(ImageView2D):
         dirty_tiles,
         tile_source_ids,
         tile_payloads=None,
+        shader_mapping=None,
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
         force_levels: bool = False,
+        force_mapping: bool = False,
     ):
         from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
@@ -1331,9 +1354,11 @@ class VisPyImageView2D(ImageView2D):
                 rgb_already_windowed=rgb_already_windowed,
                 dirty_tiles=dirty_tiles,
                 tile_source_ids=tile_source_ids,
+                shader_mapping=shader_mapping,
                 tile_delta=tile_delta,
                 tile_residency_budget_bytes=tile_residency_budget_bytes,
                 force_levels=force_levels,
+                force_mapping=force_mapping,
             )
         if img is None:
             return TileLayerUpdateStats()
@@ -1461,9 +1486,11 @@ class VisPyImageView2D(ImageView2D):
         rgb_already_windowed: bool,
         dirty_tiles,
         tile_source_ids,
+        shader_mapping=None,
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
         force_levels: bool = False,
+        force_mapping: bool = False,
     ):
         from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
@@ -1486,8 +1513,11 @@ class VisPyImageView2D(ImageView2D):
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         if layer is None:
             return TileLayerUpdateStats()
-        if force_levels and getattr(layer, "last_stats", None).visible_items:
-            stats = layer.set_levels(levels)
+        if (force_levels or force_mapping) and getattr(layer, "last_stats", None).visible_items:
+            stats = layer.set_presentation_uniforms(
+                levels=levels,
+                shader_mapping=shader_mapping,
+            )
         else:
             try:
                 stats = layer.update(
@@ -1496,6 +1526,7 @@ class VisPyImageView2D(ImageView2D):
                     levels=levels,
                     dirty_tiles=dirty_tiles,
                     rgb_already_windowed=rgb_already_windowed,
+                    shader_mapping=shader_mapping,
                     tile_delta=tile_delta,
                     tile_residency_budget_bytes=tile_residency_budget_bytes,
                 )
@@ -1673,7 +1704,6 @@ def _tiled_source_key(tile_payloads, tile_source_ids):
         (
             int(tile),
             ids.get(int(tile), getattr(payload, "source_id", None)),
-            _shader_mapping_key(getattr(payload, "shader_mapping", None)),
         )
         for tile, payload in sorted(dict(tile_payloads).items())
     )

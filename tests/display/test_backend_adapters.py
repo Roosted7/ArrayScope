@@ -16,6 +16,7 @@ from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
+from arrayscope.display.shader_mapping import ShaderMapping
 
 
 class _FakeView:
@@ -95,6 +96,7 @@ def _tiled_presentation():
         tile_state=state,
         tile_delta=delta,
         tile_residency_budget_bytes=1024,
+        shader_mapping=ShaderMapping(),
     )
 
 
@@ -128,6 +130,7 @@ def test_adapters_translate_shared_raster_and_tiled_semantics():
         assert view.calls[0][2]["image_origin"] == (0.0, 0.0)
         assert view.calls[3][2]["tile_state"] == tiled.tile_state
         assert view.calls[3][2]["tile_delta"] == tiled.tile_delta
+        assert view.calls[3][2]["shader_mapping"] is tiled.shader_mapping
 
 
 def test_factory_accepts_custom_semantic_backend_without_rewrapping():

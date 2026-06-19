@@ -100,6 +100,7 @@ class DisplayTiledPresentation:
     tile_residency_budget_bytes: int
     histogram_plot_data: np.ndarray | None = None
     rgb_already_windowed: bool = False
+    shader_mapping: ShaderMapping | None = None
 
 
 DisplayPresentation = DisplayRasterPresentation | DisplayTiledPresentation

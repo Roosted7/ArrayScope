@@ -16,6 +16,7 @@ from arrayscope.core.window_levels import (
     normalize_bounds,
 )
 from arrayscope.display.levels import finite_bounds
+from arrayscope.display.shader_mapping import common_shader_mapping
 from arrayscope.display.model.frame import CommittedDisplayFrame
 from arrayscope.display.model.commit import (
     CommitKind,
@@ -166,6 +167,10 @@ def _presentation_for_payload(payload, *, levels, histogram_range):
             tile_delta=payload.tile_delta,
             tile_residency_budget_bytes=int(payload.tile_residency_budget_bytes),
             histogram_plot_data=payload.histogram_plot_data,
+            shader_mapping=common_shader_mapping(
+                getattr(tile, "shader_mapping", None)
+                for tile in payload.tile_state.payloads.values()
+            ),
             **common,
         )
     return DisplayRasterPresentation(

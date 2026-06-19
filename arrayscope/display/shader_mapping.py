@@ -91,6 +91,33 @@ class ShaderMapping:
         )
 
 
+def common_shader_mapping(mappings) -> ShaderMapping | None:
+    """Return the one presentation mapping shared by a set of payloads.
+
+    Shader state is frame-level presentation state.  It must never be inferred
+    independently for each atlas page because page membership changes as tiles
+    enter and leave residency.  Missing mappings are tolerated for legacy
+    scalar payloads; conflicting explicit mappings are rejected.
+    """
+
+    common = None
+    common_key = None
+    for mapping in mappings:
+        if mapping is None:
+            continue
+        if not isinstance(mapping, ShaderMapping):
+            raise TypeError("shader mappings must be ShaderMapping instances")
+        if common is None:
+            common = mapping
+            common_key = mapping.identity_key
+            continue
+        if mapping is common:
+            continue
+        if mapping.identity_key != common_key:
+            raise ValueError("a tiled presentation cannot contain conflicting shader mappings")
+    return common
+
+
 def extract_component(data, component: ShaderComponent | str) -> np.ndarray:
     component = _coerce_enum(ShaderComponent, component)
     arr = np.asarray(data)
@@ -285,6 +312,7 @@ __all__ = [
     "ShaderComponent",
     "ShaderScale",
     "ShaderMapping",
+    "common_shader_mapping",
     "TexturePlaneKind",
     "extract_component",
     "shader_component_uniform",

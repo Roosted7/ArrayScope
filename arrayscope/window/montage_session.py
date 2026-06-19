@@ -355,6 +355,7 @@ class MontageRenderSession:
                 and previous.source_id == payload.source_id
                 and previous.image is payload.image
                 and previous.histogram_data is payload.histogram_data
+                and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(payload.shader_mapping)
             ):
                 continue
             upserts[int(tile_number)] = payload
