@@ -34,6 +34,18 @@ def payload(tile_number: int, value: float, *, source_id=None) -> DisplayTilePay
     )
 
 
+def color_payload(tile_number: int, value: int, *, window_scalar=True) -> DisplayTilePayload:
+    image = np.full((2, 2, 3), int(value), dtype=np.uint8)
+    scalar = np.full((2, 2), float(value), dtype=np.float32) if window_scalar else None
+    return DisplayTilePayload(
+        tile_number=tile_number,
+        source_index=tile_number,
+        image=image,
+        histogram_data=scalar,
+        source_id=("color", tile_number, value, bool(window_scalar)),
+    )
+
+
 def test_atlas_keeps_stable_slots_when_active_set_changes():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
     first_uvs, first = pool.update_payloads(
@@ -134,12 +146,53 @@ def test_atlas_uses_shape_only_gpu_allocation_and_subuploads():
     )
 
     assert pool.cpu_shadow_bytes == 0
+    assert pool.storage_mode == "scalar"
+    assert pool.scalar_texture.initial_data is None
+    assert pool.color_texture.initial_data is not None
+    assert pool.scalar_texture.shape[-1] == 1
+    assert pool.color_texture.shape == (1, 1, 3)
+    assert len(pool.scalar_texture.updates) == 1
+    assert not pool.color_texture.updates
+    assert all(offset is not None for _data, offset, _copy in pool.scalar_texture.updates)
+    assert pool.estimated_gpu_bytes == int(np.prod(pool.atlas_shape)) * 4
+
+
+def test_atlas_allocates_only_color_plane_for_display_ready_rgb():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    _uvs, stats = pool.update_payloads(
+        {0: color_payload(0, 128, window_scalar=False)},
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=True,
+        reserve_count=2,
+    )
+
+    assert pool.storage_mode == "color"
+    assert pool.scalar_texture.shape == (1, 1)
+    assert pool.color_texture.initial_data is None
+    assert not pool.scalar_texture.updates
+    assert len(pool.color_texture.updates) == 1
+    assert stats.texture_uploads == 1
+    assert pool.estimated_gpu_bytes == int(np.prod(pool.atlas_shape)) * 3
+
+
+def test_atlas_allocates_scalar_and_color_planes_for_windowable_rgb():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    _uvs, stats = pool.update_payloads(
+        {0: color_payload(0, 128, window_scalar=True)},
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=2,
+    )
+
+    assert pool.storage_mode == "scalar_color"
     assert pool.scalar_texture.initial_data is None
     assert pool.color_texture.initial_data is None
-    assert pool.scalar_texture.shape[-1] == 1
-    assert pool.color_texture.shape[-1] == 3
-    assert all(offset is not None for _data, offset, _copy in pool.scalar_texture.updates)
-    assert all(offset is not None for _data, offset, _copy in pool.color_texture.updates)
+    assert len(pool.scalar_texture.updates) == 1
+    assert len(pool.color_texture.updates) == 1
+    assert stats.texture_uploads == 2
+    assert pool.estimated_gpu_bytes == int(np.prod(pool.atlas_shape)) * 7
 
 
 def test_atlas_rejects_tile_set_that_requires_multiple_pages():
