@@ -38,6 +38,7 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self.flushed = 0
         self.coalesced = 0
         self.deferred_side_panel_refreshes = 0
+        self.immediate_cache_flushes = 0
 
         self._render_timer = Qt.QtCore.QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -68,9 +69,14 @@ class RenderCoordinator(Qt.QtCore.QObject):
         )
         if interactive:
             self._interactive_active = True
-            self._window._cancel_render_dependent_work_for_interactive_change()
+            cache_hit = self._interactive_cache_hit()
+            if not cache_hit:
+                self._window._cancel_render_dependent_work_for_interactive_change()
             self._quiet_timer.start(self._quiet_interval_ms)
-            if not self._render_timer.isActive():
+            if cache_hit:
+                self.immediate_cache_flushes += 1
+                self._render_timer.start(0)
+            elif not self._render_timer.isActive():
                 self._render_timer.start(self._interactive_interval_ms)
             return
         self._render_timer.start(0)
@@ -84,6 +90,15 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self._render_timer.stop()
         self._quiet_timer.stop()
         self._interactive_active = False
+
+    def _interactive_cache_hit(self) -> bool:
+        predicate = getattr(self._window, "_interactive_render_cache_hit", None)
+        if not callable(predicate):
+            return False
+        try:
+            return bool(predicate())
+        except Exception:
+            return False
 
     def _flush_timer(self) -> None:
         request = self._pending_request
