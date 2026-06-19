@@ -47,7 +47,7 @@ from arrayscope.display.roi_items import (
     geometry_from_item,
     item_for_roi,
 )
-from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy
+from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy, coerce_viewport_policy
 
 if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
@@ -656,7 +656,7 @@ class ImageView2D(QtWidgets.QWidget):
         del shader_mapping, texture_kind, semantic_data, lod
         if not isinstance(img, np.ndarray):
             raise TypeError("Image must be a numpy array")
-        viewport_policy = _coerce_viewport_policy(viewport_policy, autoRange)
+        viewport_policy = coerce_viewport_policy(viewport_policy, autoRange)
             
         is_rgb = self._is_rgb_image(img)
         if img.ndim != 2 and not is_rgb:
@@ -1743,14 +1743,6 @@ class ImageView2D(QtWidgets.QWidget):
     def resizeEvent(self, event):
         """On resize, if in 'fit' mode keep the image fully visible."""
         super().resizeEvent(event)
-
-
-def _coerce_viewport_policy(viewport_policy, auto_range):
-    if auto_range is not None:
-        viewport_policy = ViewportPolicy.FIT_ONCE if bool(auto_range) else ViewportPolicy.PRESERVE
-    if isinstance(viewport_policy, (ViewportPolicy, ViewportIntent)):
-        return viewport_policy
-    return ViewportPolicy(str(viewport_policy))
 
 
 def _world_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, float, float]:

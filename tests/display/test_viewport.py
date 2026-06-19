@@ -2,7 +2,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from arrayscope.display.viewport import ViewportController, ViewportMode, ViewportPolicy
+from arrayscope.display.viewport import (
+    ViewportController,
+    ViewportIntent,
+    ViewportMode,
+    ViewportPolicy,
+    coerce_viewport_policy,
+)
 
 
 class FakeViewBox:
@@ -131,3 +137,14 @@ def test_fit_lock_tracks_origin_only_display_rect_changes():
 
     assert controller.mode == ViewportMode.FIT
     assert view.viewRange() == [[0.0, 10.0], [100.0, 108.0]]
+
+
+def test_legacy_auto_range_is_coerced_identically_for_every_backend():
+    assert coerce_viewport_policy(ViewportPolicy.PRESERVE, True) is ViewportPolicy.FIT_ONCE
+    assert coerce_viewport_policy(ViewportPolicy.FIT_ONCE, False) is ViewportPolicy.PRESERVE
+
+
+def test_semantic_viewport_intent_survives_canonical_coercion():
+    assert coerce_viewport_policy(ViewportIntent.FIT) is ViewportIntent.FIT
+    assert coerce_viewport_policy("reset_for_new_shape") is ViewportPolicy.RESET_FOR_NEW_SHAPE
+    assert coerce_viewport_policy("one_to_one") is ViewportIntent.ONE_TO_ONE
