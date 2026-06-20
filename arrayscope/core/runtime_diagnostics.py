@@ -74,6 +74,7 @@ class MontageRuntimeDiagnostics:
     pending_level_tiles: int = 0
     skipped_tiles: int = 0
     visible_tiles: int = 0
+    deferred_display_tiles: int = 0
     attached_stage_requests: int = 0
     display_mode: str = "canvas"
     backend_setting: str = "auto"
@@ -130,6 +131,11 @@ class RenderTimingDiagnostics:
 
 @dataclass(frozen=True)
 class MontageTimingDiagnostics:
+    last_viewport_plan_ms: float | None = None
+    last_cache_resolve_ms: float | None = None
+    last_stage_plan_ms: float | None = None
+    last_session_setup_ms: float | None = None
+    last_initial_commit_ms: float | None = None
     last_tile_eval_ms: float | None = None
     last_tile_cache_lookup_ms: float | None = None
     last_tile_cache_hit: bool | None = None
@@ -320,7 +326,8 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             "Montage:\n"
             f"  active={snapshot.montage.active} mode={snapshot.montage.display_mode}\n"
             f"  tiles visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
-            f"pending={snapshot.montage.pending_tiles}\n"
+            f"pending={snapshot.montage.pending_tiles} "
+            f"display_backlog={snapshot.montage.deferred_display_tiles}\n"
             f"  canvas={_bytes_or_na(snapshot.montage.canvas_bytes)}"
         ),
         (
@@ -550,6 +557,11 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"waiting_stage={snapshot.montage.tile_compute_waiting_for_stage}"
         ),
         f"Lead direct tiles: {snapshot.montage.lead_direct_tiles}",
+        f"Timing viewport plan: {_ms_text(snapshot.montage_timing.last_viewport_plan_ms)}",
+        f"Timing cache resolve: {_ms_text(snapshot.montage_timing.last_cache_resolve_ms)}",
+        f"Timing stage plan: {_ms_text(snapshot.montage_timing.last_stage_plan_ms)}",
+        f"Timing session setup: {_ms_text(snapshot.montage_timing.last_session_setup_ms)}",
+        f"Timing initial commit: {_ms_text(snapshot.montage_timing.last_initial_commit_ms)}",
         f"Timing tile eval: {_ms_text(snapshot.montage_timing.last_tile_eval_ms)}",
         f"Timing tile cache lookup: {_ms_text(snapshot.montage_timing.last_tile_cache_lookup_ms)}",
         f"Tile cache hit: {_bool_text(snapshot.montage_timing.last_tile_cache_hit)}",
