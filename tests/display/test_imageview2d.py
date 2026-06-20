@@ -52,6 +52,7 @@ def test_evaluation_overlay_and_stale_opacity(qt_app):
 
 def test_montage_tile_overlays_reuse_single_graphics_item(qt_app):
     from arrayscope.display.imageview2d import ImageView2D, MontageTileOverlay
+    from pyqtgraph.Qt import QtCore
 
     view = ImageView2D()
     view.setImage(np.zeros((8, 8), dtype=float))
@@ -68,6 +69,8 @@ def test_montage_tile_overlays_reuse_single_graphics_item(qt_app):
     assert view._montage_tile_overlay_item is item
     assert view.montageTileOverlayCount() == 2
     assert len(view._montage_tile_overlay_items) == 1
+    assert item.acceptedMouseButtons() == QtCore.Qt.MouseButton.NoButton
+    assert not item.acceptHoverEvents()
     view.close()
 
 

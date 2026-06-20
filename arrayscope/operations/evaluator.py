@@ -583,7 +583,9 @@ def _view_state_key(view_state):
         tuple(int(index) for index in getattr(view_state, "slice_indices", ())),
         getattr(getattr(view_state, "channel", None), "value", getattr(view_state, "channel", None)),
         getattr(getattr(view_state, "scale", None), "value", getattr(view_state, "scale", None)),
-        tuple(bool(value) for value in getattr(view_state, "axis_flipped", ())),
+        # Axis direction is a display transform, not a pixel-evaluation input.
+        # Keeping it out of cache keys lets rapid flip interactions reuse the
+        # same evaluated image/tile payloads instead of restarting compute.
         tuple(bool(value) for value in getattr(view_state, "axis_fftshifted", ())),
         None if getattr(view_state, "montage_axis", None) is None else int(view_state.montage_axis),
         None if getattr(view_state, "montage_columns", None) is None else int(view_state.montage_columns),

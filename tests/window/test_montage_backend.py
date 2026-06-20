@@ -108,6 +108,298 @@ def test_auto_preserves_vispy_tile_layer_mode():
     assert "preserving" in decision.reason
 
 
+def test_interactive_montage_commit_is_timer_coalesced(qt_app, monkeypatch):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    class Window(QtCore.QObject, MontageRenderMixin):
+        def __init__(self):
+            super().__init__()
+            self.view_state = ViewState.from_shape((2, 2, 1)).with_montage_axis(2, indices=(0,), text=":")
+            self._commits = 0
+
+        def _commit_montage_session_canvas(self, session, *, force=False):
+            self._commits += 1
+
+    win = Window()
+    plan = make_montage_plan(win.view_state, axis=2, indices=(0,), tile_shape=(2, 2), columns=1)
+    session = MontageRenderSession(
+        session_id=1,
+        key=("session",),
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=(0,),
+        plan=plan,
+        view_state=win.view_state,
+        document=object(),
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(2, 2),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    session.display_committed = True
+    win._montage_session = session
+    win._viewport_interaction_active = True
+
+    win._schedule_montage_canvas_commit(session, force=True)
+
+    assert win._commits == 0
+    assert session.final_commit_pending is True
+    assert win._montage_commit_timer.isActive()
+
+
+def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import MontageTileState, make_montage_plan
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    class Controller:
+        def __init__(self):
+            self.groups = []
+
+        def clear_group(self, group):
+            self.groups.append(group)
+
+    class Window(QtCore.QObject, MontageRenderMixin):
+        pass
+
+    state = ViewState.from_shape((2, 2, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8, gap=1)
+    controller = Controller()
+    session = MontageRenderSession(
+        session_id=7,
+        key=("session",),
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=tuple(range(8)),
+        plan=plan,
+        view_state=state,
+        document=object(),
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(2, 2),
+        view_range=((0.0, 2.0), (0.0, 2.0)),
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=(plan.tiles[0],),
+        rendered_tiles={},
+        loading_tiles={7},
+        skipped_tiles=set(),
+        pending_tiles=[plan.tiles[1], plan.tiles[7]],
+    )
+    session.active_tile_requests.add(7)
+    session.tile_states = [MontageTileState.UNLOADED for _tile in plan.tiles]
+    session.tile_states[7] = MontageTileState.LOADING
+    win = Window()
+    win._montage_session = session
+    win.view_state = state
+    win.montage_tile_evaluation_controller = controller
+    win._viewport_interaction_active = True
+
+    win._prune_stale_montage_tile_work(session)
+
+    assert [int(tile.montage_index) for tile in session.pending_tiles] == [1]
+    assert 7 not in session.loading_tiles
+    assert 7 not in session.active_tile_requests
+    assert session.tile_states[7] == MontageTileState.UNLOADED
+    assert controller.groups == ["montage-tile:7:7"]
+
+
+def test_interactive_viewport_expansion_chunks_new_tile_discovery(qt_app):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.operations.evaluator import _document_key
+    from arrayscope.operations.pipeline import ArrayDocument
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    class Window(QtCore.QObject, MontageRenderMixin):
+        def __init__(self, document, state, viewport_plan):
+            super().__init__()
+            self.document = document
+            self.view_state = state
+            self._viewport_plan = viewport_plan
+            self._viewport_interaction_active = True
+            self._montage_viewport_addition_batch_size = 3
+            self.resolved_batches = []
+            self.tile_schedules = 0
+            self.commits = 0
+            self.img_view = SimpleNamespace(
+                rendering_capabilities=ImageViewBackendCapabilities(
+                    name="vispy",
+                    direct_montage_tile_payloads=True,
+                    persistent_tile_residency=True,
+                    shader_windowing=True,
+                ),
+                montageDisplayMode=lambda: "vispy_tile_layer",
+            )
+
+        def _montage_viewport_plan(self, view_state):
+            return self._viewport_plan
+
+        def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
+            return None
+
+        def _resolve_montage_tiles_from_cache(self, tiles, **_kwargs):
+            batch = tuple(tiles)
+            self.resolved_batches.append(tuple(int(tile.montage_index) for tile in batch))
+            return (), batch
+
+        def _schedule_montage_canvas_commit(self, session, *, force=False):
+            self.commits += 1
+
+        def _schedule_montage_tiles(self, session):
+            self.tile_schedules += 1
+
+    document = ArrayDocument(np.zeros((2, 2, 10), dtype=np.float32))
+    state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=10, indices=tuple(range(10)), text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(10)), tile_shape=(2, 2), columns=10)
+    viewport_plan = MontageViewportPlan(
+        axis=2,
+        all_indices=tuple(range(10)),
+        viewport_shape=(4, 40),
+        tile_shape=(2, 2),
+        plan=plan,
+        view_range=((-1.0, 40.0), (-1.0, 4.0)),
+        shader_display=True,
+        persistent_tile_residency=True,
+    )
+    session = MontageRenderSession(
+        session_id=11,
+        key=montage_session_key(_document_key(document), state, viewport_plan, None),
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=tuple(range(10)),
+        plan=plan,
+        view_state=state,
+        document=document,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(4, 40),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=(),
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    win = Window(document, state, viewport_plan)
+    win._montage_session = session
+
+    assert win._try_update_montage_viewport_only() is True
+
+    assert win.resolved_batches == [(0, 1, 2)]
+    assert [int(tile.montage_index) for tile in session.pending_tiles] == [0, 1, 2]
+    assert session.loading_tiles == set()
+    assert win.tile_schedules == 0
+    assert win._montage_viewport_update_pending is True
+    assert win._last_montage_viewport_deferred_additions == 7
+
+
+def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.operations.evaluator import _document_key
+    from arrayscope.operations.pipeline import ArrayDocument
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    class Window(QtCore.QObject, MontageRenderMixin):
+        def __init__(self, document, state, viewport_plan):
+            super().__init__()
+            self.document = document
+            self.view_state = state
+            self._viewport_plan = viewport_plan
+            self.tile_schedules = 0
+            self.img_view = SimpleNamespace(
+                rendering_capabilities=ImageViewBackendCapabilities(
+                    name="vispy",
+                    direct_montage_tile_payloads=True,
+                    persistent_tile_residency=True,
+                    shader_windowing=True,
+                ),
+                montageDisplayMode=lambda: "vispy_tile_layer",
+            )
+
+        def _montage_viewport_plan(self, view_state):
+            return self._viewport_plan
+
+        def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
+            return None
+
+        def _schedule_montage_tiles(self, session):
+            self.tile_schedules += 1
+
+        def _schedule_montage_canvas_commit(self, session, *, force=False):
+            pass
+
+    document = ArrayDocument(np.zeros((2, 2, 4), dtype=np.float32))
+    state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=4, indices=tuple(range(4)), text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(2, 2), columns=4)
+    viewport_plan = MontageViewportPlan(
+        axis=2,
+        all_indices=tuple(range(4)),
+        viewport_shape=(4, 16),
+        tile_shape=(2, 2),
+        plan=plan,
+        view_range=((-1.0, 16.0), (-1.0, 4.0)),
+        shader_display=True,
+        persistent_tile_residency=True,
+    )
+    session = MontageRenderSession(
+        session_id=12,
+        key=montage_session_key(_document_key(document), state, viewport_plan, None),
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=tuple(range(4)),
+        plan=plan,
+        view_state=state,
+        document=document,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(4, 16),
+        view_range=viewport_plan.view_range,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={},
+        loading_tiles={0, 1, 2, 3},
+        skipped_tiles=set(),
+        pending_tiles=list(plan.tiles),
+    )
+    win = Window(document, state, viewport_plan)
+    win._montage_session = session
+    win._viewport_interaction_active = False
+
+    assert win._try_update_montage_viewport_only() is True
+
+    assert win.tile_schedules == 1
+
+
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
     capabilities = ImageViewBackendCapabilities(
         name="vispy",

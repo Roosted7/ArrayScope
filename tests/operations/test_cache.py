@@ -107,6 +107,15 @@ def test_montage_tile_cache_diagnostics_are_separate_from_image_cache():
     assert evaluator.image_cache_diagnostics().entries == 0
 
 
+def test_image_cache_key_ignores_axis_flip_display_transform():
+    data = np.zeros((2, 3, 4), dtype=np.float32)
+    evaluator = OperationEvaluator(ArrayDocument(data))
+    state = ViewState.from_shape(data.shape)
+    flipped = state.with_axis_flipped(state.image_axes[0], True)
+
+    assert evaluator.image_key(state) == evaluator.image_key(flipped)
+
+
 def test_apply_memory_policy_resizes_image_tile_and_profile_caches():
     evaluator = OperationEvaluator(ArrayDocument(np.zeros((2, 3), dtype=np.float32)))
     system = SystemMemorySnapshot(total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, process_rss_bytes=0)

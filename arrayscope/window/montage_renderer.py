@@ -400,15 +400,28 @@ class MontageRenderMixin:
             coverage_margin_tiles=1,
             near_margin_tiles=2,
         )
+        self._prune_stale_montage_tile_work(session)
         if not additions:
             if presentation_changed:
                 self._schedule_montage_canvas_commit(session, force=False)
+            if session.pending_tiles and not _viewport_interaction_active(self):
+                self._schedule_montage_tiles(session)
+                return True
+            if session.pending_tiles:
+                return True
             else:
                 schedule_near_viewport_montage_prefetch(self, session)
             return True
+        addition_limit = _montage_viewport_addition_batch_limit(self, interactive=_interactive_active(self))
+        additions_to_process = tuple(additions[:addition_limit])
+        if len(additions_to_process) < len(additions):
+            self._montage_viewport_update_pending = True
+            self._last_montage_viewport_deferred_additions = int(len(additions) - len(additions_to_process))
+        else:
+            self._last_montage_viewport_deferred_additions = 0
 
         cached_tiles, missing_tiles = self._resolve_montage_tiles_from_cache(
-            additions,
+            additions_to_process,
             document=session.document,
             axis=session.montage_axis,
             colormap_lut=session.colormap_lut,
@@ -424,6 +437,27 @@ class MontageRenderMixin:
             )
             session.mark_loaded(rendered)
         self._montage_pending_level_tiles_last_session = len(getattr(session, "pending_level_tiles", ()) or ())
+
+        self._montage_cached_tiles_last_session = len(cached_tiles)
+        self._montage_missing_tiles_last_session = len(missing_tiles)
+        if presentation_changed or cached_tiles:
+            self._schedule_montage_canvas_commit(session, force=False)
+        if cached_tiles:
+            self._schedule_montage_cached_level_stats(session)
+        if not missing_tiles:
+            schedule_near_viewport_montage_prefetch(self, session)
+            return True
+
+        if _viewport_interaction_active(self):
+            queued = {int(tile.montage_index) for tile in session.pending_tiles}
+            for tile in missing_tiles:
+                index = int(tile.montage_index)
+                if index not in queued:
+                    session.pending_tiles.append(tile)
+                    queued.add(index)
+            self._montage_viewport_update_pending = True
+            return True
+
         for tile in missing_tiles:
             session.mark_loading(tile)
 
@@ -437,16 +471,6 @@ class MontageRenderMixin:
                 session.pending_tiles.append(tile)
                 queued.add(index)
 
-        self._montage_cached_tiles_last_session = len(cached_tiles)
-        self._montage_missing_tiles_last_session = len(missing_tiles)
-        if presentation_changed or cached_tiles:
-            self._schedule_montage_canvas_commit(session, force=False)
-        if cached_tiles:
-            self._schedule_montage_cached_level_stats(session)
-        if not missing_tiles:
-            schedule_near_viewport_montage_prefetch(self, session)
-            return True
-
         self.prefetch_evaluation_controller.cancel_prefetch()
         self.operation_evaluator.last_status = CacheStatusSnapshot(
             CacheStatus.COMPUTING,
@@ -457,6 +481,37 @@ class MontageRenderMixin:
         self._schedule_montage_attached_stage_waits(session)
         self._schedule_montage_tiles(session)
         return True
+
+    def _prune_stale_montage_tile_work(self, session: MontageRenderSession) -> None:
+        if not _viewport_interaction_active(self):
+            return
+        keep = {
+            int(tile.montage_index)
+            for tile in session.plan.tiles_intersecting(session.view_range, margin_tiles=2)
+        }
+        if not keep:
+            return
+        pending_before = len(session.pending_tiles)
+        session.pending_tiles = [tile for tile in session.pending_tiles if int(tile.montage_index) in keep]
+        stale = (set(session.loading_tiles) | set(session.active_tile_requests)) - keep
+        if stale:
+            controller = getattr(self, "montage_tile_evaluation_controller", None)
+            for index in sorted(stale):
+                session.loading_tiles.discard(int(index))
+                session.active_tile_requests.discard(int(index))
+                if 0 <= int(index) < len(session.tile_states):
+                    session.tile_states[int(index)] = MontageTileState.UNLOADED
+                if controller is not None:
+                    controller.clear_group(f"montage-tile:{int(session.session_id)}:{int(index)}")
+        for key, waiting in list(session.stage_waiting_tiles.items()):
+            kept = [tile for tile in waiting if int(tile.montage_index) in keep]
+            if kept:
+                session.stage_waiting_tiles[key] = kept
+            else:
+                session.stage_waiting_tiles.pop(key, None)
+        pruned = pending_before - len(session.pending_tiles) + len(stale)
+        if pruned > 0:
+            self._last_montage_pruned_tile_work = int(getattr(self, "_last_montage_pruned_tile_work", 0) or 0) + int(pruned)
 
     def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
         return montage_level_key(
@@ -505,7 +560,11 @@ class MontageRenderMixin:
 
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
         expected = self._montage_level_expected_indices(session)
-        return self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
+        self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
+        stats = self._montage_level_tracker().summary_for(session.level_key)
+        if stats is None:
+            return self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
+        return stats
 
     def _montage_level_bounds_for_session(self, session, *, allow_partial: bool = False):
         source = self._montage_level_source_for_session(session, allow_partial=allow_partial)
@@ -516,7 +575,7 @@ class MontageRenderMixin:
         # It must not be confused with viewport pixels; the level key is semantic
         # and excludes zoom/pan.  WindowLevelController keeps updates monotonic.
         tracker = self._montage_level_tracker()
-        stats = tracker.stats_for(session.level_key)
+        stats = tracker.summary_for(session.level_key)
         if stats is None:
             return None
         if not allow_partial and stats.rank not in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
@@ -944,7 +1003,7 @@ class MontageRenderMixin:
         self.img_view.setImageStale(True)
         self.img_view.setEvaluationOverlay(True, "Updating montage...")
         self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
-        if getattr(session, "defer_side_panels", False):
+        if getattr(session, "defer_side_panels", False) or _viewport_interaction_active(self):
             self._deferred_side_panel_refresh_pending = True
         else:
             self._update_operation_dock()
@@ -1053,12 +1112,20 @@ class MontageRenderMixin:
         interval_ms = self._montage_commit_interval_ms(session, force=force)
         elapsed_ms = (monotonic() - float(session.last_commit_monotonic or 0.0)) * 1000.0
         needs_initial_commit = session.canvas is None and not bool(getattr(session, "display_committed", False))
+        if _viewport_interaction_active(self) and not needs_initial_commit:
+            session.final_commit_pending = True
+            session.flush_pending = True
+            self._start_montage_commit_timer(max(1, int(interval_ms)))
+            return
         if needs_initial_commit or force and not session.flush_pending or elapsed_ms >= interval_ms:
             self._commit_montage_session_canvas(session, force=force)
             return
         session.final_commit_pending = True
         session.flush_pending = True
         self._montage_coalesced_commits = int(getattr(self, "_montage_coalesced_commits", 0) or 0) + 1
+        self._start_montage_commit_timer(max(1, int(interval_ms - elapsed_ms)))
+
+    def _start_montage_commit_timer(self, interval_ms: int) -> None:
         timer = getattr(self, "_montage_commit_timer", None)
         if timer is None:
             timer = Qt.QtCore.QTimer(self)
@@ -1066,7 +1133,7 @@ class MontageRenderMixin:
             timer.timeout.connect(self._flush_montage_canvas_commit)
             self._montage_commit_timer = timer
         if not timer.isActive():
-            timer.start(max(1, int(interval_ms - elapsed_ms)))
+            timer.start(max(1, int(interval_ms)))
 
     def _montage_commit_interval_ms(self, session, *, force: bool) -> int:
         if force:
@@ -1079,6 +1146,12 @@ class MontageRenderMixin:
         if session is None or not session.final_commit_pending:
             return
         self._commit_montage_session_canvas(session, force=False)
+        if (
+            getattr(session, "show_loading_overlays", False)
+            and (session.pending_tiles or session.loading_tiles or session.active_tile_requests or getattr(session, "attached_stage_requests", None))
+        ):
+            self.img_view.setImageStale(True)
+            self.img_view.setEvaluationOverlay(True, "Updating montage...")
 
     def _commit_montage_session_canvas(self, session, *, force=False) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
@@ -1511,7 +1584,7 @@ class MontageRenderMixin:
         self._pending_profile_pos = None
         self._update_live_profile_from_pending_pos()
 
-    def _schedule_montage_viewport_update(self) -> None:
+    def _schedule_montage_viewport_update(self, *, delay_ms: int | None = None) -> None:
         if getattr(self, "_montage_viewport_update_running", False):
             self._montage_viewport_update_pending = True
             return
@@ -1521,15 +1594,13 @@ class MontageRenderMixin:
             timer.setSingleShot(True)
             timer.timeout.connect(self._run_montage_viewport_update)
             self._montage_viewport_update_timer = timer
-        timer.start(_montage_viewport_update_delay_ms(self))
+        interval = _montage_viewport_update_delay_ms(self) if delay_ms is None else max(0, int(delay_ms))
+        timer.start(interval)
 
     def _run_montage_viewport_update(self) -> None:
         if getattr(self, "_closing", False):
             return
         if self.view_state.montage_axis is None:
-            return
-        if _viewport_gesture_active():
-            self._schedule_montage_viewport_update()
             return
         if getattr(self, "_montage_viewport_update_running", False):
             self._montage_viewport_update_pending = True
@@ -1543,7 +1614,7 @@ class MontageRenderMixin:
             self._montage_viewport_update_running = False
         if getattr(self, "_montage_viewport_update_pending", False) and self.view_state.montage_axis is not None:
             self._montage_viewport_update_pending = False
-            self._schedule_montage_viewport_update()
+            self._schedule_montage_viewport_update(delay_ms=_montage_viewport_chunk_delay_ms(self))
 
     def _montage_tile_shape(self, view_state):
         primary_axis, secondary_axis = view_state.image_axes
@@ -1610,6 +1681,26 @@ def _montage_tile_result_budget_ms(window, *, interactive: bool) -> float:
     return float(feedback.work_budget_ms("montage_tile_result", interactive=interactive))
 
 
+def _montage_viewport_addition_batch_limit(window, *, interactive: bool) -> int:
+    configured = getattr(window, "_montage_viewport_addition_batch_size", None)
+    if configured is not None:
+        return max(1, int(configured))
+    decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)("montage_viewport_update", interactive=interactive)
+    if decision is not None:
+        return max(1, min(32, int(decision.batch_limit)))
+    return 8 if interactive else 16
+
+
+def _montage_viewport_chunk_delay_ms(window) -> int:
+    decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
+        "montage_viewport_update",
+        interactive=_interactive_active(window),
+    )
+    if decision is not None:
+        return max(1, min(16, int(decision.interval_ms)))
+    return 1
+
+
 def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
     image = np.asarray(payload.image)
     histogram = None if payload.histogram_data is None else np.asarray(payload.histogram_data)
@@ -1653,4 +1744,11 @@ def _viewport_gesture_active() -> bool:
 
 def _interactive_active(window) -> bool:
     coordinator = getattr(window, "render_coordinator", None)
-    return bool(coordinator is not None and getattr(coordinator, "interactive_active", False))
+    return bool(
+        coordinator is not None and getattr(coordinator, "interactive_active", False)
+        or _viewport_interaction_active(window)
+    )
+
+
+def _viewport_interaction_active(window) -> bool:
+    return bool(getattr(window, "_viewport_interaction_active", False) or _viewport_gesture_active())

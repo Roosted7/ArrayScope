@@ -203,3 +203,16 @@ def test_cached_normal_image_render_skips_memory_policy_resample(qtbot, monkeypa
         assert refreshes == []
     finally:
         win.close()
+
+
+def test_evaluation_queue_drain_is_bounded_for_non_callback_events(qt_app):
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    controller = EvaluationController(max_queue_events_per_drain=3)
+    for index in range(10):
+        controller._queue.put(("started", index, None))
+
+    controller._drain_queue()
+
+    assert len(controller._started) == 3
+    assert not controller._queue.empty()

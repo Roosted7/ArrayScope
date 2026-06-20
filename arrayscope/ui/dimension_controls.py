@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui
 
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.display.model.frame import CanvasValueSource
 from arrayscope.ui.icons import clear_label_icon, set_label_icon
 from arrayscope.ui.shortcuts import colormap_name_for_key
 
@@ -87,6 +91,31 @@ class DimensionControlMixin:
             y_dim, x_dim = self.view_state.image_axes
             view.invertY(not self._axis_flipped(y_dim))
             view.invertX(self._axis_flipped(x_dim))
+        self._update_committed_frame_for_axis_flip()
+
+    def _update_committed_frame_for_axis_flip(self):
+        frame = getattr(self, "_committed_display_frame", None)
+        if frame is None:
+            return
+        geometry = frame.geometry
+        if not _same_view_except_axis_flips(geometry.view_state, self.view_state):
+            return
+        updated_geometry = DisplayGeometry(
+            view_state=self.view_state,
+            display_shape=geometry.display_shape,
+            montage=geometry.montage,
+            montage_origin_x=geometry.montage_origin_x,
+            montage_origin_y=geometry.montage_origin_y,
+            montage_tile_states=geometry.montage_tile_states,
+        )
+        value_source = frame.value_source
+        if isinstance(value_source, CanvasValueSource):
+            value_source = CanvasValueSource(
+                data=value_source.data,
+                histogram_data=value_source.histogram_data,
+                geometry=updated_geometry,
+            )
+        self._committed_display_frame = replace(frame, geometry=updated_geometry, value_source=value_source, scene=None)
 
     def update_complex_indicators(self):
         """Initialize or update indicators for dimensions that can be combined as complex."""
@@ -194,7 +223,10 @@ class DimensionControlMixin:
             role_index = 0 if role == "y" else 1
             if self.view_state.image_axes[role_index] == int(axis):
                 self._set_view_state(self.view_state.with_axis_flipped(axis, not self._axis_flipped(axis)))
-                self.render(reason=f"dimension-{role}-flip")
+                self.update_flip_icons()
+                if hasattr(self, "dimension_strip"):
+                    self.dimension_strip.update_axis_state(axis, self.data.shape, self.view_state, self.profile_axes)
+                self.apply_axis_flips()
                 return
             self._set_view_state(self.view_state.with_image_axis(role, axis))
             if self.view_state.montage_axis in self.view_state.image_axes:
@@ -410,4 +442,25 @@ class DimensionControlMixin:
                 event.accept()
                 return True
         return super().eventFilter(obj, event)
-    
+
+
+def _same_view_except_axis_flips(previous, current) -> bool:
+    if previous is None or current is None:
+        return False
+    return (
+        getattr(previous, "ndim", None) == getattr(current, "ndim", None)
+        and tuple(getattr(previous, "shape", ())) == tuple(getattr(current, "shape", ()))
+        and getattr(previous, "image_axes", None) == getattr(current, "image_axes", None)
+        and getattr(previous, "line_axis", None) == getattr(current, "line_axis", None)
+        and tuple(getattr(previous, "slice_indices", ())) == tuple(getattr(current, "slice_indices", ()))
+        and getattr(previous, "channel", None) == getattr(current, "channel", None)
+        and getattr(previous, "scale", None) == getattr(current, "scale", None)
+        and tuple(getattr(previous, "axis_fftshifted", ())) == tuple(getattr(current, "axis_fftshifted", ()))
+        and getattr(previous, "montage_axis", None) == getattr(current, "montage_axis", None)
+        and getattr(previous, "montage_columns", None) == getattr(current, "montage_columns", None)
+        and getattr(previous, "montage_indices", None) == getattr(current, "montage_indices", None)
+        and getattr(previous, "montage_text", None) == getattr(current, "montage_text", None)
+        and tuple(getattr(previous, "axis_range_indices", ())) == tuple(getattr(current, "axis_range_indices", ()))
+        and tuple(getattr(previous, "axis_range_text", ())) == tuple(getattr(current, "axis_range_text", ()))
+        and tuple(getattr(previous, "axis_flipped", ())) != tuple(getattr(current, "axis_flipped", ()))
+    )
