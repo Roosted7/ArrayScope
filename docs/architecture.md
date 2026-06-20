@@ -187,7 +187,7 @@ source of array-view state.
 - `arrayscope.display.model.frame`: committed display-frame keys and value source ownership for
   hover/status. Tiled frames must not report values from placeholder arrays; they resolve values and
   tile-local regions through their `TiledValueSource`.
-- `arrayscope.window.montage_levels`: semantic montage histogram coverage tracking keyed by montage
+- `arrayscope.display.model.montage_levels`: semantic montage histogram coverage tracking keyed by montage
   scope, independent of viewport origin, visible canvas shape, and the current tiled index window.
   It stores deterministic sampled per-source-index tile stats so shifted tiled ranges reuse overlap
   while excluding removed indices.
