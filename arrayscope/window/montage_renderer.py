@@ -248,10 +248,7 @@ class MontageRenderMixin:
         session.shader_display = bool(shader_display)
         self._montage_session = session
         self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
-        session.pending_level_tiles = []
-        self._montage_pending_level_tiles_last_session = 0
-        for rendered in cached_tiles:
-            self._update_montage_level_bounds_from_rendered(level_key, rendered, expected_indices=all_indices)
+        self._queue_montage_cached_level_stats(session, cached_tiles, seed_if_empty=True)
         try:
             self._commit_montage_session_canvas(session, force=True)
         except MemoryError as exc:
@@ -428,15 +425,9 @@ class MontageRenderMixin:
             shader_display=bool(getattr(session, "shader_display", False)),
         )
         session.tile_compute_cache_hits += len(cached_tiles)
-        expected_indices = self._montage_level_expected_indices(session)
         for rendered in cached_tiles:
-            self._update_montage_level_bounds_from_rendered(
-                session.level_key,
-                rendered,
-                expected_indices=expected_indices,
-            )
             session.mark_loaded(rendered)
-        self._montage_pending_level_tiles_last_session = len(getattr(session, "pending_level_tiles", ()) or ())
+        self._queue_montage_cached_level_stats(session, cached_tiles, seed_if_empty=False)
 
         self._montage_cached_tiles_last_session = len(cached_tiles)
         self._montage_missing_tiles_last_session = len(missing_tiles)
@@ -609,6 +600,42 @@ class MontageRenderMixin:
             self._montage_level_stats_timer = timer
         if not timer.isActive():
             timer.start(0)
+
+    def _queue_montage_cached_level_stats(self, session, rendered_tiles, *, seed_if_empty: bool) -> None:
+        """Queue cached-payload statistics without scanning every tile inline.
+
+        Cache hits must make pixels available immediately.  Histogram sampling
+        is secondary UI work, so only one tile is allowed to seed a brand-new
+        semantic level scope before the first commit.  Remaining unseen sources
+        are processed in bounded timer slices.
+        """
+
+        tracker = self._montage_level_tracker()
+        expected = self._montage_level_expected_indices(session)
+        tracker.ensure(session.level_key, expected)
+        pending = getattr(session, "pending_level_tiles", None)
+        if pending is None:
+            pending = []
+            session.pending_level_tiles = pending
+        queued_sources = {int(item.tile.source_index) for item in pending}
+        unseen = []
+        for rendered in tuple(rendered_tiles or ()):
+            source_index = int(rendered.tile.source_index)
+            if source_index in queued_sources or tracker.has_source(session.level_key, source_index):
+                continue
+            unseen.append(rendered)
+            queued_sources.add(source_index)
+
+        summary = tracker.summary_for(session.level_key)
+        if seed_if_empty and unseen and (summary is None or not summary.source_indices):
+            seed = unseen.pop(0)
+            self._update_montage_level_bounds_from_rendered(
+                session.level_key,
+                seed,
+                expected_indices=expected,
+            )
+        pending.extend(unseen)
+        self._montage_pending_level_tiles_last_session = len(pending)
 
     def _process_montage_cached_level_stats(self) -> None:
         session = getattr(self, "_montage_session", None)
