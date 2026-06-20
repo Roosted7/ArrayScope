@@ -20,5 +20,6 @@ def test_legacy_vispy_plugin_gets_conservative_hybrid_capabilities():
 
     assert capabilities.name == VISPY_CAPABILITIES.name
     assert capabilities.prefers_tiled_montages is True
+    assert capabilities.supports_montage_canvas is False
     assert capabilities.persistent_tile_residency is True
     assert capabilities.native_pointer_interaction is False

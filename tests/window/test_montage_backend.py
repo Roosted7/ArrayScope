@@ -60,6 +60,42 @@ def test_auto_small_scalar_vispy_montage_uses_tile_layer():
     assert "canvas composition" in decision.reason
 
 
+def test_vispy_cannot_be_forced_through_montage_canvas():
+    data = np.zeros((64, 64), dtype=np.float32)
+
+    decision = choose_montage_backend(
+        _geometry(),
+        data,
+        setting=MontageDisplayBackendChoice.CANVAS,
+        renderer_backend="vispy",
+    )
+
+    assert decision.backend == "tile_layer"
+    assert decision.expected_tile_layer is True
+    assert "does not support montage canvas" in decision.reason
+    assert "unavailable" in decision.warning
+
+
+def test_canvas_capability_controls_manual_fallback_without_backend_name_checks():
+    data = np.zeros((64, 64), dtype=np.float32)
+    capabilities = ImageViewBackendCapabilities(
+        name="future-gpu-backend",
+        direct_montage_tile_payloads=True,
+        prefers_tiled_montages=True,
+        supports_montage_canvas=False,
+    )
+
+    decision = choose_montage_backend(
+        _geometry(),
+        data,
+        setting=MontageDisplayBackendChoice.CANVAS,
+        renderer_capabilities=capabilities,
+    )
+
+    assert decision.backend == "tile_layer"
+    assert "future-gpu-backend" in decision.reason
+
+
 def test_auto_policy_uses_capability_instead_of_backend_name():
     data = np.zeros((1500, 1500), dtype=np.float32)
     capabilities = ImageViewBackendCapabilities(
