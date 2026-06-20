@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 from dataclasses import replace
 
@@ -16,6 +18,10 @@ def _action(menu, text):
         if action.text() == text:
             return action
     raise AssertionError(f"action not found: {text}")
+
+
+def _read_jsonl(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def test_developer_menu_opens_diagnostics_dialog(qtbot):
@@ -58,6 +64,7 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
             assert heading in text
         assert dialog.refresh_button.isCheckable()
         assert dialog.refresh_button.isChecked()
+        assert dialog.log_button.text() == "Log..."
         assert dialog._overview_labels["status"].text()
         assert "RSS" in dialog._overview_labels["resources"].text()
         assert "sync" in dialog._overview_labels["render"].text()
@@ -243,5 +250,97 @@ def test_diagnostics_timer_stops_after_close(qtbot):
         _process_events(qtbot)
 
         assert not dialog._timer.isActive()
+    finally:
+        win.close()
+
+
+def test_diagnostics_jsonl_logging_writes_start_and_snapshots(qtbot, tmp_path, monkeypatch):
+    _clear_arrayscope_settings()
+    import arrayscope.ui.diagnostics as diagnostics_ui
+    from arrayscope.window import ArrayScopeWindow
+
+    requested_path = tmp_path / "diagnostics-log"
+    written_path = tmp_path / "diagnostics-log.jsonl"
+    monkeypatch.setattr(diagnostics_ui, "get_save_file_name", lambda *args, **kwargs: (str(requested_path), "JSON Lines (*.jsonl)"))
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.open_diagnostics_dialog()
+        dialog = win._diagnostics_dialog
+
+        dialog.log_button.click()
+
+        assert dialog.log_button.text() == "Stop"
+        assert dialog._logger is not None
+        records = _read_jsonl(written_path)
+        assert [record["event"] for record in records] == ["start", "snapshot"]
+        assert records[0]["schema_version"] == 1
+        assert records[0]["config"]["derived_shape"] == [4, 5]
+        assert records[1]["sequence"] == 1
+        assert records[1]["diagnostics"]["derived_dtype"] == "float32"
+
+        win.operation_evaluator.image(win.view_state)
+        dialog.refresh()
+        records = _read_jsonl(written_path)
+        assert [record["event"] for record in records] == ["start", "snapshot", "snapshot"]
+        assert records[-1]["sequence"] == 2
+        assert records[-1]["diagnostics"]["image_cache"]["entries"] == 1
+
+        dialog.log_button.click()
+        assert dialog.log_button.text() == "Log..."
+        assert dialog._logger is None
+        dialog.refresh()
+        assert len(_read_jsonl(written_path)) == 3
+    finally:
+        win.close()
+
+
+def test_diagnostics_jsonl_logging_cancel_keeps_logging_inactive(qtbot, tmp_path, monkeypatch):
+    _clear_arrayscope_settings()
+    import arrayscope.ui.diagnostics as diagnostics_ui
+    from arrayscope.window import ArrayScopeWindow
+
+    monkeypatch.setattr(diagnostics_ui, "get_save_file_name", lambda *args, **kwargs: ("", ""))
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.open_diagnostics_dialog()
+        dialog = win._diagnostics_dialog
+
+        dialog.log_button.click()
+
+        assert dialog.log_button.text() == "Log..."
+        assert dialog._logger is None
+        assert not list(tmp_path.iterdir())
+    finally:
+        win.close()
+
+
+def test_diagnostics_jsonl_logging_stops_on_close(qtbot, tmp_path, monkeypatch):
+    _clear_arrayscope_settings()
+    import arrayscope.ui.diagnostics as diagnostics_ui
+    from arrayscope.window import ArrayScopeWindow
+
+    path = tmp_path / "diagnostics.jsonl"
+    monkeypatch.setattr(diagnostics_ui, "get_save_file_name", lambda *args, **kwargs: (str(path), "JSON Lines (*.jsonl)"))
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.open_diagnostics_dialog()
+        dialog = win._diagnostics_dialog
+        dialog.log_button.click()
+        assert dialog._logger is not None
+
+        dialog.close()
+        _process_events(qtbot)
+
+        assert not dialog._timer.isActive()
+        assert dialog._logger is None
+        assert dialog.log_button.text() == "Log..."
+        assert [record["event"] for record in _read_jsonl(path)] == ["start", "snapshot"]
     finally:
         win.close()

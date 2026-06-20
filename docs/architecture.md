@@ -426,8 +426,11 @@ Render coalescer diagnostics are likewise internal and report pending/interactin
 requested/flushed/coalesced/deferred-refresh counters.
 The Developer -> Diagnostics dialog is a plain `QDialog`, not a managed dock, so it does not
 participate in panel layout or canvas-preservation transactions. It shows color-coded filling bars
-for memory/cache budget usage and compact text sections for deeper state. The Operations panel does
-not show cache summaries; cache detail lives in Diagnostics.
+for memory/cache budget usage and compact text sections for deeper state. Its optional JSONL logging
+button is owned by `arrayscope.ui.diagnostics`, file lifecycle is owned by
+`arrayscope.ui.diagnostics_logging`, and Qt-free serialization lives in
+`arrayscope.core.diagnostics_jsonl`. It records one structured snapshot per diagnostics refresh.
+The Operations panel does not show cache summaries; cache detail lives in Diagnostics.
 
 App settings include theme, nearby-slice prefetch, panel resize behavior, FFT backend, FFT worker count,
 memory profile, and render memory budget. The render memory budget is a per-render hard cap for

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from arrayscope import __version__
 from arrayscope.app.qt_binding import prefer_pyside6
 
 prefer_pyside6()
@@ -11,6 +12,8 @@ from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.runtime_diagnostics import format_runtime_diagnostics, format_runtime_diagnostics_sections
+from arrayscope.ui.file_dialogs import get_save_file_name
+from arrayscope.ui.diagnostics_logging import DiagnosticsJsonlLogger, default_diagnostics_log_path
 
 
 class _CompactUsageBar(QtWidgets.QProgressBar):
@@ -108,6 +111,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
     def __init__(self, parent, snapshot_provider, *, interval_ms: int = 500):
         super().__init__(parent)
         self._snapshot_provider = snapshot_provider
+        self._logger = None
         self.setWindowTitle("ArrayScope Diagnostics")
         self.setMinimumSize(480, 400)
         self.resize(520, 540)
@@ -183,8 +187,10 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         self.refresh_button = buttons.addButton("Auto text", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole)
         self.refresh_button.setCheckable(True)
         self.refresh_button.setChecked(True)
+        self.log_button = buttons.addButton("Log...", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole)
         close_button = buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Close)
         self.refresh_button.toggled.connect(lambda checked: self.refresh(force_text=True) if checked else None)
+        self.log_button.clicked.connect(self._toggle_logging)
         close_button.clicked.connect(self.close)
         layout.addWidget(buttons)
         self.setLayout(layout)
@@ -202,6 +208,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             self._update_overview(snapshot)
             if force_text or self.refresh_button.isChecked():
                 self._refresh_current_text_tab(force=force_text)
+            self._write_snapshot_log_record(snapshot)
             return
         except Exception as exc:
             text = f"Diagnostics unavailable: {exc}"
@@ -225,6 +232,50 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             return
         sections = format_runtime_diagnostics_sections(self._last_snapshot)
         edit.setPlainText(sections.get(title, ""))
+
+    def _toggle_logging(self) -> None:
+        if self._logger is not None:
+            self._stop_logging()
+            return
+        self._start_logging()
+
+    def _start_logging(self) -> None:
+        file_path, _selected_filter = get_save_file_name(
+            self,
+            "Save diagnostics log",
+            str(default_diagnostics_log_path()),
+            "JSON Lines (*.jsonl);;All files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            self.refresh(force_text=True)
+            snapshot = self._last_snapshot
+            if snapshot is None:
+                return
+            logger = DiagnosticsJsonlLogger(file_path)
+            logger.start(snapshot, app_version=__version__, interval_ms=self._timer.interval())
+            self._logger = logger
+            self.log_button.setText("Stop")
+        except Exception as exc:
+            self._stop_logging()
+            QtWidgets.QMessageBox.warning(self, "Diagnostics Log Error", f"Failed to start diagnostics logging:\n{exc}")
+
+    def _write_snapshot_log_record(self, snapshot) -> None:
+        if self._logger is None:
+            return
+        try:
+            self._logger.write_snapshot(snapshot)
+        except Exception as exc:
+            self._stop_logging()
+            QtWidgets.QMessageBox.warning(self, "Diagnostics Log Error", f"Diagnostics logging stopped:\n{exc}")
+
+    def _stop_logging(self) -> None:
+        logger = self._logger
+        self._logger = None
+        self.log_button.setText("Log...")
+        if logger is not None:
+            logger.close()
 
     def _update_overview(self, snapshot) -> None:
         policy = snapshot.memory_policy
@@ -370,10 +421,12 @@ class DiagnosticsDialog(QtWidgets.QDialog):
 
     def hideEvent(self, event):
         self._timer.stop()
+        self._stop_logging()
         super().hideEvent(event)
 
     def closeEvent(self, event):
         self._timer.stop()
+        self._stop_logging()
         super().closeEvent(event)
 
 
