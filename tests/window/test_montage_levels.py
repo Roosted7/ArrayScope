@@ -77,6 +77,49 @@ def test_montage_level_key_tracks_tile_population_but_not_layout():
     assert first != changed_population
 
 
+def test_montage_level_key_ignores_colormap_lut():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.window.montage_levels import montage_level_key
+
+    state = ViewState.from_shape((8, 8, 3)).with_montage_axis(2, indices=(0, 1, 2), text=":")
+
+    first = montage_level_key("doc", state, (0, 1, 2), np.zeros((16, 4), dtype=np.uint8))
+    second = montage_level_key("doc", state, (0, 1, 2), np.full((16, 4), 255, dtype=np.uint8))
+
+    assert first == second
+
+
+def test_montage_level_tracker_reports_reusable_source_stats():
+    tracker = MontageLevelTracker()
+    key = "scope"
+    tracker.ensure(key, (0,))
+
+    assert tracker.has_source(key, 0) is False
+    tracker.update_from_tile(key, 0, np.arange(8, dtype=np.float32), np.arange(8, dtype=np.float32))
+
+    assert tracker.has_source(key, 0) is True
+    assert tracker.has_source(key, 0, refined=True) is True
+
+
+def test_tile_stats_do_not_rescan_values_for_bounds_and_sample(monkeypatch):
+    import arrayscope.window.montage_levels as montage_levels
+
+    def fail_rescan(*_args, **_kwargs):
+        raise AssertionError("tile stats should share one finite-value pass")
+
+    monkeypatch.setattr(montage_levels, "_finite_bounds", fail_rescan)
+    monkeypatch.setattr(montage_levels, "_finite_sample", fail_rescan)
+
+    stats = montage_levels._sample_tile_stats(
+        np.asarray([0.0, np.nan, 2.0], dtype=np.float32),
+        0,
+        refined=False,
+    )
+
+    assert stats is not None
+    assert stats.bounds == (0.0, 2.0)
+
+
 def test_montage_level_tracker_can_defer_aggregate_rebuild():
     tracker = MontageLevelTracker()
     key = "scope"

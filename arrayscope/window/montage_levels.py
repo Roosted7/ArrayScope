@@ -17,19 +17,23 @@ EXACT_TILE_SAMPLE_LIMIT = 32768
 AGGREGATE_SAMPLE_LIMIT = 262144
 
 
-def montage_level_key(document_key, view_state, all_indices, colormap_lut) -> tuple[object, ...]:
-    """Identity for semantic montage levels, independent of layout/viewport."""
+def montage_level_key(document_key, view_state, all_indices, colormap_lut=None) -> tuple[object, ...]:
+    """Identity for semantic montage levels, independent of presentation state.
 
+    A lookup table changes colours, not the scalar values used for histogram
+    and window/level decisions.  Keeping it out of this key lets both backends
+    reuse semantic tile statistics across colormap-only changes.
+    """
+
+    del colormap_lut
     axis = view_state.montage_axis
     scope_state = view_state.with_montage_axis(axis, columns=None, indices=None, text=None)
-    lut_key = None if colormap_lut is None else np.asarray(colormap_lut).tobytes()
     return (
         "montage_levels",
         document_key,
         scope_state,
         None if axis is None else int(axis),
         tuple(int(index) for index in all_indices),
-        lut_key,
     )
 
 
@@ -105,6 +109,14 @@ class MontageLevelTracker:
             else:
                 self._sample_accumulators.pop(key, None)
         return self.stats_for(key) if aggregate else None
+
+    def has_source(self, key: object, source_index: int, *, refined: bool = False) -> bool:
+        """Return whether reusable statistics already exist for one source."""
+
+        stats = self._tiles.get(key, {}).get(int(source_index))
+        if stats is None:
+            return False
+        return bool(stats.refined) if refined else True
 
     def best_source(self, key: object, *, explicit_auto: bool = False) -> LevelSource | None:
         del explicit_auto
@@ -234,10 +246,14 @@ class MontageLevelTracker:
 
 
 def _sample_tile_stats(values, source_index: int, *, refined: bool) -> TileLevelStats | None:
-    bounds = _finite_bounds(values)
-    if bounds is None:
+    finite = _finite_values(values)
+    if finite is None:
         return None
-    sample = _finite_sample(values, limit=REFINED_TILE_SAMPLE_LIMIT if refined else PROVISIONAL_TILE_SAMPLE_LIMIT)
+    bounds = normalize_bounds((float(np.min(finite)), float(np.max(finite))))
+    sample = finite
+    limit = REFINED_TILE_SAMPLE_LIMIT if refined else PROVISIONAL_TILE_SAMPLE_LIMIT
+    if sample.size > int(limit):
+        sample = _sparse_even_random_sample(sample, limit=int(limit))
     return TileLevelStats(
         source_index=int(source_index),
         bounds=bounds,
@@ -247,27 +263,33 @@ def _sample_tile_stats(values, source_index: int, *, refined: bool) -> TileLevel
 
 
 def _finite_sample(values, *, limit: int) -> np.ndarray:
-    array = np.asarray(values)
-    if array.size == 0:
+    finite = _finite_values(values)
+    if finite is None:
         return np.asarray((), dtype=np.float32)
-    flat = array.reshape(-1)
-    mask = np.isfinite(flat)
-    finite = flat if bool(np.all(mask)) else flat[mask]
     if finite.size > int(limit):
         finite = _sparse_even_random_sample(finite, limit=int(limit))
     return np.asarray(finite, dtype=np.float32)
 
 
 def _finite_bounds(values) -> tuple[float, float] | None:
+    finite = _finite_values(values)
+    if finite is None:
+        return None
+    return normalize_bounds((float(np.min(finite)), float(np.max(finite))))
+
+
+def _finite_values(values) -> np.ndarray | None:
+    """Return finite flattened values with one finite-mask pass."""
+
     array = np.asarray(values)
     if array.size == 0:
         return None
     flat = array.reshape(-1)
     mask = np.isfinite(flat)
-    finite = flat if bool(np.all(mask)) else flat[mask]
-    if finite.size == 0:
-        return None
-    return normalize_bounds((float(np.min(finite)), float(np.max(finite))))
+    if bool(np.all(mask)):
+        return flat
+    finite = flat[mask]
+    return finite if finite.size else None
 
 
 def _sparse_even_random_sample(finite: np.ndarray, *, limit: int) -> np.ndarray:
