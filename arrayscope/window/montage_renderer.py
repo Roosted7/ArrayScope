@@ -118,9 +118,18 @@ class MontageRenderMixin:
         )
 
     def update_montage_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
+        for attribute in (
+            "_last_montage_viewport_plan_ms",
+            "_last_montage_cache_resolve_ms",
+            "_last_montage_stage_plan_ms",
+            "_last_montage_session_setup_ms",
+            "_last_montage_initial_commit_ms",
+        ):
+            setattr(self, attribute, None)
         axis = self.view_state.montage_axis
         if axis is None or self.view_state.image_axes is None or axis in self.view_state.image_axes:
             return
+        plan_start = perf_counter()
         policy = self._refresh_memory_policy(active_render=self._montage_render_active())
         user_levels = self._pending_display_levels_for_render()
         if force_autolevel and user_levels is not None:
@@ -192,6 +201,8 @@ class MontageRenderMixin:
                 budget_bytes=policy.single_tile_budget_bytes,
                 tile_shape=tile_shape,
             )
+        self._last_montage_viewport_plan_ms = (perf_counter() - plan_start) * 1000.0
+        cache_start = perf_counter()
         cached_tiles, missing_tiles = self._resolve_montage_tiles_from_cache(
             compute_tiles,
             document=document,
@@ -199,10 +210,14 @@ class MontageRenderMixin:
             colormap_lut=colormap_lut,
             shader_display=shader_display,
         )
+        self._last_montage_cache_resolve_ms = (perf_counter() - cache_start) * 1000.0
         self._montage_cached_tiles_last_session = len(cached_tiles)
         self._montage_missing_tiles_last_session = len(missing_tiles)
         render_generation = self._capture_render_generation()
+        stage_plan_start = perf_counter()
         stage_plan = self._plan_montage_stages(document, missing_tiles)
+        self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
+        session_setup_start = perf_counter()
         pending_tiles = [tile for tile in missing_tiles if int(tile.montage_index) not in stage_plan["waiting_indices"]]
         session_key = montage_session_key(_document_key(document), view_state, viewport_plan, colormap_lut)
         level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
@@ -249,11 +264,15 @@ class MontageRenderMixin:
         self._montage_session = session
         self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
         self._queue_montage_cached_level_stats(session, cached_tiles, seed_if_empty=True)
+        self._last_montage_session_setup_ms = (perf_counter() - session_setup_start) * 1000.0
+        initial_commit_start = perf_counter()
         try:
             self._commit_montage_session_canvas(session, force=True)
         except MemoryError as exc:
             show_status_message(self, str(exc), timeout=6000)
             return
+        finally:
+            self._last_montage_initial_commit_ms = (perf_counter() - initial_commit_start) * 1000.0
         if session.is_complete():
             self._finish_montage_session_if_complete(session)
             if defer_side_panels:

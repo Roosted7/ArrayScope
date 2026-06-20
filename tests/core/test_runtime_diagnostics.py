@@ -55,6 +55,7 @@ def _snapshot():
         montage=MontageRuntimeDiagnostics(
             active=False,
             display_mode="tile_layer",
+            deferred_display_tiles=6,
             backend_setting="auto",
             backend_chosen="tile_layer",
             backend_reason="RGB/complex montage canvas pixels 3000000 > 2000000",
@@ -71,6 +72,11 @@ def _snapshot():
         stage_warmup=StageWarmupDecision("scheduled", candidate_bytes=128, budget_bytes=1024, reason="tiles wait for shared stage"),
         montage_prefetch=(MontagePrefetchDecision(12, 12, "skipped_stage_missing", "would recompute expensive stage per tile"),),
         montage_timing=MontageTimingDiagnostics(
+            last_viewport_plan_ms=0.5,
+            last_cache_resolve_ms=1.5,
+            last_stage_plan_ms=0.75,
+            last_session_setup_ms=2.25,
+            last_initial_commit_ms=3.5,
             last_canvas_compose_ms=2.5,
             last_visible_upload_ms=10.0,
             last_histogram_upload_ms=5.0,
@@ -189,6 +195,11 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Reusable stage: stage=3 hit, repeated per tile=no" in text
     assert "Tile compute: cache_hit=3 stage_backed=4 direct=1 waiting_stage=2" in text
     assert "Lead direct tiles: 1" in text
+    assert "Timing viewport plan: 0.50 ms" in text
+    assert "Timing cache resolve: 1.50 ms" in text
+    assert "Timing stage plan: 0.75 ms" in text
+    assert "Timing session setup: 2.25 ms" in text
+    assert "Timing initial commit: 3.50 ms" in text
     assert "Tile layer:\n  visible=50 resident=80/128 updated=1 skipped=49 rgb_tiles=1" in text
     assert "Timing visible upload: 10.00 ms" in text
     assert "Timing histogram upload: 5.00 ms" in text
