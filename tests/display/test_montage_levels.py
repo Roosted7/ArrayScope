@@ -1,6 +1,6 @@
 import numpy as np
 
-from arrayscope.window.montage_levels import (
+from arrayscope.display.model.montage_levels import (
     AGGREGATE_SAMPLE_LIMIT,
     PROVISIONAL_TILE_SAMPLE_LIMIT,
     MontageLevelTracker,
@@ -64,7 +64,7 @@ def test_montage_level_tracker_samples_deterministically_and_caps_aggregate():
 
 def test_montage_level_key_tracks_tile_population_but_not_layout():
     from arrayscope.core.view_state import ViewState
-    from arrayscope.window.montage_levels import montage_level_key
+    from arrayscope.display.model.montage_levels import montage_level_key
 
     state = ViewState.from_shape((8, 8, 6)).with_montage_axis(2, columns=2, indices=(0, 1, 2), text="0:3")
     relaid = state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text="0:3")
@@ -79,7 +79,7 @@ def test_montage_level_key_tracks_tile_population_but_not_layout():
 
 def test_montage_level_key_ignores_colormap_lut():
     from arrayscope.core.view_state import ViewState
-    from arrayscope.window.montage_levels import montage_level_key
+    from arrayscope.display.model.montage_levels import montage_level_key
 
     state = ViewState.from_shape((8, 8, 3)).with_montage_axis(2, indices=(0, 1, 2), text=":")
 
@@ -102,7 +102,7 @@ def test_montage_level_tracker_reports_reusable_source_stats():
 
 
 def test_tile_stats_do_not_rescan_values_for_bounds_and_sample(monkeypatch):
-    import arrayscope.window.montage_levels as montage_levels
+    import arrayscope.display.model.montage_levels as montage_levels
 
     def fail_rescan(*_args, **_kwargs):
         raise AssertionError("tile stats should share one finite-value pass")
@@ -139,7 +139,7 @@ def test_montage_level_tracker_can_defer_aggregate_rebuild():
 
 
 def test_montage_level_tracker_uses_incremental_histogram_accumulator(monkeypatch):
-    import arrayscope.window.montage_levels as montage_levels
+    import arrayscope.display.model.montage_levels as montage_levels
 
     tracker = MontageLevelTracker()
     key = "scope"

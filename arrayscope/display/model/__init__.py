@@ -21,6 +21,12 @@ from arrayscope.display.model.frame import (
     TilePresentationState,
     TiledValueSource,
 )
+from arrayscope.display.model.montage_levels import (
+    MontageLevelStats,
+    MontageLevelTracker,
+    TileLevelStats,
+    montage_level_key,
+)
 
 __all__ = [
     "CanvasValueSource",
@@ -34,10 +40,14 @@ __all__ = [
     "DisplayTilePayload",
     "DisplayTiledPresentation",
     "FrameValueSource",
+    "MontageLevelStats",
+    "MontageLevelTracker",
     "PresentationDecision",
     "PresentationInput",
     "RenderRequestContext",
     "TilePresentationDelta",
     "TilePresentationState",
+    "TileLevelStats",
     "TiledValueSource",
+    "montage_level_key",
 ]

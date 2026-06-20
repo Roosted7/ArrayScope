@@ -41,7 +41,7 @@ from arrayscope.operations.slabs import (
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_backend import choose_montage_backend
-from arrayscope.window.montage_levels import MontageLevelStats, MontageLevelTracker, montage_level_key
+from arrayscope.display.model.montage_levels import MontageLevelStats, MontageLevelTracker, montage_level_key
 from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
     limited_payload_cache as _limited_payload_cache,
