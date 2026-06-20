@@ -242,7 +242,10 @@ class ArrayScopeWindow(
             return
         policy = self._refresh_memory_policy(active_render=self._resource_governor_work_active())
         governor.update_telemetry(sample_resource_snapshot(), policy)
-        interactive = bool(getattr(getattr(self, "render_coordinator", None), "interactive_active", False))
+        interactive = bool(
+            getattr(getattr(self, "render_coordinator", None), "interactive_active", False)
+            or getattr(self, "_viewport_interaction_active", False)
+        )
         busy = self._scheduler_busy_state()
         for lane, controller in self._evaluation_controllers_by_lane().items():
             if controller is None:
@@ -293,8 +296,31 @@ class ArrayScopeWindow(
             return governor.decide_ui_work(channel, interactive=interactive)
         return None
 
+    def _note_viewport_interaction(self, reason: str = "viewport") -> None:
+        if str(reason) == "range":
+            try:
+                if not Qt.QtWidgets.QApplication.mouseButtons():
+                    return
+            except Exception:
+                return
+        self._viewport_interaction_active = True
+        timer = getattr(self, "_viewport_interaction_quiet_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._on_viewport_interaction_quiet)
+            self._viewport_interaction_quiet_timer = timer
+        timer.start(120)
+
+    def _on_viewport_interaction_quiet(self) -> None:
+        self._viewport_interaction_active = False
+        if getattr(self, "_montage_viewport_update_pending", False) and getattr(self.view_state, "montage_axis", None) is not None:
+            self._montage_viewport_update_pending = False
+            self._schedule_montage_viewport_update()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._note_viewport_interaction("resize")
         if hasattr(self, "dimension_strip"):
             self.dimension_strip._schedule_relayout()
 

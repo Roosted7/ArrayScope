@@ -8,8 +8,10 @@ class ViewportBridge:
         self.owner = owner
 
     def on_view_range_changed(self) -> None:
+        note_interaction = getattr(self.owner, "_note_viewport_interaction", None)
+        if callable(note_interaction):
+            note_interaction("range")
         self.owner._update_display_group_title()
         if self.owner.view_state.montage_axis is not None and not getattr(self.owner, "_montage_canvas_commit_active", False):
             self.owner._schedule_montage_viewport_update()
-
 

@@ -118,3 +118,22 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
     finally:
         win.close()
         _clear_arrayscope_settings()
+
+
+def test_dimension_axis_flip_is_view_transform_only(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        y_axis = int(win.view_state.image_axes[0])
+        monkeypatch.setattr(win, "render", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("flip must not render synchronously")))
+        monkeypatch.setattr(win, "request_render", lambda **kwargs: (_ for _ in ()).throw(AssertionError("flip must not request render")))
+
+        win.set_dimension_role("y", y_axis)
+
+        assert win.view_state.axis_flipped[y_axis] is True
+    finally:
+        win.close()

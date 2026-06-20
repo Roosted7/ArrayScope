@@ -234,6 +234,7 @@ def test_montage_loading_overlays_wait_for_slow_callback(qtbot, monkeypatch):
         assert win.img_view._evaluation_overlay is None or not win.img_view._evaluation_overlay.isVisible()
 
         calls[0]["on_slow"]()
+        _process_events(qtbot, count=4)
 
         assert getattr(win.img_view, "_montage_tile_overlay_items", []) != []
         assert win.img_view._evaluation_overlay.isVisible()

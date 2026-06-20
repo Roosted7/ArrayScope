@@ -24,6 +24,8 @@ class MontageTileOverlay:
 class MontageTileOverlayItem(QtWidgets.QGraphicsItem):
     def __init__(self):
         super().__init__()
+        self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self.setAcceptHoverEvents(False)
         self._overlays = ()
 
     @property

@@ -68,7 +68,15 @@ class _PrefetchRunnable(Qt.QtCore.QRunnable):
 
 
 class EvaluationController(Qt.QtCore.QObject):
-    def __init__(self, parent=None, *, max_workers=None, name="evaluation", max_callback_dispatch_per_drain: int = 4):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        max_workers=None,
+        name="evaluation",
+        max_callback_dispatch_per_drain: int = 4,
+        max_queue_events_per_drain: int = 64,
+    ):
         super().__init__(parent)
         self.name = str(name)
         self.pool = Qt.QtCore.QThreadPool(self)
@@ -97,6 +105,7 @@ class EvaluationController(Qt.QtCore.QObject):
         self._prefetch_visible_busy_blocked_count = 0
         self._prefetch_cost_blocked_count = 0
         self._max_callback_dispatch_per_drain = max(1, int(max_callback_dispatch_per_drain))
+        self._max_queue_events_per_drain = max(1, int(max_queue_events_per_drain))
         self._queue = SimpleQueue()
         self._poll_timer = Qt.QtCore.QTimer(self)
         self._poll_timer.setInterval(10)
@@ -295,8 +304,10 @@ class EvaluationController(Qt.QtCore.QObject):
 
     def _drain_queue(self):
         dispatched_callbacks = 0
-        while not self._queue.empty():
+        processed_events = 0
+        while not self._queue.empty() and processed_events < self._max_queue_events_per_drain:
             kind, key, value = self._queue.get()
+            processed_events += 1
             if kind == "started":
                 self._started.add(key)
                 continue
