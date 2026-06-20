@@ -1437,7 +1437,12 @@ class VisPyImageView2D(ImageView2D):
             self._sync_vispy_camera_to_view()
 
     def _update_histogram_for_vispy(self, histogramData, histogramPlotData, levels) -> None:
-        plot_data = histogramPlotData if histogramPlotData is not None else self._histogram_plot_data(histogramData)
+        previous_plot_source = self.histogramPlotSource
+        self.histogramPlotSource = histogramPlotData
+        try:
+            plot_data = self._histogram_plot_data(histogramData)
+        finally:
+            self.histogramPlotSource = previous_plot_source
         if plot_data is None:
             return
         self._bind_histogram_item(self.histogramImageItem)

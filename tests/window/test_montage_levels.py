@@ -93,3 +93,38 @@ def test_montage_level_tracker_can_defer_aggregate_rebuild():
 
     assert stats.source_indices == frozenset({0})
     assert tracker.stats_for(key) is stats
+
+
+def test_montage_level_tracker_uses_incremental_histogram_accumulator(monkeypatch):
+    import arrayscope.window.montage_levels as montage_levels
+
+    tracker = MontageLevelTracker()
+    key = "scope"
+    tracker.ensure(key, (0, 1))
+    tracker.update_from_tile(
+        key,
+        0,
+        np.arange(16, dtype=np.float32),
+        np.arange(16, dtype=np.float32),
+        aggregate=False,
+    )
+
+    def fail_rebuild(*_args, **_kwargs):
+        raise AssertionError("aggregate sample should be maintained incrementally")
+
+    monkeypatch.setattr(montage_levels, "_aggregate_samples", fail_rebuild)
+
+    first = tracker.stats_for(key)
+    assert np.array_equal(tracker.histogram_data_for_stats(first), np.arange(16, dtype=np.float32))
+
+    tracker.update_from_tile(
+        key,
+        1,
+        np.arange(16, 32, dtype=np.float32),
+        np.arange(16, 32, dtype=np.float32),
+        aggregate=False,
+    )
+    second = tracker.stats_for(key)
+
+    assert second.source_indices == frozenset({0, 1})
+    assert np.array_equal(tracker.histogram_data_for_stats(second), np.arange(32, dtype=np.float32))

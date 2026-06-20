@@ -1,4 +1,12 @@
+import json
+
 from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
+from arrayscope.core.diagnostics_jsonl import (
+    diagnostics_jsonl_line,
+    diagnostics_snapshot_record,
+    diagnostics_start_record,
+    diagnostics_to_jsonable,
+)
 from arrayscope.core.memory_policy import MemoryProfileChoice, compute_memory_policy
 from arrayscope.core.runtime_diagnostics import (
     CanvasPreserveRuntimeDiagnostics,
@@ -20,10 +28,10 @@ def _cache():
     return CacheDiagnosticsSnapshot(status=CacheStatus.READY, entries=0, bytes_used=0, max_bytes=1024, hit_rate=None)
 
 
-def test_format_runtime_diagnostics_includes_all_major_sections():
+def _snapshot():
     policy = compute_memory_policy(profile=MemoryProfileChoice.BALANCED, render_cap_mb=512, input_nbytes=1, system=None)
     scheduler = SchedulerDiagnostics("visible", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    snapshot = WindowRuntimeDiagnostics(
+    return WindowRuntimeDiagnostics(
         memory_policy=policy,
         image_cache=_cache(),
         tile_cache=_cache(),
@@ -39,7 +47,6 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
             candidates_seen=0,
             stores=0,
             refused_over_budget=0,
-            last_hit="",
             last_miss="stage=1",
             last_store="stage=1",
         ),
@@ -51,7 +58,6 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
             backend_setting="auto",
             backend_chosen="tile_layer",
             backend_reason="RGB/complex montage canvas pixels 3000000 > 2000000",
-            backend_warning="",
             tile_compute_cache_hits=3,
             tile_compute_stage_backed=4,
             tile_compute_direct=1,
@@ -59,7 +65,6 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
             lead_direct_tiles=1,
             retained_stage_index=3,
             retained_stage_decision="hit",
-            repeated_expensive_stage_per_tile=False,
         ),
         canvas_preserve=CanvasPreserveRuntimeDiagnostics(events=("start gen=1",)),
         render_timing=RenderTimingDiagnostics(last_render_sync_ms=1.25),
@@ -92,7 +97,6 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
             tile_layer_vertex_uploads=1,
             tile_layer_level_updates=1,
             tile_layer_estimated_gpu_bytes=8192,
-            tile_layer_cpu_shadow_bytes=0,
             coalesced_commits=7,
         ),
         fft_backend_choice="auto",
@@ -112,6 +116,49 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
         operation_expanded_axes=(2,),
         operation_transition_summaries=("stage 1 CenteredFFT output=[:, :, 3] input=[:, :, :] expanded=2",),
     )
+
+
+def test_diagnostics_jsonl_serializes_nested_snapshot_and_records():
+    snapshot = _snapshot()
+
+    start = diagnostics_start_record(
+        snapshot,
+        recorded_at="2026-06-20T10:00:00+00:00",
+        app_version="0.0.test",
+        cwd="/tmp/project",
+        pid=123,
+        python_version="3.test",
+        platform="test-platform",
+        interval_ms=500,
+    )
+    record = diagnostics_snapshot_record(snapshot, sequence=7, recorded_at="2026-06-20T10:00:01+00:00")
+    decoded = json.loads(diagnostics_jsonl_line(record))
+
+    assert start["schema_version"] == 1
+    assert start["event"] == "start"
+    assert start["config"]["derived_shape"] == [4, 5]
+    assert start["config"]["memory_profile"] == "balanced"
+    assert decoded["event"] == "snapshot"
+    assert decoded["sequence"] == 7
+    assert decoded["diagnostics"]["memory_policy"]["profile"] == "balanced"
+    assert decoded["diagnostics"]["derived_shape"] == [4, 5]
+    assert decoded["diagnostics"]["schedulers"][0]["name"] == "visible"
+    assert decoded["diagnostics"]["canvas_preserve"]["events"] == ["start gen=1"]
+
+
+def test_diagnostics_jsonable_unknown_objects_are_stable_strings():
+    class LocalThing:
+        pass
+
+    value = diagnostics_to_jsonable({"thing": LocalThing(), "values": {3, 1, 2}, "status": CacheStatus.READY})
+
+    assert value["thing"].endswith(".LocalThing>")
+    assert value["values"] == [1, 2, 3]
+    assert value["status"] == "Ready"
+
+
+def test_format_runtime_diagnostics_includes_all_major_sections():
+    snapshot = _snapshot()
 
     text = format_runtime_diagnostics(snapshot)
 

@@ -413,6 +413,7 @@ def test_registered_operations_define_region_contract_methods():
 
 def test_memory_policy_and_runtime_diagnostics_are_qt_free():
     for rel in (
+        Path("arrayscope/core/diagnostics_jsonl.py"),
         Path("arrayscope/core/memory_policy.py"),
         Path("arrayscope/core/runtime_diagnostics.py"),
     ):
