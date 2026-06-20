@@ -1347,6 +1347,7 @@ class MontageRenderMixin:
             tile_state, tile_delta = session.build_tile_presentation(
                 tile_source_ids,
                 source_ids_trusted=bool(getattr(session, "tile_source_ids_trusted", True)),
+                max_upserts=_montage_tiled_upsert_batch_limit(self),
             )
             self._montage_recent_tile_payloads_by_base_source = _limited_payload_cache(
                 getattr(self, "_montage_recent_tile_payloads_by_base_source", None),
@@ -1403,13 +1404,21 @@ class MontageRenderMixin:
         finally:
             self._montage_canvas_commit_active = False
         self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
+        commit_item_count = max(1, len(tile_delta.upserts) + len(tile_delta.removals))
         feedback = _latency_feedback(self)
         if feedback is not None:
             if hasattr(self, "_record_ui_work"):
-                self._record_ui_work("montage_commit", self._last_montage_canvas_commit_ms)
+                self._record_ui_work("montage_commit", self._last_montage_canvas_commit_ms, count=commit_item_count)
             else:
-                feedback.observe("montage_commit", self._last_montage_canvas_commit_ms)
+                feedback.observe("montage_commit", self._last_montage_canvas_commit_ms, count=commit_item_count)
+        display_backlog = bool(session.deferred_display_tiles)
         session.note_committed()
+        if display_backlog:
+            session.final_commit_pending = True
+            session.flush_pending = True
+            self._start_montage_commit_timer(
+                max(1, _montage_commit_interval_ms(self, force=False))
+            )
         self._finish_montage_session_if_complete(session)
         schedule_near_viewport_montage_prefetch(self, session)
         self._retry_live_profile_after_montage_tile()
@@ -1745,6 +1754,25 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         semantic_data=semantic,
         lod=getattr(payload, "lod", None),
     )
+
+
+def _montage_tiled_upsert_batch_limit(window) -> int:
+    interactive = _interactive_active(window)
+    decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
+        "montage_commit",
+        interactive=interactive,
+    )
+    if decision is not None:
+        limit = max(1, int(decision.batch_limit))
+    else:
+        feedback = _latency_feedback(window)
+        limit = 4 if interactive else 8
+        if feedback is not None:
+            limit = max(1, int(feedback.batch_limit("montage_commit", interactive=interactive)))
+    feedback = _latency_feedback(window)
+    if feedback is not None and feedback.channel_snapshot("montage_commit").per_item_ewma_ms is None:
+        limit = min(limit, 4 if interactive else 8)
+    return max(1, int(limit))
 
 
 def _montage_commit_interval_ms(window, *, force: bool) -> int:

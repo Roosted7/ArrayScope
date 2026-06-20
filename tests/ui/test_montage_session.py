@@ -418,3 +418,64 @@ def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
     )
 
     assert 2 not in {tile.montage_index for tile in additions}
+
+
+def test_montage_render_session_slices_tiled_upserts_without_losing_payloads():
+    session = _session()
+    session.pending_tiles.clear()
+    source_ids = {}
+    for tile in session.plan.tiles:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
+
+    first_state, first_delta = session.build_tile_presentation(source_ids, max_upserts=2)
+
+    assert tuple(first_delta.upserts) == (0, 1)
+    assert tuple(first_state.payloads) == (0, 1)
+    assert session.deferred_display_tiles == (2, 3)
+    assert not session.is_complete()
+
+    second_state, second_delta = session.build_tile_presentation(source_ids, max_upserts=2)
+
+    assert tuple(second_delta.upserts) == (2, 3)
+    assert tuple(second_state.payloads) == (0, 1, 2, 3)
+    assert session.deferred_display_tiles == ()
+    assert session.is_complete()
+
+
+def test_montage_render_session_prioritizes_active_tiles_for_sliced_upserts():
+    session = _session()
+    session.pending_tiles.clear()
+    session.visible_tiles = (session.plan.tiles[3], session.plan.tiles[1])
+    source_ids = {}
+    for tile in session.plan.tiles:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
+
+    _state, delta = session.build_tile_presentation(source_ids, max_upserts=1)
+
+    assert tuple(delta.upserts) == (3,)
+    assert session.deferred_display_tiles[0] == 1
+
+
+def test_montage_render_session_does_not_slice_untrusted_force_refresh():
+    session = _session()
+    session.pending_tiles.clear()
+    source_ids = {}
+    for tile in session.plan.tiles:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
+
+    state, delta = session.build_tile_presentation(
+        source_ids,
+        source_ids_trusted=False,
+        max_upserts=1,
+    )
+
+    assert delta.force_refresh
+    assert tuple(delta.upserts) == (0, 1, 2, 3)
+    assert tuple(state.payloads) == (0, 1, 2, 3)
+    assert session.deferred_display_tiles == ()

@@ -112,6 +112,7 @@ class MontageRenderSession:
     _last_active_tiles: tuple[int, ...] = ()
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
+    deferred_display_tiles: tuple[int, ...] = ()
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -350,6 +351,7 @@ class MontageRenderSession:
         source_ids: dict[int, object] | None,
         *,
         source_ids_trusted: bool = True,
+        max_upserts: int | None = None,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         source_ids = dict(source_ids or {})
         previous_payloads = dict(self.tile_presentation_state.payloads)
@@ -403,6 +405,26 @@ class MontageRenderSession:
             if int(tile) in current_payloads or int(tile) in source_ids
         }
 
+        force_refresh = not bool(source_ids_trusted)
+        # Tile materialization may finish far faster than either backend can
+        # upload or prepare it.  Keep each GUI callback bounded and let the
+        # commit timer drain the remainder without delaying active tiles.
+        if (
+            max_upserts is not None
+            and not force_refresh
+            and len(upserts) > max(1, int(max_upserts))
+        ):
+            limit = max(1, int(max_upserts))
+            priority = tuple(dict.fromkeys((*active, *near, *tuple(sorted(upserts)))))
+            selected = tuple(tile for tile in priority if tile in upserts)[:limit]
+            selected_set = set(selected)
+            self.deferred_display_tiles = tuple(
+                tile for tile in priority if tile in upserts and tile not in selected_set
+            )
+            upserts = {tile: upserts[tile] for tile in selected}
+        else:
+            self.deferred_display_tiles = ()
+
         if upserts or removals:
             self.payload_revision += 1
         if active != self._last_active_tiles or planned != self._last_planned_tiles:
@@ -428,7 +450,7 @@ class MontageRenderSession:
             planned_tiles=planned,
             near_tiles=near,
             near_tile_source_ids=near_source_ids,
-            force_refresh=not bool(source_ids_trusted),
+            force_refresh=force_refresh,
         )
         state = self.tile_presentation_state.apply_delta(delta)
         self.tile_presentation_state = state
@@ -498,6 +520,7 @@ class MontageRenderSession:
             or self.stage_waiting_tiles
             or self.final_commit_pending
             or self.flush_pending
+            or self.deferred_display_tiles
         )
 
     def initialize_canvas(self, canvas: MontageViewportCanvas) -> None:
