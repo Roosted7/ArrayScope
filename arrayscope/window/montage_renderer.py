@@ -8,6 +8,7 @@ level source tracking.
 
 from __future__ import annotations
 
+from collections import deque
 from time import monotonic, perf_counter
 
 import numpy as np
@@ -502,7 +503,9 @@ class MontageRenderMixin:
         if not keep:
             return
         pending_before = len(session.pending_tiles)
-        session.pending_tiles = [tile for tile in session.pending_tiles if int(tile.montage_index) in keep]
+        session.pending_tiles = deque(
+            tile for tile in session.pending_tiles if int(tile.montage_index) in keep
+        )
         stale = (set(session.loading_tiles) | set(session.active_tile_requests)) - keep
         if stale:
             controller = getattr(self, "montage_tile_evaluation_controller", None)
@@ -634,7 +637,7 @@ class MontageRenderMixin:
         tracker.ensure(session.level_key, expected)
         pending = getattr(session, "pending_level_tiles", None)
         if pending is None:
-            pending = []
+            pending = deque()
             session.pending_level_tiles = pending
         queued_sources = {int(item.tile.source_index) for item in pending}
         unseen = []
@@ -667,7 +670,7 @@ class MontageRenderMixin:
         expected = self._montage_level_expected_indices(session)
         processed = 0
         while pending and processed < 4:
-            rendered = pending.pop(0)
+            rendered = pending.popleft()
             self._update_montage_level_bounds_from_rendered(session.level_key, rendered, expected_indices=expected)
             processed += 1
             if processed >= 1 and (perf_counter() - stats_start) * 1000.0 >= 4.0:
@@ -1088,7 +1091,7 @@ class MontageRenderMixin:
         flush_start = perf_counter()
         processed = 0
         while session.pending_completed_tiles and processed < max_batch:
-            tile, result = session.pending_completed_tiles.pop(0)
+            tile, result = session.pending_completed_tiles.popleft()
             self._apply_montage_tile_result(session, tile, result)
             processed += 1
             if processed >= 1 and (perf_counter() - flush_start) * 1000.0 >= budget_ms:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field, replace
 from time import monotonic
 
@@ -65,7 +66,7 @@ class MontageRenderSession:
     rendered_tiles: dict[int, RenderedTile]
     loading_tiles: set[int]
     skipped_tiles: set[int]
-    pending_tiles: list[MontageTile]
+    pending_tiles: deque[MontageTile] | list[MontageTile]
     active_tile_requests: set[int] = field(default_factory=set)
     tile_stage_keys: dict[int, object] = field(default_factory=dict)
     stage_waiting_tiles: dict[object, list[MontageTile]] = field(default_factory=dict)
@@ -87,8 +88,8 @@ class MontageRenderSession:
     display_committed: bool = False
     applied_level_source: object | None = None
     user_levels_override: tuple[float, float] | None = None
-    pending_level_tiles: list[RenderedTile] = field(default_factory=list)
-    pending_completed_tiles: list[tuple[MontageTile, object]] = field(default_factory=list)
+    pending_level_tiles: deque[RenderedTile] = field(default_factory=deque)
+    pending_completed_tiles: deque[tuple[MontageTile, object]] = field(default_factory=deque)
     tile_compute_cache_hits: int = 0
     tile_compute_stage_backed: int = 0
     tile_compute_direct: int = 0
@@ -113,6 +114,14 @@ class MontageRenderSession:
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
     deferred_display_tiles: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        # These queues are drained from the front throughout progressive
+        # rendering.  Normalize caller-provided lists once so dequeue remains
+        # O(1) even for production-scale montages.
+        self.pending_tiles = deque(self.pending_tiles)
+        self.pending_level_tiles = deque(self.pending_level_tiles)
+        self.pending_completed_tiles = deque(self.pending_completed_tiles)
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -193,7 +202,7 @@ class MontageRenderSession:
         self.active_tile_requests.discard(index)
         self.loading_tiles.discard(index)
         self.skipped_tiles.discard(index)
-        self.pending_tiles = [tile for tile in self.pending_tiles if int(tile.montage_index) != index]
+        self.pending_tiles = deque(tile for tile in self.pending_tiles if int(tile.montage_index) != index)
         self.mark_tile_state(rendered.tile, MontageTileState.LOADED)
 
     def snapshot_display_tile_payloads(self, source_ids: dict[int, object]) -> dict[int, DisplayTilePayload]:
@@ -468,12 +477,14 @@ class MontageRenderSession:
             self.active_tile_requests.discard(index)
             self.loading_tiles.discard(index)
             self.skipped_tiles.add(index)
-            self.pending_tiles = [pending for pending in self.pending_tiles if int(pending.montage_index) != index]
+            self.pending_tiles = deque(
+                pending for pending in self.pending_tiles if int(pending.montage_index) != index
+            )
             self.mark_tile_state(tile, MontageTileState.SKIPPED)
 
     def next_tile(self) -> MontageTile | None:
         while self.pending_tiles:
-            tile = self.pending_tiles.pop(0)
+            tile = self.pending_tiles.popleft()
             index = int(tile.montage_index)
             if index not in self.rendered_tiles and index not in self.skipped_tiles:
                 self.mark_loading(tile)
