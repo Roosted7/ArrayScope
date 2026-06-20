@@ -547,3 +547,47 @@ Goal: answer whether VisPy should replace the PyQtGraph pixel display path while
 * [x] Replace the per-tile VisPy montage prototype with a typed, batched atlas-backed tiled renderer.
 * [ ] Prototype full VisPy shader mapping from complex scalar data to magnitude/phase/RGBA if the intensity-windowing experiment is promising.
 * [ ] Decide whether VisPy becomes the only renderer before Phase 5 feature work.
+
+## Phase 4m — unified frame scheduler and rendering surface
+
+Goal: guarantee frame progress and bounded event-loop work while keeping one semantic pipeline across
+normal images, montages, PyQtGraph, and VisPy.
+
+### P0 — trace-driven freeze fixes
+
+* [x] Commit fully cached montage pixels before complete semantic level sampling.
+* [x] Bound actual tiled upserts per GUI callback and feed real item counts into latency feedback.
+* [x] Replace front-drained list work queues with constant-time FIFO queues.
+* [x] Remove the unsupported VisPy montage canvas fallback.
+* [x] Add phase-level montage timings and a Qt-free JSONL trace summarizer.
+
+### P1 — progress-preserving visible scheduler
+
+* [ ] Add explicit presented, active, and latest frame targets.
+* [ ] Replace cancel-on-every-interaction with active-plus-latest scheduling and cost-aware cancellation.
+* [ ] Measure request-to-first-frame, exact completion, frame age, and discarded work milliseconds.
+* [ ] Allow ROI/profile/histogram work to issue immediately at lower priority and refine incrementally.
+
+### P2 — one planner, multiple storage strategies
+
+* [ ] Unify normal-image and montage planning behind one semantic frame planner.
+* [ ] Generalize tiled presentations to large single images without montage geometry.
+* [ ] Select raster versus tiled/virtual storage by dimensions, bytes, update pattern, device limits,
+  and backend capability.
+* [ ] Make clean viewport/presentation commits O(changed regions), not O(all resident payloads).
+
+### P3 — backend composition and interaction ownership
+
+* [ ] Create one shared `ImageViewShell` containing a PyQtGraph or VisPy surface.
+* [ ] Remove `VisPyImageView2D(ImageView2D)` after semantic and manual parity tests pass.
+* [ ] Move pointer capture, drag lifecycle, hover, and cursor intent fully into the shared interaction
+  controller.
+* [ ] Run one backend conformance suite plus real Qt/Wayland/OpenGL interaction tests.
+
+### P4 — adaptive residency and prediction
+
+* [ ] Record CPU preparation, upload bytes/time, queue delay, frame age, and cancellation cost by
+  backend and payload kind.
+* [ ] Adapt worker, item, byte, and interval budgets independently.
+* [ ] Add value-scored directional slice, viewport-ring, hovered, and selected-object prediction.
+* [ ] Add device-budgeted multi-page and compatible multi-resolution residency.
