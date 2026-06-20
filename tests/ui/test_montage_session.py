@@ -1,3 +1,5 @@
+from collections import deque
+
 import numpy as np
 
 from arrayscope.core.view_state import ViewState
@@ -37,6 +39,9 @@ def _session():
 def test_montage_render_session_returns_pending_tiles_in_order():
     session = _session()
 
+    assert isinstance(session.pending_tiles, deque)
+    assert isinstance(session.pending_level_tiles, deque)
+    assert isinstance(session.pending_completed_tiles, deque)
     assert session.next_tile().source_index == 0
     assert session.next_tile().source_index == 1
 
@@ -409,7 +414,7 @@ def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
     session = _session()
     session.visible_tiles = session.plan.tiles[:2]
     session.loading_tiles = {2}
-    session.pending_tiles = [session.plan.tiles[2]]
+    session.pending_tiles = deque((session.plan.tiles[2],))
 
     additions, _changed = session.retarget_viewport(
         view_range=((3.0, 4.0), (0.0, 1.0)),
