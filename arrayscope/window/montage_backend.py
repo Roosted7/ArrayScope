@@ -52,6 +52,11 @@ def choose_montage_backend(
         if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
         else renderer_backend == "vispy"
     )
+    supports_montage_canvas = (
+        bool(renderer_capabilities.supports_montage_canvas)
+        if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
+        else renderer_backend != "vispy"
+    )
     renderer_name = (
         str(renderer_capabilities.name)
         if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
@@ -63,6 +68,13 @@ def choose_montage_backend(
         return MontageBackendDecision("tile_layer", "user forced tile layer", expected_tile_layer=True)
 
     if setting == MontageDisplayBackendChoice.CANVAS:
+        if not supports_montage_canvas:
+            return MontageBackendDecision(
+                "tile_layer",
+                f"{renderer_name} does not support montage canvas; using tiled presentation",
+                warning="canvas fallback is unavailable for this rendering backend",
+                expected_tile_layer=True,
+            )
         warning = None
         if large_rgb:
             warning = "canvas fallback is manual and may be slow for large RGB/complex montage"

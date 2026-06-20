@@ -15,6 +15,7 @@ from arrayscope.app.settings_state import (
     settings_to_mapping,
 )
 from arrayscope.core.memory_budget import format_bytes
+from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
 from arrayscope.operations import fft_backend
 from arrayscope.operations.registry import operation_entries
@@ -278,6 +279,13 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(self.app_settings.montage_display_backend == choice)
             action.blockSignals(False)
+        canvas_action = self._montage_backend_actions.get(MontageDisplayBackendChoice.CANVAS)
+        if canvas_action is not None:
+            supports_canvas = image_view_backend_capabilities(getattr(self, "img_view", None)).supports_montage_canvas
+            canvas_action.setEnabled(bool(supports_canvas))
+            canvas_action.setToolTip(
+                "" if supports_canvas else "The active renderer supports montage through the tiled path only."
+            )
         for choice, action in getattr(self, "_image_rendering_backend_actions", {}).items():
             action.blockSignals(True)
             action.setChecked(self.app_settings.image_rendering_backend == choice)
