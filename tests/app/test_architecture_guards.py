@@ -183,7 +183,7 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
         Path("arrayscope/display/backends/vispy/raster.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
-        Path("arrayscope/window/montage_levels.py"),
+        Path("arrayscope/display/model/montage_levels.py"),
         Path("arrayscope/window/montage_renderer.py"),
         Path("arrayscope/window/normal_renderer.py"),
         Path("arrayscope/window/viewport_bridge.py"),
@@ -265,6 +265,7 @@ def test_display_semantics_live_in_display_package():
         Path("arrayscope/window/render_model.py"),
         Path("arrayscope/window/presentation.py"),
         Path("arrayscope/window/display_commit.py"),
+        Path("arrayscope/window/montage_levels.py"),
         Path("arrayscope/display/montage_tile_layer.py"),
         Path("arrayscope/display/vispy_tiled_renderer.py"),
     )
