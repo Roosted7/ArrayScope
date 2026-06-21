@@ -531,8 +531,7 @@ class WindowMenuMixin:
         self.layout_manager.resize_default_docks()
 
     def closeEvent(self, event):
-        self._settings.setValue("geometry", self.saveGeometry())
-        self._settings.setValue("window_state", self.saveState())
+        self.layout_manager.save_window_settings()
         self._save_app_settings()
         self._closing = True
         watcher = getattr(self, "_file_watcher", None)
