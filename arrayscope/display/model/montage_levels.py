@@ -17,23 +17,27 @@ EXACT_TILE_SAMPLE_LIMIT = 32768
 AGGREGATE_SAMPLE_LIMIT = 262144
 
 
-def montage_level_key(document_key, view_state, all_indices, colormap_lut=None) -> tuple[object, ...]:
-    """Identity for semantic montage levels, independent of presentation state.
+def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=None) -> tuple[object, ...]:
+    """Identity for semantic montage levels, independent of coverage and presentation.
 
-    A lookup table changes colours, not the scalar values used for histogram
-    and window/level decisions.  Keeping it out of this key lets both backends
-    reuse semantic tile statistics across colormap-only changes.
+    ``all_indices`` describes the currently requested coverage population, not
+    the scalar identity of a tile.  Keeping it out of the key lets panning,
+    viewport expansion, and partial retargeting reuse already sampled tile
+    statistics instead of resetting histogram/window state.  The user's
+    selected montage population remains part of the semantic scope, because
+    changing it changes which source population window/level should represent.
+    LUTs likewise change colours rather than scalar values.
     """
 
-    del colormap_lut
+    del all_indices, colormap_lut
     axis = view_state.montage_axis
-    scope_state = view_state.with_montage_axis(axis, columns=None, indices=None, text=None)
+    selected_indices = None if view_state.montage_indices is None else tuple(int(index) for index in view_state.montage_indices)
+    scope_state = view_state.with_montage_axis(axis, columns=None, indices=selected_indices, text=None)
     return (
         "montage_levels",
         document_key,
         scope_state,
         None if axis is None else int(axis),
-        tuple(int(index) for index in all_indices),
     )
 
 

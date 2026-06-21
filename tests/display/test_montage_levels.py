@@ -62,7 +62,7 @@ def test_montage_level_tracker_samples_deterministically_and_caps_aggregate():
     assert np.array_equal(sample[:5], np.asarray([0, 4, 8, 12, 16], dtype=np.float32))
 
 
-def test_montage_level_key_tracks_tile_population_but_not_layout():
+def test_montage_level_key_ignores_requested_coverage_and_layout_but_keeps_selection():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.model.montage_levels import montage_level_key
 
@@ -71,10 +71,13 @@ def test_montage_level_key_tracks_tile_population_but_not_layout():
 
     first = montage_level_key("doc", state, (0, 1, 2), None)
     second = montage_level_key("doc", relaid, (0, 1, 2), None)
-    changed_population = montage_level_key("doc", relaid, (0, 1, 2, 3), None)
+    changed_coverage = montage_level_key("doc", relaid, (0, 1, 2, 3), None)
+    shifted_selection = state.with_montage_axis(2, columns=2, indices=(1, 2, 3), text="1:4")
+    shifted = montage_level_key("doc", shifted_selection, (1, 2, 3), None)
 
     assert first == second
-    assert first != changed_population
+    assert first == changed_coverage
+    assert first != shifted
 
 
 def test_montage_level_key_ignores_colormap_lut():
