@@ -26,6 +26,31 @@ The review branch fixes those immediate defects and removes the broken VisPy can
 not attempt the riskier scheduler and widget-shell rewrite without a real Qt/OpenGL environment. That
 larger work is specified below in enough detail to implement deliberately.
 
+## Repair addendum after the 14:16/14:18 captures
+
+The follow-up traces and manual testing showed that the original seven review commits fixed the long
+event-loop freezes but introduced a different class of regressions: VisPy histogram/window flicker,
+slow one-by-one tile pop-in, destructive montage retargeting during scroll/pan, placeholders that
+disappeared before content was actually visible, and occasional queued full refreshes.
+
+The repair series keeps the freeze fixes and changes the invariants:
+
+- semantic level identity is independent of the currently requested coverage; coverage is tracked by
+  the level tracker and may only improve within one semantic generation;
+- a tile may be presented before the detailed histogram curve is rebuilt, but never before the
+  automatic level source includes that tile's semantic summary;
+- materialized CPU/GPU-ready data is not the same thing as user-visible presentation; placeholders
+  are removed only after the backend acknowledges presentation;
+- resident rebinds, existing PyQtGraph items, geometry moves, and visibility changes are cheap work
+  and must not be throttled by the same mechanism as cold texture uploads or new item creation;
+- scrolling and panning preserve retained source identities and treat entering/leaving tiles as a
+  small delta rather than as a full clear-and-reload;
+- stale deltas are rejected and backend clears require explicit reasons such as context loss, backend
+  replacement, or a true semantic revision.
+
+This means the review branch should be read as two layers: the first seven commits removed the worst
+freezes, and the repair commits restore the presentation invariants needed for smooth tiled use.
+
 ## What the recent work got right
 
 ### Backend-neutral presentation semantics
@@ -87,15 +112,19 @@ This violates the most important rendering rule: metadata refinement must never 
 
 The branch now:
 
-- commits cached pixels first;
-- uses at most one tile to seed provisional levels when needed;
-- scans remaining semantic samples in bounded timer slices;
-- retains the last valid levels while refinement continues;
+- separates semantic montage identity from the requested or visible coverage;
+- incorporates the level summaries for all tiles that are about to become active before committing
+  those tiles to the backend;
+- allows the detailed histogram curve to lag by a bounded timer slice, while the rendering level
+  source may not lag presented content;
+- retains the last valid level source and prevents lower-coverage summaries from replacing better
+  coverage within the same semantic generation;
 - excludes LUT/presentation state from the semantic level key;
 - samples finite values in one pass.
 
-Expected outcome: a fully cached restart has first-pixel latency proportional to planning and one
-bounded commit, not to the total number of cached tiles.
+Expected outcome: a fully cached restart has first-pixel latency proportional to planning, level
+summary merging for the tiles being shown, and one bounded commit. New visible tiles no longer appear
+with window levels computed from unrelated early data.
 
 ## P0 — progressive display work was not actually bounded
 
@@ -105,19 +134,18 @@ in the full commit.
 
 ### Implemented correction
 
-The session now slices actual `TilePresentationDelta.upserts`. It prioritizes:
+The first attempt sliced `TilePresentationDelta.upserts`, but follow-up testing showed that this
+throttled resident/cheap work and could serialize an already-cached montage over many callbacks. The
+repair changes the unit of control: backends now report cold work separately from resident rebinds,
+existing-item shows, geometry moves, and visibility updates.
 
-1. active visible tiles;
-2. viewport-near tiles;
-3. remaining planned payloads.
+Cold texture uploads, new PyQtGraph items, and CPU windowing are the work that must obey deadlines.
+Resident VisPy atlas entries and already-created PyQtGraph items should be rebound, moved, or shown in
+the same commit whenever possible. Feedback is recorded on typed cold-work observations rather than on
+one generic callback number.
 
-The rest stay in `deferred_display_tiles` and are drained by later timer callbacks. Force-refresh
-paths with untrusted source identity remain unsliced for correctness. Feedback receives the real
-upsert/removal count.
-
-Expected outcome: backend throughput remains high, but no materialization burst can turn into one
-hundreds-of-items GUI callback. On the captured PyQtGraph cost, an eight-tile batch would reduce 166 ms
-of CPU windowing to roughly one frame-sized slice rather than blocking for the complete set.
+Expected outcome: backend throughput remains high without allowing a cold burst to monopolize the GUI
+thread, and an already-resident 272-tile montage is not artificially paced as 272 expensive uploads.
 
 ## P0 — continuous single-image interaction can cancel all progress
 
@@ -412,11 +440,17 @@ Adopt these as tested invariants rather than aspirations:
 - request to first retained/coarse frame measured separately from exact completion;
 - last valid frame remains visible;
 - pan/zoom with resident data performs zero materialization and zero texture upload;
+- scrolling a resident tiled montage preserves retained source identities and does not clear the
+  backend;
+- placeholders persist until content has been acknowledged as presented;
+- automatic levels for visible tiles include the tiles being presented, even when the detailed
+  histogram plot is refined later;
 - presentation-only level/LUT changes perform zero texture upload on shader-capable backends;
 - cache-hit one-region and 500-region sessions have bounded first-commit latency;
 - continuous input must produce frame progress and cannot require a quiet period;
 - side analyses never gate pixel presentation;
-- diagnostics report work discarded in milliseconds and bytes, not only counts.
+- diagnostics report work discarded in milliseconds and bytes, not only counts;
+- diagnostics distinguish cold work from resident rebinds, existing-item shows, and geometry moves.
 
 ## Recommended migration sequence
 
@@ -424,12 +458,15 @@ Adopt these as tested invariants rather than aspirations:
 
 Completed in this branch:
 
-- defer cache-hit semantic sampling;
-- bound tiled upserts;
-- fix feedback item counts;
+- decouple montage semantic identity from requested coverage;
+- require level coverage for tiles before they become visible;
+- separate materialized, loading, and presented tile states;
+- replace universal upsert throttling with typed cold-work reporting;
+- preserve retained tiled payloads across viewport retargeting;
+- reject stale tiled deltas and make backend clears explicit;
 - use constant-time work queues;
 - remove VisPy canvas fallback;
-- add phase timings and trace summarization.
+- add phase timings, trace summarization, and tiled work diagnostics.
 
 ### Stage 1 — make regressions measurable
 
@@ -471,7 +508,7 @@ fast paths behind the shared contracts.
 
 ## Changes committed in this review branch
 
-Starting from `f2a22c6`:
+Starting from `f2a22c6`, the first review layer contains:
 
 1. `1c0130f` — Defer cached montage level sampling
 2. `c3cbdc6` — Remove VisPy montage canvas fallback
@@ -479,8 +516,10 @@ Starting from `f2a22c6`:
 4. `bc186a7` — Add actionable montage trace diagnostics
 5. `fe5c88a` — Move montage level semantics into display model
 6. `aa2115b` — Use constant-time montage work queues
+7. `3efc7ee` — Document unified rendering and scheduling direction
 
-The documentation and architecture decision are committed separately after these code changes.
+The repair layer starts from `3efc7ee` and adds focused commits for the seven invariants above. Those
+repair commits are intentionally additive so they can be applied on top of an existing review branch.
 
 ## Validation and limitations
 

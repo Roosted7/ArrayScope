@@ -116,12 +116,14 @@ level/histogram accumulation before committing pixels. The aggregate tracker rep
 combined samples while tiles were added. The result was effectively quadratic growth in repeated
 array work for a cache-hit path.
 
-The correct order is:
+The corrected order is:
 
-1. commit already materialized pixels;
-2. seed a provisional window from at most one bounded sample if no valid level source exists;
-3. refine semantic statistics in small timer slices;
-4. publish improved histogram metadata without invalidating texture residency.
+1. materialize or resolve cached tile payloads;
+2. merge level summaries for the tiles that will become active;
+3. choose a level source whose coverage includes the active payloads;
+4. commit those pixels;
+5. acknowledge the backend-presented tiles;
+6. refine the detailed histogram curve in small timer slices without invalidating texture residency.
 
 ### Progressive commits bounded scheduling but not GUI work
 
@@ -129,8 +131,10 @@ The tile-delta model already represented upserts and removals, but the complete 
 passed into one backend call. PyQtGraph then performed all CPU display preparation and item updates in
 that callback. VisPy could similarly receive a large upload burst.
 
-The fixed path slices actual upserts, prioritizes active then near-viewport tiles, retains the rest as
-session backlog, and records the number of upserts/removals as the feedback item count.
+The first fixed path sliced actual upserts, but the 14:16/14:18 rerun showed this was still the wrong
+unit of control: resident VisPy tiles and existing PyQtGraph items were paced like cold uploads. The
+repair path keeps resident rebinds, existing-item shows, and geometry moves cheap and immediate, while
+backends report cold uploads, new items, and CPU windowing as separate feedback channels.
 
 ### Continuous normal-image interaction can starve exact rendering
 
@@ -155,17 +159,27 @@ latest view. The important point is that continuous input must not reset all pro
 
 ## Fixes made in this review branch
 
-- cache-hit montage pixels commit before complete level sampling;
-- semantic level refinement is bounded and deferred;
-- colormap/presentation state no longer invalidates semantic montage statistics;
-- actual tiled upserts are bounded per GUI callback;
-- active and near-viewport upserts are prioritized;
-- deferred upserts remain explicit session backlog;
-- feedback records real item counts;
+- cache-hit montage pixels commit before complete detailed histogram reconstruction;
+- level coverage for presented tiles is required before backend presentation;
+- semantic level identity is independent of requested coverage and LUT/presentation state;
+- materialized tiles remain loading until backend presentation is acknowledged;
+- resident/reused tiled work is not throttled as cold upload work;
+- retargeting preserves compatible source-keyed payloads and avoids destructive clears;
+- stale tiled deltas are rejected; backend clears carry explicit reasons;
 - progressive queues use constant-time front removal;
 - VisPy no longer advertises or exposes the broken montage canvas fallback;
 - phase-level synchronous montage timings were added;
-- a Qt-free JSONL trace summarizer was added.
+- a Qt-free JSONL trace summarizer and tiled work counters were added.
+
+## Follow-up 14:16/14:18 rerun
+
+The follow-up captures confirmed that the long event-loop freezes were gone, but exposed regressions in
+tiled presentation semantics: VisPy level/histogram flicker, one-by-one tile pop-in in both backends,
+scroll retargets that cleared retained content, placeholders that disappeared before visible content,
+and occasional queued full refreshes. The repair commits are therefore aimed at preserving the freeze
+fix while restoring presentation invariants. The important diagnostic distinction is cold work versus
+resident/reused work: a large commit with zero uploads is not the same risk as a large cold-upload
+commit and must not be throttled the same way.
 
 ## Measurements required for the next capture
 
@@ -177,7 +191,9 @@ The next capture should include, per session and per callback:
 - session construction time;
 - first pixel commit time;
 - number and bytes of tile upserts/removals;
-- CPU preparation milliseconds per item;
+- cold tile uploads, new PyQtGraph items, CPU-windowed tiles, resident rebinds, existing-item shows,
+  and geometry-only moves separately;
+- CPU preparation milliseconds per cold item;
 - GPU upload milliseconds and bytes;
 - draw/vertex submissions;
 - time from request to first usable frame;

@@ -233,6 +233,27 @@ sampling geometry assumes one tile shape.
 Each step must preserve a runnable backend and land with semantic conformance tests. Compatibility
 shims may remain during migration but cannot acquire new behavior.
 
+
+## Revision after the tiled-montage repair
+
+The post-review repair clarifies three invariants that the scheduler and backend protocol must enforce
+from the start:
+
+1. **Level coverage gates presentation, detailed histograms do not.** A tile may be shown before the
+   histogram widget has its final aggregate curve, but the automatic window/level source used for the
+   tile must already include that tile's semantic summary.
+2. **Lifecycle states are explicit.** Requested/materialized/resident/presented are different states.
+   Placeholders are cleared only by acknowledged presentation, not by worker completion or queueing a
+   backend commit.
+3. **Budgets apply to cold work.** Resident atlas rebinds, existing PyQtGraph item shows, visibility
+   updates, and geometry moves are not equivalent to cold uploads or CPU windowing. Feedback and
+   deadlines must report those categories separately.
+
+Unknown source identity is not a reason to clear a backend. Clears are explicit recovery operations
+with reasons such as context loss, backend replacement, semantic document revision, or incompatible
+texture representation changes. Stale presentation deltas are rejected by revision instead of being
+allowed to mutate newer state.
+
 ## Consequences
 
 Positive:
