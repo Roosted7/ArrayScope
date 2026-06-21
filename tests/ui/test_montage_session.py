@@ -46,7 +46,7 @@ def test_montage_render_session_returns_pending_tiles_in_order():
     assert session.next_tile().source_index == 1
 
 
-def test_montage_render_session_mark_loaded_moves_tile_from_loading_to_loaded():
+def test_montage_render_session_materialized_tile_stays_loading_until_presented():
     session = _session()
     tile = session.next_tile()
     rendered = RenderedTile(tile, np.ones((2, 2), dtype=np.float32), np.ones((2, 2), dtype=np.float32), 0.0, (2, 2), 16)
@@ -54,8 +54,13 @@ def test_montage_render_session_mark_loaded_moves_tile_from_loading_to_loaded():
     session.mark_loaded(rendered)
 
     assert session.is_tile_loaded(tile)
-    assert int(tile.montage_index) not in session.loading_tiles
+    assert int(tile.montage_index) in session.loading_tiles
     assert tile not in session.pending_tiles
+
+    session.mark_presented((tile.montage_index,))
+
+    assert int(tile.montage_index) not in session.loading_tiles
+    assert int(tile.montage_index) in session.presented_tiles
 
 
 def test_montage_render_session_keeps_skipped_separate_from_pending():
@@ -410,6 +415,25 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
     assert state.active_payloads(delta) == {}
 
 
+def test_temporary_materialization_gap_does_not_remove_committed_payloads():
+    session = _session()
+    source_ids = {}
+    for tile in session.plan.tiles[:2]:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
+    first_state, first_delta = session.build_tile_presentation(source_ids)
+    session.mark_presented(first_state.active_payloads(first_delta))
+
+    session.rendered_tiles.clear()
+    session.display_tile_payloads.clear()
+    next_state, next_delta = session.build_tile_presentation(source_ids)
+
+    assert next_delta.removals == ()
+    assert tuple(next_state.payloads) == (0, 1)
+    assert session.ensure_tile_states()[0].value == "loaded"
+
+
 def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
     session = _session()
     session.visible_tiles = session.plan.tiles[:2]
@@ -425,7 +449,7 @@ def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
     assert 2 not in {tile.montage_index for tile in additions}
 
 
-def test_montage_render_session_slices_tiled_upserts_without_losing_payloads():
+def test_montage_render_session_passes_cold_deadline_without_slicing_upserts():
     session = _session()
     session.pending_tiles.clear()
     source_ids = {}
@@ -434,22 +458,19 @@ def test_montage_render_session_slices_tiled_upserts_without_losing_payloads():
         session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
-    first_state, first_delta = session.build_tile_presentation(source_ids, max_upserts=2)
+    first_state, first_delta = session.build_tile_presentation(source_ids, cold_deadline_ms=3.5)
 
-    assert tuple(first_delta.upserts) == (0, 1)
-    assert tuple(first_state.payloads) == (0, 1)
-    assert session.deferred_display_tiles == (2, 3)
+    assert tuple(first_delta.upserts) == (0, 1, 2, 3)
+    assert tuple(first_state.payloads) == (0, 1, 2, 3)
+    assert first_delta.cold_deadline_ms == 3.5
+    assert session.deferred_display_tiles == ()
     assert not session.is_complete()
 
-    second_state, second_delta = session.build_tile_presentation(source_ids, max_upserts=2)
-
-    assert tuple(second_delta.upserts) == (2, 3)
-    assert tuple(second_state.payloads) == (0, 1, 2, 3)
-    assert session.deferred_display_tiles == ()
+    session.mark_presented(first_state.active_payloads(first_delta))
     assert session.is_complete()
 
 
-def test_montage_render_session_prioritizes_active_tiles_for_sliced_upserts():
+def test_montage_render_session_tile_states_keep_materialized_tiles_loading_until_presented():
     session = _session()
     session.pending_tiles.clear()
     session.visible_tiles = (session.plan.tiles[3], session.plan.tiles[1])
@@ -459,13 +480,21 @@ def test_montage_render_session_prioritizes_active_tiles_for_sliced_upserts():
         session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
-    _state, delta = session.build_tile_presentation(source_ids, max_upserts=1)
+    state, delta = session.build_tile_presentation(source_ids)
+    tile_states = session.ensure_tile_states()
 
-    assert tuple(delta.upserts) == (3,)
-    assert session.deferred_display_tiles[0] == 1
+    assert tuple(delta.upserts) == (0, 1, 2, 3)
+    assert tuple(state.active_payloads(delta)) == (3, 1)
+    assert {str(tile_states[index].value) for index in range(4)} == {"loading"}
+
+    session.mark_presented(state.active_payloads(delta))
+    tile_states = session.ensure_tile_states()
+
+    assert {index for index in range(4) if tile_states[index].value == "loaded"} == {1, 3}
+    assert {index for index in range(4) if tile_states[index].value == "loading"} == {0, 2}
 
 
-def test_montage_render_session_does_not_slice_untrusted_force_refresh():
+def test_montage_render_session_does_not_force_clear_for_untrusted_source_ids():
     session = _session()
     session.pending_tiles.clear()
     source_ids = {}
@@ -480,7 +509,86 @@ def test_montage_render_session_does_not_slice_untrusted_force_refresh():
         max_upserts=1,
     )
 
-    assert delta.force_refresh
+    assert not delta.force_refresh
+    assert delta.clear_reason == ""
     assert tuple(delta.upserts) == (0, 1, 2, 3)
     assert tuple(state.payloads) == (0, 1, 2, 3)
     assert session.deferred_display_tiles == ()
+
+
+
+def test_tile_presentation_state_rejects_stale_delta():
+    session = _session()
+    tile = session.plan.tiles[0]
+    image = np.ones((2, 2), dtype=np.float32)
+    session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+    state, delta = session.build_tile_presentation({0: ("tile-source", 0)})
+
+    stale = type(delta)(
+        structure_revision=delta.structure_revision,
+        payload_revision=delta.payload_revision + 1,
+        visibility_revision=delta.visibility_revision,
+        level_revision=delta.level_revision,
+        histogram_revision=delta.histogram_revision,
+        viewport_revision=delta.viewport_revision,
+        base_revision=delta.base_revision,
+        target_revision=delta.target_revision + 1,
+        upserts=delta.upserts,
+    )
+
+    assert state.revision == delta.target_revision
+    assert state.apply_delta(stale) is state
+
+
+def test_seeded_payloads_retain_committed_state_across_retarget():
+    original = _session()
+    tile = original.plan.tiles[2]
+    image = np.full((2, 2), 2, dtype=np.float32)
+    rendered = RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
+    original.mark_loaded(rendered)
+    source_ids = {2: ("tile-source", 2)}
+    state, delta = original.build_tile_presentation(source_ids)
+    original.mark_presented(state.active_payloads(delta))
+
+    shifted_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(2, 3), text="2:4")
+    shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2)
+    shifted_rendered = RenderedTile(
+        shifted_plan.tiles[0],
+        image,
+        image,
+        0.0,
+        image.shape,
+        image.nbytes,
+    )
+    shifted = MontageRenderSession(
+        session_id=2,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        level_expected_indices=(2, 3),
+        plan=shifted_plan,
+        view_state=shifted_state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(10, 10),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=shifted_plan.tiles,
+        rendered_tiles={0: shifted_rendered},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+
+    shifted.seed_display_tile_payloads(state.payloads, {0: ("tile-source", 2)})
+    next_state, next_delta = shifted.build_tile_presentation({0: ("tile-source", 2), 1: ("tile-source", 3)})
+
+    assert 0 in next_state.payloads
+    assert next_state.payloads[0].source_index == 2
+    assert next_delta.removals == ()
+    assert next_delta.upserts == {}
+    assert 0 in shifted.presented_tiles

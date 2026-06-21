@@ -68,6 +68,7 @@ class MontageRenderSession:
     skipped_tiles: set[int]
     pending_tiles: deque[MontageTile] | list[MontageTile]
     active_tile_requests: set[int] = field(default_factory=set)
+    presented_tiles: set[int] = field(default_factory=set)
     tile_stage_keys: dict[int, object] = field(default_factory=dict)
     stage_waiting_tiles: dict[object, list[MontageTile]] = field(default_factory=dict)
     active_stage_requests: set[object] = field(default_factory=set)
@@ -192,6 +193,16 @@ class MontageRenderSession:
         return additions
 
     def mark_loaded(self, rendered: RenderedTile) -> None:
+        """Compatibility alias for the materialization stage.
+
+        A tile is not user-visible merely because CPU/GPU source data has
+        arrived.  It becomes loaded only once the presentation backend has
+        accepted it through ``mark_presented``.
+        """
+
+        self.mark_materialized(rendered)
+
+    def mark_materialized(self, rendered: RenderedTile) -> None:
         index = int(rendered.tile.montage_index)
         self.rendered_tiles[index] = rendered
         # A replacement tile must be assigned a fresh semantic source identity
@@ -200,10 +211,22 @@ class MontageRenderSession:
         self.tile_source_ids.pop(index, None)
         self.display_tile_payloads.pop(index, None)
         self.active_tile_requests.discard(index)
-        self.loading_tiles.discard(index)
         self.skipped_tiles.discard(index)
         self.pending_tiles = deque(tile for tile in self.pending_tiles if int(tile.montage_index) != index)
-        self.mark_tile_state(rendered.tile, MontageTileState.LOADED)
+        if index not in self.presented_tiles:
+            self.loading_tiles.add(index)
+            self.mark_tile_state(rendered.tile, MontageTileState.LOADING)
+
+    def mark_presented(self, tile_numbers) -> None:
+        for tile_number in tuple(tile_numbers or ()):
+            index = int(tile_number)
+            if index not in self.rendered_tiles:
+                continue
+            self.presented_tiles.add(index)
+            self.loading_tiles.discard(index)
+            self.skipped_tiles.discard(index)
+            if 0 <= index < len(self.plan.tiles):
+                self.mark_tile_state(self.plan.tiles[index], MontageTileState.LOADED)
 
     def snapshot_display_tile_payloads(self, source_ids: dict[int, object]) -> dict[int, DisplayTilePayload]:
         """Return immutable-by-convention payload wrappers for loaded tiles.
@@ -264,41 +287,61 @@ class MontageRenderSession:
         return dict(self.display_tile_payloads)
 
     def seed_display_tile_payloads(self, previous_payloads: dict[int, DisplayTilePayload], source_ids: dict[int, object]) -> None:
-        """Reuse materialized payload wrappers from a previous compatible tiled frame."""
+        """Reuse compatible wrappers *and committed presentation ownership*.
+
+        Retargeting a montage is a placement change, not evidence that resident
+        tiles disappeared.  Seeding only the wrapper cache left the committed
+        tiled state empty in fresh sessions, so destructive removals could be
+        emitted before replacement upserts.  Exact source identities are still
+        required, so semantic changes do not reuse stale pixels.
+        """
 
         if not previous_payloads or not self.rendered_tiles:
             return
         lod_factor = self._selected_lod_factor()
         by_source = {payload.source_id: payload for payload in dict(previous_payloads).values()}
+        seeded_state = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
+        changed_state = False
         for tile_number, rendered in self.rendered_tiles.items():
             tile_number = int(tile_number)
-            if tile_number in self.display_tile_payloads:
-                continue
-            base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
-            texture_data, _texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
-            source_id = self._payload_source_id(
-                base_source_id,
-                texture_kind=getattr(rendered, "texture_kind", None),
-                mapping=getattr(rendered, "shader_mapping", None),
-                lod=lod,
-                texture_data=texture_data,
-            )
-            previous = by_source.get(source_id)
+            previous = self.display_tile_payloads.get(tile_number)
+            if previous is None:
+                base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
+                texture_data, _texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
+                source_id = self._payload_source_id(
+                    base_source_id,
+                    texture_kind=getattr(rendered, "texture_kind", None),
+                    mapping=getattr(rendered, "shader_mapping", None),
+                    lod=lod,
+                    texture_data=texture_data,
+                )
+                previous = by_source.get(source_id)
             if previous is None:
                 continue
             if int(previous.tile_number) == tile_number and int(previous.source_index) == int(rendered.tile.source_index):
-                self.display_tile_payloads[tile_number] = previous
+                payload = previous
             else:
-                self.display_tile_payloads[tile_number] = replace(
+                payload = replace(
                     previous,
                     tile_number=tile_number,
                     source_index=int(rendered.tile.source_index),
                 )
+            self.display_tile_payloads[tile_number] = payload
+            if seeded_state.get(tile_number) is not payload:
+                seeded_state[tile_number] = payload
+                changed_state = True
+        if changed_state:
+            self.tile_presentation_state = TilePresentationState(
+                seeded_state,
+                revision=int(getattr(self.tile_presentation_state, "revision", 0)),
+            )
+            self.presented_tiles.update(int(tile) for tile in seeded_state)
 
     def _payload_source_id(self, base_source_id, *, texture_kind, mapping, lod: LodInfo, texture_data) -> tuple[object, ...]:
         del mapping
+        prefix = tuple(base_source_id) if isinstance(base_source_id, tuple) else (base_source_id,)
         return (
-            base_source_id,
+            *prefix,
             "texture_kind",
             None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
             # Shader uniforms do not change texture content.  Keeping this
@@ -361,12 +404,21 @@ class MontageRenderSession:
         *,
         source_ids_trusted: bool = True,
         max_upserts: int | None = None,
+        cold_deadline_ms: float | None = None,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
+        del source_ids_trusted
         source_ids = dict(source_ids or {})
         previous_payloads = dict(self.tile_presentation_state.payloads)
         current_payloads = self.snapshot_display_tile_payloads(source_ids)
         current_loaded = set(current_payloads)
-        removals = tuple(sorted(int(tile) for tile in previous_payloads if int(tile) not in current_loaded))
+        valid_tiles = set(range(len(tuple(getattr(self.plan, "tiles", ()) or ()))))
+        removals = tuple(
+            sorted(
+                int(tile)
+                for tile in previous_payloads
+                if int(tile) not in valid_tiles or int(tile) in self.skipped_tiles
+            )
+        )
         upserts: dict[int, DisplayTilePayload] = {}
         for tile_number, payload in sorted(current_payloads.items()):
             previous = previous_payloads.get(int(tile_number))
@@ -414,26 +466,17 @@ class MontageRenderSession:
             if int(tile) in current_payloads or int(tile) in source_ids
         }
 
-        force_refresh = not bool(source_ids_trusted)
-        # Tile materialization may finish far faster than either backend can
-        # upload or prepare it.  Keep each GUI callback bounded and let the
-        # commit timer drain the remainder without delaying active tiles.
-        if (
-            max_upserts is not None
-            and not force_refresh
-            and len(upserts) > max(1, int(max_upserts))
-        ):
-            limit = max(1, int(max_upserts))
-            priority = tuple(dict.fromkeys((*active, *near, *tuple(sorted(upserts)))))
-            selected = tuple(tile for tile in priority if tile in upserts)[:limit]
-            selected_set = set(selected)
-            self.deferred_display_tiles = tuple(
-                tile for tile in priority if tile in upserts and tile not in selected_set
-            )
-            upserts = {tile: upserts[tile] for tile in selected}
-        else:
-            self.deferred_display_tiles = ()
+        force_refresh = False
+        clear_reason = ""
+        self.deferred_display_tiles = ()
+        if max_upserts is not None:
+            # Retained for old callers/tests only.  Work budgeting belongs to
+            # the backend, where cold uploads/item creation can be separated
+            # from cheap resident rebinds and geometry updates.
+            del max_upserts
 
+        base_revision = int(getattr(self.tile_presentation_state, "revision", 0))
+        target_revision = base_revision + (1 if upserts or removals else 0)
         if upserts or removals:
             self.payload_revision += 1
         if active != self._last_active_tiles or planned != self._last_planned_tiles:
@@ -453,6 +496,9 @@ class MontageRenderSession:
             level_revision=self.level_revision,
             histogram_revision=self.histogram_revision,
             viewport_revision=self.viewport_revision,
+            base_revision=base_revision,
+            target_revision=target_revision,
+            cold_deadline_ms=cold_deadline_ms,
             upserts=upserts,
             removals=removals,
             active_tiles=active,
@@ -460,6 +506,7 @@ class MontageRenderSession:
             near_tiles=near,
             near_tile_source_ids=near_source_ids,
             force_refresh=force_refresh,
+            clear_reason=clear_reason,
         )
         state = self.tile_presentation_state.apply_delta(delta)
         self.tile_presentation_state = state
@@ -507,11 +554,11 @@ class MontageRenderSession:
             index = int(index)
             if 0 <= index < len(states):
                 states[index] = MontageTileState.SKIPPED
-        for index in tuple(self.loading_tiles):
+        for index in set(self.loading_tiles) | (set(self.rendered_tiles) - set(self.presented_tiles)):
             index = int(index)
             if 0 <= index < len(states) and states[index] != MontageTileState.SKIPPED:
                 states[index] = MontageTileState.LOADING
-        for index in tuple(self.rendered_tiles):
+        for index in set(self.presented_tiles):
             index = int(index)
             if 0 <= index < len(states):
                 states[index] = MontageTileState.LOADED
@@ -566,7 +613,9 @@ class MontageRenderSession:
         if self.canvas is None:
             return False
         dirty = patch_rendered_tile_into_canvas(rendered, self.canvas)
-        self.mark_tile_state(rendered.tile, MontageTileState.LOADED)
+        index = int(rendered.tile.montage_index)
+        self.rendered_tiles[index] = rendered
+        self.mark_presented((index,))
         if dirty is None:
             return False
         self.dirty_rects.append(tuple(int(value) for value in dirty))
@@ -592,6 +641,12 @@ class MontageRenderSession:
 def _base_source_id(source_id) -> object:
     if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
         return source_id[0]
+    if isinstance(source_id, tuple) and "texture_kind" in source_id:
+        marker = source_id.index("texture_kind")
+        prefix = source_id[:marker]
+        if not prefix:
+            return None
+        return prefix[0] if len(prefix) == 1 else prefix
     return source_id
 
 
