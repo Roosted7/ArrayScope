@@ -218,7 +218,13 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         return " ".join(f"d{axis}={self.view_state.slice_indices[axis]}" for axis in axes)
 
     def _on_image_mouse_moved(self, pos):
+        self._last_image_mouse_scene_pos = pos
         self.getPixel(pos)
+
+    def _refresh_hover_after_display_commit(self) -> None:
+        pos = getattr(self, "_last_image_mouse_scene_pos", None)
+        if pos is not None:
+            self.getPixel(pos)
 
     def _on_profile_marker_moved(self, image_x, image_y):
         if not self.widgets['buttons']['display']['live_profile'].isChecked():

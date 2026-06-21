@@ -502,12 +502,20 @@ class VisPyImageView2D(ImageView2D):
                     or int(getattr(previous_layer_stats, "active_pages", 0) or 0) > 0
                 )
             )
+            requested_presented_tiles = _requested_direct_payload_tiles(montage_tile_payloads, tile_delta)
+            previous_presented_tiles = getattr(previous_layer_stats, "presented_tiles", None)
+            presentation_incomplete = bool(
+                montage_tile_payloads is not None
+                and previous_presented_tiles is not None
+                and set(int(tile) for tile in tuple(previous_presented_tiles or ())) != requested_presented_tiles
+            )
             data_unchanged = (
                 montage_tile_payloads is not None
                 and montage_dirty_tiles == ()
                 and source_key == previous_source_key
                 and not structure_changed
                 and not must_clear_visible_pages
+                and not presentation_incomplete
             )
 
             self.image = img
@@ -528,10 +536,12 @@ class VisPyImageView2D(ImageView2D):
                 from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
                 visible = len(montage_tile_payloads or {})
+                presented = getattr(previous_layer_stats, "presented_tiles", None)
                 stats = TileLayerUpdateStats(
-                    visible_items=visible,
+                    visible_items=len(tuple(presented or ())) if presented is not None else visible,
+                    presented_tiles=None if presented is None else tuple(int(tile) for tile in presented),
                     items_updated=0,
-                    items_skipped=visible,
+                    items_skipped=len(tuple(presented or ())) if presented is not None else visible,
                     rgb_window_tiles=0,
                     resident_items=int(getattr(previous_layer_stats, "resident_items", 0) or 0),
                     storage_capacity=int(getattr(previous_layer_stats, "atlas_capacity", 0) or 0),
@@ -616,7 +626,7 @@ class VisPyImageView2D(ImageView2D):
             for tile, payload in tile_state.near_payloads(tile_delta).items()
             if int(tile) not in tile_payloads
         }
-        dirty_tiles = None if tile_delta.force_refresh else ()
+        dirty_tiles = None if tile_delta.force_refresh else tuple(tile_delta.upserts)
         placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
         stats = self._apply_vispy_tile_layer_presentation(
             placeholder,
@@ -1492,6 +1502,7 @@ class VisPyImageView2D(ImageView2D):
         dirty = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
         level_tuple = (float(levels[0]), float(levels[1]))
         visible_items = 0
+        presented_tiles: list[int] = []
         updated = 0
         skipped = 0
         rgb_tiles = 0
@@ -1517,6 +1528,7 @@ class VisPyImageView2D(ImageView2D):
                 self._hide_vispy_tile(tile_number)
                 continue
             visible_items += 1
+            presented_tiles.append(int(tile_number))
             source_id = None if tile_source_ids is None else tile_source_ids.get(tile_number)
             sx0 = max(0, cx0)
             sy0 = max(0, cy0)
@@ -1597,7 +1609,13 @@ class VisPyImageView2D(ImageView2D):
         for tile_number in tuple(self._vispy_tile_visuals):
             if tile_number not in active:
                 self._hide_vispy_tile(tile_number)
-        return TileLayerUpdateStats(visible_items=visible_items, items_updated=updated, items_skipped=skipped, rgb_window_tiles=rgb_tiles)
+        return TileLayerUpdateStats(
+            visible_items=visible_items,
+            presented_tiles=tuple(presented_tiles),
+            items_updated=updated,
+            items_skipped=skipped,
+            rgb_window_tiles=rgb_tiles,
+        )
 
     def _update_vispy_direct_tile_layer(
         self,
@@ -1624,7 +1642,6 @@ class VisPyImageView2D(ImageView2D):
             _set_visual_visible(state.image_visual, False)
             _set_visual_visible(state.windowed_visual, False)
             state.visible = False
-        states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
         if tile_delta is not None:
             active_set = {int(tile) for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())}
         else:
@@ -1633,15 +1650,21 @@ class VisPyImageView2D(ImageView2D):
         for tile_number, _source_index in enumerate(tuple(montage.indices)):
             if int(tile_number) not in active_set:
                 continue
-            kind = "loaded"
-            if states and tile_number < len(states):
-                kind = str(getattr(states[tile_number], "value", states[tile_number]))
-            if kind == "loaded" and int(tile_number) in tile_payloads:
+            if int(tile_number) in tile_payloads:
                 loaded_payloads[int(tile_number)] = tile_payloads[int(tile_number)]
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         if layer is None:
             return TileLayerUpdateStats()
-        if (force_levels or force_mapping) and getattr(layer, "last_stats", None).visible_items:
+        previous_presented = getattr(getattr(layer, "last_stats", None), "presented_tiles", None)
+        presentation_complete = (
+            previous_presented is None
+            or set(int(tile) for tile in tuple(previous_presented or ())) == set(loaded_payloads)
+        )
+        if (
+            (force_levels or force_mapping)
+            and getattr(layer, "last_stats", None).visible_items
+            and presentation_complete
+        ):
             stats = layer.set_presentation_uniforms(
                 levels=levels,
                 shader_mapping=shader_mapping,
@@ -1666,6 +1689,7 @@ class VisPyImageView2D(ImageView2D):
                 previous = getattr(layer, "last_stats", None)
                 stats = GpuMontageLayerStats(
                     visible_items=len(loaded_payloads),
+                    presented_tiles=(),
                     resident_items=int(getattr(previous, "resident_items", 0) or 0),
                     atlas_capacity=int(getattr(previous, "atlas_capacity", 0) or 0),
                     estimated_gpu_bytes=int(getattr(previous, "estimated_gpu_bytes", 0) or 0),
@@ -1684,6 +1708,7 @@ class VisPyImageView2D(ImageView2D):
             self._hide_vispy_tile(tile_number)
         return TileLayerUpdateStats(
             visible_items=int(stats.visible_items),
+            presented_tiles=None if stats.presented_tiles is None else tuple(int(tile) for tile in stats.presented_tiles),
             items_updated=int(stats.items_updated),
             items_skipped=int(stats.items_skipped),
             rgb_window_tiles=0,
@@ -1829,6 +1854,14 @@ def _tiled_source_key(tile_payloads, tile_source_ids):
         )
         for tile, payload in sorted(dict(tile_payloads).items())
     )
+
+
+def _requested_direct_payload_tiles(tile_payloads, tile_delta) -> set[int]:
+    payload_tiles = set(int(tile) for tile in dict(tile_payloads or {}))
+    if tile_delta is None:
+        return payload_tiles
+    active_tiles = set(int(tile) for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ()))
+    return payload_tiles.intersection(active_tiles)
 
 
 def _shader_mapping_key(mapping):

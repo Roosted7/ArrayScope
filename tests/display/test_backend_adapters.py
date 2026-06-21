@@ -94,6 +94,7 @@ def _tiled_presentation():
         histogram_range=raster.histogram_range,
         viewport_policy=raster.viewport_policy,
         tile_state=state,
+        base_tile_state=TilePresentationState(),
         tile_delta=delta,
         tile_residency_budget_bytes=1024,
         shader_mapping=ShaderMapping(),

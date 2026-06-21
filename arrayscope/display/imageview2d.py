@@ -564,7 +564,7 @@ class ImageView2D(QtWidgets.QWidget):
 
         del shader_mapping  # PyQtGraph receives already materialized display pixels.
         tile_payloads = tile_state.active_payloads(tile_delta)
-        dirty_tiles = None if tile_delta.force_refresh else ()
+        dirty_tiles = None if tile_delta.force_refresh else tuple(tile_delta.upserts)
         placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
         stats = self._apply_tile_layer_presentation(
             placeholder,
@@ -1822,7 +1822,16 @@ def _tiled_montage_placeholder(display_shape, tile_payloads) -> np.ndarray:
 def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     payloads = dict(tile_payloads or {})
     deferred = frozenset(int(tile) for tile in tuple(getattr(stats, "deferred_tiles", ()) or ()))
-    presented = frozenset(int(tile) for tile in payloads if int(tile) not in deferred)
+    backend_presented = getattr(stats, "presented_tiles", None)
+    if backend_presented is not None:
+        presented = frozenset(int(tile) for tile in tuple(backend_presented or ()) if int(tile) in payloads)
+        deferred = deferred.union(int(tile) for tile in payloads if int(tile) not in presented)
+    else:
+        visible_items = int(getattr(stats, "visible_items", len(payloads)) or 0)
+        if visible_items < len(payloads):
+            payload_order = tuple(sorted(int(tile) for tile in payloads))
+            deferred = deferred.union(payload_order[max(0, visible_items):])
+        presented = frozenset(int(tile) for tile in payloads if int(tile) not in deferred)
     texture_uploads = int(getattr(stats, "texture_uploads", 0) or 0)
     items_created = int(getattr(stats, "items_created", 0) or 0)
     rgb_window_tiles = int(getattr(stats, "rgb_window_tiles", 0) or 0)

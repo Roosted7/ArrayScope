@@ -115,6 +115,32 @@ def test_hover_reads_op_backed_display_without_scalar_evaluation(qtbot, monkeypa
         win.close()
 
 
+def test_stationary_hover_refreshes_after_slice_change(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.arange(2 * 2 * 2, dtype=float).reshape(2, 2, 2)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(1.1, 1.1))
+        win._on_image_mouse_moved(scene_pos)
+        _process_events(qtbot, count=5)
+        assert "6" in win.widgets["labels"]["pixelValue"].text()
+
+        win._set_view_state(win.view_state.with_slice(2, 1))
+        win.render(reason="test-stationary-hover")
+        _process_events(qtbot, count=20)
+
+        text = win.widgets["labels"]["pixelValue"].text()
+        assert "7" in text
+    finally:
+        win.close()
+
+
 def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

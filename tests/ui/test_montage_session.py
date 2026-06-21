@@ -4,6 +4,7 @@ import numpy as np
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.montage import RenderedTile, make_montage_plan
+from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, ShaderScale, TexturePlaneKind
 from arrayscope.window.montage_session import MontageRenderSession
 
@@ -112,6 +113,7 @@ def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})
     second = session.snapshot_display_tile_payloads({0: ("tile", 0)})
     state, delta = session.build_tile_presentation({0: ("tile", 0)})
+    session.acknowledge_tile_presentation(delta, TileCommitReport(presented_tiles=(0,)))
     clean_state, clean_delta = session.build_tile_presentation({0: ("tile", 0)})
 
     assert second[0] is first[0]
@@ -125,6 +127,49 @@ def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes
     assert third_state.payloads[0] is not first[0]
     assert third_state.payloads[0].image is replacement
     assert third_delta.upserts[0] is third_state.payloads[0]
+
+
+def test_montage_render_session_retries_deferred_payload_until_backend_acknowledges():
+    session = _session()
+    tile = session.plan.tiles[0]
+    image = np.ones((2, 2), dtype=np.float32)
+    session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+
+    proposed, delta = session.build_tile_presentation({0: ("tile", 0)})
+
+    assert 0 in proposed.payloads
+    assert session.tile_presentation_state.payloads == {}
+
+    session.acknowledge_tile_presentation(delta, TileCommitReport(deferred_tiles=(0,)))
+    retry_state, retry_delta = session.build_tile_presentation({0: ("tile", 0)})
+
+    assert session.tile_presentation_state.payloads == {}
+    assert retry_delta.upserts == {0: proposed.payloads[0]}
+    assert retry_state.payloads[0] is proposed.payloads[0]
+
+    session.acknowledge_tile_presentation(retry_delta, TileCommitReport(presented_tiles=(0,)))
+
+    assert session.tile_presentation_state.payloads[0] is proposed.payloads[0]
+    assert 0 not in session.dirty_payloads
+    assert session.deferred_display_tiles == ()
+
+
+def test_montage_render_session_dirty_payloads_keep_session_incomplete_until_acknowledged():
+    session = _session()
+    tile = session.plan.tiles[0]
+    image = np.ones((2, 2), dtype=np.float32)
+    session.pending_tiles.clear()
+    session.loading_tiles.clear()
+
+    session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+
+    assert not session.is_complete()
+
+    state, delta = session.build_tile_presentation({0: ("tile", 0)})
+    session.acknowledge_tile_presentation(delta, TileCommitReport(presented_tiles=state.active_payloads(delta)))
+    session.mark_presented(state.active_payloads(delta))
+
+    assert session.is_complete()
 
 
 def test_montage_render_session_delta_carries_near_sources_without_payloads():
@@ -423,6 +468,10 @@ def test_temporary_materialization_gap_does_not_remove_committed_payloads():
         session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
     first_state, first_delta = session.build_tile_presentation(source_ids)
+    session.acknowledge_tile_presentation(
+        first_delta,
+        TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)),
+    )
     session.mark_presented(first_state.active_payloads(first_delta))
 
     session.rendered_tiles.clear()
@@ -466,6 +515,10 @@ def test_montage_render_session_passes_cold_deadline_without_slicing_upserts():
     assert session.deferred_display_tiles == ()
     assert not session.is_complete()
 
+    session.acknowledge_tile_presentation(
+        first_delta,
+        TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)),
+    )
     session.mark_presented(first_state.active_payloads(first_delta))
     assert session.is_complete()
 
@@ -487,6 +540,10 @@ def test_montage_render_session_tile_states_keep_materialized_tiles_loading_unti
     assert tuple(state.active_payloads(delta)) == (3, 1)
     assert {str(tile_states[index].value) for index in range(4)} == {"loading"}
 
+    session.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(presented_tiles=state.active_payloads(delta)),
+    )
     session.mark_presented(state.active_payloads(delta))
     tile_states = session.ensure_tile_states()
 
@@ -548,6 +605,10 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
     original.mark_loaded(rendered)
     source_ids = {2: ("tile-source", 2)}
     state, delta = original.build_tile_presentation(source_ids)
+    original.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(presented_tiles=state.active_payloads(delta)),
+    )
     original.mark_presented(state.active_payloads(delta))
 
     shifted_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(2, 3), text="2:4")

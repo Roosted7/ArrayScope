@@ -181,8 +181,10 @@ def _presentation_for_payload(payload, *, levels, histogram_range):
     if payload.tile_state is not None or payload.tile_delta is not None:
         if payload.tile_state is None or payload.tile_delta is None:
             raise ValueError("tiled presentations require both tile_state and tile_delta")
+        base_tile_state = payload.base_tile_state or payload.tile_state
         return DisplayTiledPresentation(
             tile_state=payload.tile_state,
+            base_tile_state=base_tile_state,
             tile_delta=payload.tile_delta,
             tile_residency_budget_bytes=int(payload.tile_residency_budget_bytes),
             histogram_plot_data=payload.histogram_plot_data,

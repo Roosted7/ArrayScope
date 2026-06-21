@@ -9,7 +9,7 @@ from arrayscope.display.lod import LodInfo
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.commit import DisplayCommitter
-from arrayscope.display.model.frame import DisplayFrameKey, DisplayTilePayload, TilePresentationDelta, TilePresentationState, TiledValueSource
+from arrayscope.display.model.frame import DisplayFrameKey, DisplayTilePayload, TileCommitReport, TilePresentationDelta, TilePresentationState, TiledValueSource
 from arrayscope.display.model.commit import DisplayTiledPresentation
 
 
@@ -34,6 +34,7 @@ def _presentation():
         source_shape=image.shape,
         lod=LodInfo(0, 1, image.shape, image.shape, 0),
     )
+    base_state = TilePresentationState()
     state = TilePresentationState({0: payload})
     delta = TilePresentationDelta(
         structure_revision=1,
@@ -53,6 +54,7 @@ def _presentation():
         histogram_range=(0.0, 3.0),
         viewport_policy=ViewportPolicy.PRESERVE,
         tile_state=state,
+        base_tile_state=base_state,
         tile_delta=delta,
         tile_residency_budget_bytes=64 * 1024 * 1024,
     )
@@ -62,9 +64,11 @@ class _FakeImageView:
     def __init__(self):
         self.commit = None
         self.bounds = None
+        self.report = None
 
     def setTiledMontagePresentation(self, **kwargs):
         self.commit = kwargs
+        return self.report
 
     def setProfileMarkerBoundsRect(self, bounds):
         self.bounds = bounds
@@ -87,6 +91,22 @@ def test_tiled_committer_keeps_fake_raster_out_of_committed_frame():
     assert isinstance(frame.value_source, TiledValueSource)
     assert frame.value_source.payloads == presentation.tile_state.payloads
     assert view.bounds == (0.0, 0.0, 1.0, 1.0)
+
+
+def test_tiled_committer_excludes_deferred_payloads_from_committed_frame():
+    view = _FakeImageView()
+    view.report = TileCommitReport(deferred_tiles=(0,))
+    presentation = _presentation()
+    committer = DisplayCommitter(view)
+
+    frame = committer.commit_tile_layer(
+        presentation,
+        DisplayFrameKey(("doc",), ("view",), 1),
+    )
+
+    assert frame.data is None
+    assert frame.value_source.payloads == {}
+    assert committer.last_tile_committed_state.payloads == {}
 
 
 def test_full_commit_rejects_tiled_presentation():

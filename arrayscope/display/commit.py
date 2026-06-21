@@ -15,9 +15,11 @@ class DisplayCommitter:
         self.backend = backend_adapter_for_view(image_view)
         self.image_view = self.backend.view
         self.last_tile_commit_report: TileCommitReport | None = None
+        self.last_tile_committed_state = None
 
     def commit_full(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         self.last_tile_commit_report = None
+        self.last_tile_committed_state = None
         presentation = self._require_raster(presentation, "full")
         self._validate_presentation(presentation)
         scene = display_scene_for_presentation(presentation)
@@ -27,6 +29,7 @@ class DisplayCommitter:
 
     def commit_fast(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         self.last_tile_commit_report = None
+        self.last_tile_committed_state = None
         presentation = self._require_raster(presentation, "fast")
         self._validate_presentation(presentation)
         if self.backend.current_raster_shape() != tuple(presentation.geometry.display_shape):
@@ -46,23 +49,29 @@ class DisplayCommitter:
                     presented_tiles=presentation.tile_state.active_payloads(presentation.tile_delta),
                     removed_tiles=presentation.tile_delta.removals,
                 )
+            tile_state = presentation.base_tile_state.acknowledge_delta(presentation.tile_delta, report)
             self.last_tile_commit_report = report
+            self.last_tile_committed_state = tile_state
         else:
             self.last_tile_commit_report = None
+            self.last_tile_committed_state = None
             self.backend.present_raster(presentation, mode=RasterCommitMode.TILE_LAYER)
         self.backend.set_profile_bounds(scene.bounds)
-        return self._frame_for(presentation, key, scene)
+        return self._frame_for(presentation, key, scene, tile_state=self.last_tile_committed_state)
 
     def _frame_for(
         self,
         presentation: DisplayPresentation,
         key: DisplayFrameKey,
         scene: DisplayScene,
+        *,
+        tile_state=None,
     ) -> CommittedDisplayFrame:
         if isinstance(presentation, DisplayTiledPresentation):
             data = None
             histogram_data = None
-            value_source = TiledValueSource(presentation.tile_state.payloads)
+            committed_state = tile_state or presentation.tile_state
+            value_source = TiledValueSource(committed_state.payloads)
         else:
             data = presentation.data
             histogram_data = presentation.histogram_data

@@ -55,6 +55,7 @@ def test_montage_scene_separates_visibility_nearness_and_residency():
         histogram_range=(0.0, 1.0),
         viewport_policy=ViewportPolicy.PRESERVE,
         tile_state=state,
+        base_tile_state=state,
         tile_delta=delta,
         tile_residency_budget_bytes=1024,
     )
@@ -102,6 +103,7 @@ def test_raster_montage_and_tiled_montage_have_same_region_geometry():
         histogram_range=(0.0, 1.0),
         viewport_policy=ViewportPolicy.PRESERVE,
         tile_state=state,
+        base_tile_state=state,
         tile_delta=delta,
         tile_residency_budget_bytes=1024,
     )
