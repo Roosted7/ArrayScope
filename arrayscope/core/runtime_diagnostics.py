@@ -29,9 +29,13 @@ class ImageUploadTiming:
     fast_same_object: bool = False
     mode: str = ""
     tile_layer_visible_items: int = 0
+    tile_layer_items_created: int = 0
     tile_layer_items_updated: int = 0
     tile_layer_items_skipped: int = 0
     tile_layer_rgb_window_tiles: int = 0
+    tile_layer_image_replacements: int = 0
+    tile_layer_existing_items_shown: int = 0
+    tile_layer_relocated_tiles: int = 0
     tile_layer_resident_items: int = 0
     tile_layer_storage_capacity: int = 0
     tile_layer_storage_rebuilds: int = 0
@@ -163,9 +167,13 @@ class MontageTimingDiagnostics:
     upload_histogram_bytes: int = 0
     upload_fast_same_object: bool = False
     tile_layer_visible_items: int = 0
+    tile_layer_items_created: int = 0
     tile_layer_items_updated: int = 0
     tile_layer_items_skipped: int = 0
     tile_layer_rgb_window_tiles: int = 0
+    tile_layer_image_replacements: int = 0
+    tile_layer_existing_items_shown: int = 0
+    tile_layer_relocated_tiles: int = 0
     tile_layer_resident_items: int = 0
     tile_layer_storage_capacity: int = 0
     tile_layer_storage_rebuilds: int = 0
@@ -335,7 +343,10 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"  visible={snapshot.montage_timing.tile_layer_visible_items} "
             f"resident={snapshot.montage_timing.tile_layer_resident_items}/"
             f"{snapshot.montage_timing.tile_layer_storage_capacity} "
+            f"created={snapshot.montage_timing.tile_layer_items_created} "
             f"updated={snapshot.montage_timing.tile_layer_items_updated} "
+            f"shown={snapshot.montage_timing.tile_layer_existing_items_shown} "
+            f"moved={snapshot.montage_timing.tile_layer_relocated_tiles} "
             f"skipped={snapshot.montage_timing.tile_layer_items_skipped} "
             f"rgb_tiles={snapshot.montage_timing.tile_layer_rgb_window_tiles}\n"
             f"  rgb={_ms_text(snapshot.montage_timing.last_tile_layer_rgb_window_ms)} "
@@ -589,7 +600,10 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"visible={snapshot.montage_timing.tile_layer_visible_items} "
             f"resident={snapshot.montage_timing.tile_layer_resident_items}/"
             f"{snapshot.montage_timing.tile_layer_storage_capacity} "
+            f"created={snapshot.montage_timing.tile_layer_items_created} "
             f"updated={snapshot.montage_timing.tile_layer_items_updated} "
+            f"shown={snapshot.montage_timing.tile_layer_existing_items_shown} "
+            f"moved={snapshot.montage_timing.tile_layer_relocated_tiles} "
             f"skipped={snapshot.montage_timing.tile_layer_items_skipped}"
         ),
         f"Tile layer RGB window tiles: {snapshot.montage_timing.tile_layer_rgb_window_tiles}",
