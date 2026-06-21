@@ -254,8 +254,11 @@ burst is quiet.
 Progressive montage rendering has a narrower commit path than full image rendering. Presentation
 policy chooses a raster canvas or a direct tiled presentation. Raster sessions patch a bounded
 session-owned canvas. Tiled sessions retain typed payload/source wrappers and progressively commit the
-currently loaded mapping; renderer compatibility placeholders are created only inside the legacy
-widget shell. A successful commit records a `CanvasValueSource` or `TiledValueSource` as the semantic
+dirty payload mapping; renderer compatibility placeholders are created only inside the legacy
+widget shell. Tiled presentation state is proposed from a session-owned dirty payload/removal queue,
+then adopted only from the backend acknowledgement. Deferred uploads remain dirty and loading, and
+only acknowledged tiled payloads enter the committed `TiledValueSource` used by hover/ROI/profile
+semantics. A successful commit records a `CanvasValueSource` or `TiledValueSource` as the semantic
 hover/ROI/profile source. Progressive commits update the selected pixel representation, display
 geometry, axis flips, viewport preservation, committed frame, and loading/skipped overlays; side
 panels and expensive dock/profile/ROI refreshes run only on full commits or after the interaction

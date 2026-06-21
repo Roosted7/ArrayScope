@@ -428,15 +428,14 @@ class MontageRenderMixin:
             if session.pending_tiles:
                 return True
             else:
+                self._finish_montage_session_if_complete(session)
                 schedule_near_viewport_montage_prefetch(self, session)
             return True
-        addition_limit = _montage_viewport_addition_batch_limit(self, interactive=_interactive_active(self))
-        additions_to_process = tuple(additions[:addition_limit])
-        if len(additions_to_process) < len(additions):
-            self._montage_viewport_update_pending = True
-            self._last_montage_viewport_deferred_additions = int(len(additions) - len(additions_to_process))
-        else:
-            self._last_montage_viewport_deferred_additions = 0
+        # Cache lookups and resident payload rebinding are cheap semantic work.
+        # Do not pace them like cold tile evaluation, or the last visible tile
+        # can lag hover/value availability behind several viewport chunks.
+        additions_to_process = tuple(additions)
+        self._last_montage_viewport_deferred_additions = 0
 
         cached_tiles, missing_tiles = self._resolve_montage_tiles_from_cache(
             additions_to_process,
@@ -457,6 +456,7 @@ class MontageRenderMixin:
         if cached_tiles:
             self._schedule_montage_cached_level_stats(session)
         if not missing_tiles:
+            self._finish_montage_session_if_complete(session)
             schedule_near_viewport_montage_prefetch(self, session)
             return True
 
@@ -1205,12 +1205,19 @@ class MontageRenderMixin:
         interval_ms = self._montage_commit_interval_ms(session, force=force)
         elapsed_ms = (monotonic() - float(session.last_commit_monotonic or 0.0)) * 1000.0
         needs_initial_commit = session.canvas is None and not bool(getattr(session, "display_committed", False))
+        needs_final_dirty_commit = bool(
+            force
+            and not session.pending_tiles
+            and not session.active_tile_requests
+            and not session.pending_completed_tiles
+            and (getattr(session, "dirty_payloads", None) or getattr(session, "pending_removals", None) or getattr(session, "deferred_display_tiles", None))
+        )
         if _viewport_interaction_active(self) and not needs_initial_commit:
             session.final_commit_pending = True
             session.flush_pending = True
             self._start_montage_commit_timer(max(1, int(interval_ms)))
             return
-        if needs_initial_commit or force and not session.flush_pending or elapsed_ms >= interval_ms:
+        if needs_initial_commit or needs_final_dirty_commit or force and not session.flush_pending or elapsed_ms >= interval_ms:
             self._commit_montage_session_canvas(session, force=force)
             return
         session.final_commit_pending = True
@@ -1406,6 +1413,7 @@ class MontageRenderMixin:
             previous_payloads = _previous_tiled_payloads(getattr(self, "_committed_display_frame", None))
             if previous_payloads:
                 session.seed_display_tile_payloads(previous_payloads, tile_source_ids)
+            base_tile_state = session.tile_presentation_state
             tile_state, tile_delta = session.build_tile_presentation(
                 tile_source_ids,
                 source_ids_trusted=bool(getattr(session, "tile_source_ids_trusted", True)),
@@ -1447,11 +1455,11 @@ class MontageRenderMixin:
                     render_generation=session.render_generation,
                     montage_level_key=session.level_key,
                     tile_state=tile_state,
+                    base_tile_state=base_tile_state,
                     tile_delta=tile_delta,
                     user_levels=session.user_levels_override,
                     semantic_commit=semantic_commit,
                 )
-                session.display_committed = bool(session.rendered_tiles)
             else:
                 self._apply_progressive_display_image(
                     display_image,
@@ -1469,23 +1477,21 @@ class MontageRenderMixin:
                     render_generation=session.render_generation,
                     montage_level_key=session.level_key,
                     tile_state=tile_state,
+                    base_tile_state=base_tile_state,
                     tile_delta=tile_delta,
                     user_levels=session.user_levels_override,
                     semantic_commit=semantic_commit,
                 )
             report = getattr(self._display_committer(), "last_tile_commit_report", None)
+            session.acknowledge_tile_presentation(tile_delta, report)
             presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)
             session.mark_presented(presented_tiles)
-            session.deferred_display_tiles = (
-                tuple(getattr(report, "deferred_tiles", ()) or ())
-                if report is not None
-                else ()
-            )
             session.display_committed = bool(session.presented_tiles)
             rendered_geometry = replace(
                 rendered_geometry,
                 montage_tile_states=session.ensure_tile_states(),
             )
+            self._sync_committed_montage_geometry(rendered_geometry)
             overlay_start = perf_counter()
             rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
             self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
@@ -1529,6 +1535,15 @@ class MontageRenderMixin:
         if hasattr(self.img_view, "clearMontageTileOverlays"):
             self.img_view.clearMontageTileOverlays()
         return True
+
+    def _sync_committed_montage_geometry(self, geometry) -> None:
+        self.display_geometry = geometry
+        frame = getattr(self, "_committed_display_frame", None)
+        if frame is not None:
+            self._set_committed_display_frame(replace(frame, geometry=geometry, scene=None))
+        refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
+        if callable(refresh_hover):
+            refresh_hover()
 
     def _montage_tile_source_ids(self, session) -> dict[int, object]:
         source_ids = getattr(session, "tile_source_ids", None)

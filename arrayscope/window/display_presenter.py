@@ -84,6 +84,7 @@ class DisplayPresentationMixin:
         montage_dirty_tiles=None,
         montage_tile_source_ids=None,
         tile_state=None,
+        base_tile_state=None,
         tile_delta=None,
         user_levels=None,
         semantic_commit: bool = True,
@@ -111,6 +112,7 @@ class DisplayPresentationMixin:
                         montage_dirty_tiles=montage_dirty_tiles,
                         montage_tile_source_ids=montage_tile_source_ids,
                         tile_state=tile_state,
+                        base_tile_state=base_tile_state,
                         tile_delta=tile_delta,
                         tile_residency_budget_bytes=tile_residency_budget_bytes(self._memory_policy()),
                     ),
@@ -143,6 +145,9 @@ class DisplayPresentationMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
+                refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
+                if callable(refresh_hover):
+                    refresh_hover()
             if defer_side_panels:
                 self._deferred_side_panel_refresh_pending = True
             elif semantic_commit:
@@ -184,6 +189,7 @@ class DisplayPresentationMixin:
         montage_dirty_tiles=None,
         montage_tile_source_ids=None,
         tile_state=None,
+        base_tile_state=None,
         tile_delta=None,
         user_levels=None,
         semantic_commit: bool = True,
@@ -208,6 +214,7 @@ class DisplayPresentationMixin:
                         montage_dirty_tiles=montage_dirty_tiles,
                         montage_tile_source_ids=montage_tile_source_ids,
                         tile_state=tile_state,
+                        base_tile_state=base_tile_state,
                         tile_delta=tile_delta,
                         tile_residency_budget_bytes=tile_residency_budget_bytes(self._memory_policy()),
                     ),
@@ -249,6 +256,9 @@ class DisplayPresentationMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
+                refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
+                if callable(refresh_hover):
+                    refresh_hover()
             self.apply_axis_flips()
             self.img_view.setImageStale(False)
         except Exception as e:

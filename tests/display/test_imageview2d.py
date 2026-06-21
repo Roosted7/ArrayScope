@@ -119,6 +119,25 @@ def test_image_presentation_keeps_levels_and_histogram_range_separate(qt_app):
     view.close()
 
 
+def test_tile_commit_report_uses_backend_presented_tile_ids_for_middle_holes():
+    from types import SimpleNamespace
+
+    from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
+    from arrayscope.display.imageview2d import _tile_commit_report
+
+    payloads = {0: object(), 1: object(), 2: object()}
+    stats = TileLayerUpdateStats(
+        visible_items=2,
+        presented_tiles=(0, 2),
+        deferred_tiles=(),
+    )
+
+    report = _tile_commit_report(payloads, SimpleNamespace(removals=()), stats)
+
+    assert report.presented_tiles == frozenset({0, 2})
+    assert report.deferred_tiles == frozenset({1})
+
+
 def test_update_image_data_fast_accepts_display_ready_rgb(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 

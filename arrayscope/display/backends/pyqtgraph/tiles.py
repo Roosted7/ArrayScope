@@ -37,6 +37,7 @@ class TileLayerItemState:
 @dataclass(frozen=True)
 class TileLayerUpdateStats:
     visible_items: int = 0
+    presented_tiles: tuple[int, ...] | None = None
     items_created: int = 0
     items_updated: int = 0
     items_skipped: int = 0
@@ -274,6 +275,7 @@ class MontageTileLayer:
 
         return TileLayerUpdateStats(
             visible_items=int(visible_items),
+            presented_tiles=tuple(sorted(active)),
             items_created=int(items_created),
             items_updated=int(items_updated),
             items_skipped=int(items_skipped),
@@ -448,6 +450,11 @@ class MontageTileLayer:
 
         return TileLayerUpdateStats(
             visible_items=int(visible_items),
+            presented_tiles=tuple(
+                int(tile)
+                for tile in sorted(active)
+                if int(tile) not in set(deferred_tiles)
+            ),
             items_created=int(items_created),
             items_updated=int(items_updated),
             items_skipped=int(items_skipped),
@@ -478,6 +485,7 @@ class MontageTileLayer:
             self._prune_rgb_source_cache()
         return TileLayerUpdateStats(
             visible_items=visible_items,
+            presented_tiles=tuple(sorted(int(state.tile_number) for state in self._states.values() if state.visible)),
             items_updated=items_updated,
             items_skipped=items_skipped,
             rgb_window_tiles=rgb_window_tiles,

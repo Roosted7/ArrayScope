@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
 from time import monotonic
 
@@ -19,7 +19,7 @@ from arrayscope.display.montage import (
     patch_rendered_tile_into_canvas,
 )
 from arrayscope.display.shader_mapping import TexturePlaneKind
-from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta, TilePresentationState
 
 
 def _shader_mapping_key(mapping):
@@ -102,6 +102,8 @@ class MontageRenderSession:
     repeated_expensive_stage_per_tile: bool = False
     tile_source_ids: dict[int, object] = field(default_factory=dict)
     display_tile_payloads: dict[int, DisplayTilePayload] = field(default_factory=dict)
+    dirty_payloads: OrderedDict[int, None] = field(default_factory=OrderedDict)
+    pending_removals: set[int] = field(default_factory=set)
     tile_presentation_state: TilePresentationState = field(default_factory=TilePresentationState)
     structure_revision: int = 0
     payload_revision: int = 0
@@ -123,6 +125,8 @@ class MontageRenderSession:
         self.pending_tiles = deque(self.pending_tiles)
         self.pending_level_tiles = deque(self.pending_level_tiles)
         self.pending_completed_tiles = deque(self.pending_completed_tiles)
+        for index in sorted(int(tile) for tile in self.rendered_tiles):
+            self.dirty_payloads.setdefault(int(index), None)
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -210,6 +214,7 @@ class MontageRenderSession:
         # their cached wrappers across progressive batches.
         self.tile_source_ids.pop(index, None)
         self.display_tile_payloads.pop(index, None)
+        self.dirty_payloads[index] = None
         self.active_tile_requests.discard(index)
         self.skipped_tiles.discard(index)
         self.pending_tiles = deque(tile for tile in self.pending_tiles if int(tile.montage_index) != index)
@@ -225,6 +230,8 @@ class MontageRenderSession:
             self.presented_tiles.add(index)
             self.loading_tiles.discard(index)
             self.skipped_tiles.discard(index)
+            self.dirty_payloads.pop(index, None)
+            self.pending_removals.discard(index)
             if 0 <= index < len(self.plan.tiles):
                 self.mark_tile_state(self.plan.tiles[index], MontageTileState.LOADED)
 
@@ -242,49 +249,61 @@ class MontageRenderSession:
                 self.display_tile_payloads.pop(int(stale), None)
         lod_factor = self._selected_lod_factor()
         for tile_number, rendered in self.rendered_tiles.items():
-            tile_number = int(tile_number)
-            base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
-            mapping = getattr(rendered, "shader_mapping", None)
-            texture_kind = getattr(rendered, "texture_kind", None)
-            exact_image = np.asarray(rendered.image)
-            exact_histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
-            semantic = getattr(rendered, "semantic_data", None)
-            semantic = exact_image if semantic is None else np.asarray(semantic)
-            lod = self._planned_lod_info(rendered, factor=lod_factor)
-            texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
-            del texture_histogram
-            source_id = self._payload_source_id(
-                base_source_id,
-                texture_kind=texture_kind,
-                mapping=mapping,
-                lod=lod,
-                texture_data=texture_data,
-            )
-            previous = self.display_tile_payloads.get(tile_number)
-            if (
-                previous is not None
-                and _base_source_id(previous.source_id) == base_source_id
-                and previous.source_id == source_id
-                and previous.image is exact_image
-                and previous.histogram_data is exact_histogram
-                and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
-            ):
-                continue
-            self.display_tile_payloads[tile_number] = DisplayTilePayload(
-                tile_number=tile_number,
-                source_index=int(rendered.tile.source_index),
-                image=exact_image,
-                histogram_data=exact_histogram,
-                source_id=source_id,
-                texture_data=texture_data,
-                texture_kind=texture_kind,
-                semantic_data=semantic,
-                semantic_histogram_data=exact_histogram,
-                source_shape=tuple(int(value) for value in exact_image.shape[:2]),
-                lod=lod,
-                shader_mapping=mapping,
-            )
+            self._ensure_display_tile_payload(int(tile_number), rendered, source_ids, lod_factor=lod_factor)
         return dict(self.display_tile_payloads)
+
+    def _ensure_display_tile_payload(
+        self,
+        tile_number: int,
+        rendered: RenderedTile,
+        source_ids: dict[int, object],
+        *,
+        lod_factor: int,
+    ) -> DisplayTilePayload:
+        tile_number = int(tile_number)
+        base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
+        mapping = getattr(rendered, "shader_mapping", None)
+        texture_kind = getattr(rendered, "texture_kind", None)
+        exact_image = np.asarray(rendered.image)
+        exact_histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
+        semantic = getattr(rendered, "semantic_data", None)
+        semantic = exact_image if semantic is None else np.asarray(semantic)
+        lod = self._planned_lod_info(rendered, factor=lod_factor)
+        texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
+        del texture_histogram
+        source_id = self._payload_source_id(
+            base_source_id,
+            texture_kind=texture_kind,
+            mapping=mapping,
+            lod=lod,
+            texture_data=texture_data,
+        )
+        previous = self.display_tile_payloads.get(tile_number)
+        if (
+            previous is not None
+            and _base_source_id(previous.source_id) == base_source_id
+            and previous.source_id == source_id
+            and previous.image is exact_image
+            and previous.histogram_data is exact_histogram
+            and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
+        ):
+            return previous
+        payload = DisplayTilePayload(
+            tile_number=tile_number,
+            source_index=int(rendered.tile.source_index),
+            image=exact_image,
+            histogram_data=exact_histogram,
+            source_id=source_id,
+            texture_data=texture_data,
+            texture_kind=texture_kind,
+            semantic_data=semantic,
+            semantic_histogram_data=exact_histogram,
+            source_shape=tuple(int(value) for value in exact_image.shape[:2]),
+            lod=lod,
+            shader_mapping=mapping,
+        )
+        self.display_tile_payloads[tile_number] = payload
+        return payload
 
     def seed_display_tile_payloads(self, previous_payloads: dict[int, DisplayTilePayload], source_ids: dict[int, object]) -> None:
         """Reuse compatible wrappers *and committed presentation ownership*.
@@ -408,19 +427,38 @@ class MontageRenderSession:
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         del source_ids_trusted
         source_ids = dict(source_ids or {})
-        previous_payloads = dict(self.tile_presentation_state.payloads)
-        current_payloads = self.snapshot_display_tile_payloads(source_ids)
-        current_loaded = set(current_payloads)
+        previous_state = self.tile_presentation_state
+        previous_payloads = dict(previous_state.payloads)
+        loaded = {int(index) for index in self.rendered_tiles}
+        for stale in tuple(self.display_tile_payloads):
+            if int(stale) not in loaded:
+                self.display_tile_payloads.pop(int(stale), None)
+                self.pending_removals.add(int(stale))
+                self.dirty_payloads.pop(int(stale), None)
+        lod_factor = self._selected_lod_factor()
+        dirty_payload_tiles = set(int(tile) for tile in self.dirty_payloads)
+        dirty_payload_tiles.update(int(tile) for tile in self.deferred_display_tiles)
+        for tile_number in sorted(dirty_payload_tiles):
+            rendered = self.rendered_tiles.get(int(tile_number))
+            if rendered is not None:
+                self._ensure_display_tile_payload(int(tile_number), rendered, source_ids, lod_factor=lod_factor)
+        current_payloads = self.display_tile_payloads
+        current_loaded = set(self.rendered_tiles)
         valid_tiles = set(range(len(tuple(getattr(self.plan, "tiles", ()) or ()))))
         removals = tuple(
             sorted(
-                int(tile)
-                for tile in previous_payloads
-                if int(tile) not in valid_tiles or int(tile) in self.skipped_tiles
+                {
+                    int(tile)
+                    for tile in previous_payloads
+                    if int(tile) not in valid_tiles or int(tile) in self.skipped_tiles
+                }.union(int(tile) for tile in self.pending_removals)
             )
         )
         upserts: dict[int, DisplayTilePayload] = {}
-        for tile_number, payload in sorted(current_payloads.items()):
+        for tile_number in sorted(dirty_payload_tiles):
+            payload = current_payloads.get(int(tile_number))
+            if payload is None:
+                continue
             previous = previous_payloads.get(int(tile_number))
             if previous is payload:
                 continue
@@ -475,7 +513,7 @@ class MontageRenderSession:
             # from cheap resident rebinds and geometry updates.
             del max_upserts
 
-        base_revision = int(getattr(self.tile_presentation_state, "revision", 0))
+        base_revision = int(getattr(previous_state, "revision", 0))
         target_revision = base_revision + (1 if upserts or removals else 0)
         if upserts or removals:
             self.payload_revision += 1
@@ -508,9 +546,29 @@ class MontageRenderSession:
             force_refresh=force_refresh,
             clear_reason=clear_reason,
         )
-        state = self.tile_presentation_state.apply_delta(delta)
-        self.tile_presentation_state = state
+        state = previous_state.apply_delta(delta)
         return state, delta
+
+    def acknowledge_tile_presentation(self, delta: TilePresentationDelta, report: TileCommitReport | None) -> TilePresentationState:
+        if report is None:
+            report = TileCommitReport(
+                presented_tiles=self.tile_presentation_state.apply_delta(delta).active_payloads(delta),
+                removed_tiles=delta.removals,
+            )
+        report = report if isinstance(report, TileCommitReport) else TileCommitReport()
+        acknowledged = self.tile_presentation_state.acknowledge_delta(delta, report)
+        self.tile_presentation_state = acknowledged
+        for tile in report.presented_tiles:
+            self.dirty_payloads.pop(int(tile), None)
+        for tile in report.removed_tiles:
+            self.pending_removals.discard(int(tile))
+            self.dirty_payloads.pop(int(tile), None)
+            self.display_tile_payloads.pop(int(tile), None)
+        for tile in report.deferred_tiles:
+            if int(tile) in self.rendered_tiles:
+                self.dirty_payloads[int(tile)] = None
+        self.deferred_display_tiles = tuple(int(tile) for tile in report.deferred_tiles)
+        return acknowledged
 
     def mark_loading(self, tile: MontageTile) -> None:
         index = int(tile.montage_index)
@@ -524,6 +582,10 @@ class MontageRenderSession:
             self.active_tile_requests.discard(index)
             self.loading_tiles.discard(index)
             self.skipped_tiles.add(index)
+            self.pending_removals.add(index)
+            self.dirty_payloads.pop(index, None)
+            self.display_tile_payloads.pop(index, None)
+            self.tile_source_ids.pop(index, None)
             self.pending_tiles = deque(
                 pending for pending in self.pending_tiles if int(pending.montage_index) != index
             )
@@ -579,6 +641,8 @@ class MontageRenderSession:
             or self.final_commit_pending
             or self.flush_pending
             or self.deferred_display_tiles
+            or self.dirty_payloads
+            or self.pending_removals
         )
 
     def initialize_canvas(self, canvas: MontageViewportCanvas) -> None:

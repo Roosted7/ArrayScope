@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -227,6 +227,38 @@ class TilePresentationState:
             payloads.pop(int(tile_number), None)
         payloads.update(delta.upserts)
         return TilePresentationState(payloads, revision=int(delta.target_revision))
+
+    def acknowledge_delta(self, delta: TilePresentationDelta, report: TileCommitReport) -> "TilePresentationState":
+        """Apply only the portion of a proposed delta accepted by the backend."""
+
+        if not isinstance(report, TileCommitReport):
+            raise TypeError("tile presentation acknowledgement requires a TileCommitReport")
+        if bool(report.stale) or int(delta.base_revision) != int(self.revision):
+            return self
+        presented = set(int(tile) for tile in report.presented_tiles)
+        accepted_upserts = {
+            int(tile): payload
+            for tile, payload in dict(delta.upserts).items()
+            if int(tile) in presented
+        }
+        removals = set(int(tile) for tile in report.removed_tiles)
+        # If a replacement upload is deferred, the backend has hidden that
+        # tile rather than showing stale pixels.  Mirror that in semantic
+        # committed state so hover/ROI values do not read the old source.
+        removals.update(
+            int(tile)
+            for tile in report.deferred_tiles
+            if int(tile) in delta.upserts and int(tile) in self.payloads
+        )
+        if not accepted_upserts and not removals:
+            return self
+        acknowledged = replace(
+            delta,
+            upserts=accepted_upserts,
+            removals=tuple(sorted(removals)),
+            target_revision=int(delta.target_revision),
+        )
+        return self.apply_delta(acknowledged)
 
     def active_payloads(self, delta: TilePresentationDelta) -> dict[int, DisplayTilePayload]:
         return {int(tile): self.payloads[int(tile)] for tile in delta.active_tiles if int(tile) in self.payloads}

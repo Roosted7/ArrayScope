@@ -31,6 +31,7 @@ except Exception:  # pragma: no cover - optional dependency import path
 @dataclass(frozen=True)
 class GpuMontageLayerStats:
     visible_items: int = 0
+    presented_tiles: tuple[int, ...] | None = None
     resident_items: int = 0
     atlas_capacity: int = 0
     atlas_rebuilds: int = 0
@@ -421,7 +422,8 @@ class TextureAtlasPool:
             page = self.pages[int(page_index)]
             self._touch(resident_key)
             source_changed = self.source_ids.get(resident_key) != payload.source_id
-            should_upload = bool(dirty_all or newly_assigned or source_changed or tile_number in dirty)
+            missing_uploaded_source = resident_key not in self.source_ids
+            should_upload = bool(dirty_all or newly_assigned or source_changed or missing_uploaded_source or tile_number in dirty)
             uvs[tile_number] = page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload))
             if (
                 cold_deadline_ms is not None
@@ -468,10 +470,30 @@ class TextureAtlasPool:
             updated += 1
             cold_tiles_committed += int(should_upload)
 
-        self.tile_slots = active_tile_slots
+        presented_tiles = tuple(
+            int(tile_number)
+            for tile_number, payload in payload_items
+            if int(tile_number) in active_tile_slots
+            and self.source_ids.get(_resident_key(payload)) == payload.source_id
+        )
+        presented_set = set(presented_tiles)
+        for tile_number, _payload in payload_items:
+            if int(tile_number) not in presented_set and int(tile_number) not in deferred_tiles:
+                deferred_tiles.append(int(tile_number))
+        self.tile_slots = {
+            int(tile): slot
+            for tile, slot in active_tile_slots.items()
+            if int(tile) in presented_set
+        }
+        uvs = {
+            int(tile): uv
+            for tile, uv in uvs.items()
+            if int(tile) in presented_set
+        }
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
         return uvs, GpuMontageLayerStats(
-            visible_items=len(payload_items),
+            visible_items=len(presented_tiles),
+            presented_tiles=presented_tiles,
             resident_items=self.resident_count,
             atlas_capacity=self.capacity,
             atlas_rebuilds=int(rebuilt),
@@ -778,6 +800,7 @@ class GpuMontageLayer:
         previous = self._last_stats
         self._last_stats = GpuMontageLayerStats(
             visible_items=self._visible_items,
+            presented_tiles=tuple(int(tile) for tile in sorted(self._pool.tile_slots)),
             resident_items=self._pool.resident_count,
             atlas_capacity=self._pool.capacity,
             level_updates=int(bool(level_updates)),
@@ -903,11 +926,14 @@ class GpuMontageLayer:
             if mapping_changed:
                 mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
             visual.visible = page_index in active_pages
+            if visual.visible and callable(getattr(visual, "update", None)):
+                visual.update()
         for visual in self._visuals_by_page[len(self._pool.pages):]:
             visual.visible = False
         self._visible_items = int(texture_stats.visible_items)
         self._last_stats = GpuMontageLayerStats(
             visible_items=texture_stats.visible_items,
+            presented_tiles=texture_stats.presented_tiles,
             resident_items=texture_stats.resident_items,
             atlas_capacity=texture_stats.atlas_capacity,
             atlas_rebuilds=texture_stats.atlas_rebuilds,
@@ -965,6 +991,7 @@ class GpuMontageLayer:
             previous = self._last_stats
             return GpuMontageLayerStats(
                 visible_items=int(previous.visible_items),
+                presented_tiles=previous.presented_tiles,
                 resident_items=self._pool.resident_count,
                 atlas_capacity=self._pool.capacity,
                 estimated_gpu_bytes=self._pool.estimated_gpu_bytes,

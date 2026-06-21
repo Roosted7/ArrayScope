@@ -59,6 +59,7 @@ class DisplayPayload:
     montage_dirty_tiles: tuple[int, ...] | None = None
     montage_tile_source_ids: dict[int, object] | None = None
     tile_state: TilePresentationState | None = None
+    base_tile_state: TilePresentationState | None = None
     tile_delta: TilePresentationDelta | None = None
     tile_residency_budget_bytes: int = 0
 
@@ -96,6 +97,7 @@ class DisplayTiledPresentation:
     histogram_range: tuple[float, float]
     viewport_policy: ViewportPolicy
     tile_state: TilePresentationState
+    base_tile_state: TilePresentationState
     tile_delta: TilePresentationDelta
     tile_residency_budget_bytes: int
     histogram_plot_data: np.ndarray | None = None

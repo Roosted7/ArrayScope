@@ -257,7 +257,7 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     assert controller.groups == ["montage-tile:7:7"]
 
 
-def test_interactive_viewport_expansion_chunks_new_tile_discovery(qt_app):
+def test_interactive_viewport_expansion_resolves_cached_tiles_without_chunking(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
@@ -345,12 +345,12 @@ def test_interactive_viewport_expansion_chunks_new_tile_discovery(qt_app):
 
     assert win._try_update_montage_viewport_only() is True
 
-    assert win.resolved_batches == [(0, 1, 2)]
-    assert [int(tile.montage_index) for tile in session.pending_tiles] == [0, 1, 2]
+    assert win.resolved_batches == [tuple(range(10))]
+    assert [int(tile.montage_index) for tile in session.pending_tiles] == list(range(10))
     assert session.loading_tiles == set()
     assert win.tile_schedules == 0
     assert win._montage_viewport_update_pending is True
-    assert win._last_montage_viewport_deferred_additions == 7
+    assert win._last_montage_viewport_deferred_additions == 0
 
 
 def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app):
@@ -434,6 +434,46 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app):
     assert win._try_update_montage_viewport_only() is True
 
     assert win.tile_schedules == 1
+
+
+def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
+    from dataclasses import replace
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayFrameKey
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class Window(QtCore.QObject, MontageRenderMixin):
+        def _set_committed_display_frame(self, frame):
+            self._committed_display_frame = frame
+
+    state = ViewState.from_shape((2, 2, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":")
+    loading = DisplayGeometry(
+        view_state=state,
+        display_shape=(2, 2),
+        montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0),
+        montage_tile_states=(MontageTileState.LOADING,),
+    )
+    loaded = replace(loading, montage_tile_states=(MontageTileState.LOADED,))
+    frame = CommittedDisplayFrame(
+        data=np.zeros((2, 2), dtype=np.float32),
+        histogram_data=None,
+        geometry=loading,
+        levels=(0.0, 1.0),
+        histogram_range=(0.0, 1.0),
+        key=DisplayFrameKey(("doc",), ("view",), 1),
+    )
+    win = Window()
+    win.display_geometry = loading
+    win._committed_display_frame = frame
+
+    win._sync_committed_montage_geometry(loaded)
+
+    assert win.display_geometry.montage_tile_states == (MontageTileState.LOADED,)
+    assert win._committed_display_frame.geometry.montage_tile_states == (MontageTileState.LOADED,)
+    assert win._committed_display_frame.scene.geometry == loaded
 
 
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
