@@ -9,6 +9,7 @@ level source tracking.
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 from time import monotonic, perf_counter
 
 import numpy as np
@@ -659,6 +660,44 @@ class MontageRenderMixin:
         pending.extend(unseen)
         self._montage_pending_level_tiles_last_session = len(pending)
 
+    def _ensure_montage_level_stats_for_payloads(self, session, payloads) -> int:
+        """Merge stats for every tile that is about to be visible.
+
+        Detailed histogram curves may lag, but automatic window/level state must
+        already cover every payload in the same presentation commit.  This keeps
+        bright or high-dynamic-range tiles from being drawn with levels derived
+        from an earlier subset.
+        """
+
+        tracker = self._montage_level_tracker()
+        expected = self._montage_level_expected_indices(session)
+        tracker.ensure(session.level_key, expected)
+        stats_start = perf_counter()
+        added = 0
+        pending = getattr(session, "pending_level_tiles", None)
+        for tile_number in tuple(dict(payloads or {})):
+            rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
+            if rendered is None:
+                continue
+            source_index = int(rendered.tile.source_index)
+            if tracker.has_source(session.level_key, source_index):
+                continue
+            self._update_montage_level_bounds_from_rendered(
+                session.level_key,
+                rendered,
+                expected_indices=expected,
+            )
+            added += 1
+            if pending is not None:
+                session.pending_level_tiles = deque(
+                    item for item in pending if int(item.tile.source_index) != source_index
+                )
+                pending = session.pending_level_tiles
+        self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
+        self._montage_level_sources_added_last_commit = int(added)
+        self._montage_pending_level_tiles_last_session = len(getattr(session, "pending_level_tiles", ()) or ())
+        return int(added)
+
     def _process_montage_cached_level_stats(self) -> None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session.session_id, session.key):
@@ -677,8 +716,13 @@ class MontageRenderMixin:
                 break
         self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
         self._montage_pending_level_tiles_last_session = len(pending)
-        if session.display_committed and not pending:
-            self._schedule_montage_canvas_commit(session, force=True)
+        # A histogram/level refinement is presentation metadata.  It must not
+        # force a full tiled-payload refresh or replay stale removals after a
+        # viewport change.  Normal display commits will publish richer sources;
+        # when there is no display backlog, a non-forced commit can update
+        # uniforms/histogram without invalidating residency.
+        if processed and session.display_committed and not getattr(session, "deferred_display_tiles", ()):
+            self._schedule_montage_canvas_commit(session, force=False)
         self._schedule_montage_cached_level_stats(session)
 
     def _plan_montage_stages(self, document, missing_tiles):
@@ -1304,6 +1348,10 @@ class MontageRenderMixin:
                     user_levels=session.user_levels_override,
                     semantic_commit=semantic_commit,
                 )
+            session.mark_presented(session.rendered_tiles.keys())
+            session.display_committed = bool(session.presented_tiles)
+            if session.canvas is not None:
+                object.__setattr__(session.canvas, "tile_states", tuple(session.ensure_tile_states()))
             overlay_start = perf_counter()
             self._update_montage_tile_overlays(canvas)
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
@@ -1354,14 +1402,6 @@ class MontageRenderMixin:
         self._next_viewport_policy = ViewportPolicy.PRESERVE
         self._montage_canvas_commit_active = True
         try:
-            level_stats = self._montage_level_stats_for_session(session)
-            explicit_auto = bool(getattr(session, "force_auto", False))
-            semantic_commit = bool(session.rendered_tiles)
-            decision_force_auto = bool(explicit_auto and semantic_commit)
-            first_display_commit = not bool(session.display_committed)
-            publish_metadata = bool(explicit_auto) or self._should_publish_montage_level_metadata(session, level_stats)
-            semantic_source = self._montage_level_source_for_session(session, allow_partial=publish_metadata)
-            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
             payload_start = perf_counter()
             previous_payloads = _previous_tiled_payloads(getattr(self, "_committed_display_frame", None))
             if previous_payloads:
@@ -1369,13 +1409,27 @@ class MontageRenderMixin:
             tile_state, tile_delta = session.build_tile_presentation(
                 tile_source_ids,
                 source_ids_trusted=bool(getattr(session, "tile_source_ids_trusted", True)),
-                max_upserts=_montage_tiled_upsert_batch_limit(self),
+                cold_deadline_ms=_montage_commit_budget_ms(self),
+            )
+            active_payloads = tile_state.active_payloads(tile_delta)
+            self._ensure_montage_level_stats_for_payloads(session, active_payloads)
+            rendered_geometry = replace(
+                rendered_geometry,
+                montage_tile_states=session.ensure_tile_states(),
             )
             self._montage_recent_tile_payloads_by_base_source = _limited_payload_cache(
                 getattr(self, "_montage_recent_tile_payloads_by_base_source", None),
                 tile_state.payloads,
             )
             self._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
+            level_stats = self._montage_level_stats_for_session(session)
+            explicit_auto = bool(getattr(session, "force_auto", False))
+            semantic_commit = bool(active_payloads)
+            decision_force_auto = bool(explicit_auto and semantic_commit)
+            first_display_commit = not bool(session.display_committed)
+            publish_metadata = bool(explicit_auto) or self._should_publish_montage_level_metadata(session, level_stats)
+            semantic_source = self._montage_level_source_for_session(session, allow_partial=publish_metadata)
+            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
             if first_display_commit:
                 self._apply_full_display_image(
                     display_image,
@@ -1419,6 +1473,19 @@ class MontageRenderMixin:
                     user_levels=session.user_levels_override,
                     semantic_commit=semantic_commit,
                 )
+            report = getattr(self._display_committer(), "last_tile_commit_report", None)
+            presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)
+            session.mark_presented(presented_tiles)
+            session.deferred_display_tiles = (
+                tuple(getattr(report, "deferred_tiles", ()) or ())
+                if report is not None
+                else ()
+            )
+            session.display_committed = bool(session.presented_tiles)
+            rendered_geometry = replace(
+                rendered_geometry,
+                montage_tile_states=session.ensure_tile_states(),
+            )
             overlay_start = perf_counter()
             rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
             self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
@@ -1426,13 +1493,17 @@ class MontageRenderMixin:
         finally:
             self._montage_canvas_commit_active = False
         self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
-        commit_item_count = max(1, len(tile_delta.upserts) + len(tile_delta.removals))
+        report = getattr(self._display_committer(), "last_tile_commit_report", None)
+        cold_count = int(getattr(report, "cold_count", 0) or 0)
         feedback = _latency_feedback(self)
         if feedback is not None:
+            if cold_count > 0:
+                cold_ms = float(getattr(report, "cold_work_ms", 0.0) or 0.0) or self._last_montage_canvas_commit_ms
+                feedback.observe("montage_cold_commit", cold_ms, count=cold_count)
             if hasattr(self, "_record_ui_work"):
-                self._record_ui_work("montage_commit", self._last_montage_canvas_commit_ms, count=commit_item_count)
+                self._record_ui_work("montage_commit", self._last_montage_canvas_commit_ms, count=1)
             else:
-                feedback.observe("montage_commit", self._last_montage_canvas_commit_ms, count=commit_item_count)
+                feedback.observe("montage_commit", self._last_montage_canvas_commit_ms, count=1)
         display_backlog = bool(session.deferred_display_tiles)
         session.note_committed()
         if display_backlog:
@@ -1778,23 +1849,18 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
     )
 
 
-def _montage_tiled_upsert_batch_limit(window) -> int:
+def _montage_commit_budget_ms(window) -> float:
     interactive = _interactive_active(window)
     decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
         "montage_commit",
         interactive=interactive,
     )
     if decision is not None:
-        limit = max(1, int(decision.batch_limit))
-    else:
-        feedback = _latency_feedback(window)
-        limit = 4 if interactive else 8
-        if feedback is not None:
-            limit = max(1, int(feedback.batch_limit("montage_commit", interactive=interactive)))
+        return max(1.0, float(decision.budget_ms))
     feedback = _latency_feedback(window)
-    if feedback is not None and feedback.channel_snapshot("montage_commit").per_item_ewma_ms is None:
-        limit = min(limit, 4 if interactive else 8)
-    return max(1, int(limit))
+    if feedback is None:
+        return 4.0 if interactive else 8.0
+    return max(1.0, float(feedback.work_budget_ms("montage_commit", interactive=interactive)))
 
 
 def _montage_commit_interval_ms(window, *, force: bool) -> int:
