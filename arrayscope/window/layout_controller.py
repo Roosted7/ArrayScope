@@ -34,10 +34,33 @@ class WindowLayoutManager:
         state = win._settings.value("window_state")
         if state is not None:
             win.restoreState(state)
+        self._hide_managed_docks_after_state_restore()
+        self._reset_session_dock_visibility_preferences()
+        self._restore_saved_base_window_size()
         if not win.profile_dock.isVisible() and win.data.ndim == 1:
             self.set_managed_dock_visible(win.profile_dock, True, reason="restore-one-dimensional", preserve_canvas=False)
         self.sync_progressive_docks(preserve_canvas=False)
         Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
+
+    def save_window_settings(self):
+        win = self.window
+        win._settings.setValue("geometry", win.saveGeometry())
+        win._settings.setValue("window_state", win.saveState())
+        win._settings.setValue("window_base_size", self._window_size_excluding_docked_panels())
+
+    def _reset_session_dock_visibility_preferences(self):
+        win = self.window
+        win._operation_dock_user_visible = None
+        win._profile_dock_user_visible = None
+        win._inspection_dock_user_visible = None
+        for dock in self._managed_docks():
+            if dock is not None:
+                self._state_for(dock).user_visible = None
+
+    def _hide_managed_docks_after_state_restore(self):
+        for dock in self._managed_docks():
+            if dock is not None:
+                self.set_managed_dock_visible(dock, False, reason="restore-hidden", preserve_canvas=False, raise_dock=False)
 
     def reset_layout(self):
         win = self.window
@@ -336,6 +359,71 @@ class WindowLayoutManager:
             if size > 0:
                 extents.append((dock, int(size), orientation))
         return tuple(extents)
+
+    def _window_size_excluding_docked_panels(self):
+        win = self.window
+        size = Qt.QtCore.QSize(win.size())
+        if win.isMaximized() or win.isFullScreen():
+            return size
+        width_delta = 0
+        height_delta = 0
+        separator = self._dock_separator_extent()
+        for dock in self._managed_docks():
+            if dock is None or not dock.isVisible():
+                continue
+            panel_manager = getattr(win, "panel_manager", None)
+            panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+            if panel is not None and panel.location != PanelLocation.DOCKED:
+                continue
+            area = self._dock_area_for_transition(dock)
+            if self._is_horizontal_dock_area(area):
+                extent = int(dock.width())
+                if extent > 0:
+                    width_delta += extent + separator
+            else:
+                extent = int(dock.height())
+                if extent > 0:
+                    height_delta += extent + separator
+        minimum = self._dockless_minimum_window_size()
+        return Qt.QtCore.QSize(
+            max(int(minimum.width()), int(size.width()) - int(width_delta)),
+            max(int(minimum.height()), int(size.height()) - int(height_delta)),
+        )
+
+    def _restore_saved_base_window_size(self):
+        win = self.window
+        if win.isMaximized() or win.isFullScreen():
+            return
+        size = self._settings_size("window_base_size")
+        if size is None or not size.isValid() or size.isEmpty():
+            return
+        minimum = self._dockless_minimum_window_size()
+        target = Qt.QtCore.QSize(
+            max(int(minimum.width()), int(size.width())),
+            max(int(minimum.height()), int(size.height())),
+        )
+        if target != win.size():
+            win.resize(target)
+
+    def _dockless_minimum_window_size(self):
+        minimum = Qt.QtCore.QSize(320, 240)
+        central = self.window.centralWidget()
+        if central is not None:
+            minimum = minimum.expandedTo(central.minimumSizeHint()).expandedTo(central.minimumSize())
+        return minimum
+
+    def _settings_size(self, key):
+        value = self.window._settings.value(key)
+        if value is None:
+            return None
+        if isinstance(value, Qt.QtCore.QSize):
+            return Qt.QtCore.QSize(value)
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            try:
+                return Qt.QtCore.QSize(int(value[0]), int(value[1]))
+            except Exception:
+                return None
+        return None
 
     def _restore_visible_dock_extents(self, dock_extents) -> None:
         for orientation in (Qt.QtCore.Qt.Orientation.Horizontal, Qt.QtCore.Qt.Orientation.Vertical):

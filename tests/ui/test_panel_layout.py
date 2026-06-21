@@ -465,6 +465,81 @@ def test_operations_dock_does_not_auto_reopen_after_user_close(qtbot):
         win.close()
 
 
+def test_restored_window_size_excludes_visible_docked_panels(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.resize(920, 620)
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(win.operation_dock, True, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=40)
+        expanded_size = win.size()
+        base_size = win.layout_manager._window_size_excluding_docked_panels()
+
+        assert base_size.width() < expanded_size.width()
+
+        win.close()
+        _process_events(qtbot, count=10)
+    finally:
+        if win.isVisible():
+            win.close()
+
+    restored = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(restored)
+    try:
+        _process_events(qtbot, count=40)
+
+        assert abs(restored.size().width() - base_size.width()) <= 2
+        assert abs(restored.size().height() - base_size.height()) <= 2
+        assert restored.size().width() < expanded_size.width() - 10
+    finally:
+        restored.close()
+        _clear_arrayscope_settings()
+
+
+def test_operation_dock_manual_close_is_not_persistent_across_launches(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    first = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(first)
+    try:
+        _process_events(qtbot, count=20)
+        first.request_operation("reverse", 0)
+        _process_events(qtbot, count=30)
+        assert first.operation_dock.isVisible()
+
+        action = _view_action(first, "Operations")
+        action.trigger()
+        _process_events(qtbot, count=20)
+        assert not first.operation_dock.isVisible()
+        assert first._operation_dock_user_visible is False
+
+        first.close()
+        _process_events(qtbot, count=10)
+    finally:
+        if first.isVisible():
+            first.close()
+
+    second = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(second)
+    try:
+        _process_events(qtbot, count=20)
+        assert second._operation_dock_user_visible is None
+
+        second.request_operation("reverse", 0)
+        _process_events(qtbot, count=30)
+
+        assert second.operation_dock.isVisible()
+    finally:
+        second.close()
+        _clear_arrayscope_settings()
+
+
 def test_detached_inspection_show_does_not_redock_until_requested(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window.panels import PanelLocation
