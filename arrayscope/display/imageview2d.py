@@ -131,6 +131,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._freehand_spacing = 1.0
         self.viewport_controller = ViewportController()
         self._viewport_applying = False
+        self._fit_mode_reminder_last_ms = 0.0
         self._display_colormap = None
         self._display_colormap_lut = default_gray_lut()
         self._display_colormap_key = _array_content_key(self._display_colormap_lut)
@@ -1705,13 +1706,51 @@ class ImageView2D(QtWidgets.QWidget):
             and event.type() == QtCore.QEvent.Type.Wheel
             and self.viewport_controller.is_fit_locked()
         ):
+            self._show_fit_mode_interaction_reminder()
             event.accept()
             return True
         if obj is self.graphicsView.viewport() and self._handle_context_menu_event(event):
             return True
         if obj is self.graphicsView.viewport() and self._handle_roi_drawing_event(event):
             return True
+        if (
+            obj is self.graphicsView.viewport()
+            and self.viewport_controller.is_fit_locked()
+            and self._is_fit_locked_pan_attempt(event)
+        ):
+            self._show_fit_mode_interaction_reminder()
         return super().eventFilter(obj, event)
+
+    def _is_fit_locked_pan_attempt(self, event) -> bool:
+        event_type = event.type()
+        if event_type == QtCore.QEvent.Type.MouseButtonPress:
+            return event.button() in (
+                QtCore.Qt.MouseButton.LeftButton,
+                QtCore.Qt.MouseButton.MiddleButton,
+            )
+        if event_type == QtCore.QEvent.Type.MouseMove:
+            buttons = event.buttons()
+            return bool(
+                buttons
+                & (
+                    QtCore.Qt.MouseButton.LeftButton
+                    | QtCore.Qt.MouseButton.MiddleButton
+                )
+            )
+        return False
+
+    def _show_fit_mode_interaction_reminder(self):
+        now_ms = perf_counter() * 1000.0
+        if now_ms - float(getattr(self, "_fit_mode_reminder_last_ms", 0.0) or 0.0) < 1000.0:
+            return
+        self._fit_mode_reminder_last_ms = now_ms
+        notify = getattr(self, "_notify_status", None)
+        if not callable(notify):
+            return
+        try:
+            notify("Fit mode is enabled; turn off Fit to pan or zoom.", 1000)
+        except TypeError:
+            notify("Fit mode is enabled; turn off Fit to pan or zoom.")
 
     def _current_image_world_rect(self):
         if self.image is None:

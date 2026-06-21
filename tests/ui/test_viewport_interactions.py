@@ -58,6 +58,28 @@ def test_toolbar_fit_and_one_to_one_are_viewport_commands(qtbot):
         win.close()
 
 
+def test_fit_mode_pan_zoom_reminder_is_transient(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.display.viewport import ViewportMode
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(20 * 30, dtype=float).reshape(20, 30))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.display_toolbar.fit_action.trigger()
+        _process_events(qtbot, count=10)
+        assert win.img_view.viewport_controller.mode == ViewportMode.FIT
+
+        win.img_view._show_fit_mode_interaction_reminder()
+
+        assert "Fit mode is enabled" in win.statusBar().currentMessage()
+        qtbot.wait(1200)
+        assert win.statusBar().currentMessage() == ""
+    finally:
+        win.close()
+
+
 def test_one_to_one_is_one_shot_and_slice_updates_preserve_user_view(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.display.viewport import ViewportMode

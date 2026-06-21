@@ -340,7 +340,10 @@ class DisplayControlBuildMixin:
         self.image_tab = QtWidgets.QWidget()
         self.image_tab_layout = QtWidgets.QVBoxLayout()
         
-        self.img_view = create_image_view(getattr(self, "app_settings", None), notify=lambda message: self.statusBar().showMessage(message, 5000))
+        self.img_view = create_image_view(
+            getattr(self, "app_settings", None),
+            notify=lambda message, timeout=5000: self.statusBar().showMessage(message, int(timeout)),
+        )
         self.pixel_hud = PixelHud()
         self.img_view.setHudWidget(self.pixel_hud)
         self.image_tab_layout.addWidget(self.img_view)

@@ -65,6 +65,7 @@ class NormalImageRenderMixin:
         previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
 
         self._montage_session = None
+        self._last_montage_autofit_signature = None
         self._stop_montage_session_slow_overlay()
         self._current_montage_geometry = None
         self._current_montage_plan = None

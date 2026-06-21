@@ -19,8 +19,12 @@ def create_image_view(settings=None, *, notify=None):
         try:
             from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
-            return VisPyImageView2D()
+            view = VisPyImageView2D()
+            view._notify_status = notify
+            return view
         except Exception as exc:
             if callable(notify):
                 notify(f"VisPy renderer unavailable; using PyQtGraph ({exc})")
-    return ImageView2D()
+    view = ImageView2D()
+    view._notify_status = notify
+    return view
