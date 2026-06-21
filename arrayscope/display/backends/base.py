@@ -17,6 +17,7 @@ from arrayscope.display.backend_contract import ImageViewBackendCapabilities, im
 
 if TYPE_CHECKING:
     from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
+    from arrayscope.display.model.frame import TileCommitReport
 
 
 class RasterCommitMode(Enum):
@@ -41,7 +42,7 @@ class ImageRenderBackend(Protocol):
 
     def present_raster(self, presentation: "DisplayRasterPresentation", *, mode: RasterCommitMode) -> None: ...
 
-    def present_tiled(self, presentation: "DisplayTiledPresentation") -> None: ...
+    def present_tiled(self, presentation: "DisplayTiledPresentation") -> "TileCommitReport | None": ...
 
     def set_profile_bounds(self, bounds: tuple[float, float, float, float]) -> None: ...
 
@@ -95,11 +96,11 @@ class ImageViewMethodBackendAdapter:
             return
         raise ValueError(f"unsupported raster commit mode: {mode}")
 
-    def present_tiled(self, presentation: "DisplayTiledPresentation") -> None:
+    def present_tiled(self, presentation: "DisplayTiledPresentation"):
         commit = getattr(self._view, "setTiledMontagePresentation", None)
         if not callable(commit):
             raise TypeError("image view does not implement first-class tiled presentation commits")
-        commit(
+        return commit(
             geometry=presentation.geometry,
             tile_state=presentation.tile_state,
             tile_delta=presentation.tile_delta,

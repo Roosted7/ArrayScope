@@ -100,6 +100,57 @@ class DisplayTilePayload:
         return total
 
 
+
+
+@dataclass(frozen=True)
+class TileCommitReport:
+    """Backend acknowledgement for a tiled presentation commit.
+
+    Counts distinguish expensive cold work from cheap resident rebinds or
+    geometry-only changes, so scheduling feedback does not throttle already
+    resident tiles as though they all required uploads.
+    """
+
+    presented_tiles: frozenset[int] = field(default_factory=frozenset)
+    removed_tiles: frozenset[int] = field(default_factory=frozenset)
+    deferred_tiles: frozenset[int] = field(default_factory=frozenset)
+    texture_uploads: int = 0
+    texture_upload_bytes: int = 0
+    pyqtgraph_items_created: int = 0
+    cpu_windowed_tiles: int = 0
+    resident_rebinds: int = 0
+    existing_items_shown: int = 0
+    relocated_tiles: int = 0
+    cold_work_ms: float = 0.0
+    visibility_work_ms: float = 0.0
+    total_ms: float = 0.0
+    stale: bool = False
+    clear_reason: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "presented_tiles", frozenset(int(tile) for tile in self.presented_tiles))
+        object.__setattr__(self, "removed_tiles", frozenset(int(tile) for tile in self.removed_tiles))
+        object.__setattr__(self, "deferred_tiles", frozenset(int(tile) for tile in self.deferred_tiles))
+        for name in (
+            "texture_uploads",
+            "texture_upload_bytes",
+            "pyqtgraph_items_created",
+            "cpu_windowed_tiles",
+            "resident_rebinds",
+            "existing_items_shown",
+            "relocated_tiles",
+        ):
+            object.__setattr__(self, name, max(0, int(getattr(self, name))))
+        for name in ("cold_work_ms", "visibility_work_ms", "total_ms"):
+            object.__setattr__(self, name, max(0.0, float(getattr(self, name) or 0.0)))
+        object.__setattr__(self, "stale", bool(self.stale))
+        object.__setattr__(self, "clear_reason", str(self.clear_reason or ""))
+
+    @property
+    def cold_count(self) -> int:
+        return int(self.texture_uploads + self.pyqtgraph_items_created + self.cpu_windowed_tiles)
+
+
 @dataclass(frozen=True)
 class TilePresentationDelta:
     structure_revision: int
@@ -108,6 +159,9 @@ class TilePresentationDelta:
     level_revision: int
     histogram_revision: int
     viewport_revision: int
+    base_revision: int = 0
+    target_revision: int = 0
+    cold_deadline_ms: float | None = None
     upserts: Mapping[int, DisplayTilePayload] = field(default_factory=dict)
     removals: tuple[int, ...] = ()
     active_tiles: tuple[int, ...] = ()
@@ -115,6 +169,7 @@ class TilePresentationDelta:
     near_tiles: tuple[int, ...] = ()
     near_tile_source_ids: Mapping[int, object] = field(default_factory=dict)
     force_refresh: bool = False
+    clear_reason: str = ""
 
     def __post_init__(self) -> None:
         upserts = {int(key): _coerce_tile_payload(value) for key, value in dict(self.upserts).items()}
@@ -134,6 +189,11 @@ class TilePresentationDelta:
         object.__setattr__(self, "level_revision", int(self.level_revision))
         object.__setattr__(self, "histogram_revision", int(self.histogram_revision))
         object.__setattr__(self, "viewport_revision", int(self.viewport_revision))
+        object.__setattr__(self, "base_revision", int(self.base_revision))
+        target = int(self.target_revision) if int(self.target_revision) else int(self.base_revision) + (1 if upserts or removals else 0)
+        object.__setattr__(self, "target_revision", target)
+        deadline = self.cold_deadline_ms
+        object.__setattr__(self, "cold_deadline_ms", None if deadline is None else max(0.0, float(deadline)))
         object.__setattr__(self, "upserts", upserts)
         object.__setattr__(self, "removals", removals)
         object.__setattr__(self, "active_tiles", active)
@@ -141,11 +201,13 @@ class TilePresentationDelta:
         object.__setattr__(self, "near_tiles", near)
         object.__setattr__(self, "near_tile_source_ids", near_sources)
         object.__setattr__(self, "force_refresh", bool(self.force_refresh))
+        object.__setattr__(self, "clear_reason", str(self.clear_reason or ""))
 
 
 @dataclass(frozen=True)
 class TilePresentationState:
     payloads: Mapping[int, DisplayTilePayload] = field(default_factory=dict)
+    revision: int = 0
 
     def __post_init__(self) -> None:
         typed = {int(key): _coerce_tile_payload(value) for key, value in dict(self.payloads).items()}
@@ -153,15 +215,18 @@ class TilePresentationState:
             if int(payload.tile_number) != int(key):
                 raise ValueError("tile state payload key must match tile_number")
         object.__setattr__(self, "payloads", typed)
+        object.__setattr__(self, "revision", int(self.revision))
 
     def apply_delta(self, delta: TilePresentationDelta) -> "TilePresentationState":
         if not isinstance(delta, TilePresentationDelta):
             raise TypeError("tile presentation state requires a TilePresentationDelta")
+        if int(delta.base_revision) != int(self.revision):
+            return self
         payloads = dict(self.payloads)
         for tile_number in delta.removals:
             payloads.pop(int(tile_number), None)
         payloads.update(delta.upserts)
-        return TilePresentationState(payloads)
+        return TilePresentationState(payloads, revision=int(delta.target_revision))
 
     def active_payloads(self, delta: TilePresentationDelta) -> dict[int, DisplayTilePayload]:
         return {int(tile): self.payloads[int(tile)] for tile in delta.active_tiles if int(tile) in self.payloads}
@@ -307,7 +372,7 @@ class CommittedDisplayFrame:
                     geometry=self.geometry,
                 ),
             )
-        elif self.data is None and not isinstance(self.value_source, TiledValueSource):
+        elif self.data is None and not isinstance(self.value_source, TiledValueSource) and not hasattr(self.value_source, "payloads"):
             raise ValueError("data-less committed frames require a tiled value source")
         if self.scene is None:
             storage = DisplayStorage.TILED if isinstance(self.value_source, TiledValueSource) else DisplayStorage.RASTER

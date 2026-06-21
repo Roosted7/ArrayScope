@@ -28,6 +28,7 @@ from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
 from arrayscope.display.imageview2d import _tiled_montage_placeholder
+from arrayscope.display.imageview2d import _tile_commit_report
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import CursorIntent, hit_test_display_overlays
 from arrayscope.display.overlay_hit_test import hit_test_roi, roi_handle_points
@@ -590,6 +591,7 @@ class VisPyImageView2D(ImageView2D):
                 self._last_vispy_tiled_shader_mapping = shader_mapping
                 self._last_vispy_tiled_histogram_key = histogram_key
             self._last_vispy_tiled_viewport_key = viewport_key
+            return stats
         finally:
             self._applying_presentation = applying
             self._finish_upload_timing()
@@ -616,7 +618,7 @@ class VisPyImageView2D(ImageView2D):
         }
         dirty_tiles = None if tile_delta.force_refresh else ()
         placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
-        self._apply_vispy_tile_layer_presentation(
+        stats = self._apply_vispy_tile_layer_presentation(
             placeholder,
             histogramData=None,
             histogramPlotData=histogramPlotData,
@@ -639,6 +641,7 @@ class VisPyImageView2D(ImageView2D):
             tile_delta=tile_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes,
         )
+        return _tile_commit_report(tile_payloads, tile_delta, stats)
 
     def _schedule_vispy_warm_tile_residency(
         self,
@@ -665,10 +668,9 @@ class VisPyImageView2D(ImageView2D):
             timer.setSingleShot(True)
             timer.timeout.connect(self._process_vispy_warm_tile_residency)
             self._vispy_warm_tile_timer = timer
-        # Warm uploads are speculative.  Restarting a short quiet-period timer
-        # ensures they never compete with an active camera gesture or the
-        # first useful visible-tile commit.
-        timer.start(40)
+        # Warm uploads are speculative and are queued after the visible commit
+        # returns, so they cannot delay the first useful tiled presentation.
+        timer.start(0)
 
     def _process_vispy_warm_tile_residency(self) -> None:
         payloads = dict(getattr(self, "_vispy_pending_warm_tile_payloads", {}) or {})
