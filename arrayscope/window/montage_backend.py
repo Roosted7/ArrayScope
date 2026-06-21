@@ -37,7 +37,7 @@ def choose_montage_backend(
         return MontageBackendDecision("canvas", "not a montage display")
 
     setting = normalize_montage_display_backend_choice(setting)
-    pixels = _canvas_pixels(data)
+    pixels = max(_canvas_pixels(data), _montage_pixels(geometry))
     rgb_like = _is_rgb_like(data)
     large = pixels > LARGE_MONTAGE_CANVAS_PIXELS
     large_rgb = large and rgb_like
@@ -130,6 +130,23 @@ def _canvas_pixels(data) -> int:
     if len(shape) != 2:
         return 0
     return int(shape[0]) * int(shape[1])
+
+
+def _montage_pixels(geometry) -> int:
+    montage = getattr(geometry, "montage", None)
+    if montage is None:
+        return 0
+    try:
+        columns = int(montage.columns)
+        rows = int(montage.rows)
+        tile_width = int(montage.tile_width)
+        tile_height = int(montage.tile_height)
+        gap = int(getattr(montage, "gap", 0))
+    except Exception:
+        return 0
+    width = columns * tile_width + max(0, columns - 1) * gap
+    height = rows * tile_height + max(0, rows - 1) * gap
+    return max(0, width) * max(0, height)
 
 
 def _is_rgb_like(data) -> bool:

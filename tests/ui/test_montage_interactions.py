@@ -62,6 +62,7 @@ def test_montage_status_does_not_remain_computing(qtbot):
 
 def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbot):
     _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((2, 3, 20), dtype=float)
@@ -70,6 +71,7 @@ def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbo
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.CANVAS)
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
         win.render(reason="test-montage")
@@ -100,6 +102,7 @@ def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbo
 
 def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
     _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((2, 3, 20), dtype=np.float32)
@@ -108,6 +111,7 @@ def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.CANVAS)
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
         win.render(reason="test-montage")
@@ -137,6 +141,7 @@ def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
 
 def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
     _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((2, 3, 20), dtype=np.float32)
@@ -145,6 +150,7 @@ def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.CANVAS)
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
         win.render(reason="test-montage")
@@ -166,6 +172,138 @@ def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
         assert after[0] == pytest.approx(before[0])
         assert after[1] == pytest.approx(before[1])
         assert canvas.canvas_rect[1] <= tile_10.y0 < canvas.canvas_rect[3]
+    finally:
+        win.close()
+
+
+def test_montage_tile_count_increase_auto_fits_when_many_tiles_are_outside_view(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtWidgets
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((2, 3, 20), dtype=np.float32)
+    for index in range(data.shape[2]):
+        data[:, :, index] = index
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(5)), text=":"))
+        win.render(reason="test-montage")
+        _process_events(qtbot, count=50)
+        win.img_view.getView().setRange(xRange=(0, 2), yRange=(0, 3), padding=0)
+        before = win.img_view.getView().viewRange()
+        status_height = win.statusBar().height()
+
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
+        win.render(reason="test-montage-more-tiles")
+        _process_events(qtbot, count=80)
+
+        view_range = win.img_view.getView().viewRange()
+        assert view_range[0][0] <= 0
+        assert view_range[0][1] >= 19
+        assert view_range[1][0] <= 0
+        assert view_range[1][1] >= 11
+
+        action = win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel")
+        assert action is not None
+        assert win.statusBar().height() == status_height
+        action.linkActivated.emit("action")
+        _process_events(qtbot, count=10)
+
+        restored = win.img_view.getView().viewRange()
+        assert restored[0] == pytest.approx(before[0], abs=0.03)
+        assert restored[1] == pytest.approx(before[1], abs=0.03)
+    finally:
+        win.close()
+
+
+def test_switching_to_larger_montage_auto_fits_when_tiles_would_be_hidden(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtWidgets
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((2, 3, 20), dtype=np.float32)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.img_view.getView().setRange(xRange=(0, 3), yRange=(0, 2), padding=0)
+
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
+        win.render(reason="test-switch-to-montage")
+        _process_events(qtbot, count=80)
+
+        view_range = win.img_view.getView().viewRange()
+        assert view_range[0][0] <= 0
+        assert view_range[0][1] >= 19
+        assert view_range[1][0] <= 0
+        assert view_range[1][1] >= 11
+        assert win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel") is not None
+    finally:
+        win.close()
+
+
+def test_montage_tile_count_increase_keeps_view_when_most_tiles_are_visible(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtWidgets
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((2, 3, 12), dtype=np.float32)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(10)), text=":"))
+        win.render(reason="test-montage")
+        _process_events(qtbot, count=50)
+        action = win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel")
+        if action is not None:
+            action.linkActivated.emit("action")
+            _process_events(qtbot, count=5)
+        win.img_view.getView().setRange(xRange=(0, 19), yRange=(0, 5), padding=0)
+        before = win.img_view.getView().viewRange()
+
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(12)), text=":"))
+        win.render(reason="test-montage-few-more-tiles")
+        _process_events(qtbot, count=80)
+
+        after = win.img_view.getView().viewRange()
+        assert after[0] == pytest.approx(before[0])
+        assert after[1] == pytest.approx(before[1])
+        assert win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel") is None
+    finally:
+        win.close()
+
+
+def test_montage_auto_fit_skips_when_fit_mode_is_enabled(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtWidgets
+    from arrayscope.display.viewport import ViewportMode
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((2, 3, 20), dtype=np.float32)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(5)), text=":"))
+        win.render(reason="test-montage")
+        _process_events(qtbot, count=50)
+        action = win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel")
+        if action is not None:
+            action.linkActivated.emit("action")
+            _process_events(qtbot, count=5)
+        win.display_toolbar.fit_action.trigger()
+        _process_events(qtbot, count=10)
+        assert win.img_view.viewport_controller.mode == ViewportMode.FIT
+
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
+        win.render(reason="test-montage-fit-mode")
+        _process_events(qtbot, count=80)
+
+        assert win.img_view.viewport_controller.mode == ViewportMode.FIT
+        assert win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel") is None
     finally:
         win.close()
 
@@ -421,7 +559,7 @@ def test_montage_schedules_missing_tiles_on_montage_lane(qtbot, monkeypatch):
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_montage_view()
 
-        assert len(calls) == 2
+        assert len(calls) == 3
         assert calls[0]["key"][0] == "montage_tile"
         assert calls[0]["replace_group"].startswith("montage-tile:")
         assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.montage_tile_workers
@@ -870,6 +1008,7 @@ def test_montage_visible_tiles_do_not_define_relative_levels(qtbot, monkeypatch)
         tile1 = win._montage_session.plan.tiles[1]
         calls[1]["on_done"](_tile_result(tile1, 1000))
         qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 3:5], np.full((2, 2), 1000, dtype=np.float32)), timeout=1000)
+        qtbot.waitUntil(lambda: tuple(float(value) for value in win.img_view.getLevels()) != first_levels, timeout=1000)
 
         assert tuple(float(value) for value in win.img_view.getLevels()) != first_levels
         assert tuple(float(value) for value in win.img_view.getLevels()) == (99.0, 1010.0)
@@ -1104,7 +1243,7 @@ def test_visible_render_budget_uses_app_setting():
     assert mixin._visible_render_budget_bytes() == 256 * 1024 * 1024
 
 
-def test_montage_memory_warning_uses_viewport_canvas_estimate(qtbot, monkeypatch):
+def test_montage_memory_warning_uses_auto_fit_viewport_canvas_estimate(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     import arrayscope.window.montage_renderer as montage_renderer
     from arrayscope.app.settings_state import AppSettingsState
@@ -1123,6 +1262,6 @@ def test_montage_memory_warning_uses_viewport_canvas_estimate(qtbot, monkeypatch
         win.update_montage_view()
 
         assert not any("Montage would allocate" in message for message in messages)
-        assert not any("Montage viewport canvas would allocate" in message for message in messages)
+        assert any("Montage viewport canvas would allocate" in message for message in messages)
     finally:
         win.close()

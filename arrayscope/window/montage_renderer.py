@@ -40,7 +40,7 @@ from arrayscope.operations.slabs import (
     plan_slab,
     request_for_image,
 )
-from arrayscope.ui.toasts import show_status_message
+from arrayscope.ui.toasts import show_status_action, show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.display.model.montage_levels import MontageLevelStats, MontageLevelTracker, montage_level_key
@@ -64,6 +64,7 @@ from arrayscope.display.model.commit import CommitKind
 
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
+MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
 
 
 class MontageRenderMixin:
@@ -155,6 +156,11 @@ class MontageRenderMixin:
         viewport_shape = viewport_plan.viewport_shape
         tile_shape = viewport_plan.tile_shape
         plan = viewport_plan.plan
+        if self._maybe_auto_fit_montage_tiles(plan.geometry):
+            viewport_plan = self._montage_viewport_plan(view_state)
+            viewport_shape = viewport_plan.viewport_shape
+            tile_shape = viewport_plan.tile_shape
+            plan = viewport_plan.plan
         current_range = viewport_plan.view_range
         canvas_rect = montage_rect_for_viewport(plan, view_range=current_range, viewport_shape=viewport_shape)
         display_tiles = viewport_plan.candidate_tiles(margin_tiles=0)
@@ -169,7 +175,17 @@ class MontageRenderMixin:
             rgb=view_state.channel == ChannelMode.COMPLEX,
             histogram=True,
         )
-        if canvas_estimate > policy.montage_canvas_budget_bytes:
+        canvas_warning_geometry = DisplayGeometry(
+            view_state=view_state,
+            display_shape=(max(1, int(canvas_rect[3]) - int(canvas_rect[1])), max(1, int(canvas_rect[2]) - int(canvas_rect[0]))),
+            montage=plan.geometry,
+        )
+        if view_state.channel == ChannelMode.COMPLEX and not shader_display:
+            backend_probe = np.zeros((1, 1, 3), dtype=np.uint8)
+        else:
+            backend_probe = np.zeros((1, 1), dtype=np.dtype(output_dtype))
+        backend_decision = self._montage_backend_policy(canvas_warning_geometry, backend_probe)
+        if backend_decision.backend == "canvas" and canvas_estimate > policy.montage_canvas_budget_bytes:
             show_status_message(
                 self,
                 f"Montage viewport canvas would allocate {format_bytes(canvas_estimate)} over budget {format_bytes(policy.montage_canvas_budget_bytes)}. Zoom in or increase Performance > Render Memory Budget.",
@@ -1545,6 +1561,58 @@ class MontageRenderMixin:
         if callable(refresh_hover):
             refresh_hover()
 
+    def _maybe_auto_fit_montage_tiles(self, geometry) -> bool:
+        montage = getattr(geometry, "montage", geometry)
+        if montage is None or not getattr(montage, "indices", ()):
+            self._last_montage_autofit_signature = None
+            return False
+        tile_count = len(tuple(montage.indices))
+        full_range = _montage_full_view_range(montage)
+        signature = _montage_autofit_signature(montage, full_range)
+        previous_signature = getattr(self, "_last_montage_autofit_signature", None)
+        self._last_montage_autofit_signature = signature
+        if previous_signature is not None and not _montage_autofit_scope_grew(previous_signature, signature):
+            return False
+        viewport_controller = getattr(self.img_view, "viewport_controller", None)
+        if viewport_controller is not None and viewport_controller.is_fit_locked():
+            return False
+        view = self.img_view.getView()
+        before_range = _copy_view_range(view.viewRange())
+        visible_count = _visible_montage_tile_count(montage, before_range)
+        if tile_count <= 0 or visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION:
+            return False
+        if _view_range_contains(before_range, full_range):
+            return False
+        previous_mode = None if viewport_controller is None else viewport_controller.mode
+        self._set_montage_view_range(full_range)
+
+        def undo():
+            self._set_montage_view_range(before_range)
+            if viewport_controller is not None and previous_mode is not None:
+                viewport_controller.mode = previous_mode
+
+        show_status_action(
+            self,
+            "Fitted montage to show all tiles.",
+            "Undo",
+            undo,
+            timeout=5000,
+        )
+        return True
+
+    def _set_montage_view_range(self, view_range) -> None:
+        view = self.img_view.getView()
+        was_applying = bool(getattr(self.img_view, "_viewport_applying", False))
+        self.img_view._viewport_applying = True
+        try:
+            view.setRange(
+                xRange=(float(view_range[0][0]), float(view_range[0][1])),
+                yRange=(float(view_range[1][0]), float(view_range[1][1])),
+                padding=0,
+            )
+        finally:
+            self.img_view._viewport_applying = was_applying
+
     def _montage_tile_source_ids(self, session) -> dict[int, object]:
         source_ids = getattr(session, "tile_source_ids", None)
         if source_ids is None:
@@ -1778,6 +1846,72 @@ class MontageRenderMixin:
             (float(view_range[0][0]), float(view_range[0][1])),
             (float(view_range[1][0]), float(view_range[1][1])),
         )
+
+
+def _copy_view_range(view_range):
+    return (
+        (float(view_range[0][0]), float(view_range[0][1])),
+        (float(view_range[1][0]), float(view_range[1][1])),
+    )
+
+
+def _montage_full_view_range(montage):
+    height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(montage.gap)
+    width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(montage.gap)
+    return ((0.0, float(max(1, width))), (0.0, float(max(1, height))))
+
+
+def _visible_montage_tile_count(montage, view_range) -> int:
+    x0, x1 = sorted((float(view_range[0][0]), float(view_range[0][1])))
+    y0, y1 = sorted((float(view_range[1][0]), float(view_range[1][1])))
+    tile_width = int(montage.tile_width)
+    tile_height = int(montage.tile_height)
+    columns = max(1, int(montage.columns))
+    gap = max(0, int(montage.gap))
+    visible = 0
+    for tile_number, _source_index in enumerate(tuple(montage.indices)):
+        row = tile_number // columns
+        col = tile_number % columns
+        tx0 = col * (tile_width + gap)
+        ty0 = row * (tile_height + gap)
+        tx1 = tx0 + tile_width
+        ty1 = ty0 + tile_height
+        if tx1 > x0 and tx0 < x1 and ty1 > y0 and ty0 < y1:
+            visible += 1
+    return visible
+
+
+def _view_range_contains(view_range, target_range) -> bool:
+    x0, x1 = sorted((float(view_range[0][0]), float(view_range[0][1])))
+    y0, y1 = sorted((float(view_range[1][0]), float(view_range[1][1])))
+    tx0, tx1 = sorted((float(target_range[0][0]), float(target_range[0][1])))
+    ty0, ty1 = sorted((float(target_range[1][0]), float(target_range[1][1])))
+    return x0 <= tx0 and x1 >= tx1 and y0 <= ty0 and y1 >= ty1
+
+
+def _montage_autofit_signature(montage, full_range) -> tuple[int, float, float, int, int]:
+    width = max(0.0, float(full_range[0][1]) - float(full_range[0][0]))
+    height = max(0.0, float(full_range[1][1]) - float(full_range[1][0]))
+    return (
+        len(tuple(getattr(montage, "indices", ()) or ())),
+        width,
+        height,
+        int(getattr(montage, "columns", 0) or 0),
+        int(getattr(montage, "rows", 0) or 0),
+    )
+
+
+def _montage_autofit_scope_grew(previous, current) -> bool:
+    try:
+        previous_count, previous_width, previous_height, _previous_columns, _previous_rows = previous
+        current_count, current_width, current_height, _current_columns, _current_rows = current
+    except Exception:
+        return True
+    return (
+        int(current_count) > int(previous_count)
+        or float(current_width) > float(previous_width)
+        or float(current_height) > float(previous_height)
+    )
 
 
 def _montage_tile_layer_placeholder(session) -> np.ndarray:
