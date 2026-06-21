@@ -43,7 +43,7 @@ def test_roi_statistics_refresh_is_debounced(qtbot, monkeypatch):
         win.close()
 
 
-def test_hidden_inspection_panel_skips_roi_statistics(qtbot, monkeypatch):
+def test_hidden_inspection_panel_updates_overlay_without_dock_work(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -66,6 +66,47 @@ def test_hidden_inspection_panel_skips_roi_statistics(qtbot, monkeypatch):
 
         assert calls == []
         assert getattr(win, "_inspection_stale", False)
+        assert win.inspection_dock.roi_model.rowCount() == 0
+        assert win.img_view._roi_info_panel is not None
+        assert "n=36" in win.img_view._roi_info_panel.text()
+        assert "mean=184.5" in win.img_view._roi_info_panel.text()
+    finally:
+        win.close()
+
+
+def test_detached_inspection_panel_refreshes_roi_statistics_and_histogram(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window.panels import PanelLocation
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(40 * 40, dtype=float).reshape(40, 40))
+    qtbot.addWidget(win)
+    calls = []
+    original = win._compute_roi_inspection_snapshot
+    monkeypatch.setattr(
+        win,
+        "_compute_roi_inspection_snapshot",
+        lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1],
+    )
+    try:
+        _process_events(qtbot, count=20)
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=10)
+        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=10)
+        assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
+        assert not win.inspection_dock.isVisible()
+
+        calls.clear()
+        win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
+        qtbot.waitUntil(lambda: len(calls) == 1, timeout=3000)
+        _process_events(qtbot, count=10)
+
+        model = win.inspection_dock.roi_model
+        assert model.rowCount() == 1
+        assert model.data(model.index(0, 2)) == "36"
+        assert len(win.inspection_dock.histogram_plot.listDataItems()) == 1
+        assert not getattr(win, "_inspection_stale", False)
     finally:
         win.close()
 

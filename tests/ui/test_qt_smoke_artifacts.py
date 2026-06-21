@@ -292,7 +292,6 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         assert win.img_view._roi_info_panel is not None
         assert win.img_view._roi_info_panel.isVisible()
         assert len(win.img_view.roiSelections()) == 3
-        assert win.inspection_dock.roi_model.rowCount() == 3
         assert rectangle.geometry.kind == RoiKind.RECTANGLE
         assert polyline.geometry.kind == RoiKind.POLYLINE
         assert freehand.geometry.points[0] == freehand.geometry.points[-1]
@@ -303,6 +302,7 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         assert win.inspection_dock.isVisible()
         assert win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
         _process_events(qt_app, count=12)
+        assert win.inspection_dock.roi_model.rowCount() == 3
         assert len(win.inspection_dock.histogram_plot.listDataItems()) >= 6
         _grab_widget(win.inspection_dock.widget(), "arrayscope_roi_inspection_dock.png", min_width=240, min_height=260)
     finally:
