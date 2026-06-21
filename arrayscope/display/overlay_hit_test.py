@@ -154,4 +154,14 @@ def _coerce_geometry(geometry) -> RoiGeometry:
         return geometry
     if isinstance(geometry, dict):
         return RoiGeometry(**geometry)
+    if hasattr(geometry, "kind") and (hasattr(geometry, "points") or hasattr(geometry, "rect")):
+        kind = getattr(geometry, "kind")
+        return RoiGeometry(
+            kind=getattr(kind, "value", kind),
+            points=tuple(getattr(geometry, "points", ()) or ()),
+            rect=getattr(geometry, "rect", None),
+            line_width=float(getattr(geometry, "line_width", 1.0)),
+            closed=bool(getattr(geometry, "closed", False)),
+            image_axes=tuple(getattr(geometry, "image_axes", (0, 1)) or (0, 1)),
+        )
     raise TypeError("ROI hit testing requires RoiGeometry")
