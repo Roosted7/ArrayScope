@@ -17,6 +17,12 @@ def previous_tiled_payloads(frame) -> dict[int, object]:
 def base_tile_source_id(source_id) -> object | None:
     if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
         return source_id[0]
+    if isinstance(source_id, tuple) and "texture_kind" in source_id:
+        marker = source_id.index("texture_kind")
+        prefix = source_id[:marker]
+        if not prefix:
+            return None
+        return prefix[0] if len(prefix) == 1 else prefix
     return source_id
 
 
