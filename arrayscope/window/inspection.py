@@ -115,16 +115,26 @@ class InspectionWorkflowMixin:
         self._schedule_refresh_inspection_dock("refresh")
         self._last_inspection_refresh_ms = (perf_counter() - start) * 1000.0
 
+    def _inspection_panel_is_visible(self) -> bool:
+        if not hasattr(self, "inspection_dock"):
+            return False
+        panel_manager = getattr(self, "panel_manager", None)
+        if panel_manager is not None:
+            try:
+                return bool(panel_manager.is_visible("inspection"))
+            except Exception:
+                pass
+        return bool(self.inspection_dock.isVisible())
+
     def _schedule_refresh_inspection_dock(self, reason):
         if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
             return
         self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
         selections = self.roi_store.selections
         self.inspection_dock.set_rois(selections)
-        if not self.inspection_dock.isVisible():
+        if not self._inspection_panel_is_visible():
             self._inspection_stale = True
             stats_by_roi = self._hidden_roi_statistics(selections)
-            self.inspection_dock.set_statistics(stats_by_roi)
             self._update_roi_info_overlay(stats_by_roi)
             return
         if not hasattr(self, "_roi_refresh_timer"):
@@ -145,7 +155,7 @@ class InspectionWorkflowMixin:
         try:
             if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
                 return
-            if not self.inspection_dock.isVisible():
+            if not self._inspection_panel_is_visible():
                 self._inspection_stale = True
                 return
             self._inspection_stale = False
