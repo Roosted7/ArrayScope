@@ -52,6 +52,16 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
     capabilities = getattr(view, "rendering_capabilities", None)
     if isinstance(capabilities, ImageViewBackendCapabilities):
         return capabilities
+    if capabilities is not None and hasattr(capabilities, "name"):
+        return ImageViewBackendCapabilities(
+            name=str(getattr(capabilities, "name", "pyqtgraph") or "pyqtgraph"),
+            direct_montage_tile_payloads=bool(getattr(capabilities, "direct_montage_tile_payloads", False)),
+            prefers_tiled_montages=bool(getattr(capabilities, "prefers_tiled_montages", False)),
+            supports_montage_canvas=bool(getattr(capabilities, "supports_montage_canvas", True)),
+            persistent_tile_residency=bool(getattr(capabilities, "persistent_tile_residency", False)),
+            shader_windowing=bool(getattr(capabilities, "shader_windowing", False)),
+            native_pointer_interaction=bool(getattr(capabilities, "native_pointer_interaction", True)),
+        )
 
     name = str(getattr(view, "rendering_backend_name", "pyqtgraph") or "pyqtgraph").lower()
     direct = bool(getattr(view, "supports_direct_montage_tile_payloads", False))
