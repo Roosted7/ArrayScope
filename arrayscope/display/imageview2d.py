@@ -39,6 +39,7 @@ from arrayscope.display.levels import finite_bounds
 from arrayscope.display.shader_mapping import default_gray_lut, normalize_lut_rgb
 from arrayscope.display.layers import ViewLayerOwner
 from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer, TileLayerUpdateStats
+from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
 from arrayscope.display.profile_marker import ProfileMarkerOwner
 from arrayscope.display.roi_items import (
@@ -238,9 +239,13 @@ class ImageView2D(QtWidgets.QWidget):
             "histogram_pixels": 0,
             "fast_same_object": False,
             "tile_layer_visible_items": 0,
+            "tile_layer_items_created": 0,
             "tile_layer_items_updated": 0,
             "tile_layer_items_skipped": 0,
             "tile_layer_rgb_window_tiles": 0,
+            "tile_layer_image_replacements": 0,
+            "tile_layer_existing_items_shown": 0,
+            "tile_layer_relocated_tiles": 0,
             "tile_layer_resident_items": 0,
             "tile_layer_storage_capacity": 0,
             "tile_layer_storage_rebuilds": 0,
@@ -297,9 +302,13 @@ class ImageView2D(QtWidgets.QWidget):
             fast_same_object=bool(timing["fast_same_object"]),
             mode=str(timing["mode"]),
             tile_layer_visible_items=int(timing["tile_layer_visible_items"]),
+            tile_layer_items_created=int(timing["tile_layer_items_created"]),
             tile_layer_items_updated=int(timing["tile_layer_items_updated"]),
             tile_layer_items_skipped=int(timing["tile_layer_items_skipped"]),
             tile_layer_rgb_window_tiles=int(timing["tile_layer_rgb_window_tiles"]),
+            tile_layer_image_replacements=int(timing["tile_layer_image_replacements"]),
+            tile_layer_existing_items_shown=int(timing["tile_layer_existing_items_shown"]),
+            tile_layer_relocated_tiles=int(timing["tile_layer_relocated_tiles"]),
             tile_layer_resident_items=int(timing["tile_layer_resident_items"]),
             tile_layer_storage_capacity=int(timing["tile_layer_storage_capacity"]),
             tile_layer_storage_rebuilds=int(timing["tile_layer_storage_rebuilds"]),
@@ -382,14 +391,15 @@ class ImageView2D(QtWidgets.QWidget):
                 and np.shares_memory(previous, data)
             )
         start = perf_counter()
-        if same_object:
-            item.setImage(None, autoLevels=False, levels=levels)
-        else:
-            item.setImage(ensure_imageitem_array(data), autoLevels=False, levels=levels)
-        elapsed = (perf_counter() - start) * 1000.0
         array = np.asarray(data)
+        image_kwargs = {}
         if str(role) == "visible" and array.ndim == 2:
-            item.setLookupTable(self._display_colormap_lut)
+            image_kwargs["lut"] = self._display_colormap_lut
+        if same_object:
+            item.setImage(None, autoLevels=False, levels=levels, **image_kwargs)
+        else:
+            item.setImage(ensure_imageitem_array(data), autoLevels=False, levels=levels, **image_kwargs)
+        elapsed = (perf_counter() - start) * 1000.0
         timing = self._upload_timing
         if str(role) == "histogram":
             self._record_upload_timing("histogram_upload_ms", elapsed)
@@ -430,6 +440,7 @@ class ImageView2D(QtWidgets.QWidget):
         montage_dirty_tiles: tuple[int, ...] | None = None,
         montage_tile_source_ids: dict[int, object] | None = None,
         montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
+        tile_delta=None,
     ) -> None:
         if geometry is None or getattr(geometry, "montage", None) is None:
             raise ValueError("tile-layer presentation requires montage geometry")
@@ -461,6 +472,7 @@ class ImageView2D(QtWidgets.QWidget):
         montage_dirty_tiles: tuple[int, ...] | None = None,
         montage_tile_source_ids: dict[int, object] | None = None,
         montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
+        tile_delta=None,
     ) -> None:
         self._start_upload_timing("tile_layer")
         applying = self._applying_presentation
@@ -487,6 +499,7 @@ class ImageView2D(QtWidgets.QWidget):
                 montage_dirty_tiles=montage_dirty_tiles,
                 montage_tile_source_ids=montage_tile_source_ids,
                 montage_tile_payloads=montage_tile_payloads,
+                tile_delta=tile_delta,
             )
             self._record_tile_layer_stats(stats)
             histogram_key = self._tile_layer_histogram_key(
@@ -522,6 +535,7 @@ class ImageView2D(QtWidgets.QWidget):
             self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
             self._updateAspectRatio()
             self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy, image_origin=(geometry.montage_origin_x, geometry.montage_origin_y))
+            return stats
         finally:
             self._applying_presentation = applying
             self._finish_upload_timing()
@@ -552,7 +566,7 @@ class ImageView2D(QtWidgets.QWidget):
         tile_payloads = tile_state.active_payloads(tile_delta)
         dirty_tiles = None if tile_delta.force_refresh else ()
         placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
-        self._apply_tile_layer_presentation(
+        stats = self._apply_tile_layer_presentation(
             placeholder,
             histogramData=None,
             histogramPlotData=histogramPlotData,
@@ -564,9 +578,11 @@ class ImageView2D(QtWidgets.QWidget):
             montage_dirty_tiles=dirty_tiles,
             montage_tile_source_ids={key: payload.source_id for key, payload in tile_payloads.items()},
             montage_tile_payloads=tile_payloads,
+            tile_delta=tile_delta,
         )
+        return _tile_commit_report(tile_payloads, tile_delta, stats)
 
-    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None) -> TileLayerUpdateStats:
+    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None) -> TileLayerUpdateStats:
         if self._montage_tile_layer is None:
             return TileLayerUpdateStats()
         return self._montage_tile_layer.update_presentation(
@@ -578,6 +594,7 @@ class ImageView2D(QtWidgets.QWidget):
             dirty_tiles=montage_dirty_tiles,
             tile_source_ids=montage_tile_source_ids,
             tile_payloads=montage_tile_payloads,
+            tile_delta=tile_delta,
         )
 
     def _record_tile_layer_stats(self, stats: TileLayerUpdateStats) -> None:
@@ -585,9 +602,13 @@ class ImageView2D(QtWidgets.QWidget):
         if timing is None:
             return
         timing["tile_layer_visible_items"] = int(stats.visible_items)
+        timing["tile_layer_items_created"] = int(getattr(stats, "items_created", 0))
         timing["tile_layer_items_updated"] = int(stats.items_updated)
         timing["tile_layer_items_skipped"] = int(stats.items_skipped)
         timing["tile_layer_rgb_window_tiles"] = int(stats.rgb_window_tiles)
+        timing["tile_layer_image_replacements"] = int(getattr(stats, "image_replacements", 0))
+        timing["tile_layer_existing_items_shown"] = int(getattr(stats, "existing_items_shown", 0))
+        timing["tile_layer_relocated_tiles"] = int(getattr(stats, "relocated_tiles", 0))
         timing["tile_layer_resident_items"] = int(stats.resident_items)
         timing["tile_layer_storage_capacity"] = int(stats.storage_capacity)
         timing["tile_layer_storage_rebuilds"] = int(stats.storage_rebuilds)
@@ -705,9 +726,10 @@ class ImageView2D(QtWidgets.QWidget):
                     self.autoLevels()
                 elif levels is not None:
                     if isinstance(levels, (list, tuple)) and len(levels) == 2:
-                        self._sync_display_levels(levels[0], levels[1], update_image=False, emit_user=False)
+                        self._displayLevels = (float(levels[0]), float(levels[1]))
                     else:
-                        self._sync_display_levels(*levels, update_image=False, emit_user=False)
+                        low, high = levels
+                        self._displayLevels = (float(low), float(high))
             finally:
                 self._applying_presentation = applying
             
@@ -921,6 +943,14 @@ class ImageView2D(QtWidgets.QWidget):
             if histogram_plot_data is not None:
                 self._bind_histogram_item(self.histogramImageItem)
                 self._set_image_item_data(self.histogramImageItem, histogram_plot_data, histogram_levels, role="histogram")
+            elif self.histogramSource is not None:
+                self._bind_histogram_item(self.histogramImageItem)
+                self._set_image_item_data(
+                    self.histogramImageItem,
+                    histogram_data,
+                    histogram_levels,
+                    role="histogram",
+                )
             else:
                 self._bind_histogram_item(self.imageItem)
                 self._refresh_histogram_plot(auto_level=False)
@@ -1081,6 +1111,8 @@ class ImageView2D(QtWidgets.QWidget):
         
     def getLevels(self):
         """Get the current histogram levels"""
+        if self._displayLevels is not None:
+            return self._displayLevels
         return self.histogram.getLevels()
 
     def getHistogramDataBounds(self):
@@ -1785,6 +1817,32 @@ def _tiled_montage_placeholder(display_shape, tile_payloads) -> np.ndarray:
         return np.broadcast_to(base, (height, width, 3))
     base = np.zeros((1, 1), dtype=np.float32)
     return np.broadcast_to(base, (height, width))
+
+
+def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
+    payloads = dict(tile_payloads or {})
+    deferred = frozenset(int(tile) for tile in tuple(getattr(stats, "deferred_tiles", ()) or ()))
+    presented = frozenset(int(tile) for tile in payloads if int(tile) not in deferred)
+    texture_uploads = int(getattr(stats, "texture_uploads", 0) or 0)
+    items_created = int(getattr(stats, "items_created", 0) or 0)
+    rgb_window_tiles = int(getattr(stats, "rgb_window_tiles", 0) or 0)
+    existing_items = int(getattr(stats, "existing_items_shown", 0) or 0)
+    relocated = int(getattr(stats, "relocated_tiles", 0) or 0)
+    updated = int(getattr(stats, "items_updated", 0) or 0)
+    resident = max(0, len(payloads) - texture_uploads - items_created - updated)
+    return TileCommitReport(
+        presented_tiles=presented,
+        removed_tiles=frozenset(getattr(tile_delta, "removals", ()) or ()),
+        deferred_tiles=deferred,
+        texture_uploads=texture_uploads,
+        texture_upload_bytes=int(getattr(stats, "texture_upload_bytes", 0) or 0),
+        pyqtgraph_items_created=items_created,
+        cpu_windowed_tiles=rgb_window_tiles,
+        resident_rebinds=resident,
+        existing_items_shown=existing_items,
+        relocated_tiles=relocated,
+        cold_work_ms=float(getattr(stats, "upload_ms", 0.0) or 0.0),
+    )
 
 
 def _is_tiled_loading_only_commit(

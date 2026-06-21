@@ -6,7 +6,7 @@ import numpy as np
 
 from arrayscope.display.backends import RasterCommitMode, backend_adapter_for_view
 from arrayscope.display.scene import DisplayScene, display_scene_for_presentation
-from arrayscope.display.model.frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TiledValueSource
+from arrayscope.display.model.frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TileCommitReport, TiledValueSource
 from arrayscope.display.model.commit import DisplayPresentation, DisplayRasterPresentation, DisplayTiledPresentation
 
 
@@ -14,8 +14,10 @@ class DisplayCommitter:
     def __init__(self, image_view):
         self.backend = backend_adapter_for_view(image_view)
         self.image_view = self.backend.view
+        self.last_tile_commit_report: TileCommitReport | None = None
 
     def commit_full(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
+        self.last_tile_commit_report = None
         presentation = self._require_raster(presentation, "full")
         self._validate_presentation(presentation)
         scene = display_scene_for_presentation(presentation)
@@ -24,6 +26,7 @@ class DisplayCommitter:
         return self._frame_for(presentation, key, scene)
 
     def commit_fast(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
+        self.last_tile_commit_report = None
         presentation = self._require_raster(presentation, "fast")
         self._validate_presentation(presentation)
         if self.backend.current_raster_shape() != tuple(presentation.geometry.display_shape):
@@ -37,8 +40,15 @@ class DisplayCommitter:
         self._validate_presentation(presentation)
         scene = display_scene_for_presentation(presentation)
         if isinstance(presentation, DisplayTiledPresentation):
-            self.backend.present_tiled(presentation)
+            report = self.backend.present_tiled(presentation)
+            if not isinstance(report, TileCommitReport):
+                report = TileCommitReport(
+                    presented_tiles=presentation.tile_state.active_payloads(presentation.tile_delta),
+                    removed_tiles=presentation.tile_delta.removals,
+                )
+            self.last_tile_commit_report = report
         else:
+            self.last_tile_commit_report = None
             self.backend.present_raster(presentation, mode=RasterCommitMode.TILE_LAYER)
         self.backend.set_profile_bounds(scene.bounds)
         return self._frame_for(presentation, key, scene)

@@ -60,6 +60,7 @@ class GpuMontageLayerStats:
     mipmap_available: bool = False
     complex_texture_uploads: int = 0
     shader_uniform_updates: int = 0
+    deferred_tiles: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -363,6 +364,7 @@ class TextureAtlasPool:
         near_tiles: tuple[int, ...] = (),
         near_tile_source_ids: dict[int, object] | None = None,
         budget_bytes: int | None = None,
+        cold_deadline_ms: float | None = None,
     ) -> tuple[dict[int, tuple[float, float, float, float]], GpuMontageLayerStats]:
         start = perf_counter()
         raw_payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
@@ -406,6 +408,8 @@ class TextureAtlasPool:
         complex_uploads = 0
         updated = 0
         skipped = int(unsupported_items)
+        deferred_tiles: list[int] = []
+        cold_tiles_committed = 0
         evictions_before = self.eviction_count
         evicted_near_before = self.evicted_near_count
         tile_h, tile_w = self.tile_shape or tile_shape
@@ -419,6 +423,17 @@ class TextureAtlasPool:
             source_changed = self.source_ids.get(resident_key) != payload.source_id
             should_upload = bool(dirty_all or newly_assigned or source_changed or tile_number in dirty)
             uvs[tile_number] = page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload))
+            if (
+                cold_deadline_ms is not None
+                and should_upload
+                and cold_tiles_committed > 0
+                and (perf_counter() - start) * 1000.0 >= float(cold_deadline_ms)
+            ):
+                active_tile_slots.pop(int(tile_number), None)
+                uvs.pop(int(tile_number), None)
+                deferred_tiles.append(int(tile_number))
+                skipped += 1
+                continue
             if not should_upload:
                 skipped += 1
                 continue
@@ -451,6 +466,7 @@ class TextureAtlasPool:
                 upload_bytes += int(color.nbytes)
             self.source_ids[resident_key] = payload.source_id
             updated += 1
+            cold_tiles_committed += int(should_upload)
 
         self.tile_slots = active_tile_slots
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
@@ -481,6 +497,7 @@ class TextureAtlasPool:
             mipmap_updates=0,
             mipmap_available=False,
             complex_texture_uploads=complex_uploads,
+            deferred_tiles=tuple(deferred_tiles),
         )
 
     def warm_payloads(
@@ -823,6 +840,7 @@ class GpuMontageLayer:
             near_tiles=near_tiles,
             near_tile_source_ids=near_tile_source_ids,
             budget_bytes=tile_residency_budget_bytes,
+            cold_deadline_ms=getattr(tile_delta, "cold_deadline_ms", None),
         )
         self._ensure_visual_count(len(self._pool.pages))
         vertex_uploads = 0
@@ -919,6 +937,7 @@ class GpuMontageLayer:
             mipmap_available=texture_stats.mipmap_available,
             complex_texture_uploads=texture_stats.complex_texture_uploads,
             shader_uniform_updates=level_updates + mapping_updates,
+            deferred_tiles=texture_stats.deferred_tiles,
         )
         return self._last_stats
 

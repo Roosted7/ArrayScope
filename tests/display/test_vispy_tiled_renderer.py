@@ -159,6 +159,59 @@ def test_atlas_keeps_stable_slots_when_active_set_changes():
     assert ("tile", 2, 30.0) in pool.source_ids.values()
 
 
+def test_cold_deadline_makes_progress_on_deferred_tail_tiles():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    payloads = {
+        index: payload(index, float(index))
+        for index in range(4)
+    }
+
+    _uvs, first = pool.update_payloads(
+        payloads,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=4,
+        cold_deadline_ms=0.0,
+    )
+    assert first.items_updated == 1
+    assert first.deferred_tiles == (1, 2, 3)
+
+    _uvs, second = pool.update_payloads(
+        payloads,
+        tile_shape=(2, 2),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        reserve_count=4,
+        cold_deadline_ms=0.0,
+    )
+    assert second.items_updated == 1
+    assert second.deferred_tiles == (2, 3)
+
+    _uvs, third = pool.update_payloads(
+        payloads,
+        tile_shape=(2, 2),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        reserve_count=4,
+        cold_deadline_ms=0.0,
+    )
+    _uvs, fourth = pool.update_payloads(
+        payloads,
+        tile_shape=(2, 2),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        reserve_count=4,
+        cold_deadline_ms=0.0,
+    )
+
+    assert third.items_updated == 1
+    assert third.deferred_tiles == (3,)
+    assert fourth.items_updated == 1
+    assert fourth.deferred_tiles == ()
+    assert set(pool.source_ids.values()) == {payload.source_id for payload in payloads.values()}
+
+
 def test_atlas_reserve_includes_pending_visible_tiles():
     geometry = SimpleNamespace(
         montage=SimpleNamespace(indices=tuple(range(6))),
