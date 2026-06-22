@@ -210,9 +210,6 @@ def _constrain_axis_range(
             center = (view_start + view_end) * 0.5
         view_start = center - span * 0.5
         view_end = center + span * 0.5
-        if direction < 0:
-            return (view_end, view_start)
-        return (view_start, view_end)
 
     required_overlap = min_visible_fraction * min(content_span, span)
     min_view_start = content_start + required_overlap - span
