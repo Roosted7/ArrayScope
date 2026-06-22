@@ -1,6 +1,10 @@
 from pathlib import Path
 import sys
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
+    import tomli as tomllib
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
