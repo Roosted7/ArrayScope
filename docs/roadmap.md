@@ -8,22 +8,29 @@ A roadmap item is complete only when its exit gate is met. “Code exists” is 
 
 ### N0. Correctness and reproducibility gate
 
-**Goal:** establish one trustworthy release baseline before expanding the rendering architecture.
+**Goal:** establish one trustworthy `0.8.0` release-candidate baseline before expanding the rendering architecture.
 
 Work:
 
 - Choose release/version semantics after the ArrayScope rebrand; align package metadata, changelog, tags, and build workflow.
+- Keep the `v0.8.0` tag, package metadata, runtime `arrayscope.__version__`, changelog, and dedicated ArrayScope repository identity aligned before publication.
 - Run the broad test matrix on supported Python/Qt platforms and record known skips.
 - Add focused regression around the latest slicing/range, histogram, viewport, and tile-priority changes.
 - Keep strict stale-commit/document-revision checks enabled in all visible paths.
 - Remove test-order dependence and lifecycle leaks as they are found.
+- Reproduce both RC artifact types from documented commands:
+  `python -m arrayscope.tools.release_diagnostics --jsonl tests/artifacts/v0.8.0-diagnostics-pyqtgraph.jsonl --backend pyqtgraph`,
+  `python -m arrayscope.tools.release_diagnostics --jsonl tests/artifacts/v0.8.0-diagnostics-vispy.jsonl --backend vispy`,
+  `python -m arrayscope.core.diagnostics_trace tests/artifacts/v0.8.0-diagnostics-pyqtgraph.jsonl`,
+  `python -m arrayscope.core.diagnostics_trace tests/artifacts/v0.8.0-diagnostics-vispy.jsonl`,
+  and `python -m arrayscope.display.rendering_benchmarks --runs 1 --jsonl tests/artifacts/v0.8.0-rendering-benchmark-linux.jsonl`.
 
 Exit gate:
 
 - clean checkout builds and launches on Linux, macOS, and Windows CI targets;
 - all supported automated suites pass or have documented platform skips;
 - package/version/repository identity is unambiguous;
-- a v28 diagnostics trace and benchmark artifact can be reproduced from documented commands.
+- a v28 diagnostics trace and benchmark artifact can be reproduced from documented commands without mixing their JSONL schemas.
 
 ### N1. Enforce GUI callback budgets
 

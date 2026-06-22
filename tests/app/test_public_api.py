@@ -1,6 +1,49 @@
-def test_package_module_is_callable():
-    import sys
+from pathlib import Path
+import sys
+import tomllib
 
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_runtime_version_uses_canonical_module():
+    import arrayscope
+    from arrayscope._version import __version__
+
+    assert arrayscope.__version__ == __version__ == "0.8.0"
+
+
+def test_package_metadata_uses_canonical_version_when_installed():
+    from importlib.metadata import PackageNotFoundError, version
+
+    import arrayscope
+
+    try:
+        metadata_version = version("ArrayScope")
+    except PackageNotFoundError:
+        return
+
+    assert metadata_version == arrayscope.__version__
+
+
+def test_pyproject_uses_dynamic_version_from_canonical_module():
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert pyproject["project"]["dynamic"] == ["version"]
+    assert pyproject["tool"]["setuptools"]["dynamic"]["version"] == {
+        "attr": "arrayscope._version.__version__"
+    }
+
+
+def test_changelog_names_arrayscope_v080_release_candidate():
+    changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert "## 0.8.0 — ArrayScope v28 release candidate" in changelog
+    assert "## Legacy ndslice releases" in changelog
+    assert changelog.index("## 0.8.0") < changelog.index("## Legacy ndslice releases")
+
+
+def test_package_module_is_callable():
     for name in list(sys.modules):
         if name == "arrayscope" or name.startswith("arrayscope."):
             del sys.modules[name]

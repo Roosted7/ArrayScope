@@ -2,7 +2,7 @@
 
 ArrayScope is a Python/Qt viewer for quickly understanding n-dimensional NumPy arrays. It is aimed at scientific and reconstruction workflows where the useful first questions are usually: *which dimensions matter, what does this slice contain, how do values change, and what happens after a small operation such as an FFT, crop, reduction, or axis change?*
 
-The current repository is an active pre-release development line. The original lightweight viewer is still present, but the implementation now also contains a staged operation evaluator, bounded caches, progressive montage rendering, ROI/profile inspection, runtime diagnostics, and an experimental VisPy backend. See [Current state](docs/current-state.md) before treating every advanced path as production-stable.
+The current repository is the ArrayScope `0.8.0` release-candidate line. It has moved well beyond the original lightweight ndslice viewer: the implementation now contains a staged operation evaluator, bounded caches, progressive montage rendering, ROI/profile inspection, runtime diagnostics, and an experimental VisPy backend. See [Current state](docs/current-state.md) before treating every advanced path as production-stable.
 
 ![ArrayScope showcase](docs/images/showcase.gif)
 
@@ -95,7 +95,7 @@ When a container contains several datasets, ArrayScope shows a selector and high
 
 ## Installation
 
-The repository currently identifies itself as version `0.0.1` after the ArrayScope rebrand and is still being prepared for a coherent public release. For development, use the source checkout:
+ArrayScope identifies this release-candidate baseline as version `0.8.0`. Until the first PyPI upload is published, install from the dedicated ArrayScope source checkout:
 
 ```bash
 git clone <repository-url>

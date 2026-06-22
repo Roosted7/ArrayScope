@@ -17,6 +17,10 @@ dependencies:
   - psutil
   - pytest
   - hypothesis
+  - ruff
+  - build
+  - twine
+  - vispy>=0.14
   - pip
   - pip:
       - -e .

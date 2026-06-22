@@ -5,7 +5,8 @@ from __future__ import annotations
 import sys
 import types
 
-__version__ = "0.0.1"
+from arrayscope._version import __version__
+
 _arrayscope = None
 
 

@@ -1,6 +1,6 @@
 # Current state
 
-**Snapshot:** ArrayScope v28 development line, reviewed on 2026-06-22. The audit fixes described below are additional branch-local fixes.
+**Snapshot:** ArrayScope `0.8.0` release-candidate / v28 baseline, reviewed on 2026-06-22. The audit fixes described below are included in this RC baseline.
 
 ArrayScope has outgrown the original “small PyQtGraph image viewer” architecture and is in a deliberate transition. The project already has many of the right semantic boundaries and safety mechanisms; the remaining risk is that normal-image, montage, PyQtGraph, and VisPy paths still compose those mechanisms differently.
 
@@ -18,7 +18,7 @@ ArrayScope has outgrown the original “small PyQtGraph image viewer” architec
 | PyQtGraph backend | Default | Feature-complete baseline; many per-tile `ImageItem`s can become a CPU/scene bottleneck. |
 | VisPy backend | Experimental | First-class tiled atlas/shader path exists, but the widget still subclasses the complete PyQtGraph view. |
 | Diagnostics/benchmarks | Good internal foundation | Counters and JSONL traces are useful; real GPU/Wayland baselines are incomplete. |
-| Packaging/release story | Not ready | Package metadata, legacy changelog versions, and release provenance require cleanup before publication. |
+| Packaging/release story | RC-ready | Package/runtime version identity is aligned for `0.8.0`; CI and RC artifacts still need publication evidence before release. |
 | Documentation | Reorganized in this audit | Live guidance is now separated from archived phase notes. |
 
 ## What is working well
@@ -80,7 +80,7 @@ Headless tests can verify contracts and deterministic work counters. They cannot
 
 ### 7. Rapid local development increases integration risk
 
-Recent work changed histogram, viewport, slicing, and tile priority behavior in quick succession. Before release, consolidate provenance, CI status, versioning, and trace baselines.
+Recent work changed histogram, viewport, slicing, and tile priority behavior in quick succession. Before publication, keep the RC provenance, CI status, versioning, diagnostics trace, and benchmark baselines together.
 
 ## Audit fixes
 
@@ -90,6 +90,7 @@ The restored v28 fixes include:
 - bounded evaluation-group invalidation with pruned completed per-tile generation bookkeeping;
 - the `format_bytes` render-refusal import and single-action auto-window behavior when a manual histogram preview is open;
 - consolidated CI and release tag/package/runtime version guards;
+- canonical `0.8.0` package/runtime version identity and deterministic RC diagnostics artifacts;
 - concurrent multi-path CLI launches while preserving single-path blocking;
 - display resource shutdown and bounded benchmark lifecycle cleanup;
 - viewport minimum-overlap preservation after max-span clamping;
