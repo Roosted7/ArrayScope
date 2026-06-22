@@ -203,3 +203,14 @@ def test_constrain_view_range_allows_zoomed_in_edges():
 
     assert constrained[0] == pytest.approx((99.9, 101.9))
     assert constrained[1] == pytest.approx((0.0, 2.0))
+
+
+def test_constrain_view_range_recovers_overlap_after_zoom_limit_uses_old_center():
+    constrained = constrain_view_range(
+        ((1000.0, 4000.0), (1000.0, 3000.0)),
+        (0.0, 0.0, 100.0, 40.0),
+        previous_view_range=((1000.0, 4000.0), (1000.0, 3000.0)),
+    )
+
+    assert constrained[0] == pytest.approx((95.0, 2095.0))
+    assert constrained[1] == pytest.approx((38.0, 838.0))
