@@ -4,22 +4,25 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  linux-tests:
-    name: Linux tests Python ${{ matrix.python-version }}
+  python-compat:
+    name: Python compatibility ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-    env:
-      QT_QPA_PLATFORM: offscreen
-      PYQTGRAPH_QT_LIB: PySide6
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
@@ -28,8 +31,38 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,vispy]"
-      - name: Run tests
-        run: pytest -q
+      - name: Run Python compatibility tests
+        run: |
+          pytest -q \
+            tests/core \
+            tests/operations \
+            tests/app/test_architecture_guards.py \
+            tests/app/test_operation_benchmarks.py \
+            tests/app/test_public_api.py
+
+  linux-gui-tests:
+    name: Linux GUI tests Python 3.12
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYQTGRAPH_QT_LIB: PySide6
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libgl1 libegl1
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,vispy]"
+      - name: Run GUI and integration tests
+        run: pytest -q tests/display tests/window tests/ui tests/app
 
   strict-ui:
     name: Strict UI tests
@@ -43,6 +76,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
@@ -54,8 +89,34 @@ jobs:
       - name: Run strict UI tests
         run: pytest tests/ui -q
 
-  smoke-artifacts:
-    name: Screenshot and benchmark smoke (${{ matrix.os }})
+  build-package:
+    name: Build package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+      - name: Build package
+        run: python -m build
+      - name: Check package
+        run: python -m twine check dist/*
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  platform-validation:
+    name: Platform validation (${{ matrix.os }})
+    needs: build-package
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -68,6 +129,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -76,53 +139,17 @@ jobs:
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,vispy]"
-      - name: Run screenshot smoke tests
-        env:
-          QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
-        run: pytest tests/ui/test_qt_smoke_artifacts.py -q
-      - name: Run rendering benchmark smoke
-        shell: bash
-        env:
-          QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
-        run: |
-          mkdir -p tests/artifacts
-          python -m arrayscope.display.rendering_benchmarks \
-            --runs 1 \
-            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-${{ matrix.os }}.jsonl
-      - name: Upload screenshots
-        uses: actions/upload-artifact@v4
+          python -m pip install pytest pytest-qt hypothesis "vispy>=0.14.0"
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: smoke-artifacts-${{ matrix.os }}
-          path: |
-            tests/artifacts/*.png
-            tests/artifacts/*.jsonl
-          if-no-files-found: error
-
-  package:
-    name: Build and install wheel (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install build twine
-      - name: Build package
-        run: python -m build
-      - name: Check package
-        run: python -m twine check dist/*
+          name: dist
+          path: dist
       - name: Install wheel and verify versions
         shell: bash
         run: |
           python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
           python - <<'PY'
           from importlib.metadata import metadata, version
           import arrayscope
@@ -134,6 +161,56 @@ jobs:
           assert runtime_version == metadata_version, (runtime_version, metadata_version)
           PY
           python -m arrayscope --help
+      - name: Run screenshot smoke tests
+        id: screenshots
+        continue-on-error: true
+        env:
+          QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
+        run: pytest tests/ui/test_qt_smoke_artifacts.py -q
+      - name: Run rendering benchmark smoke
+        id: benchmarks
+        continue-on-error: true
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
+        run: |
+          mkdir -p tests/artifacts
+          python -m arrayscope.display.rendering_benchmarks \
+            --runs 1 \
+            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-${{ matrix.os }}.jsonl
+      - name: Run platform display/window tests
+        id: platform-tests
+        continue-on-error: true
+        env:
+          QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
+        run: pytest -q tests/display tests/window tests/app/test_public_api.py
+      - name: Upload platform artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-artifacts-${{ matrix.os }}
+          path: |
+            tests/artifacts/*.png
+            tests/artifacts/*.jsonl
+          if-no-files-found: warn
+      - name: Check platform validation results
+        if: always()
+        shell: bash
+        run: |
+          failed=0
+          if [ "${{ steps.screenshots.outcome }}" != "success" ]; then
+            echo "Screenshot outcome: ${{ steps.screenshots.outcome }}"
+            failed=1
+          fi
+          if [ "${{ steps.benchmarks.outcome }}" != "success" ]; then
+            echo "Benchmark outcome: ${{ steps.benchmarks.outcome }}"
+            failed=1
+          fi
+          if [ "${{ steps.platform-tests.outcome }}" != "success" ]; then
+            echo "Platform tests outcome: ${{ steps.platform-tests.outcome }}"
+            failed=1
+          fi
+          exit "$failed"
 
   rc-artifacts:
     name: RC diagnostics and benchmark artifacts
@@ -146,6 +223,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install system dependencies
         run: |
           sudo apt-get update -q

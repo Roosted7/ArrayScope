@@ -12,6 +12,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libgl1 libegl1
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
@@ -26,6 +32,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
           python - <<'PY'
           import os
           from importlib.metadata import metadata, version

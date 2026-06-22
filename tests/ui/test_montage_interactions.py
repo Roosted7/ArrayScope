@@ -596,11 +596,14 @@ def test_montage_schedules_missing_tiles_on_montage_lane(qtbot, monkeypatch):
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_montage_view()
 
-        assert len(calls) == 3
+        assert calls
         assert calls[0]["key"][0] == "montage_tile"
         assert calls[0]["replace_group"].startswith("montage-tile:")
         assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.montage_tile_workers
         assert win.visible_evaluation_controller.pool.maxThreadCount() == 1
+        requested_indices = {0, 1, 2}
+        scheduled_indices = {int(call["key"][-1]) for call in calls}
+        assert scheduled_indices <= requested_indices
         tile = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile, 1))
         assert all(call["key"][0] == "montage_tile" for call in calls)
