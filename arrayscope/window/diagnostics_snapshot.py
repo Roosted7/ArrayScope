@@ -42,6 +42,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
 
     session = getattr(window, "_montage_session", None)
     canvas = getattr(window, "_current_montage_canvas", None)
+    overlay_count = _montage_overlay_count(window)
+    presentation = _presentation_diagnostics(window)
     canvas_bytes = None
     if canvas is not None:
         canvas_bytes = int(getattr(canvas.data, "nbytes", 0))
@@ -67,8 +69,16 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         pending_level_tiles=0 if session is None else len(getattr(session, "pending_level_tiles", ())),
         skipped_tiles=0 if session is None else len(session.skipped_tiles),
         visible_tiles=0 if session is None else len(session.visible_tiles),
+        presented_tiles=0 if session is None else len(getattr(session, "presented_tiles", ())),
         deferred_display_tiles=0 if session is None else len(getattr(session, "deferred_display_tiles", ())),
+        overlay_count=overlay_count,
         attached_stage_requests=0 if session is None else len(getattr(session, "attached_stage_requests", ())),
+        presentation_draw_count=int(presentation.get("draw_count", 0) or 0),
+        tile_presentation_request_count=int(presentation.get("tile_presentation_request_count", 0) or 0),
+        tile_presentation_draw_count=int(presentation.get("tile_presentation_draw_count", 0) or 0),
+        tile_presentation_draw_pending=bool(presentation.get("tile_presentation_draw_pending", False)),
+        tile_visual_visible_pages=int(presentation.get("tile_visual_visible_pages", 0) or 0),
+        overlays_above_tiles=bool(presentation.get("overlays_above_tiles", False)),
         display_mode=str(getattr(window.img_view, "montageDisplayMode", lambda: "canvas")()),
         backend_setting=str(getattr(getattr(getattr(window, "app_settings", None), "montage_display_backend", "auto"), "value", getattr(getattr(window, "app_settings", None), "montage_display_backend", "auto"))),
         backend_chosen=str(getattr(window, "_last_montage_backend_actual", getattr(getattr(window, "_last_montage_backend_choice", None), "backend", "canvas"))),
@@ -304,6 +314,26 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         image_rendering_backend_selected=str(image_backend_selected),
         image_rendering_backend_actual=image_backend_actual,
     )
+
+
+def _presentation_diagnostics(window) -> dict[str, object]:
+    getter = getattr(getattr(window, "img_view", None), "vispyPresentationDiagnostics", None)
+    if callable(getter):
+        try:
+            return dict(getter())
+        except Exception:
+            return {}
+    return {}
+
+
+def _montage_overlay_count(window) -> int:
+    getter = getattr(getattr(window, "img_view", None), "montageTileOverlayCount", None)
+    if callable(getter):
+        try:
+            return int(getter())
+        except Exception:
+            return 0
+    return 0
 
 
 def _stage_cache_candidate_summary(candidate):

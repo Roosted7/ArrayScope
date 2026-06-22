@@ -21,6 +21,8 @@ These lanes do not have equal urgency or cost. Visible first-pixel work has a de
 ### Normal image
 
 A coalescer/generation model chooses the latest requested state, performs cache/cost checks, and starts immediate, asynchronous, chunked, degraded, or refused work. Latest-only cancellation avoids stale commits but can discard repeated progress during continuous interaction.
+The normal visible path now uses active-plus-latest submission with a stable supersession key and a separate target value.
+Queued obsolete visible work is collapsed while already-running reusable work can finish and be stored without committing stale pixels.
 
 ### Montage
 

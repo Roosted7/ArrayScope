@@ -2143,7 +2143,12 @@ def test_vispy_montage_tile_overlays_have_vispy_placeholder_visuals(qt_app):
         assert view.montageTileOverlayCount() == 2
         assert len(view._vispy_overlay_visuals) == 2
         assert all(visual.visible for visual in view._vispy_overlay_visuals)
-        assert tuple(int(getattr(visual, "order", 0)) for visual in view._vispy_overlay_visuals) == (50, 51)
+        assert tuple(int(getattr(visual, "order", 0)) for visual in view._vispy_overlay_visuals) == (5, 6)
+        view._vispy_gpu_montage_layer._ensure_visual_count(1)
+        view._vispy_gpu_montage_layer._visuals_by_page[0].visible = True
+        tile_order = int(getattr(view._vispy_gpu_montage_layer._visuals_by_page[0], "order", 0))
+        assert tile_order > max(int(getattr(visual, "order", 0)) for visual in view._vispy_overlay_visuals)
+        assert view.vispyPresentationDiagnostics()["overlays_above_tiles"] is False
         visuals = tuple(view._vispy_overlay_visuals)
 
         view.setMontageTileOverlays(overlays)

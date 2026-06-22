@@ -233,6 +233,122 @@ def test_active_plus_latest_reuses_stale_completion_without_on_done(qt_app):
     assert controller.diagnostics().stale_reused == 1
 
 
+def test_active_plus_latest_supersedes_by_key_value_without_group_epoch(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    done = []
+    reused = []
+    stale = []
+    before = controller.group_generation("visible")
+
+    controller.start_active_plus_latest(
+        lambda: (time.sleep(0.08), "active")[1],
+        key="active",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        supersession_key="visible-image",
+        supersession_value="old-target",
+        on_done=done.append,
+        on_stale=lambda: stale.append("active"),
+        on_reuse_stale=reused.append,
+    )
+    for _ in range(20):
+        QtTest.QTest.qWait(10)
+        qt_app.processEvents()
+        if controller._started:
+            break
+
+    controller.start_active_plus_latest(
+        lambda: "latest",
+        key="latest",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        supersession_key="visible-image",
+        supersession_value="new-target",
+        on_done=done.append,
+        on_stale=lambda: stale.append("latest"),
+    )
+
+    assert controller.group_generation("visible") == before
+
+    QtTest.QTest.qWait(220)
+    qt_app.processEvents()
+
+    assert done == ["latest"]
+    assert reused == ["active"]
+    assert stale == ["active"]
+
+
+def test_active_plus_latest_keeps_unrelated_supersession_key_queued(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    done = []
+    stale = []
+
+    controller.start_active_plus_latest(
+        lambda: (time.sleep(0.08), "active-image")[1],
+        key="active-image",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        supersession_key="visible-image",
+        supersession_value="active-target",
+        on_done=done.append,
+        on_stale=lambda: stale.append("active-image"),
+    )
+    for _ in range(20):
+        QtTest.QTest.qWait(10)
+        qt_app.processEvents()
+        if controller._started:
+            break
+
+    controller.start_active_plus_latest(
+        lambda: "profile",
+        key="profile",
+        priority=EvalPriority.LIVE_PROFILE,
+        replace_group="visible",
+        supersession_key="profile",
+        supersession_value="profile-target",
+        on_done=done.append,
+        on_stale=lambda: stale.append("profile"),
+    )
+    controller.start_active_plus_latest(
+        lambda: "old-image",
+        key="old-image",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        supersession_key="visible-image",
+        supersession_value="old-target",
+        on_done=done.append,
+        on_stale=lambda: stale.append("old-image"),
+    )
+    controller.start_active_plus_latest(
+        lambda: "new-image",
+        key="new-image",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        supersession_key="visible-image",
+        supersession_value="new-target",
+        on_done=done.append,
+        on_stale=lambda: stale.append("new-image"),
+    )
+
+    QtTest.QTest.qWait(260)
+    qt_app.processEvents()
+
+    assert "profile" in done
+    assert "new-image" in done
+    assert "old-image" not in done
+    assert "old-image" in stale
+    assert "profile" not in stale
+    assert controller.diagnostics().queued_collapsed >= 1
+
+
 def test_clear_group_preserves_unrelated_prefetch_bookkeeping(qt_app):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 

@@ -16,6 +16,9 @@ prefer_pyside6()
 import pyqtgraph.Qt as Qt
 
 
+_UNSET = object()
+
+
 class CancellationToken:
     def __init__(self):
         self._cancelled = False
@@ -95,6 +98,7 @@ class EvaluationController(Qt.QtCore.QObject):
         self._group_request_generations = {}
         self._group_child_groups = {}
         self._group_epoch = 0
+        self._supersession_values = {}
         self._frame_progress = {}
         self._prefetch_keys = set()
         self._max_prefetch = 32
@@ -202,12 +206,23 @@ class EvaluationController(Qt.QtCore.QObject):
         pass_token=False,
         frame_target: FrameTarget | None = None,
         supersession_key=None,
+        supersession_value=_UNSET,
     ):
         replace_group = str(replace_group)
-        self.clear_group(replace_group)
+        supersession_value = self._normalize_supersession_value(supersession_key, supersession_value)
+        if supersession_key is None:
+            self.clear_group(replace_group)
+            group_generation = self.advance_group(replace_group)
+        else:
+            self._collapse_group_queued(
+                replace_group,
+                supersession_key=supersession_key,
+                preserve_started=False,
+            )
+            group_generation = self.group_generation(replace_group)
+            self._advance_supersession(replace_group, supersession_key, supersession_value)
         self.generation += 1
         generation = self.generation
-        group_generation = self.advance_group(replace_group)
         request = EvalRequest(
             key=key,
             priority=EvalPriority(priority),
@@ -217,6 +232,7 @@ class EvaluationController(Qt.QtCore.QObject):
             memory_budget_bytes=memory_budget_bytes,
             frame_target=frame_target,
             supersession_key=supersession_key,
+            supersession_value=supersession_value,
         )
         token = CancellationToken()
         self._pending.add(generation)
@@ -251,12 +267,18 @@ class EvaluationController(Qt.QtCore.QObject):
         pass_token=False,
         frame_target: FrameTarget | None = None,
         supersession_key=None,
+        supersession_value=_UNSET,
     ):
         replace_group = str(replace_group)
-        self._collapse_group_queued(replace_group)
+        supersession_value = self._normalize_supersession_value(supersession_key, supersession_value)
+        self._collapse_group_queued(replace_group, supersession_key=supersession_key)
         self.generation += 1
         generation = self.generation
-        group_generation = self.advance_group(replace_group)
+        if supersession_key is None:
+            group_generation = self.advance_group(replace_group)
+        else:
+            group_generation = self.group_generation(replace_group)
+            self._advance_supersession(replace_group, supersession_key, supersession_value)
         request = EvalRequest(
             key=key,
             priority=EvalPriority(priority),
@@ -266,6 +288,7 @@ class EvaluationController(Qt.QtCore.QObject):
             memory_budget_bytes=memory_budget_bytes,
             frame_target=frame_target,
             supersession_key=supersession_key,
+            supersession_value=supersession_value,
         )
         token = CancellationToken()
         self._pending.add(generation)
@@ -375,7 +398,7 @@ class EvaluationController(Qt.QtCore.QObject):
 
     def _emit_slow(self, generation, callback):
         request = self._requests.get(generation)
-        if request is not None and generation in self._pending and request.group_generation == self.group_generation(request.replace_group):
+        if request is not None and generation in self._pending and not self._is_request_stale(request):
             callback()
 
     def _ensure_polling(self):
@@ -458,7 +481,7 @@ class EvaluationController(Qt.QtCore.QObject):
 
     def _finish(self, generation, value):
         request = self._requests.get(generation)
-        stale = request is None or request.group_generation != self.group_generation(request.replace_group) or self._shutting_down
+        stale = request is None or self._is_request_stale(request)
         replace_group = None if request is None else request.replace_group
         target = None if request is None else request.frame_target
         self._cleanup_generation(generation)
@@ -487,7 +510,7 @@ class EvaluationController(Qt.QtCore.QObject):
 
     def _fail(self, generation, exc):
         request = self._requests.get(generation)
-        stale = request is None or request.group_generation != self.group_generation(request.replace_group) or self._shutting_down
+        stale = request is None or self._is_request_stale(request)
         replace_group = None if request is None else request.replace_group
         self._cleanup_generation(generation)
         _on_done, on_error, on_stale, _on_reuse = self._handlers.pop(generation, (None, None, None, None))
@@ -540,6 +563,9 @@ class EvaluationController(Qt.QtCore.QObject):
             if not generations:
                 self._group_request_generations.pop(group, None)
                 self._group_generations.pop(group, None)
+                for key in tuple(self._supersession_values):
+                    if key[0] == group:
+                        self._supersession_values.pop(key, None)
                 for parent in self._group_parents(group):
                     children = self._group_child_groups.get(parent)
                     if children is None:
@@ -560,17 +586,22 @@ class EvaluationController(Qt.QtCore.QObject):
             if isinstance(key, int) and not getattr(runnable, "started", False):
                 self._discard_generation(key, stale=True)
 
-    def _collapse_group_queued(self, replace_group: str) -> None:
+    def _collapse_group_queued(self, replace_group: str, *, supersession_key=None, preserve_started: bool = True) -> None:
         groups = {str(replace_group)}
         groups.update(self._group_child_groups.get(str(replace_group), ()))
         preserved = 0
         collapsed = 0
         for group in tuple(groups):
             for generation in tuple(self._group_request_generations.get(group, ())):
+                request = self._requests.get(generation)
+                if supersession_key is not None and (
+                    request is None or request.supersession_key != supersession_key
+                ):
+                    continue
                 runnable = self._runnables.get(generation)
                 if runnable is None:
                     continue
-                if getattr(runnable, "started", False) or generation in self._started:
+                if preserve_started and (getattr(runnable, "started", False) or generation in self._started):
                     preserved += 1
                     continue
                 token = self._tokens.get(generation)
@@ -581,6 +612,27 @@ class EvaluationController(Qt.QtCore.QObject):
         self._active_preserved_count += int(preserved)
         self._queued_collapsed_count += int(collapsed)
         self._refresh_frame_progress(replace_group)
+
+    @staticmethod
+    def _normalize_supersession_value(supersession_key, supersession_value):
+        if supersession_key is None:
+            return None
+        if supersession_value is _UNSET:
+            return supersession_key
+        return supersession_value
+
+    def _advance_supersession(self, replace_group: str, supersession_key, supersession_value) -> None:
+        self._supersession_values[(str(replace_group), supersession_key)] = supersession_value
+
+    def _is_request_stale(self, request) -> bool:
+        if self._shutting_down:
+            return True
+        if request.group_generation != self.group_generation(request.replace_group):
+            return True
+        if request.supersession_key is None:
+            return False
+        current = self._supersession_values.get((str(request.replace_group), request.supersession_key), _UNSET)
+        return current is _UNSET or current != request.supersession_value
 
     def _refresh_frame_progress(self, replace_group: str, *, presented: FrameTarget | None = None) -> None:
         replace_group = str(replace_group)

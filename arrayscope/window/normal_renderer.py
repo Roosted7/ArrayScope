@@ -304,7 +304,8 @@ class NormalImageRenderMixin:
             priority=EvalPriority.VISIBLE_IMAGE,
             replace_group="visible-image",
             frame_target=frame_target,
-            supersession_key=(
+            supersession_key="visible-image",
+            supersession_value=(
                 frame_target.semantic_key,
                 frame_target.viewport_key,
                 frame_target.presentation_key,

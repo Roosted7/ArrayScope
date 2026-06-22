@@ -137,6 +137,9 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_overlay_lines = None
         self._vispy_overlay_key: tuple[object, ...] = ()
         self._vispy_overlay_count = 0
+        self._vispy_draw_count = 0
+        self._vispy_tile_presentation_request_count = 0
+        self._vispy_tile_presentation_draw_count = 0
         self._vispy_profile_visuals: dict[str, object] = {}
         self._vispy_last_levels: tuple[float, float] = (0.0, 1.0)
         self._vispy_warm_tile_timer: QtCore.QTimer | None = None
@@ -176,6 +179,10 @@ class VisPyImageView2D(ImageView2D):
         self.layout.addWidget(self.histogram)
 
         self._vispy_canvas.events.mouse_move.connect(self._on_vispy_mouse_move)
+        try:
+            self._vispy_canvas.events.draw.connect(self._on_vispy_draw)
+        except Exception:
+            pass
 
     def __init__(self, parent=None, view=None, imageItem=None):
         super().__init__(parent=parent, view=view, imageItem=imageItem)
@@ -205,6 +212,36 @@ class VisPyImageView2D(ImageView2D):
             except Exception:
                 pass
         super().closeEvent(event)
+
+    def _on_vispy_draw(self, *_args) -> None:
+        self._vispy_draw_count = int(getattr(self, "_vispy_draw_count", 0) or 0) + 1
+        self._vispy_tile_presentation_draw_count = int(
+            getattr(self, "_vispy_tile_presentation_request_count", 0) or 0
+        )
+
+    def vispyPresentationDiagnostics(self) -> dict[str, object]:
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        tile_visuals = tuple(getattr(layer, "_visuals_by_page", ()) or ())
+        visible_tile_visuals = tuple(visual for visual in tile_visuals if bool(getattr(visual, "visible", False)))
+        tile_orders = tuple(int(getattr(visual, "order", 0)) for visual in visible_tile_visuals)
+        overlay_visuals = tuple(getattr(self, "_vispy_overlay_visuals", ()) or ())
+        visible_overlays = tuple(visual for visual in overlay_visuals if bool(getattr(visual, "visible", False)))
+        overlay_orders = tuple(int(getattr(visual, "order", 0)) for visual in visible_overlays)
+        tile_min = min(tile_orders) if tile_orders else None
+        overlay_max = max(overlay_orders) if overlay_orders else None
+        return {
+            "draw_count": int(getattr(self, "_vispy_draw_count", 0) or 0),
+            "tile_presentation_request_count": int(getattr(self, "_vispy_tile_presentation_request_count", 0) or 0),
+            "tile_presentation_draw_count": int(getattr(self, "_vispy_tile_presentation_draw_count", 0) or 0),
+            "tile_presentation_draw_pending": int(getattr(self, "_vispy_tile_presentation_draw_count", 0) or 0)
+            < int(getattr(self, "_vispy_tile_presentation_request_count", 0) or 0),
+            "tile_visual_visible_pages": len(visible_tile_visuals),
+            "tile_visual_min_order": tile_min,
+            "overlay_count": int(getattr(self, "_vispy_overlay_count", 0) or 0),
+            "overlay_visual_visible_items": len(visible_overlays),
+            "overlay_visual_max_order": overlay_max,
+            "overlays_above_tiles": bool(tile_min is not None and overlay_max is not None and overlay_max >= tile_min),
+        }
 
     def _display_overlay_parent(self):
         return getattr(self, "_display_container", self.graphicsView)
@@ -1375,7 +1412,7 @@ class VisPyImageView2D(ImageView2D):
         mesh = getattr(self, "_vispy_overlay_mesh", None)
         if mesh is None:
             mesh = self._vispy_visuals.Mesh(parent=self._vispy_view.scene)
-            mesh.order = 50
+            mesh.order = 5
             try:
                 mesh.set_gl_state("translucent", depth_test=False)
             except Exception:
@@ -1389,7 +1426,7 @@ class VisPyImageView2D(ImageView2D):
         lines = getattr(self, "_vispy_overlay_lines", None)
         if lines is None:
             lines = self._vispy_visuals.Line(parent=self._vispy_view.scene, method="gl", connect="segments")
-            lines.order = 51
+            lines.order = 6
             try:
                 lines.set_gl_state("translucent", depth_test=False)
             except Exception:
@@ -1780,6 +1817,9 @@ class VisPyImageView2D(ImageView2D):
         )
 
     def _request_vispy_tile_layer_redraw(self) -> None:
+        self._vispy_tile_presentation_request_count = int(
+            getattr(self, "_vispy_tile_presentation_request_count", 0) or 0
+        ) + 1
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         for visual in tuple(getattr(layer, "_visuals_by_page", ()) or ()):
             if bool(getattr(visual, "visible", False)) and callable(getattr(visual, "update", None)):

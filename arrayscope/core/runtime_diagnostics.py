@@ -78,8 +78,16 @@ class MontageRuntimeDiagnostics:
     pending_level_tiles: int = 0
     skipped_tiles: int = 0
     visible_tiles: int = 0
+    presented_tiles: int = 0
     deferred_display_tiles: int = 0
+    overlay_count: int = 0
     attached_stage_requests: int = 0
+    presentation_draw_count: int = 0
+    tile_presentation_request_count: int = 0
+    tile_presentation_draw_count: int = 0
+    tile_presentation_draw_pending: bool = False
+    tile_visual_visible_pages: int = 0
+    overlays_above_tiles: bool = False
     display_mode: str = "canvas"
     backend_setting: str = "auto"
     backend_chosen: str = "canvas"
@@ -334,8 +342,9 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             "Montage:\n"
             f"  active={snapshot.montage.active} mode={snapshot.montage.display_mode}\n"
             f"  tiles visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
+            f"presented={snapshot.montage.presented_tiles} "
             f"pending={snapshot.montage.pending_tiles} "
-            f"display_backlog={snapshot.montage.deferred_display_tiles}\n"
+            f"display_backlog={snapshot.montage.deferred_display_tiles} overlays={snapshot.montage.overlay_count}\n"
             f"  canvas={_bytes_or_na(snapshot.montage.canvas_bytes)}"
         ),
         (
@@ -571,9 +580,20 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         (
             "Tiles: "
             f"visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
+            f"presented={snapshot.montage.presented_tiles} "
             f"loading={snapshot.montage.loading_tiles} pending={snapshot.montage.pending_tiles} "
             f"pending levels={snapshot.montage.pending_level_tiles} "
             f"skipped={snapshot.montage.skipped_tiles}"
+        ),
+        (
+            "Presentation: "
+            f"overlays={snapshot.montage.overlay_count} "
+            f"draws={snapshot.montage.presentation_draw_count} "
+            f"tile_draw={snapshot.montage.tile_presentation_draw_count}/"
+            f"{snapshot.montage.tile_presentation_request_count} "
+            f"pending={snapshot.montage.tile_presentation_draw_pending} "
+            f"tile_pages={snapshot.montage.tile_visual_visible_pages} "
+            f"overlays_above_tiles={snapshot.montage.overlays_above_tiles}"
         ),
         f"Attached stage waits: {snapshot.montage.attached_stage_requests}",
         f"Display mode: {snapshot.montage.display_mode}",

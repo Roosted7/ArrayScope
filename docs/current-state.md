@@ -43,10 +43,10 @@ The suite includes pure shape/value tests, property tests, UI interaction tests,
 
 The target architecture in [ADR 0039](decisions/0039-unified-image-surface-and-deadline-scheduler.md) is only partly implemented.
 
-Implemented pieces include semantic display frames/presentations, backend capabilities/adapters, typed tile payloads, persistent VisPy residency, memory/resource policy, and montage sessions. Remaining gaps include:
+Implemented pieces include semantic display frames/presentations, backend capabilities/adapters, typed tile payloads, persistent VisPy residency, memory/resource policy, montage sessions, and active-plus-latest normal visible scheduling with supersession key/value freshness checks.
+Remaining gaps include:
 
 - one frame planner for both normal image and montage;
-- active-plus-latest progress-preserving visible scheduling;
 - one deadline/admission model across visible, analysis, commit, and speculative lanes;
 - storage-neutral tiled geometry for very large single planes;
 - complete shared pointer capture and drag lifecycle;

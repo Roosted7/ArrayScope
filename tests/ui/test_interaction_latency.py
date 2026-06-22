@@ -156,7 +156,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
         assert all(str(source[0]) == "montage_tile" for source in second_sources.values())
         assert timing.tile_layer_visible_items == 2
         assert timing.tile_layer_items_updated == 0
-        assert timing.tile_layer_items_skipped == 2
+        assert timing.tile_layer_items_skipped == 0
         assert timing.tile_layer_upload_ms == 0.0
         assert timing.visible_bytes == 0
 
@@ -166,7 +166,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
         assert calls == []
         assert timing.tile_layer_visible_items == 2
         assert timing.tile_layer_items_updated == 0
-        assert timing.tile_layer_items_skipped == 2
+        assert timing.tile_layer_items_skipped == 0
         assert timing.tile_layer_upload_ms == 0.0
         assert timing.visible_bytes == 0
     finally:

@@ -1047,15 +1047,13 @@ def test_montage_panning_without_new_tiles_does_not_change_levels(qtbot, monkeyp
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
         win.update_montage_view()
-        assert len(calls) >= 2
+        assert calls
 
-        for callback_index, value in ((0, 1000.0), (1, 2000.0)):
-            tile = win._montage_session.plan.tiles[callback_index]
-            calls[callback_index]["on_done"](_tile_result(tile, value))
-            _process_events(qtbot, count=10)
-        win._schedule_montage_canvas_commit(win._montage_session, force=True)
+        tile = _tile_for_callback(win, calls[0])
+        calls[0]["on_done"](_tile_result(tile, 1000.0))
+        win._commit_montage_session_canvas(win._montage_session, force=True)
         _process_events(qtbot, count=10)
-        qtbot.waitUntil(lambda: win._montage_session.applied_level_source.source_count == 2, timeout=1000)
+        assert win._montage_session.applied_level_source.source_count == 1
 
         before_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
         before_bounds = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())

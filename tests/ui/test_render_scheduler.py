@@ -24,7 +24,7 @@ def test_visible_render_controller_uses_active_plus_latest_group(qtbot, monkeypa
     original_start_active_plus_latest = win.visible_evaluation_controller.start_active_plus_latest
 
     def recording_start_active_plus_latest(fn, **kwargs):
-        calls.append(kwargs.get("replace_group"))
+        calls.append(kwargs)
 
         def slow_fn(*args):
             time.sleep(0.02)
@@ -41,7 +41,9 @@ def test_visible_render_controller_uses_active_plus_latest_group(qtbot, monkeypa
         win.render(reason="test-2")
         _process_events(qtbot, count=40)
 
-        assert "visible-image" in calls
+        assert any(call.get("replace_group") == "visible-image" for call in calls)
+        assert all(call.get("supersession_key") == "visible-image" for call in calls)
+        assert all(isinstance(call.get("supersession_value"), tuple) for call in calls)
         assert win.visible_evaluation_controller.pool.maxThreadCount() == 1
     finally:
         win.close()

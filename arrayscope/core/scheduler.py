@@ -40,6 +40,7 @@ class EvalRequest:
     memory_budget_bytes: int | None = None
     frame_target: FrameTarget | None = None
     supersession_key: object | None = None
+    supersession_value: object | None = None
 
 
 @dataclass(frozen=True)

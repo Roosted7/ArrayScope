@@ -190,8 +190,16 @@ class _EventLoopProbe:
 def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_s: float, action) -> dict[str, object]:
     probe.reset()
     start = perf_counter()
+    draw_start = _vispy_draw_count(win)
     action()
-    milestones = _wait_for_montage_complete(app, QtCore, win, timeout_s=timeout_s, start=start)
+    milestones = _wait_for_montage_complete(
+        app,
+        QtCore,
+        win,
+        timeout_s=timeout_s,
+        start=start,
+        draw_start=draw_start,
+    )
     elapsed_ms = (perf_counter() - start) * 1000.0
     _process_events(app, QtCore, count=5)
     record = _phase_record(win, phase=phase, elapsed_ms=elapsed_ms, event_loop_max_gap_ms=probe.max_gap_ms)
@@ -200,27 +208,53 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
     return record
 
 
-def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: float) -> dict[str, float | None]:
+def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: float, draw_start: int) -> dict[str, float | int | bool | None]:
     deadline = time.monotonic() + float(timeout_s)
     first_loaded_ms = None
     first_display_committed_ms = None
+    first_overlay_clear_ms = None
+    saw_overlays = _montage_overlay_count(win) > 0
+    first_logical_complete_ms = None
+    logical_complete_tile_request_count = None
+    draw_after_complete_ms = None
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
         session = getattr(win, "_montage_session", None)
+        mode = getattr(win.img_view, "montageDisplayMode", lambda: "")()
+        vispy_tiled = str(mode) == "vispy_tile_layer" and _vispy_canvas_visible(win)
         if session is not None:
             if first_loaded_ms is None and bool(getattr(session, "presented_tiles", ())):
                 first_loaded_ms = (perf_counter() - start) * 1000.0
             if first_display_committed_ms is None and bool(getattr(session, "display_committed", False)):
                 first_display_committed_ms = (perf_counter() - start) * 1000.0
-        if (
+        overlay_count = _montage_overlay_count(win)
+        saw_overlays = bool(saw_overlays or overlay_count > 0)
+        if saw_overlays and first_overlay_clear_ms is None and overlay_count == 0:
+            first_overlay_clear_ms = (perf_counter() - start) * 1000.0
+        logical_complete = (
             session is not None
             and bool(getattr(session, "display_committed", False))
             and session.is_complete()
-            and getattr(win.img_view, "montageDisplayMode", lambda: "")() in {"tile_layer", "vispy_tile_layer", "canvas"}
-        ):
+            and mode in {"tile_layer", "vispy_tile_layer", "canvas"}
+        )
+        if logical_complete and first_logical_complete_ms is None:
+            first_logical_complete_ms = (perf_counter() - start) * 1000.0
+            logical_complete_tile_request_count = _vispy_tile_presentation_request_count(win)
+        tile_drawn = _vispy_tile_presentation_draw_count(win) >= int(logical_complete_tile_request_count or 0)
+        if logical_complete and (not vispy_tiled or tile_drawn):
+            if vispy_tiled:
+                draw_after_complete_ms = (perf_counter() - start) * 1000.0
             return {
                 "first_loaded_tile_ms": first_loaded_ms,
                 "first_display_committed_ms": first_display_committed_ms,
+                "first_overlay_clear_ms": first_overlay_clear_ms,
+                "logical_complete_ms": first_logical_complete_ms,
+                "draw_after_complete_ms": draw_after_complete_ms,
+                "vispy_draw_count_start": int(draw_start),
+                "vispy_draw_count_complete": _vispy_draw_count(win),
+                "vispy_tile_presentation_request_count": _vispy_tile_presentation_request_count(win),
+                "vispy_tile_presentation_draw_count": _vispy_tile_presentation_draw_count(win),
+                "waited_for_vispy_draw_after_complete": bool(vispy_tiled),
             }
         time.sleep(0.005)
     snapshot = win.collect_runtime_diagnostics()
@@ -232,7 +266,9 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
         f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
         f"completed={0 if session is None else len(getattr(session, 'pending_completed_tiles', ()) or ())} "
         f"stage_waiting={0 if session is None else sum(len(tiles) for tiles in getattr(session, 'stage_waiting_tiles', {}).values())} "
-        f"lead_warmups={0 if session is None else len(getattr(session, 'lead_stage_warmups', {}) or {})}"
+        f"lead_warmups={0 if session is None else len(getattr(session, 'lead_stage_warmups', {}) or {})} "
+        f"overlays={_montage_overlay_count(win)} vispy_draws={_vispy_draw_count(win)} "
+        f"tile_draw={_vispy_tile_presentation_draw_count(win)}/{_vispy_tile_presentation_request_count(win)}"
     )
 
 
@@ -244,6 +280,7 @@ def _phase_record(win, *, phase: str, elapsed_ms: float, event_loop_max_gap_ms: 
     recent_callbacks = () if resource is None else tuple(resource.recent_over_warning_callbacks)
     feedback_channels = () if resource is None else tuple(resource.feedback_channels)
     ui_decisions = () if resource is None else tuple(resource.ui_decisions)
+    vispy = _vispy_presentation_diagnostics(win)
     return {
         "phase": phase,
         "elapsed_ms": float(elapsed_ms),
@@ -281,10 +318,65 @@ def _phase_record(win, *, phase: str, elapsed_ms: float, event_loop_max_gap_ms: 
         "tile_layer_estimated_gpu_bytes": int(timing.tile_layer_estimated_gpu_bytes),
         "tile_layer_page_count": int(timing.tile_layer_page_count),
         "tile_layer_active_pages": int(timing.tile_layer_active_pages),
+        "montage_overlay_count": _montage_overlay_count(win),
+        "vispy_draw_count": int(vispy.get("draw_count", 0)),
+        "vispy_tile_presentation_request_count": int(vispy.get("tile_presentation_request_count", 0)),
+        "vispy_tile_presentation_draw_count": int(vispy.get("tile_presentation_draw_count", 0)),
+        "vispy_tile_presentation_draw_pending": bool(vispy.get("tile_presentation_draw_pending", False)),
+        "vispy_tile_visual_visible_pages": int(vispy.get("tile_visual_visible_pages", 0)),
+        "vispy_tile_visual_min_order": vispy.get("tile_visual_min_order"),
+        "vispy_overlay_visual_visible_items": int(vispy.get("overlay_visual_visible_items", 0)),
+        "vispy_overlay_visual_max_order": vispy.get("overlay_visual_max_order"),
+        "vispy_overlays_above_tiles": bool(vispy.get("overlays_above_tiles", False)),
         "resource_feedback_channels": [asdict(channel) for channel in feedback_channels],
         "resource_ui_decisions": [asdict(decision) for decision in ui_decisions],
         "recent_over_warning_callbacks": [asdict(callback) for callback in recent_callbacks],
     }
+
+
+def _vispy_presentation_diagnostics(win) -> dict[str, object]:
+    getter = getattr(getattr(win, "img_view", None), "vispyPresentationDiagnostics", None)
+    if callable(getter):
+        try:
+            return dict(getter())
+        except Exception:
+            return {}
+    return {}
+
+
+def _vispy_draw_count(win) -> int:
+    diagnostics = _vispy_presentation_diagnostics(win)
+    return int(diagnostics.get("draw_count", 0) or 0)
+
+
+def _vispy_tile_presentation_request_count(win) -> int:
+    diagnostics = _vispy_presentation_diagnostics(win)
+    return int(diagnostics.get("tile_presentation_request_count", 0) or 0)
+
+
+def _vispy_tile_presentation_draw_count(win) -> int:
+    diagnostics = _vispy_presentation_diagnostics(win)
+    return int(diagnostics.get("tile_presentation_draw_count", 0) or 0)
+
+
+def _vispy_canvas_visible(win) -> bool:
+    native = getattr(getattr(win, "img_view", None), "_vispy_canvas_native", None)
+    if native is None:
+        return False
+    try:
+        return bool(native.isVisible())
+    except Exception:
+        return False
+
+
+def _montage_overlay_count(win) -> int:
+    getter = getattr(getattr(win, "img_view", None), "montageTileOverlayCount", None)
+    if callable(getter):
+        try:
+            return int(getter())
+        except Exception:
+            return 0
+    return 0
 
 
 def _base_record(
