@@ -1093,6 +1093,12 @@ class ImageView2D(QtWidgets.QWidget):
         finally:
             if started_timing:
                 self._finish_upload_timing()
+
+    def cancelHistogramLevelInteraction(self) -> None:
+        if self._histogram_preview_controller is not None:
+            self._histogram_preview_controller.cancel()
+        if self._histogram_display_controller is not None:
+            self._histogram_display_controller.cancel_manual_edit()
                 
     def autoLevels(self):
         """Automatically set the histogram levels based on image data"""

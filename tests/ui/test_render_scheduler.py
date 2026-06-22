@@ -80,6 +80,40 @@ def test_visible_render_uses_cost_decision_refuse_without_clearing_previous_imag
         win.close()
 
 
+def test_refused_render_formats_fallback_memory_message(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    import arrayscope.window.normal_renderer as normal_renderer
+    import arrayscope.window.render as render_module
+    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
+    qtbot.addWidget(win)
+    messages = []
+    try:
+        _process_events(qtbot, count=20)
+        win.operation_evaluator.clear_cache()
+        monkeypatch.setattr(win, "_estimated_image_display_bytes", lambda _state: 2048)
+        monkeypatch.setattr(
+            render_module,
+            "choose_visible_render_decision",
+            lambda _context: RenderDecision(RenderDecisionKind.REFUSE, "test refuse"),
+        )
+        monkeypatch.setattr(
+            normal_renderer,
+            "show_status_message",
+            lambda _owner, text, **_kwargs: messages.append(text),
+        )
+
+        win.update_image_view()
+
+        assert messages == [
+            "Image view would allocate 2.0 KiB. Reduce image-axis ranges or switch axes."
+        ]
+    finally:
+        win.close()
+
+
 def test_degraded_preview_commits_with_overlay_and_not_exact_cache(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     import arrayscope.window.render as render_module

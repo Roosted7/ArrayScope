@@ -170,6 +170,13 @@ class HistogramDisplayController(QtCore.QObject):
         if self._manual_popup is not None:
             self._manual_popup.close()
 
+    def cancel_manual_edit(self) -> None:
+        popup = self._manual_popup
+        if popup is not None:
+            popup.reject()
+            return
+        self._manual_start_levels = None
+
     def _install_manual_clicks(self) -> None:
         item = self._histogram_item()
         region = None if item is None else getattr(item, "region", None)
@@ -224,7 +231,7 @@ class HistogramDisplayController(QtCore.QObject):
         self.request_auto_window()
 
     def request_auto_window(self) -> None:
-        self.close_popup()
+        self.cancel_manual_edit()
         signal = getattr(self.owner, "autoWindowRequested", None)
         if signal is not None:
             signal.emit()

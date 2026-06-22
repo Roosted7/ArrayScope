@@ -13,6 +13,7 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.backend_contract import image_view_backend_capabilities
