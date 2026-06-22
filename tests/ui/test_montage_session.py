@@ -1,4 +1,5 @@
 from collections import deque
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -583,6 +584,69 @@ def test_montage_render_session_tile_states_keep_materialized_tiles_loading_unti
 
     assert {index for index in range(4) if tile_states[index].value == "loaded"} == {1, 3}
     assert {index for index in range(4) if tile_states[index].value == "loading"} == {0, 2}
+
+
+def test_montage_render_session_reuses_tile_state_tuple_until_revision_changes():
+    session = _session()
+
+    first = session.ensure_tile_states()
+    second = session.ensure_tile_states()
+    assert second is first
+
+    session.mark_loading(session.plan.tiles[0])
+    third = session.ensure_tile_states()
+    fourth = session.ensure_tile_states()
+
+    assert third is not first
+    assert fourth is third
+    assert third[0].value == "loading"
+
+
+def test_montage_overlay_refresh_caches_empty_and_repeated_state():
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class ImageView:
+        def __init__(self):
+            self.overlays = ()
+            self.calls = 0
+
+        def setMontageTileOverlays(self, overlays):
+            self.overlays = tuple(overlays or ())
+            self.calls += 1
+
+        def montageTileOverlayCount(self):
+            return len(self.overlays)
+
+    session = _session()
+    image_view = ImageView()
+    owner = SimpleNamespace(img_view=image_view, _montage_session=session)
+    rect = (0, 0, 20, 20)
+
+    MontageRenderMixin._update_montage_tile_overlays_for_plan(
+        owner,
+        session.plan,
+        session.ensure_tile_states(),
+        rect,
+    )
+    assert image_view.calls == 0
+
+    session.mark_skipped(session.plan.tiles[1])
+    MontageRenderMixin._update_montage_tile_overlays_for_plan(
+        owner,
+        session.plan,
+        session.ensure_tile_states(),
+        rect,
+    )
+    assert image_view.calls == 1
+    assert len(image_view.overlays) == 1
+
+    MontageRenderMixin._update_montage_tile_overlays_for_plan(
+        owner,
+        session.plan,
+        session.ensure_tile_states(),
+        rect,
+    )
+    assert image_view.calls == 1
 
 
 def test_montage_render_session_does_not_force_clear_for_untrusted_source_ids():

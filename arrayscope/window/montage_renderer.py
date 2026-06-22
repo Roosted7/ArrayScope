@@ -44,7 +44,7 @@ from arrayscope.operations.slabs import (
 from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_backend import choose_montage_backend
-from arrayscope.display.model.montage_levels import MontageLevelStats, MontageLevelTracker, montage_level_key
+from arrayscope.display.model.montage_levels import MontageLevelStats, MontageLevelTracker, montage_level_key, sample_tile_level_stats
 from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
     limited_payload_cache as _limited_payload_cache,
@@ -567,6 +567,7 @@ class MontageRenderMixin:
                 session.loading_tiles.discard(int(index))
                 if 0 <= int(index) < len(session.tile_states):
                     session.tile_states[int(index)] = MontageTileState.UNLOADED
+                    session.invalidate_tile_states()
         for key, waiting in list(session.stage_waiting_tiles.items()):
             kept = [tile for tile in waiting if int(tile.montage_index) in keep]
             if kept:
@@ -626,6 +627,19 @@ class MontageRenderMixin:
             refined=bool(refined),
             aggregate=False,
         )
+
+    def _queue_montage_level_refinement(self, session, rendered) -> None:
+        tracker = self._montage_level_tracker()
+        source_index = int(rendered.tile.source_index)
+        if tracker.has_source(session.level_key, source_index, refined=True):
+            return
+        pending = getattr(session, "pending_refined_level_tiles", None)
+        if pending is None:
+            pending = deque()
+            session.pending_refined_level_tiles = pending
+        if source_index in {int(item.tile.source_index) for item in pending}:
+            return
+        pending.append(rendered)
 
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
         expected = self._montage_level_expected_indices(session)
@@ -712,8 +726,9 @@ class MontageRenderMixin:
                 seed,
                 expected_indices=expected,
             )
+            self._queue_montage_level_refinement(session, seed)
         pending.extend(unseen)
-        self._montage_pending_level_tiles_last_session = len(pending)
+        self._montage_pending_level_tiles_last_session = len(pending or ())
 
     def _ensure_montage_level_stats_for_payloads(self, session, payloads) -> int:
         """Merge stats for every tile that is about to be visible.
@@ -742,6 +757,7 @@ class MontageRenderMixin:
                 rendered,
                 expected_indices=expected,
             )
+            self._queue_montage_level_refinement(session, rendered)
             added += 1
             if pending is not None:
                 session.pending_level_tiles = deque(
@@ -766,19 +782,76 @@ class MontageRenderMixin:
         while pending and processed < 4:
             rendered = pending.popleft()
             self._update_montage_level_bounds_from_rendered(session.level_key, rendered, expected_indices=expected)
+            self._queue_montage_level_refinement(session, rendered)
             processed += 1
             if processed >= 1 and (perf_counter() - stats_start) * 1000.0 >= 4.0:
                 break
         self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
-        self._montage_pending_level_tiles_last_session = len(pending)
+        self._montage_pending_level_tiles_last_session = len(pending or ())
         # A histogram/level refinement is presentation metadata.  It must not
         # force a full tiled-payload refresh or replay stale removals after a
         # viewport change.  Normal display commits will publish richer sources;
         # when there is no display backlog, a non-forced commit can update
         # uniforms/histogram without invalidating residency.
-        if processed and session.display_committed and not getattr(session, "deferred_display_tiles", ()):
+        if (
+            processed
+            and session.display_committed
+            and not getattr(session, "deferred_display_tiles", ())
+            and getattr(session, "user_levels_override", None) is None
+        ):
             self._schedule_montage_canvas_commit(session, force=False)
         self._schedule_montage_cached_level_stats(session)
+
+    def _schedule_montage_refined_level_stats(self, session) -> None:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return
+        pending = getattr(session, "pending_refined_level_tiles", None)
+        if not pending:
+            return
+        controller = getattr(self, "prefetch_evaluation_controller", None)
+        if controller is None:
+            return
+        scheduled = 0
+        while pending and scheduled < 4:
+            rendered = pending.popleft()
+            source_index = int(rendered.tile.source_index)
+            if self._montage_level_tracker().has_source(session.level_key, source_index, refined=True):
+                continue
+            source = rendered.histogram_data if rendered.histogram_data is not None else rendered.image
+            key = ("montage_refined_level_stats", session.level_key, source_index)
+
+            def evaluate(source=source, source_index=source_index):
+                return sample_tile_level_stats(source, int(source_index), refined=True)
+
+            def done(
+                stats,
+                session_id=session.session_id,
+                session_key=session.key,
+                level_key=session.level_key,
+            ):
+                self._on_montage_refined_level_stats_done(session_id, session_key, level_key, stats)
+
+            started = controller.start_prefetch(
+                evaluate,
+                on_done=done,
+                key=key,
+                memory_budget_bytes=self._memory_policy().tile_cache_budget_bytes,
+            )
+            if not getattr(started, "scheduled", False):
+                if str(getattr(started, "reason", "")) == "deduped":
+                    scheduled += 1
+                    continue
+                pending.appendleft(rendered)
+                break
+            scheduled += 1
+
+    def _on_montage_refined_level_stats_done(self, session_id, session_key, level_key, stats) -> None:
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session_id, session_key):
+            return
+        if stats is not None:
+            self._montage_level_tracker().update_from_stats(level_key, stats, aggregate=False)
+        self._schedule_montage_refined_level_stats(session)
 
     def _plan_montage_stages(self, document, missing_tiles):
         document_key = stage_document_key(document)
@@ -1335,6 +1408,7 @@ class MontageRenderMixin:
             self._last_montage_tile_result_flush_count = int(processed)
             self._record_gui_budget(budget)
             self._activate_cached_waiting_stages(session, release_missing=True)
+            self._schedule_montage_cached_level_stats(session)
             if session.pending_tiles:
                 self._schedule_montage_tiles(session)
             force = not session.pending_tiles and not session.active_tile_requests and not session.pending_completed_tiles
@@ -1367,6 +1441,7 @@ class MontageRenderMixin:
             rendered,
             expected_indices=self._montage_level_expected_indices(session),
         )
+        self._queue_montage_level_refinement(session, rendered)
         session.mark_loaded(rendered)
         self._resolve_lead_stage_warmup(session, tile)
         patch_start = perf_counter()
@@ -1783,6 +1858,9 @@ class MontageRenderMixin:
             or getattr(session, "deferred_display_tiles", None)
         ):
             return
+        if bool(getattr(session, "display_committed", False)):
+            self._schedule_montage_canvas_commit(session, force=False)
+            return
         session.final_commit_pending = True
         session.flush_pending = True
         try:
@@ -1802,6 +1880,7 @@ class MontageRenderMixin:
         self.img_view.setEvaluationOverlay(False)
         if hasattr(self.img_view, "clearMontageTileOverlays"):
             self.img_view.clearMontageTileOverlays()
+        self._schedule_montage_refined_level_stats(session)
         return True
 
     def _sync_committed_montage_geometry(self, geometry) -> None:
@@ -1982,11 +2061,49 @@ class MontageRenderMixin:
     def _update_montage_tile_overlays_for_plan(self, plan, tile_states, canvas_rect) -> None:
         if not hasattr(self.img_view, "setMontageTileOverlays"):
             return
+        session = getattr(self, "_montage_session", None)
+        show_loading = bool(getattr(session, "show_loading_overlays", False))
+        candidate_numbers: tuple[int, ...] | None = None
+        tile_state_revision = None
+        if session is not None and getattr(session, "plan", None) is plan:
+            tile_state_revision = int(getattr(session, "tile_state_revision", 0) or 0)
+            candidates = set(int(tile) for tile in getattr(session, "skipped_tiles", ()) or ())
+            if show_loading:
+                candidates.update(int(tile) for tile in getattr(session, "loading_tiles", ()) or ())
+                candidates.update(
+                    int(tile)
+                    for tile in set(getattr(session, "rendered_tiles", {}) or {})
+                    - set(getattr(session, "presented_tiles", ()) or ())
+                )
+            candidate_numbers = tuple(sorted(candidates))
+            key = (
+                id(plan),
+                tuple(int(value) for value in canvas_rect),
+                tile_state_revision,
+                show_loading,
+                candidate_numbers,
+            )
+            if key == getattr(self, "_last_montage_overlay_update_key", None):
+                return
+            self._last_montage_overlay_update_key = key
+            if not candidate_numbers:
+                if int(getattr(self.img_view, "montageTileOverlayCount", lambda: 0)() or 0) != 0:
+                    self.img_view.setMontageTileOverlays(())
+                return
         overlays = []
         canvas_x0, canvas_y0, canvas_x1, canvas_y1 = (int(value) for value in canvas_rect)
-        for tile in plan.tiles:
+        if candidate_numbers is None:
+            tiles = tuple(plan.tiles)
+        else:
+            plan_tiles = tuple(plan.tiles)
+            tiles = tuple(
+                plan_tiles[int(index)]
+                for index in candidate_numbers
+                if 0 <= int(index) < len(plan_tiles)
+            )
+        for tile in tiles:
             state = tile_states[int(tile.montage_index)] if int(tile.montage_index) < len(tile_states) else MontageTileState.UNLOADED
-            if state == MontageTileState.LOADING and not bool(getattr(getattr(self, "_montage_session", None), "show_loading_overlays", False)):
+            if state == MontageTileState.LOADING and not show_loading:
                 continue
             if state not in {MontageTileState.LOADING, MontageTileState.SKIPPED}:
                 continue

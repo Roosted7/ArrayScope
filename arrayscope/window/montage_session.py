@@ -93,6 +93,7 @@ class MontageRenderSession:
     applied_level_source: object | None = None
     user_levels_override: tuple[float, float] | None = None
     pending_level_tiles: deque[RenderedTile] = field(default_factory=deque)
+    pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
     pending_completed_tiles: deque[tuple[MontageTile, object]] = field(default_factory=deque)
     tile_compute_cache_hits: int = 0
     tile_compute_stage_backed: int = 0
@@ -114,6 +115,7 @@ class MontageRenderSession:
     level_revision: int = 0
     histogram_revision: int = 0
     viewport_revision: int = 0
+    tile_state_revision: int = 0
     priority_focus: tuple[float, float] | None = None
     priority_retargeted_tiles: int = 0
     priority_fairness_pops: int = 0
@@ -123,6 +125,8 @@ class MontageRenderSession:
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
     deferred_display_tiles: tuple[int, ...] = ()
+    _tile_states_cached_revision: int = -1
+    _tile_states_cached_tuple: tuple[MontageTileState, ...] = ()
 
     def __post_init__(self) -> None:
         # These queues are drained throughout progressive rendering.  The
@@ -143,6 +147,7 @@ class MontageRenderSession:
             for key, value in dict(self.stage_waiting_tiles or {}).items()
         }
         self.pending_level_tiles = deque(self.pending_level_tiles)
+        self.pending_refined_level_tiles = deque(self.pending_refined_level_tiles)
         self.pending_completed_tiles = deque(self.pending_completed_tiles)
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)
@@ -383,6 +388,7 @@ class MontageRenderSession:
                 revision=int(getattr(self.tile_presentation_state, "revision", 0)),
             )
             self.presented_tiles.update(int(tile) for tile in seeded_state)
+            self.invalidate_tile_states()
 
     def _payload_source_id(self, base_source_id, *, texture_kind, mapping, lod: LodInfo, texture_data) -> tuple[object, ...]:
         del mapping
@@ -647,6 +653,11 @@ class MontageRenderSession:
         return tuple(self.plan.tiles[index] for index in sorted(self.skipped_tiles) if 0 <= index < len(self.plan.tiles))
 
     def ensure_tile_states(self) -> tuple[MontageTileState, ...]:
+        if (
+            int(self._tile_states_cached_revision) == int(self.tile_state_revision)
+            and len(self._tile_states_cached_tuple) == len(tuple(self.plan.tiles))
+        ):
+            return self._tile_states_cached_tuple
         states = [MontageTileState.UNLOADED for _tile in self.plan.tiles]
         for index in tuple(self.skipped_tiles):
             index = int(index)
@@ -661,9 +672,11 @@ class MontageRenderSession:
             if 0 <= index < len(states):
                 states[index] = MontageTileState.LOADED
         self.tile_states = states
+        self._tile_states_cached_revision = int(self.tile_state_revision)
+        self._tile_states_cached_tuple = tuple(self.tile_states)
         if self.canvas is not None:
-            object.__setattr__(self.canvas, "tile_states", tuple(self.tile_states))
-        return tuple(self.tile_states)
+            object.__setattr__(self.canvas, "tile_states", self._tile_states_cached_tuple)
+        return self._tile_states_cached_tuple
 
     def is_complete(self) -> bool:
         return not (
@@ -688,6 +701,7 @@ class MontageRenderSession:
         self.canvas_histogram_data = canvas.histogram_data
         self.canvas_rect = tuple(int(value) for value in canvas.canvas_rect)
         self.tile_states = list(canvas.tile_states)
+        self.invalidate_tile_states()
         self.dirty_rects.clear()
         self.dirty_tiles.clear()
 
@@ -706,9 +720,18 @@ class MontageRenderSession:
         if not self.tile_states:
             self.tile_states = [MontageTileState.UNLOADED for _tile in self.plan.tiles]
         if 0 <= index < len(self.tile_states):
-            self.tile_states[index] = MontageTileState(state)
+            state = MontageTileState(state)
+            if self.tile_states[index] == state:
+                return
+            self.tile_states[index] = state
+            self.invalidate_tile_states()
             if self.canvas is not None:
                 object.__setattr__(self.canvas, "tile_states", tuple(self.tile_states))
+
+    def invalidate_tile_states(self) -> None:
+        self.tile_state_revision += 1
+        self._tile_states_cached_revision = -1
+        self._tile_states_cached_tuple = ()
 
     def patch_rendered_tile(self, rendered: RenderedTile) -> bool:
         if self.canvas is None:

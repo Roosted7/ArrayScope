@@ -11,10 +11,10 @@ import numpy as np
 from arrayscope.core.window_levels import LevelSource, LevelSourceRank, normalize_bounds
 
 
-PROVISIONAL_TILE_SAMPLE_LIMIT = 2048
+PROVISIONAL_TILE_SAMPLE_LIMIT = 512
 REFINED_TILE_SAMPLE_LIMIT = 8192
 EXACT_TILE_SAMPLE_LIMIT = 32768
-AGGREGATE_SAMPLE_LIMIT = 262144
+AGGREGATE_SAMPLE_LIMIT = 65536
 
 
 def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=None) -> tuple[object, ...]:
@@ -109,6 +109,26 @@ class MontageLevelTracker:
             by_source[int(source_index)] = tile_stats
             self._invalidate(key)
             if previous is None and int(source_index) in expected:
+                self._append_tile_sample(key, expected, tile_stats)
+            else:
+                self._sample_accumulators.pop(key, None)
+        return self.stats_for(key) if aggregate else None
+
+    def update_from_stats(
+        self,
+        key: object,
+        tile_stats: TileLevelStats,
+        *,
+        aggregate: bool = True,
+    ) -> MontageLevelStats | None:
+        expected = self._expected.get(key, frozenset())
+        by_source = self._tiles.setdefault(key, {})
+        source_index = int(tile_stats.source_index)
+        previous = by_source.get(source_index)
+        if previous is None or tile_stats.refined or not previous.refined:
+            by_source[source_index] = tile_stats
+            self._invalidate(key)
+            if previous is None and source_index in expected:
                 self._append_tile_sample(key, expected, tile_stats)
             else:
                 self._sample_accumulators.pop(key, None)
@@ -264,6 +284,10 @@ def _sample_tile_stats(values, source_index: int, *, refined: bool) -> TileLevel
         sample=sample.astype(np.float32, copy=False),
         refined=bool(refined or np.asarray(values).size <= EXACT_TILE_SAMPLE_LIMIT),
     )
+
+
+def sample_tile_level_stats(values, source_index: int, *, refined: bool) -> TileLevelStats | None:
+    return _sample_tile_stats(values, int(source_index), refined=bool(refined))
 
 
 def _finite_sample(values, *, limit: int) -> np.ndarray:

@@ -15,6 +15,70 @@ def test_profile_montage_workflow_py_spy_command_mentions_external_sampler():
     assert "--backend all" in command
 
 
+def test_profile_suite_commands_cover_required_profilers(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
+
+    commands = profiler_suite_commands(("--backend", "vispy", "--profile-suite", str(tmp_path)), tmp_path)
+
+    assert {item["profiler_type"] for item in commands} == {"plain", "cprofile", "py-spy-raw", "perf-record"}
+    by_type = {item["profiler_type"]: item for item in commands}
+    assert "cProfile" in by_type["cprofile"]["command"]
+    assert "py-spy record" in by_type["py-spy-raw"]["command"]
+    assert "--format raw" in by_type["py-spy-raw"]["command"]
+    assert "perf record" in by_type["perf-record"]["command"]
+    assert "--profile-suite" not in by_type["plain"]["command"]
+    for item in commands:
+        assert item["jsonl"].endswith(".jsonl")
+        assert item["artifact_paths"]
+
+
+def test_profile_base_record_marks_hidden_offscreen_or_capped_runs_as_smoke(monkeypatch):
+    import numpy as np
+    from arrayscope.tools.profile_montage_workflow import _base_record
+
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    visible = _base_record(
+        run_id="run",
+        backend="vispy",
+        data_path=Path("data.nii"),
+        data=np.zeros((2, 3, 4), dtype=np.float32),
+        load_mode="native",
+        montage_axis=2,
+        indices=(0, 1, 2, 3),
+        full_tile_count=4,
+        columns=2,
+        show_window=True,
+        max_tiles=None,
+        profiler_type="plain",
+        profiler_artifact_paths=(),
+        qt_platform="xcb",
+    )
+    hidden = {**visible, **_base_record(
+        run_id="run",
+        backend="vispy",
+        data_path=Path("data.nii"),
+        data=np.zeros((2, 3, 4), dtype=np.float32),
+        load_mode="native",
+        montage_axis=2,
+        indices=(0, 1),
+        full_tile_count=4,
+        columns=2,
+        show_window=False,
+        max_tiles=2,
+        profiler_type="perf-record",
+        profiler_artifact_paths=("perf.data",),
+        qt_platform="offscreen",
+    )}
+
+    assert visible["smoke_only"] is False
+    assert visible["pacing_evidence"] is True
+    assert visible["xdg_session_type"] == "wayland"
+    assert hidden["smoke_only"] is True
+    assert hidden["pacing_evidence"] is False
+    assert hidden["tile_cap_applied"] is True
+    assert hidden["profiler_artifact_paths"] == ["perf.data"]
+
+
 def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     from arrayscope.tools.profile_montage_workflow import _wait_for_montage_complete
 

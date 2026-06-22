@@ -6,8 +6,11 @@ import argparse
 from dataclasses import asdict
 import json
 import math
+import os
 from pathlib import Path
 import shlex
+import shutil
+import subprocess
 import sys
 import time
 from time import perf_counter
@@ -29,6 +32,8 @@ def run_profile_montage_workflow(
     columns: int | None = None,
     load_mode: str = "app",
     show_window: bool = True,
+    profiler_type: str = "plain",
+    profiler_artifact_paths: tuple[str | Path, ...] = (),
 ) -> tuple[dict[str, object], ...]:
     """Run raw full montage, then FFT-over-montage-axis full montage.
 
@@ -85,7 +90,13 @@ def run_profile_montage_workflow(
             load_mode=load_mode,
             montage_axis=montage_axis,
             indices=indices,
+            full_tile_count=tile_count,
             columns=columns,
+            show_window=show_window,
+            max_tiles=max_tiles,
+            profiler_type=profiler_type,
+            profiler_artifact_paths=profiler_artifact_paths,
+            qt_platform=str(app.platformName()),
         )
         _append_record(
             records,
@@ -247,7 +258,8 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
         if fully_visible and fully_visible_ms is None:
             fully_visible_ms = (perf_counter() - start) * 1000.0
             fully_visible_tile_request_count = _vispy_tile_presentation_request_count(win)
-        final_drawn = _vispy_tile_presentation_draw_count(win) >= int(fully_visible_tile_request_count or 0)
+        current_request_count = _vispy_tile_presentation_request_count(win)
+        final_drawn = _vispy_tile_presentation_draw_count(win) >= int(current_request_count)
         if fully_visible and (not vispy_tiled or final_drawn):
             if vispy_tiled:
                 draw_after_complete_ms = (perf_counter() - start) * 1000.0
@@ -260,6 +272,7 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
                 "fully_visible_ms": fully_visible_ms,
                 "active_presented_tile_count": int(visibility_state["active_presented_tile_count"]),
                 "active_planned_tile_count": int(visibility_state["active_planned_tile_count"]),
+                "requested_tile_count": int(visibility_state["requested_tile_count"]),
                 "deferred_display_tile_count": int(visibility_state["deferred_display_tile_count"]),
                 "vispy_draw_count_start": int(draw_start),
                 "vispy_draw_count_complete": _vispy_draw_count(win),
@@ -386,6 +399,9 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
             "deferred_display_tile_count": 0,
         }
     active = set(_active_planned_montage_tiles(session))
+    expected = set(_expected_requested_montage_tiles(session))
+    if not expected:
+        expected = set(active)
     presented = {int(tile) for tile in tuple(getattr(session, "presented_tiles", ()) or ())}
     deferred = tuple(int(tile) for tile in tuple(getattr(session, "deferred_display_tiles", ()) or ()))
     vispy = _vispy_presentation_diagnostics(win)
@@ -420,13 +436,15 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
         str(mode) in {"tile_layer", "vispy_tile_layer", "canvas"}
         and getattr(session, "display_committed", False)
         and not has_backlog
-        and active.issubset(presented)
+        and expected.issubset(active)
+        and expected.issubset(presented)
         and overlay_nonblocking
     )
     return {
         "fully_visible": fully_visible,
         "active_presented_tile_count": len(active_presented),
         "active_planned_tile_count": len(active),
+        "requested_tile_count": len(expected),
         "deferred_display_tile_count": len(deferred),
     }
 
@@ -443,6 +461,20 @@ def _active_planned_montage_tiles(session) -> tuple[int, ...]:
         if index not in skipped:
             active.append(index)
     return tuple(dict.fromkeys(active))
+
+
+def _expected_requested_montage_tiles(session) -> tuple[int, ...]:
+    skipped = {int(tile) for tile in tuple(getattr(session, "skipped_tiles", ()) or ())}
+    indices = tuple(getattr(session, "level_expected_indices", ()) or ())
+    if not indices:
+        geometry = getattr(getattr(session, "plan", None), "geometry", None)
+        indices = tuple(getattr(geometry, "indices", ()) or ())
+    if not indices:
+        return ()
+    # level_expected_indices stores source indices for the montage request.  For
+    # ordinary full-workflow montages the semantic tile numbers are positional.
+    # When a custom subset is used, still require every requested tile slot.
+    return tuple(index for index in range(len(indices)) if int(index) not in skipped)
 
 
 def _vispy_canvas_visible(win) -> bool:
@@ -475,16 +507,36 @@ def _base_record(
     montage_axis: int,
     indices: tuple[int, ...],
     columns: int,
+    full_tile_count: int,
+    show_window: bool,
+    max_tiles: int | None,
+    profiler_type: str,
+    profiler_artifact_paths: tuple[str | Path, ...],
+    qt_platform: str,
 ) -> dict[str, object]:
+    capped = max_tiles is not None and len(indices) < int(full_tile_count)
+    smoke_only = bool((not show_window) or str(qt_platform).lower() == "offscreen" or capped)
     return {
         "run_id": run_id,
         "backend": backend,
         "data_path": str(data_path),
         "load_mode": str(load_mode),
+        "profiler_type": str(profiler_type),
+        "profiler_artifact_paths": [str(path) for path in tuple(profiler_artifact_paths or ())],
+        "qt_platform": str(qt_platform),
+        "xdg_session_type": os.environ.get("XDG_SESSION_TYPE", ""),
+        "wayland_display": os.environ.get("WAYLAND_DISPLAY", ""),
+        "display": os.environ.get("DISPLAY", ""),
+        "show_window": bool(show_window),
+        "max_tiles": None if max_tiles is None else int(max_tiles),
+        "tile_cap_applied": bool(capped),
+        "smoke_only": bool(smoke_only),
+        "pacing_evidence": bool(not smoke_only),
         "data_shape": tuple(int(value) for value in np.shape(data)),
         "data_dtype": str(getattr(getattr(data, "dtype", None), "str", getattr(data, "dtype", ""))),
         "montage_axis": int(montage_axis),
         "tile_count": len(indices),
+        "full_tile_count": int(full_tile_count),
         "columns": int(columns),
     }
 
@@ -564,6 +616,116 @@ def py_spy_command(argv: tuple[str, ...] | None = None) -> str:
     return shlex.join(("py-spy", "record", "--native", "-o", "arrayscope-montage-workflow.svg", "--", sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *args))
 
 
+def cprofile_command(argv: tuple[str, ...], output: str | Path) -> str:
+    return shlex.join((sys.executable, "-m", "cProfile", "-o", str(output), "-m", "arrayscope.tools.profile_montage_workflow", *tuple(argv)))
+
+
+def py_spy_raw_command(argv: tuple[str, ...], output: str | Path) -> str:
+    return shlex.join(("py-spy", "record", "--native", "--format", "raw", "-o", str(output), "--", sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *tuple(argv)))
+
+
+def perf_record_command(argv: tuple[str, ...], output: str | Path) -> str:
+    return shlex.join(("perf", "record", "-g", "-o", str(output), "--", sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *tuple(argv)))
+
+
+def profiler_suite_commands(argv: tuple[str, ...], suite_dir: str | Path) -> tuple[dict[str, object], ...]:
+    suite_dir = Path(suite_dir)
+    plain_jsonl = suite_dir / "plain.jsonl"
+    cprofile_artifact = suite_dir / "montage.cprofile"
+    py_spy_artifact = suite_dir / "montage.pyspy.raw"
+    perf_artifact = suite_dir / "montage.perf.data"
+    base = _suite_child_args(argv)
+    return (
+        {
+            "profiler_type": "plain",
+            "jsonl": str(plain_jsonl),
+            "artifact_paths": (str(plain_jsonl),),
+            "command": shlex.join((sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *base, "--jsonl", str(plain_jsonl), "--profiler-type", "plain", "--profiler-artifact", str(plain_jsonl))),
+        },
+        {
+            "profiler_type": "cprofile",
+            "jsonl": str(suite_dir / "cprofile.jsonl"),
+            "artifact_paths": (str(cprofile_artifact), str(suite_dir / "cprofile.jsonl")),
+            "command": cprofile_command((*base, "--jsonl", str(suite_dir / "cprofile.jsonl"), "--profiler-type", "cprofile", "--profiler-artifact", str(cprofile_artifact)), cprofile_artifact),
+        },
+        {
+            "profiler_type": "py-spy-raw",
+            "jsonl": str(suite_dir / "py-spy.jsonl"),
+            "artifact_paths": (str(py_spy_artifact), str(suite_dir / "py-spy.jsonl")),
+            "command": py_spy_raw_command((*base, "--jsonl", str(suite_dir / "py-spy.jsonl"), "--profiler-type", "py-spy-raw", "--profiler-artifact", str(py_spy_artifact)), py_spy_artifact),
+        },
+        {
+            "profiler_type": "perf-record",
+            "jsonl": str(suite_dir / "perf.jsonl"),
+            "artifact_paths": (str(perf_artifact), str(suite_dir / "perf.jsonl")),
+            "command": perf_record_command((*base, "--jsonl", str(suite_dir / "perf.jsonl"), "--profiler-type", "perf-record", "--profiler-artifact", str(perf_artifact)), perf_artifact),
+        },
+    )
+
+
+def run_profile_suite(argv: tuple[str, ...], suite_dir: str | Path) -> int:
+    suite_dir = Path(suite_dir)
+    suite_dir.mkdir(parents=True, exist_ok=True)
+    commands = profiler_suite_commands(argv, suite_dir)
+    manifest_path = suite_dir / "suite-manifest.jsonl"
+    if manifest_path.exists():
+        manifest_path.unlink()
+    for item in commands:
+        profiler = str(item["profiler_type"])
+        command = str(item["command"])
+        executable = shlex.split(command)[0]
+        if profiler.startswith("py-spy") and shutil.which("py-spy") is None:
+            return _write_suite_failure(manifest_path, item, "py-spy executable not found")
+        if profiler.startswith("perf") and shutil.which("perf") is None:
+            return _write_suite_failure(manifest_path, item, "perf executable not found")
+        started = perf_counter()
+        completed = subprocess.run(shlex.split(command), cwd=Path.cwd(), check=False)
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        artifacts = tuple(str(path) for path in tuple(item.get("artifact_paths", ()) or ()))
+        missing = [path for path in artifacts if not Path(path).exists() or Path(path).stat().st_size <= 0]
+        record = {
+            **item,
+            "command_executable": executable,
+            "returncode": int(completed.returncode),
+            "elapsed_ms": float(elapsed_ms),
+            "missing_artifacts": missing,
+            "complete": completed.returncode == 0 and not missing,
+        }
+        with manifest_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+        if completed.returncode != 0 or missing:
+            return completed.returncode or 2
+    return 0
+
+
+def _write_suite_failure(path: Path, item: dict[str, object], reason: str) -> int:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({**item, "complete": False, "missing_reason": str(reason)}, sort_keys=True) + "\n")
+    return 127
+
+
+def _suite_child_args(argv: tuple[str, ...]) -> tuple[str, ...]:
+    blocked = {"--profile-suite", "--print-py-spy-command"}
+    result: list[str] = []
+    skip_next = False
+    for index, arg in enumerate(tuple(argv)):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in blocked:
+            skip_next = arg == "--profile-suite"
+            continue
+        if arg.startswith("--profile-suite="):
+            continue
+        if arg in {"--jsonl", "--profiler-type", "--profiler-artifact"}:
+            skip_next = True
+            continue
+        if arg.startswith("--jsonl=") or arg.startswith("--profiler-type=") or arg.startswith("--profiler-artifact="):
+            continue
+        result.append(arg)
+    return tuple(result)
+
+
 def main(argv: tuple[str, ...] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the realistic tiled montage + FFT profiling workflow")
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="Dataset path; defaults to the bundled realistic NIfTI")
@@ -575,12 +737,18 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     parser.add_argument("--load-mode", choices=("app", "native"), default="app")
     parser.add_argument("--hide-window", action="store_true", help="Do not show the window; useful with QT_QPA_PLATFORM=offscreen")
     parser.add_argument("--print-py-spy-command", action="store_true", help="Print an external py-spy command for this invocation and exit")
+    parser.add_argument("--profile-suite", default=None, help="Run plain JSONL, cProfile, py-spy raw, and perf record into this directory")
+    parser.add_argument("--profiler-type", default="plain", help=argparse.SUPPRESS)
+    parser.add_argument("--profiler-artifact", action="append", default=[], help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     if args.print_py_spy_command:
         filtered = tuple(arg for arg in (argv if argv is not None else sys.argv[1:]) if arg != "--print-py-spy-command")
         print(py_spy_command(filtered))
         return 0
+    if args.profile_suite:
+        source_argv = tuple(argv if argv is not None else sys.argv[1:])
+        return run_profile_suite(source_argv, args.profile_suite)
 
     jsonl = None if args.jsonl is None else Path(args.jsonl)
     if jsonl is not None and jsonl.exists():
@@ -597,6 +765,8 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                 columns=None if args.columns <= 0 else args.columns,
                 load_mode=args.load_mode,
                 show_window=not args.hide_window,
+                profiler_type=args.profiler_type,
+                profiler_artifact_paths=tuple(args.profiler_artifact or ()),
             )
         )
     for record in records:

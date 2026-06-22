@@ -2,7 +2,9 @@ import numpy as np
 
 from arrayscope.display.model.montage_levels import (
     AGGREGATE_SAMPLE_LIMIT,
+    EXACT_TILE_SAMPLE_LIMIT,
     PROVISIONAL_TILE_SAMPLE_LIMIT,
+    REFINED_TILE_SAMPLE_LIMIT,
     MontageLevelTracker,
 )
 from arrayscope.display.planning import LevelSourceRank
@@ -60,6 +62,28 @@ def test_montage_level_tracker_samples_deterministically_and_caps_aggregate():
     assert sample is not None
     assert sample.size <= AGGREGATE_SAMPLE_LIMIT
     assert np.array_equal(sample[:5], np.asarray([0, 4, 8, 12, 16], dtype=np.float32))
+
+
+def test_montage_level_tracker_records_provisional_then_refined_samples():
+    tracker = MontageLevelTracker()
+    key = "scope"
+    large = np.arange(EXACT_TILE_SAMPLE_LIMIT * 2, dtype=np.float32)
+
+    tracker.ensure(key, (0,))
+    tracker.update_from_tile(key, 0, large, large, refined=False)
+    provisional = tracker.stats_for(key)
+
+    assert provisional.refined is False
+    assert provisional.sample is not None
+    assert provisional.sample.size <= PROVISIONAL_TILE_SAMPLE_LIMIT
+
+    tracker.update_from_tile(key, 0, large, large, refined=True)
+    refined = tracker.stats_for(key)
+
+    assert refined.refined is True
+    assert refined.bounds == provisional.bounds
+    assert refined.sample is not None
+    assert PROVISIONAL_TILE_SAMPLE_LIMIT < refined.sample.size <= REFINED_TILE_SAMPLE_LIMIT
 
 
 def test_montage_level_key_ignores_requested_coverage_and_layout_but_keeps_selection():

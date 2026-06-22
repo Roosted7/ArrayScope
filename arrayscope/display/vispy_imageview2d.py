@@ -141,6 +141,8 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_draw_count = 0
         self._vispy_tile_presentation_request_count = 0
         self._vispy_tile_presentation_draw_count = 0
+        self._vispy_canvas_update_request_count = 0
+        self._vispy_canvas_update_pending = False
         self._vispy_profile_visuals: dict[str, object] = {}
         self._vispy_last_levels: tuple[float, float] = (0.0, 1.0)
         self._vispy_warm_tile_timer: QtCore.QTimer | None = None
@@ -216,6 +218,7 @@ class VisPyImageView2D(ImageView2D):
 
     def _on_vispy_draw(self, *_args) -> None:
         self._vispy_draw_count = int(getattr(self, "_vispy_draw_count", 0) or 0) + 1
+        self._vispy_canvas_update_pending = False
         self._vispy_tile_presentation_draw_count = int(
             getattr(self, "_vispy_tile_presentation_request_count", 0) or 0
         )
@@ -241,6 +244,8 @@ class VisPyImageView2D(ImageView2D):
             "tile_presentation_draw_count": int(getattr(self, "_vispy_tile_presentation_draw_count", 0) or 0),
             "tile_presentation_draw_pending": int(getattr(self, "_vispy_tile_presentation_draw_count", 0) or 0)
             < int(getattr(self, "_vispy_tile_presentation_request_count", 0) or 0),
+            "canvas_update_request_count": int(getattr(self, "_vispy_canvas_update_request_count", 0) or 0),
+            "canvas_update_pending": bool(getattr(self, "_vispy_canvas_update_pending", False)),
             "presented_tiles": presented_tiles,
             "presented_tile_count": len(presented_tiles),
             "tile_visual_visible_pages": len(visible_tile_visuals),
@@ -314,9 +319,7 @@ class VisPyImageView2D(ImageView2D):
             layer = getattr(self, "_vispy_gpu_montage_layer", None)
             if layer is not None:
                 layer.set_shader_mapping(mapping)
-        canvas = getattr(self, "_vispy_canvas", None)
-        if canvas is not None:
-            canvas.update()
+        self._request_vispy_canvas_update()
 
     def _display_shader_mapping(self, mapping):
         return shader_mapping_with_lut(
@@ -826,7 +829,7 @@ class VisPyImageView2D(ImageView2D):
                 return
             if self._is_windowed_rgb_vispy_main():
                 self._vispy_windowed_image.set_levels(levels)
-                self._vispy_canvas.update()
+                self._request_vispy_canvas_update()
             elif self._is_rgb_image(self.image):
                 self._upload_vispy_main_image(self.image, histogramData=self.histogramSource, levels=levels, image_origin=getattr(self, "_last_vispy_origin", (0.0, 0.0)))
             else:
@@ -1044,7 +1047,7 @@ class VisPyImageView2D(ImageView2D):
             visual.order = 10_000
         visual.visible = True
         self._upsert_vispy_roi_handles(roi_id, geometry, color)
-        self._vispy_canvas.update()
+        self._request_vispy_canvas_update()
 
     def _remove_vispy_roi(self, roi_id) -> None:
         visual = self._vispy_roi_visuals.pop(str(roi_id), None)
@@ -1061,7 +1064,7 @@ class VisPyImageView2D(ImageView2D):
                     current.visible = False
                 except Exception:
                     pass
-        self._vispy_canvas.update()
+        self._request_vispy_canvas_update()
 
     def _upsert_vispy_roi_handles(self, roi_id, geometry, color) -> None:
         roi_id = str(roi_id)
@@ -1269,7 +1272,7 @@ class VisPyImageView2D(ImageView2D):
         super().hideProfileMarker()
         for visual in getattr(self, "_vispy_profile_visuals", {}).values():
             _set_visual_visible(visual, False)
-        self._vispy_canvas.update()
+        self._request_vispy_canvas_update()
 
     def _sync_profile_marker_visibility(self):
         super()._sync_profile_marker_visibility()
@@ -1306,7 +1309,7 @@ class VisPyImageView2D(ImageView2D):
         self._upsert_vispy_line("profile_handle_x", np.asarray([[x - marker, y], [x + marker, y]], dtype=np.float32), line_color, width=3.0 if hovered else 2.0)
         self._upsert_vispy_line("profile_handle_y", np.asarray([[x, y - marker], [x, y + marker]], dtype=np.float32), line_color, width=3.0 if hovered else 2.0)
         self._upsert_vispy_profile_dot(x, y, hovered=hovered)
-        self._vispy_canvas.update()
+        self._request_vispy_canvas_update()
 
     def _upsert_vispy_line(self, key: str, points, color, *, width: float, order: int = 10_000):
         visual = self._vispy_profile_visuals.get(str(key))
@@ -1349,7 +1352,7 @@ class VisPyImageView2D(ImageView2D):
         if tool is None or len(points) < 2:
             _set_visual_visible(visual, False)
             if visual is not None:
-                self._vispy_canvas.update()
+                self._request_vispy_canvas_update()
             return
         if visual is None:
             visual = self._vispy_visuals.Line(
@@ -1368,7 +1371,7 @@ class VisPyImageView2D(ImageView2D):
         else:
             visual.set_data(pos=points, color=_vispy_color((255, 190, 60)), width=2.5)
         visual.visible = True
-        self._vispy_canvas.update()
+        self._request_vispy_canvas_update()
 
     def setMontageTileOverlays(self, overlays):
         overlays = tuple(overlays or ())
@@ -1385,10 +1388,7 @@ class VisPyImageView2D(ImageView2D):
             self._vispy_pending_overlay_clear_request_count = int(
                 getattr(self, "_vispy_tile_presentation_request_count", 0) or 0
             )
-            try:
-                self._vispy_canvas.update()
-            except Exception:
-                pass
+            self._request_vispy_canvas_update()
             return
         self._hide_vispy_montage_tile_overlays_now()
 
@@ -1417,7 +1417,7 @@ class VisPyImageView2D(ImageView2D):
         lines.set_data(pos=line_points, color=line_colors, width=1.25, connect="segments")
         mesh.visible = True
         lines.visible = bool(len(line_points))
-        self._vispy_canvas.update()
+        self._request_vispy_canvas_update()
 
     def _hide_vispy_montage_tile_overlays_now(self) -> None:
         super().clearMontageTileOverlays()
@@ -1427,7 +1427,7 @@ class VisPyImageView2D(ImageView2D):
         for visual in getattr(self, "_vispy_overlay_visuals", ()):
             _set_visual_visible(visual, False)
         try:
-            self._vispy_canvas.update()
+            self._request_vispy_canvas_update()
         except Exception:
             pass
 
@@ -1525,7 +1525,7 @@ class VisPyImageView2D(ImageView2D):
         camera = getattr(getattr(self, "_vispy_view", None), "camera", None)
         if camera is not None:
             camera.aspect = 1.0 if getattr(self, "displayMode", "square_pixels") == "square_pixels" else None
-            self._vispy_canvas.update()
+            self._request_vispy_canvas_update()
 
     def setFitLocked(self, enabled):
         super().setFitLocked(enabled)
@@ -1855,23 +1855,22 @@ class VisPyImageView2D(ImageView2D):
                     visual.update()
                 except Exception:
                     pass
+        self._request_vispy_canvas_update()
+
+    def _request_vispy_canvas_update(self) -> None:
         canvas = getattr(self, "_vispy_canvas", None)
         if canvas is None:
             return
+        if bool(getattr(self, "_vispy_canvas_update_pending", False)):
+            return
+        self._vispy_canvas_update_pending = True
+        self._vispy_canvas_update_request_count = int(
+            getattr(self, "_vispy_canvas_update_request_count", 0) or 0
+        ) + 1
         try:
             canvas.update()
         except Exception:
-            pass
-        native = getattr(canvas, "native", None)
-        if native is not None:
-            try:
-                native.update()
-            except Exception:
-                pass
-        try:
-            QtCore.QTimer.singleShot(0, canvas.update)
-        except Exception:
-            pass
+            self._vispy_canvas_update_pending = False
 
     def _ensure_vispy_tile(self, tile_number: int, *, windowed_rgb: bool = False) -> _VisPyTileState:
         tile_number = int(tile_number)
@@ -1924,7 +1923,7 @@ class VisPyImageView2D(ImageView2D):
             self._vispy_camera_key = key
             self._vispy_view.camera.flip = (key[2], key[3], False)
             self._vispy_view.camera.set_range(x=(float(x_range[0]), float(x_range[1])), y=(float(y_range[0]), float(y_range[1])), margin=0)
-            self._vispy_canvas.update()
+            self._request_vispy_canvas_update()
         except Exception:
             pass
 

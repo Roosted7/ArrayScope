@@ -97,6 +97,33 @@ def test_scalar_level_preview_updates_clim_without_rgb_work(qt_app):
         view.close()
 
 
+def test_vispy_tile_redraw_coalesces_canvas_updates_but_keeps_draw_wait(qt_app, monkeypatch):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    update_calls = []
+    try:
+        monkeypatch.setattr(view._vispy_canvas, "update", lambda: update_calls.append("canvas"))
+
+        view._request_vispy_tile_layer_redraw()
+        view._request_vispy_tile_layer_redraw()
+
+        diagnostics = view.vispyPresentationDiagnostics()
+        assert diagnostics["tile_presentation_request_count"] == 2
+        assert diagnostics["tile_presentation_draw_pending"] is True
+        assert diagnostics["canvas_update_request_count"] == 1
+        for _ in range(5):
+            qt_app.processEvents()
+        assert update_calls == ["canvas"]
+
+        view._on_vispy_draw()
+        diagnostics = view.vispyPresentationDiagnostics()
+        assert diagnostics["tile_presentation_draw_count"] == 2
+        assert diagnostics["tile_presentation_draw_pending"] is False
+    finally:
+        view.close()
+
+
 def test_windowed_rgb_presentation_uses_shader_path(qt_app, monkeypatch):
     import arrayscope.display.vispy_imageview2d as vispy_view
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
