@@ -1,5 +1,7 @@
 # ArrayScope v24 rendering review
 
+> **Historical review.** This document records a dated evidence set. Use [`../current-state.md`](../current-state.md), [`../architecture.md`](../architecture.md), and [`../roadmap.md`](../roadmap.md) for current guidance.
+
 ## Executive verdict
 
 The project has changed course in the right direction.  v24's typed tile payloads and one batched

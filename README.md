@@ -1,176 +1,133 @@
-# arrayscope
+# ArrayScope
 
-**Quick interactive visualization for N-dimensional NumPy arrays**
+ArrayScope is a Python/Qt viewer for quickly understanding n-dimensional NumPy arrays. It is aimed at scientific and reconstruction workflows where the useful first questions are usually: *which dimensions matter, what does this slice contain, how do values change, and what happens after a small operation such as an FFT, crop, reduction, or axis change?*
 
-A python package for browsing slices, applying FFTs, and inspecting data.
+The current repository is an active pre-release development line. The original lightweight viewer is still present, but the implementation now also contains a staged operation evaluator, bounded caches, progressive montage rendering, ROI/profile inspection, runtime diagnostics, and an experimental VisPy backend. See [Current state](docs/current-state.md) before treating every advanced path as production-stable.
 
-Quickly checking multi-dimensional data usually means writing the same matplotlib boilerplate over and over. This tool lets you just call `asc(data)` and interactively explore what you've got.
+![ArrayScope showcase](docs/images/showcase.gif)
 
-## Usage
+## Start here
+
 ```python
-import arrayscope as asc
 import numpy as np
+import arrayscope as asc
 
-# Create some data
 x = np.linspace(-5, 5, 100)
 y = np.linspace(-5, 5, 100)
 z = np.linspace(-5, 5, 50)
-X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-mag = np.exp(-(X**2 + Y**2 + Z**2) / 10)
-pha = np.pi/4 * (X + Y + Z)
-complex_data = mag * np.exp(1j * pha)
+X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+data = np.exp(-(X**2 + Y**2 + Z**2) / 10)
 
-asc(complex_data, title='3D Complex Gaussian')
+asc(data, title="3D Gaussian")
 ```
 
-![Showcase](docs/images/showcase.gif)
-
-## Features
-
-Data slicing and dimension selection should be intuitive: click the two dimensions you want to show and slice using the spinboxes.
-
-**Centered FFT** - Click dimension labels to apply centered 1D FFT transforms. Useful for checking k-space data in MRI reconstructions or analyzing frequency content.
-![FFT](docs/images/fft.gif)
-
-**Line plot** - See 1D slices through your data. Shift+scroll for Y zoom, Ctrl+scroll for X zoom:
-
-![Line plot](docs/images/lineplot.png)
-
-**Video export**
-Right-clicking a dimension button to export a video or PNG frames along that dimension.
-Video export uses the default `imageio`, `imageio-ffmpeg`, and `Pillow` dependencies.
-![Export](docs/images/video_export.gif)
-
-
-**Scaling**
-
-Log scaling is often good for k-space visualization.
-Symmetric log scaling is an extension of the log scale which supports negative values.
-
-
-**Colormap**
-Change colormap:
-  - Ctrl+1: Gray
-  - Ctrl+2: [Viridis](https://bids.github.io/colormap/)
-  - Ctrl+3: [Plasma](https://bids.github.io/colormap/)
-  - Ctrl+4: Cyclic rainbow, hides phase wraps
-  - Ctrl+5: [Cividis](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0199239)
-  - Ctrl+6: [Cubehelix](http://www.mrao.cam.ac.uk/~dag/CUBEHELIX/)
-  - Ctrl+7: [Cool](https://d3js.org/d3-scale-chromatic/sequential)
-  - Ctrl+8: [Warm](https://d3js.org/d3-scale-chromatic/sequential)
-
-
-**Axis flipping**
-Click arrow icons (⬇️/⬆️ and ⬅️/➡️) next to dimension labels to flip axes.
-Default orientation is image-style (origin lower-left).
-Flip the primary axis for matrix-style (origin upper-left).
-
-**Non-blocking windows**
-
-By default, windows open in separate processes, allowing multiple simultaneous views:
-```python
-asc(data1)
-asc(data2) # Both windows appear
-```
-
-Use `block=True` to wait for the window to close before continuing:
-```python
-asc(data1, block=True)  # Script pauses here
-asc(data2)  # Shown after first closes
-```
-
-If Qt is already initialized in the current process, `asc(..., block=False)`
-cannot safely fork a child process. In that case:
-
-- In IPython/Jupyter with `%gui qt`, arrayscope opens inline in the current process (still non-blocking).
-- Without an active Qt event loop, arrayscope falls back to blocking mode and emits a warning.
-
-### Command Line
+For a file:
 
 ```bash
-arrayscope data.npy # Numpy file
-arrayscope image.nii.gz
-arrayscope image.dcm
-arrayscope some_dicom_dir/ # Automatically attemps to form an nd-array from DICOM the files
-arrayscope --help   # Show all options
+python -m arrayscope data.npy
+# or, after installation
+arrayscope data.npy
 ```
 
-**File support**
-arrayscope has CLI support and can conveniently display:
-| Format | File suffix | Requirement |
-|---|---:|---|
-| NumPy | `.npy`, `.npz` | NumPy |
-| MATLAB | `.mat` | scipy |
-| HDF5 | `.h5`, `.hdf5` | h5py |
-| [BART](https://mrirecon.github.io/bart/) | `.cfl` + `.hdr` | — |
-| Philips REC | `.REC` + `.xml` | — |
-| [NIfTI](https://nifti.nimh.nih.gov/) | `.nii`, `.nii.gz` | nibabel |
-| DICOM file | `.dcm` | pydicom |
-| DICOM directory | directory containing `.dcm` files | pydicom, nibabel, `dcm2niix` on `PATH` |
+By default, a call from a normal Python process opens a separate viewer process. Use `block=True` when the caller must wait for the window to close:
 
-HDF5 files can be compound complex dtype, or real/imag fields.
+```python
+asc(data, block=True)
+```
 
-For DICOM directories, arrayscope does not infer series dimensions itself. It runs `dcm2niix`, then loads the produced NIfTI volume.
+When Qt already exists in the current process, ArrayScope avoids an unsafe fork. In IPython/Jupyter with `%gui qt`, it opens inline; without a running Qt event loop it falls back to blocking mode with a warning.
 
-If there are multiple datasets in the file, a selection GUI appears which highlights arrays supported by arrayscope (essentially numeric).
-Double click to open.
+## What it does today
 
-![Selector](docs/images/selector.png)
+### Navigate and reshape the view
 
+- Select two image axes and slice remaining dimensions.
+- Enter explicit index/range selections, including cropped X/Y views.
+- Flip axes and apply centered FFT shift semantics per dimension.
+- Use normal image, line-profile, or tiled montage presentation.
+- Preserve, fit, or restore the viewport, including true 1:1 display.
+
+### Inspect values
+
+- Hover pixels using the committed frame’s coordinate/value model.
+- Draw ROI, line, polyline, and freehand inspection geometry.
+- View live profiles and ROI statistics/histograms.
+- Adjust window/level from the histogram, use automatic levels, or enter values directly.
+
+### Transform data without replacing the source
+
+The operation stack supports reversible, ordered steps such as crop, reverse, reductions, centered FFT/IFFT, FFT shift, and complex-axis conversion. The document keeps the source array and operation history separate; runtime optimization does not rewrite the visible operation stack.
+
+![Centered FFT](docs/images/fft.gif)
+
+### Work with larger views
+
+- Visible image evaluation can run asynchronously and in chunks.
+- Montage tiles are evaluated and presented progressively.
+- Image, tile, profile, and reusable operation-stage caches have separate budgets.
+- Runtime memory policy, latency feedback, a resource governor, and diagnostics expose why work was admitted, delayed, degraded, or refused.
+- PyQtGraph is the default backend. VisPy provides experimental shader windowing and persistent tiled residency.
+
+These mechanisms substantially improve bounded behavior, but the unified frame scheduler and backend-composition migration are not complete. The live plan is in the [roadmap](docs/roadmap.md).
+
+### Export and load data
+
+Video/PNG-frame export is available from a dimension action.
+
+![Video export](docs/images/video_export.gif)
+
+Supported command-line inputs include:
+
+| Format | Suffix or input | Notes |
+|---|---|---|
+| NumPy | `.npy`, `.npz` | Multiple arrays open a selector |
+| MATLAB | `.mat` | SciPy, with HDF5 fallback for v7.3-style files |
+| HDF5 | `.h5`, `.hdf5` | Numeric datasets and common complex layouts |
+| BART | `.cfl` + `.hdr` | Paired files |
+| Philips | `.REC` + `.xml` | Paired files |
+| NIfTI | `.nii`, `.nii.gz` | Via nibabel |
+| DICOM | `.dcm` | Single-file loading via pydicom |
+| DICOM directory | directory | Converted through `dcm2niix` on `PATH` |
+
+When a container contains several datasets, ArrayScope shows a selector and highlights supported numeric arrays.
+
+![Dataset selector](docs/images/selector.png)
 
 ## Installation
 
-### Install
+The repository currently identifies itself as version `0.0.1` after the ArrayScope rebrand and is still being prepared for a coherent public release. For development, use the source checkout:
 
 ```bash
-pip install arrayscope
+git clone <repository-url>
+cd ArrayScope
+python -m pip install -e ".[dev,vispy]"
+python -m arrayscope path/to/data.npy
 ```
 
-ArrayScope uses PySide6 by default through PyQtGraph's Qt abstraction.
-
-For DICOM directories you also need the external `dcm2niix` binary available on `PATH`. A practical install route is:
+The project’s maintained environment is described by `environment.yml` and activated locally through `.envrc`/direnv:
 
 ```bash
-conda install -c conda-forge dcm2niix
+PATH=~/miniconda3/bin:$PATH direnv exec . pytest -q tests/core
 ```
 
-If `dcm2niix` is missing or conversion fails, arrayscope reports a clear error instead of trying to infer the series layout itself.
+Core runtime dependencies include NumPy, PySide6, PyQtGraph, SciPy, h5py, pydicom, nibabel, imageio, Pillow, and psutil. VisPy is optional.
 
-### From source
+## Project documentation
 
-```bash
-git clone <this-repository>
-cd arrayscope
+- [Documentation index](docs/index.md) — the progressive entry point.
+- [Mission](docs/mission.md) — product boundaries and success criteria.
+- [Current state](docs/current-state.md) — what is mature, transitional, or experimental.
+- [Architecture](docs/architecture.md) — ownership and invariants.
+- [Roadmap](docs/roadmap.md) — current gates rather than historical phases.
+- [ArrayShow and ArrayView comparison](docs/comparison.md) — product and technical lessons.
+- [v28 project audit](docs/reviews/v28-project-audit.md) — findings behind the current plan.
 
-# Use directly without installing
-python -m arrayscope data.npy
+Historical phase notes and manual checklists remain under [`docs/archive/`](docs/archive/README.md); they are evidence, not current instructions.
 
-pip install -e .
-```
+## Scope
 
-
-## Requirements
-
-- Python >= 3.10
-- NumPy >= 1.20.0
-- PyQtGraph >= 0.14.0
-- PySide6 >= 6.4.0
-- h5py >= 3.0.0
-- scipy >= 1.7.0
-- pydicom >= 2.4.0
-- nibabel >= 4.0.0
-- imageio >= 2.9.0
-- imageio-ffmpeg >= 0.4.2
-- Pillow >= 8.0.0
+ArrayScope is deliberately not a napari replacement, a MATLAB clone, a medical workstation, or a general registration/segmentation platform. It should remain quick to invoke and easy to understand while supporting serious array inspection and a bounded path for larger scientific data.
 
 ## License
 
-MIT License - see LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Acknowledgments
-
-Built with [PyQtGraph](https://www.pyqtgraph.org/) for high-performance visualization.
+MIT. See [LICENSE](LICENSE).

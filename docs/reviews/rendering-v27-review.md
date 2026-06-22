@@ -1,5 +1,7 @@
 # ArrayScope v27 rendering architecture and performance review
 
+> **Historical review.** This document records a dated evidence set. Use [`../current-state.md`](../current-state.md), [`../architecture.md`](../architecture.md), and [`../roadmap.md`](../roadmap.md) for current guidance.
+
 ## Executive verdict
 
 Do not throw away the semantic display, operation-planning, caching, or tiled-residency work. Those
@@ -506,20 +508,20 @@ extract both surfaces. Delete `VisPyImageView2D(ImageView2D)` only after parity 
 Add typed feedback, value-based prediction, multi-page/multi-resolution residency, and backend-specific
 fast paths behind the shared contracts.
 
-## Changes committed in this review branch
+## Changes made in this review branch
 
-Starting from `f2a22c6`, the first review layer contains:
+The first review layer contains:
 
-1. `1c0130f` — Defer cached montage level sampling
-2. `c3cbdc6` — Remove VisPy montage canvas fallback
-3. `1ce4225` — Bound progressive tiled display commits
-4. `bc186a7` — Add actionable montage trace diagnostics
-5. `fe5c88a` — Move montage level semantics into display model
-6. `aa2115b` — Use constant-time montage work queues
-7. `3efc7ee` — Document unified rendering and scheduling direction
+1. Defer cached montage level sampling.
+2. Remove VisPy montage canvas fallback.
+3. Bound progressive tiled presentation updates.
+4. Add actionable montage trace diagnostics.
+5. Move montage level semantics into display model.
+6. Use constant-time montage work queues.
+7. Document unified rendering and scheduling direction.
 
-The repair layer starts from `3efc7ee` and adds focused commits for the seven invariants above. Those
-repair commits are intentionally additive so they can be applied on top of an existing review branch.
+The repair layer adds focused fixes for the seven invariants above. Those repairs are intentionally
+additive so they can be applied on top of an existing review branch.
 
 ## Validation and limitations
 

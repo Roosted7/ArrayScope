@@ -1,133 +1,105 @@
 # Ideas
 
-Agents may append concise ideas here when discovered during implementation.
+This is a parking area for useful possibilities that are not active commitments. Items move to the [roadmap](roadmap.md) only when they have a clear user problem, owner, dependencies, and measurable exit gate.
 
-Rules:
+## Validate soon
 
-* Do not promote ideas to `docs/roadmap.md` unless explicitly requested.
-* Keep entries short and actionable.
-* Prefer one-line context plus why it matters.
-* Put speculative or risky work under “Maybe later” or “Maybe never”.
+### Selection grammar preview
 
-## UI / UX ideas
+The range parser currently supports Python-like forms and compatibility fallbacks. Add an inline normalized preview such as “indices 0, 2, 4” and explicit error/repair messages so users do not have to infer whether a form used inclusive/exclusive or MATLAB/Python ordering.
 
-* For 1D arrays, consider making the profile plot the central widget instead of a dock so the first
-  viewport has no sparse empty central area.
-* Canvas-first default layout: for simple 2D arrays, show only image, histogram, compact dimension controls, and minimal display controls.
-* Hide the Operations dock by default when there are no operations; show it automatically after the first operation.
-* Hide the Profile dock by default unless live profile is enabled, data is 1D, or a profile axis is selected.
-* Replace the remaining “Image View” tab chrome with a direct central canvas unless multiple central view modes are actually active.
-* Add layout presets: Minimal, Inspect, Pipeline, Compare.
-* Add a Reset Layout action plus named saved layouts.
-* Add a command palette / locator, e.g. `Ctrl+K`, for commands such as “FFT dim 2”, “RSS dim 3”, “save recipe”, “show profile”.
-* Add an operation palette/search: searchable list of operations with short descriptions and compatible dimensions.
-* Add on-canvas HUD overlays for pixel value, cursor index, current window/level, zoom, and active operation stack summary.
-* Consider adding optional profile/montage badges to dimension chips later if the per-dimension menu is not discoverable enough.
-* Add hover tooltips for dimension roles and operation rows.
-* Add a “compact controls” mode for quick plotting and a “full controls” mode for inspection.
-* Add keyboard-first navigation: arrow keys/scroll for active slice dimension, shortcuts for active dimension selection, `F` fit, `1` 1:1 pixels, `A` auto window.
-* Add transient toast/status messages instead of printing warnings to stdout.
-* Add an overview/minimap dock for large 2D images.
-* Add operation row color/status bar: cached/ready/stale/error, but only when the status reflects real state.
-* Add optional dark/light/native theme choice after the interaction model is stable.
-* Add visual warnings before expensive full materialization or export.
+### Callback-budget trace overlay
 
-## Dimension and viewing ideas
+Expose the last few >4/8/16 ms GUI callbacks with lane, item count, bytes, and cause in developer diagnostics. This would make event-loop regressions visible during ordinary interaction.
 
-* Expose axis metadata in the UI: user-renamable labels, units, spacing, coordinates, and file-derived defaults.
-* Support user-renamable dimensions, e.g. `x`, `y`, `z`, `coil`, `time`, `echo`, `channel`.
-* Extend montage to two non-image dimensions with explicit row/column montage axes.
-* Add line-profile export presets for CSV/NPY with axis metadata columns.
-* Add ROI tools for point and ellipse selections.
-* Add per-ROI draggable info callouts with connector lines that stay anchored correctly while panning,
-  zooming, and resizing.
-* Add linked crosshair between image and profile views.
-* Add optional image marker snapping to integer pixels, center of pixel, or nearest local maximum.
-* Add multi-array compare modes: difference, ratio, phase difference, overlay, linked cursor.
-* Make ROI compare layers public, operation-aware, and session-backed instead of the current internal compatible-2D histogram scaffold.
-* Add full nD ROI back-projection from display-space ROI geometry for operation-aware source-array measurement.
+### Queue visualization
 
-## Operation / pipeline ideas
+A developer-only panel could show presented/active/latest targets and visible/stage/speculative work counts. It must read typed scheduler state, not become another controller.
 
-* Add enable/disable operation without deleting it.
-* Add inline edit for operation parameters, starting with crop ranges.
-* Add duplicate operation.
-* Add operation groups or named sections.
-* Add pipeline comments/labels.
-* Add recipe save/load including ViewState, not just operation stack.
-* Add full session save/load: operation stack, axes, slices, windowing, channel, scale, layout, profile state.
-* Add output-size estimation before materialization/export.
-* Add undo/redo stack for view and operation changes.
-* Add operation compatibility preview before applying or reordering.
-* Add operation search by dimension compatibility, e.g. show only operations valid for selected dimension.
-* Add batch/apply-to-all-open-windows recipe workflow later.
+### Benchmark fixture datasets
 
-## Performance ideas
+Store small deterministic generators plus metadata for representative scalar, complex MRI-like, high-dimensional, large-plane, and many-tile workloads. Keep large binary data outside normal source archives when possible.
 
-* Add optional per-cache manual budget overrides on top of the current memory profile presets if users need finer control.
-* Add richer diagnostics graphs/timelines for cache growth, scheduler activity, and prefetch usefulness.
-* Add explicit export progress for derived-array `.npy/.npz` saves after materialization is complete.
-* Add benchmark fixtures for representative MRI stacks so cache and slab changes can be compared over time.
-* Add chunked/cancellable FFT and reduction execution so expensive transforms can be interrupted rather
-  than only estimated and warned about.
-* True cancellation inside one FFT call remains unsolved; current chunking cancels only between
-  independent output chunks and major evaluation steps.
-* Consider optional disk-backed StageCache later with `numpy.memmap` or Joblib-inspired storage, but
-  only after the in-memory planner/cache path has real usage data.
-* Add optional memory-mapped array support for large `.npy` files.
-* Measure prefetch usefulness on representative 3D/4D datasets before adding predictive cache heuristics
-  beyond nearby-slice/profile prefetch.
-* Consider zarr/dask later, but do not introduce them before the internal lazy evaluator is clean.
+## Architecture experiments
 
-* Extract one backend-neutral pointer/ROI/profile interaction state machine, then render its semantic
-  overlay state through PyQtGraph or VisPy adapters.
-* Maintain a production rendering matrix by OS/compositor/GPU class using first-frame latency, UI gap,
-  upload bytes, storage rebuilds, and tail latency rather than setter time or GPU utilization alone.
+### Indexed tile priority
 
-## IO / MRI ideas
+Compare heap-with-version, bucketed distance rings, and ordered visible/near queues. Requirements: bounded retarget cost, starvation prevention, stage-wait integration, stable IDs, and no full sort on mouse move.
 
-* Add BART `.cfl/.hdr` write/export.
-* Add NIfTI export for 3D/4D derived arrays when affine metadata is available.
-* Preserve metadata from source formats: affine, voxel size, orientation, echo/time/coil labels.
-* Add better DICOM series grouping metadata display.
-* Add ISMRMRD support later if useful.
-* Add “coil dimension” helper operations: RSS, SoS, simple combine, phase reference, coil montage.
-* Add k-space/MRI presets: centered FFT over selected axes, show log/symlog magnitude, crop center k-space.
+### Active-plus-latest scheduler
 
-## Testing / quality ideas
+Prototype a pure Qt-free model before wiring workers. Simulate input rates, cost estimates, cancellation delays, cache reuse, and deadline misses to choose completion-versus-restart policy.
 
-* Keep pure tests independent of Qt and pyqtgraph imports.
-* Split GUI workflows from pure helpers when adding new features.
-* Add screenshot/artifact tests for UI regressions, but keep them few and meaningful.
-* Add a clean-environment import test: `python -c "import arrayscope"`.
-* Add tests for recipe compatibility across shape-changing operations.
-* Add benchmark-style tests for display refresh on representative 3D/4D arrays.
-* Add CI workflow updates for strict UI and screenshot artifact tests if the repository gains GitHub Actions.
+### Storage-neutral region presentation
 
-## Technical debt
+Represent a raster as one region and a huge plane/montage as several regions, independent of montage-axis semantics. Validate that geometry, levels, values, dirty state, and backend commits use the same model.
 
-* Replace print-based warnings with logging or user-facing status messages.
-* Add first-class scalar display support for operation stacks that reduce all dimensions.
-* Clarify FFT naming: current centered FFT/IFFT follow viewer convention but may surprise users expecting NumPy direction.
-* Add public data-mutation ergonomics beyond `notify_data_changed()`, such as context managers or observable data sources.
-* Consider a debug overlay showing the current `DisplayGeometry` mapping under the cursor when strict UI mode is enabled.
-* Watch user feedback on Python-default slice text with MATLAB-style fallback, especially for
-  ambiguous three-part ranges.
-* Add a priority scheduler for visible rendering, profile, ROI, hover, and prefetch work before
-  reintroducing operation-backed predictive prefetch.
-* Reintroduce physical FOV/aspect controls only after axis spacing/unit metadata is available.
+### Surface composition seam
 
-## Maybe later
+Extract one narrow capability at a time from `ImageView2D`: teardown, camera, raster commit, tiled commit, overlays, pointer mapping. Avoid creating a giant new abstract base class that merely mirrors both current widgets.
 
-* Plugin system.
-* Full node-graph workflow editor.
-* GPU-backed display/evaluation.
-* Dask/zarr execution backend.
-* Full napari replacement behavior.
-* Full MATLAB ArrayShow parity.
-* QML rewrite.
+### Off-thread histogram refinement
 
-## Rendering backend experiments
+Measure whether bounded sampling/binning actually violates budget. When it does, move only the expensive refinement to an immutable worker request; preserve immediate level feedback and target-key guards.
 
-* Move remaining complex display preparation to GPU shaders: upload complex/scalar source data and generate phase/color plus magnitude/intensity mapping on the GPU.
-* Keep PyQtGraph's histogram as long as it remains useful; only replace it after the pixel display path is proven better.
+### Real GPU budget probe
+
+Record device limits, attempt representative allocations conservatively, and cache proven-compatible texture classes for the session. Treat allocation failure as recoverable evidence, not a crash.
+
+## Product candidates
+
+### Linked viewer groups
+
+Typed links for cursor, slice, levels, ROI, or recipe. Default to no link. Explicit group object, origin/revision guard, and per-channel enablement; no global `asObjs`-style registry.
+
+### Compare/difference inspection
+
+A narrow compare workflow with shared viewport/levels, absolute/signed difference, and ROI statistics. Resist turning it into a full registration tool.
+
+### Dimension presets
+
+Named view recipes for common axis/channel/operation selections, stored separately from raw array data and portable across compatible shapes/metadata.
+
+### Axis metadata surface
+
+Human-readable axis labels, units, physical coordinates, and spacing in dimension controls, profiles, export, and hover. Missing metadata remains a valid simple array.
+
+### Lazy source adapter
+
+Protocol for shape/dtype/metadata plus cancellable region reads. First adapters: NumPy memmap and chunked HDF5/Zarr-like sources. Evaluate dependencies and remote semantics separately.
+
+### Editor/Jupyter integration
+
+Single semantic launch/session protocol that hosts can invoke. Learn from ArrayView’s broad reach but avoid maintaining divergent WebSocket/stdio/browser state machines unless real usage justifies them.
+
+## UI polish parking lot
+
+- Better empty/loading/degraded/error visual hierarchy.
+- Searchable command palette generated from the same command registry as menus/shortcuts.
+- Compact per-axis labels/units and normalized range preview.
+- Optional pixel grid and crosshair at high zoom.
+- ROI naming/group visibility with simple bulk actions.
+- Persisted workspace presets without persisting stale document identities.
+- Accessible keyboard traversal and contrast checks.
+
+## Scientific/MRI parking lot
+
+- Coil/channel quick presets and root-sum-of-squares operation recipe.
+- Phase/magnitude paired inspection and phase-circle profile view.
+- K-space/image-space linked recipe, implemented as linked views rather than destructive toggling.
+- Orientation/spacing adapters for NIfTI/DICOM metadata while keeping the core array model generic.
+- Export of ROI/profile measurements with source/operation/view provenance.
+
+## Avoid
+
+Do not pursue these as shortcuts:
+
+- global viewer registries or workspace scanning;
+- backend-specific semantic state;
+- destructive default operations;
+- one giant self-contained frontend/module for deployment convenience;
+- duplicated state representations that rely on perpetual reconciliation;
+- mixed-size LOD images in fixed-shape atlas slots;
+- debounce timers as the only scheduling policy;
+- feature modes whose interactions with every existing mode are undefined;
+- wall-clock benchmark claims that do not distinguish CPU submission from GPU presentation.

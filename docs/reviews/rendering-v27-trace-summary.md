@@ -1,5 +1,7 @@
 # ArrayScope v27 rendering trace summary
 
+> **Historical review.** This document records a dated evidence set. Use [`../current-state.md`](../current-state.md), [`../architecture.md`](../architecture.md), and [`../roadmap.md`](../roadmap.md) for current guidance.
+
 ## Scope
 
 This note analyzes the two diagnostics captures shipped with the v27 source archive:
