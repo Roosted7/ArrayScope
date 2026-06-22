@@ -90,6 +90,8 @@ class EvaluationController(Qt.QtCore.QObject):
         self._handlers = {}
         self._tokens = {}
         self._group_generations = {}
+        self._group_request_generations = {}
+        self._group_child_groups = {}
         self._group_epoch = 0
         self._prefetch_keys = set()
         self._max_prefetch = 32
@@ -134,16 +136,17 @@ class EvaluationController(Qt.QtCore.QObject):
     def clear_group(self, replace_group: str):
         replace_group = str(replace_group)
         self.advance_group(replace_group)
-        for generation, request in tuple(self._requests.items()):
-            if request.replace_group != replace_group and not request.replace_group.startswith(f"{replace_group}:"):
-                continue
-            self.advance_group(request.replace_group)
-            token = self._tokens.get(generation)
-            if token is not None:
-                token.cancel()
-            runnable = self._runnables.get(generation)
-            if runnable is not None and not getattr(runnable, "started", False):
-                self._discard_generation(generation, stale=True)
+        groups = {replace_group}
+        groups.update(self._group_child_groups.get(replace_group, ()))
+        for group in tuple(groups):
+            self.advance_group(group)
+            for generation in tuple(self._group_request_generations.get(group, ())):
+                token = self._tokens.get(generation)
+                if token is not None:
+                    token.cancel()
+                runnable = self._runnables.get(generation)
+                if runnable is not None and not getattr(runnable, "started", False):
+                    self._discard_generation(generation, stale=True)
         if not self._runnables:
             self._poll_timer.stop()
 
@@ -151,10 +154,6 @@ class EvaluationController(Qt.QtCore.QObject):
         replace_group = str(replace_group)
         self._group_epoch += 1
         self._group_generations[replace_group] = self._group_epoch
-        for group in tuple(self._group_generations):
-            if group.startswith(f"{replace_group}:"):
-                self._group_epoch += 1
-                self._group_generations[group] = self._group_epoch
         return self._group_generations[replace_group]
 
     def group_generation(self, replace_group: str) -> int:
@@ -210,6 +209,7 @@ class EvaluationController(Qt.QtCore.QObject):
         self._requests[generation] = request
         self._tokens[generation] = token
         self._handlers[generation] = (on_done, on_error, on_stale)
+        self._index_request(request)
         if on_slow is not None:
             Qt.QtCore.QTimer.singleShot(int(slow_ms), lambda generation=generation: self._emit_slow(generation, on_slow))
 
@@ -346,11 +346,12 @@ class EvaluationController(Qt.QtCore.QObject):
 
     def _finish(self, generation, value):
         request = self._requests.get(generation)
+        stale = request is None or request.group_generation != self.group_generation(request.replace_group) or self._shutting_down
         self._cleanup_generation(generation)
         on_done, _on_error, on_stale = self._handlers.pop(generation, (None, None, None))
         if on_done is None:
             return
-        if request is None or request.group_generation != self.group_generation(request.replace_group) or self._shutting_down:
+        if stale:
             self._stale_count += 1
             if on_stale is not None:
                 on_stale()
@@ -360,9 +361,10 @@ class EvaluationController(Qt.QtCore.QObject):
 
     def _fail(self, generation, exc):
         request = self._requests.get(generation)
+        stale = request is None or request.group_generation != self.group_generation(request.replace_group) or self._shutting_down
         self._cleanup_generation(generation)
         _on_done, on_error, on_stale = self._handlers.pop(generation, (None, None, None))
-        if request is None or request.group_generation != self.group_generation(request.replace_group) or self._shutting_down:
+        if stale:
             self._stale_count += 1
             if on_stale is not None:
                 on_stale()
@@ -384,8 +386,39 @@ class EvaluationController(Qt.QtCore.QObject):
         self._pending.discard(generation)
         self._started.discard(generation)
         self._runnables.pop(generation, None)
-        self._requests.pop(generation, None)
+        request = self._requests.pop(generation, None)
+        if request is not None:
+            self._unindex_request(request)
         self._tokens.pop(generation, None)
+
+    def _index_request(self, request):
+        group = str(request.replace_group)
+        self._group_request_generations.setdefault(group, set()).add(request.generation)
+        for parent in self._group_parents(group):
+            self._group_child_groups.setdefault(parent, set()).add(group)
+
+    def _unindex_request(self, request):
+        group = str(request.replace_group)
+        generations = self._group_request_generations.get(group)
+        if generations is not None:
+            generations.discard(request.generation)
+            if not generations:
+                self._group_request_generations.pop(group, None)
+                self._group_generations.pop(group, None)
+                for parent in self._group_parents(group):
+                    children = self._group_child_groups.get(parent)
+                    if children is None:
+                        continue
+                    children.discard(group)
+                    if not children:
+                        self._group_child_groups.pop(parent, None)
+
+    @staticmethod
+    def _group_parents(group: str) -> tuple[str, ...]:
+        parts = str(group).split(":")
+        if len(parts) <= 1:
+            return ()
+        return tuple(":".join(parts[:index]) for index in range(1, len(parts)))
 
     def _remove_not_started_runnables(self):
         for key, runnable in tuple(self._runnables.items()):
