@@ -229,7 +229,7 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot,
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
-        monkeypatch.setattr(win.visible_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
+        monkeypatch.setattr(win.visible_evaluation_controller, "start_active_plus_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
 
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
@@ -266,7 +266,7 @@ def test_relative_window_levels_match_for_cached_and_uncached_images(qtbot, monk
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
-        monkeypatch.setattr(win.visible_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
+        monkeypatch.setattr(win.visible_evaluation_controller, "start_active_plus_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
 
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()

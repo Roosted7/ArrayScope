@@ -555,16 +555,12 @@ class MontageRenderMixin:
         session.pending_tiles = deque(
             tile for tile in session.pending_tiles if int(tile.montage_index) in keep
         )
-        stale = (set(session.loading_tiles) | set(session.active_tile_requests)) - keep
+        stale = (set(session.loading_tiles) - set(session.active_tile_requests)) - keep
         if stale:
-            controller = getattr(self, "montage_tile_evaluation_controller", None)
             for index in sorted(stale):
                 session.loading_tiles.discard(int(index))
-                session.active_tile_requests.discard(int(index))
                 if 0 <= int(index) < len(session.tile_states):
                     session.tile_states[int(index)] = MontageTileState.UNLOADED
-                if controller is not None:
-                    controller.clear_group(f"montage-tile:{int(session.session_id)}:{int(index)}")
         for key, waiting in list(session.stage_waiting_tiles.items()):
             kept = [tile for tile in waiting if int(tile.montage_index) in keep]
             if kept:
@@ -1103,16 +1099,36 @@ class MontageRenderMixin:
         def evaluate(token):
             return self._evaluate_montage_tile_snapshot(session, tile, token)
 
+        session_id = int(session.session_id)
+        montage_axis = int(session.montage_axis)
+        document = session.document
+        colormap_lut = session.colormap_lut
+        shader_display = bool(getattr(session, "shader_display", False))
+
+        def done(result):
+            self._on_montage_tile_done(
+                session_id,
+                tile,
+                result,
+                document=document,
+                montage_axis=montage_axis,
+                colormap_lut=colormap_lut,
+                shader_display=shader_display,
+            )
+
+        def error(exc):
+            self._on_montage_tile_error(session_id, tile, exc)
+
         controller = getattr(self, "montage_tile_evaluation_controller", self.visible_evaluation_controller)
         controller.start_latest(
             evaluate,
             key=("montage_tile", session.key, int(tile.montage_index)),
             priority=EvalPriority.VISIBLE_IMAGE,
-            replace_group=f"montage-tile:{int(session.session_id)}:{int(tile.montage_index)}",
-            on_done=lambda result, session_id=session.session_id, tile=tile: self._on_montage_tile_done(session_id, tile, result),
-            on_error=lambda exc, session_id=session.session_id, tile=tile: self._on_montage_tile_error(session_id, tile, exc),
+            replace_group=f"montage-tile:{session_id}:{int(tile.montage_index)}",
+            on_done=done,
+            on_error=error,
             on_stale=lambda: None,
-            on_slow=lambda: self._on_montage_tile_slow(session.session_id),
+            on_slow=lambda: self._on_montage_tile_slow(session_id),
             slow_ms=100,
             pass_token=True,
         )
@@ -1223,14 +1239,45 @@ class MontageRenderMixin:
         else:
             self._update_operation_dock()
 
-    def _on_montage_tile_done(self, session_id, tile, result) -> None:
+    def _on_montage_tile_done(self, session_id, tile, result, *, document, montage_axis: int, colormap_lut, shader_display: bool) -> None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, session.key):
+            self._store_reusable_montage_tile_result(
+                tile,
+                result,
+                document=document,
+                montage_axis=montage_axis,
+                colormap_lut=colormap_lut,
+                shader_display=shader_display,
+            )
             return
         if not self._is_current_render_generation(session.render_generation):
+            self._store_reusable_montage_tile_result(
+                tile,
+                result,
+                document=document,
+                montage_axis=montage_axis,
+                colormap_lut=colormap_lut,
+                shader_display=shader_display,
+            )
             return
         session.pending_completed_tiles.append((tile, result))
         self._schedule_montage_tile_result_flush(session)
+
+    def _store_reusable_montage_tile_result(self, tile, result, *, document, montage_axis: int, colormap_lut, shader_display: bool):
+        if _document_key(document) != _document_key(self.document):
+            return None
+        stored = self.operation_evaluator.store_montage_tile_result(
+            tile,
+            montage_axis=montage_axis,
+            colormap_lut=colormap_lut,
+            result=result,
+            shader_display=shader_display,
+        )
+        controller = getattr(self, "montage_tile_evaluation_controller", None)
+        if stored is not None and controller is not None and hasattr(controller, "note_stale_reused"):
+            controller.note_stale_reused()
+        return stored
 
     def _schedule_montage_tile_result_flush(self, session) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):

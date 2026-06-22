@@ -21,7 +21,7 @@ from arrayscope.core.runtime_diagnostics import (
 from arrayscope.operations.stage_cache import StageCacheDiagnostics
 from arrayscope.window.stage_warmup import StageWarmupDecision
 from arrayscope.window.montage_prefetch import MontagePrefetchDecision
-from arrayscope.core.scheduler import SchedulerDiagnostics
+from arrayscope.core.scheduler import FrameTarget, SchedulerDiagnostics
 
 
 def _cache():
@@ -30,7 +30,28 @@ def _cache():
 
 def _snapshot():
     policy = compute_memory_policy(profile=MemoryProfileChoice.BALANCED, render_cap_mb=512, input_nbytes=1, system=None)
-    scheduler = SchedulerDiagnostics("visible", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    scheduler = SchedulerDiagnostics(
+        "visible",
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        active_preserved=2,
+        queued_collapsed=3,
+        stale_reused=1,
+        presented_target=FrameTarget("semantic", None, "presentation", "exact-visible"),
+    )
     return WindowRuntimeDiagnostics(
         memory_policy=policy,
         image_cache=_cache(),
@@ -50,7 +71,7 @@ def _snapshot():
             last_miss="stage=1",
             last_store="stage=1",
         ),
-        schedulers=(scheduler,),
+        schedulers=(scheduler, SchedulerDiagnostics("idle", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)),
         render=RenderRuntimeDiagnostics(last_request_key="('image', b'\\xf9\\x7f\\x10')"),
         montage=MontageRuntimeDiagnostics(
             active=False,
@@ -149,6 +170,10 @@ def test_diagnostics_jsonl_serializes_nested_snapshot_and_records():
     assert decoded["diagnostics"]["memory_policy"]["profile"] == "balanced"
     assert decoded["diagnostics"]["derived_shape"] == [4, 5]
     assert decoded["diagnostics"]["schedulers"][0]["name"] == "visible"
+    assert decoded["diagnostics"]["schedulers"][0]["active_preserved"] == 2
+    assert decoded["diagnostics"]["schedulers"][0]["queued_collapsed"] == 3
+    assert decoded["diagnostics"]["schedulers"][0]["stale_reused"] == 1
+    assert decoded["diagnostics"]["schedulers"][0]["presented_target"]["quality"] == "exact-visible"
     assert decoded["diagnostics"]["canvas_preserve"]["events"] == ["start gen=1"]
 
 
@@ -217,6 +242,9 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Tile cache last session: cached=3 missing=4" in text
     assert "Workers: visible=1, montage_tile=2" in text
     assert "FFT workers: visible=4, montage_tile=1" in text
+    assert "active_preserved=2" in text
+    assert "queued_collapsed=3" in text
+    assert "stale_reused=1" in text
     assert "Inactive:" in text
     assert "Context:\n" in text
 

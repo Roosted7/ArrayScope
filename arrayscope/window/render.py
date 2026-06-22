@@ -764,8 +764,6 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
 
     def _cancel_render_dependent_work_for_interactive_change(self) -> None:
         for controller_name, groups in (
-            ("visible_evaluation_controller", ("visible-image", "visible-montage")),
-            ("montage_tile_evaluation_controller", ("montage-tile",)),
             ("profile_evaluation_controller", ("profile-plot", "live-profile")),
             ("roi_evaluation_controller", ("roi-inspection",)),
             ("pixel_evaluation_controller", ("pixel",)),

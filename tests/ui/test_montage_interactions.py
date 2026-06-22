@@ -683,7 +683,12 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(2 * 2 * 4, dtype=np.float32).reshape(2, 2, 4))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
+
+    def capture_start_latest(_fn, **kwargs):
+        calls.append(kwargs)
+        return len(calls)
+
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_start_latest)
     try:
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
@@ -1297,7 +1302,8 @@ def test_stale_montage_tile_result_does_not_mutate_current_ui_state(qtbot, monke
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
         win.update_montage_view()
         old_callback = calls[0]["on_done"]
-        old_tile = win._montage_session.plan.tiles[0]
+        old_tile_number = int(calls[0]["key"][2])
+        old_tile = win._montage_session.plan.tiles[old_tile_number]
 
         win._set_view_state(win.view_state.with_montage_axis(2, columns=2, indices=(2, 3), text="2:"))
         win.update_montage_view()
@@ -1309,6 +1315,14 @@ def test_stale_montage_tile_result_does_not_mutate_current_ui_state(qtbot, monke
         assert win._montage_session.session_id == current_session_id
         assert win._current_montage_canvas is current_canvas
         assert win.img_view._evaluation_overlay.isVisible()
+        assert win.operation_evaluator.cached_montage_tile_silent(
+            old_tile.view_state,
+            montage_axis=2,
+            source_index=old_tile.source_index,
+            colormap_lut=None,
+            shader_display=False,
+        ) is not None
+        assert win.montage_tile_evaluation_controller.diagnostics().stale_reused == 1
     finally:
         win.close()
 

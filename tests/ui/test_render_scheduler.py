@@ -14,25 +14,25 @@ from tests.ui.helpers import (
 )
 
 
-def test_visible_render_controller_uses_latest_only_group(qtbot, monkeypatch):
+def test_visible_render_controller_uses_active_plus_latest_group(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9 * 10, dtype=float).reshape(8, 9, 10))
     qtbot.addWidget(win)
     calls = []
-    original_start_latest = win.visible_evaluation_controller.start_latest
+    original_start_active_plus_latest = win.visible_evaluation_controller.start_active_plus_latest
 
-    def recording_start_latest(fn, **kwargs):
+    def recording_start_active_plus_latest(fn, **kwargs):
         calls.append(kwargs.get("replace_group"))
 
         def slow_fn(*args):
             time.sleep(0.02)
             return fn(*args)
 
-        return original_start_latest(slow_fn, **kwargs)
+        return original_start_active_plus_latest(slow_fn, **kwargs)
 
-    monkeypatch.setattr(win.visible_evaluation_controller, "start_latest", recording_start_latest)
+    monkeypatch.setattr(win.visible_evaluation_controller, "start_active_plus_latest", recording_start_active_plus_latest)
     try:
         _process_events(qtbot, count=20)
         win._set_view_state(win.view_state.with_slice(2, 1))
@@ -272,12 +272,12 @@ def test_stale_visible_result_does_not_clear_updating_overlay(qtbot, monkeypatch
     qtbot.addWidget(win)
     captured = {}
 
-    def capture_start_latest(_fn, **kwargs):
+    def capture_start_active_plus_latest(_fn, **kwargs):
         captured.update(kwargs)
         kwargs["on_slow"]()
         return 1
 
-    monkeypatch.setattr(win.visible_evaluation_controller, "start_latest", capture_start_latest)
+    monkeypatch.setattr(win.visible_evaluation_controller, "start_active_plus_latest", capture_start_active_plus_latest)
     try:
         _process_events(qtbot, count=20)
         win.operation_evaluator.clear_cache()

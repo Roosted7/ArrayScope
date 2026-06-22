@@ -859,6 +859,9 @@ def _scheduler_lines(schedulers: tuple[object, ...]) -> tuple[str, ...]:
                 ("blocked_idle", scheduler.prefetch_idle_blocked),
                 ("blocked_visible", scheduler.prefetch_visible_busy_blocked),
                 ("blocked_cost", scheduler.prefetch_cost_blocked),
+                ("active_preserved", getattr(scheduler, "active_preserved", 0)),
+                ("queued_collapsed", getattr(scheduler, "queued_collapsed", 0)),
+                ("stale_reused", getattr(scheduler, "stale_reused", 0)),
             )
         )
         if not active_parts and not event_parts:

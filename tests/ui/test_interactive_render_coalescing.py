@@ -74,7 +74,7 @@ def test_coalescer_throttles_without_starving_continuous_bursts(qtbot, monkeypat
         win.close()
 
 
-def test_interactive_slice_cancels_stale_render_dependent_work(qtbot, monkeypatch):
+def test_interactive_slice_preserves_visible_work_and_cancels_side_work(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -87,6 +87,7 @@ def test_interactive_slice_cancels_stale_render_dependent_work(qtbot, monkeypatc
         return lambda group: cleared.append((controller_name, group))
 
     monkeypatch.setattr(win.visible_evaluation_controller, "clear_group", record_clear("visible"))
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "clear_group", record_clear("montage"))
     monkeypatch.setattr(win.profile_evaluation_controller, "clear_group", record_clear("profile"))
     monkeypatch.setattr(win.roi_evaluation_controller, "clear_group", record_clear("roi"))
     monkeypatch.setattr(win.pixel_evaluation_controller, "clear_group", record_clear("pixel"))
@@ -96,8 +97,7 @@ def test_interactive_slice_cancels_stale_render_dependent_work(qtbot, monkeypatc
         _process_events(qtbot, count=2)
         win._on_slice_index_changed(2, 1)
 
-        assert ("visible", "visible-image") in cleared
-        assert ("visible", "visible-montage") in cleared
+        assert not any(name in {"visible", "montage"} for name, _group in cleared)
         assert ("profile", "profile-plot") in cleared
         assert ("profile", "live-profile") in cleared
         assert ("roi", "roi-inspection") in cleared

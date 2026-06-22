@@ -14,6 +14,7 @@ from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.memory_budget import format_bytes
+from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.backend_contract import image_view_backend_capabilities
@@ -235,15 +236,35 @@ class NormalImageRenderMixin:
             else:
                 self._update_operation_dock()
 
-        def done(result):
-            if not self._is_current_render_generation(render_generation):
-                return
+        def current_target_matches() -> bool:
             if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut, shader_display=shader_display):
+                return False
+            if window_mode != self._current_window_mode():
+                return False
+            if _normalize_levels(user_levels) != _normalize_levels(self._pending_display_levels_for_render()):
+                return False
+            return True
+
+        def store_reusable_exact(result):
+            if _document_key(document) != _document_key(self.document):
+                return None
+            return self.operation_evaluator.store_image_result(
+                view_state,
+                colormap_lut,
+                result,
+                shader_display=shader_display,
+            )
+
+        def done(result):
+            if not current_target_matches():
+                store_reusable_exact(result)
                 return
             self._last_render_completed_ms = float(getattr(result, "eval_ms", 0.0) or 0.0)
             self._last_render_was_degraded = False
             self._degraded_rendered_view = None
-            display_image = self.operation_evaluator.store_image_result(view_state, colormap_lut, result, shader_display=shader_display)
+            display_image = store_reusable_exact(result)
+            if display_image is None:
+                return
             geometry = DisplayGeometry(view_state=view_state, display_shape=display_image.data.shape[:2])
             self._apply_display_image(
                 display_image,
@@ -254,7 +275,7 @@ class NormalImageRenderMixin:
                 defer_side_panels=defer_side_panels,
                 document_key=_document_key(document),
                 request_key=request_key,
-                render_generation=render_generation,
+                render_generation=self._capture_render_generation(),
                 user_levels=user_levels,
             )
             schedule_stage_warmup(self, view_state)
@@ -267,14 +288,31 @@ class NormalImageRenderMixin:
             show_status_message(self, f"Image update failed: {exc}")
 
         submitted_at = perf_counter()
-        self.visible_evaluation_controller.start_latest(
+        frame_target = FrameTarget(
+            semantic_key=request_key,
+            viewport_key=None,
+            presentation_key=(
+                str(window_mode),
+                _normalize_levels(user_levels),
+                bool(force_auto),
+            ),
+            quality="exact-visible",
+        )
+        self.visible_evaluation_controller.start_active_plus_latest(
             evaluate,
             key=request_key,
             priority=EvalPriority.VISIBLE_IMAGE,
             replace_group="visible-image",
+            frame_target=frame_target,
+            supersession_key=(
+                frame_target.semantic_key,
+                frame_target.viewport_key,
+                frame_target.presentation_key,
+            ),
             on_done=done,
             on_error=error,
             on_stale=lambda: self.operation_evaluator.note_render_cancelled(),
+            on_reuse_stale=store_reusable_exact,
             on_slow=slow,
             pass_token=True,
         )
@@ -296,3 +334,13 @@ def _should_clear_stale_visible_frame(previous_frame, document_key, image_view) 
         return False
     previous_key = getattr(previous_frame, "key", None)
     return getattr(previous_key, "document_key", None) != document_key
+
+
+def _normalize_levels(levels):
+    if levels is None:
+        return None
+    try:
+        low, high = levels
+    except (TypeError, ValueError):
+        return None
+    return float(low), float(high)

@@ -6,25 +6,6 @@ A roadmap item is complete only when its exit gate is met. “Code exists” is 
 
 ## Now — stabilize the v28 foundation
 
-### N2. Progress-preserving visible scheduling
-
-**Goal:** prevent latest-only cancellation from repeatedly discarding useful near-complete work.
-
-Work:
-
-- Introduce explicit presented, active, and latest-queued visible targets.
-- Define supersession keys separately for semantic, viewport, and presentation changes.
-- Let cheap-to-finish or reusable active work complete when restart cost is higher.
-- Keep exact-visible progress moving during continuous input while still rejecting stale commits.
-- Feed cancellation cost and reusable output into diagnostics/feedback.
-
-Exit gate:
-
-- a continuous-input regression always reaches useful progressive/exact frames;
-- obsolete queued targets collapse to one latest target;
-- no stale frame can commit;
-- traces show less repeated/cancelled CPU work than the current latest-only baseline.
-
 ### N3. Dynamic tile priority without mouse-event sorting
 
 **Goal:** make active work follow viewport/hover value safely.

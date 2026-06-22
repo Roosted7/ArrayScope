@@ -251,10 +251,10 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     win._prune_stale_montage_tile_work(session)
 
     assert [int(tile.montage_index) for tile in session.pending_tiles] == [1]
-    assert 7 not in session.loading_tiles
-    assert 7 not in session.active_tile_requests
-    assert session.tile_states[7] == MontageTileState.UNLOADED
-    assert controller.groups == ["montage-tile:7:7"]
+    assert 7 in session.loading_tiles
+    assert 7 in session.active_tile_requests
+    assert session.tile_states[7] == MontageTileState.LOADING
+    assert controller.groups == []
 
 
 def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):

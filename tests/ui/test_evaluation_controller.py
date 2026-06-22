@@ -56,7 +56,7 @@ def test_evaluation_controller_drain_yields_on_elapsed_budget(qt_app):
 
     for key, value in (("a", 1), ("b", 2), ("c", 3)):
         controller._runnables[key] = object()
-        controller._handlers[key] = (callback, None, None)
+        controller._handlers[key] = (callback, None, None, None)
         controller._queue.put(("prefetch_done", key, value))
 
     controller._drain_queue()
@@ -97,6 +97,117 @@ def test_start_latest_clears_queued_work_and_only_commits_newest(qt_app):
 
     assert done == ["new"]
     assert "old" in stale
+
+
+def test_active_plus_latest_preserves_started_work_and_collapses_queued(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.core.scheduler import FrameTarget
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    done = []
+    stale = []
+    active_target = FrameTarget("semantic-old", None, "presentation-old", "exact-visible")
+    queued_old_target = FrameTarget("semantic-queued-old", None, "presentation-old", "exact-visible")
+    queued_new_target = FrameTarget("semantic-queued-new", None, "presentation-new", "exact-visible")
+
+    controller.start_active_plus_latest(
+        lambda: (time.sleep(0.12), "active")[1],
+        key="active",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        frame_target=active_target,
+        on_done=done.append,
+        on_stale=lambda: stale.append("active"),
+    )
+    for _ in range(20):
+        QtTest.QTest.qWait(10)
+        qt_app.processEvents()
+        if controller._started:
+            break
+    assert controller._started
+    assert controller.frame_progress("visible").active == active_target
+
+    controller.start_active_plus_latest(
+        lambda: "queued-old",
+        key="queued-old",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        frame_target=queued_old_target,
+        on_done=done.append,
+        on_stale=lambda: stale.append("queued-old"),
+    )
+    controller.start_active_plus_latest(
+        lambda: "queued-new",
+        key="queued-new",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        frame_target=queued_new_target,
+        on_done=done.append,
+        on_stale=lambda: stale.append("queued-new"),
+    )
+    progress = controller.frame_progress("visible")
+    assert progress.active == active_target
+    assert progress.queued_latest == queued_new_target
+
+    QtTest.QTest.qWait(260)
+    qt_app.processEvents()
+
+    assert done == ["queued-new"]
+    assert "active" in stale
+    assert "queued-old" in stale
+    progress = controller.frame_progress("visible")
+    assert progress.presented == queued_new_target
+    assert progress.active is None
+    assert progress.queued_latest is None
+    diagnostics = controller.diagnostics()
+    assert diagnostics.active_preserved >= 1
+    assert diagnostics.queued_collapsed >= 1
+    assert diagnostics.presented_target == queued_new_target
+
+
+def test_active_plus_latest_reuses_stale_completion_without_on_done(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    done = []
+    reused = []
+    stale = []
+
+    controller.start_active_plus_latest(
+        lambda: (time.sleep(0.08), "active")[1],
+        key="active",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=done.append,
+        on_stale=lambda: stale.append("active"),
+        on_reuse_stale=reused.append,
+    )
+    for _ in range(20):
+        QtTest.QTest.qWait(10)
+        qt_app.processEvents()
+        if controller._started:
+            break
+
+    controller.start_active_plus_latest(
+        lambda: "latest",
+        key="latest",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=done.append,
+        on_stale=lambda: stale.append("latest"),
+    )
+
+    QtTest.QTest.qWait(220)
+    qt_app.processEvents()
+
+    assert done == ["latest"]
+    assert reused == ["active"]
+    assert stale == ["active"]
+    assert controller.diagnostics().stale_reused == 1
 
 
 def test_clear_group_preserves_unrelated_prefetch_bookkeeping(qt_app):
