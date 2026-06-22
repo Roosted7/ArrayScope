@@ -51,6 +51,18 @@ def show_status_action(window, message, action_text, on_action, timeout=5000):
     return widget
 
 
+def show_revert_action(window, message, on_revert, *, timeout=5000):
+    """Show a transient non-blocking status action with a shared revert affordance."""
+
+    return show_status_action(
+        window,
+        message,
+        "Revert",
+        on_revert,
+        timeout=timeout,
+    )
+
+
 def _clear_status_action(window, widget=None):
     existing = getattr(window, "_arrayscope_status_action_widget", None)
     if widget is not None and existing is not widget:

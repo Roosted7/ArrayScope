@@ -40,7 +40,7 @@ from arrayscope.operations.slabs import (
     plan_slab,
     request_for_image,
 )
-from arrayscope.ui.toasts import show_status_action, show_status_message
+from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.display.model.montage_levels import MontageLevelStats, MontageLevelTracker, montage_level_key
@@ -146,6 +146,7 @@ class MontageRenderMixin:
             self._force_autolevel = False
         window_mode = self._current_window_mode()
         previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
+        pending_auto_level_source = getattr(self, "_pending_auto_level_source", None) if force_auto else None
 
         view_state = self.view_state
         shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
@@ -268,7 +269,11 @@ class MontageRenderMixin:
             attached_stage_requests=stage_plan["attached_stage_keys"],
             stage_values=stage_plan["stage_values"],
             defer_side_panels=bool(defer_side_panels),
-            applied_level_source=None if previous_frame is None else fallback_level_source(previous_frame),
+            applied_level_source=(
+                pending_auto_level_source
+                if pending_auto_level_source is not None
+                else (None if previous_frame is None else fallback_level_source(previous_frame))
+            ),
             user_levels_override=user_levels,
             tile_compute_cache_hits=len(cached_tiles),
             tile_compute_waiting_for_stage=len(stage_plan["waiting_indices"]),
@@ -280,6 +285,8 @@ class MontageRenderMixin:
         )
         session.shader_display = bool(shader_display)
         self._montage_session = session
+        if pending_auto_level_source is not None:
+            self._pending_auto_level_source = None
         self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
         self._queue_montage_cached_level_stats(session, cached_tiles, seed_if_empty=True)
         self._last_montage_session_setup_ms = (perf_counter() - session_setup_start) * 1000.0
@@ -1591,10 +1598,9 @@ class MontageRenderMixin:
             if viewport_controller is not None and previous_mode is not None:
                 viewport_controller.mode = previous_mode
 
-        show_status_action(
+        show_revert_action(
             self,
             "Fitted montage to show all tiles.",
-            "Undo",
             undo,
             timeout=5000,
         )

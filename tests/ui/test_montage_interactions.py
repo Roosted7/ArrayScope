@@ -771,6 +771,31 @@ def test_montage_force_auto_waits_for_first_real_tile_before_changing_levels(qtb
         win.close()
 
 
+def test_montage_auto_window_button_applies_current_semantic_bounds_immediately(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
+        win.render(reason="test-montage")
+        _process_events(qtbot, count=80)
+        expected = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+
+        win.img_view.setLevels(2.0, 8.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (2.0, 8.0)
+
+        win.auto_window_levels()
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == expected
+        _process_events(qtbot, count=20)
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == expected
+    finally:
+        win.close()
+
+
 def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

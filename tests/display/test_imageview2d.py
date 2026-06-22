@@ -1261,6 +1261,196 @@ def test_histogram_drag_preview_emits_user_level_once_on_finish(qt_app):
     view.close()
 
 
+def test_adaptive_histogram_uses_coarser_bins_when_zoomed_out(qt_app):
+    from arrayscope.display.histogram_controller import _histogram_value_pixel_height
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        view.resize(480, 520)
+        view.show()
+        qt_app.processEvents()
+        data = np.linspace(0.0, 100.0, 10_000, dtype=float).reshape(100, 100)
+        view.setImagePresentation(data, histogramData=data, levels=(10.0, 90.0), histogramRange=(0.0, 100.0))
+        view.histogram.item.vb.setYRange(0.0, 100.0, padding=0)
+        view._refresh_histogram_plot(auto_level=False)
+
+        _x, full_counts = view.histogram.item.plot.getData()
+        pixel_height = _histogram_value_pixel_height(view.histogram.item)
+
+        assert len(full_counts) <= int(pixel_height / 5) + 2
+    finally:
+        view.close()
+
+
+def test_adaptive_histogram_increases_detail_when_zoomed_in(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        view.resize(480, 520)
+        view.show()
+        qt_app.processEvents()
+        data = np.linspace(0.0, 100.0, 10_000, dtype=float).reshape(100, 100)
+        view.setImagePresentation(data, histogramData=data, levels=(10.0, 90.0), histogramRange=(0.0, 100.0))
+
+        view.histogram.item.vb.setYRange(0.0, 100.0, padding=0)
+        view._refresh_histogram_plot(auto_level=False)
+        _x, full_counts = view.histogram.item.plot.getData()
+
+        view.histogram.item.vb.setYRange(45.0, 55.0, padding=0)
+        view._refresh_histogram_plot(auto_level=False)
+        _x, zoom_counts = view.histogram.item.plot.getData()
+
+        assert len(zoom_counts) > len(full_counts)
+        assert len(zoom_counts) <= 500
+    finally:
+        view.close()
+
+
+def test_adaptive_histogram_falls_back_for_degenerate_bounds(qt_app):
+    from arrayscope.display.histogram_controller import adaptive_histogram_for_view
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        data = np.zeros((8, 8), dtype=float)
+        view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+
+        histogram = adaptive_histogram_for_view(
+            view.histogramImageItem,
+            view.histogram.item,
+            histogram_bounds=(1.0, 1.0),
+        )
+
+        assert histogram is not None
+        assert len(histogram[0]) >= 2
+        assert len(histogram[0]) == len(histogram[1])
+    finally:
+        view.close()
+
+
+def test_adaptive_histogram_auto_level_refresh_updates_display_levels(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        data = np.arange(16, dtype=float).reshape(4, 4)
+        view.setImage(data, histogramData=data, levels=(2.0, 8.0))
+
+        view._histogram_display_controller.refresh_histogram_plot(auto_level=True)
+
+        assert tuple(float(value) for value in view.getLevels()) == (0.0, 15.0)
+        assert tuple(float(value) for value in view.imageItem.levels) == (0.0, 15.0)
+    finally:
+        view.close()
+
+
+def test_histogram_double_click_requests_auto_window(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtCore
+
+    class _DoubleClick:
+        def __init__(self, scene_pos):
+            self._scene_pos = scene_pos
+            self.accepted = False
+
+        def button(self):
+            return QtCore.Qt.MouseButton.LeftButton
+
+        def double(self):
+            return True
+
+        def isAccepted(self):
+            return self.accepted
+
+        def scenePos(self):
+            return self._scene_pos
+
+        def accept(self):
+            self.accepted = True
+
+    view = ImageView2D()
+    try:
+        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        calls = []
+        view.autoWindowRequested.connect(lambda: calls.append(True))
+        scene_pos = view.histogram.item.vb.mapViewToScene(QtCore.QPointF(0.0, 12.0))
+        event = _DoubleClick(scene_pos)
+
+        view._histogram_display_controller._on_scene_mouse_clicked(event)
+
+        assert event.accepted
+        assert calls == [True]
+    finally:
+        view.close()
+
+
+def test_histogram_limit_popup_live_preview_accepts_once(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 10.0))
+        user_calls = []
+        view.userLevelsChanged.connect(lambda: user_calls.append(True))
+
+        view._histogram_display_controller.begin_limit_edit("lower")
+        popup = view._histogram_display_controller.active_popup()
+        popup.edit.setValue(2.0)
+
+        assert user_calls == []
+        assert tuple(float(value) for value in view.getLevels()) == (2.0, 10.0)
+
+        popup.accept()
+
+        assert user_calls == [True]
+        assert tuple(float(value) for value in view.getLevels()) == (2.0, 10.0)
+    finally:
+        view.close()
+
+
+def test_histogram_limit_popup_escape_restores_without_user_signal(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 10.0))
+        user_calls = []
+        view.userLevelsChanged.connect(lambda: user_calls.append(True))
+
+        view._histogram_display_controller.begin_limit_edit("upper")
+        popup = view._histogram_display_controller.active_popup()
+        popup.edit.setValue(7.0)
+        assert tuple(float(value) for value in view.getLevels()) == (0.0, 7.0)
+
+        popup.reject()
+
+        assert user_calls == []
+        assert tuple(float(value) for value in view.getLevels()) == (0.0, 10.0)
+    finally:
+        view.close()
+
+
+def test_histogram_span_popup_keeps_clicked_value_anchored(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtCore
+
+    view = ImageView2D()
+    try:
+        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 10.0))
+        scene_pos = view.histogram.item.vb.mapViewToScene(QtCore.QPointF(0.0, 2.0))
+
+        view._histogram_display_controller.begin_span_edit(scene_pos)
+        popup = view._histogram_display_controller.active_popup()
+        popup.edit.setValue(20.0)
+
+        assert tuple(round(float(value), 6) for value in view.getLevels()) == (-2.0, 18.0)
+        popup.accept()
+    finally:
+        view.close()
+
+
 def _axis_overlap(view_range, content_range) -> float:
     view_start, view_end = sorted((float(view_range[0]), float(view_range[1])))
     content_start, content_end = sorted((float(content_range[0]), float(content_range[1])))

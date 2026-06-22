@@ -284,6 +284,14 @@ def test_auto_window_resets_absolute_levels_once(qtbot):
         _process_events(qtbot, count=30)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (100.0, 119.0)
+        widget = getattr(win, "_arrayscope_status_action_widget", None)
+        assert widget is not None
+        assert "Revert" in widget.text()
+
+        widget.linkActivated.emit("action")
+        _process_events(qtbot, count=30)
+
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (5.0, 15.0)
     finally:
         win.close()
 
