@@ -222,6 +222,8 @@ def phase_lut_indices(data, lut_size: int) -> np.ndarray:
     phase = extract_component(data, ShaderComponent.ANGLE)
     position = (phase + np.pi) / (2.0 * np.pi)
     position = np.nan_to_num(position, nan=0.0, posinf=0.0, neginf=0.0)
+    upper_endpoint = np.isclose(position, 1.0, rtol=0.0, atol=np.finfo(np.float32).eps)
+    position = np.where(upper_endpoint, 1.0, position)
     return np.clip((position * (int(lut_size) - 1)).astype(np.int64), 0, int(lut_size) - 1)
 
 
