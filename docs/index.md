@@ -26,6 +26,7 @@ Read only the deep dive related to the change being made.
 - [Architecture decisions](decisions/README.md): accepted decisions, grouped by topic and implementation status.
 - [Testing strategy](testing/strategy.md): what each test layer proves and what it cannot prove.
 - [Manual regression](testing/manual-regression.md): compact release/hardware checks.
+- [Release-candidate evidence](testing/release-candidate.md): developer commands for N0/RC artifacts and package identity.
 - [Reviews](reviews/README.md): dated audits and trace analyses.
 - [Proposals](proposals/README.md): work that is designed but not accepted as current direction.
 

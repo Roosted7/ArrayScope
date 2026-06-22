@@ -2,7 +2,11 @@
 
 This file records user-visible release changes. Detailed development history and architecture decisions live under `docs/` and in Git.
 
-## Unreleased — ArrayScope development line
+## 0.8.0 — ArrayScope v28 release candidate
+
+This is the first ArrayScope release-candidate baseline after the rebrand from
+the historical ndslice line. It establishes package/runtime identity,
+reproducible release diagnostics, and the current v28 correctness baseline.
 
 ### Added
 
@@ -12,12 +16,14 @@ This file records user-visible release changes. Detailed development history and
 - Runtime memory policy, lane-aware compute policy, latency feedback, resource governance, diagnostics snapshots, trace logging, and rendering benchmarks.
 - Experimental VisPy raster/tiled backend with shader-based scalar and complex display mapping.
 - Explicit viewport modes, fit lock, 1:1 view, cropped image-axis ranges, and adaptive/manual histogram controls.
+- A deterministic release diagnostics command and benchmark JSONL output for RC evidence.
 
 ### Changed
 
 - PySide6 is the default Qt binding through PyQtGraph’s abstraction.
 - Display semantics, backend mechanics, operation planning, caching, and UI orchestration have been split into focused packages.
 - Documentation now separates live guidance from archived phase notes and provides a progressive architecture/roadmap path.
+- Package metadata and runtime version now share the canonical ArrayScope `0.8.0` version.
 
 ### Fixed in the v28 audit
 
