@@ -114,22 +114,93 @@ def test_clear_group_invalidates_even_without_active_runnable(qt_app):
 
 
 def test_clear_group_prefix_invalidates_child_group(qt_app):
+    from pyqtgraph.Qt import QtTest
+
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
+    stale = []
+    done = []
     controller.start_latest(
-        lambda: "tile",
+        lambda: (time.sleep(0.12), "tile")[1],
         key="tile",
         priority=EvalPriority.VISIBLE_IMAGE,
         replace_group="montage-tile:1:2",
-        on_done=lambda _value: None,
+        on_done=done.append,
+        on_stale=lambda: stale.append("tile"),
     )
+    for _ in range(20):
+        QtTest.QTest.qWait(10)
+        qt_app.processEvents()
+        if controller._started:
+            break
+    assert controller._started
     before = controller.group_generation("montage-tile:1:2")
 
     controller.clear_group("montage-tile")
 
     assert controller.group_generation("montage-tile:1:2") > before
+    QtTest.QTest.qWait(180)
+    qt_app.processEvents()
+    assert done == []
+    assert stale == ["tile"]
     controller.shutdown_for_close()
+
+
+def test_clear_group_prefix_preserves_unrelated_groups_and_prefetches(qt_app):
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    visible_done = []
+    tile_stale = []
+    controller.start_latest(
+        lambda: (time.sleep(0.12), "tile")[1],
+        key="tile",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="montage-tile:1:2",
+        on_done=lambda _value: None,
+        on_stale=lambda: tile_stale.append("tile"),
+    )
+    controller.start_latest(
+        lambda: "visible",
+        key="visible",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        on_done=visible_done.append,
+    )
+    prefetch = controller.start_prefetch(lambda: "prefetch", key=("prefetch", "keep"))
+
+    controller.clear_group("montage-tile")
+
+    assert prefetch.scheduled
+    assert ("prefetch", "keep") in controller._prefetch_keys
+    assert "visible" in controller._group_request_generations
+    assert controller.group_generation("visible") > 0
+    controller.shutdown_for_close()
+
+
+def test_completed_tile_group_bookkeeping_is_pruned(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    done = []
+    controller.start_latest(
+        lambda: "tile",
+        key="tile",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="montage-tile:1:2",
+        on_done=done.append,
+    )
+
+    QtTest.QTest.qWait(80)
+    qt_app.processEvents()
+
+    assert done == ["tile"]
+    assert "montage-tile:1:2" not in controller._group_request_generations
+    assert "montage-tile:1:2" not in controller._group_generations
+    assert controller._group_child_groups.get("montage-tile") in (None, set())
 
 
 def test_visible_pool_max_thread_count_is_one(qt_app):
