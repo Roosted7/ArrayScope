@@ -224,13 +224,21 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
 
     def _clear_image_hover_state(self) -> None:
         self._last_image_mouse_scene_pos = None
-        label = self.widgets['labels']['pixelValue']
-        if hasattr(label, "set_pixel_status"):
-            label.set_pixel_status("", self._slice_context_text())
-        else:
-            label.setText("")
-        if hasattr(self, "img_view"):
-            self.img_view.hideHud()
+        label = None
+        widgets = getattr(self, "widgets", None)
+        if isinstance(widgets, dict):
+            labels = widgets.get("labels", {})
+            if isinstance(labels, dict):
+                label = labels.get("pixelValue")
+        if label is not None:
+            if hasattr(label, "set_pixel_status"):
+                label.set_pixel_status("", self._slice_context_text())
+            elif hasattr(label, "setText"):
+                label.setText("")
+        view = getattr(self, "img_view", None)
+        hide_hud = getattr(view, "hideHud", None)
+        if callable(hide_hud):
+            hide_hud()
 
     def _refresh_hover_after_display_commit(self) -> None:
         pos = getattr(self, "_last_image_mouse_scene_pos", None)

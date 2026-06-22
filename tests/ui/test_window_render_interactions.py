@@ -170,6 +170,17 @@ def test_image_viewport_leave_clears_hover_status(qtbot):
         win.close()
 
 
+def test_clear_image_hover_state_tolerates_early_initialization():
+    from arrayscope.window.render import RenderMixin
+
+    win = object.__new__(RenderMixin)
+    win._last_image_mouse_scene_pos = object()
+
+    win._clear_image_hover_state()
+
+    assert win._last_image_mouse_scene_pos is None
+
+
 def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
