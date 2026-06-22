@@ -186,7 +186,7 @@ def test_document_undo_clear_and_all_operation_shape_changes():
 
 
 def test_display_cache_invalidates_for_operations_and_view_state():
-    data = np.arange(3 * 4).reshape(3, 4).astype(float)
+    data = np.arange(3 * 4 * 5).reshape(3, 4, 5).astype(float)
     state = ViewState.from_shape(data.shape)
     evaluator = OperationEvaluator(ArrayDocument(data))
 
@@ -196,7 +196,7 @@ def test_display_cache_invalidates_for_operations_and_view_state():
     assert evaluator.derived_evaluations == 0
     assert evaluator.image_evaluations == 1
 
-    shifted_state = state.with_slice(0, 1)
+    shifted_state = state.with_slice(2, 0)
     evaluator.image(shifted_state)
     assert evaluator.derived_evaluations == 0
     assert evaluator.image_evaluations == 2

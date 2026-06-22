@@ -192,13 +192,14 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
     from arrayscope.display.imageview2d import MontageTileOverlay
     from arrayscope.window import ArrayScopeWindow
 
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
-    settings.sync()
-
     data = np.linspace(0.0, 1.0, 96 * 96, dtype=np.float32).reshape(96, 96)
-    win = ArrayScopeWindow(data)
+    win = None
     try:
+        settings = QtCore.QSettings()
+        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+        settings.sync()
+
+        win = ArrayScopeWindow(data)
         win.resize(900, 640)
         win.show()
         _process_events(qt_app, count=20)
@@ -219,7 +220,8 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
         assert "FIXME" not in win.widgets["labels"]["pixelValue"].text()
         _grab_widget(win, "arrayscope_vispy_backend_smoke.png", min_width=500, min_height=360)
     finally:
-        win.close()
+        if win is not None:
+            win.close()
         _clear_arrayscope_settings()
         _process_events(qt_app)
 

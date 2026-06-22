@@ -132,6 +132,9 @@ class InspectionWorkflowMixin:
         self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
         selections = self.roi_store.selections
         self.inspection_dock.set_rois(selections)
+        if not any(selection.enabled for selection in selections):
+            self._apply_empty_inspection_state_if_needed(selections)
+            return
         if not self._inspection_panel_is_visible():
             self._inspection_stale = True
             stats_by_roi = self._hidden_roi_statistics(selections)
@@ -163,14 +166,7 @@ class InspectionWorkflowMixin:
             selections = self.roi_store.selections
             self.inspection_dock.set_rois(selections)
             if not any(selection.enabled for selection in selections):
-                key = ("empty-roi", tuple((selection.id, selection.enabled, selection.geometry) for selection in selections))
-                self._roi_inspection_request_key = key
-                self._roi_inspection_in_flight = False
-                if key != getattr(self, "_roi_inspection_applied_key", None):
-                    self.inspection_dock.set_statistics(OrderedDict())
-                    self.inspection_dock.set_histograms(())
-                    self._update_roi_info_overlay(OrderedDict())
-                    self._roi_inspection_applied_key = key
+                self._apply_empty_inspection_state_if_needed(selections)
                 return
             image = self._roi_source_image()
             layers = self._compatible_compare_layers(image) if image is not None else ()
@@ -198,6 +194,17 @@ class InspectionWorkflowMixin:
             self._last_inspection_refresh_ms = (perf_counter() - start) * 1000.0
             if hasattr(self, "_record_ui_work"):
                 self._record_ui_work("roi_refresh", self._last_inspection_refresh_ms)
+
+    def _apply_empty_inspection_state_if_needed(self, selections) -> None:
+        key = ("empty-roi", tuple((selection.id, selection.enabled, selection.geometry) for selection in selections))
+        self._roi_inspection_request_key = key
+        self._roi_inspection_in_flight = False
+        if key == getattr(self, "_roi_inspection_applied_key", None):
+            return
+        self.inspection_dock.set_statistics(OrderedDict())
+        self.inspection_dock.set_histograms(())
+        self._update_roi_info_overlay(OrderedDict())
+        self._roi_inspection_applied_key = key
 
     def _roi_inspection_key(self, image, selections, layers):
         if self._roi_uses_montage_demand(selections):
