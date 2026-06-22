@@ -54,6 +54,23 @@ Record separately:
 - cache/residency state;
 - process RSS.
 
+Use `arrayscope.tools.profile_montage_workflow` when scheduler or backend
+changes may affect perceived pacing. It drives a real window through the
+bundled NIfTI dataset, full dim-2 tiled montage, and FFT-over-dim-2 montage.
+The tool emits phase JSONL with first-content timing, total phase timing,
+event-loop max gap, callback observations, tile upload bytes, and montage
+compute counters. Use those JSONL fields as the timing evidence. Full-axis FFT
+montage should be stage-backed once the shared stage is available; hundreds of
+direct FFT tile computations are a scheduler/cache regression even if tiles
+eventually appear.
+
+Wrap the workflow with external profilers only for attribution. Prefer
+`py-spy record --format raw --rate 10 --nonblocking` for Python stacks and
+`perf record -F 99 -g` for native SciPy/Qt/GL stacks. Avoid treating high-rate
+or `py-spy --native` runs as timing evidence unless they are compared against a
+plain JSONL run, because native unwinding can materially slow Qt and FFT-heavy
+workloads. Run the workflow on a real display for OpenGL/VisPy claims.
+
 ## Manual and real-hardware tests
 
 [Manual regression](manual-regression.md) covers interaction feel, rendering artifacts, Wayland/panel behavior, HiDPI, GPU limits, and lifecycle/context loss. Record OS, session type, Qt/PySide/PyQtGraph/VisPy versions, GPU/driver, data shape/dtype, backend, and settings.

@@ -779,6 +779,7 @@ def test_montage_loading_canvas_preserves_levels_until_first_real_tile(qtbot, mo
         tile1 = _tile_for_callback(win, calls[1])
         calls[1]["on_done"](_tile_result(tile1, 200))
         qtbot.waitUntil(lambda: _canvas_has_tile_value(win, tile1, 200), timeout=1000)
+        qtbot.waitUntil(lambda: win._montage_session.applied_level_source.source_count == 2, timeout=1000)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (121.888889, 190.555556)
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (99.0, 202.0)
@@ -1052,6 +1053,9 @@ def test_montage_panning_without_new_tiles_does_not_change_levels(qtbot, monkeyp
             tile = win._montage_session.plan.tiles[callback_index]
             calls[callback_index]["on_done"](_tile_result(tile, value))
             _process_events(qtbot, count=10)
+        win._schedule_montage_canvas_commit(win._montage_session, force=True)
+        _process_events(qtbot, count=10)
+        qtbot.waitUntil(lambda: win._montage_session.applied_level_source.source_count == 2, timeout=1000)
 
         before_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
         before_bounds = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
@@ -1111,7 +1115,13 @@ def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypa
     stage_calls = []
     tile_calls = []
     monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: tile_calls.append(kwargs) or len(tile_calls))
+
+    def capture_tile_call(fn, **kwargs):
+        kwargs["fn"] = fn
+        tile_calls.append(kwargs)
+        return len(tile_calls)
+
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_tile_call)
     try:
         _process_events(qtbot)
         win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
@@ -1123,11 +1133,17 @@ def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypa
         assert stage_calls == []
         assert len(tile_calls) == 1
         assert win._montage_session.stage_waiting_tiles
+
+        result = tile_calls[0]["fn"](None)
+        tile_calls[0]["on_done"](result)
+
+        qtbot.waitUntil(lambda: len(tile_calls) > 1, timeout=1000)
+        assert not win._montage_session.stage_waiting_tiles
     finally:
         win.close()
 
 
-def test_fft_montage_keeps_waiting_tiles_behind_lead_tile_cache_warmup(qtbot, monkeypatch):
+def test_fft_montage_keeps_waiting_tiles_behind_in_flight_lead_warmup(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.window import ArrayScopeWindow
@@ -1147,9 +1163,54 @@ def test_fft_montage_keeps_waiting_tiles_behind_lead_tile_cache_warmup(qtbot, mo
         win.update_montage_view()
         win.update_montage_view()
 
-        assert stage_calls == []
-        assert len(tile_calls) == 2
+        assert len(stage_calls) == 1
+        assert len(tile_calls) == 1
         assert win._montage_session.stage_waiting_tiles
+    finally:
+        win.close()
+
+
+def test_fft_montage_attached_stage_still_schedules_visible_lead_tile(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.operations.pipeline import CenteredFFT
+    from arrayscope.operations.stage_materialization import StageMaterializationResult
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4))
+    qtbot.addWidget(win)
+    stage_calls = []
+    tile_calls = []
+    monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
+
+    def capture_tile_call(fn, **kwargs):
+        kwargs["fn"] = fn
+        tile_calls.append(kwargs)
+        return len(tile_calls)
+
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_tile_call)
+    try:
+        _process_events(qtbot)
+        win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
+        win._set_document(win.operation_coordinator.document)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
+
+        materializer = win.operation_evaluator.stage_materializer
+        original_request_stage = materializer.request_stage
+
+        def attached_stage(document_key, candidate):
+            key = materializer.key_for_candidate(document_key, candidate)
+            request = original_request_stage(document_key, candidate).request
+            return StageMaterializationResult("attached", key, request=request)
+
+        monkeypatch.setattr(materializer, "request_stage", attached_stage)
+
+        win.update_montage_view()
+
+        assert len(stage_calls) == 1
+        assert tile_calls == []
+        assert len(win._montage_session.stage_waiting_tiles) == 1
+        assert not win._montage_session.lead_stage_warmups
+        assert win._montage_session.tile_compute_waiting_for_stage == 4
     finally:
         win.close()
 

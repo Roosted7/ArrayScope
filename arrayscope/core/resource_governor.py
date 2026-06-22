@@ -57,6 +57,7 @@ class UiWorkDecision:
     budget_ms: float
     interval_ms: int
     reason: str
+    byte_cap: int = 0
 
 
 @dataclass(frozen=True)
@@ -244,9 +245,17 @@ class ResourceGovernor:
                 int(feedback.tuning.min_batch),
                 min(int(feedback.tuning.max_batch), int(budget // max(0.25, snapshot.per_item_ewma_ms))),
             )
+        default_byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
+        byte_cap = default_byte_cap
+        if snapshot.per_byte_ewma_ms is not None and snapshot.per_byte_ewma_ms > 0.0:
+            byte_cap = max(
+                1024,
+                int(budget // max(1e-9, snapshot.per_byte_ewma_ms)),
+            )
         interval = int(feedback.commit_interval_ms(channel, interactive=interactive))
         if self._pressure.ui_pressure == ResourcePressure.HIGH:
             batch = max(1, batch // 2)
+            byte_cap = max(1024, byte_cap // 2)
             budget = max(2.0, budget * 0.75)
             interval = min(250, max(interval, int(round(budget * 3.0))))
             reason = "high UI pressure"
@@ -258,7 +267,24 @@ class ResourceGovernor:
                 reason = "elevated UI pressure; preserving compute/result throughput"
         else:
             reason = "feedback target"
-        decision = UiWorkDecision(channel, batch, budget, interval, reason)
+        if (
+            channel == "montage_commit"
+            and snapshot.last_count > 0
+            and snapshot.last_count <= max(2, batch)
+            and snapshot.last_byte_count > 0
+            and snapshot.last_byte_count <= default_byte_cap
+            and snapshot.last_elapsed_ms >= budget
+        ):
+            proposed_batch = min(
+                int(feedback.tuning.max_batch),
+                max(batch, int(snapshot.last_count) * 2),
+            )
+            if proposed_batch > batch:
+                bytes_per_item = float(snapshot.last_byte_count) / max(1.0, float(snapshot.last_count))
+                batch = int(proposed_batch)
+                byte_cap = min(default_byte_cap, max(byte_cap, int(bytes_per_item * float(batch))))
+                reason = f"{reason}; amortizing fixed commit overhead"
+        decision = UiWorkDecision(channel, batch, budget, interval, reason, int(byte_cap))
         self._ui_decisions[channel] = decision
         return decision
 

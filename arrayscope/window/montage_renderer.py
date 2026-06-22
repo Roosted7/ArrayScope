@@ -273,6 +273,7 @@ class MontageRenderMixin:
             stage_waiting_tiles=stage_plan["stage_waiting_tiles"],
             attached_stage_requests=stage_plan["attached_stage_keys"],
             stage_values=stage_plan["stage_values"],
+            lead_stage_warmups=stage_plan["lead_stage_warmups"],
             defer_side_panels=bool(defer_side_panels),
             applied_level_source=(
                 pending_auto_level_source
@@ -397,6 +398,7 @@ class MontageRenderMixin:
             existing.extend(tile for tile in waiting if int(tile.montage_index) not in existing_numbers)
         session.attached_stage_requests.update(stage_plan["attached_stage_keys"])
         session.stage_values.update(stage_plan["stage_values"])
+        session.lead_stage_warmups.update(stage_plan.get("lead_stage_warmups", {}))
         session.tile_compute_waiting_for_stage += len(stage_plan["waiting_indices"])
         session.stage_backed_tiles_pending += len(stage_plan["waiting_indices"])
         session.lead_direct_tiles += int(stage_plan["lead_direct_tiles"])
@@ -793,6 +795,7 @@ class MontageRenderMixin:
         tile_stage_keys = {}
         stage_waiting_tiles = {}
         stage_values = {}
+        lead_stage_warmups = {}
         stage_requests = []
         attached_stage_keys = set()
         waiting_indices = set()
@@ -823,7 +826,8 @@ class MontageRenderMixin:
                     tile_stage_keys[int(tile.montage_index)] = key
                     waiting_indices.add(int(tile.montage_index))
                 if _direct_tiles and _stage_fits_cache(candidate, self._memory_policy()):
-                    self.operation_evaluator.stage_materializer.cancel(key)
+                    for tile in _direct_tiles:
+                        lead_stage_warmups[int(tile.montage_index)] = key
                 else:
                     stage_requests.append((result.request, group["plan"]))
                 continue
@@ -833,6 +837,8 @@ class MontageRenderMixin:
                 for tile in tiles:
                     tile_stage_keys[int(tile.montage_index)] = key
                     waiting_indices.add(int(tile.montage_index))
+                if result.request is not None:
+                    stage_requests.append((result.request, group["plan"]))
                 continue
             for tile in tiles:
                 tile_stage_keys.pop(int(tile.montage_index), None)
@@ -842,6 +848,7 @@ class MontageRenderMixin:
             "tile_stage_keys": tile_stage_keys,
             "stage_waiting_tiles": stage_waiting_tiles,
             "stage_values": stage_values,
+            "lead_stage_warmups": lead_stage_warmups,
             "stage_requests": stage_requests,
             "attached_stage_keys": attached_stage_keys,
             "waiting_indices": waiting_indices,
@@ -1349,6 +1356,7 @@ class MontageRenderMixin:
             expected_indices=self._montage_level_expected_indices(session),
         )
         session.mark_loaded(rendered)
+        self._resolve_lead_stage_warmup(session, tile)
         patch_start = perf_counter()
         if session.has_canvas():
             session.patch_rendered_tile(rendered)
@@ -1358,12 +1366,36 @@ class MontageRenderMixin:
             self._last_montage_canvas_patch_ms = 0.0
         return _rendered_tile_nbytes(rendered)
 
+    def _resolve_lead_stage_warmup(self, session, tile) -> None:
+        key = getattr(session, "lead_stage_warmups", {}).pop(int(tile.montage_index), None)
+        if key is None:
+            return
+        cache = self.operation_evaluator.stage_cache
+        value = cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)
+        if value is not None:
+            self.operation_evaluator.stage_materializer.complete(key, value)
+            budget = self._montage_callback_budget(
+                "montage_stage_wait",
+                interactive=_interactive_active(self),
+                work_class="stage_wait_activation",
+            )
+            self._activate_montage_stage_value(session, key, value, budget=budget)
+            self._record_gui_budget(budget)
+            return
+        # The lead direct tile was expected to seed this reusable stage.  If it
+        # did not, drop the fake in-flight marker so the existing release path
+        # can fall back to direct work and still converge.
+        self.operation_evaluator.stage_materializer.cancel(key)
+
     def _on_montage_tile_error(self, session_id, tile, exc) -> None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, session.key):
             return
         if not self._is_current_render_generation(session.render_generation):
             return
+        key = getattr(session, "lead_stage_warmups", {}).pop(int(tile.montage_index), None)
+        if key is not None:
+            self.operation_evaluator.stage_materializer.cancel(key)
         session.mark_skipped(tile)
         show_status_message(self, f"Montage tile update failed: {exc}", timeout=4000)
         self._schedule_montage_canvas_commit(session, force=True)
@@ -1584,10 +1616,19 @@ class MontageRenderMixin:
             if previous_payloads:
                 session.seed_display_tile_payloads(previous_payloads, tile_source_ids)
             base_tile_state = session.tile_presentation_state
+            callback_budget = self._montage_callback_budget(
+                "montage_commit",
+                interactive=_interactive_active(self),
+                work_class="presentation_upsert",
+            )
             tile_state, tile_delta = session.build_tile_presentation(
                 tile_source_ids,
                 source_ids_trusted=bool(getattr(session, "tile_source_ids_trusted", True)),
                 cold_deadline_ms=_montage_commit_budget_ms(self),
+                callback_target_ms=callback_budget.target_ms,
+                callback_warning_ms=callback_budget.warning_ms,
+                callback_item_cap=callback_budget.item_cap,
+                callback_byte_cap=callback_budget.byte_cap,
             )
             active_payloads = tile_state.active_payloads(tile_delta)
             self._ensure_montage_level_stats_for_payloads(session, active_payloads)
@@ -1671,15 +1712,34 @@ class MontageRenderMixin:
         self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
         report = getattr(self._display_committer(), "last_tile_commit_report", None)
         cold_count = int(getattr(report, "cold_count", 0) or 0)
+        warm_count = int(getattr(report, "existing_items_shown", 0) or 0) + int(getattr(report, "relocated_tiles", 0) or 0)
+        processed_count = max(1, cold_count + warm_count)
         feedback = _latency_feedback(self)
         if feedback is not None:
             if cold_count > 0:
                 cold_ms = float(getattr(report, "cold_work_ms", 0.0) or 0.0) or self._last_montage_canvas_commit_ms
-                feedback.observe("montage_cold_commit", cold_ms, count=cold_count)
+                feedback.observe(
+                    "montage_cold_commit",
+                    cold_ms,
+                    count=cold_count,
+                    byte_count=int(getattr(report, "texture_upload_bytes", 0) or 0),
+                )
             if hasattr(self, "_record_ui_work"):
-                self._record_ui_work("montage_commit", self._last_montage_canvas_commit_ms, count=1)
+                self._record_ui_work(
+                    "montage_commit",
+                    self._last_montage_canvas_commit_ms,
+                    count=processed_count,
+                    byte_count=int(getattr(report, "texture_upload_bytes", 0) or 0),
+                    work_class="presentation_upsert",
+                    backend=str(getattr(self.img_view, "rendering_backend_name", "pyqtgraph")),
+                )
             else:
-                feedback.observe("montage_commit", self._last_montage_canvas_commit_ms, count=1)
+                feedback.observe(
+                    "montage_commit",
+                    self._last_montage_canvas_commit_ms,
+                    count=processed_count,
+                    byte_count=int(getattr(report, "texture_upload_bytes", 0) or 0),
+                )
         display_backlog = bool(session.deferred_display_tiles)
         session.note_committed()
         if display_backlog:

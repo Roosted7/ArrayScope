@@ -22,7 +22,6 @@ prefer_pyside6()
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.imageview2d import _point_inside_view_range
@@ -109,10 +108,12 @@ class VisPyImageView2D(ImageView2D):
             method="auto",
             clim=(0.0, 1.0),
         )
+        self._vispy_image.order = 0
         self._vispy_image.transform = self._vispy_transforms.STTransform(translate=(0.0, 0.0, 0.0))
         self._vispy_windowed_image = self._vispy_scene.visuals.create_visual_node(GpuMappedImageVisual)(
             parent=self._vispy_view.scene
         )
+        self._vispy_windowed_image.order = 0
         self._vispy_windowed_image.visible = False
         self._vispy_windowed_image.transform = self._vispy_transforms.STTransform(translate=(0.0, 0.0, 0.0))
         from arrayscope.display.backends.vispy.tiles import create_gpu_montage_layer
@@ -552,11 +553,6 @@ class VisPyImageView2D(ImageView2D):
             if not loading_only:
                 self.setHistogramDataBounds(histogramRange)
             self._montage_display_mode = "vispy_tile_layer"
-            try:
-                self._vispy_image.visible = False
-            except Exception:
-                pass
-            _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
 
             if data_unchanged and not levels_changed and not mapping_changed:
                 from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
@@ -596,7 +592,23 @@ class VisPyImageView2D(ImageView2D):
                     force_levels=bool(data_unchanged and levels_changed),
                     force_mapping=bool(data_unchanged and mapping_changed),
                 )
+            stats_deferred_tiles = set(int(tile) for tile in tuple(getattr(stats, "deferred_tiles", ()) or ()))
+            stats_presented_tiles = getattr(stats, "presented_tiles", None)
+            stats_presented_set = (
+                None
+                if stats_presented_tiles is None
+                else {int(tile) for tile in tuple(stats_presented_tiles or ())}
+            )
+            tiled_presentation_complete = not stats_deferred_tiles and (
+                stats_presented_set is None or stats_presented_set == requested_presented_tiles
+            )
+            try:
+                self._vispy_image.visible = False
+            except Exception:
+                pass
+            _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
             self._record_tile_layer_stats(stats)
+            self._request_vispy_tile_layer_redraw()
 
             # Histogram, levels, geometry, and viewport are separate concerns.
             # A level-only change must not look like a full structural commit.
@@ -618,15 +630,16 @@ class VisPyImageView2D(ImageView2D):
                 self._apply_viewport_policy(montage_shape, viewport_policy, image_origin=(0.0, 0.0))
                 self._sync_vispy_camera_to_view()
 
-            self._last_vispy_tiled_source_key = source_key
-            self._last_vispy_tiled_structure_key = structure_key
-            if not loading_only:
+            if tiled_presentation_complete:
+                self._last_vispy_tiled_source_key = source_key
+                self._last_vispy_tiled_structure_key = structure_key
+            if tiled_presentation_complete and not loading_only:
                 self._last_vispy_tiled_levels_key = level_key
                 self._last_vispy_tiled_mapping_key = mapping_key
                 self._last_vispy_tiled_source_shader_mapping = source_shader_mapping
                 self._last_vispy_tiled_shader_mapping = shader_mapping
                 self._last_vispy_tiled_histogram_key = histogram_key
-            self._last_vispy_tiled_viewport_key = viewport_key
+                self._last_vispy_tiled_viewport_key = viewport_key
             return stats
         finally:
             self._applying_presentation = applying
@@ -764,6 +777,7 @@ class VisPyImageView2D(ImageView2D):
                     force_levels=True,
                 )
                 self._record_tile_layer_stats(stats)
+                self._request_vispy_tile_layer_redraw()
                 return
             if self._is_windowed_rgb_vispy_main():
                 self._vispy_windowed_image.set_levels(levels)
@@ -1361,7 +1375,7 @@ class VisPyImageView2D(ImageView2D):
         mesh = getattr(self, "_vispy_overlay_mesh", None)
         if mesh is None:
             mesh = self._vispy_visuals.Mesh(parent=self._vispy_view.scene)
-            mesh.order = 11_000
+            mesh.order = 50
             try:
                 mesh.set_gl_state("translucent", depth_test=False)
             except Exception:
@@ -1375,7 +1389,7 @@ class VisPyImageView2D(ImageView2D):
         lines = getattr(self, "_vispy_overlay_lines", None)
         if lines is None:
             lines = self._vispy_visuals.Line(parent=self._vispy_view.scene, method="gl", connect="segments")
-            lines.order = 11_001
+            lines.order = 51
             try:
                 lines.set_gl_state("translucent", depth_test=False)
             except Exception:
@@ -1692,10 +1706,7 @@ class VisPyImageView2D(ImageView2D):
             and getattr(layer, "last_stats", None).visible_items
             and presentation_complete
         ):
-            stats = layer.set_presentation_uniforms(
-                levels=levels,
-                shader_mapping=shader_mapping,
-            )
+            stats = layer.set_presentation_uniforms(levels=levels, shader_mapping=shader_mapping)
         else:
             try:
                 stats = layer.update(
@@ -1765,7 +1776,34 @@ class VisPyImageView2D(ImageView2D):
             mipmap_available=bool(getattr(stats, "mipmap_available", False)),
             complex_texture_uploads=int(getattr(stats, "complex_texture_uploads", 0)),
             shader_uniform_updates=int(getattr(stats, "shader_uniform_updates", 0)),
+            deferred_tiles=tuple(int(tile) for tile in tuple(getattr(stats, "deferred_tiles", ()) or ())),
         )
+
+    def _request_vispy_tile_layer_redraw(self) -> None:
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        for visual in tuple(getattr(layer, "_visuals_by_page", ()) or ()):
+            if bool(getattr(visual, "visible", False)) and callable(getattr(visual, "update", None)):
+                try:
+                    visual.update()
+                except Exception:
+                    pass
+        canvas = getattr(self, "_vispy_canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.update()
+        except Exception:
+            pass
+        native = getattr(canvas, "native", None)
+        if native is not None:
+            try:
+                native.update()
+            except Exception:
+                pass
+        try:
+            QtCore.QTimer.singleShot(0, canvas.update)
+        except Exception:
+            pass
 
     def _ensure_vispy_tile(self, tile_number: int, *, windowed_rgb: bool = False) -> _VisPyTileState:
         tile_number = int(tile_number)

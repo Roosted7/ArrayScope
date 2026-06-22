@@ -66,6 +66,29 @@ def test_evaluation_controller_drain_yields_on_elapsed_budget(qt_app):
     assert controller._drain_continuation_pending is True
 
 
+def test_evaluation_controller_drain_records_budget_observation(qt_app):
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.core.compute_policy import compute_policy_from_settings
+    from arrayscope.core.resource_governor import ResourceGovernor
+    from arrayscope.window.evaluation_controller import EvaluationController
+    from pyqtgraph.Qt import QtCore
+
+    parent = QtCore.QObject()
+    parent.resource_governor = ResourceGovernor(compute_policy_from_settings(AppSettingsState(), cpu_count=4))
+
+    controller = EvaluationController(parent, max_callback_dispatch_per_drain=2, name="visible")
+    seen = []
+    controller._runnables["a"] = object()
+    controller._handlers["a"] = (seen.append, None, None, None)
+    controller._queue.put(("prefetch_done", "a", "done"))
+
+    controller._drain_queue()
+
+    callbacks = parent.resource_governor.diagnostics().feedback_channels
+    assert seen == ["done"]
+    assert any(channel.channel == "visible_queue_drain" for channel in callbacks)
+
+
 def test_start_latest_clears_queued_work_and_only_commits_newest(qt_app):
     from pyqtgraph.Qt import QtTest
 

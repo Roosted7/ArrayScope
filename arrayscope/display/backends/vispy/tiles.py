@@ -826,6 +826,7 @@ class GpuMontageLayer:
     def _ensure_visual_count(self, count: int) -> None:
         while len(self._visuals_by_page) < max(1, int(count)):
             visual = self._scene.visuals.create_visual_node(GpuWindowedTileVisual)(parent=self._parent)
+            visual.order = 10
             visual.visible = False
             visual.set_levels(self._levels)
             visual.set_shader_mapping(self._shader_mapping)
@@ -930,10 +931,16 @@ class GpuMontageLayer:
                 visual.update()
         for visual in self._visuals_by_page[len(self._pool.pages):]:
             visual.visible = False
-        self._visible_items = int(texture_stats.visible_items)
+        deferred_tiles = tuple(sorted(int(tile) for tile in tuple(texture_stats.deferred_tiles or ())))
+        effective_presented_tiles = tuple(
+            int(tile)
+            for tile in tuple(texture_stats.presented_tiles or ())
+            if int(tile) not in set(deferred_tiles)
+        )
+        self._visible_items = len(effective_presented_tiles)
         self._last_stats = GpuMontageLayerStats(
-            visible_items=texture_stats.visible_items,
-            presented_tiles=texture_stats.presented_tiles,
+            visible_items=len(effective_presented_tiles),
+            presented_tiles=effective_presented_tiles,
             resident_items=texture_stats.resident_items,
             atlas_capacity=texture_stats.atlas_capacity,
             atlas_rebuilds=texture_stats.atlas_rebuilds,
@@ -963,7 +970,7 @@ class GpuMontageLayer:
             mipmap_available=texture_stats.mipmap_available,
             complex_texture_uploads=texture_stats.complex_texture_uploads,
             shader_uniform_updates=level_updates + mapping_updates,
-            deferred_tiles=texture_stats.deferred_tiles,
+            deferred_tiles=deferred_tiles,
         )
         return self._last_stats
 
@@ -1174,16 +1181,11 @@ class GpuWindowedTileVisual(Visual):
         return True
 
     def set_shader_mapping(self, mapping) -> bool:
-        scale_mode = _shader_scale_uniform(getattr(mapping, "scale", None))
-        symlog_constant = float(getattr(mapping, "symlog_constant", 0.0) or 0.0)
-        component_mode = shader_component_uniform(getattr(mapping, "component", None))
-        display_mode = getattr(getattr(mapping, "display_mode", None), "value", getattr(mapping, "display_mode", None))
-        phase_default = bool(display_mode == ShaderDisplayMode.PHASE_COLOR.value)
-        lut = _normalized_lut(getattr(mapping, "lut_data", None), phase_default=phase_default)
-        lut_key = _array_content_key(lut)
-        mapping_key = (float(scale_mode), float(symlog_constant), float(component_mode), phase_default, lut_key)
+        mapping_key = _visual_shader_mapping_key(mapping)
         if mapping_key == self._shader_mapping_key:
             return False
+        scale_mode, symlog_constant, component_mode, phase_default, lut_key = mapping_key
+        lut = _normalized_lut(getattr(mapping, "lut_data", None), phase_default=bool(phase_default))
         self._shader_mapping_key = mapping_key
         self._scale_mode = scale_mode
         self._symlog_constant = symlog_constant
@@ -1625,6 +1627,17 @@ def _payload_mode(payload: DisplayTilePayload, *, rgb_already_windowed: bool) ->
 
 def _mapping_identity_key(mapping):
     return None if mapping is None else getattr(mapping, "identity_key", mapping)
+
+
+def _visual_shader_mapping_key(mapping) -> tuple[object, ...]:
+    scale_mode = _shader_scale_uniform(getattr(mapping, "scale", None))
+    symlog_constant = float(getattr(mapping, "symlog_constant", 0.0) or 0.0)
+    component_mode = shader_component_uniform(getattr(mapping, "component", None))
+    display_mode = getattr(getattr(mapping, "display_mode", None), "value", getattr(mapping, "display_mode", None))
+    phase_default = bool(display_mode == ShaderDisplayMode.PHASE_COLOR.value)
+    lut = _normalized_lut(getattr(mapping, "lut_data", None), phase_default=phase_default)
+    lut_key = _array_content_key(lut)
+    return (float(scale_mode), float(symlog_constant), float(component_mode), phase_default, lut_key)
 
 
 def _shader_scale_uniform(scale) -> float:

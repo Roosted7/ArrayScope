@@ -257,6 +257,7 @@ def test_runtime_diagnostics_avoids_long_feedback_worker_lines():
         ResourceGovernorDiagnostics,
         ResourcePressure,
         ResourcePressureState,
+        UiWorkDecision,
     )
 
     policy = compute_memory_policy(profile=MemoryProfileChoice.BALANCED, render_cap_mb=512, input_nbytes=1, system=None)
@@ -299,11 +300,15 @@ def test_runtime_diagnostics_avoids_long_feedback_worker_lines():
                 FeedbackChannelDiagnostics("montage_commit", 15.0, 1, 15.0, 15.0, 4.0, 1, 30),
                 FeedbackChannelDiagnostics("roi_refresh", 0.0, 0, None, None, 8.0, 8, 16),
             ),
+            ui_decisions=(
+                UiWorkDecision("montage_commit", 4, 4.0, 30, "feedback target", 2 * 1024 * 1024),
+            ),
         ),
     )
 
     sections = format_runtime_diagnostics_sections(snapshot)
 
     assert "Lane workers:\n  montage_tile: 8/8" in sections["Feedback"]
+    assert "UI decisions:\n  montage_commit: batch=4 budget=4.0 ms interval=30 ms byte-cap=2.0 MiB" in sections["Feedback"]
     assert "  Inactive:\n    - roi_refresh" in sections["Feedback"]
     assert all(len(line) <= 145 for line in sections["Render"].splitlines())

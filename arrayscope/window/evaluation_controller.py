@@ -439,6 +439,10 @@ class EvaluationController(Qt.QtCore.QObject):
                 budget.record_item()
             if budget.should_yield():
                 break
+        if budget.processed_items > 0 or budget.elapsed_ms >= budget.warning_ms:
+            recorder = getattr(getattr(self.parent(), "resource_governor", None), "record_gui_callback_observation", None)
+            if callable(recorder):
+                recorder(budget.observation())
         if (self._pending_queue_events or not self._queue.empty()) and (self._runnables or self._handlers):
             while not self._queue.empty():
                 self._pending_queue_events.append(self._queue.get())

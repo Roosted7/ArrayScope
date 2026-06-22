@@ -398,6 +398,46 @@ def test_vispy_tile_layer_uses_windowed_visuals_and_positions_loaded_tiles(qt_ap
         view.close()
 
 
+def test_vispy_tiled_mode_hides_raster_placeholder_and_layers_tiles_above_it(qt_app):
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2), 0.25, dtype=np.float32), None, ("tile", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2), 0.75, dtype=np.float32), None, ("tile", 1)),
+    }
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+    )
+    try:
+        view.setTiledMontagePresentation(
+            geometry=_montage_geometry(),
+            tile_state=TilePresentationState(payloads),
+            tile_delta=delta,
+            histogramPlotData=None,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+        )
+
+        raster_order = int(getattr(view._vispy_image, "order", 0))
+        tile_orders = tuple(int(getattr(visual, "order", 0)) for visual in view._vispy_gpu_montage_layer._visuals_by_page)
+        assert view._vispy_image.visible is False
+        assert view._vispy_windowed_image.visible is False
+        assert tile_orders
+        assert min(tile_orders) > raster_order
+    finally:
+        view.close()
+
+
 def test_vispy_tile_layer_bounds_cover_full_montage_not_viewport_canvas(qt_app):
     from arrayscope.display.viewport import ViewportPolicy
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
@@ -734,6 +774,57 @@ def test_vispy_direct_tiled_complex_display_images_render_nonblank(qt_app):
         chroma = np.max(np.abs(sampled.astype(np.int16) - sampled.mean(axis=1, keepdims=True).astype(np.int16)), axis=1)
         assert int(chroma.max()) > 16
         assert int(np.count_nonzero(chroma > 16)) > 0
+    finally:
+        view.close()
+
+
+def test_vispy_direct_tiled_scalar_presented_tiles_render_nonblack_without_level_interaction(qt_app):
+    from pyqtgraph.Qt import QtGui
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    left = np.linspace(0.2, 0.8, 64, dtype=np.float32).reshape(8, 8)
+    right = np.linspace(0.8, 0.2, 64, dtype=np.float32).reshape(8, 8)
+    payloads = {
+        0: DisplayTilePayload(0, 0, left, left, ("scalar", 0)),
+        1: DisplayTilePayload(1, 1, right, right, ("scalar", 1)),
+    }
+    view = VisPyImageView2D()
+    try:
+        view.resize(360, 240)
+        view.show()
+        report = view.setTiledMontagePresentation(
+            geometry=_montage_geometry(),
+            tile_state=TilePresentationState(payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=1,
+                visibility_revision=1,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=1,
+                upserts=payloads,
+                active_tiles=(0, 1),
+                planned_tiles=(0, 1),
+            ),
+            histogramPlotData=np.concatenate([left.ravel(), right.ravel()]),
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+        assert report.presented_tiles == frozenset({0, 1})
+        assert report.deferred_tiles == frozenset()
+
+        for _ in range(20):
+            qt_app.processEvents()
+
+        pixmap = view.grab()
+        image = pixmap.toImage().convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+        pixels = np.frombuffer(image.bits(), dtype=np.uint8).reshape(image.height(), image.width(), 4)[..., :3]
+        center = pixels[pixels.shape[0] // 5 : pixels.shape[0] * 4 // 5, pixels.shape[1] // 5 : pixels.shape[1] * 4 // 5]
+        assert int(center.max()) > 16
+        assert float(center.mean()) > 2.0
     finally:
         view.close()
 
@@ -1371,6 +1462,254 @@ def test_vispy_direct_tiled_incomplete_clean_commit_continues_payload_uploads(qt
         view.close()
 
 
+def test_vispy_scalar_tiled_geometry_retry_preserves_previous_frame(qt_app):
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    geometry = _montage_geometry()
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2), 0.25, dtype=np.float32), None, ("source", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2), 0.75, dtype=np.float32), None, ("source", 1)),
+    }
+    first_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+        callback_item_cap=1,
+        callback_byte_cap=1,
+        callback_target_ms=1000.0,
+    )
+    retry_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts={},
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+        callback_item_cap=1,
+        callback_byte_cap=0,
+        callback_target_ms=1000.0,
+    )
+    view = VisPyImageView2D()
+    try:
+        canvas_updates = []
+        original_update = view._vispy_canvas.update
+        view._vispy_canvas.update = lambda *args, **kwargs: canvas_updates.append(True) or original_update(*args, **kwargs)
+        previous = np.linspace(0.0, 1.0, 16, dtype=np.float32).reshape(4, 4)
+        view.setImagePresentation(previous, histogramData=previous, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+        assert view._vispy_image.visible
+        canvas_updates.clear()
+
+        report = view.setTiledMontagePresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState(payloads),
+            tile_delta=first_delta,
+            histogramPlotData=None,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+
+        assert report.presented_tiles == frozenset({0, 1})
+        assert report.deferred_tiles == frozenset()
+        assert not view._vispy_image.visible
+        assert canvas_updates
+
+        retry_report = view.setTiledMontagePresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState(payloads),
+            tile_delta=retry_delta,
+            histogramPlotData=None,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+
+        assert retry_report.presented_tiles == frozenset({0, 1})
+        assert retry_report.deferred_tiles == frozenset()
+        assert not view._vispy_image.visible
+    finally:
+        view.close()
+
+
+def test_vispy_tile_level_preview_updates_all_pages_without_deferred_retry(qt_app):
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    geometry = _montage_geometry()
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2), 0.25, dtype=np.float32), None, ("source", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2), 0.75, dtype=np.float32), None, ("source", 1)),
+    }
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+    )
+    view = VisPyImageView2D()
+    try:
+        view.setTiledMontagePresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState(payloads),
+            tile_delta=delta,
+            histogramPlotData=None,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+        layer = view._vispy_gpu_montage_layer
+        layer._ensure_visual_count(3)
+        layer._pool.tile_slots = {0: (0, 0), 1: (1, 0), 2: (2, 0)}
+        layer._visible_items = 3
+        canvas_updates = []
+        original_update = view._vispy_canvas.update
+        view._vispy_canvas.update = lambda *args, **kwargs: canvas_updates.append(True) or original_update(*args, **kwargs)
+
+        view._apply_histogram_preview_levels((0.2, 0.8))
+        stats = layer.last_stats
+
+        assert stats.deferred_tiles == ()
+        assert stats.presented_tiles == (0, 1, 2)
+        assert tuple(float(value) for value in layer._levels) == (0.2, 0.8)
+        assert all(tuple(getattr(visual, "_levels", ())) == (0.2, 0.8) for visual in layer._visuals_by_page[:3])
+        assert view._pending_tile_level_preview_levels is None
+        assert canvas_updates
+    finally:
+        view.close()
+
+
+def test_vispy_first_typed_tiled_commit_applies_payload_pixels_and_levels_before_autolevel(qt_app):
+    from arrayscope.core.view_state import ChannelMode, ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.slice_engine import make_image
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    source = np.array([[1 + 2j, 3 + 4j], [5 + 6j, 7 + 8j]], dtype=np.complex64)
+    state = ViewState.from_shape(source.shape).with_channel(ChannelMode.COMPLEX)
+    left = make_image(source, state)
+    right = make_image(source * (1.0 + 0.5j), state)
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_channel(ChannelMode.COMPLEX).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    payloads = {
+        0: DisplayTilePayload(
+            0,
+            0,
+            left.data,
+            left.histogram_data,
+            ("payload", 0),
+            texture_data=left.semantic_data,
+            texture_kind=left.texture_kind,
+            semantic_data=left.semantic_data,
+            semantic_histogram_data=left.histogram_data,
+            shader_mapping=left.shader_mapping,
+        ),
+        1: DisplayTilePayload(
+            1,
+            1,
+            right.data,
+            right.histogram_data,
+            ("payload", 1),
+            texture_data=right.semantic_data,
+            texture_kind=right.texture_kind,
+            semantic_data=right.semantic_data,
+            semantic_histogram_data=right.histogram_data,
+            shader_mapping=right.shader_mapping,
+        ),
+    }
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+        callback_item_cap=1,
+        callback_byte_cap=1,
+        callback_target_ms=1000.0,
+    )
+    view = VisPyImageView2D()
+    try:
+        report = view.setTiledMontagePresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState(payloads),
+            tile_delta=delta,
+            histogramPlotData=np.concatenate([left.histogram_data.ravel(), right.histogram_data.ravel()]),
+            levels=(0.0, float(np.nanmax(right.histogram_data))),
+            histogramRange=(0.0, float(np.nanmax(right.histogram_data))),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+
+        layer = view._vispy_gpu_montage_layer
+        assert report.presented_tiles == frozenset({0, 1})
+        assert report.deferred_tiles == frozenset()
+        assert layer.last_stats.presented_tiles == (0, 1)
+        clean_delta = TilePresentationDelta(
+            structure_revision=1,
+            payload_revision=1,
+            visibility_revision=1,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=1,
+            upserts={},
+            active_tiles=(0, 1),
+            planned_tiles=(0, 1),
+            callback_item_cap=8,
+            callback_byte_cap=0,
+            callback_target_ms=1000.0,
+        )
+        retry_report = view.setTiledMontagePresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState(payloads),
+            tile_delta=clean_delta,
+            histogramPlotData=np.concatenate([left.histogram_data.ravel(), right.histogram_data.ravel()]),
+            levels=(0.0, float(np.nanmax(right.histogram_data))),
+            histogramRange=(0.0, float(np.nanmax(right.histogram_data))),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+
+        assert retry_report.deferred_tiles == frozenset()
+        assert retry_report.presented_tiles == frozenset({0, 1})
+        assert layer.last_stats.presented_tiles == (0, 1)
+        assert tuple(float(value) for value in layer._levels) == (0.0, float(np.nanmax(right.histogram_data)))
+        assert layer._pool.source_ids
+        for payload in payloads.values():
+            assert layer._pool.source_ids.get(("source", payload.source_id)) == payload.source_id
+        assert layer._shader_mapping is not None
+        assert any(len(getattr(visual, "vertex_data", ())) > 0 for visual in layer._visuals_by_page)
+        assert view._pending_tile_level_preview_levels is None
+    finally:
+        view.close()
+
+
 def test_vispy_first_class_tiled_warms_loaded_near_sources_after_visible_commit(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -1804,6 +2143,7 @@ def test_vispy_montage_tile_overlays_have_vispy_placeholder_visuals(qt_app):
         assert view.montageTileOverlayCount() == 2
         assert len(view._vispy_overlay_visuals) == 2
         assert all(visual.visible for visual in view._vispy_overlay_visuals)
+        assert tuple(int(getattr(visual, "order", 0)) for visual in view._vispy_overlay_visuals) == (50, 51)
         visuals = tuple(view._vispy_overlay_visuals)
 
         view.setMontageTileOverlays(overlays)

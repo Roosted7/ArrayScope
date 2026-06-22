@@ -76,6 +76,40 @@ def test_governor_retains_over_warning_callback_observation_details():
     assert channel.last_byte_count == 4096
 
 
+def test_governor_byte_observations_reduce_byte_cap():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_commit",
+        16.0,
+        item_count=1,
+        byte_count=64 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    decision = governor.decide_ui_work("montage_commit", interactive=False)
+
+    assert 0 < decision.byte_cap < 32 * 1024 * 1024
+
+
+def test_governor_small_overbudget_commit_amortizes_fixed_overhead():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_commit",
+        20.0,
+        item_count=1,
+        byte_count=512 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    decision = governor.decide_ui_work("montage_commit", interactive=False)
+
+    assert decision.batch_limit > 1
+    assert decision.byte_cap >= 512 * 1024 * decision.batch_limit
+    assert "amortizing fixed commit overhead" in decision.reason
+
+
 def test_elevated_ui_pressure_preserves_stage_backed_tile_workers():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0)
     memory = _memory()

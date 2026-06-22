@@ -344,6 +344,10 @@ class DisplayControlBuildMixin:
             getattr(self, "app_settings", None),
             notify=lambda message, timeout=5000: self.statusBar().showMessage(message, int(timeout)),
         )
+        governor = getattr(self, "resource_governor", None)
+        observer = None if governor is None else getattr(governor, "record_gui_callback_observation", None)
+        if hasattr(self.img_view, "setGuiCallbackObserver") and callable(observer):
+            self.img_view.setGuiCallbackObserver(observer)
         self.pixel_hud = PixelHud()
         self.img_view.setHudWidget(self.pixel_hud)
         self.image_tab_layout.addWidget(self.img_view)

@@ -25,6 +25,7 @@ from arrayscope.core.roi import (
     simplify_polyline,
 )
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
+from arrayscope.core.gui_callback_budget import GuiCallbackObservation
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.histogram_controller import HistogramDisplayController, HistogramLevelPreviewController
@@ -118,6 +119,11 @@ class ImageView2D(QtWidgets.QWidget):
         self._histogram_display_controller = None
         self._upload_timing = None
         self._last_upload_timing = ImageUploadTiming()
+        self._gui_callback_observer = None
+        self._pending_tile_level_preview_levels = None
+        self._tile_level_preview_retry_timer = QtCore.QTimer(self)
+        self._tile_level_preview_retry_timer.setSingleShot(True)
+        self._tile_level_preview_retry_timer.timeout.connect(self._flush_deferred_tile_level_preview)
         self._montage_display_mode = "canvas"
         self._montage_tile_layer = None
         self._montage_tile_layer_histogram_key = None
@@ -356,6 +362,36 @@ class ImageView2D(QtWidgets.QWidget):
     def lastImageUploadTiming(self) -> ImageUploadTiming:
         return self._last_upload_timing
 
+    def setGuiCallbackObserver(self, observer) -> None:
+        self._gui_callback_observer = observer if callable(observer) else None
+
+    def _record_gui_callback_observation(
+        self,
+        *,
+        channel: str,
+        work_class: str,
+        elapsed_ms: float,
+        item_count: int = 1,
+        byte_count: int = 0,
+    ) -> None:
+        observer = getattr(self, "_gui_callback_observer", None)
+        if not callable(observer):
+            return
+        observer(
+            GuiCallbackObservation(
+                channel=str(channel),
+                work_class=str(work_class),
+                backend=str(getattr(self, "rendering_backend_name", "pyqtgraph")),
+                target_ms=8.0,
+                warning_ms=16.0,
+                item_cap=max(1, int(item_count)),
+                byte_cap=max(0, int(byte_count)),
+                elapsed_ms=max(0.0, float(elapsed_ms)),
+                processed_items=max(1, int(item_count)),
+                processed_bytes=max(0, int(byte_count)),
+            )
+        )
+
     def _disconnect_histogram_image_signal(self, item) -> None:
         signal = getattr(item, "sigImageChanged", None)
         if signal is None:
@@ -403,7 +439,16 @@ class ImageView2D(QtWidgets.QWidget):
         start = perf_counter()
         if self._histogram_display_controller is None or not self._histogram_display_controller.refresh_histogram_plot(auto_level=bool(auto_level)):
             self.histogram.item.imageChanged(autoLevel=bool(auto_level))
-        self._record_upload_timing("histogram_recompute_ms", (perf_counter() - start) * 1000.0)
+        elapsed_ms = (perf_counter() - start) * 1000.0
+        self._record_upload_timing("histogram_recompute_ms", elapsed_ms)
+        source = self.histogramPlotSource if self.histogramPlotSource is not None else self.histogramSource
+        self._record_gui_callback_observation(
+            channel="histogram_refresh",
+            work_class="histogram_plot",
+            elapsed_ms=elapsed_ms,
+            item_count=1,
+            byte_count=0 if source is None else int(getattr(np.asarray(source), "nbytes", 0) or 0),
+        )
 
     def _set_image_item_data(self, item, data, levels, *, role: str, emit_histogram_change: bool = True) -> bool:
         previous = getattr(item, "image", None)
@@ -668,6 +713,23 @@ class ImageView2D(QtWidgets.QWidget):
         timing["tile_layer_mipmap_available"] = bool(stats.mipmap_available)
         timing["tile_layer_complex_texture_uploads"] = int(stats.complex_texture_uploads)
         timing["tile_layer_shader_uniform_updates"] = int(stats.shader_uniform_updates)
+        elapsed_ms = float(getattr(stats, "upload_ms", 0.0) or 0.0)
+        observed_items = (
+            int(getattr(stats, "items_created", 0))
+            + int(stats.items_updated)
+            + int(getattr(stats, "existing_items_shown", 0))
+            + int(getattr(stats, "relocated_tiles", 0))
+            + int(getattr(stats, "level_updates", 0))
+            + len(tuple(getattr(stats, "deferred_tiles", ()) or ()))
+        )
+        if elapsed_ms > 0.0 or observed_items > 0:
+            self._record_gui_callback_observation(
+                channel="tile_layer_commit",
+                work_class="presentation_upsert",
+                elapsed_ms=elapsed_ms,
+                item_count=max(1, observed_items),
+                byte_count=int(getattr(stats, "texture_upload_bytes", 0) or 0),
+            )
 
     def _tile_layer_histogram_key(self, histogramData, histogramPlotData, *, levels, histogramRange):
         source = histogramPlotData if histogramPlotData is not None else histogramData
@@ -1087,6 +1149,8 @@ class ImageView2D(QtWidgets.QWidget):
             if self._montage_display_mode == "tile_layer":
                 stats = self._update_montage_tile_levels(levels)
                 self._record_tile_layer_stats(stats)
+                if tuple(getattr(stats, "deferred_tiles", ()) or ()):
+                    self._schedule_deferred_tile_level_preview(levels)
                 return
             if self._rgbBaseImage is None or self.histogramSource is None:
                 if self.imageItem is not None and self.imageDisp is not None and not self._is_rgb_image(self.image):
@@ -1103,9 +1167,26 @@ class ImageView2D(QtWidgets.QWidget):
             if started_timing:
                 self._finish_upload_timing()
 
+    def _schedule_deferred_tile_level_preview(self, levels) -> None:
+        self._pending_tile_level_preview_levels = (float(levels[0]), float(levels[1]))
+        timer = getattr(self, "_tile_level_preview_retry_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start(0)
+
+    def _flush_deferred_tile_level_preview(self) -> None:
+        levels = self._pending_tile_level_preview_levels
+        self._pending_tile_level_preview_levels = None
+        if levels is None:
+            return
+        self._apply_histogram_preview_levels(levels)
+
     def cancelHistogramLevelInteraction(self) -> None:
         if self._histogram_preview_controller is not None:
             self._histogram_preview_controller.cancel()
+        self._pending_tile_level_preview_levels = None
+        timer = getattr(self, "_tile_level_preview_retry_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
         if self._histogram_display_controller is not None:
             self._histogram_display_controller.cancel_manual_edit()
                 

@@ -141,7 +141,16 @@ class DisplayPresentationMixin:
             self._record_montage_backend_commit(backend_decision, actual_backend)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
-            if semantic_commit:
+            report = getattr(self._display_committer(), "last_tile_commit_report", None) if use_tile_layer else None
+            semantic_frame_commit = bool(
+                semantic_commit
+                and (
+                    not use_tile_layer
+                    or bool(getattr(report, "presented_tiles", ()))
+                    or not bool(getattr(report, "deferred_tiles", ()))
+                )
+            )
+            if semantic_frame_commit:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
@@ -150,7 +159,7 @@ class DisplayPresentationMixin:
                     refresh_hover()
             if defer_side_panels:
                 self._deferred_side_panel_refresh_pending = True
-            elif semantic_commit:
+            elif semantic_frame_commit:
                 self._update_operation_dock()
         
             # Apply axis flips after setting the image
@@ -159,7 +168,7 @@ class DisplayPresentationMixin:
             self.img_view.setEvaluationOverlay(False)
             if defer_side_panels:
                 self._deferred_side_panel_refresh_pending = True
-            elif semantic_commit:
+            elif semantic_frame_commit:
                 self._refresh_inspection_dock()
         
         except Exception as e:
@@ -252,7 +261,16 @@ class DisplayPresentationMixin:
             self._record_montage_backend_commit(backend_decision, actual_backend)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = geometry
-            if semantic_commit:
+            report = getattr(self._display_committer(), "last_tile_commit_report", None) if use_tile_layer else None
+            semantic_frame_commit = bool(
+                semantic_commit
+                and (
+                    not use_tile_layer
+                    or bool(getattr(report, "presented_tiles", ()))
+                    or not bool(getattr(report, "deferred_tiles", ()))
+                )
+            )
+            if semantic_frame_commit:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)

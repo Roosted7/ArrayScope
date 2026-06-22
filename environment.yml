@@ -17,6 +17,7 @@ dependencies:
   - psutil
   - pytest
   - hypothesis
+  - py-spy
   - ruff
   - build
   - twine

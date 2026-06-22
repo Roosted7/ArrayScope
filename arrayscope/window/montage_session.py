@@ -74,6 +74,7 @@ class MontageRenderSession:
     active_stage_requests: set[object] = field(default_factory=set)
     attached_stage_requests: set[object] = field(default_factory=set)
     stage_values: dict[object, object] = field(default_factory=dict)
+    lead_stage_warmups: dict[int, object] = field(default_factory=dict)
     canvas: MontageViewportCanvas | None = None
     canvas_data: np.ndarray | None = None
     canvas_histogram_data: np.ndarray | None = None
@@ -424,6 +425,10 @@ class MontageRenderSession:
         source_ids_trusted: bool = True,
         max_upserts: int | None = None,
         cold_deadline_ms: float | None = None,
+        callback_target_ms: float | None = None,
+        callback_warning_ms: float | None = None,
+        callback_item_cap: int | None = None,
+        callback_byte_cap: int | None = None,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         del source_ids_trusted
         source_ids = dict(source_ids or {})
@@ -537,6 +542,10 @@ class MontageRenderSession:
             base_revision=base_revision,
             target_revision=target_revision,
             cold_deadline_ms=cold_deadline_ms,
+            callback_target_ms=callback_target_ms,
+            callback_warning_ms=callback_warning_ms,
+            callback_item_cap=callback_item_cap,
+            callback_byte_cap=callback_byte_cap,
             upserts=upserts,
             removals=removals,
             active_tiles=active,

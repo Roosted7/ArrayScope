@@ -44,6 +44,55 @@ Use a large plane, many montage tiles, complex shader mode, and at least one exp
 - Hover across montage center/edges and verify useful tile priority changes without mouse lag.
 - Open ROI/profile panels during rendering and verify visible work remains dominant.
 
+## Real workflow profiling
+
+Use this when callback-budget, scheduler, or backend changes affect pacing. Run
+on a real display, not `QT_QPA_PLATFORM=offscreen`, so VisPy/OpenGL frame pacing
+and swap behavior are actually visible.
+
+```bash
+mkdir -p tests/artifacts
+PATH=~/miniconda3/bin:$PATH direnv exec . python -m arrayscope.tools.profile_montage_workflow \
+  --backend all \
+  --jsonl tests/artifacts/montage-workflow-profile.jsonl
+```
+
+The window should visibly load the bundled NIfTI dataset, draw dims 0/1 as the
+image axes, render the full dim-2 tiled montage, apply FFT on dim 2, render the
+FFT montage, then close. Confirm the pacing by eye and keep the JSONL.
+
+For timing evidence, prefer the plain JSONL run above. It records
+request-to-first-content, total phase time, event-loop max gap, callback records,
+tile upload bytes, and montage compute counters. In particular, FFT montage runs
+should not show hundreds of direct tile computations when a reusable stage is
+available; the JSONL counters should show stage-backed tiles for full-axis FFT
+montages.
+
+For Python stack attribution, wrap the same visible workflow with a low-rate,
+nonblocking `py-spy` sample. Treat the JSONL from the same run as timing
+evidence and the raw stack file as attribution evidence:
+
+```bash
+PATH=~/miniconda3/bin:$PATH direnv exec . py-spy record \
+  --format raw \
+  --rate 10 \
+  --nonblocking \
+  -o tests/artifacts/montage-workflow-profile.raw -- \
+  python -m arrayscope.tools.profile_montage_workflow \
+    --backend all \
+    --jsonl tests/artifacts/montage-workflow-profile.jsonl
+```
+
+Use `perf record -F 99 -g` when native attribution matters, such as SciPy FFT,
+Qt painting, or GL driver calls. `py-spy --native` can be useful as a last
+resort, but it can significantly perturb Qt/FFT timing; if used, compare it
+against a plain JSONL run and do not use the native py-spy timings as pacing
+evidence.
+
+If `py-spy` is not installed on the test machine, record the JSONL run and the
+missing sampler explicitly rather than substituting offscreen timing for a GPU
+claim.
+
 ## Memory and recovery
 
 - Request work just below and above configured render budget; verify clear degraded/refusal status rather than crash.

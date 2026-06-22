@@ -87,7 +87,11 @@ class GuiCallbackBudget:
                 else max(1, int(item_cap))
             ),
             byte_cap=(
-                INTERACTIVE_BYTE_CAP if interactive else IDLE_BYTE_CAP
+                max(0, int(getattr(decision, "byte_cap", 0) or 0))
+                if decision is not None and getattr(decision, "byte_cap", 0)
+                else INTERACTIVE_BYTE_CAP
+                if interactive
+                else IDLE_BYTE_CAP
             )
             if byte_cap is None
             else max(0, int(byte_cap)),

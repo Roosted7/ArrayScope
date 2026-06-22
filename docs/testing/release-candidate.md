@@ -67,6 +67,35 @@ Do not feed rendering benchmark JSONL into
 `arrayscope.core.diagnostics_trace`; benchmark samples and runtime diagnostics
 traces have different schemas.
 
+For scheduler/backend pacing changes, add a visible real-workflow profile on a
+real display. The plain JSONL run is the timing artifact:
+
+```bash
+python -m arrayscope.tools.profile_montage_workflow \
+  --backend all \
+  --jsonl tests/artifacts/v0.8.0-montage-workflow-profile.jsonl
+```
+
+Add a low-rate Python stack sample when attribution is needed:
+
+```bash
+py-spy record \
+  --format raw \
+  --rate 10 \
+  --nonblocking \
+  -o tests/artifacts/v0.8.0-montage-workflow-profile.raw -- \
+  python -m arrayscope.tools.profile_montage_workflow \
+    --backend all \
+    --jsonl tests/artifacts/v0.8.0-montage-workflow-profile.jsonl
+```
+
+Use `perf record -F 99 -g` for native SciPy/Qt/GL attribution. Avoid using
+`py-spy --native` timings as release pacing evidence unless a plain JSONL run
+shows comparable pacing.
+
+Do not run this command with `QT_QPA_PLATFORM=offscreen` when making VisPy or GPU
+frame-pacing claims.
+
 ## Evidence to record
 
 Record the commit, clean/dirty state, CI run URL, platform skips, artifact
