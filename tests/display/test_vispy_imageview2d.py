@@ -438,6 +438,38 @@ def test_vispy_tiled_mode_hides_raster_placeholder_and_layers_tiles_above_it(qt_
         view.close()
 
 
+def test_vispy_tiled_overlay_clear_waits_for_presenting_draw(qt_app):
+    from arrayscope.display.overlays import MontageTileOverlay
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    try:
+        view.setMontageTileOverlays((MontageTileOverlay(0, 0, 2, 2, "loading", "loading"),))
+        assert view.montageTileOverlayCount() == 1
+
+        view._vispy_tile_presentation_request_count = 1
+        view._vispy_tile_presentation_draw_count = 0
+        view.clearMontageTileOverlays()
+
+        assert view.montageTileOverlayCount() == 1
+        assert view._vispy_pending_overlay_clear_request_count == 1
+        overlay_orders = [
+            int(getattr(visual, "order", 0))
+            for visual in view._vispy_overlay_visuals
+            if bool(getattr(visual, "visible", False))
+        ]
+        assert overlay_orders
+        assert max(overlay_orders) < 10
+
+        view._on_vispy_draw()
+
+        assert view.montageTileOverlayCount() == 0
+        assert view._vispy_pending_overlay_clear_request_count is None
+        assert all(not bool(getattr(visual, "visible", False)) for visual in view._vispy_overlay_visuals)
+    finally:
+        view.close()
+
+
 def test_vispy_tile_layer_bounds_cover_full_montage_not_viewport_canvas(qt_app):
     from arrayscope.display.viewport import ViewportPolicy
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
@@ -1431,7 +1463,7 @@ def test_vispy_direct_tiled_incomplete_clean_commit_continues_payload_uploads(qt
     )
     view = VisPyImageView2D()
     try:
-        view.setTiledMontagePresentation(
+        first_report = view.setTiledMontagePresentation(
             geometry=geometry,
             tile_state=TilePresentationState(payloads),
             tile_delta=first_delta,
@@ -1441,9 +1473,11 @@ def test_vispy_direct_tiled_incomplete_clean_commit_continues_payload_uploads(qt
             rgb_already_windowed=False,
             tile_residency_budget_bytes=64 * 1024 * 1024,
         )
+        assert first_report.presented_tiles == frozenset({0})
+        assert first_report.deferred_tiles == frozenset({1, 2, 3})
         assert view._vispy_gpu_montage_layer.last_stats.presented_tiles == (0,)
 
-        view.setTiledMontagePresentation(
+        retry_report = view.setTiledMontagePresentation(
             geometry=geometry,
             tile_state=TilePresentationState(payloads),
             tile_delta=clean_delta,
@@ -1455,6 +1489,8 @@ def test_vispy_direct_tiled_incomplete_clean_commit_continues_payload_uploads(qt
         )
 
         timing = view.lastImageUploadTiming()
+        assert retry_report.presented_tiles == frozenset({0, 1})
+        assert retry_report.deferred_tiles == frozenset({2, 3})
         assert timing.tile_layer_items_updated == 1
         assert timing.tile_layer_texture_uploads == 1
         assert view._vispy_gpu_montage_layer.last_stats.presented_tiles == (0, 1)

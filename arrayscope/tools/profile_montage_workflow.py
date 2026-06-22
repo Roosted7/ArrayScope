@@ -215,8 +215,10 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
     first_overlay_clear_ms = None
     saw_overlays = _montage_overlay_count(win) > 0
     first_logical_complete_ms = None
-    logical_complete_tile_request_count = None
     draw_after_complete_ms = None
+    fully_visible_ms = None
+    fully_visible_tile_request_count = None
+    final_visibility_state: dict[str, object] = {}
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
         session = getattr(win, "_montage_session", None)
@@ -239,9 +241,14 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
         )
         if logical_complete and first_logical_complete_ms is None:
             first_logical_complete_ms = (perf_counter() - start) * 1000.0
-            logical_complete_tile_request_count = _vispy_tile_presentation_request_count(win)
-        tile_drawn = _vispy_tile_presentation_draw_count(win) >= int(logical_complete_tile_request_count or 0)
-        if logical_complete and (not vispy_tiled or tile_drawn):
+        visibility_state = _montage_visibility_state(win, mode=str(mode))
+        final_visibility_state = visibility_state
+        fully_visible = bool(visibility_state["fully_visible"])
+        if fully_visible and fully_visible_ms is None:
+            fully_visible_ms = (perf_counter() - start) * 1000.0
+            fully_visible_tile_request_count = _vispy_tile_presentation_request_count(win)
+        final_drawn = _vispy_tile_presentation_draw_count(win) >= int(fully_visible_tile_request_count or 0)
+        if fully_visible and (not vispy_tiled or final_drawn):
             if vispy_tiled:
                 draw_after_complete_ms = (perf_counter() - start) * 1000.0
             return {
@@ -250,6 +257,10 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
                 "first_overlay_clear_ms": first_overlay_clear_ms,
                 "logical_complete_ms": first_logical_complete_ms,
                 "draw_after_complete_ms": draw_after_complete_ms,
+                "fully_visible_ms": fully_visible_ms,
+                "active_presented_tile_count": int(visibility_state["active_presented_tile_count"]),
+                "active_planned_tile_count": int(visibility_state["active_planned_tile_count"]),
+                "deferred_display_tile_count": int(visibility_state["deferred_display_tile_count"]),
                 "vispy_draw_count_start": int(draw_start),
                 "vispy_draw_count_complete": _vispy_draw_count(win),
                 "vispy_tile_presentation_request_count": _vispy_tile_presentation_request_count(win),
@@ -267,6 +278,8 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
         f"completed={0 if session is None else len(getattr(session, 'pending_completed_tiles', ()) or ())} "
         f"stage_waiting={0 if session is None else sum(len(tiles) for tiles in getattr(session, 'stage_waiting_tiles', {}).values())} "
         f"lead_warmups={0 if session is None else len(getattr(session, 'lead_stage_warmups', {}) or {})} "
+        f"active_presented={final_visibility_state.get('active_presented_tile_count', 0)}/"
+        f"{final_visibility_state.get('active_planned_tile_count', 0)} "
         f"overlays={_montage_overlay_count(win)} vispy_draws={_vispy_draw_count(win)} "
         f"tile_draw={_vispy_tile_presentation_draw_count(win)}/{_vispy_tile_presentation_request_count(win)}"
     )
@@ -323,6 +336,8 @@ def _phase_record(win, *, phase: str, elapsed_ms: float, event_loop_max_gap_ms: 
         "vispy_tile_presentation_request_count": int(vispy.get("tile_presentation_request_count", 0)),
         "vispy_tile_presentation_draw_count": int(vispy.get("tile_presentation_draw_count", 0)),
         "vispy_tile_presentation_draw_pending": bool(vispy.get("tile_presentation_draw_pending", False)),
+        "vispy_presented_tile_count": int(vispy.get("presented_tile_count", 0)),
+        "vispy_presented_tiles": list(vispy.get("presented_tiles", ()) or ()),
         "vispy_tile_visual_visible_pages": int(vispy.get("tile_visual_visible_pages", 0)),
         "vispy_tile_visual_min_order": vispy.get("tile_visual_min_order"),
         "vispy_overlay_visual_visible_items": int(vispy.get("overlay_visual_visible_items", 0)),
@@ -357,6 +372,77 @@ def _vispy_tile_presentation_request_count(win) -> int:
 def _vispy_tile_presentation_draw_count(win) -> int:
     diagnostics = _vispy_presentation_diagnostics(win)
     return int(diagnostics.get("tile_presentation_draw_count", 0) or 0)
+
+
+def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, object]:
+    session = getattr(win, "_montage_session", None)
+    if mode is None:
+        mode = str(getattr(win.img_view, "montageDisplayMode", lambda: "")())
+    if session is None:
+        return {
+            "fully_visible": False,
+            "active_presented_tile_count": 0,
+            "active_planned_tile_count": 0,
+            "deferred_display_tile_count": 0,
+        }
+    active = set(_active_planned_montage_tiles(session))
+    presented = {int(tile) for tile in tuple(getattr(session, "presented_tiles", ()) or ())}
+    deferred = tuple(int(tile) for tile in tuple(getattr(session, "deferred_display_tiles", ()) or ()))
+    vispy = _vispy_presentation_diagnostics(win)
+    overlay_count = _montage_overlay_count(win)
+    overlays_above_tiles = bool(vispy.get("overlays_above_tiles", False))
+    overlay_nonblocking = (
+        overlay_count == 0
+        or (
+            str(mode) == "vispy_tile_layer"
+            and not overlays_above_tiles
+            and active
+            and active.issubset(presented)
+        )
+    )
+    has_backlog = bool(
+        getattr(session, "pending_tiles", ())
+        or getattr(session, "loading_tiles", ())
+        or getattr(session, "pending_completed_tiles", ())
+        or getattr(session, "active_tile_requests", ())
+        or getattr(session, "active_stage_requests", ())
+        or getattr(session, "attached_stage_requests", ())
+        or getattr(session, "stage_waiting_tiles", ())
+        or getattr(session, "final_commit_pending", False)
+        or getattr(session, "final_display_drain_pending", False)
+        or getattr(session, "flush_pending", False)
+        or deferred
+        or getattr(session, "dirty_payloads", ())
+        or getattr(session, "pending_removals", ())
+    )
+    active_presented = active.intersection(presented)
+    fully_visible = bool(
+        str(mode) in {"tile_layer", "vispy_tile_layer", "canvas"}
+        and getattr(session, "display_committed", False)
+        and not has_backlog
+        and active.issubset(presented)
+        and overlay_nonblocking
+    )
+    return {
+        "fully_visible": fully_visible,
+        "active_presented_tile_count": len(active_presented),
+        "active_planned_tile_count": len(active),
+        "deferred_display_tile_count": len(deferred),
+    }
+
+
+def _active_planned_montage_tiles(session) -> tuple[int, ...]:
+    skipped = {int(tile) for tile in tuple(getattr(session, "skipped_tiles", ()) or ())}
+    visible = tuple(getattr(session, "visible_tiles", ()) or ())
+    active = []
+    for tile in visible:
+        try:
+            index = int(getattr(tile, "montage_index"))
+        except Exception:
+            continue
+        if index not in skipped:
+            active.append(index)
+    return tuple(dict.fromkeys(active))
 
 
 def _vispy_canvas_visible(win) -> bool:

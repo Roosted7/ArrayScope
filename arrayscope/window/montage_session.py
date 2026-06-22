@@ -86,6 +86,7 @@ class MontageRenderSession:
     flush_pending: bool = False
     last_commit_monotonic: float = 0.0
     final_commit_pending: bool = False
+    final_display_drain_pending: bool = False
     show_loading_overlays: bool = False
     defer_side_panels: bool = False
     display_committed: bool = False
@@ -674,6 +675,7 @@ class MontageRenderSession:
             or self.attached_stage_requests
             or self.stage_waiting_tiles
             or self.final_commit_pending
+            or self.final_display_drain_pending
             or self.flush_pending
             or self.deferred_display_tiles
             or self.dirty_payloads
@@ -734,6 +736,7 @@ class MontageRenderSession:
     def note_committed(self) -> None:
         self.last_commit_monotonic = monotonic()
         self.final_commit_pending = False
+        self.final_display_drain_pending = False
         self.flush_pending = False
 
     def enqueue_pending_tile(self, tile: MontageTile) -> bool:

@@ -1338,7 +1338,10 @@ class MontageRenderMixin:
             if session.pending_tiles:
                 self._schedule_montage_tiles(session)
             force = not session.pending_tiles and not session.active_tile_requests and not session.pending_completed_tiles
-            self._schedule_montage_canvas_commit(session, force=force)
+            if force:
+                self._schedule_montage_canvas_commit(session, force=True)
+            else:
+                self._schedule_montage_ready_display_commit(session)
         if session.pending_completed_tiles:
             self._schedule_montage_tile_result_flush(session)
 
@@ -1456,7 +1459,8 @@ class MontageRenderMixin:
         session = getattr(self, "_montage_session", None)
         if session is None or not session.final_commit_pending:
             return
-        self._commit_montage_session_canvas(session, force=False)
+        force = bool(getattr(session, "final_display_drain_pending", False))
+        self._commit_montage_session_canvas(session, force=force)
         if (
             getattr(session, "show_loading_overlays", False)
             and (session.pending_tiles or session.loading_tiles or session.active_tile_requests or getattr(session, "attached_stage_requests", None))
@@ -1752,14 +1756,39 @@ class MontageRenderMixin:
         display_backlog = bool(session.deferred_display_tiles)
         session.note_committed()
         if display_backlog:
-            session.final_commit_pending = True
-            session.flush_pending = True
-            self._start_montage_commit_timer(
-                max(1, _montage_commit_interval_ms(self, force=False))
-            )
+            self._schedule_montage_final_display_drain(session)
         self._finish_montage_session_if_complete(session)
         schedule_near_viewport_montage_prefetch(self, session)
         self._retry_live_profile_after_montage_tile()
+
+    def _schedule_montage_final_display_drain(self, session) -> None:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return
+        session.final_commit_pending = True
+        session.flush_pending = True
+        session.final_display_drain_pending = True
+        try:
+            Qt.QtCore.QTimer.singleShot(0, self._flush_montage_canvas_commit)
+        except Exception:
+            self._start_montage_commit_timer(1)
+
+    def _schedule_montage_ready_display_commit(self, session) -> None:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return
+        if not (
+            getattr(session, "dirty_rects", None)
+            or getattr(session, "dirty_tiles", None)
+            or getattr(session, "dirty_payloads", None)
+            or getattr(session, "pending_removals", None)
+            or getattr(session, "deferred_display_tiles", None)
+        ):
+            return
+        session.final_commit_pending = True
+        session.flush_pending = True
+        try:
+            Qt.QtCore.QTimer.singleShot(0, self._flush_montage_canvas_commit)
+        except Exception:
+            self._start_montage_commit_timer(1)
 
     def _finish_montage_session_if_complete(self, session) -> bool:
         if not self._is_current_montage_session(session.session_id, session.key):

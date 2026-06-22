@@ -1,5 +1,6 @@
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -476,6 +477,91 @@ def test_montage_loading_overlay_clears_after_final_delayed_commit(qtbot, monkey
         win.close()
 
 
+def test_montage_deferred_display_backlog_drains_immediately(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
+    qtbot.addWidget(win)
+    session = SimpleNamespace(
+        session_id=1,
+        key=("test-session",),
+        final_commit_pending=False,
+        flush_pending=False,
+        final_display_drain_pending=False,
+        deferred_display_tiles=(1,),
+        dirty_payloads={1: None},
+    )
+    calls = []
+    try:
+        monkeypatch.setattr(win, "_is_current_montage_session", lambda session_id, key: session_id == 1 and key == ("test-session",))
+        monkeypatch.setattr(
+            win,
+            "_flush_montage_canvas_commit",
+            lambda: calls.append(
+                (
+                    bool(session.final_commit_pending),
+                    bool(session.flush_pending),
+                    bool(session.final_display_drain_pending),
+                )
+            ),
+        )
+        win._montage_session = session
+
+        win._schedule_montage_final_display_drain(session)
+
+        assert session.final_commit_pending
+        assert session.flush_pending
+        assert session.final_display_drain_pending
+        qtbot.waitUntil(lambda: bool(calls), timeout=1000)
+        assert calls[0] == (True, True, True)
+    finally:
+        win.close()
+
+
+def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
+    qtbot.addWidget(win)
+    session = SimpleNamespace(
+        session_id=1,
+        key=("test-session",),
+        final_commit_pending=False,
+        flush_pending=False,
+        final_display_drain_pending=False,
+        deferred_display_tiles=(),
+        pending_removals=set(),
+        dirty_payloads={1: None},
+    )
+    calls = []
+    try:
+        monkeypatch.setattr(win, "_is_current_montage_session", lambda session_id, key: session_id == 1 and key == ("test-session",))
+        monkeypatch.setattr(
+            win,
+            "_flush_montage_canvas_commit",
+            lambda: calls.append(
+                (
+                    bool(session.final_commit_pending),
+                    bool(session.flush_pending),
+                    bool(session.final_display_drain_pending),
+                )
+            ),
+        )
+        win._montage_session = session
+
+        win._schedule_montage_ready_display_commit(session)
+
+        assert session.final_commit_pending
+        assert session.flush_pending
+        assert not session.final_display_drain_pending
+        qtbot.waitUntil(lambda: bool(calls), timeout=1000)
+        assert calls[0] == (True, True, False)
+    finally:
+        win.close()
+
+
 def test_montage_canvas_tiles_are_all_accounted_for(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.display.montage import MontageTileState
@@ -695,13 +781,19 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
         win.update_montage_view()
         win._montage_tile_result_batch_size = 4
         commit_calls = []
-        original_schedule_commit = win._schedule_montage_canvas_commit
+        original_schedule_ready_commit = win._schedule_montage_ready_display_commit
 
-        def record_schedule_commit(session, *, force=False):
-            commit_calls.append(force)
-            return original_schedule_commit(session, force=force)
+        def record_schedule_ready_commit(session):
+            commit_calls.append(
+                bool(
+                    getattr(session, "dirty_rects", None)
+                    or getattr(session, "dirty_payloads", None)
+                    or getattr(session, "deferred_display_tiles", None)
+                )
+            )
+            return original_schedule_ready_commit(session)
 
-        monkeypatch.setattr(win, "_schedule_montage_canvas_commit", record_schedule_commit)
+        monkeypatch.setattr(win, "_schedule_montage_ready_display_commit", record_schedule_ready_commit)
         tile0 = _tile_for_callback(win, calls[0])
         tile1 = _tile_for_callback(win, calls[1])
         calls[0]["on_done"](_tile_result(tile0, 7))
@@ -717,6 +809,7 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
         )
 
         assert len(commit_calls) == 1
+        assert commit_calls == [True]
     finally:
         win.close()
 

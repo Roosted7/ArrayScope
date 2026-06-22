@@ -137,6 +137,7 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_overlay_lines = None
         self._vispy_overlay_key: tuple[object, ...] = ()
         self._vispy_overlay_count = 0
+        self._vispy_pending_overlay_clear_request_count: int | None = None
         self._vispy_draw_count = 0
         self._vispy_tile_presentation_request_count = 0
         self._vispy_tile_presentation_draw_count = 0
@@ -218,9 +219,14 @@ class VisPyImageView2D(ImageView2D):
         self._vispy_tile_presentation_draw_count = int(
             getattr(self, "_vispy_tile_presentation_request_count", 0) or 0
         )
+        pending_clear = getattr(self, "_vispy_pending_overlay_clear_request_count", None)
+        if pending_clear is not None and self._vispy_tile_presentation_draw_count >= int(pending_clear):
+            self._hide_vispy_montage_tile_overlays_now()
 
     def vispyPresentationDiagnostics(self) -> dict[str, object]:
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        layer_stats = getattr(layer, "last_stats", None)
+        presented_tiles = tuple(int(tile) for tile in tuple(getattr(layer_stats, "presented_tiles", ()) or ()))
         tile_visuals = tuple(getattr(layer, "_visuals_by_page", ()) or ())
         visible_tile_visuals = tuple(visual for visual in tile_visuals if bool(getattr(visual, "visible", False)))
         tile_orders = tuple(int(getattr(visual, "order", 0)) for visual in visible_tile_visuals)
@@ -235,6 +241,8 @@ class VisPyImageView2D(ImageView2D):
             "tile_presentation_draw_count": int(getattr(self, "_vispy_tile_presentation_draw_count", 0) or 0),
             "tile_presentation_draw_pending": int(getattr(self, "_vispy_tile_presentation_draw_count", 0) or 0)
             < int(getattr(self, "_vispy_tile_presentation_request_count", 0) or 0),
+            "presented_tiles": presented_tiles,
+            "presented_tile_count": len(presented_tiles),
             "tile_visual_visible_pages": len(visible_tile_visuals),
             "tile_visual_min_order": tile_min,
             "overlay_count": int(getattr(self, "_vispy_overlay_count", 0) or 0),
@@ -1373,18 +1381,23 @@ class VisPyImageView2D(ImageView2D):
         self._set_vispy_montage_tile_overlays(overlays)
 
     def clearMontageTileOverlays(self):
-        super().clearMontageTileOverlays()
-        self._vispy_overlay_key = ()
-        self._vispy_overlay_count = 0
-        for visual in getattr(self, "_vispy_overlay_visuals", ()):
-            _set_visual_visible(visual, False)
-        self._vispy_canvas.update()
+        if self._vispy_tile_presentation_draw_pending() and int(getattr(self, "_vispy_overlay_count", 0) or 0) > 0:
+            self._vispy_pending_overlay_clear_request_count = int(
+                getattr(self, "_vispy_tile_presentation_request_count", 0) or 0
+            )
+            try:
+                self._vispy_canvas.update()
+            except Exception:
+                pass
+            return
+        self._hide_vispy_montage_tile_overlays_now()
 
     def montageTileOverlayCount(self) -> int:
         return int(getattr(self, "_vispy_overlay_count", 0) or 0)
 
     def _set_vispy_montage_tile_overlays(self, overlays) -> None:
         overlays = tuple(overlays or ())
+        self._vispy_pending_overlay_clear_request_count = None
         key = _overlay_batch_key(overlays)
         self._vispy_overlay_count = len(overlays)
         if key == getattr(self, "_vispy_overlay_key", ()):
@@ -1393,9 +1406,7 @@ class VisPyImageView2D(ImageView2D):
             return
         self._vispy_overlay_key = key
         if not overlays:
-            for visual in getattr(self, "_vispy_overlay_visuals", ()):
-                _set_visual_visible(visual, False)
-            self._vispy_canvas.update()
+            self._hide_vispy_montage_tile_overlays_now()
             return
 
         mesh = self._ensure_vispy_overlay_mesh()
@@ -1407,6 +1418,23 @@ class VisPyImageView2D(ImageView2D):
         mesh.visible = True
         lines.visible = bool(len(line_points))
         self._vispy_canvas.update()
+
+    def _hide_vispy_montage_tile_overlays_now(self) -> None:
+        super().clearMontageTileOverlays()
+        self._vispy_overlay_key = ()
+        self._vispy_overlay_count = 0
+        self._vispy_pending_overlay_clear_request_count = None
+        for visual in getattr(self, "_vispy_overlay_visuals", ()):
+            _set_visual_visible(visual, False)
+        try:
+            self._vispy_canvas.update()
+        except Exception:
+            pass
+
+    def _vispy_tile_presentation_draw_pending(self) -> bool:
+        return int(getattr(self, "_vispy_tile_presentation_draw_count", 0) or 0) < int(
+            getattr(self, "_vispy_tile_presentation_request_count", 0) or 0
+        )
 
     def _ensure_vispy_overlay_mesh(self):
         mesh = getattr(self, "_vispy_overlay_mesh", None)
