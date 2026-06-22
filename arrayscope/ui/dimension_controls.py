@@ -453,6 +453,12 @@ class DimensionControlMixin:
             self.statusBar().showMessage(f"Failed to set colormap {colormap_name}: {e}", 3000)
     
     def eventFilter(self, obj, event):
+        if (
+            hasattr(self, "img_view")
+            and obj is self.img_view.graphicsView.viewport()
+            and event.type() == Qt.QtCore.QEvent.Type.Leave
+        ):
+            self._clear_image_hover_state()
         if obj == self.tab_widget.tabBar():
             if event.type() == Qt.QtCore.QEvent.Type.MouseButtonDblClick:
                 self.profile_dock.toggle_style()

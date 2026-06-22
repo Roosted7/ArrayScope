@@ -126,6 +126,9 @@ def test_stationary_hover_refreshes_after_slice_change(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_slice(2, 0))
+        win.render(reason="test-initial-slice")
+        _process_events(qtbot, count=20)
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(1.1, 1.1))
         win._on_image_mouse_moved(scene_pos)
         _process_events(qtbot, count=5)
@@ -141,6 +144,32 @@ def test_stationary_hover_refreshes_after_slice_change(qtbot):
         win.close()
 
 
+def test_image_viewport_leave_clears_hover_status(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(2.1, 1.1))
+        win._on_image_mouse_moved(scene_pos)
+        _process_events(qtbot, count=5)
+        assert win._last_image_mouse_scene_pos is not None
+        assert win.widgets["labels"]["pixelValue"].text()
+
+        event = QtCore.QEvent(QtCore.QEvent.Type.Leave)
+        QtGui.QGuiApplication.sendEvent(win.img_view.graphicsView.viewport(), event)
+        _process_events(qtbot, count=5)
+
+        assert win._last_image_mouse_scene_pos is None
+        assert win.widgets["labels"]["pixelValue"].text() == ""
+    finally:
+        win.close()
+
+
 def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -152,6 +181,10 @@ def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot)
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_slice(2, 0))
+        win.render(reason="test-initial-slice")
+        _process_events(qtbot, count=20)
+        win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
 
@@ -179,6 +212,10 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot,
     captured = []
     try:
         _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_slice(2, 0))
+        win.render(reason="test-initial-slice")
+        _process_events(qtbot, count=20)
+        win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
         monkeypatch.setattr(win.visible_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
@@ -212,6 +249,10 @@ def test_relative_window_levels_match_for_cached_and_uncached_images(qtbot, monk
     captured = []
     try:
         _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_slice(2, 0))
+        win.render(reason="test-initial-slice")
+        _process_events(qtbot, count=20)
+        win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
         monkeypatch.setattr(win.visible_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))

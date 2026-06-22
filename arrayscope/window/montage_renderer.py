@@ -57,6 +57,7 @@ from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     montage_session_key,
     montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
+    prioritize_montage_tiles,
 )
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.display.planning import LevelSourceRank, fallback_level_source, normalize_bounds
@@ -108,6 +109,7 @@ class MontageRenderMixin:
             if getattr(self.img_view, "image", None) is not None
             else None
         )
+        priority_focus = _montage_priority_focus(self, current_range)
         capabilities = image_view_backend_capabilities(self.img_view)
         return MontageViewportPlan(
             axis=int(axis),
@@ -118,6 +120,7 @@ class MontageRenderMixin:
             view_range=current_range,
             shader_display=bool(capabilities.shader_windowing),
             persistent_tile_residency=bool(capabilities.persistent_tile_residency),
+            priority_focus=priority_focus,
         )
 
     def update_montage_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
@@ -166,7 +169,8 @@ class MontageRenderMixin:
         canvas_rect = montage_rect_for_viewport(plan, view_range=current_range, viewport_shape=viewport_shape)
         display_tiles = viewport_plan.candidate_tiles(margin_tiles=0)
         candidate_tiles = viewport_plan.candidate_tiles(
-            margin_tiles=1 if viewport_plan.persistent_tile_residency else 0
+            margin_tiles=1 if viewport_plan.persistent_tile_residency else 0,
+            prioritize=True,
         )
         shader_display = viewport_plan.shader_display
         output_dtype = np.uint8 if view_state.channel == ChannelMode.COMPLEX and not shader_display else getattr(document.base_data, "dtype", np.dtype(float))
@@ -441,6 +445,7 @@ class MontageRenderMixin:
             coverage_margin_tiles=1,
             near_margin_tiles=2,
         )
+        additions = viewport_plan.prioritize_tiles(additions)
         self._prune_stale_montage_tile_work(session)
         if not additions:
             if presentation_changed:
@@ -482,6 +487,7 @@ class MontageRenderMixin:
             self._finish_montage_session_if_complete(session)
             schedule_near_viewport_montage_prefetch(self, session)
             return True
+        missing_tiles = viewport_plan.prioritize_tiles(missing_tiles)
 
         if _viewport_interaction_active(self):
             queued = {int(tile.montage_index) for tile in session.pending_tiles}
@@ -880,7 +886,11 @@ class MontageRenderMixin:
         session.active_stage_requests.discard(key)
         session.attached_stage_requests.discard(key)
         session.stage_values[key] = value
-        waiting = list(session.stage_waiting_tiles.pop(key, ()))
+        waiting = prioritize_montage_tiles(
+            session.stage_waiting_tiles.pop(key, ()),
+            view_range=getattr(session, "view_range", None),
+            focus=_montage_priority_focus(self, getattr(session, "view_range", None)),
+        )
         for tile in waiting:
             index = int(tile.montage_index)
             if index not in session.rendered_tiles and index not in session.skipped_tiles:
@@ -918,7 +928,11 @@ class MontageRenderMixin:
     def _release_stage_waiting_tiles_to_direct(self, session, key) -> None:
         session.active_stage_requests.discard(key)
         session.attached_stage_requests.discard(key)
-        waiting = list(session.stage_waiting_tiles.pop(key, ()))
+        waiting = prioritize_montage_tiles(
+            session.stage_waiting_tiles.pop(key, ()),
+            view_range=getattr(session, "view_range", None),
+            focus=_montage_priority_focus(self, getattr(session, "view_range", None)),
+        )
         for tile in waiting:
             index = int(tile.montage_index)
             session.tile_stage_keys.pop(index, None)
@@ -1706,6 +1720,7 @@ class MontageRenderMixin:
     def _classify_canvas_tiles(self, session) -> None:
         rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
         pending = {int(tile.montage_index) for tile in session.pending_tiles}
+        newly_pending = []
         for tile in session.plan.tiles:
             index = int(tile.montage_index)
             intersects = tile.x0 < rect[2] and tile.x0 + tile.width > rect[0] and tile.y0 < rect[3] and tile.y0 + tile.height > rect[1]
@@ -1716,8 +1731,15 @@ class MontageRenderMixin:
             if index in pending:
                 session.mark_loading(tile)
             else:
-                session.pending_tiles.append(tile)
-                session.mark_loading(tile)
+                newly_pending.append(tile)
+                pending.add(index)
+        for tile in prioritize_montage_tiles(
+            newly_pending,
+            view_range=((rect[0], rect[2]), (rect[1], rect[3])),
+            focus=_montage_priority_focus(self, session.view_range),
+        ):
+            session.pending_tiles.append(tile)
+            session.mark_loading(tile)
 
     def _update_montage_tile_overlays(self, canvas) -> None:
         self._update_montage_tile_overlays_for_plan(
@@ -2038,6 +2060,35 @@ def _viewport_gesture_active() -> bool:
         return bool(buttons & Qt.QtCore.Qt.MouseButton.LeftButton)
     except Exception:
         return False
+
+
+def _montage_priority_focus(window, view_range) -> tuple[float, float] | None:
+    """Return the user-attention point for scheduling visible montage tiles."""
+
+    pos = getattr(window, "_last_image_mouse_scene_pos", None)
+    if pos is not None:
+        try:
+            graphics_view = window.img_view.graphicsView
+            viewport_point = graphics_view.mapFromScene(pos)
+            if not graphics_view.viewport().rect().contains(viewport_point):
+                raise ValueError("stored hover point is outside the image viewport")
+            point = window.img_view.getView().mapSceneToView(pos)
+            x = float(point.x())
+            y = float(point.y())
+            geometry = getattr(window, "display_geometry", None)
+            status = None if geometry is None else geometry.view_point_to_tile_point(x, y, require_loaded=False)
+            if status is not None and status.kind not in {"outside", "gap"}:
+                return (x, y)
+        except Exception:
+            pass
+    try:
+        x_range, y_range = view_range
+        return (
+            (float(x_range[0]) + float(x_range[1])) * 0.5,
+            (float(y_range[0]) + float(y_range[1])) * 0.5,
+        )
+    except Exception:
+        return None
 
 
 def _interactive_active(window) -> bool:

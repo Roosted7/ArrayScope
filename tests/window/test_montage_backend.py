@@ -345,8 +345,11 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_chunking(q
 
     assert win._try_update_montage_viewport_only() is True
 
-    assert win.resolved_batches == [tuple(range(10))]
-    assert [int(tile.montage_index) for tile in session.pending_tiles] == list(range(10))
+    assert len(win.resolved_batches) == 1
+    assert set(win.resolved_batches[0]) == set(range(10))
+    pending = [int(tile.montage_index) for tile in session.pending_tiles]
+    assert set(pending) == set(range(10))
+    assert pending[0] in {4, 5}
     assert session.loading_tiles == set()
     assert win.tile_schedules == 0
     assert win._montage_viewport_update_pending is True
