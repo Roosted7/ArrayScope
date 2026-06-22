@@ -1,57 +1,117 @@
-name: Cross-platform screenshot test
+name: CI
 
 on:
   push:
   pull_request:
 
 jobs:
-  screenshot:
+  linux-tests:
+    name: Linux tests Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYQTGRAPH_QT_LIB: PySide6
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libgl1 libegl1
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,vispy]"
+      - name: Run tests
+        run: pytest -q
+
+  strict-ui:
+    name: Strict UI tests
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYQTGRAPH_QT_LIB: PySide6
+      ARRAYSCOPE_STRICT_UI: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libgl1 libegl1
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,vispy]"
+      - name: Run strict UI tests
+        run: pytest tests/ui -q
+
+  screenshots:
+    name: Screenshot smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.12', '3.13', '3.14']
-
-    runs-on: ${{ matrix.os }}
-
+    env:
+      PYQTGRAPH_QT_LIB: PySide6
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
-
+          python-version: "3.12"
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y libgl1 libegl1
-
-      - name: Install arrayscope
-        run: pip install -e ".[dev]"
-
-      - name: Run unit tests
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,vispy]"
+      - name: Run screenshot smoke tests
         env:
-          QT_QPA_PLATFORM: offscreen
-          PYQTGRAPH_QT_LIB: PySide6
-        run: pytest -q
-
-      - name: Run screenshot test (Linux)
-        if: runner.os == 'Linux'
-        env:
-          QT_QPA_PLATFORM: offscreen
-          PYQTGRAPH_QT_LIB: PySide6
+          QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
         run: pytest tests/ui/test_qt_smoke_artifacts.py -q
-
-      - name: Run screenshot test (macOS / Windows)
-        if: runner.os != 'Linux'
-        env:
-          PYQTGRAPH_QT_LIB: PySide6
-        run: pytest tests/ui/test_qt_smoke_artifacts.py -q
-
       - name: Upload screenshots
         uses: actions/upload-artifact@v4
         with:
-          name: screenshots-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: screenshots-${{ matrix.os }}
           path: tests/artifacts/*.png
           if-no-files-found: error
+
+  package:
+    name: Build and install wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+      - name: Build package
+        run: python -m build
+      - name: Check package
+        run: python -m twine check dist/*
+      - name: Install wheel and verify versions
+        run: |
+          python -m pip install dist/*.whl
+          python - <<'PY'
+          from importlib.metadata import version
+          import arrayscope
+
+          metadata_version = version("ArrayScope")
+          runtime_version = arrayscope.__version__
+          assert runtime_version == metadata_version, (runtime_version, metadata_version)
+          PY
