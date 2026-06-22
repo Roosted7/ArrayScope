@@ -174,10 +174,12 @@ jobs:
         env:
           QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
         run: |
+          set -o pipefail
           mkdir -p tests/artifacts
           python -m arrayscope.display.rendering_benchmarks \
             --runs 1 \
-            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-${{ matrix.os }}.jsonl
+            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-${{ matrix.os }}.jsonl \
+            2>&1 | tee tests/artifacts/v0.8.0-rendering-benchmark-${{ matrix.os }}.log
       - name: Run platform display/window tests
         id: platform-tests
         continue-on-error: true
@@ -192,7 +194,35 @@ jobs:
           path: |
             tests/artifacts/*.png
             tests/artifacts/*.jsonl
+            tests/artifacts/*.log
           if-no-files-found: warn
+      - name: Summarize platform artifacts
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Platform validation artifacts (${{ matrix.os }})"
+            echo
+            echo "Download \`platform-artifacts-${{ matrix.os }}\` from this run's Artifacts section."
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Outcomes:"
+            echo "- Screenshots: ${{ steps.screenshots.outcome }}"
+            echo "- Rendering benchmark: ${{ steps.benchmarks.outcome }}"
+            echo "- Display/window tests: ${{ steps.platform-tests.outcome }}"
+            echo
+            echo "Files:"
+            if [ -d tests/artifacts ]; then
+              find tests/artifacts -maxdepth 1 -type f | sort | sed 's#^#- `#; s#$#`#'
+            else
+              echo "- No platform artifact directory was created."
+            fi
+            benchmark_log="tests/artifacts/v0.8.0-rendering-benchmark-${{ matrix.os }}.log"
+            if [ -f "$benchmark_log" ] && grep -Eiq "OpenGL|no OpenGL context|WARNING|ERROR" "$benchmark_log"; then
+              echo
+              echo "Benchmark log contains OpenGL/runtime warnings; inspect the log before treating this run as hardware performance evidence."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Check platform validation results
         if: always()
         shell: bash
