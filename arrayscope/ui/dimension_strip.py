@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import pyqtgraph.Qt as Qt
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from arrayscope.core.slice_selection import (
+    parse_slice_selection,
+    selection_text_is_allowed,
+    shift_slice_selection_text,
+)
 from arrayscope.ui.icons import set_button_icon
+
+
+class _SliceSelectionValidator(QtGui.QValidator):
+    def validate(self, text, pos):
+        state = self.State.Acceptable if selection_text_is_allowed(text) else self.State.Invalid
+        return state, text, pos
 
 
 class SliceIndexEdit(QtWidgets.QAbstractSpinBox):
@@ -14,6 +25,7 @@ class SliceIndexEdit(QtWidgets.QAbstractSpinBox):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.PlusMinus)
+        self.lineEdit().setValidator(_SliceSelectionValidator(self))
 
     def text(self):
         return self.lineEdit().text()
@@ -109,13 +121,13 @@ class DimensionChip(QtWidgets.QFrame):
         self.p_button.setChecked(is_p)
         set_button_icon(self.y_button, "arrow_downward" if is_y and view_state.axis_flipped[self.axis] else "arrow_upward")
         set_button_icon(self.x_button, "arrow_forward" if is_x and view_state.axis_flipped[self.axis] else "arrow_back")
-        tiled_tooltip = "Tiled dimension cannot also be image X/Y. Clear the range first."
+        tiled_tooltip = "Use this range as an image-axis crop"
         self.y_button.setToolTip(tiled_tooltip if is_m else ("Flip Y direction" if is_y else f"Use dim {self.axis} as image Y axis"))
         self.x_button.setToolTip(tiled_tooltip if is_m else ("Flip X direction" if is_x else f"Use dim {self.axis} as image X axis"))
         self.p_button.setToolTip(f"Toggle dim {self.axis} as profile axis")
         is_display_axis = self.axis in image_axes or is_m
         is_singleton = size == 1
-        can_use_as_image = not is_singleton and not is_m and view_state.image_axes is not None
+        can_use_as_image = not is_singleton and view_state.image_axes is not None
         self.y_button.setEnabled(can_use_as_image)
         self.x_button.setEnabled(can_use_as_image)
         self.p_button.setEnabled(not is_singleton)
@@ -134,7 +146,10 @@ class DimensionChip(QtWidgets.QFrame):
                 self.slice_edit.setText(str(view_state.slice_indices[self.axis]))
             self.slice_edit.setEnabled(not is_singleton)
             self.slice_edit.setVisible(True)
-            self.slice_edit.setToolTip("Slice index or range, e.g. ':' or '0:2:100'")
+            self.slice_edit.setToolTip(
+                "Slice index or range. Python default: 0:100:2. "
+                "MATLAB fallback: 0:2:100. Lists: 0 5 8. Repair: 0-100 -> 0:100."
+            )
         finally:
             self.slice_edit.blockSignals(False)
 
@@ -150,18 +165,23 @@ class DimensionChip(QtWidgets.QFrame):
 
     def _slice_edit_stepped(self, delta):
         text = self.slice_edit.text().strip()
-        if ":" in text:
-            shifted = _shift_slice_text(text, delta, self._axis_size)
-            self.slice_edit.setText(shifted)
-            self.sliceTextChanged.emit(self.axis, shifted)
-            return
         try:
-            value = int(text)
+            shifted = _shift_slice_text(text, delta, self._axis_size)
         except ValueError:
-            value = 0
-        value = max(0, min(self._axis_size - 1, value + int(delta)))
-        self.slice_edit.setText(str(value))
-        self.sliceChanged.emit(self.axis, value)
+            try:
+                value = int(text)
+            except ValueError:
+                value = 0
+            value = max(0, min(self._axis_size - 1, value + int(delta)))
+            self.slice_edit.setText(str(value))
+            self.sliceChanged.emit(self.axis, value)
+            return
+        selection = parse_slice_selection(shifted, self._axis_size)
+        self.slice_edit.setText(shifted)
+        if selection.kind == "scalar":
+            self.sliceChanged.emit(self.axis, selection.indices[0])
+        else:
+            self.sliceTextChanged.emit(self.axis, shifted)
 
     def focusInEvent(self, event):
         self.focused.emit(self.axis)
@@ -269,26 +289,4 @@ class DimensionStrip(QtWidgets.QWidget):
 
 
 def _shift_slice_text(text, delta, axis_size):
-    parts = str(text).split(":")
-    while len(parts) < 3:
-        parts.append("")
-    start_text, step_text, stop_text = parts[:3]
-    try:
-        step = int(step_text) if step_text else 1
-    except ValueError:
-        step = 1
-    shift = int(delta) * (abs(step) if step != 0 else 1)
-
-    def shifted(value_text):
-        if value_text == "":
-            return ""
-        try:
-            return str(max(0, min(int(axis_size), int(value_text) + shift)))
-        except ValueError:
-            return value_text
-
-    start = shifted(start_text)
-    stop = shifted(stop_text)
-    if step_text:
-        return f"{start}:{step_text}:{stop}"
-    return f"{start}:{stop}"
+    return shift_slice_selection_text(text, delta, axis_size)

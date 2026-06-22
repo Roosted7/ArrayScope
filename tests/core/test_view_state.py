@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).parents[2]
 PACKAGE = types.ModuleType("arrayscope")
 PACKAGE.__path__ = [str(ROOT / "arrayscope")]
+PACKAGE.__version__ = "0.0.1"
 sys.modules.setdefault("arrayscope", PACKAGE)
 
 VIEW_STATE_PATH = ROOT / "arrayscope" / "core" / "view_state.py"
@@ -29,7 +30,7 @@ def test_from_shape_1d_uses_line_axis_only():
     assert state.shape == (5,)
     assert state.image_axes is None
     assert state.line_axis == 0
-    assert state.slice_indices == (0,)
+    assert state.slice_indices == (2,)
     assert state.display_axes() == (0,)
     assert state.non_display_axes() == ()
 
@@ -56,7 +57,7 @@ def test_singleton_dimensions_keep_current_viewer_fallback():
 
     assert state.image_axes == (0, 1)
     assert state.line_axis == 1
-    assert state.slice_indices == (0, 0, 0)
+    assert state.slice_indices == (0, 2, 0)
 
 
 def test_with_slice_returns_new_valid_state():
@@ -64,8 +65,8 @@ def test_with_slice_returns_new_valid_state():
     updated = state.with_slice(2, 4)
 
     assert updated is not state
-    assert state.slice_indices == (0, 0, 0)
-    assert updated.slice_indices == (0, 0, 4)
+    assert state.slice_indices == (1, 2, 2)
+    assert updated.slice_indices == (1, 2, 4)
 
 
 def test_invalid_axes_are_rejected():
@@ -186,6 +187,18 @@ def test_with_image_axis_keeps_axes_distinct():
 
     assert moved_y.image_axes == (1, 0)
     assert moved_x.image_axes == (1, 0)
+
+
+def test_with_image_axis_swaps_existing_other_role_without_using_montage_axis():
+    state = ViewState.from_shape((3, 4, 5)).with_image_axes(1, 2).with_montage_axis(0, indices=(0, 1), text=":")
+
+    moved_y = state.with_image_axis("y", 2)
+    moved_x = moved_y.with_image_axis("x", 2)
+
+    assert moved_y.image_axes == (2, 1)
+    assert moved_y.montage_axis == 0
+    assert moved_x.image_axes == (1, 2)
+    assert moved_x.montage_axis == 0
 
 
 def test_transposed_image_axes_swaps_axes_without_touching_flags():

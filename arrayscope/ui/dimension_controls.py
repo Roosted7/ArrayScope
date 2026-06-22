@@ -6,10 +6,12 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui
 
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.core.slice_selection import center_index
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.model.frame import CanvasValueSource
 from arrayscope.ui.icons import clear_label_icon, set_label_icon
 from arrayscope.ui.shortcuts import colormap_name_for_key
+from arrayscope.ui.toasts import show_status_message
 
 
 class DimensionControlMixin:
@@ -217,20 +219,35 @@ class DimensionControlMixin:
         elif role in ("y", "x"):
             if self.view_state.image_axes is None:
                 return
-            if self.view_state.montage_axis == int(axis):
-                self.statusBar().showMessage("Clear the tiled range before using this dimension as image X/Y", 2500)
-                return
+            axis = int(axis)
             role_index = 0 if role == "y" else 1
-            if self.view_state.image_axes[role_index] == int(axis):
+            if self.view_state.image_axes[role_index] == axis:
                 self._set_view_state(self.view_state.with_axis_flipped(axis, not self._axis_flipped(axis)))
                 self.update_flip_icons()
                 if hasattr(self, "dimension_strip"):
                     self.dimension_strip.update_axis_state(axis, self.data.shape, self.view_state, self.profile_axes)
                 self.apply_axis_flips()
                 return
-            self._set_view_state(self.view_state.with_image_axis(role, axis))
-            if self.view_state.montage_axis in self.view_state.image_axes:
-                self._set_view_state(self.view_state.with_montage_axis(None))
+            previous = self.view_state
+            state = previous
+            if previous.montage_axis == axis:
+                state = state.with_montage_axis(None)
+                if previous.montage_indices:
+                    state = state.with_axis_range(axis, indices=previous.montage_indices, text=previous.montage_text)
+            state = state.with_image_axis(role, axis)
+            new_image_axes = set(state.image_axes or ())
+            demoted_axes = tuple(old_axis for old_axis in tuple(previous.image_axes or ()) if old_axis not in new_image_axes)
+            for demoted_axis in demoted_axes:
+                range_indices = previous.axis_range_indices[demoted_axis]
+                range_text = previous.axis_range_text[demoted_axis]
+                state = state.with_axis_range(demoted_axis, None)
+                if range_indices is not None and state.montage_axis is None:
+                    state = state.with_montage_axis(demoted_axis, indices=range_indices, text=range_text)
+                else:
+                    state = state.with_slice(demoted_axis, center_index(self.data.shape[demoted_axis]))
+                    if range_indices is not None:
+                        show_status_message(self, "Could not preserve the previous image-axis crop as a montage.", timeout=2000)
+            self._set_view_state(state)
         elif role == "m":
             if self.view_state.image_axes is None or int(axis) in self.view_state.image_axes:
                 return

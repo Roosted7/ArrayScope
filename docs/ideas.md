@@ -111,8 +111,8 @@ Rules:
 * Clarify FFT naming: current centered FFT/IFFT follow viewer convention but may surprise users expecting NumPy direction.
 * Add public data-mutation ergonomics beyond `notify_data_changed()`, such as context managers or observable data sources.
 * Consider a debug overlay showing the current `DisplayGeometry` mapping under the cursor when strict UI mode is enabled.
-* Consider a deliberate migration from current `start:step:stop` range text to Python `start:stop:step`
-  syntax with a compatibility warning or explicit preference.
+* Watch user feedback on Python-default slice text with MATLAB-style fallback, especially for
+  ambiguous three-part ranges.
 * Add a priority scheduler for visible rendering, profile, ROI, hover, and prefetch work before
   reintroducing operation-backed predictive prefetch.
 * Reintroduce physical FOV/aspect controls only after axis spacing/unit metadata is available.
