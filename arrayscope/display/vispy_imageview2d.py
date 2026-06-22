@@ -308,6 +308,7 @@ class VisPyImageView2D(ImageView2D):
         viewport_policy=ViewportPolicy.PRESERVE,
         rgb_already_windowed: bool = False,
         image_origin: tuple[float, float] = (0.0, 0.0),
+        viewport_content_rect=None,
         shader_mapping=None,
         texture_kind=None,
         semantic_data: np.ndarray | None = None,
@@ -344,7 +345,12 @@ class VisPyImageView2D(ImageView2D):
             self._update_profile_line_bounds()
             self._updateAspectRatio()
             self._sync_vispy_bounds(tuple(img.shape[:2]), image_origin=image_origin)
-            self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy, image_origin=image_origin)
+            self._apply_viewport_policy(
+                tuple(img.shape[:2]),
+                viewport_policy,
+                image_origin=image_origin,
+                content_rect=viewport_content_rect,
+            )
             self._sync_vispy_camera_to_view()
         finally:
             self._applying_presentation = applying
@@ -360,6 +366,7 @@ class VisPyImageView2D(ImageView2D):
         histogramRange: tuple[float, float] | None = None,
         rgb_already_windowed: bool = False,
         image_origin: tuple[float, float] = (0.0, 0.0),
+        viewport_content_rect=None,
         shader_mapping=None,
         texture_kind=None,
         semantic_data: np.ndarray | None = None,
@@ -397,6 +404,11 @@ class VisPyImageView2D(ImageView2D):
                 self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
             self._update_profile_line_bounds()
             self._sync_vispy_bounds(tuple(img.shape[:2]), image_origin=image_origin)
+            self._refresh_viewport_content_rect(
+                tuple(img.shape[:2]),
+                viewport_content_rect,
+                image_origin=image_origin,
+            )
             self._sync_vispy_camera_to_view()
         finally:
             self._applying_presentation = applying
@@ -1441,6 +1453,7 @@ class VisPyImageView2D(ImageView2D):
                 )
             finally:
                 self._viewport_applying = False
+            self._enforce_viewport_constraints()
             self._sync_vispy_camera_to_view()
 
     def resizeEvent(self, event):

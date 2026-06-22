@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from enum import Enum
 from dataclasses import dataclass
+import math
+
+
+MIN_VIEWPORT_CONTENT_FRACTION = 0.05
 
 
 class ViewportPolicy(Enum):
@@ -139,6 +143,103 @@ def _fit(view_box, *, display_rect=None):
         return
     x0, y0, x1, y1 = display_rect
     view_box.setRange(xRange=(float(x0), float(x1)), yRange=(float(y0), float(y1)), padding=0)
+
+
+def constrain_view_range(
+    view_range,
+    content_rect,
+    *,
+    previous_view_range=None,
+    min_visible_fraction: float = MIN_VIEWPORT_CONTENT_FRACTION,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return a view range constrained to keep content recoverable.
+
+    The constraint is intentionally simple and per-axis: the content must span
+    at least ``min_visible_fraction`` of the viewport after zoom-out, and at
+    least that fraction of the smaller of content/view spans must overlap after
+    panning.
+    """
+
+    x_range, y_range = view_range
+    x0, y0, x1, y1 = content_rect
+    fraction = max(1e-9, min(1.0, float(min_visible_fraction)))
+    return (
+        _constrain_axis_range(
+            x_range,
+            (x0, x1),
+            fraction,
+            previous_axis_range=None if previous_view_range is None else previous_view_range[0],
+        ),
+        _constrain_axis_range(
+            y_range,
+            (y0, y1),
+            fraction,
+            previous_axis_range=None if previous_view_range is None else previous_view_range[1],
+        ),
+    )
+
+
+def _constrain_axis_range(
+    view_axis_range,
+    content_axis_range,
+    min_visible_fraction: float,
+    *,
+    previous_axis_range=None,
+) -> tuple[float, float]:
+    start = float(view_axis_range[0])
+    end = float(view_axis_range[1])
+    content_start, content_end = sorted((float(content_axis_range[0]), float(content_axis_range[1])))
+    content_span = content_end - content_start
+    if content_span <= 0.0 or not _finite_values(start, end, content_start, content_end):
+        return (start, end)
+
+    direction = 1.0 if end >= start else -1.0
+    view_start, view_end = sorted((start, end))
+    span = view_end - view_start
+    if span <= 0.0:
+        span = content_span * min_visible_fraction
+        center = (view_start + view_end) * 0.5
+        view_start = center - span * 0.5
+        view_end = center + span * 0.5
+
+    max_span = content_span / min_visible_fraction
+    if span > max_span:
+        span = max_span
+        center = _range_center(previous_axis_range)
+        if center is None:
+            center = (view_start + view_end) * 0.5
+        view_start = center - span * 0.5
+        view_end = center + span * 0.5
+        if direction < 0:
+            return (view_end, view_start)
+        return (view_start, view_end)
+
+    required_overlap = min_visible_fraction * min(content_span, span)
+    min_view_start = content_start + required_overlap - span
+    max_view_start = content_end - required_overlap
+    constrained_start = min(max(view_start, min_view_start), max_view_start)
+    constrained_end = constrained_start + span
+
+    if direction < 0:
+        return (constrained_end, constrained_start)
+    return (constrained_start, constrained_end)
+
+
+def _finite_values(*values: float) -> bool:
+    return all(math.isfinite(value) for value in values)
+
+
+def _range_center(axis_range) -> float | None:
+    if axis_range is None:
+        return None
+    try:
+        start = float(axis_range[0])
+        end = float(axis_range[1])
+    except Exception:
+        return None
+    if not _finite_values(start, end):
+        return None
+    return (start + end) * 0.5
 
 
 def _set_one_to_one(view_box, image_shape, viewport_size, *, display_rect=None):

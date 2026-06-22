@@ -48,7 +48,14 @@ from arrayscope.display.roi_items import (
     geometry_from_item,
     item_for_roi,
 )
-from arrayscope.display.viewport import ViewportController, ViewportIntent, ViewportPolicy, coerce_viewport_policy
+from arrayscope.display.viewport import (
+    MIN_VIEWPORT_CONTENT_FRACTION,
+    ViewportController,
+    ViewportIntent,
+    ViewportPolicy,
+    coerce_viewport_policy,
+    constrain_view_range,
+)
 
 if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
@@ -131,6 +138,8 @@ class ImageView2D(QtWidgets.QWidget):
         self._freehand_spacing = 1.0
         self.viewport_controller = ViewportController()
         self._viewport_applying = False
+        self._viewport_constraining = False
+        self._last_accepted_view_range = None
         self._fit_mode_reminder_last_ms = 0.0
         self._display_colormap = None
         self._display_colormap_lut = default_gray_lut()
@@ -535,7 +544,16 @@ class ImageView2D(QtWidgets.QWidget):
             self._update_profile_line_bounds()
             self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
             self._updateAspectRatio()
-            self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy, image_origin=(geometry.montage_origin_x, geometry.montage_origin_y))
+            self._apply_viewport_policy(
+                tuple(img.shape[:2]),
+                viewport_policy,
+                image_origin=(geometry.montage_origin_x, geometry.montage_origin_y),
+                content_rect=_viewport_rect_for_geometry(
+                    geometry,
+                    img.shape[:2],
+                    (geometry.montage_origin_x, geometry.montage_origin_y),
+                ),
+            )
             return stats
         finally:
             self._applying_presentation = applying
@@ -656,11 +674,12 @@ class ImageView2D(QtWidgets.QWidget):
             )
         return TileLayerUpdateStats()
         
-    def setImage(self, img, autoRange=None, autoLevels=True, levels=None, 
+    def setImage(self, img, autoRange=None, autoLevels=True, levels=None,
                  pos=None, scale=None, transform=None, autoHistogramRange=True,
                  histogramData=None, histogramPlotData=None, viewport_policy=ViewportPolicy.PRESERVE,
                  rgb_already_windowed: bool = False, image_origin: tuple[float, float] = (0.0, 0.0),
-                 shader_mapping=None, texture_kind=None, semantic_data: np.ndarray | None = None, lod=None):
+                 viewport_content_rect=None, shader_mapping=None, texture_kind=None,
+                 semantic_data: np.ndarray | None = None, lod=None):
         """
         Set the image to be displayed.
         
@@ -752,7 +771,12 @@ class ImageView2D(QtWidgets.QWidget):
             # Update aspect ratio based on display mode
             self._updateAspectRatio()
 
-            self._apply_viewport_policy(tuple(img.shape[:2]), viewport_policy, image_origin=image_origin)
+            self._apply_viewport_policy(
+                tuple(img.shape[:2]),
+                viewport_policy,
+                image_origin=image_origin,
+                content_rect=viewport_content_rect,
+            )
         finally:
             self._finish_upload_timing()
 
@@ -767,6 +791,7 @@ class ImageView2D(QtWidgets.QWidget):
         viewport_policy=ViewportPolicy.PRESERVE,
         rgb_already_windowed: bool = False,
         image_origin: tuple[float, float] = (0.0, 0.0),
+        geometry=None,
         shader_mapping=None,
         texture_kind=None,
         semantic_data: np.ndarray | None = None,
@@ -783,6 +808,7 @@ class ImageView2D(QtWidgets.QWidget):
             viewport_policy=viewport_policy,
             rgb_already_windowed=rgb_already_windowed,
             image_origin=image_origin,
+            viewport_content_rect=_viewport_rect_for_geometry(geometry, img.shape[:2], image_origin),
             shader_mapping=shader_mapping,
             texture_kind=texture_kind,
             semantic_data=semantic_data,
@@ -801,6 +827,7 @@ class ImageView2D(QtWidgets.QWidget):
         histogramRange: tuple[float, float],
         rgb_already_windowed: bool = False,
         image_origin: tuple[float, float] = (0.0, 0.0),
+        geometry=None,
         shader_mapping=None,
         texture_kind=None,
         semantic_data: np.ndarray | None = None,
@@ -815,6 +842,7 @@ class ImageView2D(QtWidgets.QWidget):
             histogramRange=histogramRange,
             rgb_already_windowed=rgb_already_windowed,
             image_origin=image_origin,
+            viewport_content_rect=_viewport_rect_for_geometry(geometry, img.shape[:2], image_origin),
             shader_mapping=shader_mapping,
             texture_kind=texture_kind,
             semantic_data=semantic_data,
@@ -831,6 +859,7 @@ class ImageView2D(QtWidgets.QWidget):
         histogramRange: tuple[float, float] | None = None,
         rgb_already_windowed: bool = False,
         image_origin: tuple[float, float] = (0.0, 0.0),
+        viewport_content_rect=None,
         shader_mapping=None,
         texture_kind=None,
         semantic_data: np.ndarray | None = None,
@@ -898,6 +927,7 @@ class ImageView2D(QtWidgets.QWidget):
             if histogramRange is not None:
                 self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
             self.imageItem.setPos(float(image_origin[0]), float(image_origin[1]))
+            self._refresh_viewport_content_rect(tuple(img.shape[:2]), viewport_content_rect, image_origin=image_origin)
             profile_start = perf_counter()
             self._update_profile_line_bounds()
             self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
@@ -1393,6 +1423,7 @@ class ImageView2D(QtWidgets.QWidget):
                 self.viewport_controller.one_to_one(self.view, self.image.shape[:2], self.graphicsView.viewport().size(), display_rect=self._current_image_viewport_rect())
             finally:
                 self._viewport_applying = False
+            self._enforce_viewport_constraints()
 
     def autoWindow(self):
         self.autoLevels()
@@ -1673,8 +1704,8 @@ class ImageView2D(QtWidgets.QWidget):
             # Fit: allow free aspect so the whole image fits inside the view box
             self.view.setAspectLocked(False)
 
-    def _apply_viewport_policy(self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0)):
-        display_rect = _viewport_rect_for_shape(image_shape, image_origin)
+    def _apply_viewport_policy(self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0), content_rect=None):
+        display_rect = _viewport_rect_for_shape(image_shape, image_origin) if content_rect is None else content_rect
         self._viewport_applying = True
         try:
             self.viewport_controller.apply_after_image(
@@ -1686,10 +1717,95 @@ class ImageView2D(QtWidgets.QWidget):
             )
         finally:
             self._viewport_applying = False
+        self._enforce_viewport_constraints()
+
+    def _refresh_viewport_content_rect(self, image_shape, content_rect=None, *, image_origin=(0.0, 0.0)) -> None:
+        if self.image is None:
+            return
+        display_rect = _viewport_rect_for_shape(image_shape, image_origin) if content_rect is None else content_rect
+        self._viewport_applying = True
+        try:
+            self.viewport_controller.apply_after_image(
+                self.view,
+                image_shape,
+                self.graphicsView.viewport().size(),
+                policy=ViewportPolicy.PRESERVE,
+                display_rect=display_rect,
+            )
+        finally:
+            self._viewport_applying = False
+        self._enforce_viewport_constraints()
+
+    def _enforce_viewport_constraints(self) -> None:
+        if self._viewport_applying or self._viewport_constraining or self.viewport_controller.is_fit_locked():
+            if not self._viewport_constraining:
+                self._remember_accepted_view_range()
+            return
+        content_rect = self.viewport_controller.last_display_rect
+        if content_rect is None:
+            return
+        try:
+            current = self.view.viewRange()
+            previous = self._last_accepted_view_range
+            constrained = constrain_view_range(current, content_rect, previous_view_range=previous)
+            constrained = self._aspect_safe_view_range(current, constrained, content_rect)
+        except Exception:
+            return
+        if _view_ranges_close(current, constrained):
+            self._remember_accepted_view_range(current)
+            return
+        self._viewport_constraining = True
+        self._viewport_applying = True
+        try:
+            self.view.setRange(xRange=constrained[0], yRange=constrained[1], padding=0)
+            self._remember_accepted_view_range()
+        finally:
+            self._viewport_applying = False
+            self._viewport_constraining = False
+
+    def _remember_accepted_view_range(self, view_range=None) -> None:
+        try:
+            view_range = self.view.viewRange() if view_range is None else view_range
+            self._last_accepted_view_range = (
+                (float(view_range[0][0]), float(view_range[0][1])),
+                (float(view_range[1][0]), float(view_range[1][1])),
+            )
+        except Exception:
+            self._last_accepted_view_range = None
+
+    def _aspect_safe_view_range(self, current, constrained, content_rect):
+        if getattr(self, "displayMode", "square_pixels") != "square_pixels":
+            return constrained
+        try:
+            current_x = abs(float(current[0][1]) - float(current[0][0]))
+            current_y = abs(float(current[1][1]) - float(current[1][0]))
+            x0, y0, x1, y1 = content_rect
+            max_x = abs(float(x1) - float(x0)) / MIN_VIEWPORT_CONTENT_FRACTION
+            max_y = abs(float(y1) - float(y0)) / MIN_VIEWPORT_CONTENT_FRACTION
+            x_range, y_range = constrained
+            x_span = abs(float(x_range[1]) - float(x_range[0]))
+            y_span = abs(float(y_range[1]) - float(y_range[0]))
+            ratio = current_x / current_y
+        except Exception:
+            return constrained
+        if current_x <= 0.0 or current_y <= 0.0 or max_x <= 0.0 or max_y <= 0.0 or ratio <= 0.0:
+            return constrained
+        x_span = min(x_span, max_x)
+        y_span = min(y_span, max_y)
+        target_ratio = x_span / y_span if y_span > 0.0 else ratio
+        if target_ratio < ratio:
+            y_span = min(y_span, x_span / ratio)
+        elif target_ratio > ratio:
+            x_span = min(x_span, y_span * ratio)
+        return (
+            _range_with_span(x_range, x_span),
+            _range_with_span(y_range, y_span),
+        )
 
     def _on_view_range_changed(self, *_args):
         if not self._viewport_applying:
             self.viewport_controller.note_user_range_changed()
+            self._enforce_viewport_constraints()
         self._sync_profile_marker_visibility()
 
     # --- Qt Events -----------------------------------------------------
@@ -1840,6 +1956,36 @@ def _viewport_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, fl
     x0 = float(origin[0])
     y0 = float(origin[1])
     return (x0, y0, x0 + float(max(1, width)), y0 + float(max(1, height)))
+
+
+def _viewport_rect_for_geometry(geometry, fallback_shape, fallback_origin=(0.0, 0.0)) -> tuple[float, float, float, float]:
+    montage = getattr(geometry, "montage", None)
+    if montage is None:
+        return _viewport_rect_for_shape(fallback_shape, fallback_origin)
+    width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(montage.gap)
+    height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(montage.gap)
+    return _viewport_rect_for_shape((height, width), (0.0, 0.0))
+
+
+def _view_ranges_close(first, second, *, atol: float = 1e-9) -> bool:
+    try:
+        return all(
+            abs(float(first[axis][edge]) - float(second[axis][edge])) <= atol
+            for axis in (0, 1)
+            for edge in (0, 1)
+        )
+    except Exception:
+        return False
+
+
+def _range_with_span(axis_range, span: float) -> tuple[float, float]:
+    start = float(axis_range[0])
+    end = float(axis_range[1])
+    center = (start + end) * 0.5
+    half = max(0.0, float(span)) * 0.5
+    if end < start:
+        return (center + half, center - half)
+    return (center - half, center + half)
 
 
 def _array_content_key(array: np.ndarray) -> tuple[object, ...]:
