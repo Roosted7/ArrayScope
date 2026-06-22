@@ -11,6 +11,11 @@ Fit is a checkable locked viewport mode. When enabled, pan and zoom are disabled
 aspect lock is released, resizes refit, and new image commits refit. 1:1 remains a momentary command
 that unchecks Fit and restores square-pixel interaction.
 
+Outside Fit mode, pan and zoom stay bounded enough that the current image or montage remains recoverable:
+zoom-out is capped so content occupies at least 5% of each viewport axis, and panning must leave at
+least 5% per-axis overlap. Montage constraints use full montage world bounds, not the currently
+materialized viewport canvas.
+
 ## Consequences
 
 Viewport commands remain data-free: Fit and 1:1 do not trigger array evaluation or render scheduling.

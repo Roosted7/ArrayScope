@@ -1095,6 +1095,111 @@ def test_imageview_resets_view_range_when_shape_changes(qt_app):
     view.close()
 
 
+def test_imageview_limits_zoom_out_to_recoverable_content(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        view.resize(400, 400)
+        view.setImage(np.zeros((100, 100), dtype=float))
+
+        view.getView().setRange(xRange=(-1070.0, 1330.0), yRange=(-850.0, 950.0), padding=0)
+        x_range, y_range = view.getView().viewRange()
+
+        assert x_range[1] - x_range[0] <= 2000.0 + 1e-6
+        assert y_range[1] - y_range[0] <= 2000.0 + 1e-6
+        assert (x_range[0] + x_range[1]) * 0.5 == pytest.approx(50.0)
+        assert (y_range[0] + y_range[1]) * 0.5 == pytest.approx(50.0)
+    finally:
+        view.close()
+
+
+def test_imageview_rejects_extra_zoom_out_at_limit_without_panning(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        view.resize(400, 400)
+        view.setImage(np.zeros((100, 100), dtype=float))
+        view.getView().setRange(xRange=(-870.0, 1130.0), yRange=(-950.0, 1050.0), padding=0)
+        before = view.getView().viewRange()
+
+        view.getView().setRange(xRange=(-2000.0, 4000.0), yRange=(-2200.0, 3800.0), padding=0)
+        after = view.getView().viewRange()
+
+        assert after[0] == pytest.approx(before[0])
+        assert after[1] == pytest.approx(before[1])
+    finally:
+        view.close()
+
+
+def test_imageview_prevents_panning_content_fully_out_of_view(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        view.resize(400, 400)
+        view.setImage(np.zeros((100, 100), dtype=float))
+
+        view.getView().setRange(xRange=(200.0, 300.0), yRange=(10.0, 110.0), padding=0)
+        x_range, y_range = view.getView().viewRange()
+
+        assert _axis_overlap(x_range, (0.0, 100.0)) >= 5.0 - 1e-6
+        assert y_range == pytest.approx((10.0, 110.0))
+    finally:
+        view.close()
+
+
+def test_imageview_prevents_vertical_panning_content_fully_out_of_view(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        view.resize(400, 400)
+        view.setImage(np.zeros((100, 100), dtype=float))
+
+        view.getView().setRange(xRange=(10.0, 110.0), yRange=(200.0, 300.0), padding=0)
+        x_range, y_range = view.getView().viewRange()
+
+        assert x_range[0] < 100.0
+        assert _axis_overlap(y_range, (0.0, 100.0)) >= 5.0 - 1e-6
+    finally:
+        view.close()
+
+
+def test_imageview_montage_constraints_use_full_world_not_canvas_patch(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=1),
+        montage_origin_x=0,
+        montage_origin_y=3,
+    )
+    try:
+        view.resize(400, 400)
+        view.setImagePresentation(
+            np.zeros((2, 5), dtype=float),
+            histogramData=np.zeros((2, 5), dtype=float),
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            image_origin=(geometry.montage_origin_x, geometry.montage_origin_y),
+            geometry=geometry,
+        )
+
+        view.getView().setRange(xRange=(0.0, 5.0), yRange=(-20.0, -15.0), padding=0)
+        _x_range, y_range = view.getView().viewRange()
+
+        assert y_range[0] == pytest.approx(-4.75)
+        assert y_range[1] == pytest.approx(0.25)
+    finally:
+        view.close()
+
+
 def test_programmatic_presentation_does_not_emit_user_level_signal(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
@@ -1154,6 +1259,12 @@ def test_histogram_drag_preview_emits_user_level_once_on_finish(qt_app):
     assert user_calls == [True]
     assert tuple(float(value) for value in view.getLevels()) == (0.2, 0.8)
     view.close()
+
+
+def _axis_overlap(view_range, content_range) -> float:
+    view_start, view_end = sorted((float(view_range[0]), float(view_range[1])))
+    content_start, content_end = sorted((float(content_range[0]), float(content_range[1])))
+    return max(0.0, min(view_end, content_end) - max(view_start, content_start))
 
 
 def test_full_presentation_accepts_display_ready_rgb(qt_app):

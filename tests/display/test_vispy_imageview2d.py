@@ -960,6 +960,41 @@ def test_vispy_direct_tiled_fit_syncs_camera_immediately(qt_app):
         view.close()
 
 
+def test_vispy_constraints_use_full_montage_world_for_shifted_raster(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=1),
+        montage_origin_x=0,
+        montage_origin_y=3,
+    )
+    view = VisPyImageView2D()
+    try:
+        view.resize(360, 240)
+        view.show()
+        view.setImagePresentation(
+            np.zeros((2, 5), dtype=np.float32),
+            histogramData=np.zeros((2, 5), dtype=np.float32),
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            image_origin=(geometry.montage_origin_x, geometry.montage_origin_y),
+            geometry=geometry,
+        )
+
+        view.getView().setRange(xRange=(0.0, 5.0), yRange=(-20.0, -15.0), padding=0)
+        qt_app.processEvents()
+        _x_range, y_range = view.getView().viewRange()
+
+        assert y_range == pytest.approx([-4.75, 0.25])
+        assert view._vispy_camera_key[1] == pytest.approx((-4.75, 0.25))
+    finally:
+        view.close()
+
+
 def test_vispy_first_class_tiled_new_semantic_state_reuses_resident_textures(qt_app):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState

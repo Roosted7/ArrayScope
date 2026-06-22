@@ -3,11 +3,13 @@ from types import SimpleNamespace
 import pytest
 
 from arrayscope.display.viewport import (
+    MIN_VIEWPORT_CONTENT_FRACTION,
     ViewportController,
     ViewportIntent,
     ViewportMode,
     ViewportPolicy,
     coerce_viewport_policy,
+    constrain_view_range,
 )
 
 
@@ -148,3 +150,56 @@ def test_semantic_viewport_intent_survives_canonical_coercion():
     assert coerce_viewport_policy(ViewportIntent.FIT) is ViewportIntent.FIT
     assert coerce_viewport_policy("reset_for_new_shape") is ViewportPolicy.RESET_FOR_NEW_SHAPE
     assert coerce_viewport_policy("one_to_one") is ViewportIntent.ONE_TO_ONE
+
+
+def test_constrain_view_range_caps_zoom_out_to_minimum_content_fraction():
+    constrained = constrain_view_range(
+        ((-1070.0, 1330.0), (-850.0, 950.0)),
+        (0.0, 0.0, 100.0, 40.0),
+    )
+
+    assert constrained[0][1] - constrained[0][0] == pytest.approx(100.0 / MIN_VIEWPORT_CONTENT_FRACTION)
+    assert constrained[1][1] - constrained[1][0] == pytest.approx(40.0 / MIN_VIEWPORT_CONTENT_FRACTION)
+    assert (constrained[0][0] + constrained[0][1]) * 0.5 == pytest.approx(130.0)
+    assert (constrained[1][0] + constrained[1][1]) * 0.5 == pytest.approx(50.0)
+
+
+def test_constrain_view_range_uses_previous_center_when_zoom_hits_limit():
+    constrained = constrain_view_range(
+        ((-1070.0, 1330.0), (-850.0, 950.0)),
+        (0.0, 0.0, 100.0, 40.0),
+        previous_view_range=((10.0, 110.0), (-20.0, 60.0)),
+    )
+
+    assert constrained[0] == pytest.approx((-940.0, 1060.0))
+    assert constrained[1] == pytest.approx((-380.0, 420.0))
+
+
+def test_constrain_view_range_keeps_minimum_overlap_after_pan():
+    constrained = constrain_view_range(
+        ((200.0, 300.0), (10.0, 20.0)),
+        (0.0, 0.0, 100.0, 40.0),
+    )
+
+    assert constrained[0] == pytest.approx((95.0, 195.0))
+    assert constrained[1] == pytest.approx((10.0, 20.0))
+
+
+def test_constrain_view_range_clamps_axes_independently():
+    constrained = constrain_view_range(
+        ((95.0, 195.0), (100.0, 110.0)),
+        (0.0, 0.0, 100.0, 40.0),
+    )
+
+    assert constrained[0] == pytest.approx((95.0, 195.0))
+    assert constrained[1] == pytest.approx((39.5, 49.5))
+
+
+def test_constrain_view_range_allows_zoomed_in_edges():
+    constrained = constrain_view_range(
+        ((150.0, 152.0), (0.0, 2.0)),
+        (0.0, 0.0, 100.0, 40.0),
+    )
+
+    assert constrained[0] == pytest.approx((99.9, 101.9))
+    assert constrained[1] == pytest.approx((0.0, 2.0))
