@@ -397,6 +397,51 @@ class DisplayPresentationMixin:
         if applied is not None and pending == applied:
             self._pending_display_levels = None
 
+    def _apply_display_level_override(
+        self,
+        levels,
+        *,
+        histogram_range=None,
+        emit_user: bool = False,
+        source_rank=LevelSourceRank.PREVIOUS_COMMITTED,
+        semantic_key=None,
+    ) -> LevelSource | None:
+        """Apply a level override consistently to Qt, frame, and montage state."""
+
+        levels = normalize_bounds(levels)
+        if levels is None:
+            return None
+        histogram_range = normalize_bounds(histogram_range) or normalize_bounds(self.img_view.getHistogramDataBounds()) or levels
+        apply_levels = getattr(self.img_view, "_apply_display_levels", None)
+        if callable(apply_levels):
+            apply_levels(levels[0], levels[1], emit_user=bool(emit_user))
+        else:
+            self.img_view.setLevels(levels[0], levels[1])
+        frame = getattr(self, "_committed_display_frame", None)
+        if frame is not None:
+            if semantic_key is None:
+                semantic_key = frame.key.semantic_key
+            self._committed_display_frame = replace(
+                frame,
+                levels=levels,
+                histogram_range=histogram_range,
+            )
+        session = getattr(self, "_montage_session", None)
+        if semantic_key is None and session is not None:
+            semantic_key = getattr(session, "level_key", None)
+        source = LevelSource(
+            levels=levels,
+            histogram_range=histogram_range,
+            rank=source_rank,
+            source_count=0,
+            expected_count=0,
+            semantic_key=semantic_key,
+            mode=self._current_window_mode(),
+        )
+        if session is not None:
+            session.applied_level_source = source
+        return source
+
     def _on_display_levels_changed(self) -> None:
         try:
             levels = normalize_bounds(self.img_view.getLevels())

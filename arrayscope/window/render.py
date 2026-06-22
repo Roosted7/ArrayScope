@@ -10,6 +10,7 @@ from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.colormaps import named_colormap, phase_colormap
 from arrayscope.display.colormap_policy import resolved_colormap_name
+from arrayscope.display.planning import normalize_bounds
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import (
     _document_key,
@@ -19,7 +20,7 @@ from arrayscope.operations.evaluator import (
 )
 from arrayscope.operations.render_plan import choose_visible_render_decision
 from arrayscope.profiles.model import profile_y_range
-from arrayscope.ui.toasts import show_status_message
+from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.display.model.frame import CommittedDisplayFrame, TiledValueSource
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.evaluation_controller import EvalPriority
@@ -557,8 +558,35 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         self._sync_controls_from_view_state()
 
     def auto_window_levels(self):
+        previous_levels = normalize_bounds(self.img_view.getLevels())
+        auto_bounds = normalize_bounds(self.img_view.getHistogramDataBounds())
+        auto_source = self._apply_display_level_override(auto_bounds, histogram_range=auto_bounds, emit_user=False)
+        self._pending_auto_level_source = auto_source
         self._force_autolevel = True
         self.render(reason="auto-window", force_autolevel=True)
+        if getattr(self, "_pending_auto_level_source", None) is auto_source:
+            self._pending_auto_level_source = None
+        if previous_levels is not None:
+            show_revert_action(
+                self,
+                "Auto window levels applied.",
+                lambda levels=previous_levels: self._revert_auto_window_levels(levels),
+                timeout=5000,
+            )
+
+    def _revert_auto_window_levels(self, levels) -> None:
+        levels = normalize_bounds(levels)
+        if levels is None:
+            return
+        self._force_autolevel = False
+        self._pending_auto_level_source = None
+        self._queue_display_levels(levels)
+        session = getattr(self, "_montage_session", None)
+        if session is not None:
+            session.force_auto = False
+            session.user_levels_override = levels
+        self.img_view.setLevels(levels[0], levels[1])
+        self.render(reason="auto-window-revert", force_autolevel=False)
 
     def toggle_profile_dock(self):
         visible = not self.profile_dock.isVisible()

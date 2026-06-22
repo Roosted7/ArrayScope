@@ -29,6 +29,7 @@ _FALLBACK_PIXMAPS = {
     "save": QtWidgets.QStyle.StandardPixmap.SP_DialogSaveButton,
     "folder_open": QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon,
     "download": QtWidgets.QStyle.StandardPixmap.SP_ArrowDown,
+    "done": QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton,
     "undo": QtWidgets.QStyle.StandardPixmap.SP_ArrowBack,
     "refresh": QtWidgets.QStyle.StandardPixmap.SP_BrowserReload,
     "warning": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning,

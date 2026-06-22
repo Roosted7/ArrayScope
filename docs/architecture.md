@@ -110,9 +110,10 @@ source of array-view state.
   long-term shape is a shared widget/interaction shell composed with a thin pixel-rendering backend,
   as recorded in ADR 0038.
 - `arrayscope.display.histogram_controller` and `arrayscope.display.image_upload`: focused display
-  helpers for histogram preview/final level interaction, ImageItem upload preparation, and shared
-  RGB/complex windowing. Histogram level drags update display pixels as a throttled preview, while
-  `userLevelsChanged` remains the semantic final user edit signal emitted on drag finish.
+  helpers for adaptive histogram plotting, histogram preview/final level interaction, manual
+  histogram level edit popups, ImageItem upload preparation, and shared RGB/complex windowing.
+  Histogram level drags and manual edits update display pixels as previews, while
+  `userLevelsChanged` remains the semantic final user edit signal emitted on drag or edit finish.
 - `arrayscope.display.shader_mapping`: pure NumPy shader-equivalent display mapping model. VisPy
   raster and tiled paths can upload raw scalar `float32` or raw complex `complex64`/`RG32F` texture
   planes, then apply component extraction, phase LUT color, linear/log/symlog scale, and
@@ -196,9 +197,10 @@ source of array-view state.
   image orchestration, and ViewBox range events. `RenderMixin` keeps high-level interaction/status
   glue and delegates actual visible-image paths to these modules.
 - `arrayscope.ui.dimension_strip`, `arrayscope.ui.display_toolbar`, `arrayscope.ui.command_palette`,
-  `arrayscope.ui.diagnostics`, `arrayscope.ui.docks.inspection`, and `arrayscope.ui.hud`: compact
-  viewer controls, operation discovery, developer diagnostics, ROI inspection controls, and on-canvas pixel
-  feedback. They emit user intent and do not own view state.
+  `arrayscope.ui.diagnostics`, `arrayscope.ui.docks.inspection`, `arrayscope.ui.hud`, and
+  `arrayscope.ui.toasts`: compact viewer controls, operation discovery, developer diagnostics, ROI
+  inspection controls, on-canvas pixel feedback, and transient status/revert actions. They emit user
+  intent and do not own view state.
 - `arrayscope.core.view_recipe`: serializes operations, `ViewState`, and display settings for
   full-view restore. It is pure and does not contain dock geometry.
 - `arrayscope.window.main.ArrayScopeWindow`: wires Qt signals to state changes, then either calls

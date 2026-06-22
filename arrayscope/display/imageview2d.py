@@ -27,7 +27,7 @@ from arrayscope.core.roi import (
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
-from arrayscope.display.histogram_controller import HistogramLevelPreviewController
+from arrayscope.display.histogram_controller import HistogramDisplayController, HistogramLevelPreviewController
 from arrayscope.display.image_upload import ensure_imageitem_array, rgb_display_for_levels
 from arrayscope.display.interaction import (
     CursorIntent,
@@ -71,6 +71,7 @@ class ImageView2D(QtWidgets.QWidget):
 
     # Emitted only for explicit user edits of the histogram/LUT levels.
     userLevelsChanged = QtCore.Signal()
+    autoWindowRequested = QtCore.Signal()
 
     """
     Simplified widget for displaying 2D image data.
@@ -114,6 +115,7 @@ class ImageView2D(QtWidgets.QWidget):
         self._histogram_bound_item = None
         self._histogram_known_item_ids = set()
         self._histogram_preview_controller = None
+        self._histogram_display_controller = None
         self._upload_timing = None
         self._last_upload_timing = ImageUploadTiming()
         self._montage_display_mode = "canvas"
@@ -177,11 +179,13 @@ class ImageView2D(QtWidgets.QWidget):
         self.histogramImageItem = ImageItem(axisOrder="row-major")
         self._bind_histogram_item(self.histogramImageItem)
         self._histogram_preview_controller = HistogramLevelPreviewController(self)
+        self._histogram_display_controller = HistogramDisplayController(self)
         self.histogram.setLevelMode('mono')  # Force mono mode for scalar values
         self.histogram.item.sigLevelsChanged.connect(self._on_histogram_levels_changed)
         finish_signal = getattr(self.histogram.item, "sigLevelChangeFinished", None)
         if finish_signal is not None:
             finish_signal.connect(self._on_histogram_level_change_finished)
+        self._histogram_display_controller.install()
         
         # Initialize levels
         self.levelMin = 0.0
@@ -388,7 +392,8 @@ class ImageView2D(QtWidgets.QWidget):
 
     def _refresh_histogram_plot(self, *, auto_level: bool = False) -> None:
         start = perf_counter()
-        self.histogram.item.imageChanged(autoLevel=bool(auto_level))
+        if self._histogram_display_controller is None or not self._histogram_display_controller.refresh_histogram_plot(auto_level=bool(auto_level)):
+            self.histogram.item.imageChanged(autoLevel=bool(auto_level))
         self._record_upload_timing("histogram_recompute_ms", (perf_counter() - start) * 1000.0)
 
     def _set_image_item_data(self, item, data, levels, *, role: str, emit_histogram_change: bool = True) -> bool:
@@ -1092,14 +1097,16 @@ class ImageView2D(QtWidgets.QWidget):
     def autoLevels(self):
         """Automatically set the histogram levels based on image data"""
         if self.imageDisp is not None:
-            if self._rgbBaseImage is not None:
-                image = self.histogramSource
-                if image is None:
-                    image = self._histogram_data(self.imageDisp)
-                self._updateImageLevels(image)
-            else:
-                self._updateImageLevels()
-            bounds = self.getHistogramDataBounds() or (self.levelMin, self.levelMax)
+            bounds = self.getHistogramDataBounds()
+            if bounds is None:
+                if self._rgbBaseImage is not None:
+                    image = self.histogramSource
+                    if image is None:
+                        image = self._histogram_data(self.imageDisp)
+                    self._updateImageLevels(image)
+                else:
+                    self._updateImageLevels()
+                bounds = self.getHistogramDataBounds() or (self.levelMin, self.levelMax)
             self._sync_display_levels(bounds[0], bounds[1], update_image=True, emit_user=False)
                 
     def setLevels(self, min_level, max_level):
