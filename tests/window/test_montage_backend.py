@@ -441,6 +441,66 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app):
     assert win.tile_schedules == 1
 
 
+def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    class Window(QtCore.QObject, MontageRenderMixin):
+        def __init__(self, state, viewport_plan):
+            super().__init__()
+            self.view_state = state
+            self._viewport_plan = viewport_plan
+            self.scheduled = []
+            self.img_view = SimpleNamespace(rendering_backend_name="pyqtgraph")
+
+        def _montage_viewport_plan(self, view_state):
+            return self._viewport_plan
+
+        def _is_current_montage_session(self, session_id, key):
+            return True
+
+        def _schedule_montage_tiles(self, session):
+            tile = session.next_tile()
+            if tile is not None:
+                self.scheduled.append(int(tile.montage_index))
+
+    state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=tuple(range(4)), text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(2, 2), columns=4)
+    viewport_plan = SimpleNamespace(priority_focus=(10.0, 1.0))
+    session = MontageRenderSession(
+        session_id=12,
+        key="key",
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=tuple(range(4)),
+        plan=plan,
+        view_state=state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(4, 16),
+        view_range=((0.0, 12.0), (0.0, 4.0)),
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=list(plan.tiles),
+    )
+    win = Window(state, viewport_plan)
+    win._montage_session = session
+
+    win._run_montage_priority_retarget()
+
+    assert win.scheduled == [3]
+
+
 def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
     from dataclasses import replace
     from pyqtgraph.Qt import QtCore

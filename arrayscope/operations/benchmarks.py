@@ -29,6 +29,9 @@ class BenchmarkResult:
     output_shape: tuple[int, ...]
     output_dtype: str
     chunk_count: int = 1
+    retargeted_count: int = 0
+    pop_count: int = 0
+    fairness_count: int = 0
 
 
 def benchmark_raw_slice(shape=(64, 128, 128), dtype=np.float32) -> BenchmarkResult:
@@ -187,6 +190,55 @@ def benchmark_live_profile_offscreen_unloaded_tile(shape=(16, 128, 128), dtype=n
     return _result("live_profile_offscreen_unloaded_tile", shape, dtype, elapsed, profile, None)
 
 
+def benchmark_montage_priority_queue_retarget(shape=(8, 8, 1024), dtype=np.float32) -> BenchmarkResult:
+    from arrayscope.window.montage_priority import MontageTilePriorityQueue, TilePriorityContext
+
+    state = ViewState.from_shape(shape).with_montage_axis(2, indices=tuple(range(shape[2])), columns=32, text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(shape[2])), tile_shape=shape[:2], columns=32)
+    full_range = ((0.0, float(plan.geometry.columns * (shape[1] + plan.geometry.gap))), (0.0, float(plan.geometry.rows * (shape[0] + plan.geometry.gap))))
+    context = TilePriorityContext.from_tiles(
+        view_range=full_range,
+        focus=(0.0, 0.0),
+        visible_tiles=range(shape[2]),
+        near_tiles=(),
+    )
+    queue = MontageTilePriorityQueue(plan.tiles, context=context, aging_after=8)
+    retargeted = 0
+    popped = 0
+    start = perf_counter()
+    for step in range(16):
+        focus_x = float((step % 32) * (shape[1] + plan.geometry.gap) + shape[1] * 0.5)
+        focus_y = float((step // 2 % 32) * (shape[0] + plan.geometry.gap) + shape[0] * 0.5)
+        focus_index = int(step // 2 % 32) * int(plan.geometry.columns) + int(step % 32)
+        retargeted += queue.set_context(
+            TilePriorityContext.from_tiles(
+                view_range=full_range,
+                focus=(focus_x, focus_y),
+                visible_tiles=range(shape[2]),
+                near_tiles=(),
+                priority_tiles=(focus_index,),
+            ),
+            max_items=64,
+        )
+        for _ in range(8):
+            if queue.pop() is None:
+                break
+            popped += 1
+    elapsed = _elapsed_ms(start)
+    output = np.asarray([retargeted, popped, queue.fairness_pops], dtype=np.int64)
+    return _result(
+        "montage_priority_queue_retarget",
+        shape,
+        dtype,
+        elapsed,
+        output,
+        None,
+        retargeted_count=retargeted,
+        pop_count=popped,
+        fairness_count=queue.fairness_pops,
+    )
+
+
 def run_foundation_benchmarks() -> tuple[BenchmarkResult, ...]:
     return (
         benchmark_raw_slice(),
@@ -200,10 +252,23 @@ def run_foundation_benchmarks() -> tuple[BenchmarkResult, ...]:
         benchmark_fft_stage_warmup_chunked(),
         benchmark_fft_stage_warmup_unchunked(),
         benchmark_live_profile_offscreen_unloaded_tile(),
+        benchmark_montage_priority_queue_retarget(),
     )
 
 
-def _result(name, shape, dtype, elapsed_ms, output, peak_estimate_bytes, *, chunk_count: int = 1) -> BenchmarkResult:
+def _result(
+    name,
+    shape,
+    dtype,
+    elapsed_ms,
+    output,
+    peak_estimate_bytes,
+    *,
+    chunk_count: int = 1,
+    retargeted_count: int = 0,
+    pop_count: int = 0,
+    fairness_count: int = 0,
+) -> BenchmarkResult:
     output = np.asarray(output)
     return BenchmarkResult(
         name=name,
@@ -214,6 +279,9 @@ def _result(name, shape, dtype, elapsed_ms, output, peak_estimate_bytes, *, chun
         output_shape=tuple(int(size) for size in output.shape),
         output_dtype=str(output.dtype),
         chunk_count=int(chunk_count),
+        retargeted_count=int(retargeted_count),
+        pop_count=int(pop_count),
+        fairness_count=int(fairness_count),
     )
 
 

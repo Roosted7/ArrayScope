@@ -16,6 +16,7 @@ def test_run_foundation_benchmarks_returns_expected_scenarios():
         "fft_stage_warmup_chunked",
         "fft_stage_warmup_unchunked",
         "live_profile_offscreen_unloaded_tile",
+        "montage_priority_queue_retarget",
     }
     for result in results:
         assert result.elapsed_ms >= 0
@@ -38,3 +39,14 @@ def test_chunked_warmup_benchmark_reports_multiple_chunks():
 
     assert result.name == "fft_stage_warmup_chunked"
     assert result.chunk_count > 1
+
+
+def test_montage_priority_queue_benchmark_reports_scheduler_counters():
+    from arrayscope.operations.benchmarks import benchmark_montage_priority_queue_retarget
+
+    result = benchmark_montage_priority_queue_retarget()
+
+    assert result.name == "montage_priority_queue_retarget"
+    assert result.retargeted_count > 0
+    assert result.pop_count > 0
+    assert result.fairness_count > 0

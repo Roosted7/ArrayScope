@@ -6,25 +6,6 @@ A roadmap item is complete only when its exit gate is met. “Code exists” is 
 
 ## Now — stabilize the v28 foundation
 
-### N3. Dynamic tile priority without mouse-event sorting
-
-**Goal:** make active work follow viewport/hover value safely.
-
-Work:
-
-- Represent visible/near/waiting tile queues with stable priority keys or buckets.
-- Coalesce viewport-center and hover updates to a bounded cadence.
-- Reprioritize only affected queue metadata; never sort/materialize the full set in each mouse callback.
-- Define priority aging so distant tiles eventually complete.
-- Keep stage-attached waiters bounded when released.
-
-Exit gate:
-
-- hover or camera movement changes the next scheduled tile within one bounded update interval;
-- mouse-move callbacks remain under the interactive budget;
-- starvation tests complete lower-priority visible tiles;
-- priority changes do not invalidate cache/residency identity.
-
 ### N4. Histogram and level refinement discipline
 
 **Goal:** preserve responsive level control while maintaining semantic correctness.

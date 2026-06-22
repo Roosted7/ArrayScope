@@ -288,6 +288,7 @@ class MontageRenderMixin:
             retained_stage_index=stage_plan["retained_stage_index"],
             retained_stage_decision=stage_plan["retained_stage_decision"],
             repeated_expensive_stage_per_tile=stage_plan["repeated_expensive_stage_per_tile"],
+            priority_focus=viewport_plan.priority_focus,
         )
         session.shader_display = bool(shader_display)
         self._montage_session = session
@@ -393,9 +394,12 @@ class MontageRenderMixin:
     def _merge_montage_stage_plan(self, session: MontageRenderSession, stage_plan) -> None:
         session.tile_stage_keys.update(stage_plan["tile_stage_keys"])
         for key, waiting in dict(stage_plan["stage_waiting_tiles"]).items():
-            existing = session.stage_waiting_tiles.setdefault(key, [])
+            existing = session.stage_waiting_tiles.get(key, ())
             existing_numbers = {int(tile.montage_index) for tile in existing}
-            existing.extend(tile for tile in waiting if int(tile.montage_index) not in existing_numbers)
+            session.append_stage_waiting_tiles(
+                key,
+                tuple(tile for tile in waiting if int(tile.montage_index) not in existing_numbers),
+            )
         session.attached_stage_requests.update(stage_plan["attached_stage_keys"])
         session.stage_values.update(stage_plan["stage_values"])
         session.lead_stage_warmups.update(stage_plan.get("lead_stage_warmups", {}))
@@ -447,6 +451,8 @@ class MontageRenderMixin:
             viewport_shape=viewport_plan.viewport_shape,
             coverage_margin_tiles=1,
             near_margin_tiles=2,
+            priority_focus=viewport_plan.priority_focus,
+            priority_retarget_limit=_montage_priority_retarget_batch_limit(self, interactive=_interactive_active(self)),
         )
         additions = viewport_plan.prioritize_tiles(additions)
         self._prune_stale_montage_tile_work(session)
@@ -511,11 +517,11 @@ class MontageRenderMixin:
         missing_tiles = viewport_plan.prioritize_tiles(missing_tiles)
 
         if _viewport_interaction_active(self):
-            queued = {int(tile.montage_index) for tile in session.pending_tiles}
+            queued = set(session.pending_tile_numbers())
             for tile in missing_tiles:
                 index = int(tile.montage_index)
                 if index not in queued:
-                    session.pending_tiles.append(tile)
+                    _enqueue_session_pending_tile(session, tile)
                     queued.add(index)
             self._montage_viewport_update_pending = True
             return True
@@ -526,11 +532,11 @@ class MontageRenderMixin:
         stage_plan = self._plan_montage_stages(session.document, missing_tiles)
         self._merge_montage_stage_plan(session, stage_plan)
         waiting = {int(index) for index in stage_plan["waiting_indices"]}
-        queued = {int(tile.montage_index) for tile in session.pending_tiles}
+        queued = set(session.pending_tile_numbers())
         for tile in missing_tiles:
             index = int(tile.montage_index)
             if index not in waiting and index not in queued:
-                session.pending_tiles.append(tile)
+                _enqueue_session_pending_tile(session, tile)
                 queued.add(index)
 
         self.prefetch_evaluation_controller.cancel_prefetch()
@@ -554,9 +560,7 @@ class MontageRenderMixin:
         if not keep:
             return
         pending_before = len(session.pending_tiles)
-        session.pending_tiles = deque(
-            tile for tile in session.pending_tiles if int(tile.montage_index) in keep
-        )
+        pruned_pending = session.prune_pending_tiles(keep)
         stale = (set(session.loading_tiles) - set(session.active_tile_requests)) - keep
         if stale:
             for index in sorted(stale):
@@ -566,10 +570,15 @@ class MontageRenderMixin:
         for key, waiting in list(session.stage_waiting_tiles.items()):
             kept = [tile for tile in waiting if int(tile.montage_index) in keep]
             if kept:
-                session.stage_waiting_tiles[key] = kept
+                if hasattr(waiting, "clear") and hasattr(waiting, "extend"):
+                    waiting.clear()
+                    waiting.extend(kept)
+                    session.stage_waiting_tiles[key] = waiting
+                else:
+                    session.stage_waiting_tiles[key] = kept
             else:
                 session.stage_waiting_tiles.pop(key, None)
-        pruned = pending_before - len(session.pending_tiles) + len(stale)
+        pruned = pruned_pending + len(stale)
         if pruned > 0:
             self._last_montage_pruned_tile_work = int(getattr(self, "_last_montage_pruned_tile_work", 0) or 0) + int(pruned)
 
@@ -924,7 +933,7 @@ class MontageRenderMixin:
             tile = waiting.pop(0)
             index = int(tile.montage_index)
             if index not in session.rendered_tiles and index not in session.skipped_tiles:
-                session.pending_tiles.append(tile)
+                _enqueue_session_pending_tile(session, tile)
                 session.mark_loading(tile)
             if budget is not None and should_yield_after_item(budget):
                 break
@@ -986,7 +995,7 @@ class MontageRenderMixin:
             index = int(tile.montage_index)
             session.tile_stage_keys.pop(index, None)
             if index not in session.rendered_tiles and index not in session.skipped_tiles:
-                session.pending_tiles.append(tile)
+                _enqueue_session_pending_tile(session, tile)
                 session.mark_loading(tile)
             if budget is not None and should_yield_after_item(budget):
                 break
@@ -1912,7 +1921,7 @@ class MontageRenderMixin:
 
     def _classify_canvas_tiles(self, session) -> None:
         rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
-        pending = {int(tile.montage_index) for tile in session.pending_tiles}
+        pending = set(session.pending_tile_numbers())
         newly_pending = []
         for tile in session.plan.tiles:
             index = int(tile.montage_index)
@@ -1931,7 +1940,7 @@ class MontageRenderMixin:
             view_range=((rect[0], rect[2]), (rect[1], rect[3])),
             focus=_montage_priority_focus(self, session.view_range),
         ):
-            session.pending_tiles.append(tile)
+            _enqueue_session_pending_tile(session, tile)
             session.mark_loading(tile)
 
     def _update_montage_tile_overlays(self, canvas) -> None:
@@ -2071,6 +2080,55 @@ class MontageRenderMixin:
         interval = _montage_viewport_update_delay_ms(self) if delay_ms is None else max(0, int(delay_ms))
         timer.start(interval)
 
+    def _schedule_montage_priority_retarget_from_hover(self) -> None:
+        if getattr(self, "_closing", False):
+            return
+        if getattr(self.view_state, "montage_axis", None) is None:
+            return
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+            return
+        if not (session.pending_tiles or getattr(session, "stage_waiting_tiles", None)):
+            return
+        timer = getattr(self, "_montage_priority_retarget_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._run_montage_priority_retarget)
+            self._montage_priority_retarget_timer = timer
+        self._montage_priority_retarget_pending = True
+        if not timer.isActive():
+            timer.start(_montage_priority_retarget_delay_ms(self))
+
+    def _run_montage_priority_retarget(self) -> None:
+        self._montage_priority_retarget_pending = False
+        if getattr(self, "_closing", False):
+            return
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+            return
+        if not (session.pending_tiles or getattr(session, "stage_waiting_tiles", None)):
+            return
+        budget = self._montage_callback_budget(
+            "montage_priority_retarget",
+            interactive=True,
+            work_class="queue_metadata",
+            item_cap=_montage_priority_retarget_batch_limit(self, interactive=True),
+        )
+        viewport_plan = self._montage_viewport_plan(self.view_state)
+        session.priority_focus = viewport_plan.priority_focus
+        processed = session.retarget_tile_priority(
+            focus=viewport_plan.priority_focus,
+            max_items=budget.item_cap,
+        )
+        if processed:
+            budget.record_item(item_count=processed)
+        self._last_montage_priority_retarget_count = int(processed)
+        self._last_montage_priority_retarget_pending = len(session.pending_tiles)
+        self._record_gui_budget(budget)
+        if session.pending_tiles:
+            self._schedule_montage_tiles(session)
+
     def _run_montage_viewport_update(self) -> None:
         if getattr(self, "_closing", False):
             return
@@ -2193,6 +2251,14 @@ def _lead_direct_tiles(tiles, *, count: int = 1):
     return tiles[:count], tiles[count:]
 
 
+def _enqueue_session_pending_tile(session, tile) -> None:
+    enqueue = getattr(session, "enqueue_pending_tile", None)
+    if callable(enqueue):
+        enqueue(tile)
+        return
+    session.pending_tiles.append(tile)
+
+
 def _stage_fits_cache(candidate, memory_policy) -> bool:
     estimated = getattr(candidate, "estimated_nbytes", None)
     if estimated is None:
@@ -2231,6 +2297,26 @@ def _montage_viewport_chunk_delay_ms(window) -> int:
     if decision is not None:
         return max(1, min(16, int(decision.interval_ms)))
     return 1
+
+
+def _montage_priority_retarget_delay_ms(window) -> int:
+    decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
+        "montage_priority_retarget",
+        interactive=True,
+    )
+    if decision is not None:
+        return max(1, min(64, int(decision.interval_ms)))
+    return 32
+
+
+def _montage_priority_retarget_batch_limit(window, *, interactive: bool) -> int:
+    decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
+        "montage_priority_retarget",
+        interactive=interactive,
+    )
+    if decision is not None:
+        return max(1, min(128, int(decision.batch_limit)))
+    return 64 if interactive else 128
 
 
 def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:

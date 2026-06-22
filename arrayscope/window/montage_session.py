@@ -20,6 +20,7 @@ from arrayscope.display.montage import (
 )
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta, TilePresentationState
+from arrayscope.window.montage_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
 
 
 def _shader_mapping_key(mapping):
@@ -66,7 +67,7 @@ class MontageRenderSession:
     rendered_tiles: dict[int, RenderedTile]
     loading_tiles: set[int]
     skipped_tiles: set[int]
-    pending_tiles: deque[MontageTile] | list[MontageTile]
+    pending_tiles: MontageTilePriorityQueue | deque[MontageTile] | list[MontageTile]
     active_tile_requests: set[int] = field(default_factory=set)
     presented_tiles: set[int] = field(default_factory=set)
     tile_stage_keys: dict[int, object] = field(default_factory=dict)
@@ -112,6 +113,9 @@ class MontageRenderSession:
     level_revision: int = 0
     histogram_revision: int = 0
     viewport_revision: int = 0
+    priority_focus: tuple[float, float] | None = None
+    priority_retargeted_tiles: int = 0
+    priority_fairness_pops: int = 0
     tile_lod_factor: int = 1
     desired_tile_lod_factor: int = 1
     _last_active_tiles: tuple[int, ...] = ()
@@ -120,10 +124,23 @@ class MontageRenderSession:
     deferred_display_tiles: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        # These queues are drained from the front throughout progressive
-        # rendering.  Normalize caller-provided lists once so dequeue remains
-        # O(1) even for production-scale montages.
-        self.pending_tiles = deque(self.pending_tiles)
+        # These queues are drained throughout progressive rendering.  The
+        # visible tile queue is indexed so viewport/hover retargeting updates
+        # metadata instead of sorting inside high-frequency callbacks.
+        pending = tuple(self.pending_tiles or ())
+        context = self._tile_priority_context()
+        if isinstance(self.pending_tiles, MontageTilePriorityQueue):
+            self.pending_tiles.set_context(context, max_items=len(self.pending_tiles))
+        else:
+            self.pending_tiles = MontageTilePriorityQueue(pending, context=context)
+        self.stage_waiting_tiles = {
+            key: (
+                value
+                if isinstance(value, MontageTilePriorityQueue)
+                else MontageTilePriorityQueue(tuple(value or ()), context=context)
+            )
+            for key, value in dict(self.stage_waiting_tiles or {}).items()
+        }
         self.pending_level_tiles = deque(self.pending_level_tiles)
         self.pending_completed_tiles = deque(self.pending_completed_tiles)
         for index in sorted(int(tile) for tile in self.rendered_tiles):
@@ -139,6 +156,8 @@ class MontageRenderSession:
         viewport_shape: tuple[int, int],
         coverage_margin_tiles: int = 1,
         near_margin_tiles: int = 2,
+        priority_focus: tuple[float, float] | None = None,
+        priority_retarget_limit: int = 64,
     ) -> tuple[tuple[MontageTile, ...], bool]:
         """Retarget draw and compute coverage without replacing the session.
 
@@ -149,6 +168,7 @@ class MontageRenderSession:
 
         self.view_range = view_range
         self.viewport_shape = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
+        self.priority_focus = priority_focus
         self._selected_lod_factor()
         active = _viewport_tiles(
             self.plan,
@@ -181,6 +201,12 @@ class MontageRenderSession:
             or near_numbers != self._last_near_tiles
         )
         self.visible_tiles = active
+        self.priority_retargeted_tiles = self.retarget_tile_priority(
+            focus=priority_focus,
+            max_items=max(1, int(priority_retarget_limit)),
+            active_tiles=active_numbers,
+            near_tiles=near_numbers,
+        )
         return additions, bool(presentation_changed)
 
     def expand_viewport_coverage(
@@ -218,7 +244,7 @@ class MontageRenderSession:
         self.dirty_payloads[index] = None
         self.active_tile_requests.discard(index)
         self.skipped_tiles.discard(index)
-        self.pending_tiles = deque(tile for tile in self.pending_tiles if int(tile.montage_index) != index)
+        self.discard_pending_tile(index)
         if index not in self.presented_tiles:
             self.loading_tiles.add(index)
             self.mark_tile_state(rendered.tile, MontageTileState.LOADING)
@@ -595,18 +621,18 @@ class MontageRenderSession:
             self.dirty_payloads.pop(index, None)
             self.display_tile_payloads.pop(index, None)
             self.tile_source_ids.pop(index, None)
-            self.pending_tiles = deque(
-                pending for pending in self.pending_tiles if int(pending.montage_index) != index
-            )
+            self.discard_pending_tile(index)
             self.mark_tile_state(tile, MontageTileState.SKIPPED)
 
     def next_tile(self) -> MontageTile | None:
+        self._ensure_pending_priority_queue()
         while self.pending_tiles:
-            tile = self.pending_tiles.popleft()
+            tile = self.pending_tiles.pop()
             index = int(tile.montage_index)
             if index not in self.rendered_tiles and index not in self.skipped_tiles:
                 self.mark_loading(tile)
                 self.active_tile_requests.add(index)
+                self.priority_fairness_pops = int(getattr(self.pending_tiles, "fairness_pops", 0) or 0)
                 return tile
         return None
 
@@ -709,6 +735,140 @@ class MontageRenderSession:
         self.last_commit_monotonic = monotonic()
         self.final_commit_pending = False
         self.flush_pending = False
+
+    def enqueue_pending_tile(self, tile: MontageTile) -> bool:
+        self._ensure_pending_priority_queue()
+        before = len(self.pending_tiles)
+        self.pending_tiles.append(tile)
+        return len(self.pending_tiles) > before
+
+    def enqueue_pending_tiles(self, tiles) -> int:
+        added = 0
+        for tile in tuple(tiles or ()):
+            if self.enqueue_pending_tile(tile):
+                added += 1
+        return int(added)
+
+    def discard_pending_tile(self, tile_or_index) -> bool:
+        self._ensure_pending_priority_queue()
+        return bool(self.pending_tiles.discard(tile_or_index))
+
+    def prune_pending_tiles(self, keep: set[int] | frozenset[int]) -> int:
+        self._ensure_pending_priority_queue()
+        return int(self.pending_tiles.prune(keep))
+
+    def pending_tile_numbers(self) -> tuple[int, ...]:
+        self._ensure_pending_priority_queue()
+        return tile_numbers(self.pending_tiles)
+
+    def append_stage_waiting_tiles(self, key, tiles) -> int:
+        waiting = self.stage_waiting_tiles.get(key)
+        if not isinstance(waiting, MontageTilePriorityQueue):
+            waiting = MontageTilePriorityQueue(tuple(waiting or ()), context=self._tile_priority_context())
+            self.stage_waiting_tiles[key] = waiting
+        before = len(waiting)
+        waiting.extend(tuple(tiles or ()))
+        return max(0, len(waiting) - before)
+
+    def retarget_tile_priority(
+        self,
+        *,
+        focus=None,
+        max_items: int = 64,
+        active_tiles=None,
+        near_tiles=None,
+    ) -> int:
+        if active_tiles is None:
+            active_tiles = tuple(int(tile.montage_index) for tile in self.visible_tiles)
+        if near_tiles is None:
+            near_tiles = tuple(
+                int(tile.montage_index)
+                for tile in _viewport_tiles(
+                    self.plan,
+                    view_range=self.view_range,
+                    viewport_shape=self.viewport_shape,
+                    margin_tiles=2,
+                )
+            )
+        if focus is not None:
+            self.priority_focus = focus
+        context = self._tile_priority_context(
+            active_tiles=active_tiles,
+            near_tiles=near_tiles,
+            priority_tiles=self._priority_focus_tile_numbers(),
+        )
+        self._ensure_pending_priority_queue(context=context)
+        self.priority_retargeted_tiles = self.pending_tiles.set_context(
+            context,
+            max_items=max(1, int(max_items)),
+        )
+        remaining = max(0, int(max_items) - int(self.priority_retargeted_tiles))
+        for waiting in tuple(self.stage_waiting_tiles.values()):
+            if remaining <= 0:
+                break
+            if hasattr(waiting, "set_context"):
+                remaining -= int(waiting.set_context(context, max_items=remaining))
+        return int(self.priority_retargeted_tiles)
+
+    def _tile_priority_context(self, *, active_tiles=None, near_tiles=None, priority_tiles=None) -> TilePriorityContext:
+        if active_tiles is None:
+            active_tiles = tuple(int(tile.montage_index) for tile in self.visible_tiles)
+        if near_tiles is None:
+            try:
+                near_tiles = tuple(
+                    int(tile.montage_index)
+                    for tile in _viewport_tiles(
+                        self.plan,
+                        view_range=self.view_range,
+                        viewport_shape=self.viewport_shape,
+                        margin_tiles=2,
+                    )
+                )
+            except Exception:
+                near_tiles = ()
+        return TilePriorityContext.from_tiles(
+            view_range=self.view_range,
+            focus=self.priority_focus,
+            visible_tiles=active_tiles,
+            near_tiles=near_tiles,
+            priority_tiles=priority_tiles or (),
+        )
+
+    def _priority_focus_tile_numbers(self) -> tuple[int, ...]:
+        focus = self.priority_focus
+        if focus is None:
+            return ()
+        try:
+            x = float(focus[0])
+            y = float(focus[1])
+            geometry = self.plan.geometry
+            tile_width = int(geometry.tile_width)
+            tile_height = int(geometry.tile_height)
+            gap = max(0, int(geometry.gap))
+            stride_x = max(1, tile_width + gap)
+            stride_y = max(1, tile_height + gap)
+            col = int(x // stride_x)
+            row = int(y // stride_y)
+            local_x = x - col * stride_x
+            local_y = y - row * stride_y
+            if local_x < 0 or local_y < 0 or local_x >= tile_width or local_y >= tile_height:
+                return ()
+            if col < 0 or row < 0 or col >= int(geometry.columns):
+                return ()
+            index = row * int(geometry.columns) + col
+            if 0 <= index < len(tuple(self.plan.tiles)):
+                return (int(index),)
+        except Exception:
+            return ()
+        return ()
+
+    def _ensure_pending_priority_queue(self, *, context: TilePriorityContext | None = None) -> None:
+        if isinstance(self.pending_tiles, MontageTilePriorityQueue):
+            return
+        self.pending_tiles = MontageTilePriorityQueue(
+            tuple(self.pending_tiles or ()),
+            context=context or self._tile_priority_context(),
+        )
 
 
 def _base_source_id(source_id) -> object:

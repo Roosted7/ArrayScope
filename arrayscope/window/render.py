@@ -221,6 +221,9 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
     def _on_image_mouse_moved(self, pos):
         self._last_image_mouse_scene_pos = pos
         self.getPixel(pos)
+        schedule_priority = getattr(self, "_schedule_montage_priority_retarget_from_hover", None)
+        if callable(schedule_priority):
+            schedule_priority()
 
     def _clear_image_hover_state(self) -> None:
         self._last_image_mouse_scene_pos = None

@@ -40,11 +40,45 @@ def _session():
 def test_montage_render_session_returns_pending_tiles_in_order():
     session = _session()
 
-    assert isinstance(session.pending_tiles, deque)
     assert isinstance(session.pending_level_tiles, deque)
     assert isinstance(session.pending_completed_tiles, deque)
+    assert [tile.source_index for tile in session.pending_tiles] == [0, 1, 2]
     assert session.next_tile().source_index == 0
     assert session.next_tile().source_index == 1
+
+
+def test_montage_render_session_retarget_changes_next_pending_tile():
+    session = _session()
+    session.view_range = ((0.0, 12.0), (0.0, 4.0))
+
+    session.retarget_tile_priority(
+        focus=(8.0, 1.0),
+        max_items=4,
+        active_tiles=(0, 1, 2, 3),
+        near_tiles=(),
+    )
+
+    assert session.next_tile().source_index == 2
+
+
+def test_montage_priority_retarget_preserves_payload_identity():
+    session = _session()
+    tile = session.plan.tiles[0]
+    image = np.ones((2, 2), dtype=np.float32)
+    rendered = RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
+    session.mark_loaded(rendered)
+    first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+
+    session.retarget_tile_priority(
+        focus=(8.0, 1.0),
+        max_items=4,
+        active_tiles=(0, 1, 2, 3),
+        near_tiles=(),
+    )
+    second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+
+    assert second is first
+    assert second.source_id == first.source_id
 
 
 def test_montage_render_session_materialized_tile_stays_loading_until_presented():
