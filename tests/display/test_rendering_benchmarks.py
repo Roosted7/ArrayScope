@@ -5,11 +5,33 @@ import pytest
 
 pytest.importorskip("vispy")
 
+@pytest.fixture(scope="module")
+def benchmark_results(qt_app):
+    from pyqtgraph.Qt import QtWidgets
 
-def test_rendering_backend_benchmarks_report_expected_scenarios(qt_app):
-    from arrayscope.display.rendering_benchmarks import assert_optional_perf_gates, benchmark_rendering_backends
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
+    view_types = (ImageView2D, VisPyImageView2D)
+    before = sum(
+        isinstance(widget, view_types)
+        for widget in QtWidgets.QApplication.topLevelWidgets()
+    )
     results = benchmark_rendering_backends(measure_presented=False)
+    after = sum(
+        isinstance(widget, view_types)
+        for widget in QtWidgets.QApplication.topLevelWidgets()
+    )
+    assert after <= before
+    return results
+
+
+
+def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_results):
+    from arrayscope.display.rendering_benchmarks import assert_optional_perf_gates
+
+    results = benchmark_results
 
     assert {result.name for result in results} == {
         "pyqtgraph_scalar_level_preview",
@@ -42,10 +64,8 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(qt_app):
     assert_optional_perf_gates(results)
 
 
-def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(qt_app):
-    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
-
-    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
+def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(benchmark_results):
+    results = {result.name: result for result in benchmark_results}
     pyqtgraph = results["pyqtgraph_complex_tile_level_preview"].timing
     vispy = results["vispy_complex_tile_level_preview"].timing
 
@@ -58,10 +78,8 @@ def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(qt_app):
     assert vispy.tile_layer_items_skipped == vispy.tile_layer_visible_items
 
 
-def test_vispy_clean_tile_flush_skips_existing_visuals(qt_app):
-    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
-
-    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
+def test_vispy_clean_tile_flush_skips_existing_visuals(benchmark_results):
+    results = {result.name: result for result in benchmark_results}
     vispy = results["vispy_clean_tile_flush"].timing
 
     assert vispy.tile_layer_visible_items > 0
@@ -71,10 +89,8 @@ def test_vispy_clean_tile_flush_skips_existing_visuals(qt_app):
     assert vispy.visible_bytes == 0
 
 
-def test_vispy_dirty_and_pan_scenarios_have_deterministic_upload_counters(qt_app):
-    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
-
-    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
+def test_vispy_dirty_and_pan_scenarios_have_deterministic_upload_counters(benchmark_results):
+    results = {result.name: result for result in benchmark_results}
     dirty = results["vispy_one_dirty_tile_commit"].timing
     pan = results["vispy_pan_zoom_no_upload"].timing
 
@@ -90,10 +106,8 @@ def test_vispy_dirty_and_pan_scenarios_have_deterministic_upload_counters(qt_app
     assert pan.visible_bytes == 0
 
 
-def test_vispy_level_only_tile_commit_updates_uniforms_without_uploads(qt_app):
-    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
-
-    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
+def test_vispy_level_only_tile_commit_updates_uniforms_without_uploads(benchmark_results):
+    results = {result.name: result for result in benchmark_results}
     timing = results["vispy_tile_level_uniform_update"].timing
 
     assert timing.tile_layer_visible_items > 0
@@ -106,10 +120,8 @@ def test_vispy_level_only_tile_commit_updates_uniforms_without_uploads(qt_app):
     assert timing.visible_bytes == 0
 
 
-def test_warm_residency_queue_scaling_reports_batched_speculative_uploads(qt_app):
-    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
-
-    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
+def test_warm_residency_queue_scaling_reports_batched_speculative_uploads(benchmark_results):
+    results = {result.name: result for result in benchmark_results}
     result = results["vispy_warm_residency_queue_scaling"]
     timing = result.timing
 
@@ -122,10 +134,8 @@ def test_warm_residency_queue_scaling_reports_batched_speculative_uploads(qt_app
     assert timing.tile_layer_near_resident_items == 40
 
 
-def test_progressive_tile_stream_reports_aggregate_work(qt_app):
-    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
-
-    results = {result.name: result for result in benchmark_rendering_backends(measure_presented=False)}
+def test_progressive_tile_stream_reports_aggregate_work(benchmark_results):
+    results = {result.name: result for result in benchmark_results}
     vispy_result = results["vispy_progressive_tile_stream"]
     timing = vispy_result.timing
 

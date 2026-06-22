@@ -1475,3 +1475,21 @@ def test_full_presentation_accepts_display_ready_rgb(qt_app):
     assert view._rgbBaseImage is None
     np.testing.assert_array_equal(view.imageDisp, rgb)
     view.close()
+
+
+def test_close_cancels_queued_histogram_refresh(qt_app, monkeypatch):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    calls = []
+    monkeypatch.setattr(
+        view._histogram_display_controller,
+        "refresh_histogram_plot",
+        lambda **_kwargs: calls.append(True),
+    )
+
+    view._histogram_display_controller.schedule_refresh()
+    view.close()
+    qt_app.processEvents()
+
+    assert calls == []
