@@ -58,7 +58,9 @@ class MontageViewportPlan:
 def prioritize_montage_tiles(tiles, *, view_range, focus=None):
     """Return tiles ordered from normalized viewport-focus distance outward."""
 
-    tiles = tuple(tiles or ())
+    if tiles is None:
+        return ()
+    tiles = tuple(tiles)
     if not tiles:
         return ()
     try:
@@ -79,8 +81,12 @@ def prioritize_montage_tiles(tiles, *, view_range, focus=None):
         focus_x = (float(x0) + float(x1)) * 0.5
         focus_y = (float(y0) + float(y1)) * 0.5
     else:
-        focus_x = float(focus[0])
-        focus_y = float(focus[1])
+        try:
+            focus_x = float(focus[0])
+            focus_y = float(focus[1])
+        except (IndexError, KeyError, TypeError, ValueError):
+            focus_x = (float(x0) + float(x1)) * 0.5
+            focus_y = (float(y0) + float(y1)) * 0.5
 
     def score(tile):
         center_x = float(tile.x0) + float(tile.width) * 0.5

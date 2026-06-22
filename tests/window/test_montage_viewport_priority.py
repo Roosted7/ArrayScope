@@ -40,6 +40,21 @@ def test_montage_tile_priority_normalizes_by_viewport_aspect():
     assert first_indices == [4, 1, 7]
 
 
+def test_montage_tile_priority_accepts_array_inputs_and_invalid_focus():
+    import numpy as np
+
+    from arrayscope.window.montage_viewport import prioritize_montage_tiles
+
+    plan = _plan()
+    ordered = prioritize_montage_tiles(
+        np.asarray(plan.tiles, dtype=object),
+        view_range=((0, 32), (0, 32)),
+        focus=("not-a-number", 16),
+    )
+
+    assert ordered[0].montage_index == 4
+
+
 def test_montage_viewport_plan_can_return_prioritized_candidates():
     from arrayscope.window.montage_viewport import MontageViewportPlan
 
