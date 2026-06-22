@@ -191,8 +191,22 @@ def test_empty_inspection_dock_does_not_rewrite_table_on_montage_viewport_update
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     table_updates = []
+    histogram_updates = []
+    overlay_updates = []
     original_set_statistics = win.inspection_dock.set_statistics
+    original_set_histograms = win.inspection_dock.set_histograms
+    original_update_overlay = win._update_roi_info_overlay
     monkeypatch.setattr(win.inspection_dock, "set_statistics", lambda stats: (table_updates.append(dict(stats)), original_set_statistics(stats))[1])
+    monkeypatch.setattr(
+        win.inspection_dock,
+        "set_histograms",
+        lambda histograms: (histogram_updates.append(tuple(histograms)), original_set_histograms(histograms))[1],
+    )
+    monkeypatch.setattr(
+        win,
+        "_update_roi_info_overlay",
+        lambda stats: (overlay_updates.append(dict(stats)), original_update_overlay(stats))[1],
+    )
     try:
         _process_events(qtbot, count=20)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
@@ -201,6 +215,8 @@ def test_empty_inspection_dock_does_not_rewrite_table_on_montage_viewport_update
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
         _process_events(qtbot, count=20)
         table_updates.clear()
+        histogram_updates.clear()
+        overlay_updates.clear()
 
         win.img_view.getView().setRange(xRange=(0, 3), yRange=(3, 6), padding=0)
         win.update_montage_view()
@@ -209,6 +225,8 @@ def test_empty_inspection_dock_does_not_rewrite_table_on_montage_viewport_update
         _process_events(qtbot, count=40)
 
         assert table_updates == []
+        assert histogram_updates == []
+        assert overlay_updates == []
         assert win.inspection_dock.roi_model.rowCount() == 0
     finally:
         win.close()

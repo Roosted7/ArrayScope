@@ -181,14 +181,15 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
     from arrayscope.app.settings_state import ImageRenderingBackendChoice, MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
-    settings.sync()
-
-    win = ArrayScopeWindow(np.arange(2 * 2 * 8, dtype=np.float32).reshape(2, 2, 8))
-    qtbot.addWidget(win)
     scheduled = []
+    win = None
     try:
+        settings = QtCore.QSettings()
+        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+        settings.sync()
+
+        win = ArrayScopeWindow(np.arange(2 * 2 * 8, dtype=np.float32).reshape(2, 2, 8))
+        qtbot.addWidget(win)
         win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
         process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
@@ -203,7 +204,8 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
         assert win.img_view.rendering_backend_name == "vispy"
         assert scheduled
     finally:
-        win.close()
+        if win is not None:
+            win.close()
         clear_arrayscope_settings()
 
 
@@ -215,13 +217,14 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
     from arrayscope.app.settings_state import ImageRenderingBackendChoice, MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
-    settings.sync()
-
-    win = ArrayScopeWindow(np.arange(4 * 100 * 8, dtype=np.float32).reshape(4, 100, 8))
-    qtbot.addWidget(win)
+    win = None
     try:
+        settings = QtCore.QSettings()
+        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+        settings.sync()
+
+        win = ArrayScopeWindow(np.arange(4 * 100 * 8, dtype=np.float32).reshape(4, 100, 8))
+        qtbot.addWidget(win)
         win.resize(360, 240)
         win.show()
         win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
@@ -233,6 +236,10 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
         )
         win._set_view_state(win.view_state.with_montage_axis(2, columns=8, indices=tuple(range(8)), text=":"))
         win.update_montage_view()
+        # Expanded montage ranges auto-fit by design. Narrow explicitly so this
+        # test measures viewport retargeting rather than initial fit policy.
+        win.img_view.getView().setRange(xRange=(0.0, 100.0), yRange=(0.0, 4.0), padding=0)
+        win._run_montage_viewport_update()
         initial_visible = len(win._montage_session.visible_tiles)
 
         win.img_view.getView().setRange(xRange=(0.0, 807.0), yRange=(0.0, 4.0), padding=0)
@@ -242,7 +249,8 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
         assert initial_visible < 8
         assert expanded_visible == 8
     finally:
-        win.close()
+        if win is not None:
+            win.close()
         clear_arrayscope_settings()
 
 
@@ -265,9 +273,22 @@ def test_cold_montage_tile_patches_without_side_panel_refresh(qtbot, monkeypatch
         operation_refreshes.clear()
         inspection_refreshes.clear()
 
-        tile = win._montage_session.plan.tiles[0]
+        requested_index = int(calls[0]["key"][-1])
+        tile = next(
+            tile
+            for tile in win._montage_session.plan.tiles
+            if int(tile.montage_index) == requested_index
+        )
         calls[0]["on_done"](_tile_result(tile, 9))
-        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 9, dtype=np.float32)), timeout=250)
+
+        def requested_tile_is_patched():
+            canvas = win._current_montage_canvas
+            x0 = int(tile.x0) - int(canvas.origin_x)
+            y0 = int(tile.y0) - int(canvas.origin_y)
+            patch = canvas.data[y0 : y0 + tile.height, x0 : x0 + tile.width]
+            return np.array_equal(patch, np.full((tile.height, tile.width), 9, dtype=np.float32))
+
+        qtbot.waitUntil(requested_tile_is_patched, timeout=250)
 
         assert operation_refreshes == []
         assert inspection_refreshes == []

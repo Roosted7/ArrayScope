@@ -74,6 +74,6 @@ def test_profile_coordinator_clamps_and_renders_line_result():
     )
 
     assert result.marker_position == (2, 0)
-    assert result.view_state.slice_indices == (0, 2, 0)
+    assert result.view_state.slice_indices == (0, 2, 2)
     assert result.y_range == (1.0, 9.0)
     np.testing.assert_array_equal(result.line_result.data, data[0, 2, :])

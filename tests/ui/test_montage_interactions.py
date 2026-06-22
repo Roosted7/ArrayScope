@@ -22,6 +22,43 @@ def _tile_result(tile, value):
     return EvaluationResult(DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes))
 
 
+def _tile_for_callback(win, call):
+    requested_index = int(call["key"][-1])
+    return next(
+        tile
+        for tile in win._montage_session.plan.tiles
+        if int(tile.montage_index) == requested_index
+    )
+
+
+def _canvas_tile_region(canvas, tile):
+    y0 = int(tile.y0) - int(canvas.origin_y)
+    x0 = int(tile.x0) - int(canvas.origin_x)
+    return (slice(y0, y0 + int(tile.height)), slice(x0, x0 + int(tile.width)))
+
+
+def _canvas_has_tile_value(win, tile, value):
+    canvas = win._current_montage_canvas
+    if canvas is None:
+        return False
+    rows, cols = _canvas_tile_region(canvas, tile)
+    expected = np.full((int(tile.height), int(tile.width)), value, dtype=np.float32)
+    return np.array_equal(canvas.data[rows, cols], expected)
+
+
+def _assert_canvas_tile_value(canvas, tile, value):
+    rows, cols = _canvas_tile_region(canvas, tile)
+    expected = np.full((int(tile.height), int(tile.width)), value, dtype=np.float32)
+    np.testing.assert_array_equal(canvas.data[rows, cols], expected)
+
+
+def _use_slice_zero(win, qtbot):
+    win._set_view_state(win.view_state.with_slice(2, 0))
+    win.render(reason="test-initial-slice")
+    _process_events(qtbot, count=20)
+    win.operation_evaluator.clear_cache()
+
+
 def test_montage_roi_gap_source_is_nan(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -564,7 +601,7 @@ def test_montage_schedules_missing_tiles_on_montage_lane(qtbot, monkeypatch):
         assert calls[0]["replace_group"].startswith("montage-tile:")
         assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.montage_tile_workers
         assert win.visible_evaluation_controller.pool.maxThreadCount() == 1
-        tile = win._montage_session.plan.tiles[0]
+        tile = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile, 1))
         assert all(call["key"][0] == "montage_tile" for call in calls)
     finally:
@@ -584,15 +621,20 @@ def test_montage_finished_tile_updates_canvas_before_all_tiles_finish(qtbot, mon
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_montage_view()
-        tile = win._montage_session.plan.tiles[0]
+        tile = _tile_for_callback(win, calls[0])
 
         calls[0]["on_done"](_tile_result(tile, 7))
-        qtbot.waitUntil(lambda: win._current_montage_canvas.tile_states[0] == MontageTileState.LOADED, timeout=1000)
+        tile_index = int(tile.montage_index)
+        qtbot.waitUntil(lambda: win._current_montage_canvas.tile_states[tile_index] == MontageTileState.LOADED, timeout=1000)
 
         canvas = win._current_montage_canvas
-        assert canvas.tile_states[0] == MontageTileState.LOADED
-        assert canvas.tile_states[1] == MontageTileState.LOADING
-        np.testing.assert_array_equal(canvas.data[0:2, 0:2], np.full((2, 2), 7, dtype=np.float32))
+        assert canvas.tile_states[tile_index] == MontageTileState.LOADED
+        assert any(
+            state == MontageTileState.LOADING
+            for index, state in enumerate(canvas.tile_states)
+            if index != tile_index
+        )
+        _assert_canvas_tile_value(canvas, tile, 7)
     finally:
         win.close()
 
@@ -617,12 +659,12 @@ def test_montage_finished_tile_patches_without_rebuilding_canvas(qtbot, monkeypa
             lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("canvas rebuilt")),
         )
 
-        tile = win._montage_session.plan.tiles[0]
+        tile = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile, 7))
-        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 7, dtype=np.float32)), timeout=1000)
+        qtbot.waitUntil(lambda: _canvas_has_tile_value(win, tile, 7), timeout=1000)
 
         assert id(win._current_montage_canvas.data) == data_id
-        np.testing.assert_array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 7, dtype=np.float32))
+        _assert_canvas_tile_value(win._current_montage_canvas, tile, 7)
     finally:
         win.close()
 
@@ -648,16 +690,16 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
             return original_schedule_commit(session, force=force)
 
         monkeypatch.setattr(win, "_schedule_montage_canvas_commit", record_schedule_commit)
-        tile0 = win._montage_session.plan.tiles[0]
-        tile1 = win._montage_session.plan.tiles[1]
+        tile0 = _tile_for_callback(win, calls[0])
+        tile1 = _tile_for_callback(win, calls[1])
         calls[0]["on_done"](_tile_result(tile0, 7))
         calls[1]["on_done"](_tile_result(tile1, 9))
 
         assert win._montage_session.pending_completed_tiles
         qtbot.waitUntil(
             lambda: (
-                np.array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 7, dtype=np.float32))
-                and np.array_equal(win._current_montage_canvas.data[0:2, 3:5], np.full((2, 2), 9, dtype=np.float32))
+                _canvas_has_tile_value(win, tile0, 7)
+                and _canvas_has_tile_value(win, tile1, 9)
             ),
             timeout=1000,
         )
@@ -683,9 +725,9 @@ def test_montage_progressive_tile_commit_preserves_current_levels(qtbot, monkeyp
         win.update_montage_view()
         win.img_view.setLevels(2.0, 8.0)
 
-        tile = win._montage_session.plan.tiles[0]
+        tile = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile, 100))
-        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 100, dtype=np.float32)), timeout=1000)
+        qtbot.waitUntil(lambda: _canvas_has_tile_value(win, tile, 100), timeout=1000)
         qtbot.waitUntil(lambda: bool(win._montage_session.display_committed), timeout=1000)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (2.0, 8.0)
@@ -703,6 +745,7 @@ def test_montage_loading_canvas_preserves_levels_until_first_real_tile(qtbot, mo
     monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
+        _use_slice_zero(win, qtbot)
         win.img_view.setLevels(2.0, 8.0)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_montage_view()
@@ -712,18 +755,18 @@ def test_montage_loading_canvas_preserves_levels_until_first_real_tile(qtbot, mo
         assert tuple(win.img_view.image.shape[:2]) == tuple(win._current_montage_canvas.data.shape[:2])
         assert not win._montage_session.display_committed
 
-        tile = win._montage_session.plan.tiles[0]
+        tile = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile, 100))
-        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 100, dtype=np.float32)), timeout=1000)
+        qtbot.waitUntil(lambda: _canvas_has_tile_value(win, tile, 100), timeout=1000)
         qtbot.waitUntil(lambda: bool(win._montage_session.display_committed), timeout=1000)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (99.444444, 100.777778)
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (99.0, 101.0)
         assert win._montage_session.applied_level_source.source_count == 1
 
-        tile1 = win._montage_session.visible_tiles[1]
+        tile1 = _tile_for_callback(win, calls[1])
         calls[1]["on_done"](_tile_result(tile1, 200))
-        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 3:5], np.full((2, 2), 200, dtype=np.float32)), timeout=1000)
+        qtbot.waitUntil(lambda: _canvas_has_tile_value(win, tile1, 200), timeout=1000)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (121.888889, 190.555556)
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (99.0, 202.0)
@@ -751,6 +794,7 @@ def test_montage_force_auto_waits_for_first_real_tile_before_changing_levels(qtb
     monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
+        _use_slice_zero(win, qtbot)
         win.img_view.setLevels(2.0, 8.0)
         previous_frame = win._committed_display_frame
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
@@ -761,7 +805,7 @@ def test_montage_force_auto_waits_for_first_real_tile_before_changing_levels(qtb
         assert win._committed_display_frame is previous_frame
         assert not win._montage_session.display_committed
 
-        tile = win._montage_session.plan.tiles[0]
+        tile = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile, 100))
         qtbot.waitUntil(lambda: bool(win._montage_session.display_committed), timeout=1000)
 
@@ -845,6 +889,7 @@ def test_enabling_montage_with_cached_tile_preserves_relative_window_fractions(q
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
+        _use_slice_zero(win, qtbot)
         win.img_view.setLevels(5.0, 15.0)
         state = win.view_state.with_montage_axis(2, columns=3, indices=(1, 2), text="1:3")
         plan = make_montage_plan(state, axis=2, indices=(1, 2), tile_shape=(4, 5), columns=3)
@@ -879,6 +924,7 @@ def test_shifting_montage_range_preserves_relative_window_fractions(qtbot, monke
 
     try:
         _process_events(qtbot)
+        _use_slice_zero(win, qtbot)
         win.img_view.setLevels(5.0, 15.0)
         first_state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
         first_plan = make_montage_plan(first_state, axis=2, indices=(0, 1), tile_shape=(4, 5), columns=2)
@@ -951,13 +997,14 @@ def test_montage_degenerate_previous_levels_do_not_become_one_tile_window(qtbot,
     monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
+        _use_slice_zero(win, qtbot)
         initial_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
         assert initial_levels == (-0.5, 0.5)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
         win.update_montage_view()
         assert calls
 
-        tile0 = win._montage_session.plan.tiles[0]
+        tile0 = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile0, 1000.0))
         qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=1000)
 
@@ -1025,14 +1072,14 @@ def test_montage_visible_tiles_do_not_define_relative_levels(qtbot, monkeypatch)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_montage_view()
 
-        tile0 = win._montage_session.plan.tiles[0]
+        tile0 = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile0, 100))
-        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 0:2], np.full((2, 2), 100, dtype=np.float32)), timeout=1000)
+        qtbot.waitUntil(lambda: _canvas_has_tile_value(win, tile0, 100), timeout=1000)
         first_levels = tuple(float(value) for value in win.img_view.getLevels())
 
-        tile1 = win._montage_session.plan.tiles[1]
+        tile1 = _tile_for_callback(win, calls[1])
         calls[1]["on_done"](_tile_result(tile1, 1000))
-        qtbot.waitUntil(lambda: np.array_equal(win._current_montage_canvas.data[0:2, 3:5], np.full((2, 2), 1000, dtype=np.float32)), timeout=1000)
+        qtbot.waitUntil(lambda: _canvas_has_tile_value(win, tile1, 1000), timeout=1000)
         qtbot.waitUntil(lambda: tuple(float(value) for value in win.img_view.getLevels()) != first_levels, timeout=1000)
 
         assert tuple(float(value) for value in win.img_view.getLevels()) != first_levels

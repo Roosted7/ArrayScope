@@ -73,7 +73,12 @@ def test_chunked_complex_rgb_matches_exact():
 def test_chunked_shader_complex_keeps_raw_texture_and_scaled_histogram():
     data = (np.arange(8 * 9 * 3, dtype=np.float32).reshape(8, 9, 3) + 1j).astype(np.complex64)
     document = ArrayDocument(data)
-    state = ViewState.from_shape(data.shape).with_channel(ChannelMode.COMPLEX).with_scale(ScaleMode.LOG)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_slice(2, 0)
+        .with_channel(ChannelMode.COMPLEX)
+        .with_scale(ScaleMode.LOG)
+    )
 
     chunked = evaluate_image_snapshot_chunked(document, state, chunk_axis=0, chunk_size=3, shader_display=True)
 

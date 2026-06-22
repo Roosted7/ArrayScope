@@ -113,13 +113,14 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
-    settings.sync()
-
-    win = ArrayScopeWindow(np.arange(20 * 30, dtype=np.float32).reshape(20, 30))
-    qtbot.addWidget(win)
+    win = None
     try:
+        settings = QtCore.QSettings()
+        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+        settings.sync()
+
+        win = ArrayScopeWindow(np.arange(20 * 30, dtype=np.float32).reshape(20, 30))
+        qtbot.addWidget(win)
         _process_events(qtbot, count=20)
         assert win.img_view.rendering_backend_name == "vispy"
         y_dim, x_dim = win.view_state.image_axes
@@ -138,7 +139,8 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
         assert win.img_view.getView().state["yInverted"] is True
         assert win.img_view._vispy_view.camera.flip == (False, True, False)
     finally:
-        win.close()
+        if win is not None:
+            win.close()
         _clear_arrayscope_settings()
 
 
