@@ -46,6 +46,10 @@ def _canvas_has_tile_value(win, tile, value):
     return np.array_equal(canvas.data[rows, cols], expected)
 
 
+def _display_levels(win):
+    return tuple(float(value) for value in win.img_view.getLevels())
+
+
 def _assert_canvas_tile_value(canvas, tile, value):
     rows, cols = _canvas_tile_region(canvas, tile)
     expected = np.full((int(tile.height), int(tile.width)), value, dtype=np.float32)
@@ -1078,15 +1082,16 @@ def test_montage_visible_tiles_do_not_define_relative_levels(qtbot, monkeypatch)
         tile0 = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile0, 100))
         qtbot.waitUntil(lambda: _canvas_has_tile_value(win, tile0, 100), timeout=1000)
-        first_levels = tuple(float(value) for value in win.img_view.getLevels())
+        qtbot.waitUntil(lambda: _display_levels(win) == (99.0, 101.0), timeout=1000)
+        first_levels = _display_levels(win)
 
         tile1 = _tile_for_callback(win, calls[1])
         calls[1]["on_done"](_tile_result(tile1, 1000))
         qtbot.waitUntil(lambda: _canvas_has_tile_value(win, tile1, 1000), timeout=1000)
-        qtbot.waitUntil(lambda: tuple(float(value) for value in win.img_view.getLevels()) != first_levels, timeout=1000)
+        qtbot.waitUntil(lambda: _display_levels(win) == (99.0, 1010.0), timeout=1000)
 
-        assert tuple(float(value) for value in win.img_view.getLevels()) != first_levels
-        assert tuple(float(value) for value in win.img_view.getLevels()) == (99.0, 1010.0)
+        assert _display_levels(win) != first_levels
+        assert _display_levels(win) == (99.0, 1010.0)
     finally:
         win.close()
 
