@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Optional, Tuple
 
 from arrayscope.core.axis_utils import clamp_index, non_singleton_axes, validate_axis, validate_distinct_axes
+from arrayscope.core.slice_selection import center_index
 
 
 class _ValueEnum(Enum):
@@ -116,7 +117,7 @@ class ViewState:
             shape=shape,
             image_axes=image_axes,
             line_axis=line_axis,
-            slice_indices=(0,) * ndim,
+            slice_indices=tuple(center_index(size) for size in shape),
             axis_flipped=(False,) * ndim,
             axis_fftshifted=(False,) * ndim,
         )
@@ -146,10 +147,14 @@ class ViewState:
         axis = self._validate_axis(axis)
         primary_axis, secondary_axis = self.image_axes
         if role == "y":
+            if axis == secondary_axis:
+                secondary_axis = primary_axis
             primary_axis = axis
             if primary_axis == secondary_axis:
                 secondary_axis = self._fallback_distinct_axis(primary_axis)
         elif role == "x":
+            if axis == primary_axis:
+                primary_axis = secondary_axis
             secondary_axis = axis
             if primary_axis == secondary_axis:
                 primary_axis = self._fallback_distinct_axis(secondary_axis)
@@ -218,7 +223,7 @@ class ViewState:
         migrated = ViewState.from_shape(shape)
 
         slice_indices = tuple(
-            clamp_index(shape, axis, self.slice_indices[axis] if axis < self.ndim else 0)
+            clamp_index(shape, axis, self.slice_indices[axis] if axis < self.ndim else center_index(shape[axis]))
             for axis in range(ndim)
         )
 
@@ -365,6 +370,6 @@ class ViewState:
     def _fallback_distinct_axis(self, axis):
         candidates = list(non_singleton_axes(self.shape)) + list(range(self.ndim))
         for candidate in candidates:
-            if candidate != axis:
+            if candidate != axis and candidate != self.montage_axis:
                 return candidate
         raise ValueError("image axes must be distinct")

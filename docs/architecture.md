@@ -526,9 +526,11 @@ the existing line evaluator/cache and sends all results to one plot. Complex pro
 when global channel mode is `complex`, line evaluation preserves complex samples so the Profile dock can
 choose magnitude, phase, real, imaginary, or magnitude plus phase strip.
 
-Montage is a display mode driven by range text in a non-image dimension slice field, stored on
-`ViewState.montage_axis`. The current image axes remain the tile Y/X axes. Range text on image axes is
-stored as per-axis display ranges, allowing image-axis subsetting such as `0:2:100`. Montage uses
+Montage is a display mode driven by multi-index selection text in a non-image dimension slice field,
+stored on `ViewState.montage_axis`. The current image axes remain the tile Y/X axes. Selection text
+uses Python slicing by default, accepts MATLAB-style ranges as a fallback, and supports raw index
+lists. Range/list text on image axes is stored as per-axis display ranges, allowing image-axis
+subsetting such as `0:100:2` or `0 5 8`. Montage uses
 `MontagePlan` to derive full grid geometry and visible tiles. The interactive canvas rectangle is based
 on the requested viewport clipped to full montage bounds; it is never shrunk to the loaded tiles.
 Visible tiles are evaluated through the same image snapshot path as normal views, cached individually,

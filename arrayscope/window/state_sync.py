@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from arrayscope.core.slice_selection import center_index, parse_slice_selection
 from arrayscope.core.array_metadata import derived_info_for
 from arrayscope.core.view_state import ChannelMode, ScaleMode
+from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
 
 
@@ -91,28 +93,29 @@ class StateSyncMixin:
         if axis >= self.view_state.ndim:
             return
         if text == "":
-            midpoint = max(0, int(self.data.shape[axis]) // 2)
+            midpoint = center_index(self.data.shape[axis])
             state = self.view_state.with_slice(axis, midpoint).with_axis_range(axis, None)
             if state.montage_axis == axis:
                 state = state.with_montage_axis(None)
             self._apply_slice_state(axis, state, reason="slice-empty-midpoint", interactive=True, immediate_axis_only=False)
             return
-        if ":" not in text:
-            try:
-                state = self.view_state.with_slice(axis, int(text)).with_axis_range(axis, None)
-                if state.montage_axis == axis:
-                    state = state.with_montage_axis(None)
-                self._apply_slice_state(axis, state, reason="slice", interactive=True, immediate_axis_only=True)
-            except ValueError:
-                self._sync_controls_from_view_state()
-            return
         try:
-            indices = _indices_from_slice_text(text, self.data.shape[axis])
+            selection = parse_slice_selection(text, self.data.shape[axis])
         except ValueError:
+            show_status_message(self, f"Could not understand slice selection: {text}", timeout=2000)
             self._sync_controls_from_view_state()
             return
+        indices = selection.indices
         if not indices:
+            show_status_message(self, f"Could not understand slice selection: {text}", timeout=2000)
             self._sync_controls_from_view_state()
+            return
+        text = selection.text
+        if selection.kind == "scalar":
+            state = self.view_state.with_slice(axis, indices[0]).with_axis_range(axis, None)
+            if state.montage_axis == axis:
+                state = state.with_montage_axis(None)
+            self._apply_slice_state(axis, state, reason="slice", interactive=True, immediate_axis_only=True)
             return
         if self.view_state.image_axes is not None and axis in self.view_state.image_axes:
             state = self.view_state.with_axis_range(axis, indices=indices, text=text)
@@ -301,34 +304,4 @@ class StateSyncMixin:
 
 
 def _indices_from_slice_text(text, axis_size):
-    parts = str(text).split(":")
-    if len(parts) > 3:
-        raise ValueError("slice range must have at most start:stop:step")
-
-    def parse(part):
-        part = part.strip()
-        return None if part == "" else int(part)
-
-    while len(parts) < 3:
-        parts.append("")
-    if len(str(text).split(":")) == 3:
-        start, step, stop = (parse(part) for part in parts[:3])
-        if step is None:
-            step = 1
-        if start is None:
-            start = 0 if step > 0 else int(axis_size) - 1
-        if stop is None:
-            stop = int(axis_size) - 1 if step > 0 else 0
-        if step == 0:
-            raise ValueError("slice step cannot be zero")
-        end = min(int(axis_size) - 1, stop) if step > 0 else max(0, stop)
-        values = []
-        current = max(0, min(int(axis_size) - 1, start))
-        while (current <= end if step > 0 else current >= end):
-            values.append(current)
-            current += step
-        return tuple(values)
-    start, stop, step = (parse(part) for part in parts[:3])
-    if step == 0:
-        raise ValueError("slice step cannot be zero")
-    return tuple(range(*slice(start, stop, step).indices(int(axis_size))))
+    return parse_slice_selection(text, axis_size).indices
