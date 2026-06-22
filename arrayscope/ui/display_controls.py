@@ -349,6 +349,7 @@ class DisplayControlBuildMixin:
         self.image_tab_layout.addWidget(self.img_view)
         self.image_tab.setLayout(self.image_tab_layout)
         self.img_view.getView().scene().sigMouseMoved.connect(lambda pos: self._on_image_mouse_moved(pos))
+        self.img_view.graphicsView.viewport().installEventFilter(self)
         self.img_view.set_profile_marker_callback(self._on_profile_marker_moved)
         self.img_view.roiCreated.connect(self._on_roi_created)
         self.img_view.roiChanged.connect(self._on_roi_changed)

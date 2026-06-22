@@ -222,6 +222,16 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         self._last_image_mouse_scene_pos = pos
         self.getPixel(pos)
 
+    def _clear_image_hover_state(self) -> None:
+        self._last_image_mouse_scene_pos = None
+        label = self.widgets['labels']['pixelValue']
+        if hasattr(label, "set_pixel_status"):
+            label.set_pixel_status("", self._slice_context_text())
+        else:
+            label.setText("")
+        if hasattr(self, "img_view"):
+            self.img_view.hideHud()
+
     def _refresh_hover_after_display_commit(self) -> None:
         pos = getattr(self, "_last_image_mouse_scene_pos", None)
         if pos is not None:

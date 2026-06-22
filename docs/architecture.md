@@ -535,7 +535,10 @@ subsetting such as `0:100:2` or `0 5 8`. Montage uses
 on the requested viewport clipped to full montage bounds; it is never shrunk to the loaded tiles.
 Visible tiles are evaluated through the same image snapshot path as normal views, cached individually,
 and composed into one bounded `MontageViewportCanvas` with `origin_x`/`origin_y` in full montage
-coordinates. The canvas carries per-tile states (`loaded`, `loading`, `skipped`, `unloaded`) so hover
+coordinates. Cold visible-tile evaluation is queued from a normalized viewport-focus distance, using
+the active hover point when available and otherwise the viewport center, while montage geometry and
+tile numbering remain in stable grid order. The canvas carries per-tile states (`loaded`, `loading`,
+`skipped`, `unloaded`) so hover
 and live profile can distinguish real data from loading placeholders, hard budget-skipped tiles, and
 inter-tile gaps. ViewBox coordinates are full montage world coordinates: the bounded canvas `ImageItem`
 is positioned at `canvas.origin_x/origin_y`, and the exact tile-layer mode positions tile `ImageItem`s
