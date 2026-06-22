@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import argparse
+import gc
 import json
 import os
 from pathlib import Path
@@ -96,69 +97,70 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
     if measure_presented is None:
         measure_presented = os.environ.get("ARRAYSCOPE_BENCH_PRESENTED") == "1"
     results = []
-    for view_type in (ImageView2D, VisPyImageView2D):
-        view = view_type()
-        try:
-            results.append(_benchmark_scalar_level_preview(view, measure_presented=measure_presented))
-        finally:
-            view.close()
-
-    for view_type in (ImageView2D, VisPyImageView2D):
-        view = view_type()
-        try:
-            results.append(_benchmark_complex_tile_level_preview(view, measure_presented=measure_presented))
-        finally:
-            view.close()
-
-    for view_type in (ImageView2D, VisPyImageView2D):
-        view = view_type()
-        try:
-            results.append(_benchmark_tile_level_uniform_update(view, measure_presented=measure_presented))
-        finally:
-            view.close()
-
-    for view_type in (ImageView2D, VisPyImageView2D):
-        view = view_type()
-        try:
-            results.append(_benchmark_clean_tile_flush(view, measure_presented=measure_presented))
-        finally:
-            view.close()
-
-    for view_type in (ImageView2D, VisPyImageView2D):
-        view = view_type()
-        try:
-            results.append(_benchmark_large_complex_tiled_initial(view, measure_presented=measure_presented))
-        finally:
-            view.close()
-
-    for view_type in (ImageView2D, VisPyImageView2D):
-        view = view_type()
-        try:
-            results.append(_benchmark_one_dirty_tile_commit(view, measure_presented=measure_presented))
-        finally:
-            view.close()
-
-    for view_type in (ImageView2D, VisPyImageView2D):
-        view = view_type()
-        try:
-            results.append(_benchmark_pan_zoom_no_upload(view, measure_presented=measure_presented))
-        finally:
-            view.close()
-
-    for view_type in (ImageView2D, VisPyImageView2D):
-        view = view_type()
-        try:
-            results.append(_benchmark_progressive_tile_stream(view, measure_presented=measure_presented))
-        finally:
-            view.close()
-
-    view = VisPyImageView2D()
+    scenarios = (
+        _benchmark_scalar_level_preview,
+        _benchmark_complex_tile_level_preview,
+        _benchmark_tile_level_uniform_update,
+        _benchmark_clean_tile_flush,
+        _benchmark_large_complex_tiled_initial,
+        _benchmark_one_dirty_tile_commit,
+        _benchmark_pan_zoom_no_upload,
+        _benchmark_progressive_tile_stream,
+    )
     try:
-        results.append(_benchmark_warm_residency_queue_scaling(view, measure_presented=measure_presented))
+        for scenario in scenarios:
+            for view_type in (ImageView2D, VisPyImageView2D):
+                results.append(
+                    _run_view_benchmark(
+                        view_type,
+                        scenario,
+                        measure_presented=measure_presented,
+                    )
+                )
+
+        results.append(
+            _run_view_benchmark(
+                VisPyImageView2D,
+                _benchmark_warm_residency_queue_scaling,
+                measure_presented=measure_presented,
+            )
+        )
+        return tuple(results)
+    finally:
+        _collect_benchmark_widgets()
+
+
+def _run_view_benchmark(view_type, scenario, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    """Run one scenario and close its parentless Qt/VisPy view."""
+
+    view = view_type()
+    try:
+        return scenario(view, measure_presented=measure_presented)
     finally:
         view.close()
+        view.deleteLater()
+        view = None
 
-    return tuple(results)
+
+def _collect_benchmark_widgets() -> None:
+    """Release closed benchmark widgets and their parentless context menus.
+
+    PyQtGraph signal cycles can retain a closed benchmark view until cyclic
+    garbage collection. A complete benchmark run creates hundreds of menus and
+    graphics helpers, so deferring cleanup to interpreter shutdown can make
+    pytest appear to hang. Cleanup is outside every measured action.
+    """
+
+    from pyqtgraph.Qt import QtCore, QtWidgets
+
+    app = QtWidgets.QApplication.instance()
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    if app is not None:
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+    gc.collect()
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    if app is not None:
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
 
 
 def _benchmark_scalar_level_preview(view, *, measure_presented: bool) -> RenderingBenchmarkResult:

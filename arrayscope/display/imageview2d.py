@@ -372,6 +372,15 @@ class ImageView2D(QtWidgets.QWidget):
             except (TypeError, RuntimeError):
                 break
 
+    def closeEvent(self, event) -> None:
+        preview = getattr(self, "_histogram_preview_controller", None)
+        if preview is not None:
+            preview.cancel()
+        display = getattr(self, "_histogram_display_controller", None)
+        if display is not None:
+            display.cancel()
+        super().closeEvent(event)
+
     def _bind_histogram_item(self, item) -> None:
         if item is None or self._histogram_bound_item is item:
             return

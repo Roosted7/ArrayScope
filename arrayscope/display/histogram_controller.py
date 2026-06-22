@@ -96,8 +96,16 @@ class HistogramDisplayController(QtCore.QObject):
         QtCore.QTimer.singleShot(0, self._refresh_from_timer)
 
     def _refresh_from_timer(self) -> None:
+        if not self._refresh_pending:
+            return
         self._refresh_pending = False
         self.refresh_histogram_plot(auto_level=False)
+
+    def cancel(self) -> None:
+        """Cancel queued refresh work before the owning widget is destroyed."""
+
+        self._refresh_pending = False
+        self.close_popup()
 
     def refresh_histogram_plot(self, *, auto_level: bool = False) -> bool:
         item = self._histogram_item()

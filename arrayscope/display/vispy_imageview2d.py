@@ -191,6 +191,20 @@ class VisPyImageView2D(ImageView2D):
             state_signal.connect(lambda *_args: self._request_vispy_camera_sync())
 
 
+    def closeEvent(self, event) -> None:
+        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
+        if warm_timer is not None:
+            warm_timer.stop()
+        self._vispy_pending_warm_tile_payloads = {}
+        self._vispy_pending_warm_tile_context = {}
+        canvas = getattr(self, "_vispy_canvas", None)
+        if canvas is not None:
+            try:
+                canvas.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
+
     def _display_overlay_parent(self):
         return getattr(self, "_display_container", self.graphicsView)
 
