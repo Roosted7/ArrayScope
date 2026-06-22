@@ -1,5 +1,6 @@
 from arrayscope.app.settings_state import AppSettingsState
 from arrayscope.core.compute_policy import ComputeLane, compute_policy_from_settings
+from arrayscope.core.gui_callback_budget import GuiCallbackObservation
 from arrayscope.core.memory_policy import MemoryPolicy, MemoryProfileChoice, SystemMemorySnapshot, compute_memory_policy
 from arrayscope.core.resource_governor import ResourceGovernor, ResourcePressure, SchedulerBusyState
 from arrayscope.core.resource_telemetry import CpuSnapshot, ResourceSnapshot
@@ -49,6 +50,30 @@ def test_ui_pressure_reduces_batch_and_workers():
     assert governor.diagnostics().pressure.ui_pressure == ResourcePressure.HIGH
     assert ui_decision.batch_limit < 12
     assert worker_decision.target_workers < worker_decision.max_workers
+
+
+def test_governor_retains_over_warning_callback_observation_details():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    observation = GuiCallbackObservation(
+        channel="montage_commit",
+        work_class="tile_upsert",
+        backend="vispy",
+        target_ms=4.0,
+        warning_ms=16.0,
+        item_cap=12,
+        byte_cap=8 * 1024 * 1024,
+        elapsed_ms=18.0,
+        processed_items=3,
+        processed_bytes=4096,
+    )
+
+    governor.record_gui_callback_observation(observation)
+
+    callbacks = governor.diagnostics().recent_over_warning_callbacks
+    assert callbacks == (observation,)
+    channel = governor.diagnostics().feedback_channels[0]
+    assert channel.last_count == 3
+    assert channel.last_byte_count == 4096
 
 
 def test_elevated_ui_pressure_preserves_stage_backed_tile_workers():

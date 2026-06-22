@@ -265,6 +265,8 @@ class ArrayScopeWindow(
                 continue
             decision = governor.decide_ui_work(channel, interactive=interactive)
             controller.set_max_callback_dispatch_per_drain(decision.batch_limit)
+            if hasattr(controller, "set_callback_budget_ms"):
+                controller.set_callback_budget_ms(decision.budget_ms)
         histogram_decision = governor.decide_ui_work("histogram_preview", interactive=interactive)
         img_view = getattr(self, "img_view", None)
         if img_view is not None and hasattr(img_view, "setHistogramPreviewInterval"):
@@ -281,14 +283,30 @@ class ArrayScopeWindow(
         if prefetch is not None:
             prefetch.set_max_prefetch(max(1, prefetch_decision.max_items if prefetch_decision.allowed else 1))
 
-    def _record_ui_work(self, channel: str, elapsed_ms: float, *, count: int = 1) -> None:
+    def _record_ui_work(
+        self,
+        channel: str,
+        elapsed_ms: float,
+        *,
+        count: int = 1,
+        byte_count: int = 0,
+        work_class: str = "",
+        backend: str = "",
+    ) -> None:
         governor = getattr(self, "resource_governor", None)
         if governor is not None:
-            governor.record_ui_observation(channel, elapsed_ms, item_count=count)
+            governor.record_ui_observation(
+                channel,
+                elapsed_ms,
+                item_count=count,
+                byte_count=byte_count,
+                work_class=work_class,
+                backend=backend,
+            )
             return
         feedback = getattr(self, "latency_feedback", None)
         if feedback is not None:
-            feedback.observe(channel, elapsed_ms, count=count)
+            feedback.observe(channel, elapsed_ms, count=count, byte_count=byte_count)
 
     def _ui_work_decision(self, channel: str, *, interactive: bool = False):
         governor = getattr(self, "resource_governor", None)

@@ -43,6 +43,29 @@ def test_evaluation_controller_dedupes_and_limits_prefetch(qt_app):
     assert limited.reason == "limited"
 
 
+def test_evaluation_controller_drain_yields_on_elapsed_budget(qt_app):
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    controller = EvaluationController(max_callback_dispatch_per_drain=99)
+    controller.set_callback_budget_ms(0.1)
+    done = []
+
+    def callback(value):
+        time.sleep(0.01)
+        done.append(value)
+
+    for key, value in (("a", 1), ("b", 2), ("c", 3)):
+        controller._runnables[key] = object()
+        controller._handlers[key] = (callback, None, None)
+        controller._queue.put(("prefetch_done", key, value))
+
+    controller._drain_queue()
+
+    assert done == [1]
+    assert len(controller._pending_queue_events) == 2
+    assert controller._drain_continuation_pending is True
+
+
 def test_start_latest_clears_queued_work_and_only_commits_newest(qt_app):
     from pyqtgraph.Qt import QtTest
 

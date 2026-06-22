@@ -8,6 +8,8 @@ import time
 
 from arrayscope.core.memory_policy import SystemMemorySnapshot, sample_system_memory
 
+_PROCESS_CPU_SAMPLERS: dict[int, object] = {}
+
 
 @dataclass(frozen=True)
 class CpuSnapshot:
@@ -41,7 +43,8 @@ def sample_resource_snapshot(*, psutil_module=None, cpu_count: int | None = None
     if psutil_module is not None:
         try:
             system_cpu = float(psutil_module.cpu_percent(interval=None))
-            process_cpu = float(psutil_module.Process().cpu_percent(interval=None))
+            process = _process_cpu_sampler(psutil_module)
+            process_cpu = float(process.cpu_percent(interval=None))
             source = "psutil"
         except Exception:
             warnings.append("psutil CPU telemetry unavailable")
@@ -63,3 +66,14 @@ def sample_resource_snapshot(*, psutil_module=None, cpu_count: int | None = None
         ),
         timestamp_monotonic=time.monotonic(),
     )
+
+
+def _process_cpu_sampler(psutil_module):
+    """Return a stable Process object for psutil's delta-based CPU sampler."""
+
+    key = id(psutil_module)
+    process = _PROCESS_CPU_SAMPLERS.get(key)
+    if process is None:
+        process = psutil_module.Process()
+        _PROCESS_CPU_SAMPLERS[key] = process
+    return process

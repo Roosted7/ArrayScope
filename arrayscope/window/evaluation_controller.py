@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import deque
 from queue import SimpleQueue
 
 from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.app.errors import handle_ui_exception, traceback_text
+from arrayscope.core.gui_callback_budget import GuiCallbackBudget
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.core.scheduler import EvalPriority, EvalRequest, PrefetchStart, SchedulerDiagnostics
 
@@ -108,6 +110,9 @@ class EvaluationController(Qt.QtCore.QObject):
         self._prefetch_cost_blocked_count = 0
         self._max_callback_dispatch_per_drain = max(1, int(max_callback_dispatch_per_drain))
         self._max_queue_events_per_drain = max(1, int(max_queue_events_per_drain))
+        self._callback_budget_ms: float | None = None
+        self._pending_queue_events = deque()
+        self._drain_continuation_pending = False
         self._queue = SimpleQueue()
         self._poll_timer = Qt.QtCore.QTimer(self)
         self._poll_timer.setInterval(10)
@@ -261,6 +266,9 @@ class EvaluationController(Qt.QtCore.QObject):
     def set_max_callback_dispatch_per_drain(self, count: int) -> None:
         self._max_callback_dispatch_per_drain = max(1, int(count))
 
+    def set_callback_budget_ms(self, budget_ms: float | None) -> None:
+        self._callback_budget_ms = None if budget_ms is None else max(0.25, float(budget_ms))
+
     def set_max_prefetch(self, count: int) -> None:
         self._max_prefetch = max(0, int(count))
 
@@ -303,10 +311,25 @@ class EvaluationController(Qt.QtCore.QObject):
             self._poll_timer.start()
 
     def _drain_queue(self):
-        dispatched_callbacks = 0
+        self._drain_continuation_pending = False
+        budget = GuiCallbackBudget(
+            channel=f"{self.name}_queue_drain",
+            work_class="evaluation_callback",
+            backend="qt",
+            target_ms=(
+                float(self._callback_budget_ms)
+                if self._callback_budget_ms is not None
+                else 8.0
+            ),
+            item_cap=int(self._max_callback_dispatch_per_drain),
+            byte_cap=0,
+        )
         processed_events = 0
-        while not self._queue.empty() and processed_events < self._max_queue_events_per_drain:
-            kind, key, value = self._queue.get()
+        while (self._pending_queue_events or not self._queue.empty()) and processed_events < self._max_queue_events_per_drain:
+            if self._pending_queue_events:
+                kind, key, value = self._pending_queue_events.popleft()
+            else:
+                kind, key, value = self._queue.get()
             processed_events += 1
             if kind == "started":
                 self._started.add(key)
@@ -324,8 +347,8 @@ class EvaluationController(Qt.QtCore.QObject):
                         on_done(value)
                     except Exception as exc:
                         handle_ui_exception("prefetch callback", exc)
-                    dispatched_callbacks += 1
-                    if dispatched_callbacks >= self._max_callback_dispatch_per_drain:
+                    budget.record_item()
+                    if budget.should_yield():
                         break
                 continue
             if kind == "prefetch_failed":
@@ -335,14 +358,24 @@ class EvaluationController(Qt.QtCore.QObject):
                 continue
             if kind == "finished":
                 self._finish(key, value)
-                dispatched_callbacks += 1
+                budget.record_item()
             elif kind == "failed":
                 self._fail(key, value)
-                dispatched_callbacks += 1
-            if dispatched_callbacks >= self._max_callback_dispatch_per_drain:
+                budget.record_item()
+            if budget.should_yield():
                 break
-        if not self._runnables and self._queue.empty():
+        if (self._pending_queue_events or not self._queue.empty()) and (self._runnables or self._handlers):
+            while not self._queue.empty():
+                self._pending_queue_events.append(self._queue.get())
+            self._schedule_drain_continuation()
+        if not self._runnables and self._queue.empty() and not self._pending_queue_events:
             self._poll_timer.stop()
+
+    def _schedule_drain_continuation(self) -> None:
+        if self._drain_continuation_pending:
+            return
+        self._drain_continuation_pending = True
+        Qt.QtCore.QTimer.singleShot(0, self._drain_queue)
 
     def _finish(self, generation, value):
         request = self._requests.get(generation)

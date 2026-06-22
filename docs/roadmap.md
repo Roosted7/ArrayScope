@@ -6,25 +6,6 @@ A roadmap item is complete only when its exit gate is met. “Code exists” is 
 
 ## Now — stabilize the v28 foundation
 
-### N1. Enforce GUI callback budgets
-
-**Goal:** make responsiveness a contract instead of a convention.
-
-Work:
-
-- Instrument every Qt/OpenGL mutation callback with elapsed time, item count, and bytes.
-- Bound stage-wait release, ready-tile fan-in, presentation upserts, histogram refresh, and visibility/geometry updates by time as well as items/bytes.
-- Split or reschedule any callback that can traverse a user/data-sized collection.
-- Record request-to-first-frame and maximum event-loop gap in benchmark output.
-- Treat 4 ms interactive, 8 ms idle, and 16 ms warning thresholds consistently.
-
-Exit gate:
-
-- stress scenarios show no unbounded callback path;
-- deterministic tests verify partial progress/rescheduling;
-- real traces identify work class/backend for every callback over 16 ms;
-- continuous pan, zoom, slicing, and level drag do not freeze the event loop on reference datasets.
-
 ### N2. Progress-preserving visible scheduling
 
 **Goal:** prevent latest-only cancellation from repeatedly discarding useful near-complete work.

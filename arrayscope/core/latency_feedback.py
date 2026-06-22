@@ -22,8 +22,10 @@ class LatencyFeedbackTuning:
 class LatencyFeedbackChannel:
     elapsed_ewma_ms: float | None = None
     per_item_ewma_ms: float | None = None
+    per_byte_ewma_ms: float | None = None
     last_elapsed_ms: float = 0.0
     last_count: int = 0
+    last_byte_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -31,8 +33,10 @@ class LatencyFeedbackChannelSnapshot:
     channel: str
     elapsed_ewma_ms: float | None
     per_item_ewma_ms: float | None
+    per_byte_ewma_ms: float | None
     last_elapsed_ms: float
     last_count: int
+    last_byte_count: int
 
 
 @dataclass
@@ -40,14 +44,18 @@ class LatencyFeedbackController:
     tuning: LatencyFeedbackTuning = field(default_factory=LatencyFeedbackTuning)
     _channels: dict[str, LatencyFeedbackChannel] = field(default_factory=dict)
 
-    def observe(self, channel: str, elapsed_ms: float, *, count: int = 1) -> None:
+    def observe(self, channel: str, elapsed_ms: float, *, count: int = 1, byte_count: int = 0) -> None:
         state = self._channels.setdefault(str(channel), LatencyFeedbackChannel())
         elapsed = max(0.0, float(elapsed_ms))
         count = max(1, int(count))
+        byte_count = max(0, int(byte_count))
         state.last_elapsed_ms = elapsed
         state.last_count = count
+        state.last_byte_count = byte_count
         state.elapsed_ewma_ms = _ewma(state.elapsed_ewma_ms, elapsed, self.tuning.ewma_alpha)
         state.per_item_ewma_ms = _ewma(state.per_item_ewma_ms, elapsed / count, self.tuning.ewma_alpha)
+        if byte_count > 0:
+            state.per_byte_ewma_ms = _ewma(state.per_byte_ewma_ms, elapsed / byte_count, self.tuning.ewma_alpha)
 
     def work_budget_ms(self, channel: str, *, interactive: bool = False) -> float:
         state = self._channels.get(str(channel))
@@ -79,13 +87,15 @@ class LatencyFeedbackController:
         name = str(channel)
         state = self._channels.get(name)
         if state is None:
-            return LatencyFeedbackChannelSnapshot(name, None, None, 0.0, 0)
+            return LatencyFeedbackChannelSnapshot(name, None, None, None, 0.0, 0, 0)
         return LatencyFeedbackChannelSnapshot(
             channel=name,
             elapsed_ewma_ms=state.elapsed_ewma_ms,
             per_item_ewma_ms=state.per_item_ewma_ms,
+            per_byte_ewma_ms=state.per_byte_ewma_ms,
             last_elapsed_ms=float(state.last_elapsed_ms),
             last_count=int(state.last_count),
+            last_byte_count=int(state.last_byte_count),
         )
 
     def snapshots(self) -> tuple[LatencyFeedbackChannelSnapshot, ...]:

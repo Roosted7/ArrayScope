@@ -408,7 +408,8 @@ def _feedback_lines(diagnostics: ResourceGovernorDiagnostics | None) -> tuple[st
                 f"  {channel.channel}:\n"
                 f"    last={_ms_text(channel.last_elapsed_ms)} "
                 f"ewma={_ms_text(channel.elapsed_ewma_ms)} "
-                f"per-item={_ms_text(channel.per_item_ewma_ms)}\n"
+                f"per-item={_ms_text(channel.per_item_ewma_ms)} "
+                f"bytes={format_bytes(channel.last_byte_count)}\n"
                 f"    batch={channel.batch_limit} "
                 f"budget={channel.budget_ms:.1f} ms "
                 f"interval={channel.interval_ms} ms"
@@ -417,6 +418,19 @@ def _feedback_lines(diagnostics: ResourceGovernorDiagnostics | None) -> tuple[st
         if inactive:
             lines.append("  Inactive:")
             lines.extend(f"    - {name}" for name in inactive)
+    if diagnostics.recent_over_warning_callbacks:
+        lines.append("Callbacks over warning:")
+        for callback in diagnostics.recent_over_warning_callbacks[-8:]:
+            label = callback.channel
+            details = []
+            if callback.work_class:
+                details.append(f"class={callback.work_class}")
+            if callback.backend:
+                details.append(f"backend={callback.backend}")
+            details.append(f"elapsed={_ms_text(callback.elapsed_ms)}")
+            details.append(f"items={callback.processed_items}")
+            details.append(f"bytes={format_bytes(callback.processed_bytes)}")
+            lines.append(f"  {label}: " + " ".join(details))
     return tuple(lines)
 
 

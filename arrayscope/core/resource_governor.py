@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import deque
 from enum import Enum
 from time import monotonic
 
 from arrayscope.core.compute_policy import ComputeLane, ComputePolicy
+from arrayscope.core.gui_callback_budget import GuiCallbackObservation, WARNING_THRESHOLD_MS
 from arrayscope.core.latency_feedback import LatencyFeedbackController, LatencyFeedbackTuning
 from arrayscope.core.memory_policy import MemoryPolicy, MemoryProfileChoice, normalize_memory_profile_choice
 from arrayscope.core.resource_telemetry import ResourceSnapshot
@@ -75,6 +77,8 @@ class FeedbackChannelDiagnostics:
     budget_ms: float
     batch_limit: int
     interval_ms: int
+    last_byte_count: int = 0
+    per_byte_ewma_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,7 @@ class ResourceGovernorDiagnostics:
     lane_decisions: tuple[LaneWorkerDecision, ...] = ()
     ui_decisions: tuple[UiWorkDecision, ...] = ()
     feedback_channels: tuple[FeedbackChannelDiagnostics, ...] = ()
+    recent_over_warning_callbacks: tuple[GuiCallbackObservation, ...] = ()
     telemetry_source: str = "n/a"
     system_cpu_percent: float | None = None
     process_cpu_percent: float | None = None
@@ -122,6 +127,7 @@ class ResourceGovernor:
     _last_lane_update_monotonic: dict[ComputeLane, float] = field(default_factory=dict)
     _lane_decisions: dict[ComputeLane, LaneWorkerDecision] = field(default_factory=dict)
     _ui_decisions: dict[str, UiWorkDecision] = field(default_factory=dict)
+    _recent_over_warning_callbacks: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=32))
 
     def __post_init__(self) -> None:
         self.profile = normalize_memory_profile_choice(self.profile)
@@ -155,9 +161,43 @@ class ResourceGovernor:
         self._memory_policy = memory_policy
         self._pressure = self._compute_pressure(snapshot, memory_policy)
 
-    def record_ui_observation(self, channel: str, elapsed_ms: float, item_count: int = 1) -> None:
-        self.latency_feedback.observe(channel, elapsed_ms, count=max(1, int(item_count)))
+    def record_ui_observation(
+        self,
+        channel: str,
+        elapsed_ms: float,
+        item_count: int = 1,
+        *,
+        byte_count: int = 0,
+        work_class: str = "",
+        backend: str = "",
+    ) -> None:
+        count = max(1, int(item_count))
+        byte_count = max(0, int(byte_count))
+        self.latency_feedback.observe(channel, elapsed_ms, count=count, byte_count=byte_count)
+        if float(elapsed_ms) >= WARNING_THRESHOLD_MS:
+            self._recent_over_warning_callbacks.append(
+                GuiCallbackObservation(
+                    channel=str(channel),
+                    work_class=str(work_class or ""),
+                    backend=str(backend or ""),
+                    target_ms=float(self.latency_feedback.work_budget_ms(channel, interactive=False)),
+                    warning_ms=WARNING_THRESHOLD_MS,
+                    item_cap=max(1, count),
+                    byte_cap=byte_count,
+                    elapsed_ms=max(0.0, float(elapsed_ms)),
+                    processed_items=count,
+                    processed_bytes=byte_count,
+                )
+            )
         self._pressure = self._pressure_with_ui(channel)
+
+    def record_gui_callback_observation(self, observation: GuiCallbackObservation) -> None:
+        count = max(1, int(observation.processed_items))
+        byte_count = max(0, int(observation.processed_bytes))
+        self.latency_feedback.observe(observation.channel, observation.elapsed_ms, count=count, byte_count=byte_count)
+        if observation.over_warning:
+            self._recent_over_warning_callbacks.append(observation)
+        self._pressure = self._pressure_with_ui(observation.channel)
 
     def decide_lane_workers(self, lane: ComputeLane, *, interactive: bool, busy_state: SchedulerBusyState) -> LaneWorkerDecision:
         lane = ComputeLane(lane)
@@ -256,8 +296,10 @@ class ResourceGovernor:
                     channel=channel,
                     last_elapsed_ms=snapshot.last_elapsed_ms,
                     last_count=snapshot.last_count,
+                    last_byte_count=snapshot.last_byte_count,
                     elapsed_ewma_ms=snapshot.elapsed_ewma_ms,
                     per_item_ewma_ms=snapshot.per_item_ewma_ms,
+                    per_byte_ewma_ms=snapshot.per_byte_ewma_ms,
                     budget_ms=decision.budget_ms,
                     batch_limit=decision.batch_limit,
                     interval_ms=decision.interval_ms,
@@ -270,6 +312,7 @@ class ResourceGovernor:
             lane_decisions=tuple(self._lane_decisions[lane] for lane in ComputeLane if lane in self._lane_decisions),
             ui_decisions=tuple(self._ui_decisions[channel] for channel in sorted(self._ui_decisions)),
             feedback_channels=tuple(feedback_channels),
+            recent_over_warning_callbacks=tuple(self._recent_over_warning_callbacks),
             telemetry_source="n/a" if cpu is None else cpu.source,
             system_cpu_percent=None if cpu is None else cpu.system_cpu_percent,
             process_cpu_percent=None if cpu is None else cpu.process_cpu_percent,

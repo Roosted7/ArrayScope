@@ -257,7 +257,7 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     assert controller.groups == ["montage-tile:7:7"]
 
 
-def test_interactive_viewport_expansion_resolves_cached_tiles_without_chunking(qt_app):
+def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
@@ -345,15 +345,17 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_chunking(q
 
     assert win._try_update_montage_viewport_only() is True
 
-    assert len(win.resolved_batches) == 1
-    assert set(win.resolved_batches[0]) == set(range(10))
+    assert len(win.resolved_batches) == 3
+    resolved = [tile for batch in win.resolved_batches for tile in batch]
+    assert len(resolved) == 3
     pending = [int(tile.montage_index) for tile in session.pending_tiles]
-    assert set(pending) == set(range(10))
+    assert pending == resolved
     assert pending[0] in {4, 5}
     assert session.loading_tiles == set()
     assert win.tile_schedules == 0
     assert win._montage_viewport_update_pending is True
-    assert win._last_montage_viewport_deferred_additions == 0
+    assert win._montage_viewport_continue_immediately is True
+    assert win._last_montage_viewport_deferred_additions == 7
 
 
 def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app):
@@ -675,6 +677,58 @@ def test_stage_wait_release_falls_back_to_direct_tile_evaluation():
     assert session.tile_stage_keys == {}
     assert [tile.montage_index for tile in session.pending_tiles] == [3]
     assert session.loading_tiles == {3}
+
+
+def test_stage_wait_in_flight_is_not_actionable_timer_work():
+    pytest.importorskip("pyqtgraph")
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class _Cache:
+        def get(self, key):
+            return None
+
+    class _Materializer:
+        _in_flight = {"stage-key": object()}
+
+    class _Evaluator:
+        stage_cache = _Cache()
+        stage_materializer = _Materializer()
+
+    class _Window(MontageRenderMixin):
+        operation_evaluator = _Evaluator()
+
+    session = SimpleNamespace(
+        stage_values={},
+        stage_waiting_tiles={"stage-key": [SimpleNamespace(montage_index=3)]},
+    )
+
+    assert not _Window()._stage_wait_has_actionable_work(session, release_missing=True)
+
+
+def test_stage_wait_completed_stage_is_actionable_timer_work():
+    pytest.importorskip("pyqtgraph")
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class _Cache:
+        def get(self, key):
+            return "stage-value" if key == "stage-key" else None
+
+    class _Materializer:
+        _in_flight = {}
+
+    class _Evaluator:
+        stage_cache = _Cache()
+        stage_materializer = _Materializer()
+
+    class _Window(MontageRenderMixin):
+        operation_evaluator = _Evaluator()
+
+    session = SimpleNamespace(
+        stage_values={},
+        stage_waiting_tiles={"stage-key": [SimpleNamespace(montage_index=3)]},
+    )
+
+    assert _Window()._stage_wait_has_actionable_work(session, release_missing=True)
 
 
 def test_montage_session_key_excludes_transient_viewport_range():
