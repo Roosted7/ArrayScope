@@ -1,64 +1,77 @@
 # AGENTS.md
 
-This is a Python/Qt n-dimensional array viewer.
+ArrayScope is a Python/Qt n-dimensional scientific-array viewer. Preserve its defining property: a small user action should produce an understandable view quickly, while expensive work remains bounded and observable.
 
-## Before changing code
+## Read the minimum useful context
 
-Read only the files relevant to the task:
+Use this order rather than scanning every historical note:
 
-* For project scope and feature direction, read `docs/mission.md` and `docs/roadmap.md`.
-* For architecture-sensitive changes, read `docs/architecture.md`.
-* For accepted design decisions and rationale, see `docs/decisions/*.md`.
-* For ArrayShow comparisons, read `docs/references/ArrayShow.md`.
-* For non-blocking future ideas, check `docs/ideas.md` only when the task asks for planning, feature design, or follow-up suggestions.
+1. `docs/mission.md` for scope and product principles.
+2. `docs/current-state.md` for maturity and known risks.
+3. `docs/roadmap.md` for active work and exit gates.
+4. `docs/architecture.md` for ownership and invariants.
+5. The relevant deep dive in `docs/architecture/`.
+6. `docs/decisions/README.md` and the specific ADR when a decision’s rationale matters.
+7. `docs/ideas.md` only for exploratory/future work.
+
+`docs/archive/` is historical evidence, not live direction. `docs/reviews/` contains dated assessments that may be superseded.
 
 ## Environment
 
-Use the project conda environment through direnv for local commands:
-
-```bash
-direnv exec . <command>
-```
-
-The `.envrc` activates the conda environment named `arrayscope`. If a non-interactive agent shell cannot find `conda`, add the local conda binary to `PATH` before running `direnv exec`, for example:
+The maintained local workflow uses the `arrayscope` conda environment through direnv:
 
 ```bash
 PATH=~/miniconda3/bin:$PATH direnv exec . <command>
 ```
 
-When dependencies change, update `environment.yml` and apply it to the conda environment:
+When dependencies change:
 
 ```bash
 PATH=~/miniconda3/bin:$PATH direnv exec . conda env update -f environment.yml --prune
 ```
 
-## While changing code
+Headless GUI tests normally use `QT_QPA_PLATFORM=offscreen`. VisPy/OpenGL tests still need separate real-hardware runs before performance or Wayland claims are accepted.
 
-* Update docs when changing architecture, public behavior, roadmap status, or ArrayShow-derived design decisions.
-* Add concise notes to `docs/ideas.md` when useful future ideas or technical debt are discovered.
-* Add or update decision documents only for choices that affect future architecture, public API, packaging, testing strategy, or major UX behavior.
-* Do not mark roadmap items as done, or move ideas into the roadmap, unless explicitly requested or clearly part of the assigned task.
+## Architecture rules
 
-## After changing code
+- `ViewState` and document objects own semantic state; widgets mirror state and emit intent.
+- Keep GUI callbacks thin. Do bounded work, publish progress, and reschedule the remainder.
+- Keep authoritative identities separate: document, semantic target, viewport, presentation, and physical residency.
+- Separate materialization identity from presentation identity. Levels/LUT changes must not imply new source pixels.
+- Camera-only changes must not restart array evaluation.
+- Requested, materialized, resident, and presented are distinct lifecycle states.
+- The committed frame owns coordinate/value semantics; placeholders never do.
+- Operations declare capabilities and region behavior. Do not add registered-operation type switches to render/slab code.
+- Background workers consume immutable snapshots and return values. They do not mutate live Qt-owned coordinators.
+- Backend code owns scene/texture mechanics, not the meaning of ROI hits, levels, frame identity, or viewport intent.
+- Compatibility shims, wrappers, or other "quick fixes" must be avoided. Problems must be solved at the source.
 
-* Add tests for new behavior.
-* Run relevant existing tests and update them only when behavior intentionally changed.
-* Check and ensure coherence across architecture, public behavior, and documentation.
-  * Through file inspection, small tests, full UI simulations (simulate interactions, and check rendered results)
-  * Iterate when needed (from updating docs, to bugs, all the way to improving looks and feels)
-* End with a handoff note containing:
+## Change policy
 
-  * what changed;
-  * tests run;
-  * manual checks performed, if any;
-  * important follow-up ideas or risks.
+Prefer small, reviewable fixes. Add an ADR only for a durable architecture, API, packaging, test-strategy, or major UX decision. Update live docs when behavior, maturity, ownership, or roadmap status changes; move obsolete process notes to the archive instead of layering another contradictory section on top.
 
-## Rules
+Every new array operation needs shape/value coverage. Every visible feature needs an interaction/smoke test where practical. Performance work needs deterministic work counters plus real timing evidence; wall-clock headless timings alone are not a GPU claim.
 
-* Do not add major behavior directly to the main window if it belongs in view state, slicing, dimension operations, or another focused module.
-* Prefer pure NumPy functions for array transformations.
-* GUI callbacks should be thin: update state, call focused logic, refresh the view.
-* Every new array operation needs at least a shape/value test.
-* Every visible UI feature should have a smoke test or rendering snapshot where practical.
-* Keep refactors behavior-preserving unless the task explicitly asks for behavior changes.
-* Prefer small, reviewable changes over broad rewrites.
+## Validation
+
+Run focused tests first, then the broadest affordable layer:
+
+```bash
+pytest -q tests/core tests/operations
+QT_QPA_PLATFORM=offscreen pytest -q tests/display tests/window
+QT_QPA_PLATFORM=offscreen pytest -q tests/ui tests/app
+```
+
+Also run:
+
+```bash
+python -m compileall -q arrayscope
+ruff check arrayscope tests --select F821,E9
+git diff --check
+```
+
+For rendering/UI changes, perform the relevant manual checks from `docs/testing/manual-regression.md` and record the backend, OS/session type, dataset shape/dtype, and diagnostics trace.
+
+## Handoff
+
+State what changed, tests and manual checks run, remaining risks, and any follow-up that belongs in `docs/roadmap.md` or `docs/ideas.md`.

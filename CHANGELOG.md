@@ -1,61 +1,57 @@
 # Changelog
 
-## Unreleased
+This file records user-visible release changes. Detailed development history and architecture decisions live under `docs/` and in Git.
 
-### Changed
-- **Qt binding default** — ArrayScope now depends on and tests PySide6 by default through PyQtGraph's Qt abstraction. The hard PyQt5 dependency has been removed.
-
-## [0.7.0]
+## Unreleased — ArrayScope development line
 
 ### Added
-- **DICOM directory loading** — `arrayscope some_dicom_dir/` now converts a directory of `.dcm` files via `dcm2niix` and loads the produced NIfTI volume. Single `.dcm` files still load through `pydicom`.
-- **Save current array as NumPy** — Ctrl+S now saves the current array state to `.npy`, with a range-selection dialog and optional singleton-dimension squeezing.
 
-## [0.6.1]
-
-### Changed
-- **Default channel selection** — Real-valued data now defaults to 'real' channel. Complex data defaults to 'abs' channel
-
-### Fixed
-- **macOS emoji rendering** — Fixed emoji glyphs on macOS
-
-## [0.6.0]
-
-### Added
-- **File monitoring & live reload** — Watch for file changes; click warning icon (⚠️) to reload
-- **Cross-platform CI** — Automated testing on Ubuntu, macOS, Windows with Python 3.12–3.14
+- Reversible dimension-operation stack with recipes, runtime optimization, cost estimates, and reusable operation-stage caching.
+- Live profiles, ROI inspection, ROI histograms, comparison helpers, and managed inspection panels.
+- Progressive, viewport-bounded montage rendering with typed tile payloads and explicit requested/materialized/resident/presented state.
+- Runtime memory policy, lane-aware compute policy, latency feedback, resource governance, diagnostics snapshots, trace logging, and rendering benchmarks.
+- Experimental VisPy raster/tiled backend with shader-based scalar and complex display mapping.
+- Explicit viewport modes, fit lock, 1:1 view, cropped image-axis ranges, and adaptive/manual histogram controls.
 
 ### Changed
-- **Fusion Qt style**
 
-### Fixed
-- **File locking** — Close HDF5/NPZ files immediately after data load to prevent locks blocking other processes
+- PySide6 is the default Qt binding through PyQtGraph’s abstraction.
+- Display semantics, backend mechanics, operation planning, caching, and UI orchestration have been split into focused packages.
+- Documentation now separates live guidance from archived phase notes and provides a progressive architecture/roadmap path.
 
-## [0.5.1] - 2026-04-09
+### Fixed in the v28 audit
 
-### Fixed
-- **Colormap switching** — Fixed error when switching back to gray colormap on PyQt5 systems without matplotlib.
+- The normal-image over-budget fallback now imports and uses the byte formatter instead of raising `NameError`.
+- Viewport zoom-out constraints still enforce recoverable content overlap when an old viewport center is far outside new content.
+- Display widgets cancel queued histogram refreshes and close VisPy resources during shutdown.
+- Rendering benchmarks release parentless Qt/VisPy object graphs and share one module result set, avoiding very slow test-process teardown.
+- Two stale evaluator tests now vary actual sliced axes, and test package bootstrapping is collection-order independent.
 
-## [0.5.0] - 2026-02-18
+## Legacy ndslice releases
 
-### Added
-- **PyQt6 support** — works with both PyQt5 (default) and PyQt6 via optional dependency: `pip install arrayscope[pyqt6]`
-- **HiDPI display support**
-- **Colormaps** — Added colormaps with keyboard shortcuts:
-  - Ctrl+1: Gray
-  - Ctrl+2: [Viridis](https://bids.github.io/colormap/)
-  - Ctrl+3: [Plasma](https://bids.github.io/colormap/)
-  - Ctrl+4: PAL-relaxed (cyclic, hides phase wraps)
-  - Ctrl+5: [Cividis](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0199239)
-  - Ctrl+6: [Cubehelix](http://www.mrao.cam.ac.uk/~dag/CUBEHELIX/)
-  - Ctrl+7: [Cool](https://d3js.org/d3-scale-chromatic/sequential)
-  - Ctrl+8: [Warm](https://d3js.org/d3-scale-chromatic/sequential)
-- **Video export**:
-  - GIF, WebM, MP4, PNG (frames)
-  - Window/Level can be per-slice or fixed
-  
-- **Update pyqtgraph to 0.14.0**
+The entries below predate the ArrayScope rebrand. Their version numbers do not describe the current package maturity.
 
-### Fixed
-- Window/Level reset on re-clicking `linear` / `symlog`
-- MATLAB v7.3 file loading — falls back to HDF5 loader when scipy.io.loadmat fails
+### 0.7.0
+
+- Added DICOM directory conversion through `dcm2niix`.
+- Added Ctrl+S NumPy export with range selection and optional singleton squeezing.
+
+### 0.6.1
+
+- Real arrays default to the real component; complex arrays default to magnitude.
+- Fixed macOS emoji rendering.
+
+### 0.6.0
+
+- Added file monitoring/live reload and cross-platform CI.
+- Adopted the Fusion Qt style.
+- Closed HDF5/NPZ containers promptly to avoid file-lock issues.
+
+### 0.5.1 — 2026-04-09
+
+- Fixed switching back to the gray colormap without matplotlib.
+
+### 0.5.0 — 2026-02-18
+
+- Added PyQt6/HiDPI support in the legacy line, more colormaps, video export, and MATLAB v7.3 fallback loading.
+- Fixed window/level reset when reselecting linear or symlog scale.
