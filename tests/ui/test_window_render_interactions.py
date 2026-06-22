@@ -337,6 +337,54 @@ def test_auto_window_resets_absolute_levels_once(qtbot):
         win.close()
 
 
+def test_auto_window_clears_pending_preview_and_renders_once_with_revert(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.zeros((4, 5, 2), dtype=np.float32)
+    data[:, :, 0] = np.arange(20, dtype=np.float32).reshape(4, 5)
+    data[:, :, 1] = 100.0 + np.arange(20, dtype=np.float32).reshape(4, 5)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
+        win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
+        win.img_view.setLevels(5.0, 15.0)
+        win._on_slice_index_changed(2, 1)
+        win.render_coordinator.flush_now()
+        _process_events(qtbot, count=20)
+
+        preview = win.img_view._histogram_preview_controller
+        preview.pending_levels = (6.0, 14.0)
+        preview.timer.start(1)
+        render_calls = []
+        original_render = win.render
+        monkeypatch.setattr(
+            win,
+            "render",
+            lambda *args, **kwargs: (render_calls.append(kwargs), original_render(*args, **kwargs))[1],
+        )
+
+        win.auto_window_levels()
+        _process_events(qtbot, count=30)
+
+        assert [call.get("reason") for call in render_calls] == ["auto-window"]
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (100.0, 119.0)
+        assert preview.pending_levels is None
+        assert not preview.timer.isActive()
+
+        widget = getattr(win, "_arrayscope_status_action_widget", None)
+        assert widget is not None
+        widget.linkActivated.emit("action")
+        _process_events(qtbot, count=30)
+
+        assert [call.get("reason") for call in render_calls] == ["auto-window", "auto-window-revert"]
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (5.0, 15.0)
+    finally:
+        win.close()
+
+
 def test_strict_ui_mode_raises_callback_exceptions(monkeypatch):
     from arrayscope.app.errors import handle_ui_exception
 

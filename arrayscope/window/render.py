@@ -568,6 +568,9 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         self._sync_controls_from_view_state()
 
     def auto_window_levels(self):
+        cancel_level_interaction = getattr(self.img_view, "cancelHistogramLevelInteraction", None)
+        if callable(cancel_level_interaction):
+            cancel_level_interaction()
         previous_levels = normalize_bounds(self.img_view.getLevels())
         auto_bounds = normalize_bounds(self.img_view.getHistogramDataBounds())
         auto_source = self._apply_display_level_override(auto_bounds, histogram_range=auto_bounds, emit_user=False)
@@ -588,6 +591,9 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         levels = normalize_bounds(levels)
         if levels is None:
             return
+        cancel_level_interaction = getattr(self.img_view, "cancelHistogramLevelInteraction", None)
+        if callable(cancel_level_interaction):
+            cancel_level_interaction()
         self._force_autolevel = False
         self._pending_auto_level_source = None
         self._queue_display_levels(levels)
