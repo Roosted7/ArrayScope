@@ -19,11 +19,12 @@ window/level behavior, cancellation, and diagnostics.
 
 ## Decision
 
-Keep one semantic display pipeline and compose it with backend adapters.
+Keep one semantic display pipeline and compose it with backend adapters. The abstraction preserves
+shared meaning, not identical physical commit style.
 
 The shared side owns:
 
-- raster and tiled presentation models;
+- tiled presentation models, including one-tile and small-tile cases;
 - display geometry and viewport intent;
 - level and histogram decisions;
 - committed value-source semantics for hover, ROI, and profile reads;
@@ -33,15 +34,34 @@ The shared side owns:
 A rendering backend owns only:
 
 - surface creation and lifecycle;
-- raster upload and presentation;
+- one-tile/small-tile upload and presentation mechanics;
 - tiled storage, residency, and draw submission;
 - camera/range application;
 - backend-specific overlay visuals;
 - concrete upload/draw diagnostics.
 
-Capabilities, not backend names, select optional paths.  Raster and tiled presentations are distinct
-first-class types.  Both PyQtGraph and VisPy consume the same typed `DisplayTilePayload` values and
-must pass one semantic conformance test suite.
+Capabilities, not backend names, select optional paths. Both PyQtGraph and VisPy consume the same
+typed `DisplayTilePayload` values and must pass one semantic conformance test suite.
+
+The protocol must expose semantic commonality:
+
+- tile identity;
+- value source;
+- level/window/LUT semantics;
+- ROI/profile semantics;
+- viewport and committed-frame identity.
+
+The protocol must also allow backend-specific mechanics:
+
+- PyQtGraph may use item-oriented update semantics, including per-item visibility, geometry, and
+  `ImageItem` data updates;
+- VisPy may use coherent atlas/page transaction semantics, where texture writes, geometry/page
+  metadata, visibility, and draw invalidation are acknowledged as one presentation commit for the
+  admitted payloads.
+
+Shared semantics do not require a shared physical commit model. A backend protocol that forces VisPy
+to look like PyQtGraph item mutation, or forces PyQtGraph to fake VisPy atlas transactions, is the
+wrong abstraction.
 
 The intended package shape is:
 
@@ -83,16 +103,17 @@ Trade-offs:
 
 - The current hybrid surface remains during migration and still pays some dual-scene and Qt stacking
   cost.
-- The backend protocol must stay semantic; exposing every VisPy or PyQtGraph primitive through it
-  would create a lowest-common-denominator abstraction.
+- The backend protocol must stay semantic while still permitting different mechanics; exposing every
+  VisPy or PyQtGraph primitive through it would create a lowest-common-denominator abstraction.
 - Native VisPy pointer interaction is deferred until the shared interaction controller no longer
   depends on `QGraphicsItem` event ownership.
 
 ## Migration sequence
 
-1. Keep `DisplayRasterPresentation` and `DisplayTiledPresentation` as the only pixel commit inputs.
-2. Move capability lookup, raster/tile upload, camera application, and overlay drawing behind a small
-   backend protocol.
+1. Keep canonical display presentation objects as the only pixel commit inputs while converging normal
+   image and montage presentation on tiled regions.
+2. Move capability lookup, tiled payload commit, camera application, and overlay drawing behind a
+   small backend protocol.
 3. Extract pointer hit testing and drag state from Qt graphics items into one shared controller.
 4. Replace backend inheritance with a shared widget shell plus backend composition.
 5. Run the same semantic and benchmark scenarios against every backend.
@@ -112,9 +133,11 @@ Trade-offs:
 
 ## Required tests
 
-- One conformance suite for raster/tiled levels, geometry, value lookup, viewport preservation, dirty
-  tile semantics, overlays, and interaction state.
+- One conformance suite for tiled levels, geometry, value lookup, viewport preservation, dirty tile
+  semantics, overlays, and interaction state.
 - Backend-specific tests for upload counts, residency, storage rebuilds, evictions, and shader mode.
+- Backend-specific commit tests for PyQtGraph item updates and VisPy coherent atlas/page
+  transactions.
 - Presented-frame benchmarks that measure first-frame latency and Qt event-loop starvation separately
   from setter submission time.
 - Manual parity checks for hover, cursors, ROI/profile drag feedback, status HUD, and ROI information.

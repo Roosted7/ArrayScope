@@ -154,10 +154,12 @@ ViewIntent
   -> FramePlan / WorkGraph
   -> DeadlineScheduler
   -> PresentationCommit
-  -> ImageSurface (raster or tiled storage strategy)
+  -> ImageSurface (unified tiled regions with backend-specific commit mechanics)
 ```
 
-A small plane, huge plane, one-tile montage, and many-tile montage should share semantic planning and differ only in storage strategy.
+A small plane, huge plane, one-tile montage, and many-tile montage should share semantic planning.
+One-tile and small-tile cases are optimized inside the tiled engine; backend surfaces may commit them
+through different physical mechanics without changing their meaning.
 
 ## Non-negotiable invariants
 
@@ -169,10 +171,13 @@ A small plane, huge plane, one-tile montage, and many-tile montage should share 
 - First pixels do not wait for a detailed histogram plot; they do require a valid semantic level source for the pixels shown.
 - GUI callbacks have item, byte, and elapsed-time limits; an item cap alone is not a time budget.
 - Cold upload/preparation is measured separately from warm rebind/visibility work.
+- Warm/speculative residency is separately budgeted and yields to visible residency.
 - Hidden side panels do not continuously compute.
 - The committed frame, not a compatibility placeholder, answers hover/value queries.
 - Backend branches are based on declared capabilities, not concrete class-name tests.
 - Clearing a backend requires an explicit reason such as context loss, replacement, document revision, or incompatible physical representation.
+- VisPy visible tile admission is coherent: placeholders clear only after texture data, geometry,
+  visibility, and draw invalidation are consistent.
 
 ## Placement guide
 

@@ -19,6 +19,11 @@ time, so careless rebinding can multiply histogram recomputation.
 
 Display upload remains on the Qt thread, but ArrayScope reduces and measures that work.
 
+This ADR primarily records the PyQtGraph upload and item-update response to slow montage display.
+Its throttling, per-item refresh, and histogram rebinding details must not leak into the VisPy design.
+Later backend composition keeps the semantic presentation contract shared while allowing different
+physical commit mechanics.
+
 `ImageView2D` owns upload instrumentation for visible image upload, histogram plot upload, histogram
 recompute, RGB re-windowing, level synchronization, and profile-bound refresh. Runtime diagnostics show
 these phases separately from tile evaluation, stage cache, and canvas composition.
@@ -43,9 +48,9 @@ The Performance menu exposes the montage display backend as Auto, Tile layer, or
 Auto keeps PyQtGraph small/scalar montages on canvas, selects tile-layer mode for large RGB/complex
 montages and previously slow upload paths, and records the chosen backend and reason in diagnostics.
 Backends that declare both direct tiled payload support and a tiled-montage preference, such as
-VisPy, use tile-layer mode immediately in Auto to avoid canvas composition/upload during progressive
-montage updates. Canvas fallback remains available for developer/user escape hatches, but large
-RGB/complex canvas fallback is diagnosed as potentially slow.
+VisPy, use their direct tiled-delta path immediately in Auto to avoid canvas composition/upload during
+progressive montage updates. Canvas fallback remains available for developer/user escape hatches, but
+large RGB/complex canvas fallback is diagnosed as potentially slow.
 
 Tile-layer presentation is stateful and dirty-aware. Presentation models carry optional dirty tile
 numbers: `None` means the tile state is unknown and visible loaded items should refresh, `()` means a
@@ -98,3 +103,7 @@ to report zero tile item updates and zero visible upload bytes.
 The display implementation is more complex: ImageView2D now owns two montage paint modes, and tests
 must guard that both use the same levels, histogram source, hover/value semantics, and dirty-only
 update behavior.
+
+For future work, PyQtGraph and VisPy should share semantic presentation, not necessarily scheduling or
+commit mechanics. PyQtGraph can remain item-oriented; VisPy should commit admitted visible tiles as a
+coherent atlas/page transaction.

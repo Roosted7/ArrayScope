@@ -63,6 +63,8 @@ All paths that mutate Qt or OpenGL state follow these limits:
 - every batch has item, byte, and elapsed-time limits;
 - partial progress is published and remaining work is rescheduled;
 - queueing many individual Qt events is not equivalent to one bounded callback.
+- result fan-in is budgeted before visible admission; ready tile bursts must be admitted in bounded
+  item/byte/time batches rather than drained unconditionally.
 
 Current code does not yet enforce this everywhere. In particular, stage-wait release, priority rebuilds, histogram refresh, and some presentation updates need traces at large tile counts.
 
@@ -71,6 +73,7 @@ Current code does not yet enforce this everywhere. In particular, stage-wait rel
 Cancellation protects correctness and scarce resources; it is not a substitute for scheduling.
 
 - Stale results are rejected by semantic key/revision even if cancellation arrives late.
+- Stale visible work is dropped before visible admission.
 - Exact cache entries are written only by complete accepted results.
 - Work that is cheap to finish or reusable may be allowed to complete.
 - Presentation-only changes supersede presentation work, not materialization.
@@ -96,6 +99,10 @@ Estimates are conservative admission inputs, not proof that allocation will succ
 ## GPU residency
 
 GPU residency has its own budget and lifecycle. It must consider queried device limits, actual allocation outcomes, texture format/shape, context identity, and pressure. CPU cache presence does not imply GPU residency; GPU eviction does not invalidate semantic CPU data.
+
+Visible residency has priority over warm/speculative residency. Warm tile promotion, prefetch, and
+retained-source residency use a separate lower-priority budget and must shrink, pause, or cancel when
+visible materialization, visible GPU residency, or admitted visible commit fan-in needs capacity.
 
 ## Feedback and resource governance
 
@@ -123,7 +130,7 @@ At minimum capture:
 - cold upload versus warm rebind/visibility counts;
 - cache/stage hit rates and evictions;
 - process RSS and estimated GPU residency;
-- backend, dtype/component, storage strategy, and interaction state.
+- backend, dtype/component, tile layout/commit path, and interaction state.
 
 ## Testing limits
 

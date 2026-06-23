@@ -26,9 +26,10 @@ and overlays difficult to reason about.
 
 ## Decision
 
-ArrayScope will use one semantic image-presentation pipeline and one deadline-aware work scheduler.
-Raster and tiled/virtual storage remain interchangeable physical strategies selected by a planner.
-They are not separate semantic render pipelines.
+ArrayScope will use one semantic image-presentation pipeline, a unified tiled image surface for normal
+image presentation, and one deadline-aware work scheduler. Single images, large planes, and montages
+are represented as tile regions in the same semantic pipeline. One-tile and small-tile cases are
+optimized inside the tiled engine rather than routed through a separate semantic renderer.
 
 The target flow is:
 
@@ -39,8 +40,8 @@ ViewIntent
   -> DeadlineScheduler
   -> PresentationCommit
   -> ImageSurface
-       -> raster strategy
-       -> tiled / virtual strategy
+       -> tiled regions
+       -> backend-specific commit mechanics
 ```
 
 ### Semantic frame identity
@@ -103,6 +104,10 @@ Cancellation is by supersession key and value, not by a global render generation
 exact work supersedes an older queued target, but an already-running item may finish when its
 remaining cost is lower than restart cost or when it produces reusable cache data.
 
+Backpressure applies before visible admission. Stale work is dropped before it can enter the visible
+presentation set. Result fan-in is itself budgeted, so a worker burst cannot turn into an unbounded
+GUI callback simply because every result is technically ready.
+
 ### Admission score
 
 After hard visible deadlines, optional work is admitted using an explicit value score:
@@ -127,26 +132,33 @@ Every path that mutates Qt or OpenGL state must obey all of these rules:
 - batches are bounded by items, bytes, and elapsed time;
 - callbacks publish partial progress and reschedule remaining work;
 - semantic histogram refinement never gates first pixel presentation;
+- histogram/level-only updates are not required to make already resident visible tiles drawable;
 - the last valid frame remains visible until a replacement is usable.
 
-### One semantic surface, multiple storage strategies
+### Unified tiled image surface
 
-A normal image is a one-region semantic scene. A montage is a multi-region semantic scene. Either may
-use raster or tiled storage.
+A normal image is a one-region semantic scene. A montage is a multi-region semantic scene. A very
+large single plane is a multi-tile semantic scene without montage-axis meaning. All three use the
+same tiled presentation model. The planner chooses tile regions, page/atlas layout, residency
+priority, and backend capability use; it does not choose between separate normal-image and montage
+semantic renderers.
 
-The storage planner chooses among:
+The tiled engine may collapse small cases to one tile or a small fixed tile set. That is an
+optimization inside the same surface, not a second authoritative presentation path.
 
-- one texture / one `ImageItem` for a small, stable plane;
-- partitioned tiles for a very large single plane;
-- tiled montage storage for many semantic regions;
-- explicit multi-resolution pages when source levels exist or can be built off-thread.
-
-The choice considers dimensions, texture limits, estimated bytes, update frequency, viewport size,
-backend capabilities, and available residency. A one-tile montage and a normal image must share level,
-value, scheduling, cache, and interaction semantics even when their physical allocation differs.
+The planner considers dimensions, texture limits, estimated bytes, update frequency, viewport size,
+backend capabilities, and available residency. A one-tile montage, a small normal image, and an
+internally tiled large plane must share level, value, scheduling, cache, and interaction semantics
+even when their physical allocation or backend calls differ.
 
 `DisplayTiledPresentation` must therefore cease requiring montage geometry. Internal tile geometry for
 a large single plane should be represented independently of montage-axis semantics.
+
+For VisPy, admitted visible tile payloads are committed as coherent GPU presentation transactions.
+The backend must not clear placeholders or report presentation until texture data, page geometry,
+visibility state, and draw invalidation are all consistent. The active visible commit is atomic for
+the admitted payloads: it may be small and progressive, but it cannot expose a half-admitted set whose
+coordinate/value semantics disagree with the drawable scene.
 
 ### Backend composition
 
@@ -211,7 +223,7 @@ Selected or hovered entities receive higher prediction probability than unrelate
 
 GPU residency and CPU semantic caches are separate budgets. GPU allocation is based on queried device
 limits, proven allocation results, configured policy, and current pressure—not a fixed assumed texture
-size.
+size. Warm/speculative residency is budgeted separately and must yield to visible residency.
 
 Native-resolution tiles remain the production baseline. Multi-resolution rendering uses explicit
 compatible storage classes: separate pages per LOD/tile shape, texture arrays grouped by dimensions,
@@ -248,6 +260,13 @@ from the start:
 3. **Budgets apply to cold work.** Resident atlas rebinds, existing PyQtGraph item shows, visibility
    updates, and geometry moves are not equivalent to cold uploads or CPU windowing. Feedback and
    deadlines must report those categories separately.
+4. **Visible commit is coherent for admitted payloads.** Backpressure happens before visible
+   admission. Once a visible tile payload is admitted into a VisPy presentation delta, the backend
+   either commits texture data, geometry, visibility, and draw invalidation consistently or leaves the
+   prior placeholder/retained frame in force.
+5. **Warm work is subordinate.** Warm residency, prefetch, and retained-source promotion have separate
+   budgets and are cancelled, deferred, or shrunk before they compete with visible residency or
+   visible commit fan-in.
 
 Unknown source identity is not a reason to clear a backend. Clears are explicit recovery operations
 with reasons such as context loss, backend replacement, semantic document revision, or incompatible
@@ -263,7 +282,8 @@ Positive:
 - predictable GUI-thread latency independent of source size;
 - useful idle compute without competition with visible work;
 - backend comparisons based on actual frame delivery;
-- large single images can gain tiled residency without becoming fake montages;
+- large single images can gain tiled residency without becoming fake montages or separate semantic
+  renderers;
 - PyQtGraph remains a reliable fallback while VisPy can exploit shaders and persistent GPU storage.
 
 Costs and risks:

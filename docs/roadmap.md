@@ -26,23 +26,24 @@ Exit gate:
 
 ## Next — converge the architecture
 
-### X1. Unified frame planner and storage strategy
+### X1. Unified frame planner and tiled image surface
 
 **Goal:** normal images and montages become one semantic presentation pipeline.
 
 Work:
 
-- Introduce explicit `FrameTarget`/quality and a storage-neutral region/tile model.
+- Introduce explicit `FrameTarget`/quality and a unified region/tile model.
 - Move normal and montage planning behind one `FramePlanner`.
-- Choose raster, internally tiled large-plane, or montage-tiled storage from dimensions, limits, update rate, and residency.
+- Represent single images, large planes, and montages as tile regions in the same semantic pipeline.
+- Optimize one-tile and small-tile cases inside the tiled engine.
 - Make one-tile montage and normal image share level/value/cache/scheduling tests.
 - Generalize `DisplayTiledPresentation` so montage geometry is optional.
 
 Exit gate:
 
-- no semantic branch depends on “normal versus montage” when storage strategy is the real distinction;
+- no semantic branch depends on “normal versus montage”;
 - a huge single plane can use internal tiling;
-- conformance tests pass across raster/tiled and both backends;
+- conformance tests pass across one-tile, small-tile, large-tile, and montage cases on both backends;
 - existing public interactions remain available throughout migration.
 
 ### X2. Backend composition
@@ -52,7 +53,7 @@ Exit gate:
 Work:
 
 - Define `ImageViewShell` ownership of controls, histogram, HUD, viewport, and semantic signals.
-- Define `ImageSurface` protocol for raster/tiled commit, camera, overlay state, pointer conversion, diagnostics, and teardown.
+- Define `ImageSurface` protocol for tiled payload commit, camera, overlay state, pointer conversion, diagnostics, and teardown.
 - Move remaining PyQtGraph/VisPy mechanics to their backend packages.
 - Retire compatibility shims only after internal imports and tests use canonical paths.
 

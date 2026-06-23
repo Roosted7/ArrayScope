@@ -10,7 +10,7 @@ An evaluation result supplies data plus semantic metadata such as texture kind, 
 - levels and histogram domain/source;
 - LUT and scale mapping;
 - viewport intent;
-- raster or tiled payloads;
+- tiled region payloads;
 - dirty/retained/presented tile state.
 
 The resulting display presentation is backend-independent. A backend adapter translates it into concrete widget/texture calls and reports commit work/acknowledgement.
@@ -49,15 +49,18 @@ Three concepts are separate:
 
 A progressive tile can be shown before a high-detail plot is complete, but automatic levels for that tile must be based on semantic coverage that includes it. User-locked levels are not overwritten by later refinement. Preview drags/manual edits may update pixels immediately while only final edits emit the semantic level-change signal.
 
-## Storage strategies
+## Unified Tiled Surface
 
-### Raster
+ArrayScope presents normal images, large planes, and montages through one semantic tiled image
+surface. A small/stable image may collapse to one tile and one backend texture/item; a large single
+plane may use internal tiles; a montage uses multiple semantic tile regions. Those are optimizations
+and layouts inside one presentation model, not separate semantic renderers.
 
-A small/stable image can use one PyQtGraph `ImageItem` or one VisPy texture. This is simple and efficient until plane size, update rate, texture limits, or preparation cost make one full upload undesirable.
-
-### Tiled
-
-A tiled presentation is a set of semantic regions and payloads. PyQtGraph uses persistent per-tile image items; VisPy uses atlas/texture-backed visuals. Tile identity is based on materialized data and compatible physical representation, not levels/LUT.
+A tiled presentation is a set of semantic regions and payloads. PyQtGraph uses persistent per-tile
+image items; VisPy uses atlas/texture-backed visuals. Tile identity is based on materialized data and
+compatible physical representation, not levels/LUT. Level/window/LUT changes are presentation
+updates, preferably shader/uniform updates where the backend supports them, and do not imply new
+source pixels.
 
 A montage is one reason to have semantic regions, but not the only one. The target architecture also permits internal tiling of one huge plane without inventing a montage axis.
 
@@ -103,6 +106,10 @@ The default path is mature and provides the complete feature baseline. Its tiled
 ### VisPy
 
 VisPy supports shader mapping and persistent tiled residency with atlas-backed drawing. It can avoid repeated CPU windowing and reduce many-item overhead. It remains experimental because `VisPyImageView2D` still subclasses the full PyQtGraph widget, so two scene/event systems and lifecycle models coexist.
+VisPy is the preferred backend for sustained large tiled rendering, pending small-view latency and
+platform validation. Its active visible commit should be a coherent GPU presentation transaction:
+admitted payloads are acknowledged only after texture data, atlas/page geometry, visibility, and draw
+invalidation are consistent.
 
 Widget close now stops warm-tile work, cancels queued histogram refresh, and closes the VisPy canvas. This is necessary cleanup, not the final composition architecture.
 
@@ -111,6 +118,8 @@ Widget close now stops warm-tile work, cancels queued histogram refresh, and clo
 - Keep the last valid frame until a replacement is usable.
 - Reject stale commits by revision/key.
 - Do not clear because an identity is merely unknown.
+- Apply backpressure before visible admission; once admitted, visible payloads commit coherently or
+  the previous placeholder/retained frame remains in force.
 - Bound cold preparation/upload by items, bytes, and elapsed time.
 - Do not count a batch of many tiles as one feedback item.
 - Separate submission time, preparation time, upload bytes/time, queue delay, and first-frame/presented age.
