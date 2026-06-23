@@ -137,7 +137,7 @@ state/viewport change
   -> session retarget
   -> cache/stage lookup and tile materialization
   -> semantic level coverage
-  -> bounded presentation delta
+  -> ready presentation delta
   -> adapter upload/rebind/visibility work
   -> acknowledgement and committed frame
 ```

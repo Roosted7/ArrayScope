@@ -1797,7 +1797,6 @@ class MontageRenderMixin:
             ) + int(bool(fast_drain))
             tile_state, tile_delta = session.build_tile_presentation(
                 tile_source_ids,
-                source_ids_trusted=bool(getattr(session, "tile_source_ids_trusted", True)),
                 cold_deadline_ms=_montage_commit_budget_ms(self),
             )
             active_payloads = tile_state.active_payloads(tile_delta)
@@ -2211,7 +2210,6 @@ class MontageRenderMixin:
         if source_ids is None:
             source_ids = {}
             session.tile_source_ids = source_ids
-        trusted = True
         plan_tiles = {
             int(tile.montage_index): tile
             for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
@@ -2232,7 +2230,6 @@ class MontageRenderMixin:
                     shader_display=bool(getattr(session, "shader_display", False)),
                 )
             except Exception:
-                trusted = False
                 rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
                 if rendered is None:
                     source_ids[tile_number] = (
@@ -2252,7 +2249,6 @@ class MontageRenderMixin:
                         None if histogram is None else tuple(np.shape(histogram)),
                         None if histogram is None else str(np.asarray(histogram).dtype),
                     )
-        session.tile_source_ids_trusted = bool(trusted)
         return dict(source_ids)
 
     def _should_publish_montage_level_metadata(self, session, stats: MontageLevelStats) -> bool:

@@ -467,11 +467,8 @@ class MontageRenderSession:
         self,
         source_ids: dict[int, object] | None,
         *,
-        source_ids_trusted: bool = True,
-        max_upserts: int | None = None,
         cold_deadline_ms: float | None = None,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
-        del source_ids_trusted
         source_ids = dict(source_ids or {})
         previous_state = self.tile_presentation_state
         previous_payloads = dict(previous_state.payloads)
@@ -547,8 +544,6 @@ class MontageRenderSession:
         force_refresh = False
         clear_reason = ""
         self.deferred_display_tiles = ()
-        if max_upserts is not None:
-            del max_upserts
 
         base_revision = int(getattr(previous_state, "revision", 0))
         target_revision = base_revision + (1 if upserts or removals else 0)

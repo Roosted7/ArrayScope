@@ -649,7 +649,7 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     assert image_view.calls == 1
 
 
-def test_montage_render_session_does_not_force_clear_for_untrusted_source_ids():
+def test_montage_render_session_commits_ready_payloads_atomically():
     session = _session()
     session.pending_tiles.clear()
     source_ids = {}
@@ -658,11 +658,7 @@ def test_montage_render_session_does_not_force_clear_for_untrusted_source_ids():
         session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
-    state, delta = session.build_tile_presentation(
-        source_ids,
-        source_ids_trusted=False,
-        max_upserts=1,
-    )
+    state, delta = session.build_tile_presentation(source_ids)
 
     assert not delta.force_refresh
     assert delta.clear_reason == ""
