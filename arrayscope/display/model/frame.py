@@ -162,10 +162,6 @@ class TilePresentationDelta:
     base_revision: int = 0
     target_revision: int = 0
     cold_deadline_ms: float | None = None
-    callback_target_ms: float | None = None
-    callback_warning_ms: float | None = None
-    callback_item_cap: int | None = None
-    callback_byte_cap: int | None = None
     upserts: Mapping[int, DisplayTilePayload] = field(default_factory=dict)
     removals: tuple[int, ...] = ()
     active_tiles: tuple[int, ...] = ()
@@ -198,14 +194,6 @@ class TilePresentationDelta:
         object.__setattr__(self, "target_revision", target)
         deadline = self.cold_deadline_ms
         object.__setattr__(self, "cold_deadline_ms", None if deadline is None else max(0.0, float(deadline)))
-        target_ms = self.callback_target_ms
-        warning_ms = self.callback_warning_ms
-        item_cap = self.callback_item_cap
-        byte_cap = self.callback_byte_cap
-        object.__setattr__(self, "callback_target_ms", None if target_ms is None else max(0.0, float(target_ms)))
-        object.__setattr__(self, "callback_warning_ms", None if warning_ms is None else max(0.0, float(warning_ms)))
-        object.__setattr__(self, "callback_item_cap", None if item_cap is None else max(1, int(item_cap)))
-        object.__setattr__(self, "callback_byte_cap", None if byte_cap is None else max(0, int(byte_cap)))
         object.__setattr__(self, "upserts", upserts)
         object.__setattr__(self, "removals", removals)
         object.__setattr__(self, "active_tiles", active)

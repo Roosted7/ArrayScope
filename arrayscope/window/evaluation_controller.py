@@ -32,47 +32,61 @@ class CancellationToken:
 
 
 class _EvaluationRunnable(Qt.QtCore.QRunnable):
-    def __init__(self, request, fn, queue, token, *, pass_token=False):
+    def __init__(self, request, fn, queue, token, *, pass_token=False, notify_queue=None):
         super().__init__()
         self.request = request
         self.fn = fn
         self.queue = queue
         self.token = token
         self.pass_token = bool(pass_token)
+        self.notify_queue = notify_queue
         self.started = False
+
+    def _put(self, item) -> None:
+        self.queue.put(item)
+        if self.notify_queue is not None:
+            self.notify_queue()
 
     def run(self):
         self.started = True
-        self.queue.put(("started", self.request.generation, None))
+        self._put(("started", self.request.generation, None))
         if self.token.cancelled:
-            self.queue.put(("cancelled", self.request.generation, None))
+            self._put(("cancelled", self.request.generation, None))
             return
         try:
             value = self.fn(self.token) if self.pass_token else self.fn()
-            self.queue.put(("finished", self.request.generation, value))
+            self._put(("finished", self.request.generation, value))
         except EvaluationCancelled:
-            self.queue.put(("cancelled", self.request.generation, None))
+            self._put(("cancelled", self.request.generation, None))
         except Exception as exc:
             exc.arrayscope_traceback = traceback_text(exc)
-            self.queue.put(("failed", self.request.generation, exc))
+            self._put(("failed", self.request.generation, exc))
 
 
 class _PrefetchRunnable(Qt.QtCore.QRunnable):
-    def __init__(self, fn, queue, key):
+    def __init__(self, fn, queue, key, *, notify_queue=None):
         super().__init__()
         self.fn = fn
         self.queue = queue
         self.key = key
+        self.notify_queue = notify_queue
+
+    def _put(self, item) -> None:
+        self.queue.put(item)
+        if self.notify_queue is not None:
+            self.notify_queue()
 
     def run(self):
         try:
-            self.queue.put(("prefetch_done", self.key, self.fn()))
+            self._put(("prefetch_done", self.key, self.fn()))
         except Exception as exc:
             exc.arrayscope_traceback = traceback_text(exc)
-            self.queue.put(("prefetch_failed", self.key, exc))
+            self._put(("prefetch_failed", self.key, exc))
 
 
 class EvaluationController(Qt.QtCore.QObject):
+    queueEventReady = Qt.QtCore.Signal()
+
     def __init__(
         self,
         parent=None,
@@ -123,8 +137,12 @@ class EvaluationController(Qt.QtCore.QObject):
         self._drain_continuation_pending = False
         self._queue = SimpleQueue()
         self._poll_timer = Qt.QtCore.QTimer(self)
-        self._poll_timer.setInterval(10)
+        self._poll_timer.setInterval(1)
         self._poll_timer.timeout.connect(self._drain_queue)
+        try:
+            self.queueEventReady.connect(self._drain_queue, Qt.QtCore.Qt.ConnectionType.QueuedConnection)
+        except Exception:
+            self.queueEventReady.connect(self._drain_queue)
 
     def cancel_pending(self):
         self.generation += 1
@@ -243,7 +261,14 @@ class EvaluationController(Qt.QtCore.QObject):
         if on_slow is not None:
             Qt.QtCore.QTimer.singleShot(int(slow_ms), lambda generation=generation: self._emit_slow(generation, on_slow))
 
-        runnable = _EvaluationRunnable(request, fn, self._queue, token, pass_token=pass_token)
+        runnable = _EvaluationRunnable(
+            request,
+            fn,
+            self._queue,
+            token,
+            pass_token=pass_token,
+            notify_queue=self._notify_queue_event,
+        )
         self._runnables[generation] = runnable
         self._refresh_frame_progress(replace_group)
         self.pool.start(runnable)
@@ -299,7 +324,14 @@ class EvaluationController(Qt.QtCore.QObject):
         if on_slow is not None:
             Qt.QtCore.QTimer.singleShot(int(slow_ms), lambda generation=generation: self._emit_slow(generation, on_slow))
 
-        runnable = _EvaluationRunnable(request, fn, self._queue, token, pass_token=pass_token)
+        runnable = _EvaluationRunnable(
+            request,
+            fn,
+            self._queue,
+            token,
+            pass_token=pass_token,
+            notify_queue=self._notify_queue_event,
+        )
         self._runnables[generation] = runnable
         self._refresh_frame_progress(replace_group)
         self.pool.start(runnable)
@@ -327,7 +359,7 @@ class EvaluationController(Qt.QtCore.QObject):
             return PrefetchStart(False, "limited")
         self._prefetch_keys.add(key)
         self._prefetch_scheduled_count += 1
-        runnable = _PrefetchRunnable(fn, self._queue, key)
+        runnable = _PrefetchRunnable(fn, self._queue, key, notify_queue=self._notify_queue_event)
         self._runnables[key] = runnable
         if on_done is not None:
             self._handlers[key] = (on_done, None, None, None)
@@ -404,6 +436,10 @@ class EvaluationController(Qt.QtCore.QObject):
     def _ensure_polling(self):
         if not self._poll_timer.isActive():
             self._poll_timer.start()
+        self._notify_queue_event()
+
+    def _notify_queue_event(self) -> None:
+        self.queueEventReady.emit()
 
     def _drain_queue(self):
         self._drain_continuation_pending = False
@@ -477,7 +513,7 @@ class EvaluationController(Qt.QtCore.QObject):
         if self._drain_continuation_pending:
             return
         self._drain_continuation_pending = True
-        Qt.QtCore.QTimer.singleShot(0, self._drain_queue)
+        self._notify_queue_event()
 
     def _finish(self, generation, value):
         request = self._requests.get(generation)

@@ -365,8 +365,10 @@ class TextureAtlasPool:
         near_tiles: tuple[int, ...] = (),
         near_tile_source_ids: dict[int, object] | None = None,
         budget_bytes: int | None = None,
-        cold_deadline_ms: float | None = None,
     ) -> tuple[dict[int, tuple[float, float, float, float]], GpuMontageLayerStats]:
+        # The window scheduler decides which ready tiles enter a visible
+        # commit.  Do not queue or slice again here: once a payload reaches the
+        # visible atlas commit, it must become presentable in that commit.
         start = perf_counter()
         raw_payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
         storage_mode = (
@@ -410,7 +412,6 @@ class TextureAtlasPool:
         updated = 0
         skipped = int(unsupported_items)
         deferred_tiles: list[int] = []
-        cold_tiles_committed = 0
         evictions_before = self.eviction_count
         evicted_near_before = self.evicted_near_count
         tile_h, tile_w = self.tile_shape or tile_shape
@@ -425,17 +426,6 @@ class TextureAtlasPool:
             missing_uploaded_source = resident_key not in self.source_ids
             should_upload = bool(dirty_all or newly_assigned or source_changed or missing_uploaded_source or tile_number in dirty)
             uvs[tile_number] = page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload))
-            if (
-                cold_deadline_ms is not None
-                and should_upload
-                and cold_tiles_committed > 0
-                and (perf_counter() - start) * 1000.0 >= float(cold_deadline_ms)
-            ):
-                active_tile_slots.pop(int(tile_number), None)
-                uvs.pop(int(tile_number), None)
-                deferred_tiles.append(int(tile_number))
-                skipped += 1
-                continue
             if not should_upload:
                 skipped += 1
                 continue
@@ -468,7 +458,6 @@ class TextureAtlasPool:
                 upload_bytes += int(color.nbytes)
             self.source_ids[resident_key] = payload.source_id
             updated += 1
-            cold_tiles_committed += int(should_upload)
 
         presented_tiles = tuple(
             int(tile_number)
@@ -864,7 +853,6 @@ class GpuMontageLayer:
             near_tiles=near_tiles,
             near_tile_source_ids=near_tile_source_ids,
             budget_bytes=tile_residency_budget_bytes,
-            cold_deadline_ms=getattr(tile_delta, "cold_deadline_ms", None),
         )
         self._ensure_visual_count(len(self._pool.pages))
         vertex_uploads = 0
@@ -927,8 +915,6 @@ class GpuMontageLayer:
             if mapping_changed:
                 mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
             visual.visible = page_index in active_pages
-            if visual.visible and callable(getattr(visual, "update", None)):
-                visual.update()
         for visual in self._visuals_by_page[len(self._pool.pages):]:
             visual.visible = False
         deferred_tiles = tuple(sorted(int(tile) for tile in tuple(texture_stats.deferred_tiles or ())))

@@ -375,9 +375,6 @@ def test_tiled_presentation_does_not_budget_ready_payload_visibility(qt_app):
         upserts=payloads,
         active_tiles=(0, 1, 2),
         planned_tiles=(0, 1, 2),
-        callback_item_cap=1,
-        callback_byte_cap=0,
-        callback_target_ms=1000.0,
     )
 
     report = view.setTiledMontagePresentation(

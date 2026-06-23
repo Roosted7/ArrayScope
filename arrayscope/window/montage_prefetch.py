@@ -86,8 +86,15 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                     candidate,
                     evaluation_context=context,
                 )
-                maker = make_shader_image_from_slab if shader_display else make_image_from_slab
-                display_image = maker(slab, request, colormap_lut=session.colormap_lut)
+                if shader_display:
+                    display_image = make_shader_image_from_slab(
+                        slab,
+                        request,
+                        colormap_lut=session.colormap_lut,
+                        provisional_histogram=True,
+                    )
+                else:
+                    display_image = make_image_from_slab(slab, request, colormap_lut=session.colormap_lut)
                 return EvaluationResult(
                     value=display_image,
                     eval_ms=(perf_counter() - start) * 1000.0,
@@ -103,6 +110,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                 stage_document_key=stage_document_key(session.document),
                 evaluation_context=context,
                 shader_display=shader_display,
+                provisional_histogram=bool(shader_display),
             )
 
         def done(result, tile=tile, session_id=session.session_id, session_key=session.key):

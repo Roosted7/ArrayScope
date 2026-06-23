@@ -13,6 +13,8 @@ def test_profile_montage_workflow_py_spy_command_mentions_external_sampler():
     assert command.startswith("py-spy record")
     assert "arrayscope.tools.profile_montage_workflow" in command
     assert "--backend all" in command
+    assert "--native" not in command
+    assert "--rate 50" in command
 
 
 def test_profile_suite_commands_cover_required_profilers(tmp_path):
@@ -25,11 +27,27 @@ def test_profile_suite_commands_cover_required_profilers(tmp_path):
     assert "cProfile" in by_type["cprofile"]["command"]
     assert "py-spy record" in by_type["py-spy-raw"]["command"]
     assert "--format raw" in by_type["py-spy-raw"]["command"]
+    assert "--native" not in by_type["py-spy-raw"]["command"]
+    assert "--rate 50" in by_type["py-spy-raw"]["command"]
     assert "perf record" in by_type["perf-record"]["command"]
     assert "--profile-suite" not in by_type["plain"]["command"]
     for item in commands:
         assert item["jsonl"].endswith(".jsonl")
         assert item["artifact_paths"]
+
+
+def test_profile_suite_can_opt_into_native_py_spy_without_passing_suite_flag_to_child(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
+
+    commands = profiler_suite_commands(
+        ("--backend", "vispy", "--profile-suite", str(tmp_path), "--py-spy-native"),
+        tmp_path,
+    )
+    by_type = {item["profiler_type"]: item for item in commands}
+
+    assert "py-spy-raw-native" in by_type
+    assert "--native" in by_type["py-spy-raw-native"]["command"]
+    assert "--profile-suite" not in by_type["plain"]["command"]
 
 
 def test_profile_base_record_marks_hidden_offscreen_or_capped_runs_as_smoke(monkeypatch):

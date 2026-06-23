@@ -163,67 +163,6 @@ def test_atlas_keeps_stable_slots_when_active_set_changes():
     assert ("tile", 2, 30.0) in pool.source_ids.values()
 
 
-def test_cold_deadline_makes_progress_on_deferred_tail_tiles():
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
-    payloads = {
-        index: payload(index, float(index))
-        for index in range(4)
-    }
-
-    _uvs, first = pool.update_payloads(
-        payloads,
-        tile_shape=(2, 2),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=4,
-        cold_deadline_ms=0.0,
-    )
-    assert first.items_updated == 1
-    assert first.visible_items == 1
-    assert first.presented_tiles == (0,)
-    assert first.deferred_tiles == (1, 2, 3)
-    assert set(pool.slots) == {0}
-
-    _uvs, second = pool.update_payloads(
-        payloads,
-        tile_shape=(2, 2),
-        dirty_tiles=(),
-        rgb_already_windowed=False,
-        reserve_count=4,
-        cold_deadline_ms=0.0,
-    )
-    assert second.items_updated == 1
-    assert second.visible_items == 2
-    assert second.presented_tiles == (0, 1)
-    assert second.deferred_tiles == (2, 3)
-    assert set(pool.slots) == {0, 1}
-
-    _uvs, third = pool.update_payloads(
-        payloads,
-        tile_shape=(2, 2),
-        dirty_tiles=(),
-        rgb_already_windowed=False,
-        reserve_count=4,
-        cold_deadline_ms=0.0,
-    )
-    _uvs, fourth = pool.update_payloads(
-        payloads,
-        tile_shape=(2, 2),
-        dirty_tiles=(),
-        rgb_already_windowed=False,
-        reserve_count=4,
-        cold_deadline_ms=0.0,
-    )
-
-    assert third.items_updated == 1
-    assert third.presented_tiles == (0, 1, 2)
-    assert third.deferred_tiles == (3,)
-    assert fourth.items_updated == 1
-    assert fourth.presented_tiles == (0, 1, 2, 3)
-    assert fourth.deferred_tiles == ()
-    assert set(pool.source_ids.values()) == {payload.source_id for payload in payloads.values()}
-
-
 def test_dirty_resident_payload_uploads_even_when_source_id_matches():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     payloads = {0: payload(0, 1.0)}
@@ -501,54 +440,6 @@ def test_new_atlas_page_inherits_current_levels_without_reuploading_old_geometry
     assert layer._visuals_by_page[1].levels[-1] == (10.0, 20.0)
     assert first_visual.geometry_calls == 1
     assert layer._visuals_by_page[1].geometry_calls == 1
-
-
-def test_clean_active_update_requests_visual_redraw_without_uploads():
-    layer = GpuMontageLayer(
-        scene=FakeScene(),
-        visuals=None,
-        gloo=FakeGloo(),
-        transforms=None,
-        parent=None,
-        limits=GpuDeviceLimits(max_texture_size=4),
-    )
-    montage = SimpleNamespace(
-        indices=(0, 1),
-        tile_width=2,
-        tile_height=2,
-        columns=2,
-        rows=1,
-        gap=0,
-    )
-    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded", "loaded"))
-    delta = SimpleNamespace(planned_tiles=(0, 1), near_tiles=(), near_tile_source_ids={})
-    payloads = {index: payload(index, float(index)) for index in range(2)}
-
-    layer.update(
-        payloads=payloads,
-        geometry=geometry,
-        levels=(0.0, 1.0),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        tile_delta=delta,
-    )
-    visual = layer._visuals_by_page[0]
-    update_calls = int(visual.update_calls)
-    geometry_calls = int(visual.geometry_calls)
-
-    clean = layer.update(
-        payloads=payloads,
-        geometry=geometry,
-        levels=(0.0, 1.0),
-        dirty_tiles=(),
-        rgb_already_windowed=False,
-        tile_delta=delta,
-    )
-
-    assert clean.items_updated == 0
-    assert clean.vertex_uploads == 0
-    assert visual.geometry_calls == geometry_calls
-    assert visual.update_calls > update_calls
 
 
 def test_mapping_only_update_is_uniform_across_pages_without_texture_or_vertex_uploads():

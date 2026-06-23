@@ -32,6 +32,7 @@ from arrayscope.display.montage import (
     optimal_montage_columns,
 )
 from arrayscope.display.slice_engine import DisplayImage, make_image_from_slab, make_shader_image_from_slab
+from arrayscope.display.shader_mapping import apply_scale as apply_shader_scale, extract_component
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.operations.evaluator import EvaluationResult, _document_key, evaluate_image_snapshot, stage_document_key
@@ -44,7 +45,13 @@ from arrayscope.operations.slabs import (
 from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_backend import choose_montage_backend
-from arrayscope.display.model.montage_levels import MontageLevelStats, MontageLevelTracker, montage_level_key, sample_tile_level_stats
+from arrayscope.display.model.montage_levels import (
+    MontageLevelStats,
+    MontageLevelTracker,
+    montage_level_key,
+    provisional_tile_level_stats,
+    sample_tile_level_stats,
+)
 from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
     limited_payload_cache as _limited_payload_cache,
@@ -618,15 +625,25 @@ class MontageRenderMixin:
         if expected_indices is None:
             previous_stats = self._montage_level_tracker().stats_for(level_key)
             expected_indices = () if previous_stats is None else previous_stats.expected_indices
-        self._montage_level_tracker().ensure(level_key, expected_indices)
-        self._montage_level_tracker().update_from_tile(
-            level_key,
+        tracker = self._montage_level_tracker()
+        tracker.ensure_expected(level_key, expected_indices)
+        level_stats = getattr(rendered, "level_stats", None)
+        if level_stats is not None and not refined:
+            tracker.update_from_stats(level_key, level_stats, aggregate=False)
+            return
+        level_data = getattr(rendered, "level_data", None)
+        if level_data is not None and not refined:
+            stats = provisional_tile_level_stats(level_data, int(rendered.tile.source_index))
+            if stats is not None:
+                tracker.update_from_stats(level_key, stats, aggregate=False)
+                return
+        stats = sample_tile_level_stats(
+            _montage_refined_level_values(rendered),
             int(rendered.tile.source_index),
-            rendered.histogram_data,
-            rendered.image,
             refined=bool(refined),
-            aggregate=False,
         )
+        if stats is not None:
+            tracker.update_from_stats(level_key, stats, aggregate=False)
 
     def _queue_montage_level_refinement(self, session, rendered) -> None:
         tracker = self._montage_level_tracker()
@@ -637,9 +654,14 @@ class MontageRenderMixin:
         if pending is None:
             pending = deque()
             session.pending_refined_level_tiles = pending
-        if source_index in {int(item.tile.source_index) for item in pending}:
+        pending_sources = getattr(session, "pending_refined_level_sources", None)
+        if pending_sources is None:
+            pending_sources = {int(item.tile.source_index) for item in pending}
+            session.pending_refined_level_sources = pending_sources
+        if source_index in pending_sources:
             return
         pending.append(rendered)
+        pending_sources.add(source_index)
 
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
         expected = self._montage_level_expected_indices(session)
@@ -709,7 +731,10 @@ class MontageRenderMixin:
         if pending is None:
             pending = deque()
             session.pending_level_tiles = pending
-        queued_sources = {int(item.tile.source_index) for item in pending}
+        queued_sources = getattr(session, "pending_level_sources", None)
+        if queued_sources is None:
+            queued_sources = {int(item.tile.source_index) for item in pending}
+            session.pending_level_sources = queued_sources
         unseen = []
         for rendered in tuple(rendered_tiles or ()):
             source_index = int(rendered.tile.source_index)
@@ -744,7 +769,6 @@ class MontageRenderMixin:
         tracker.ensure(session.level_key, expected)
         stats_start = perf_counter()
         added = 0
-        pending = getattr(session, "pending_level_tiles", None)
         for tile_number in tuple(dict(payloads or {})):
             rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
             if rendered is None:
@@ -759,11 +783,9 @@ class MontageRenderMixin:
             )
             self._queue_montage_level_refinement(session, rendered)
             added += 1
-            if pending is not None:
-                session.pending_level_tiles = deque(
-                    item for item in pending if int(item.tile.source_index) != source_index
-                )
-                pending = session.pending_level_tiles
+            pending_sources = getattr(session, "pending_level_sources", None)
+            if pending_sources is not None:
+                pending_sources.discard(source_index)
         self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
         self._montage_level_sources_added_last_commit = int(added)
         self._montage_pending_level_tiles_last_session = len(getattr(session, "pending_level_tiles", ()) or ())
@@ -781,7 +803,12 @@ class MontageRenderMixin:
         processed = 0
         while pending and processed < 4:
             rendered = pending.popleft()
-            self._update_montage_level_bounds_from_rendered(session.level_key, rendered, expected_indices=expected)
+            source_index = int(rendered.tile.source_index)
+            pending_sources = getattr(session, "pending_level_sources", None)
+            if pending_sources is not None:
+                pending_sources.discard(source_index)
+            if not self._montage_level_tracker().has_source(session.level_key, source_index):
+                self._update_montage_level_bounds_from_rendered(session.level_key, rendered, expected_indices=expected)
             self._queue_montage_level_refinement(session, rendered)
             processed += 1
             if processed >= 1 and (perf_counter() - stats_start) * 1000.0 >= 4.0:
@@ -816,8 +843,11 @@ class MontageRenderMixin:
             rendered = pending.popleft()
             source_index = int(rendered.tile.source_index)
             if self._montage_level_tracker().has_source(session.level_key, source_index, refined=True):
+                pending_sources = getattr(session, "pending_refined_level_sources", None)
+                if pending_sources is not None:
+                    pending_sources.discard(source_index)
                 continue
-            source = rendered.histogram_data if rendered.histogram_data is not None else rendered.image
+            source = _montage_refined_level_values(rendered)
             key = ("montage_refined_level_stats", session.level_key, source_index)
 
             def evaluate(source=source, source_index=source_index):
@@ -828,8 +858,9 @@ class MontageRenderMixin:
                 session_id=session.session_id,
                 session_key=session.key,
                 level_key=session.level_key,
+                source_index=source_index,
             ):
-                self._on_montage_refined_level_stats_done(session_id, session_key, level_key, stats)
+                self._on_montage_refined_level_stats_done(session_id, session_key, level_key, source_index, stats)
 
             started = controller.start_prefetch(
                 evaluate,
@@ -845,12 +876,24 @@ class MontageRenderMixin:
                 break
             scheduled += 1
 
-    def _on_montage_refined_level_stats_done(self, session_id, session_key, level_key, stats) -> None:
+    def _on_montage_refined_level_stats_done(self, session_id, session_key, level_key, source_index, stats) -> None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, session_key):
             return
+        pending_sources = getattr(session, "pending_refined_level_sources", None)
+        if pending_sources is not None:
+            pending_sources.discard(int(source_index))
         if stats is not None:
             self._montage_level_tracker().update_from_stats(level_key, stats, aggregate=False)
+            summary = self._montage_level_tracker().summary_for(level_key)
+            if (
+                summary is not None
+                and session.display_committed
+                and not getattr(session, "deferred_display_tiles", ())
+                and getattr(session, "user_levels_override", None) is None
+                and self._should_publish_montage_level_metadata(session, summary)
+            ):
+                self._schedule_montage_canvas_commit(session, force=False)
         self._schedule_montage_refined_level_stats(session)
 
     def _plan_montage_stages(self, document, missing_tiles):
@@ -1163,7 +1206,8 @@ class MontageRenderMixin:
         controller = getattr(self, "montage_tile_evaluation_controller", self.visible_evaluation_controller)
         max_workers = max(1, int(controller.pool.maxThreadCount()))
         while len(session.active_tile_requests) < max_workers:
-            if not self._schedule_next_montage_tile(session):
+            scheduled = self._schedule_next_montage_tile(session)
+            if not scheduled:
                 break
 
     def _schedule_next_montage_tile(self, session: MontageRenderSession) -> bool:
@@ -1251,8 +1295,16 @@ class MontageRenderMixin:
                         cancellation_token=token,
                         evaluation_context=context,
                     )
-                    maker = make_shader_image_from_slab if bool(getattr(session, "shader_display", False)) else make_image_from_slab
-                    display_image = maker(slab, request, colormap_lut=session.colormap_lut)
+                    if bool(getattr(session, "shader_display", False)):
+                        display_image = make_shader_image_from_slab(
+                            slab,
+                            request,
+                            colormap_lut=session.colormap_lut,
+                            provisional_histogram=True,
+                        )
+                    else:
+                        display_image = make_image_from_slab(slab, request, colormap_lut=session.colormap_lut)
+                    display_image = _attach_montage_tile_level_stats(display_image, tile)
                     return EvaluationResult(
                         value=display_image,
                         eval_ms=(perf_counter() - start) * 1000.0,
@@ -1261,16 +1313,19 @@ class MontageRenderMixin:
                         region_plan=plan.region_plan,
                         compute_path="stage_backed",
                     )
-            return evaluate_image_snapshot(
+            result = evaluate_image_snapshot(
                 session.document,
                 tile.view_state,
                 colormap_lut=session.colormap_lut,
                 cancellation_token=token,
                 shader_display=bool(getattr(session, "shader_display", False)),
+                provisional_histogram=bool(getattr(session, "shader_display", False)),
                 stage_cache=self.operation_evaluator.stage_cache,
                 stage_document_key=stage_document_key(session.document),
                 evaluation_context=context,
             )
+            result = replace(result, value=_attach_montage_tile_level_stats(result.value, tile))
+            return result
         finally:
             self._last_montage_tile_eval_ms = (perf_counter() - start) * 1000.0
 
@@ -1371,22 +1426,39 @@ class MontageRenderMixin:
     def _schedule_montage_tile_result_flush(self, session) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
+        self._montage_tile_result_key = (int(session.session_id), session.key)
+        if _vispy_tile_layer_fast_drain_enabled(self, session):
+            if not bool(getattr(self, "_montage_tile_result_flush_queued", False)):
+                self._montage_tile_result_flush_queued = True
+                try:
+                    queued = Qt.QtCore.QMetaObject.invokeMethod(
+                        self,
+                        "_flush_montage_tile_results",
+                        Qt.QtCore.Qt.ConnectionType.QueuedConnection,
+                    )
+                except Exception:
+                    queued = False
+                if queued:
+                    return
+                self._montage_tile_result_flush_queued = False
         timer = getattr(self, "_montage_tile_result_timer", None)
         if timer is None:
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._flush_montage_tile_results)
             self._montage_tile_result_timer = timer
-        self._montage_tile_result_key = (int(session.session_id), session.key)
         if not timer.isActive():
             timer.start(0)
 
+    @Qt.QtCore.Slot()
     def _flush_montage_tile_results(self) -> None:
+        self._montage_tile_result_flush_queued = False
         key = getattr(self, "_montage_tile_result_key", None)
         session = getattr(self, "_montage_session", None)
         if session is None or key is None or not self._is_current_montage_session(key[0], key[1]):
             return
         interactive = _interactive_active(self)
+        fast_drain = _vispy_tile_layer_fast_drain_enabled(self, session)
         budget = self._montage_callback_budget(
             "montage_tile_result",
             interactive=interactive,
@@ -1395,9 +1467,10 @@ class MontageRenderMixin:
         )
         flush_start = perf_counter()
         processed = 0
+        expected_indices = self._montage_level_expected_indices(session)
         while session.pending_completed_tiles:
             tile, result = session.pending_completed_tiles.popleft()
-            byte_count = self._apply_montage_tile_result(session, tile, result)
+            byte_count = self._apply_montage_tile_result(session, tile, result, expected_indices=expected_indices)
             processed += 1
             budget.record_item(byte_count=byte_count)
             if budget.should_yield():
@@ -1419,18 +1492,21 @@ class MontageRenderMixin:
         if session.pending_completed_tiles:
             self._schedule_montage_tile_result_flush(session)
 
-    def _apply_montage_tile_result(self, session, tile, result) -> int:
+    def _apply_montage_tile_result(self, session, tile, result, *, expected_indices=None) -> int:
         if not self._is_current_montage_session(session.session_id, session.key):
             return 0
         if not self._is_current_render_generation(session.render_generation):
             return 0
-        rendered = self.operation_evaluator.store_montage_tile_result(
-            tile,
-            montage_axis=session.montage_axis,
-            colormap_lut=session.colormap_lut,
-            result=result,
-            shader_display=bool(getattr(session, "shader_display", False)),
-        )
+        if _vispy_tile_layer_fast_drain_enabled(self, session):
+            rendered = _rendered_tile_from_evaluation_result(tile, result)
+        else:
+            rendered = self.operation_evaluator.store_montage_tile_result(
+                tile,
+                montage_axis=session.montage_axis,
+                colormap_lut=session.colormap_lut,
+                result=result,
+                shader_display=bool(getattr(session, "shader_display", False)),
+            )
         compute_path = str(getattr(result, "compute_path", "direct") or "direct")
         if compute_path == "stage_backed":
             session.tile_compute_stage_backed += 1
@@ -1439,7 +1515,7 @@ class MontageRenderMixin:
         self._update_montage_level_bounds_from_rendered(
             session.level_key,
             rendered,
-            expected_indices=self._montage_level_expected_indices(session),
+            expected_indices=self._montage_level_expected_indices(session) if expected_indices is None else expected_indices,
         )
         self._queue_montage_level_refinement(session, rendered)
         session.mark_loaded(rendered)
@@ -1530,7 +1606,9 @@ class MontageRenderMixin:
                 return _montage_commit_interval_ms(self, force=True)
         return _montage_commit_interval_ms(self, force=False)
 
+    @Qt.QtCore.Slot()
     def _flush_montage_canvas_commit(self):
+        self._montage_canvas_commit_flush_queued = False
         session = getattr(self, "_montage_session", None)
         if session is None or not session.final_commit_pending:
             return
@@ -1601,7 +1679,11 @@ class MontageRenderMixin:
             first_display_commit = not bool(session.display_committed)
             publish_metadata = bool(explicit_auto) or self._should_publish_montage_level_metadata(session, level_stats)
             semantic_source = self._montage_level_source_for_session(session, allow_partial=publish_metadata)
-            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
+            histogram_plot_data = (
+                self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
+                if _should_publish_montage_histogram_plot(first_display_commit, explicit_auto, level_stats)
+                else None
+            )
             if newly_composed or first_display_commit:
                 self._apply_full_display_image(
                     display_image,
@@ -1704,22 +1786,28 @@ class MontageRenderMixin:
             if previous_payloads:
                 session.seed_display_tile_payloads(previous_payloads, tile_source_ids)
             base_tile_state = session.tile_presentation_state
-            callback_budget = self._montage_callback_budget(
-                "montage_commit",
-                interactive=_interactive_active(self),
-                work_class="presentation_upsert",
-            )
+            fast_drain = _vispy_tile_layer_fast_drain_enabled(self, session)
+            self._vispy_tile_layer_fast_drain_last_enabled = bool(fast_drain)
+            self._vispy_tile_layer_fast_drain_enabled_count = int(
+                getattr(self, "_vispy_tile_layer_fast_drain_enabled_count", 0) or 0
+            ) + int(bool(fast_drain))
             tile_state, tile_delta = session.build_tile_presentation(
                 tile_source_ids,
                 source_ids_trusted=bool(getattr(session, "tile_source_ids_trusted", True)),
                 cold_deadline_ms=_montage_commit_budget_ms(self),
-                callback_target_ms=callback_budget.target_ms,
-                callback_warning_ms=callback_budget.warning_ms,
-                callback_item_cap=callback_budget.item_cap,
-                callback_byte_cap=callback_budget.byte_cap,
             )
             active_payloads = tile_state.active_payloads(tile_delta)
-            self._ensure_montage_level_stats_for_payloads(session, active_payloads)
+            first_display_commit = not bool(session.display_committed)
+            if first_display_commit and not active_payloads:
+                session.final_commit_pending = False
+                session.flush_pending = False
+                session.final_display_drain_pending = False
+                self._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
+                if session.pending_tiles:
+                    self._schedule_montage_tiles(session)
+                return
+            level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
+            self._ensure_montage_level_stats_for_payloads(session, level_payloads)
             rendered_geometry = replace(
                 rendered_geometry,
                 montage_tile_states=session.ensure_tile_states(),
@@ -1733,10 +1821,13 @@ class MontageRenderMixin:
             explicit_auto = bool(getattr(session, "force_auto", False))
             semantic_commit = bool(active_payloads)
             decision_force_auto = bool(explicit_auto and semantic_commit)
-            first_display_commit = not bool(session.display_committed)
             publish_metadata = bool(explicit_auto) or self._should_publish_montage_level_metadata(session, level_stats)
             semantic_source = self._montage_level_source_for_session(session, allow_partial=publish_metadata)
-            histogram_plot_data = self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
+            histogram_plot_data = (
+                self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
+                if _should_publish_montage_histogram_plot(first_display_commit, explicit_auto, level_stats)
+                else None
+            )
             if first_display_commit:
                 self._apply_full_display_image(
                     display_image,
@@ -1863,10 +1954,29 @@ class MontageRenderMixin:
             return
         session.final_commit_pending = True
         session.flush_pending = True
+        if _vispy_tile_layer_fast_drain_enabled(self, session) and self._queue_montage_canvas_commit_flush():
+            return
         try:
             Qt.QtCore.QTimer.singleShot(0, self._flush_montage_canvas_commit)
         except Exception:
             self._start_montage_commit_timer(1)
+
+    def _queue_montage_canvas_commit_flush(self) -> bool:
+        if bool(getattr(self, "_montage_canvas_commit_flush_queued", False)):
+            return True
+        self._montage_canvas_commit_flush_queued = True
+        try:
+            queued = Qt.QtCore.QMetaObject.invokeMethod(
+                self,
+                "_flush_montage_canvas_commit",
+                Qt.QtCore.Qt.ConnectionType.QueuedConnection,
+            )
+        except Exception:
+            queued = False
+        if queued:
+            return True
+        self._montage_canvas_commit_flush_queued = False
+        return False
 
     def _finish_montage_session_if_complete(self, session) -> bool:
         if not self._is_current_montage_session(session.session_id, session.key):
@@ -2155,12 +2265,13 @@ class MontageRenderMixin:
         work_class: str,
         item_cap: int | None = None,
         byte_cap: int | None = None,
+        target_ms: float | None = None,
     ) -> GuiCallbackBudget:
         decision = getattr(self, "_ui_work_decision", lambda *args, **kwargs: None)(
             channel,
             interactive=interactive,
         )
-        return GuiCallbackBudget.for_decision(
+        budget = GuiCallbackBudget.for_decision(
             channel,
             decision,
             interactive=interactive,
@@ -2169,6 +2280,9 @@ class MontageRenderMixin:
             item_cap=item_cap,
             byte_cap=byte_cap,
         )
+        if target_ms is not None:
+            budget.target_ms = max(0.0, float(target_ms))
+        return budget
 
     def _record_gui_budget(self, budget: GuiCallbackBudget) -> None:
         observation = budget.observation()
@@ -2481,16 +2595,73 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         texture_kind=getattr(payload, "texture_kind", None),
         semantic_data=semantic,
         lod=getattr(payload, "lod", None),
+        level_data=getattr(payload, "level_data", None),
+        level_stats=getattr(payload, "level_stats", None),
+    )
+
+
+def _rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
+    value = result.value
+    return RenderedTile(
+        tile=tile,
+        image=value.data,
+        histogram_data=value.histogram_data,
+        eval_ms=float(getattr(result, "eval_ms", 0.0) or 0.0),
+        slab_shape=tuple(getattr(result, "slab_shape", np.shape(value.data))),
+        slab_nbytes=getattr(result, "slab_nbytes", None),
+        shader_mapping=getattr(value, "shader_mapping", None),
+        texture_kind=getattr(value, "texture_kind", None),
+        semantic_data=getattr(value, "semantic_data", None),
+        lod=getattr(value, "lod", None),
+        level_data=getattr(value, "level_data", None),
+        level_stats=getattr(value, "level_stats", None),
     )
 
 
 def _rendered_tile_nbytes(rendered) -> int:
     total = 0
-    for name in ("image", "histogram_data", "semantic_data"):
+    for name in ("image", "histogram_data", "semantic_data", "level_data"):
         value = getattr(rendered, name, None)
         if value is not None:
             total += int(getattr(np.asarray(value), "nbytes", 0) or 0)
     return int(total)
+
+
+def _montage_refined_level_values(rendered) -> np.ndarray:
+    histogram = getattr(rendered, "histogram_data", None)
+    if histogram is not None:
+        return np.asarray(histogram)
+    mapping = getattr(rendered, "shader_mapping", None)
+    semantic = getattr(rendered, "semantic_data", None)
+    if mapping is not None and semantic is not None:
+        values = extract_component(np.asarray(semantic), getattr(mapping, "component", "real"))
+        return apply_shader_scale(
+            values,
+            getattr(mapping, "scale", "linear"),
+            symlog_constant=float(getattr(mapping, "symlog_constant", 0.0) or 0.0),
+        )
+    image = getattr(rendered, "image", None)
+    if image is None:
+        return np.asarray((), dtype=np.float32)
+    image = np.asarray(image)
+    if np.iscomplexobj(image):
+        return np.abs(image).astype(np.float32, copy=False)
+    return image
+
+
+def _attach_montage_tile_level_stats(display_image, tile):
+    level_data = getattr(display_image, "level_data", None)
+    if level_data is not None:
+        stats = provisional_tile_level_stats(level_data, int(tile.source_index))
+        if stats is not None:
+            return replace(display_image, level_stats=stats)
+    return display_image
+
+
+def _should_publish_montage_histogram_plot(first_display_commit: bool, explicit_auto: bool, stats: MontageLevelStats) -> bool:
+    if bool(first_display_commit) or bool(explicit_auto):
+        return True
+    return stats.rank in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}
 
 
 def _montage_commit_budget_ms(window) -> float:
@@ -2505,6 +2676,17 @@ def _montage_commit_budget_ms(window) -> float:
     if feedback is None:
         return 4.0 if interactive else 8.0
     return max(1.0, float(feedback.work_budget_ms("montage_commit", interactive=interactive)))
+
+
+def _vispy_tile_layer_fast_drain_enabled(window, session) -> bool:
+    if _viewport_interaction_active(window):
+        return False
+    if not bool(getattr(session, "display_committed", False)):
+        return False
+    if str(getattr(getattr(window, "img_view", None), "rendering_backend_name", "")).lower() != "vispy":
+        return False
+    capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
+    return bool(capabilities.direct_montage_tile_payloads and capabilities.persistent_tile_residency)
 
 
 def _montage_commit_interval_ms(window, *, force: bool) -> int:

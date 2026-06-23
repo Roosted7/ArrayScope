@@ -231,6 +231,46 @@ def test_make_shader_image_from_slab_keeps_complex_texture_raw_and_histogram_sca
     assert image.shader_mapping.scale == "log"
 
 
+def test_make_shader_image_from_slab_downcasts_complex128_to_render_precision():
+    data = np.array([[1 + 2j, -3 + 4j]], dtype=np.complex128)
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.ABS)
+
+    image = make_shader_image_from_slab(data, _FakeImageRequest(state))
+
+    assert image.texture_kind == "complex_rg32f"
+    assert image.data.dtype == np.complex64
+    assert image.semantic_data is image.data
+    assert image.histogram_data is not None
+    assert image.histogram_data.dtype == np.float32
+    np.testing.assert_allclose(image.histogram_data, np.abs(data).astype(np.float32))
+
+
+def test_provisional_shader_level_sample_covers_center_spike():
+    data = np.ones((96, 96), dtype=np.float32)
+    data[data.shape[0] // 2, data.shape[1] // 2] = 10_000.0
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.REAL)
+
+    image = make_shader_image_from_slab(data, _FakeImageRequest(state), provisional_histogram=True)
+
+    assert image.histogram_data is None
+    assert image.level_data is not None
+    assert image.level_data.size <= 512
+    assert float(np.max(image.level_data)) == 10_000.0
+
+
+def test_provisional_shader_level_sample_covers_complex_abs_center_spike():
+    data = np.ones((96, 96), dtype=np.complex128)
+    data[data.shape[0] // 2, data.shape[1] // 2] = 3_000.0 + 4_000.0j
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.ABS)
+
+    image = make_shader_image_from_slab(data, _FakeImageRequest(state), provisional_histogram=True)
+
+    assert image.histogram_data is None
+    assert image.level_data is not None
+    assert image.level_data.size <= 512
+    assert float(np.max(image.level_data)) == 5_000.0
+
+
 @pytest.mark.parametrize(
     ("channel", "component", "display_mode", "expected"),
     (

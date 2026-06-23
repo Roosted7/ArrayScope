@@ -1443,88 +1443,6 @@ def test_vispy_direct_tiled_loading_payloads_are_submitted_for_backend_ack(qt_ap
         view.close()
 
 
-def test_vispy_direct_tiled_incomplete_clean_commit_continues_payload_uploads(qt_app):
-    from arrayscope.core.view_state import ViewState
-    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-    from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
-    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-
-    geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
-        display_shape=(2, 11),
-        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
-        montage_tile_states=(MontageTileState.LOADING,) * 4,
-    )
-    payloads = {
-        index: DisplayTilePayload(index, index, np.full((2, 2), float(index + 1), dtype=np.float32), None, ("source", index))
-        for index in range(4)
-    }
-    first_delta = TilePresentationDelta(
-        structure_revision=1,
-        payload_revision=1,
-        visibility_revision=1,
-        level_revision=1,
-        histogram_revision=1,
-        viewport_revision=1,
-        cold_deadline_ms=0.0,
-        upserts=payloads,
-        active_tiles=(0, 1, 2, 3),
-        planned_tiles=(0, 1, 2, 3),
-        near_tiles=(0, 1, 2, 3),
-        near_tile_source_ids={index: payload.source_id for index, payload in payloads.items()},
-    )
-    clean_delta = TilePresentationDelta(
-        structure_revision=1,
-        payload_revision=1,
-        visibility_revision=1,
-        level_revision=1,
-        histogram_revision=1,
-        viewport_revision=1,
-        cold_deadline_ms=0.0,
-        upserts={},
-        active_tiles=(0, 1, 2, 3),
-        planned_tiles=(0, 1, 2, 3),
-        near_tiles=(0, 1, 2, 3),
-        near_tile_source_ids={index: payload.source_id for index, payload in payloads.items()},
-    )
-    view = VisPyImageView2D()
-    try:
-        first_report = view.setTiledMontagePresentation(
-            geometry=geometry,
-            tile_state=TilePresentationState(payloads),
-            tile_delta=first_delta,
-            histogramPlotData=None,
-            levels=(0.0, 4.0),
-            histogramRange=(0.0, 4.0),
-            rgb_already_windowed=False,
-            tile_residency_budget_bytes=64 * 1024 * 1024,
-        )
-        assert first_report.presented_tiles == frozenset({0})
-        assert first_report.deferred_tiles == frozenset({1, 2, 3})
-        assert view._vispy_gpu_montage_layer.last_stats.presented_tiles == (0,)
-
-        retry_report = view.setTiledMontagePresentation(
-            geometry=geometry,
-            tile_state=TilePresentationState(payloads),
-            tile_delta=clean_delta,
-            histogramPlotData=None,
-            levels=(0.0, 4.0),
-            histogramRange=(0.0, 4.0),
-            rgb_already_windowed=False,
-            tile_residency_budget_bytes=64 * 1024 * 1024,
-        )
-
-        timing = view.lastImageUploadTiming()
-        assert retry_report.presented_tiles == frozenset({0, 1})
-        assert retry_report.deferred_tiles == frozenset({2, 3})
-        assert timing.tile_layer_items_updated == 1
-        assert timing.tile_layer_texture_uploads == 1
-        assert view._vispy_gpu_montage_layer.last_stats.presented_tiles == (0, 1)
-    finally:
-        view.close()
-
-
 def test_vispy_scalar_tiled_geometry_retry_preserves_previous_frame(qt_app):
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
@@ -1544,9 +1462,6 @@ def test_vispy_scalar_tiled_geometry_retry_preserves_previous_frame(qt_app):
         upserts=payloads,
         active_tiles=(0, 1),
         planned_tiles=(0, 1),
-        callback_item_cap=1,
-        callback_byte_cap=1,
-        callback_target_ms=1000.0,
     )
     retry_delta = TilePresentationDelta(
         structure_revision=1,
@@ -1558,9 +1473,6 @@ def test_vispy_scalar_tiled_geometry_retry_preserves_previous_frame(qt_app):
         upserts={},
         active_tiles=(0, 1),
         planned_tiles=(0, 1),
-        callback_item_cap=1,
-        callback_byte_cap=0,
-        callback_target_ms=1000.0,
     )
     view = VisPyImageView2D()
     try:
@@ -1713,9 +1625,6 @@ def test_vispy_first_typed_tiled_commit_applies_payload_pixels_and_levels_before
         upserts=payloads,
         active_tiles=(0, 1),
         planned_tiles=(0, 1),
-        callback_item_cap=1,
-        callback_byte_cap=1,
-        callback_target_ms=1000.0,
     )
     view = VisPyImageView2D()
     try:
@@ -1744,9 +1653,6 @@ def test_vispy_first_typed_tiled_commit_applies_payload_pixels_and_levels_before
             upserts={},
             active_tiles=(0, 1),
             planned_tiles=(0, 1),
-            callback_item_cap=8,
-            callback_byte_cap=0,
-            callback_target_ms=1000.0,
         )
         retry_report = view.setTiledMontagePresentation(
             geometry=geometry,

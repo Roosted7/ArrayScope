@@ -81,12 +81,18 @@ class MontageLevelTracker:
         self._sample_accumulators: dict[object, tuple[frozenset[int], frozenset[int], np.ndarray | None]] = {}
 
     def ensure(self, key: object, expected_indices: Iterable[int]) -> MontageLevelStats:
+        expected = self.ensure_expected(key, expected_indices)
+        return self._stats_for_expected(key, expected)
+
+    def ensure_expected(self, key: object, expected_indices: Iterable[int]) -> frozenset[int]:
+        """Record expected coverage without rebuilding aggregate statistics."""
+
         expected = frozenset(int(index) for index in expected_indices)
         if self._expected.get(key) != expected:
             self._expected[key] = expected
             self._invalidate(key)
         self._tiles.setdefault(key, {})
-        return self._stats_for_expected(key, expected)
+        return expected
 
     def update_from_tile(
         self,
@@ -108,7 +114,7 @@ class MontageLevelTracker:
         if previous is None or bool(refined) or not previous.refined:
             by_source[int(source_index)] = tile_stats
             self._invalidate(key)
-            if previous is None and int(source_index) in expected:
+            if aggregate and previous is None and int(source_index) in expected:
                 self._append_tile_sample(key, expected, tile_stats)
             else:
                 self._sample_accumulators.pop(key, None)
@@ -128,7 +134,7 @@ class MontageLevelTracker:
         if previous is None or tile_stats.refined or not previous.refined:
             by_source[source_index] = tile_stats
             self._invalidate(key)
-            if previous is None and source_index in expected:
+            if aggregate and previous is None and source_index in expected:
                 self._append_tile_sample(key, expected, tile_stats)
             else:
                 self._sample_accumulators.pop(key, None)
@@ -269,7 +275,7 @@ class MontageLevelTracker:
         return LevelSourceRank.MONTAGE_VISIBLE_SUBSET
 
 
-def _sample_tile_stats(values, source_index: int, *, refined: bool) -> TileLevelStats | None:
+def _sample_tile_stats(values, source_index: int, *, refined: bool, exact: bool = True) -> TileLevelStats | None:
     finite = _finite_values(values)
     if finite is None:
         return None
@@ -282,12 +288,16 @@ def _sample_tile_stats(values, source_index: int, *, refined: bool) -> TileLevel
         source_index=int(source_index),
         bounds=bounds,
         sample=sample.astype(np.float32, copy=False),
-        refined=bool(refined or np.asarray(values).size <= EXACT_TILE_SAMPLE_LIMIT),
+        refined=bool(refined or (bool(exact) and np.asarray(values).size <= EXACT_TILE_SAMPLE_LIMIT)),
     )
 
 
 def sample_tile_level_stats(values, source_index: int, *, refined: bool) -> TileLevelStats | None:
     return _sample_tile_stats(values, int(source_index), refined=bool(refined))
+
+
+def provisional_tile_level_stats(values, source_index: int) -> TileLevelStats | None:
+    return _sample_tile_stats(values, int(source_index), refined=False, exact=False)
 
 
 def _finite_sample(values, *, limit: int) -> np.ndarray:
@@ -312,6 +322,8 @@ def _finite_values(values) -> np.ndarray | None:
     array = np.asarray(values)
     if array.size == 0:
         return None
+    if np.iscomplexobj(array):
+        array = np.abs(array).astype(np.float32, copy=False)
     flat = array.reshape(-1)
     mask = np.isfinite(flat)
     if bool(np.all(mask)):

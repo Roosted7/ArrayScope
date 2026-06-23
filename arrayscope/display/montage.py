@@ -199,6 +199,8 @@ class RenderedTilePayload:
     texture_kind: TexturePlaneKind | None = None
     semantic_data: np.ndarray | None = None
     lod: LodInfo | None = None
+    level_data: np.ndarray | None = None
+    level_stats: object | None = None
 
     def nbytes(self) -> int:
         total = int(self.image.nbytes)
@@ -206,6 +208,8 @@ class RenderedTilePayload:
             total += int(self.histogram_data.nbytes)
         if isinstance(self.semantic_data, np.ndarray) and self.semantic_data is not self.image:
             total += int(self.semantic_data.nbytes)
+        if isinstance(self.level_data, np.ndarray) and self.level_data is not self.image and self.level_data is not self.histogram_data:
+            total += int(self.level_data.nbytes)
         return total
 
     def bind(self, tile: MontageTile) -> "RenderedTile":
@@ -220,6 +224,8 @@ class RenderedTilePayload:
             texture_kind=self.texture_kind,
             semantic_data=self.semantic_data,
             lod=self.lod,
+            level_data=self.level_data,
+            level_stats=self.level_stats,
         )
 
 
@@ -235,6 +241,8 @@ class RenderedTile:
     texture_kind: TexturePlaneKind | None = None
     semantic_data: np.ndarray | None = None
     lod: LodInfo | None = None
+    level_data: np.ndarray | None = None
+    level_stats: object | None = None
 
     def nbytes(self) -> int:
         total = int(self.image.nbytes)
@@ -242,6 +250,8 @@ class RenderedTile:
             total += int(self.histogram_data.nbytes)
         if isinstance(self.semantic_data, np.ndarray) and self.semantic_data is not self.image:
             total += int(self.semantic_data.nbytes)
+        if isinstance(self.level_data, np.ndarray) and self.level_data is not self.image and self.level_data is not self.histogram_data:
+            total += int(self.level_data.nbytes)
         return total
 
     def payload(self) -> RenderedTilePayload:
@@ -255,6 +265,8 @@ class RenderedTile:
             texture_kind=self.texture_kind,
             semantic_data=self.semantic_data,
             lod=self.lod,
+            level_data=self.level_data,
+            level_stats=self.level_stats,
         )
 
 

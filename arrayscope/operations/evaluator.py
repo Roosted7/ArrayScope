@@ -394,6 +394,8 @@ class OperationEvaluator:
             texture_kind=getattr(result.value, "texture_kind", None),
             semantic_data=getattr(result.value, "semantic_data", None),
             lod=getattr(result.value, "lod", None),
+            level_data=getattr(result.value, "level_data", None),
+            level_stats=getattr(result.value, "level_stats", None),
         )
         self._tile_cache.last_eval_ms = result.eval_ms
         self.last_region_plan = result.region_plan
@@ -621,6 +623,7 @@ def evaluate_image_snapshot(
     *,
     degraded=False,
     shader_display: bool = False,
+    provisional_histogram: bool = False,
     stage_cache=None,
     stage_document_key=None,
     evaluation_context=None,
@@ -639,8 +642,15 @@ def evaluate_image_snapshot(
         evaluation_context=evaluation_context,
     )
     _check_cancelled(cancellation_token)
-    maker = make_shader_image_from_slab if bool(shader_display) else make_image_from_slab
-    value = maker(slab, request, colormap_lut=colormap_lut)
+    if bool(shader_display):
+        value = make_shader_image_from_slab(
+            slab,
+            request,
+            colormap_lut=colormap_lut,
+            provisional_histogram=bool(provisional_histogram),
+        )
+    else:
+        value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
     _check_cancelled(cancellation_token)
     return EvaluationResult(
         value=value,

@@ -31,6 +31,8 @@ class DisplayImage:
     texture_kind: TexturePlaneKind | None = None
     semantic_data: np.ndarray | None = None
     lod: LodInfo | None = None
+    level_data: np.ndarray | None = None
+    level_stats: object | None = None
 
 
 @dataclass(frozen=True)
@@ -169,7 +171,7 @@ def make_image_from_slab(slab, request, colormap_lut=None):
     )
 
 
-def make_shader_image_from_slab(slab, request, colormap_lut=None):
+def make_shader_image_from_slab(slab, request, colormap_lut=None, *, provisional_histogram: bool = False):
     """Create a shader-capable display image from an evaluated image slab."""
     state = request.view_state
     if state.image_axes is None:
@@ -192,11 +194,21 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None):
             lut_identity=_lut_identity(colormap_lut) if phase_color else None,
             lut_data=colormap_lut if phase_color else None,
         )
-        histogram_data = apply_shader_scale(
-            extract_component(image_data, component),
-            mapping.scale,
-            symlog_constant=mapping.symlog_constant,
-        )
+        if provisional_histogram:
+            histogram_data = None
+            level_data = _sample_shader_level_data(
+                image_data,
+                component,
+                mapping.scale,
+                symlog_constant=mapping.symlog_constant,
+            )
+        else:
+            histogram_data = apply_shader_scale(
+                extract_component(image_data, component),
+                mapping.scale,
+                symlog_constant=mapping.symlog_constant,
+            )
+            level_data = None
         complex_data = np.ascontiguousarray(image_data.astype(np.complex64, copy=False))
         return DisplayImage(
             data=complex_data,
@@ -206,6 +218,7 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None):
             shader_mapping=mapping,
             texture_kind=TexturePlaneKind.COMPLEX_RG32F,
             semantic_data=complex_data,
+            level_data=level_data,
         )
 
     default_levels = None
@@ -217,14 +230,21 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None):
         scale=_shader_scale(state.scale),
         display_mode=ShaderDisplayMode.SCALAR,
     )
-    histogram_data = apply_shader_scale(component, mapping.scale, symlog_constant=mapping.symlog_constant)
+    if provisional_histogram:
+        histogram_data = None
+        level_data = _sample_shader_level_data(component, ShaderComponent.REAL, mapping.scale, symlog_constant=mapping.symlog_constant)
+    else:
+        histogram_data = apply_shader_scale(component, mapping.scale, symlog_constant=mapping.symlog_constant)
+        level_data = None
+    component = np.ascontiguousarray(np.asarray(component, dtype=np.float32))
     return DisplayImage(
-        data=np.ascontiguousarray(np.asarray(component, dtype=np.float32)),
+        data=component,
         histogram_data=histogram_data,
         default_levels=default_levels,
         shader_mapping=mapping,
         texture_kind=TexturePlaneKind.SCALAR_R32F,
-        semantic_data=np.ascontiguousarray(np.asarray(component, dtype=np.float32)),
+        semantic_data=component,
+        level_data=level_data,
     )
 
 
@@ -326,6 +346,64 @@ def _shader_component_for_channel(channel) -> ShaderComponent:
     if channel == ChannelMode.ANGLE:
         return ShaderComponent.ANGLE
     return ShaderComponent.REAL
+
+
+def _sample_shader_level_data(
+    data,
+    component: ShaderComponent,
+    scale: ShaderScale,
+    *,
+    symlog_constant: float = 0.0,
+    limit: int = 512,
+) -> np.ndarray:
+    arr = np.asarray(data)
+    if arr.size == 0:
+        return np.asarray((), dtype=np.float32)
+    limit = max(1, int(limit))
+    sampled = _spatial_level_sample(arr, limit=limit)
+    values = extract_component(sampled.reshape(-1), component)
+    values = apply_shader_scale(values, scale, symlog_constant=symlog_constant)
+    return np.asarray(values, dtype=np.float32).reshape(-1)
+
+
+def _spatial_level_sample(arr: np.ndarray, *, limit: int) -> np.ndarray:
+    """Return a small deterministic sample spread over the image plane."""
+
+    values = np.asarray(arr)
+    if values.size <= int(limit):
+        return values.reshape(-1)
+    if values.ndim < 2:
+        indices = np.linspace(0, values.size - 1, int(limit), dtype=np.int64)
+        return values.reshape(-1)[indices]
+
+    height = max(1, int(values.shape[0]))
+    width = max(1, int(values.shape[1]))
+    # Choose a grid with roughly square spacing in pixel units.  This keeps the
+    # sample spread across the full tile instead of walking a flattened stride.
+    rows = max(1, int(np.sqrt(float(limit) * float(height) / float(width))))
+    cols = max(1, int(limit) // rows)
+    while rows * cols > int(limit) and cols > 1:
+        cols -= 1
+    while rows * cols > int(limit) and rows > 1:
+        rows -= 1
+    row_indices = _even_spatial_indices(height, rows)
+    col_indices = _even_spatial_indices(width, cols)
+    return values[np.ix_(row_indices, col_indices)].reshape(-1, *values.shape[2:])
+
+
+def _even_spatial_indices(size: int, count: int) -> np.ndarray:
+    size = max(1, int(size))
+    count = max(1, min(int(count), size))
+    if count == 1:
+        return np.asarray([size // 2], dtype=np.int64)
+    indices = np.linspace(0, size - 1, count, dtype=np.int64)
+    center = size // 2
+    indices[int(np.argmin(np.abs(indices - center)))] = center
+    indices = np.unique(indices)
+    if indices.size < count:
+        filler = np.linspace(0, size - 1, count * 2, dtype=np.int64)
+        indices = np.unique(np.concatenate((indices, filler)))
+    return np.asarray(np.sort(indices)[:count], dtype=np.int64)
 
 
 def _lut_identity(colormap_lut):

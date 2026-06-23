@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from typing import Mapping
 
 from arrayscope.display.geometry import DisplayGeometry
@@ -125,18 +126,44 @@ def display_scene_for_geometry(
             bounds=bounds,
         )
 
-    tile_count = len(montage.indices)
-    all_tiles = tuple(range(tile_count))
     if tile_delta is None:
-        active = set(all_tiles)
-        planned = set(all_tiles)
-        near = set(all_tiles)
+        tile_count = len(montage.indices)
+        active = tuple(range(tile_count))
+        planned = active
+        near = active
     else:
-        active = {int(value) for value in tuple(getattr(tile_delta, "active_tiles", ()) or ())}
-        planned = {int(value) for value in tuple(getattr(tile_delta, "planned_tiles", ()) or ())}
-        near = {int(value) for value in tuple(getattr(tile_delta, "near_tiles", ()) or ())}
-    payload_keys = {int(value) for value in dict(payloads or {})}
-    states = tuple(geometry.montage_tile_states or ())
+        active = _unique_int_tuple(getattr(tile_delta, "active_tiles", ()) or ())
+        planned = _unique_int_tuple(getattr(tile_delta, "planned_tiles", ()) or ())
+        near = _unique_int_tuple(getattr(tile_delta, "near_tiles", ()) or ())
+    payload_keys = _unique_int_tuple(dict(payloads or {}))
+    return _montage_scene_cached(
+        geometry,
+        storage,
+        payload_keys,
+        tuple(geometry.montage_tile_states or ()),
+        active,
+        planned,
+        near,
+    )
+
+
+@lru_cache(maxsize=128)
+def _montage_scene_cached(
+    geometry: DisplayGeometry,
+    storage: DisplayStorage,
+    payload_keys: tuple[int, ...],
+    states: tuple[object, ...],
+    active: tuple[int, ...],
+    planned: tuple[int, ...],
+    near: tuple[int, ...],
+) -> DisplayScene:
+    montage = geometry.montage
+    if montage is None:
+        raise ValueError("cached montage scene requires montage geometry")
+    active_set = set(active)
+    planned_set = set(planned)
+    near_set = set(near)
+    payload_key_set = set(payload_keys)
     regions = []
     for tile_number, source_index in enumerate(montage.indices):
         row = tile_number // montage.columns
@@ -158,10 +185,10 @@ def display_scene_for_geometry(
                 source_index=int(source_index),
                 bounds=bounds,
                 status=status,
-                active=tile_number in active,
-                planned=tile_number in planned,
-                near=tile_number in near,
-                resident=tile_number in payload_keys or (storage is DisplayStorage.RASTER and status == "loaded"),
+                active=tile_number in active_set,
+                planned=tile_number in planned_set,
+                near=tile_number in near_set,
+                resident=tile_number in payload_key_set or (storage is DisplayStorage.RASTER and status == "loaded"),
             )
         )
 
@@ -174,6 +201,10 @@ def display_scene_for_geometry(
         regions=tuple(regions),
         bounds=_shape_bounds(full_height, full_width),
     )
+
+
+def _unique_int_tuple(values) -> tuple[int, ...]:
+    return tuple(dict.fromkeys(int(value) for value in tuple(values or ())))
 
 
 def _shape_bounds(height: int, width: int) -> tuple[float, float, float, float]:

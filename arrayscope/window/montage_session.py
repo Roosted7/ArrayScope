@@ -93,7 +93,9 @@ class MontageRenderSession:
     applied_level_source: object | None = None
     user_levels_override: tuple[float, float] | None = None
     pending_level_tiles: deque[RenderedTile] = field(default_factory=deque)
+    pending_level_sources: set[int] = field(default_factory=set)
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
+    pending_refined_level_sources: set[int] = field(default_factory=set)
     pending_completed_tiles: deque[tuple[MontageTile, object]] = field(default_factory=deque)
     tile_compute_cache_hits: int = 0
     tile_compute_stage_backed: int = 0
@@ -147,7 +149,13 @@ class MontageRenderSession:
             for key, value in dict(self.stage_waiting_tiles or {}).items()
         }
         self.pending_level_tiles = deque(self.pending_level_tiles)
+        self.pending_level_sources = {
+            int(source) for source in (self.pending_level_sources or ())
+        } or {int(item.tile.source_index) for item in self.pending_level_tiles}
         self.pending_refined_level_tiles = deque(self.pending_refined_level_tiles)
+        self.pending_refined_level_sources = {
+            int(source) for source in (self.pending_refined_level_sources or ())
+        } or {int(item.tile.source_index) for item in self.pending_refined_level_tiles}
         self.pending_completed_tiles = deque(self.pending_completed_tiles)
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)
@@ -458,10 +466,6 @@ class MontageRenderSession:
         source_ids_trusted: bool = True,
         max_upserts: int | None = None,
         cold_deadline_ms: float | None = None,
-        callback_target_ms: float | None = None,
-        callback_warning_ms: float | None = None,
-        callback_item_cap: int | None = None,
-        callback_byte_cap: int | None = None,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         del source_ids_trusted
         source_ids = dict(source_ids or {})
@@ -575,10 +579,6 @@ class MontageRenderSession:
             base_revision=base_revision,
             target_revision=target_revision,
             cold_deadline_ms=cold_deadline_ms,
-            callback_target_ms=callback_target_ms,
-            callback_warning_ms=callback_warning_ms,
-            callback_item_cap=callback_item_cap,
-            callback_byte_cap=callback_byte_cap,
             upserts=upserts,
             removals=removals,
             active_tiles=active,

@@ -20,6 +20,7 @@ import numpy as np
 
 
 DEFAULT_DATA_PATH = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
+PY_SPY_SAMPLE_RATE_HZ = 50
 
 
 def run_profile_montage_workflow(
@@ -306,6 +307,7 @@ def _phase_record(win, *, phase: str, elapsed_ms: float, event_loop_max_gap_ms: 
     recent_callbacks = () if resource is None else tuple(resource.recent_over_warning_callbacks)
     feedback_channels = () if resource is None else tuple(resource.feedback_channels)
     ui_decisions = () if resource is None else tuple(resource.ui_decisions)
+    lane_decisions = () if resource is None else tuple(resource.lane_decisions)
     vispy = _vispy_presentation_diagnostics(win)
     return {
         "phase": phase,
@@ -344,6 +346,8 @@ def _phase_record(win, *, phase: str, elapsed_ms: float, event_loop_max_gap_ms: 
         "tile_layer_estimated_gpu_bytes": int(timing.tile_layer_estimated_gpu_bytes),
         "tile_layer_page_count": int(timing.tile_layer_page_count),
         "tile_layer_active_pages": int(timing.tile_layer_active_pages),
+        "vispy_fast_drain_last_enabled": bool(getattr(win, "_vispy_tile_layer_fast_drain_last_enabled", False)),
+        "vispy_fast_drain_enabled_count": int(getattr(win, "_vispy_tile_layer_fast_drain_enabled_count", 0) or 0),
         "montage_overlay_count": _montage_overlay_count(win),
         "vispy_draw_count": int(vispy.get("draw_count", 0)),
         "vispy_tile_presentation_request_count": int(vispy.get("tile_presentation_request_count", 0)),
@@ -357,6 +361,13 @@ def _phase_record(win, *, phase: str, elapsed_ms: float, event_loop_max_gap_ms: 
         "vispy_overlay_visual_max_order": vispy.get("overlay_visual_max_order"),
         "vispy_overlays_above_tiles": bool(vispy.get("overlays_above_tiles", False)),
         "resource_feedback_channels": [asdict(channel) for channel in feedback_channels],
+        "resource_lane_decisions": [
+            {
+                **asdict(decision),
+                "lane": str(getattr(getattr(decision, "lane", ""), "value", getattr(decision, "lane", ""))),
+            }
+            for decision in lane_decisions
+        ],
         "resource_ui_decisions": [asdict(decision) for decision in ui_decisions],
         "recent_over_warning_callbacks": [asdict(callback) for callback in recent_callbacks],
     }
@@ -613,7 +624,24 @@ def _optional_float(value) -> float | None:
 
 def py_spy_command(argv: tuple[str, ...] | None = None) -> str:
     args = tuple(sys.argv[1:] if argv is None else argv)
-    return shlex.join(("py-spy", "record", "--native", "-o", "arrayscope-montage-workflow.svg", "--", sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *args))
+    native = _py_spy_native_requested(args)
+    args = _py_spy_filtered_args(args)
+    return shlex.join(
+        (
+            "py-spy",
+            "record",
+            *(("--native",) if native else ()),
+            "--rate",
+            str(PY_SPY_SAMPLE_RATE_HZ),
+            "-o",
+            "arrayscope-montage-workflow.svg",
+            "--",
+            sys.executable,
+            "-m",
+            "arrayscope.tools.profile_montage_workflow",
+            *args,
+        )
+    )
 
 
 def cprofile_command(argv: tuple[str, ...], output: str | Path) -> str:
@@ -621,7 +649,25 @@ def cprofile_command(argv: tuple[str, ...], output: str | Path) -> str:
 
 
 def py_spy_raw_command(argv: tuple[str, ...], output: str | Path) -> str:
-    return shlex.join(("py-spy", "record", "--native", "--format", "raw", "-o", str(output), "--", sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *tuple(argv)))
+    native = _py_spy_native_requested(tuple(argv))
+    return shlex.join(
+        (
+            "py-spy",
+            "record",
+            *(("--native",) if native else ()),
+            "--rate",
+            str(PY_SPY_SAMPLE_RATE_HZ),
+            "--format",
+            "raw",
+            "-o",
+            str(output),
+            "--",
+            sys.executable,
+            "-m",
+            "arrayscope.tools.profile_montage_workflow",
+            *tuple(argv),
+        )
+    )
 
 
 def perf_record_command(argv: tuple[str, ...], output: str | Path) -> str:
@@ -635,6 +681,9 @@ def profiler_suite_commands(argv: tuple[str, ...], suite_dir: str | Path) -> tup
     py_spy_artifact = suite_dir / "montage.pyspy.raw"
     perf_artifact = suite_dir / "montage.perf.data"
     base = _suite_child_args(argv)
+    py_spy_native = _py_spy_native_requested(argv)
+    py_spy_type = "py-spy-raw-native" if py_spy_native else "py-spy-raw"
+    py_spy_base = (*base, "--py-spy-native") if py_spy_native else base
     return (
         {
             "profiler_type": "plain",
@@ -649,10 +698,10 @@ def profiler_suite_commands(argv: tuple[str, ...], suite_dir: str | Path) -> tup
             "command": cprofile_command((*base, "--jsonl", str(suite_dir / "cprofile.jsonl"), "--profiler-type", "cprofile", "--profiler-artifact", str(cprofile_artifact)), cprofile_artifact),
         },
         {
-            "profiler_type": "py-spy-raw",
+            "profiler_type": py_spy_type,
             "jsonl": str(suite_dir / "py-spy.jsonl"),
             "artifact_paths": (str(py_spy_artifact), str(suite_dir / "py-spy.jsonl")),
-            "command": py_spy_raw_command((*base, "--jsonl", str(suite_dir / "py-spy.jsonl"), "--profiler-type", "py-spy-raw", "--profiler-artifact", str(py_spy_artifact)), py_spy_artifact),
+            "command": py_spy_raw_command((*py_spy_base, "--jsonl", str(suite_dir / "py-spy.jsonl"), "--profiler-type", py_spy_type, "--profiler-artifact", str(py_spy_artifact)), py_spy_artifact),
         },
         {
             "profiler_type": "perf-record",
@@ -683,17 +732,20 @@ def run_profile_suite(argv: tuple[str, ...], suite_dir: str | Path) -> int:
         elapsed_ms = (perf_counter() - started) * 1000.0
         artifacts = tuple(str(path) for path in tuple(item.get("artifact_paths", ()) or ()))
         missing = [path for path in artifacts if not Path(path).exists() or Path(path).stat().st_size <= 0]
+        py_spy_artifact_complete = bool(profiler.startswith("py-spy") and completed.returncode != 0 and not missing)
+        complete = completed.returncode == 0 or py_spy_artifact_complete
         record = {
             **item,
             "command_executable": executable,
             "returncode": int(completed.returncode),
             "elapsed_ms": float(elapsed_ms),
             "missing_artifacts": missing,
-            "complete": completed.returncode == 0 and not missing,
+            "nonzero_returncode_ignored": bool(py_spy_artifact_complete),
+            "complete": bool(complete),
         }
         with manifest_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
-        if completed.returncode != 0 or missing:
+        if not complete or missing:
             return completed.returncode or 2
     return 0
 
@@ -705,7 +757,7 @@ def _write_suite_failure(path: Path, item: dict[str, object], reason: str) -> in
 
 
 def _suite_child_args(argv: tuple[str, ...]) -> tuple[str, ...]:
-    blocked = {"--profile-suite", "--print-py-spy-command"}
+    blocked = {"--profile-suite", "--print-py-spy-command", "--py-spy-native"}
     result: list[str] = []
     skip_next = False
     for index, arg in enumerate(tuple(argv)):
@@ -726,6 +778,14 @@ def _suite_child_args(argv: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _py_spy_native_requested(argv: tuple[str, ...]) -> bool:
+    return any(str(arg) == "--py-spy-native" for arg in tuple(argv))
+
+
+def _py_spy_filtered_args(argv: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(arg for arg in tuple(argv) if str(arg) != "--py-spy-native")
+
+
 def main(argv: tuple[str, ...] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the realistic tiled montage + FFT profiling workflow")
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="Dataset path; defaults to the bundled realistic NIfTI")
@@ -738,6 +798,11 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     parser.add_argument("--hide-window", action="store_true", help="Do not show the window; useful with QT_QPA_PLATFORM=offscreen")
     parser.add_argument("--print-py-spy-command", action="store_true", help="Print an external py-spy command for this invocation and exit")
     parser.add_argument("--profile-suite", default=None, help="Run plain JSONL, cProfile, py-spy raw, and perf record into this directory")
+    parser.add_argument(
+        "--py-spy-native",
+        action="store_true",
+        help="Include native stacks in py-spy artifacts; useful diagnostically but not pacing evidence",
+    )
     parser.add_argument("--profiler-type", default="plain", help=argparse.SUPPRESS)
     parser.add_argument("--profiler-artifact", action="append", default=[], help=argparse.SUPPRESS)
     args = parser.parse_args(argv)

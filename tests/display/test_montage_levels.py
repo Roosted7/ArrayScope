@@ -1,4 +1,7 @@
+import warnings
+
 import numpy as np
+import pytest
 
 from arrayscope.display.model.montage_levels import (
     AGGREGATE_SAMPLE_LIMIT,
@@ -128,6 +131,25 @@ def test_montage_level_tracker_reports_reusable_source_stats():
     assert tracker.has_source(key, 0, refined=True) is True
 
 
+def test_montage_level_tracker_treats_accidental_complex_input_as_magnitude_without_warning():
+    tracker = MontageLevelTracker()
+    key = "scope"
+    values = np.asarray([1 + 2j, -3 + 4j], dtype=np.complex128)
+    tracker.ensure(key, (0,))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        tracker.update_from_tile(key, 0, None, values)
+
+    assert not caught
+    stats = tracker.stats_for(key)
+    assert stats is not None
+    assert stats.bounds == pytest.approx((np.sqrt(5.0), 5.0))
+    assert stats.sample is not None
+    assert stats.sample.dtype == np.float32
+    np.testing.assert_allclose(np.sort(stats.sample), np.sort(np.abs(values).astype(np.float32)))
+
+
 def test_tile_stats_do_not_rescan_values_for_bounds_and_sample(monkeypatch):
     import arrayscope.display.model.montage_levels as montage_levels
 
@@ -165,36 +187,37 @@ def test_montage_level_tracker_can_defer_aggregate_rebuild():
     assert tracker.stats_for(key) is stats
 
 
-def test_montage_level_tracker_uses_incremental_histogram_accumulator(monkeypatch):
+def test_montage_level_tracker_can_ensure_expected_without_aggregate_rebuild(monkeypatch):
     import arrayscope.display.model.montage_levels as montage_levels
 
     tracker = MontageLevelTracker()
     key = "scope"
-    tracker.ensure(key, (0, 1))
-    tracker.update_from_tile(
-        key,
-        0,
-        np.arange(16, dtype=np.float32),
-        np.arange(16, dtype=np.float32),
-        aggregate=False,
-    )
 
     def fail_rebuild(*_args, **_kwargs):
-        raise AssertionError("aggregate sample should be maintained incrementally")
+        raise AssertionError("expected coverage update should not rebuild aggregate stats")
 
-    monkeypatch.setattr(montage_levels, "_aggregate_samples", fail_rebuild)
+    monkeypatch.setattr(montage_levels.MontageLevelTracker, "_stats_for_expected", fail_rebuild)
 
-    first = tracker.stats_for(key)
-    assert np.array_equal(tracker.histogram_data_for_stats(first), np.arange(16, dtype=np.float32))
+    expected = tracker.ensure_expected(key, (0, 1, 2))
 
-    tracker.update_from_tile(
-        key,
-        1,
-        np.arange(16, 32, dtype=np.float32),
-        np.arange(16, 32, dtype=np.float32),
-        aggregate=False,
+    assert expected == frozenset({0, 1, 2})
+
+
+def test_montage_refined_level_values_use_shader_component_for_complex_tiles():
+    from types import SimpleNamespace
+
+    from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping
+    from arrayscope.window.montage_renderer import _montage_refined_level_values
+
+    semantic = np.asarray([[1 + 2j, -3 + 4j]], dtype=np.complex128)
+    rendered = SimpleNamespace(
+        histogram_data=None,
+        semantic_data=semantic,
+        image=semantic,
+        shader_mapping=ShaderMapping(component=ShaderComponent.ABS),
     )
-    second = tracker.stats_for(key)
 
-    assert second.source_indices == frozenset({0, 1})
-    assert np.array_equal(tracker.histogram_data_for_stats(second), np.arange(32, dtype=np.float32))
+    values = _montage_refined_level_values(rendered)
+
+    assert values.dtype == np.float32
+    np.testing.assert_allclose(values, np.abs(semantic).astype(np.float32))
