@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+from importlib import metadata
+import io
 import json
 import math
 import os
+import pstats
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -20,7 +24,10 @@ import numpy as np
 
 
 DEFAULT_DATA_PATH = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
-PY_SPY_SAMPLE_RATE_HZ = 50
+PY_SPY_LOW_IMPACT_SAMPLE_RATE_HZ = 50
+PY_SPY_FULL_SAMPLE_RATE_HZ = 80
+PY_SPY_FULL_DURATION_S = 16
+PY_SPY_FULL_POST_RUN_SLEEP_S = 12
 
 
 def run_profile_montage_workflow(
@@ -32,7 +39,6 @@ def run_profile_montage_workflow(
     max_tiles: int | None = None,
     columns: int | None = None,
     load_mode: str = "app",
-    show_window: bool = True,
     profiler_type: str = "plain",
     profiler_artifact_paths: tuple[str | Path, ...] = (),
 ) -> tuple[dict[str, object], ...]:
@@ -93,10 +99,10 @@ def run_profile_montage_workflow(
             indices=indices,
             full_tile_count=tile_count,
             columns=columns,
-            show_window=show_window,
             max_tiles=max_tiles,
             profiler_type=profiler_type,
             profiler_artifact_paths=profiler_artifact_paths,
+            run_temperature=_workflow_run_temperature(),
             qt_platform=str(app.platformName()),
         )
         _append_record(
@@ -107,6 +113,7 @@ def run_profile_montage_workflow(
                 "phase": "load_data",
                 "elapsed_ms": load_elapsed_ms,
                 "complete": True,
+                "run_temperature": "cold",
             },
         )
 
@@ -117,9 +124,11 @@ def run_profile_montage_workflow(
             image_choice=ImageRenderingBackendChoice,
             montage_choice=MontageDisplayBackendChoice,
         )
+        apply_theme = getattr(win, "_apply_theme_choice", None)
+        if callable(apply_theme):
+            apply_theme(win.app_settings.theme, persist=False)
         win.resize(1400, 900)
-        if show_window:
-            win.show()
+        win.show()
         _process_events(app, QtCore, count=20)
         probe = _EventLoopProbe(QtCore)
         probe.start()
@@ -139,7 +148,7 @@ def run_profile_montage_workflow(
             timeout_s=timeout_s,
             action=lambda: (win._set_view_state(raw_state), win.render(reason="profile-raw-full-montage")),
         )
-        _append_record(records, jsonl, {**base, **raw_record})
+        _append_record(records, jsonl, {**base, **raw_record, "run_temperature": "cold"})
 
         def apply_fft() -> None:
             win.operation_coordinator.load_operations((CenteredFFT(axis=montage_axis),))
@@ -163,7 +172,7 @@ def run_profile_montage_workflow(
             timeout_s=timeout_s,
             action=apply_fft,
         )
-        _append_record(records, jsonl, {**base, **fft_record})
+        _append_record(records, jsonl, {**base, **fft_record, "run_temperature": "mixed"})
         return tuple(records)
     finally:
         if win is not None:
@@ -519,14 +528,14 @@ def _base_record(
     indices: tuple[int, ...],
     columns: int,
     full_tile_count: int,
-    show_window: bool,
     max_tiles: int | None,
     profiler_type: str,
     profiler_artifact_paths: tuple[str | Path, ...],
+    run_temperature: str = "mixed",
     qt_platform: str,
 ) -> dict[str, object]:
     capped = max_tiles is not None and len(indices) < int(full_tile_count)
-    smoke_only = bool((not show_window) or str(qt_platform).lower() == "offscreen" or capped)
+    smoke_only = bool(str(qt_platform).lower() == "offscreen" or capped)
     return {
         "run_id": run_id,
         "backend": backend,
@@ -534,11 +543,11 @@ def _base_record(
         "load_mode": str(load_mode),
         "profiler_type": str(profiler_type),
         "profiler_artifact_paths": [str(path) for path in tuple(profiler_artifact_paths or ())],
+        "run_temperature": str(run_temperature),
         "qt_platform": str(qt_platform),
         "xdg_session_type": os.environ.get("XDG_SESSION_TYPE", ""),
         "wayland_display": os.environ.get("WAYLAND_DISPLAY", ""),
         "display": os.environ.get("DISPLAY", ""),
-        "show_window": bool(show_window),
         "max_tiles": None if max_tiles is None else int(max_tiles),
         "tile_cap_applied": bool(capped),
         "smoke_only": bool(smoke_only),
@@ -576,8 +585,11 @@ def _is_nifti(path: Path) -> bool:
 def _replace_settings(settings, *, backend: str, image_choice, montage_choice):
     from dataclasses import replace
 
+    from arrayscope.app.theme import ThemeChoice
+
     return replace(
         settings,
+        theme=ThemeChoice.DARK if backend == "vispy" else ThemeChoice.LIGHT,
         image_rendering_backend=image_choice.VISPY if backend == "vispy" else image_choice.PYQTGRAPH,
         montage_display_backend=montage_choice.TILE_LAYER,
     )
@@ -632,7 +644,9 @@ def py_spy_command(argv: tuple[str, ...] | None = None) -> str:
             "record",
             *(("--native",) if native else ()),
             "--rate",
-            str(PY_SPY_SAMPLE_RATE_HZ),
+            str(PY_SPY_LOW_IMPACT_SAMPLE_RATE_HZ),
+            "--gil",
+            "--nonblocking",
             "-o",
             "arrayscope-montage-workflow.svg",
             "--",
@@ -648,68 +662,120 @@ def cprofile_command(argv: tuple[str, ...], output: str | Path) -> str:
     return shlex.join((sys.executable, "-m", "cProfile", "-o", str(output), "-m", "arrayscope.tools.profile_montage_workflow", *tuple(argv)))
 
 
-def py_spy_raw_command(argv: tuple[str, ...], output: str | Path) -> str:
+def py_spy_raw_command(
+    argv: tuple[str, ...],
+    output: str | Path,
+    *,
+    rate_hz: int,
+    nonblocking: bool = False,
+    gil: bool = False,
+    duration_s: int | None = None,
+    post_run_sleep_s: int = 0,
+) -> str:
     native = _py_spy_native_requested(tuple(argv))
+    target = (
+        (
+            sys.executable,
+            "-c",
+            "import sys, time; from arrayscope.tools.profile_montage_workflow import main; "
+            "rc = main(tuple(sys.argv[1:-1])); time.sleep(float(sys.argv[-1])); raise SystemExit(rc)",
+            *tuple(argv),
+            str(int(post_run_sleep_s)),
+        )
+        if duration_s is not None
+        else (sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *tuple(argv))
+    )
     return shlex.join(
         (
             "py-spy",
             "record",
             *(("--native",) if native else ()),
+            *(("--duration", str(int(duration_s))) if duration_s is not None else ()),
             "--rate",
-            str(PY_SPY_SAMPLE_RATE_HZ),
+            str(int(rate_hz)),
+            *(("--nonblocking",) if nonblocking else ()),
+            *(("--gil",) if gil else ()),
             "--format",
             "raw",
             "-o",
             str(output),
             "--",
-            sys.executable,
-            "-m",
-            "arrayscope.tools.profile_montage_workflow",
-            *tuple(argv),
+            *target,
         )
     )
 
 
 def perf_record_command(argv: tuple[str, ...], output: str | Path) -> str:
-    return shlex.join(("perf", "record", "-g", "-o", str(output), "--", sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *tuple(argv)))
+    return shlex.join(("perf", "record", "-F", "99", "-g", "-o", str(output), "--", sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *tuple(argv)))
 
 
 def profiler_suite_commands(argv: tuple[str, ...], suite_dir: str | Path) -> tuple[dict[str, object], ...]:
     suite_dir = Path(suite_dir)
     plain_jsonl = suite_dir / "plain.jsonl"
     cprofile_artifact = suite_dir / "montage.cprofile"
-    py_spy_artifact = suite_dir / "montage.pyspy.raw"
+    py_spy_low_artifact = suite_dir / "montage.pyspy.low-impact.raw"
+    py_spy_full_artifact = suite_dir / "montage.pyspy.full.raw"
     perf_artifact = suite_dir / "montage.perf.data"
     base = _suite_child_args(argv)
+    include_cprofile = _include_cprofile_requested(argv)
     py_spy_native = _py_spy_native_requested(argv)
-    py_spy_type = "py-spy-raw-native" if py_spy_native else "py-spy-raw"
+    py_spy_low_type = "py-spy-raw-low-impact-native" if py_spy_native else "py-spy-raw-low-impact"
+    py_spy_full_type = "py-spy-raw-full-native" if py_spy_native else "py-spy-raw-full"
     py_spy_base = (*base, "--py-spy-native") if py_spy_native else base
-    return (
+    commands: list[dict[str, object]] = [
         {
             "profiler_type": "plain",
+            "required": True,
             "jsonl": str(plain_jsonl),
             "artifact_paths": (str(plain_jsonl),),
             "command": shlex.join((sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *base, "--jsonl", str(plain_jsonl), "--profiler-type", "plain", "--profiler-artifact", str(plain_jsonl))),
         },
         {
-            "profiler_type": "cprofile",
-            "jsonl": str(suite_dir / "cprofile.jsonl"),
-            "artifact_paths": (str(cprofile_artifact), str(suite_dir / "cprofile.jsonl")),
-            "command": cprofile_command((*base, "--jsonl", str(suite_dir / "cprofile.jsonl"), "--profiler-type", "cprofile", "--profiler-artifact", str(cprofile_artifact)), cprofile_artifact),
+            "profiler_type": py_spy_low_type,
+            "required": True,
+            "jsonl": str(suite_dir / "py-spy-low-impact.jsonl"),
+            "artifact_paths": (str(py_spy_low_artifact), str(suite_dir / "py-spy-low-impact.jsonl")),
+            "command": py_spy_raw_command(
+                (*py_spy_base, "--jsonl", str(suite_dir / "py-spy-low-impact.jsonl"), "--profiler-type", py_spy_low_type, "--profiler-artifact", str(py_spy_low_artifact)),
+                py_spy_low_artifact,
+                rate_hz=PY_SPY_LOW_IMPACT_SAMPLE_RATE_HZ,
+                nonblocking=True,
+                gil=True,
+            ),
         },
         {
-            "profiler_type": py_spy_type,
-            "jsonl": str(suite_dir / "py-spy.jsonl"),
-            "artifact_paths": (str(py_spy_artifact), str(suite_dir / "py-spy.jsonl")),
-            "command": py_spy_raw_command((*py_spy_base, "--jsonl", str(suite_dir / "py-spy.jsonl"), "--profiler-type", py_spy_type, "--profiler-artifact", str(py_spy_artifact)), py_spy_artifact),
+            "profiler_type": py_spy_full_type,
+            "required": True,
+            "jsonl": str(suite_dir / "py-spy-full.jsonl"),
+            "artifact_paths": (str(py_spy_full_artifact), str(suite_dir / "py-spy-full.jsonl")),
+            "command": py_spy_raw_command(
+                (*py_spy_base, "--jsonl", str(suite_dir / "py-spy-full.jsonl"), "--profiler-type", py_spy_full_type, "--profiler-artifact", str(py_spy_full_artifact)),
+                py_spy_full_artifact,
+                rate_hz=PY_SPY_FULL_SAMPLE_RATE_HZ,
+                duration_s=PY_SPY_FULL_DURATION_S,
+                post_run_sleep_s=PY_SPY_FULL_POST_RUN_SLEEP_S,
+            ),
         },
         {
             "profiler_type": "perf-record",
+            "required": False,
             "jsonl": str(suite_dir / "perf.jsonl"),
             "artifact_paths": (str(perf_artifact), str(suite_dir / "perf.jsonl")),
             "command": perf_record_command((*base, "--jsonl", str(suite_dir / "perf.jsonl"), "--profiler-type", "perf-record", "--profiler-artifact", str(perf_artifact)), perf_artifact),
         },
-    )
+    ]
+    if include_cprofile:
+        commands.insert(
+            1,
+            {
+                "profiler_type": "cprofile",
+                "required": True,
+                "jsonl": str(suite_dir / "cprofile.jsonl"),
+                "artifact_paths": (str(cprofile_artifact), str(suite_dir / "cprofile.jsonl")),
+                "command": cprofile_command((*base, "--jsonl", str(suite_dir / "cprofile.jsonl"), "--profiler-type", "cprofile", "--profiler-artifact", str(cprofile_artifact)), cprofile_artifact),
+            },
+        )
+    return tuple(commands)
 
 
 def run_profile_suite(argv: tuple[str, ...], suite_dir: str | Path) -> int:
@@ -719,45 +785,580 @@ def run_profile_suite(argv: tuple[str, ...], suite_dir: str | Path) -> int:
     manifest_path = suite_dir / "suite-manifest.jsonl"
     if manifest_path.exists():
         manifest_path.unlink()
+    tool_versions = _suite_tool_versions()
+    repository = _repository_state()
+    step_records: list[dict[str, object]] = []
     for item in commands:
         profiler = str(item["profiler_type"])
+        step_temperature = _suite_step_temperature(step_records)
         command = str(item["command"])
         executable = shlex.split(command)[0]
+        stdout_path = suite_dir / f"{_artifact_stem(profiler)}.stdout.log"
+        stderr_path = suite_dir / f"{_artifact_stem(profiler)}.stderr.log"
+        required = bool(item.get("required", False))
         if profiler.startswith("py-spy") and shutil.which("py-spy") is None:
-            return _write_suite_failure(manifest_path, item, "py-spy executable not found")
+            status = "failed" if required else "skipped"
+            reason_key = "failure_reason" if status == "failed" else "skip_reason"
+            record = _suite_step_record(
+                item,
+                command_executable=executable,
+                returncode=127,
+                elapsed_ms=0.0,
+                missing_artifacts=tuple(item.get("artifact_paths", ()) or ()),
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                status=status,
+                reason_key=reason_key,
+                reason="py-spy executable not found",
+                tool_versions=tool_versions,
+                repository=repository,
+                run_temperature=step_temperature,
+            )
+            _write_manifest_record(manifest_path, record)
+            step_records.append(record)
+            continue
         if profiler.startswith("perf") and shutil.which("perf") is None:
-            return _write_suite_failure(manifest_path, item, "perf executable not found")
+            record = _suite_step_record(
+                item,
+                command_executable=executable,
+                returncode=127,
+                elapsed_ms=0.0,
+                missing_artifacts=tuple(item.get("artifact_paths", ()) or ()),
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                status="skipped",
+                reason_key="skip_reason",
+                reason="perf executable not found",
+                tool_versions=tool_versions,
+                repository=repository,
+                run_temperature=step_temperature,
+            )
+            _write_manifest_record(manifest_path, record)
+            step_records.append(record)
+            continue
         started = perf_counter()
-        completed = subprocess.run(shlex.split(command), cwd=Path.cwd(), check=False)
+        with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+            completed = subprocess.run(shlex.split(command), cwd=Path.cwd(), check=False, stdout=stdout, stderr=stderr)
         elapsed_ms = (perf_counter() - started) * 1000.0
         artifacts = tuple(str(path) for path in tuple(item.get("artifact_paths", ()) or ()))
         missing = [path for path in artifacts if not Path(path).exists() or Path(path).stat().st_size <= 0]
-        py_spy_artifact_complete = bool(profiler.startswith("py-spy") and completed.returncode != 0 and not missing)
-        complete = completed.returncode == 0 or py_spy_artifact_complete
-        record = {
-            **item,
-            "command_executable": executable,
-            "returncode": int(completed.returncode),
-            "elapsed_ms": float(elapsed_ms),
-            "missing_artifacts": missing,
-            "nonzero_returncode_ignored": bool(py_spy_artifact_complete),
-            "complete": bool(complete),
-        }
-        with manifest_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
-        if not complete or missing:
-            return completed.returncode or 2
-    return 0
+        profiler_diagnostics = _profiler_log_diagnostics(profiler, stdout_path, stderr_path)
+        sample_issue = _profiler_sample_issue(profiler, profiler_diagnostics)
+        complete = int(completed.returncode) == 0 and not missing and sample_issue == ""
+        if complete:
+            status = "completed"
+            reason_key = None
+            reason = ""
+        else:
+            status = "failed" if required else "degraded"
+            reason_key = "failure_reason" if status == "failed" else "degraded_reason"
+            if int(completed.returncode) != 0:
+                reason = f"command exited with {int(completed.returncode)}"
+            elif sample_issue:
+                reason = sample_issue
+            else:
+                reason = "missing or empty expected artifacts"
+        record = _suite_step_record(
+            item,
+            command_executable=executable,
+            returncode=int(completed.returncode),
+            elapsed_ms=elapsed_ms,
+            missing_artifacts=missing,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            profiler_diagnostics=profiler_diagnostics,
+            status=status,
+            reason_key=reason_key,
+            reason=reason,
+            tool_versions=tool_versions,
+            repository=repository,
+            run_temperature=step_temperature,
+        )
+        _write_manifest_record(manifest_path, record)
+        step_records.append(record)
+    summary = _suite_summary_record(step_records, tool_versions=tool_versions, repository=repository)
+    interpretation_path = suite_dir / "suite-summary.md"
+    summary["interpretation_path"] = str(interpretation_path)
+    _write_suite_interpretation(interpretation_path, step_records, summary)
+    print(interpretation_path.read_text(encoding="utf-8"), end="")
+    _write_manifest_record(manifest_path, summary)
+    return 0 if bool(summary["overall_valid"]) else _suite_exit_code(step_records)
 
 
-def _write_suite_failure(path: Path, item: dict[str, object], reason: str) -> int:
+def _write_manifest_record(path: Path, record: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({**item, "complete": False, "missing_reason": str(reason)}, sort_keys=True) + "\n")
-    return 127
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _suite_step_record(
+    item: dict[str, object],
+    *,
+    command_executable: str,
+    returncode: int,
+    elapsed_ms: float,
+    missing_artifacts,
+    stdout_path: Path,
+    stderr_path: Path,
+    profiler_diagnostics: dict[str, object] | None = None,
+    status: str,
+    reason_key: str | None = None,
+    reason: str = "",
+    tool_versions: dict[str, str],
+    repository: dict[str, object],
+    run_temperature: str,
+) -> dict[str, object]:
+    complete = str(status) == "completed"
+    record = {
+        **item,
+        "record_type": "suite_step",
+        "required": bool(item.get("required", False)),
+        "status": str(status),
+        "valid": bool(complete),
+        "complete": bool(complete),
+        "command_executable": str(command_executable),
+        "returncode": int(returncode),
+        "elapsed_ms": float(elapsed_ms),
+        "missing_artifacts": [str(path) for path in tuple(missing_artifacts or ())],
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "profiler_diagnostics": dict(profiler_diagnostics or {}),
+        "tool_versions": dict(tool_versions),
+        "repository_revision": str(repository["repository_revision"]),
+        "repository_dirty": bool(repository["repository_dirty"]),
+        "run_temperature": str(run_temperature),
+    }
+    if reason_key is not None and reason:
+        record[str(reason_key)] = str(reason)
+    return record
+
+
+def _suite_summary_record(
+    records: list[dict[str, object]],
+    *,
+    tool_versions: dict[str, str],
+    repository: dict[str, object],
+) -> dict[str, object]:
+    statuses = {str(record["profiler_type"]): str(record["status"]) for record in records}
+    overall_valid = bool(records) and all(bool(record.get("valid", False)) for record in records)
+    if overall_valid:
+        overall_status = "completed"
+    elif any(str(record.get("status")) == "failed" for record in records):
+        overall_status = "failed"
+    else:
+        overall_status = "degraded"
+    return {
+        "record_type": "suite_summary",
+        "overall_valid": bool(overall_valid),
+        "overall_status": overall_status,
+        "step_statuses": statuses,
+        "step_count": len(records),
+        "tool_versions": dict(tool_versions),
+        "repository_revision": str(repository["repository_revision"]),
+        "repository_dirty": bool(repository["repository_dirty"]),
+        "run_temperature": _aggregate_run_temperature(tuple(str(record.get("run_temperature", "")) for record in records)),
+    }
+
+
+def _suite_exit_code(records: list[dict[str, object]]) -> int:
+    for record in records:
+        if str(record.get("status")) == "failed":
+            return int(record.get("returncode") or 1)
+    for record in records:
+        if str(record.get("status")) in {"degraded", "skipped"}:
+            return int(record.get("returncode") or 2)
+    return 2
+
+
+def _artifact_stem(profiler: str) -> str:
+    return str(profiler).replace("/", "-").replace(" ", "-")
+
+
+def _profiler_log_diagnostics(profiler: str, stdout_path: Path, stderr_path: Path) -> dict[str, object]:
+    stdout = _read_text_if_exists(stdout_path)
+    stderr = _read_text_if_exists(stderr_path)
+    diagnostics: dict[str, object] = {
+        "warning_count": stderr.count("WARN  "),
+    }
+    if str(profiler).startswith("py-spy"):
+        rate_match = re.search(r"Sampling process\s+(\d+)\s+times a second", stdout)
+        match = re.search(r"Samples:\s*(\d+)\s+Errors:\s*(\d+)", stdout)
+        diagnostics["sample_rate_hz"] = int(rate_match.group(1)) if rate_match else 0
+        diagnostics["sample_count"] = int(match.group(1)) if match else 0
+        diagnostics["error_count"] = int(match.group(2)) if match else 0
+        diagnostics["missed_stack_count"] = stderr.count("Failed to get stack trace")
+        diagnostics["scope"] = "low_impact_python_gil_holders" if "low-impact" in str(profiler) else "complete_sampling_all_python_threads"
+        diagnostics["sampling_mode"] = "nonblocking_gil_samples" if "low-impact" in str(profiler) else "blocking_all_python_thread_samples"
+        diagnostics["sampling_complete"] = bool(
+            int(diagnostics["sample_count"]) > 0
+            and (("low-impact" in str(profiler)) or (int(diagnostics["error_count"]) == 0 and int(diagnostics["missed_stack_count"]) == 0))
+        )
+    elif str(profiler).startswith("perf"):
+        diagnostics["scope"] = "native_and_python_process_samples"
+    elif str(profiler) == "cprofile":
+        diagnostics["scope"] = "deterministic_python_calls"
+    else:
+        diagnostics["scope"] = "workflow_timing_jsonl"
+    return diagnostics
+
+
+def _profiler_sample_issue(profiler: str, diagnostics: dict[str, object]) -> str:
+    if str(profiler).startswith("py-spy") and int(diagnostics.get("sample_count", 0) or 0) <= 0:
+        return "py-spy produced no samples"
+    if str(profiler).startswith("py-spy") and "full" in str(profiler) and not bool(diagnostics.get("sampling_complete", False)):
+        return "py-spy full profile missed stack samples"
+    return ""
+
+
+def _read_text_if_exists(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _write_suite_interpretation(path: Path, records: list[dict[str, object]], summary: dict[str, object]) -> None:
+    lines = [
+        "# Profile Suite Summary",
+        "",
+        f"- Overall status: `{summary.get('overall_status')}`",
+        f"- Overall valid: `{summary.get('overall_valid')}`",
+        f"- Run temperature: `{summary.get('run_temperature')}`",
+        "",
+        "## Timing Evidence",
+        "",
+    ]
+    plain = _find_step(records, "plain")
+    if plain is None:
+        lines.append("Plain JSONL timing evidence was not produced.")
+    else:
+        lines.extend(_plain_timing_summary(Path(str(plain.get("jsonl", "")))))
+        lines.extend(["", "## Tooling Slowdown", ""])
+        lines.extend(_tooling_slowdown_summary(plain, records))
+    lines.extend(["", "## Python Attribution", ""])
+    low = _find_step(records, "py-spy-raw-low-impact")
+    full = _find_step(records, "py-spy-raw-full")
+    generic = _find_step(records, "py-spy-raw") if low is None and full is None else None
+    if low is not None:
+        lines.extend(_py_spy_summary(low, title="Low-impact py-spy"))
+    if full is not None:
+        lines.extend(_py_spy_summary(full, title="Full sampled py-spy"))
+    if generic is not None:
+        lines.extend(_py_spy_summary(generic, title="py-spy"))
+    if low is None and full is None and generic is None:
+        lines.append("No py-spy artifacts were produced.")
+    lines.extend(["", "## Deterministic Python Calls", ""])
+    cprofile = _find_step(records, "cprofile")
+    if cprofile is None:
+        lines.append("cProfile was not run. Use `--include-cprofile` when deterministic Python call counts are worth the slowdown.")
+    else:
+        lines.extend(_cprofile_summary(cprofile))
+    lines.extend(["", "## Native Attribution", ""])
+    perf = _find_step(records, "perf-record")
+    if perf is None:
+        lines.append("perf was not run.")
+    else:
+        lines.extend(_perf_summary(perf))
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _find_step(records: list[dict[str, object]], profiler_type: str) -> dict[str, object] | None:
+    for record in records:
+        if str(record.get("profiler_type", "")).startswith(profiler_type):
+            return record
+    return None
+
+
+def _plain_timing_summary(path: Path) -> list[str]:
+    records = _read_jsonl(path)
+    if not records:
+        return [f"No readable timing records found at `{path}`."]
+    lines = [
+        f"Source: `{path}`",
+        "",
+        "Headline only; detailed counters remain in JSONL.",
+        "",
+        "| Backend | phase | total ms | first visible ms | max gap ms | tiles | compute |",
+        "|---|---|---:|---:|---:|---:|---|",
+    ]
+    for record in records:
+        backend = str(record.get("backend", ""))
+        phase = str(record.get("phase", ""))
+        elapsed = _format_ms(record.get("elapsed_ms"))
+        first = _format_ms(record.get("first_loaded_tile_ms") or record.get("first_display_committed_ms"))
+        gap = _format_ms(record.get("event_loop_max_gap_ms"))
+        tiles = _tile_summary(record)
+        compute = _compute_summary(record)
+        lines.append(f"| `{backend}` | `{phase}` | {elapsed} | {first} | {gap} | {tiles} | {compute} |")
+    return lines
+
+
+def _py_spy_summary(record: dict[str, object], *, title: str) -> list[str]:
+    diagnostics = dict(record.get("profiler_diagnostics", {}) or {})
+    lines = [
+        f"### {title}",
+        "",
+        f"- Status: `{record.get('status')}`",
+        f"- Mode: `{diagnostics.get('sampling_mode', 'unknown')}`",
+        f"- Samples/errors: `{diagnostics.get('sample_count', 0)}` / `{diagnostics.get('error_count', 0)}`",
+        f"- Missed stacks: `{diagnostics.get('missed_stack_count', 0)}`",
+    ]
+    artifacts = tuple(record.get("artifact_paths", ()) or ())
+    raw_paths = [Path(str(path)) for path in artifacts if str(path).endswith(".raw")]
+    if raw_paths:
+        top = _top_py_spy_stacks(raw_paths[0])
+        if top:
+            lines.extend(["", "Top sampled stacks (cropped to leaf context):"])
+            for stack, count in top:
+                lines.append(f"- `{count}` {stack}")
+        else:
+            lines.append(f"- No readable raw stack samples found in `{raw_paths[0]}`.")
+    return lines
+
+
+def _tooling_slowdown_summary(plain: dict[str, object], records: list[dict[str, object]]) -> list[str]:
+    plain_phases = _backend_phase_elapsed_map(Path(str(plain.get("jsonl", ""))))
+    if not plain_phases:
+        return ["No readable plain timing records were available for slowdown comparisons."]
+    rows: list[str] = []
+    for record in records:
+        profiler_type = str(record.get("profiler_type", ""))
+        if profiler_type == "plain":
+            continue
+        phases = _backend_phase_elapsed_map(Path(str(record.get("jsonl", ""))))
+        for backend in sorted(plain_phases):
+            baseline = plain_phases.get(backend, {})
+            values = phases.get(backend, {})
+            rows.append(
+                "| "
+                + " | ".join(
+                    (
+                        f"`{profiler_type}`",
+                        f"`{backend}`",
+                        str(record.get("status", "unknown")),
+                        _delta_cell(values.get("raw_full_tiled_montage"), baseline.get("raw_full_tiled_montage")),
+                        _delta_cell(values.get("fft_full_tiled_montage"), baseline.get("fft_full_tiled_montage")),
+                        _delta_cell(_combined_elapsed_ms(values), _combined_elapsed_ms(baseline)),
+                    )
+                )
+                + " |"
+            )
+    if not rows:
+        return ["No tooled runs were available for slowdown comparisons."]
+    return [
+        "Compared with the non-tooled `plain` workflow. Negative values mean the tooled run happened to finish faster.",
+        "",
+        "| Tool | backend | status | normal delta | FFT delta | combined delta |",
+        "|---|---|---|---:|---:|---:|",
+        *rows,
+    ]
+
+
+def _cprofile_summary(record: dict[str, object]) -> list[str]:
+    artifacts = tuple(record.get("artifact_paths", ()) or ())
+    profiles = [Path(str(path)) for path in artifacts if str(path).endswith(".cprofile")]
+    if not profiles or not profiles[0].exists():
+        return ["cProfile was requested, but no readable `.cprofile` artifact was found."]
+    stream = io.StringIO()
+    try:
+        stats = pstats.Stats(str(profiles[0]), stream=stream).strip_dirs().sort_stats("cumulative")
+        stats.print_stats(8)
+    except Exception as exc:
+        return [f"Could not read cProfile artifact `{profiles[0]}`: {exc}"]
+    lines = [f"Source: `{profiles[0]}`", "", "Top cumulative Python call entries (cropped):", "```text"]
+    lines.extend(stream.getvalue().strip().splitlines()[:14])
+    lines.append("```")
+    return lines
+
+
+def _perf_summary(record: dict[str, object]) -> list[str]:
+    artifacts = tuple(record.get("artifact_paths", ()) or ())
+    perf_paths = [Path(str(path)) for path in artifacts if str(path).endswith(".data")]
+    if not perf_paths or not perf_paths[0].exists():
+        return ["perf was requested, but no readable `perf.data` artifact was found."]
+    completed = None
+    if shutil.which("perf") is not None:
+        try:
+            completed = subprocess.run(
+                ("perf", "report", "--stdio", "-i", str(perf_paths[0]), "--no-children", "--sort", "comm,dso,symbol"),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            completed = None
+    lines = [f"Source: `{perf_paths[0]}`"]
+    if completed is None or completed.returncode != 0:
+        lines.append("Run `perf report -i <artifact>` locally for native attribution.")
+        return lines
+    report_lines = _interesting_perf_lines(completed.stdout.splitlines())[:12]
+    lines.extend(["", "Top perf report lines (cropped):", "```text", *report_lines, "```"])
+    return lines
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    try:
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+def _backend_phase_elapsed_map(path: Path) -> dict[str, dict[str, float]]:
+    phases: dict[str, dict[str, float]] = {}
+    for record in _read_jsonl(path):
+        backend = str(record.get("backend", "unknown"))
+        phase = str(record.get("phase", ""))
+        try:
+            phases.setdefault(backend, {})[phase] = float(record["elapsed_ms"])
+        except Exception:
+            continue
+    return phases
+
+
+def _combined_elapsed_ms(phases: dict[str, float]) -> float | None:
+    raw = phases.get("raw_full_tiled_montage")
+    fft = phases.get("fft_full_tiled_montage")
+    if raw is None or fft is None:
+        return None
+    return raw + fft
+
+
+def _delta_cell(value: float | None, baseline: float | None) -> str:
+    if value is None or baseline is None or baseline == 0:
+        return "n/a"
+    delta = value - baseline
+    percent = (delta / baseline) * 100.0
+    sign = "+" if delta >= 0 else ""
+    return f"{sign}{delta:.1f} ms ({sign}{percent:.1f}%)"
+
+
+def _top_py_spy_stacks(path: Path, *, limit: int = 8) -> list[tuple[str, int]]:
+    stacks: list[tuple[str, int]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        stack, sep, raw_count = line.rpartition(" ")
+        if not sep:
+            continue
+        try:
+            count = int(raw_count)
+        except ValueError:
+            continue
+        frames = [frame.strip() for frame in stack.split(";") if frame.strip()]
+        if not frames:
+            continue
+        interesting = " -> ".join(frames[-4:]) if frames else stack
+        stacks.append((interesting, count))
+    stacks.sort(key=lambda item: item[1], reverse=True)
+    return stacks[:limit]
+
+
+def _interesting_perf_lines(lines: list[str]) -> list[str]:
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "%" not in stripped and "Overhead" not in stripped:
+            continue
+        result.append(line[:180])
+    return result
+
+
+def _format_ms(value) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.1f}"
+    except Exception:
+        return "n/a"
+
+
+def _tile_summary(record: dict[str, object]) -> str:
+    tile_count = record.get("tile_count")
+    full = record.get("full_tile_count")
+    requested = record.get("requested_tile_count")
+    presented = record.get("active_presented_tile_count")
+    if requested is not None and presented is not None:
+        return f"{presented}/{requested}"
+    if tile_count is not None and full is not None:
+        return f"{tile_count}/{full}"
+    return "n/a"
+
+
+def _compute_summary(record: dict[str, object]) -> str:
+    direct = record.get("montage_tile_compute_direct")
+    stage = record.get("montage_tile_compute_stage_backed")
+    cache = record.get("montage_tile_compute_cache_hits")
+    parts = []
+    if direct is not None:
+        parts.append(f"direct {direct}")
+    if stage is not None:
+        parts.append(f"stage {stage}")
+    if cache is not None:
+        parts.append(f"cache {cache}")
+    return ", ".join(parts) if parts else "n/a"
+
+
+def _suite_step_temperature(previous_records: list[dict[str, object]]) -> str:
+    return "cold" if not previous_records else "warm"
+
+
+def _aggregate_run_temperature(temperatures: tuple[str, ...]) -> str:
+    observed = {temperature for temperature in temperatures if temperature in {"cold", "warm", "mixed"}}
+    if not observed:
+        return "mixed"
+    if len(observed) == 1:
+        return next(iter(observed))
+    return "mixed"
+
+
+def _workflow_run_temperature() -> str:
+    return "mixed"
+
+
+def _repository_state() -> dict[str, object]:
+    revision = _run_text_command(("git", "rev-parse", "--verify", "HEAD"))
+    dirty = bool(_run_text_command(("git", "status", "--short")))
+    return {
+        "repository_revision": revision or "unknown",
+        "repository_dirty": dirty,
+    }
+
+
+def _suite_tool_versions() -> dict[str, str]:
+    versions = {
+        "python": sys.version.split()[0],
+        "arrayscope": _package_version("ArrayScope"),
+        "numpy": getattr(np, "__version__", ""),
+        "py-spy": _run_text_command(("py-spy", "--version")) if shutil.which("py-spy") else "unavailable",
+        "perf": _run_text_command(("perf", "--version")) if shutil.which("perf") else "unavailable",
+    }
+    for package in ("PySide6", "pyqtgraph", "vispy", "nibabel"):
+        versions[package] = _package_version(package)
+    return versions
+
+
+def _package_version(package: str) -> str:
+    try:
+        return metadata.version(package)
+    except metadata.PackageNotFoundError:
+        return "unavailable"
+
+
+def _run_text_command(command: tuple[str, ...]) -> str:
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=5)
+    except Exception:
+        return ""
+    output = (completed.stdout or completed.stderr or "").strip()
+    return output.splitlines()[0] if output else ""
 
 
 def _suite_child_args(argv: tuple[str, ...]) -> tuple[str, ...]:
-    blocked = {"--profile-suite", "--print-py-spy-command", "--py-spy-native"}
+    blocked = {"--profile-suite", "--print-py-spy-command", "--py-spy-native", "--include-cprofile"}
     result: list[str] = []
     skip_next = False
     for index, arg in enumerate(tuple(argv)):
@@ -782,6 +1383,10 @@ def _py_spy_native_requested(argv: tuple[str, ...]) -> bool:
     return any(str(arg) == "--py-spy-native" for arg in tuple(argv))
 
 
+def _include_cprofile_requested(argv: tuple[str, ...]) -> bool:
+    return any(str(arg) == "--include-cprofile" for arg in tuple(argv))
+
+
 def _py_spy_filtered_args(argv: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(arg for arg in tuple(argv) if str(arg) != "--py-spy-native")
 
@@ -795,9 +1400,9 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     parser.add_argument("--max-tiles", type=int, default=0, help="Optional tile cap for local smoke runs; 0 means full dim 2")
     parser.add_argument("--columns", type=int, default=0, help="Montage columns; 0 chooses a near-square layout")
     parser.add_argument("--load-mode", choices=("app", "native"), default="app")
-    parser.add_argument("--hide-window", action="store_true", help="Do not show the window; useful with QT_QPA_PLATFORM=offscreen")
     parser.add_argument("--print-py-spy-command", action="store_true", help="Print an external py-spy command for this invocation and exit")
-    parser.add_argument("--profile-suite", default=None, help="Run plain JSONL, cProfile, py-spy raw, and perf record into this directory")
+    parser.add_argument("--profile-suite", default=None, help="Run plain JSONL, py-spy raw, and perf record into this directory")
+    parser.add_argument("--include-cprofile", action="store_true", help="Include cProfile call-count attribution; slower and not timing evidence")
     parser.add_argument(
         "--py-spy-native",
         action="store_true",
@@ -818,24 +1423,18 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     jsonl = None if args.jsonl is None else Path(args.jsonl)
     if jsonl is not None and jsonl.exists():
         jsonl.unlink()
-    records = []
     for backend in (("pyqtgraph", "vispy") if args.backend == "all" else (args.backend,)):
-        records.extend(
-            run_profile_montage_workflow(
-                data_path=args.data,
-                backend=backend,
-                jsonl=jsonl,
-                timeout_s=args.timeout_s,
-                max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
-                columns=None if args.columns <= 0 else args.columns,
-                load_mode=args.load_mode,
-                show_window=not args.hide_window,
-                profiler_type=args.profiler_type,
-                profiler_artifact_paths=tuple(args.profiler_artifact or ()),
-            )
+        run_profile_montage_workflow(
+            data_path=args.data,
+            backend=backend,
+            jsonl=jsonl,
+            timeout_s=args.timeout_s,
+            max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
+            columns=None if args.columns <= 0 else args.columns,
+            load_mode=args.load_mode,
+            profiler_type=args.profiler_type,
+            profiler_artifact_paths=tuple(args.profiler_artifact or ()),
         )
-    for record in records:
-        print(json.dumps(record, sort_keys=True))
     return 0
 
 

@@ -57,19 +57,33 @@ Record separately:
 Use `arrayscope.tools.profile_montage_workflow` when scheduler or backend
 changes may affect perceived pacing. It drives a real window through the
 bundled NIfTI dataset, full dim-2 tiled montage, and FFT-over-dim-2 montage.
-The tool emits phase JSONL with first-content timing, total phase timing,
-event-loop max gap, callback observations, tile upload bytes, and montage
-compute counters. Use those JSONL fields as the timing evidence. Full-axis FFT
-montage should be stage-backed once the shared stage is available; hundreds of
-direct FFT tile computations are a scheduler/cache regression even if tiles
-eventually appear.
+With `--jsonl`, the tool writes phase records with first-content timing, total
+phase timing, event-loop max gap, callback observations, tile upload bytes, and
+montage compute counters. Use those JSONL fields as the timing evidence.
+Full-axis FFT montage should be stage-backed once the shared stage is available;
+hundreds of direct FFT tile computations are a scheduler/cache regression even
+if tiles eventually appear.
 
-Wrap the workflow with external profilers only for attribution. Prefer
-`py-spy record --format raw --rate 10 --nonblocking` for Python stacks and
-`perf record -F 99 -g` for native SciPy/Qt/GL stacks. Avoid treating high-rate
-or `py-spy --native` runs as timing evidence unless they are compared against a
-plain JSONL run, because native unwinding can materially slow Qt and FFT-heavy
-workloads. Run the workflow on a real display for OpenGL/VisPy claims.
+Wrap the workflow with external profilers only for attribution. Prefer a
+low-impact `py-spy record --format raw --rate 50 --nonblocking --gil` sample for
+quick Python hot-stack hints, a duration-bounded blocking `py-spy --rate 80` run
+when complete sampled Python-thread stacks matter more than pacing, and
+`perf record -F 99 -g` for native SciPy/Qt/GL stacks. Use `cProfile` only as
+opt-in deterministic Python call-count evidence because it substantially
+perturbs the GUI workflow. Avoid treating high-rate, blocking, cProfile, or
+`py-spy --native` runs as timing evidence unless they are compared against a
+plain JSONL run. Run the workflow on a real display for OpenGL/VisPy claims.
+
+The built-in `--profile-suite` runner emits plain timing JSONL, low-impact
+py-spy, full sampled py-spy, and perf artifacts by default; cProfile is
+available with `--include-cprofile`. It prints the focused `suite-summary.md`
+interpretation to stdout and leaves raw JSONL/profiler details on disk. Treat
+`suite-manifest.jsonl` as authoritative: a complete suite requires
+`overall_valid: true`, every child command to return `0`, every expected
+artifact to be nonempty, and full sampled py-spy to report samples without
+missed-stack errors. Missing tools, profiler failures, or partial artifacts are
+degraded or failed evidence that must be fixed before using the suite as
+benchmark support.
 
 ## Manual and real-hardware tests
 

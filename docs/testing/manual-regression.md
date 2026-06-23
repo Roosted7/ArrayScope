@@ -75,8 +75,9 @@ evidence and the raw stack file as attribution evidence:
 ```bash
 PATH=~/miniconda3/bin:$PATH direnv exec . py-spy record \
   --format raw \
-  --rate 10 \
+  --rate 50 \
   --nonblocking \
+  --gil \
   -o tests/artifacts/montage-workflow-profile.raw -- \
   python -m arrayscope.tools.profile_montage_workflow \
     --backend all \

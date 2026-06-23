@@ -81,8 +81,9 @@ Add a low-rate Python stack sample when attribution is needed:
 ```bash
 py-spy record \
   --format raw \
-  --rate 10 \
+  --rate 50 \
   --nonblocking \
+  --gil \
   -o tests/artifacts/v0.8.0-montage-workflow-profile.raw -- \
   python -m arrayscope.tools.profile_montage_workflow \
     --backend all \

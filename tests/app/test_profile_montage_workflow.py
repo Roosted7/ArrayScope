@@ -1,5 +1,9 @@
+import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +19,8 @@ def test_profile_montage_workflow_py_spy_command_mentions_external_sampler():
     assert "--backend all" in command
     assert "--native" not in command
     assert "--rate 50" in command
+    assert "--gil" in command
+    assert "--nonblocking" in command
 
 
 def test_profile_suite_commands_cover_required_profilers(tmp_path):
@@ -22,18 +28,39 @@ def test_profile_suite_commands_cover_required_profilers(tmp_path):
 
     commands = profiler_suite_commands(("--backend", "vispy", "--profile-suite", str(tmp_path)), tmp_path)
 
-    assert {item["profiler_type"] for item in commands} == {"plain", "cprofile", "py-spy-raw", "perf-record"}
+    assert {item["profiler_type"] for item in commands} == {"plain", "py-spy-raw-low-impact", "py-spy-raw-full", "perf-record"}
     by_type = {item["profiler_type"]: item for item in commands}
-    assert "cProfile" in by_type["cprofile"]["command"]
-    assert "py-spy record" in by_type["py-spy-raw"]["command"]
-    assert "--format raw" in by_type["py-spy-raw"]["command"]
-    assert "--native" not in by_type["py-spy-raw"]["command"]
-    assert "--rate 50" in by_type["py-spy-raw"]["command"]
+    assert "py-spy record" in by_type["py-spy-raw-low-impact"]["command"]
+    assert "--format raw" in by_type["py-spy-raw-low-impact"]["command"]
+    assert "--native" not in by_type["py-spy-raw-low-impact"]["command"]
+    assert "--rate 50" in by_type["py-spy-raw-low-impact"]["command"]
+    assert "--gil" in by_type["py-spy-raw-low-impact"]["command"]
+    assert "--nonblocking" in by_type["py-spy-raw-low-impact"]["command"]
+    assert "--format raw" in by_type["py-spy-raw-full"]["command"]
+    assert "--duration 16" in by_type["py-spy-raw-full"]["command"]
+    assert "--rate 80" in by_type["py-spy-raw-full"]["command"]
+    assert "--gil" not in by_type["py-spy-raw-full"]["command"]
+    assert "--nonblocking" not in by_type["py-spy-raw-full"]["command"]
     assert "perf record" in by_type["perf-record"]["command"]
+    assert "-F 99" in by_type["perf-record"]["command"]
     assert "--profile-suite" not in by_type["plain"]["command"]
     for item in commands:
         assert item["jsonl"].endswith(".jsonl")
         assert item["artifact_paths"]
+
+
+def test_profile_suite_can_opt_into_cprofile_without_passing_flag_to_child(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
+
+    commands = profiler_suite_commands(
+        ("--backend", "vispy", "--profile-suite", str(tmp_path), "--include-cprofile"),
+        tmp_path,
+    )
+    by_type = {item["profiler_type"]: item for item in commands}
+
+    assert "cprofile" in by_type
+    assert "cProfile" in by_type["cprofile"]["command"]
+    assert "--include-cprofile" not in by_type["plain"]["command"]
 
 
 def test_profile_suite_can_opt_into_native_py_spy_without_passing_suite_flag_to_child(tmp_path):
@@ -45,12 +72,213 @@ def test_profile_suite_can_opt_into_native_py_spy_without_passing_suite_flag_to_
     )
     by_type = {item["profiler_type"]: item for item in commands}
 
-    assert "py-spy-raw-native" in by_type
-    assert "--native" in by_type["py-spy-raw-native"]["command"]
+    assert "py-spy-raw-low-impact-native" in by_type
+    assert "py-spy-raw-full-native" in by_type
+    assert "--native" in by_type["py-spy-raw-low-impact-native"]["command"]
+    assert "--native" in by_type["py-spy-raw-full-native"]["command"]
     assert "--profile-suite" not in by_type["plain"]["command"]
 
 
-def test_profile_base_record_marks_hidden_offscreen_or_capped_runs_as_smoke(monkeypatch):
+def test_profile_workflow_forces_backend_specific_themes():
+    from arrayscope.app.settings_state import AppSettingsState, ImageRenderingBackendChoice, MontageDisplayBackendChoice
+    from arrayscope.app.theme import ThemeChoice
+    from arrayscope.tools.profile_montage_workflow import _replace_settings
+
+    pyqtgraph = _replace_settings(
+        AppSettingsState(),
+        backend="pyqtgraph",
+        image_choice=ImageRenderingBackendChoice,
+        montage_choice=MontageDisplayBackendChoice,
+    )
+    vispy = _replace_settings(
+        AppSettingsState(),
+        backend="vispy",
+        image_choice=ImageRenderingBackendChoice,
+        montage_choice=MontageDisplayBackendChoice,
+    )
+
+    assert pyqtgraph.theme == ThemeChoice.LIGHT
+    assert vispy.theme == ThemeChoice.DARK
+
+
+def test_profile_suite_manifest_records_success_and_summary(tmp_path, monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    artifact = tmp_path / "py-spy.raw"
+    jsonl = tmp_path / "py-spy.jsonl"
+    monkeypatch.setattr(
+        workflow,
+        "profiler_suite_commands",
+        lambda _argv, _suite_dir: (
+            {
+                "profiler_type": "py-spy-raw",
+                "required": True,
+                "jsonl": str(jsonl),
+                "artifact_paths": (str(artifact), str(jsonl)),
+                "command": "py-spy record -- fake-success",
+            },
+        ),
+    )
+    monkeypatch.setattr(workflow, "_suite_tool_versions", lambda: {"python": "test", "py-spy": "py-spy 0.4.2"})
+    monkeypatch.setattr(workflow, "_repository_state", lambda: {"repository_revision": "abc123", "repository_dirty": False})
+    monkeypatch.setattr(workflow.shutil, "which", lambda exe: f"/usr/bin/{exe}")
+
+    def fake_run(_command, **kwargs):
+        artifact.write_text("samples", encoding="utf-8")
+        jsonl.write_text('{"phase":"load"}\n', encoding="utf-8")
+        kwargs["stdout"].write(
+            "py-spy> Sampling process 50 times a second. Press Control-C to exit.\n"
+            "py-spy> Wrote raw flamegraph data. Samples: 12 Errors: 0\n"
+        )
+        kwargs["stderr"].write("stderr\n")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(workflow.subprocess, "run", fake_run)
+
+    rc = workflow.run_profile_suite(("--backend", "pyqtgraph"), tmp_path)
+
+    records = [json.loads(line) for line in (tmp_path / "suite-manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    step, summary = records
+    assert rc == 0
+    assert step["record_type"] == "suite_step"
+    assert step["status"] == "completed"
+    assert step["valid"] is True
+    assert step["complete"] is True
+    assert step["command"] == "py-spy record -- fake-success"
+    assert step["returncode"] == 0
+    assert Path(step["stdout_path"]).exists()
+    assert Path(step["stderr_path"]).exists()
+    assert step["tool_versions"]["py-spy"] == "py-spy 0.4.2"
+    assert step["repository_revision"] == "abc123"
+    assert step["run_temperature"] == "cold"
+    assert summary["record_type"] == "suite_summary"
+    assert summary["overall_valid"] is True
+    assert summary["overall_status"] == "completed"
+    assert summary["run_temperature"] == "cold"
+    report = Path(summary["interpretation_path"])
+    assert report.exists()
+    text = report.read_text(encoding="utf-8")
+    assert "Profile Suite Summary" in text
+    assert "Timing Evidence" in text
+    assert "py-spy" in text
+
+
+def test_profile_suite_summary_marks_multiple_child_processes_mixed(tmp_path, monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    artifacts = [tmp_path / "plain.jsonl", tmp_path / "py-spy.raw"]
+    monkeypatch.setattr(
+        workflow,
+        "profiler_suite_commands",
+        lambda _argv, _suite_dir: (
+            {
+                "profiler_type": "plain",
+                "required": True,
+                "jsonl": str(artifacts[0]),
+                "artifact_paths": (str(artifacts[0]),),
+                "command": "python -m arrayscope.tools.profile_montage_workflow",
+            },
+            {
+                "profiler_type": "py-spy-raw",
+                "required": True,
+                "jsonl": str(tmp_path / "py-spy.jsonl"),
+                "artifact_paths": (str(artifacts[1]),),
+                "command": "py-spy record -- fake-success",
+            },
+        ),
+    )
+    monkeypatch.setattr(workflow, "_suite_tool_versions", lambda: {"python": "test"})
+    monkeypatch.setattr(workflow, "_repository_state", lambda: {"repository_revision": "abc123", "repository_dirty": False})
+    monkeypatch.setattr(workflow.shutil, "which", lambda exe: f"/usr/bin/{exe}")
+
+    def fake_run(command, **kwargs):
+        if command[0] == "py-spy":
+            artifacts[1].write_text("samples", encoding="utf-8")
+            kwargs["stdout"].write(
+                "py-spy> Sampling process 50 times a second. Press Control-C to exit.\n"
+                "py-spy> Wrote raw flamegraph data. Samples: 12 Errors: 0\n"
+            )
+        else:
+            artifacts[0].write_text('{"phase":"load"}\n', encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(workflow.subprocess, "run", fake_run)
+
+    assert workflow.run_profile_suite(("--backend", "pyqtgraph"), tmp_path) == 0
+
+    records = [json.loads(line) for line in (tmp_path / "suite-manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [record["run_temperature"] for record in records[:2]] == ["cold", "warm"]
+    assert records[-1]["run_temperature"] == "mixed"
+
+
+def test_profile_suite_py_spy_nonzero_is_failed_even_with_artifacts(tmp_path, monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    artifact = tmp_path / "py-spy.raw"
+    jsonl = tmp_path / "py-spy.jsonl"
+    monkeypatch.setattr(
+        workflow,
+        "profiler_suite_commands",
+        lambda _argv, _suite_dir: (
+            {
+                "profiler_type": "py-spy-raw",
+                "required": True,
+                "jsonl": str(jsonl),
+                "artifact_paths": (str(artifact), str(jsonl)),
+                "command": "py-spy record -- fake-failure",
+            },
+        ),
+    )
+    monkeypatch.setattr(workflow, "_suite_tool_versions", lambda: {"python": "test", "py-spy": "py-spy 0.4.2"})
+    monkeypatch.setattr(workflow, "_repository_state", lambda: {"repository_revision": "abc123", "repository_dirty": False})
+    monkeypatch.setattr(workflow.shutil, "which", lambda exe: f"/usr/bin/{exe}")
+
+    def fake_run(_command, **kwargs):
+        artifact.write_text("samples", encoding="utf-8")
+        jsonl.write_text('{"phase":"load"}\n', encoding="utf-8")
+        kwargs["stderr"].write("py-spy failed\n")
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(workflow.subprocess, "run", fake_run)
+
+    rc = workflow.run_profile_suite(("--backend", "pyqtgraph"), tmp_path)
+
+    records = [json.loads(line) for line in (tmp_path / "suite-manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    step, summary = records
+    assert rc == 1
+    assert step["status"] == "failed"
+    assert step["valid"] is False
+    assert step["complete"] is False
+    assert step["returncode"] == 1
+    assert step["missing_artifacts"] == []
+    assert "nonzero_returncode_ignored" not in step
+    assert summary["overall_valid"] is False
+    assert summary["overall_status"] == "failed"
+
+
+def test_py_spy_full_profile_requires_complete_sampling(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import _profiler_log_diagnostics, _profiler_sample_issue
+
+    stdout = tmp_path / "stdout.log"
+    stderr = tmp_path / "stderr.log"
+    stdout.write_text(
+        "py-spy> Sampling process 80 times a second. Press Control-C to exit.\n"
+        "py-spy> Wrote raw flamegraph data. Samples: 20 Errors: 1\n",
+        encoding="utf-8",
+    )
+    stderr.write_text("[WARN  py_spy] Failed to get stack trace from 123\n", encoding="utf-8")
+
+    diagnostics = _profiler_log_diagnostics("py-spy-raw-full", stdout, stderr)
+
+    assert diagnostics["sample_rate_hz"] == 80
+    assert diagnostics["sample_count"] == 20
+    assert diagnostics["error_count"] == 1
+    assert diagnostics["missed_stack_count"] == 1
+    assert diagnostics["sampling_complete"] is False
+    assert _profiler_sample_issue("py-spy-raw-full", diagnostics) == "py-spy full profile missed stack samples"
+
+
+def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch):
     import numpy as np
     from arrayscope.tools.profile_montage_workflow import _base_record
 
@@ -65,7 +293,6 @@ def test_profile_base_record_marks_hidden_offscreen_or_capped_runs_as_smoke(monk
         indices=(0, 1, 2, 3),
         full_tile_count=4,
         columns=2,
-        show_window=True,
         max_tiles=None,
         profiler_type="plain",
         profiler_artifact_paths=(),
@@ -81,7 +308,6 @@ def test_profile_base_record_marks_hidden_offscreen_or_capped_runs_as_smoke(monk
         indices=(0, 1),
         full_tile_count=4,
         columns=2,
-        show_window=False,
         max_tiles=2,
         profiler_type="perf-record",
         profiler_artifact_paths=("perf.data",),
@@ -189,6 +415,72 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
 
 
 @pytest.mark.skipif(
+    os.environ.get("ARRAYSCOPE_RUN_PY_SPY_SMOKE") != "1",
+    reason="opt-in real py-spy workflow smoke; set ARRAYSCOPE_RUN_PY_SPY_SMOKE=1",
+)
+def test_py_spy_smoke_profile_workflow_exits_cleanly(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import DEFAULT_DATA_PATH
+
+    py_spy = shutil.which("py-spy")
+    if py_spy is None:
+        pytest.skip("py-spy executable not found")
+    if not DEFAULT_DATA_PATH.exists():
+        pytest.skip(f"profile dataset not found: {DEFAULT_DATA_PATH}")
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        pytest.skip("onscreen py-spy smoke requires a real display")
+    if os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+        pytest.skip("onscreen py-spy smoke cannot run with QT_QPA_PLATFORM=offscreen")
+
+    raw = tmp_path / "workflow.raw"
+    jsonl = tmp_path / "workflow.jsonl"
+    completed = subprocess.run(
+        (
+            py_spy,
+            "record",
+            "--format",
+            "raw",
+            "--rate",
+            "50",
+            "--nonblocking",
+            "--gil",
+            "-o",
+            str(raw),
+            "--",
+            sys.executable,
+            "-m",
+            "arrayscope.tools.profile_montage_workflow",
+            "--backend",
+            "pyqtgraph",
+            "--timeout-s",
+            "180",
+            "--jsonl",
+            str(jsonl),
+            "--profiler-type",
+            "py-spy-raw",
+            "--profiler-artifact",
+            str(raw),
+        ),
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=45,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert raw.exists() and raw.stat().st_size > 0
+    assert jsonl.exists() and jsonl.stat().st_size > 0
+    records = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
+    by_phase = {record["phase"]: record for record in records}
+    assert by_phase["raw_full_tiled_montage"]["tile_count"] == by_phase["raw_full_tiled_montage"]["full_tile_count"]
+    assert by_phase["raw_full_tiled_montage"]["tile_cap_applied"] is False
+    assert by_phase["raw_full_tiled_montage"]["active_presented_tile_count"] == by_phase["raw_full_tiled_montage"]["requested_tile_count"]
+    assert by_phase["fft_full_tiled_montage"]["tile_count"] == by_phase["fft_full_tiled_montage"]["full_tile_count"]
+    assert by_phase["fft_full_tiled_montage"]["tile_cap_applied"] is False
+    assert by_phase["fft_full_tiled_montage"]["active_presented_tile_count"] == by_phase["fft_full_tiled_montage"]["requested_tile_count"]
+    assert "Signal source has been deleted" not in completed.stderr
+
+
+@pytest.mark.skipif(
     os.environ.get("ARRAYSCOPE_RUN_PROFILE_WORKFLOW") != "1",
     reason="opt-in realistic GUI profiling workflow; set ARRAYSCOPE_RUN_PROFILE_WORKFLOW=1",
 )
@@ -220,7 +512,6 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
             jsonl=jsonl,
             timeout_s=timeout_s,
             max_tiles=max_tiles,
-            show_window=os.environ.get("ARRAYSCOPE_PROFILE_HIDE_WINDOW") != "1",
         )
         all_records.extend(records)
 

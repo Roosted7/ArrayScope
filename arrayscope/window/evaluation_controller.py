@@ -45,7 +45,14 @@ class _EvaluationRunnable(Qt.QtCore.QRunnable):
     def _put(self, item) -> None:
         self.queue.put(item)
         if self.notify_queue is not None:
-            self.notify_queue()
+            try:
+                self.notify_queue()
+            except RuntimeError:
+                # The owning QObject can be deleted while cooperative
+                # cancellation is unwinding on a worker thread during window
+                # close.  The result is already queued, and closed controllers
+                # intentionally ignore late callbacks.
+                pass
 
     def run(self):
         self.started = True
@@ -74,7 +81,10 @@ class _PrefetchRunnable(Qt.QtCore.QRunnable):
     def _put(self, item) -> None:
         self.queue.put(item)
         if self.notify_queue is not None:
-            self.notify_queue()
+            try:
+                self.notify_queue()
+            except RuntimeError:
+                pass
 
     def run(self):
         try:
@@ -439,7 +449,12 @@ class EvaluationController(Qt.QtCore.QObject):
         self._notify_queue_event()
 
     def _notify_queue_event(self) -> None:
-        self.queueEventReady.emit()
+        if self._shutting_down:
+            return
+        try:
+            self.queueEventReady.emit()
+        except RuntimeError:
+            pass
 
     def _drain_queue(self):
         self._drain_continuation_pending = False

@@ -507,6 +507,35 @@ def test_shutdown_ignores_late_results(qt_app):
     assert done == []
 
 
+def test_shutdown_and_late_runnable_notification_do_not_raise(qt_app):
+    from arrayscope.core.scheduler import EvalPriority, EvalRequest
+    from arrayscope.window.evaluation_controller import CancellationToken, EvaluationController, _EvaluationRunnable
+
+    controller = EvaluationController(max_workers=1)
+    controller.shutdown_for_close()
+
+    controller._notify_queue_event()
+
+    token = CancellationToken()
+    token.cancel()
+    request = EvalRequest(
+        key="late-cancel",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        generation=1,
+        replace_group="visible",
+        group_generation=1,
+    )
+    runnable = _EvaluationRunnable(
+        request,
+        lambda: None,
+        controller._queue,
+        token,
+        notify_queue=lambda: (_ for _ in ()).throw(RuntimeError("Signal source has been deleted")),
+    )
+
+    runnable.run()
+
+
 def test_start_latest_can_pass_cancellation_token(qt_app):
     from pyqtgraph.Qt import QtTest
 
