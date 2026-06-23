@@ -22,6 +22,7 @@ from arrayscope.operations.render_plan import choose_visible_render_decision
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.display.model.frame import CommittedDisplayFrame, TiledValueSource
+from arrayscope.display.geometry import display_geometry_coordinates_equal
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
@@ -134,7 +135,11 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             return False
         if frame.key.document_key != _document_key(self.document):
             return False
-        if frame.geometry != getattr(self, "display_geometry", None):
+        display_geometry = getattr(self, "display_geometry", None)
+        if frame.geometry != display_geometry and not (
+            isinstance(frame.value_source, TiledValueSource)
+            and display_geometry_coordinates_equal(frame.geometry, display_geometry)
+        ):
             return False
         if frame.data is None:
             if not isinstance(frame.value_source, TiledValueSource):

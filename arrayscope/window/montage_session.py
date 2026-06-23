@@ -126,6 +126,8 @@ class MontageRenderSession:
     _last_active_tiles: tuple[int, ...] = ()
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
+    _near_tile_numbers_cache_key: tuple[object, ...] | None = None
+    _near_tile_numbers_cache: tuple[int, ...] = ()
     deferred_display_tiles: tuple[int, ...] = ()
     _tile_states_cached_revision: int = -1
     _tile_states_cached_tuple: tuple[MontageTileState, ...] = ()
@@ -486,13 +488,13 @@ class MontageRenderSession:
                 self._ensure_display_tile_payload(int(tile_number), rendered, source_ids, lod_factor=lod_factor)
         current_payloads = self.display_tile_payloads
         current_loaded = set(self.rendered_tiles)
-        valid_tiles = set(range(len(tuple(getattr(self.plan, "tiles", ()) or ()))))
+        valid_tile_count = len(tuple(getattr(self.plan, "tiles", ()) or ()))
         removals = tuple(
             sorted(
                 {
                     int(tile)
                     for tile in previous_payloads
-                    if int(tile) not in valid_tiles or int(tile) in self.skipped_tiles
+                    if int(tile) < 0 or int(tile) >= valid_tile_count or int(tile) in self.skipped_tiles
                 }.union(int(tile) for tile in self.pending_removals)
             )
         )
@@ -520,17 +522,7 @@ class MontageRenderSession:
             if int(tile.montage_index) not in self.skipped_tiles
         )
         active = tuple(int(tile) for tile in planned if int(tile) in current_loaded)
-        near_candidates = _viewport_tiles(
-            self.plan,
-            view_range=self.view_range,
-            viewport_shape=self.viewport_shape,
-            margin_tiles=2,
-        )
-        near = tuple(
-            int(tile.montage_index)
-            for tile in near_candidates
-            if int(tile.montage_index) not in self.skipped_tiles
-        )
+        near = tuple(tile for tile in self._near_tile_numbers(margin_tiles=2) if int(tile) not in self.skipped_tiles)
         # Residency is keyed by the complete texture-content identity carried
         # by DisplayTilePayload.source_id, not the evaluator's base tile key.
         # Supplying the base key here made inactive near-viewport tiles look
@@ -550,9 +542,6 @@ class MontageRenderSession:
         clear_reason = ""
         self.deferred_display_tiles = ()
         if max_upserts is not None:
-            # Retained for old callers/tests only.  Work budgeting belongs to
-            # the backend, where cold uploads/item creation can be separated
-            # from cheap resident rebinds and geometry updates.
             del max_upserts
 
         base_revision = int(getattr(previous_state, "revision", 0))
@@ -841,15 +830,7 @@ class MontageRenderSession:
             active_tiles = tuple(int(tile.montage_index) for tile in self.visible_tiles)
         if near_tiles is None:
             try:
-                near_tiles = tuple(
-                    int(tile.montage_index)
-                    for tile in _viewport_tiles(
-                        self.plan,
-                        view_range=self.view_range,
-                        viewport_shape=self.viewport_shape,
-                        margin_tiles=2,
-                    )
-                )
+                near_tiles = self._near_tile_numbers(margin_tiles=2)
             except Exception:
                 near_tiles = ()
         return TilePriorityContext.from_tiles(
@@ -859,6 +840,28 @@ class MontageRenderSession:
             near_tiles=near_tiles,
             priority_tiles=priority_tiles or (),
         )
+
+    def _near_tile_numbers(self, *, margin_tiles: int) -> tuple[int, ...]:
+        key = (
+            id(self.plan),
+            _view_range_cache_key(self.view_range),
+            tuple(int(value) for value in tuple(self.viewport_shape or ())),
+            int(margin_tiles),
+        )
+        if key == self._near_tile_numbers_cache_key:
+            return self._near_tile_numbers_cache
+        tiles = tuple(
+            int(tile.montage_index)
+            for tile in _viewport_tiles(
+                self.plan,
+                view_range=self.view_range,
+                viewport_shape=self.viewport_shape,
+                margin_tiles=int(margin_tiles),
+            )
+        )
+        self._near_tile_numbers_cache_key = key
+        self._near_tile_numbers_cache = tiles
+        return tiles
 
     def _priority_focus_tile_numbers(self) -> tuple[int, ...]:
         focus = self.priority_focus
@@ -914,3 +917,10 @@ def _array_content_token(array) -> tuple[object, ...]:
     shape = tuple(int(value) for value in values.shape)
     dtype = values.dtype.str
     return shape, dtype, id(values)
+
+
+def _view_range_cache_key(view_range) -> tuple[tuple[float, ...], ...] | tuple[object, ...]:
+    try:
+        return tuple(tuple(float(value) for value in tuple(axis)) for axis in tuple(view_range or ()))
+    except Exception:
+        return (repr(view_range),)

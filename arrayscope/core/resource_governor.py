@@ -111,6 +111,14 @@ _PROFILE_TUNING = {
     MemoryProfileChoice.CUSTOM: _ProfileTuning(4.0, 8.0, 12, 1, 2),
 }
 
+_PRESSURE_TELEMETRY_ONLY_CHANNELS = frozenset(
+    {
+        "montage_cold_commit",
+        "montage_present_total",
+        "tile_layer_commit",
+    }
+)
+
 
 @dataclass
 class ResourceGovernor:
@@ -267,23 +275,6 @@ class ResourceGovernor:
                 reason = "elevated UI pressure; preserving compute/result throughput"
         else:
             reason = "feedback target"
-        if (
-            channel == "montage_commit"
-            and snapshot.last_count > 0
-            and snapshot.last_count <= max(2, batch)
-            and snapshot.last_byte_count > 0
-            and snapshot.last_byte_count <= default_byte_cap
-            and snapshot.last_elapsed_ms >= budget
-        ):
-            proposed_batch = min(
-                int(feedback.tuning.max_batch),
-                max(batch, int(snapshot.last_count) * 2),
-            )
-            if proposed_batch > batch:
-                bytes_per_item = float(snapshot.last_byte_count) / max(1.0, float(snapshot.last_count))
-                batch = int(proposed_batch)
-                byte_cap = min(default_byte_cap, max(byte_cap, int(bytes_per_item * float(batch))))
-                reason = f"{reason}; amortizing fixed commit overhead"
         decision = UiWorkDecision(channel, batch, budget, interval, reason, int(byte_cap))
         self._ui_decisions[channel] = decision
         return decision
@@ -377,6 +368,8 @@ class ResourceGovernor:
     def _ui_pressure_from_channels(self) -> ResourcePressure:
         worst = ResourcePressure.NORMAL
         for snapshot in self.latency_feedback.snapshots():
+            if snapshot.channel in _PRESSURE_TELEMETRY_ONLY_CHANNELS:
+                continue
             target = self.latency_feedback.tuning.target_idle_ms
             elapsed = snapshot.elapsed_ewma_ms
             if elapsed is None:

@@ -49,6 +49,9 @@ class FakeVisual:
         self.visible = False
         self.levels = []
         self.geometry_calls = 0
+        self.vertices = None
+        self.texcoords = None
+        self.modes = None
         self.mapping_calls = 0
         self.mappings = []
         self.textures = None
@@ -63,6 +66,9 @@ class FakeVisual:
 
     def set_geometry(self, vertices, texcoords, modes):
         self.geometry_calls += 1
+        self.vertices = np.asarray(vertices)
+        self.texcoords = np.asarray(texcoords)
+        self.modes = np.asarray(modes)
 
     def set_textures(self, scalar, color):
         changed = self.textures != (scalar, color)
@@ -627,6 +633,154 @@ def test_atlas_reuses_resident_source_when_tile_number_changes():
     assert reused.resident_items == 4
     page_index, slot = pool.resident_slots[_resident_key(payload(0, 2.0, source_id=sources[2]))]
     assert pool.slots[0] == page_index * 1_000_000 + slot
+
+
+def test_gpu_layer_updates_geometry_for_clean_resident_complex_retarget():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=8),
+    )
+    montage = SimpleNamespace(
+        indices=(0, 1, 2, 3),
+        tile_width=2,
+        tile_height=2,
+        columns=2,
+        rows=2,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",) * 4)
+    initial_payloads = {index: complex_payload(index) for index in range(4)}
+    first_delta = SimpleNamespace(
+        upserts=initial_payloads,
+        removals=(),
+        active_tiles=(0, 1, 2, 3),
+        planned_tiles=(0, 1, 2, 3),
+        near_tiles=(0, 1, 2, 3),
+        near_tile_source_ids={index: value.source_id for index, value in initial_payloads.items()},
+        force_refresh=True,
+    )
+
+    first = layer.update(
+        payloads=initial_payloads,
+        geometry=geometry,
+        levels=(0.0, 2.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=first_delta,
+    )
+    visual = layer._visuals_by_page[0]
+    first_geometry_calls = int(visual.geometry_calls)
+    source_two_slot = layer._pool.tile_slots[2]
+    source_two = initial_payloads[2]
+    retargeted = DisplayTilePayload(
+        0,
+        source_two.source_index,
+        source_two.image,
+        source_two.histogram_data,
+        source_two.source_id,
+        texture_data=source_two.texture_data,
+        texture_kind=source_two.texture_kind,
+        semantic_data=source_two.semantic_data,
+        semantic_histogram_data=source_two.semantic_histogram_data,
+        source_shape=source_two.source_shape,
+        lod=source_two.lod,
+        shader_mapping=source_two.shader_mapping,
+    )
+    clean_delta = SimpleNamespace(
+        upserts={},
+        removals=(),
+        active_tiles=(0,),
+        planned_tiles=(0, 1, 2, 3),
+        near_tiles=(0, 1, 2, 3),
+        near_tile_source_ids={0: retargeted.source_id},
+        force_refresh=False,
+    )
+
+    shifted = layer.update(
+        payloads={0: retargeted},
+        geometry=geometry,
+        levels=(0.0, 2.0),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        tile_delta=clean_delta,
+    )
+
+    assert first.texture_uploads == 4
+    assert shifted.texture_uploads == 0
+    assert shifted.items_updated == 0
+    assert shifted.vertex_uploads == 1
+    assert shifted.presented_tiles == (0,)
+    assert layer._pool.tile_slots[0] == source_two_slot
+    assert layer._pool.tile_resident_keys[0] == _resident_key(retargeted)
+    assert visual.geometry_calls == first_geometry_calls + 1
+
+
+def test_clean_complex_active_tile_reuploads_when_uploaded_source_proof_is_missing():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=8),
+    )
+    montage = SimpleNamespace(
+        indices=(0,),
+        tile_width=2,
+        tile_height=2,
+        columns=1,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",))
+    payloads = {0: complex_payload(0)}
+    first_delta = SimpleNamespace(
+        upserts=payloads,
+        removals=(),
+        active_tiles=(0,),
+        planned_tiles=(0,),
+        near_tiles=(0,),
+        near_tile_source_ids={0: payloads[0].source_id},
+        force_refresh=True,
+    )
+    layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 2.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=first_delta,
+    )
+    resident_key = _resident_key(payloads[0])
+    layer._pool.source_ids.pop(resident_key)
+    clean_delta = SimpleNamespace(
+        upserts={},
+        removals=(),
+        active_tiles=(0,),
+        planned_tiles=(0,),
+        near_tiles=(0,),
+        near_tile_source_ids={0: payloads[0].source_id},
+        force_refresh=False,
+    )
+
+    recovered = layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 2.0),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        tile_delta=clean_delta,
+    )
+
+    assert recovered.presented_tiles == (0,)
+    assert recovered.deferred_tiles == ()
+    assert recovered.items_updated == 1
+    assert recovered.texture_uploads == 1
+    assert layer._pool.source_ids[resident_key] == payloads[0].source_id
 
 
 def test_atlas_uses_shape_only_gpu_allocation_and_subuploads():

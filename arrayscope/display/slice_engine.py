@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional, Tuple
 
 import numpy as np
@@ -376,19 +377,31 @@ def _spatial_level_sample(arr: np.ndarray, *, limit: int) -> np.ndarray:
         indices = np.linspace(0, values.size - 1, int(limit), dtype=np.int64)
         return values.reshape(-1)[indices]
 
-    height = max(1, int(values.shape[0]))
-    width = max(1, int(values.shape[1]))
+    flat_indices = _spatial_level_indices(
+        int(values.shape[0]),
+        int(values.shape[1]),
+        int(limit),
+    )
+    trailing_shape = tuple(values.shape[2:])
+    return values.reshape(int(values.shape[0]) * int(values.shape[1]), *trailing_shape)[flat_indices]
+
+
+@lru_cache(maxsize=128)
+def _spatial_level_indices(height: int, width: int, limit: int) -> np.ndarray:
+    height = max(1, int(height))
+    width = max(1, int(width))
+    limit = max(1, int(limit))
     # Choose a grid with roughly square spacing in pixel units.  This keeps the
     # sample spread across the full tile instead of walking a flattened stride.
     rows = max(1, int(np.sqrt(float(limit) * float(height) / float(width))))
     cols = max(1, int(limit) // rows)
-    while rows * cols > int(limit) and cols > 1:
+    while rows * cols > limit and cols > 1:
         cols -= 1
-    while rows * cols > int(limit) and rows > 1:
+    while rows * cols > limit and rows > 1:
         rows -= 1
     row_indices = _even_spatial_indices(height, rows)
     col_indices = _even_spatial_indices(width, cols)
-    return values[np.ix_(row_indices, col_indices)].reshape(-1, *values.shape[2:])
+    return (row_indices[:, None] * int(width) + col_indices[None, :]).reshape(-1)
 
 
 def _even_spatial_indices(size: int, count: int) -> np.ndarray:

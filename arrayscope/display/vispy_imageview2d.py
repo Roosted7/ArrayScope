@@ -1750,14 +1750,14 @@ class VisPyImageView2D(ImageView2D):
             state.visible = False
         if tile_delta is not None:
             active_set = {int(tile) for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())}
+            loaded_payloads = {
+                int(tile): payload
+                for tile, payload in dict(tile_payloads or {}).items()
+                if int(tile) in active_set
+            }
         else:
             active_set = set(dict(tile_payloads or {}))
-        loaded_payloads = {}
-        for tile_number, _source_index in enumerate(tuple(montage.indices)):
-            if int(tile_number) not in active_set:
-                continue
-            if int(tile_number) in tile_payloads:
-                loaded_payloads[int(tile_number)] = tile_payloads[int(tile_number)]
+            loaded_payloads = {int(tile): payload for tile, payload in dict(tile_payloads or {}).items()}
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         if layer is None:
             return TileLayerUpdateStats()

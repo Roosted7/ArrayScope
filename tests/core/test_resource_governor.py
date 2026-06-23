@@ -92,22 +92,25 @@ def test_governor_byte_observations_reduce_byte_cap():
     assert 0 < decision.byte_cap < 32 * 1024 * 1024
 
 
-def test_governor_small_overbudget_commit_amortizes_fixed_overhead():
+def test_upload_telemetry_does_not_drive_global_ui_pressure():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    memory = _memory()
+    governor.update_telemetry(_snapshot(memory), memory)
     governor.record_ui_observation(
-        "montage_commit",
-        20.0,
-        item_count=1,
-        byte_count=512 * 1024,
+        "montage_present_total",
+        60.0,
+        item_count=16,
+        byte_count=64 * 1024 * 1024,
         work_class="presentation_upsert",
         backend="vispy",
     )
 
     decision = governor.decide_ui_work("montage_commit", interactive=False)
 
-    assert decision.batch_limit > 1
-    assert decision.byte_cap >= 512 * 1024 * decision.batch_limit
-    assert "amortizing fixed commit overhead" in decision.reason
+    assert governor.diagnostics().pressure.ui_pressure == ResourcePressure.NORMAL
+    assert decision.batch_limit == 12
+    assert decision.interval_ms <= 16
+    assert any(channel.channel == "montage_present_total" for channel in governor.diagnostics().feedback_channels)
 
 
 def test_elevated_ui_pressure_preserves_stage_backed_tile_workers():

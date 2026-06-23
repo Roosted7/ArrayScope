@@ -329,6 +329,20 @@ class DisplayGeometry:
         return int(indices[display_index])
 
 
+def display_geometry_coordinates_equal(left: DisplayGeometry | None, right: DisplayGeometry | None) -> bool:
+    """Return True when two display geometries map coordinates the same way."""
+
+    if left is None or right is None:
+        return False
+    return (
+        left.view_state == right.view_state
+        and tuple(left.display_shape) == tuple(right.display_shape)
+        and left.montage == right.montage
+        and int(left.montage_origin_x) == int(right.montage_origin_x)
+        and int(left.montage_origin_y) == int(right.montage_origin_y)
+    )
+
+
 def _state_value(state: object) -> str:
     value = getattr(state, "value", state)
     return str(value)

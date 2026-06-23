@@ -271,6 +271,18 @@ def test_provisional_shader_level_sample_covers_complex_abs_center_spike():
     assert float(np.max(image.level_data)) == 5_000.0
 
 
+def test_provisional_shader_level_grid_is_shared_by_shape():
+    indices = slice_engine._spatial_level_indices
+    indices.cache_clear()
+
+    first = indices(96, 96, 512)
+    second = indices(96, 96, 512)
+    third = indices(64, 96, 512)
+
+    assert first is second
+    assert third is not first
+
+
 @pytest.mark.parametrize(
     ("channel", "component", "display_mode", "expected"),
     (

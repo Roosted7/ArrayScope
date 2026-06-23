@@ -21,7 +21,7 @@ from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget, should_yield_after_item
 from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.view_state import ChannelMode
-from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
 from arrayscope.display.imageview2d import MontageTileOverlay
 from arrayscope.display.montage import (
     MontageTileState,
@@ -68,8 +68,10 @@ from arrayscope.window.montage_viewport import (
     prioritize_montage_tiles,
 )
 from arrayscope.window.montage_session import MontageRenderSession
-from arrayscope.display.planning import LevelSourceRank, fallback_level_source, normalize_bounds
-from arrayscope.display.model.commit import CommitKind
+from arrayscope.display.planning import LevelSourceRank, decide_presentation, fallback_level_source, normalize_bounds
+from arrayscope.display.model.commit import CommitKind, DisplayPayload, PresentationInput
+from arrayscope.display.model.frame import TiledValueSource
+from arrayscope.window.display_presenter import tile_residency_budget_bytes
 
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
@@ -665,7 +667,7 @@ class MontageRenderMixin:
 
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
         expected = self._montage_level_expected_indices(session)
-        self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
+        self._montage_level_tracker().ensure_expected(session.level_key, expected)
         stats = self._montage_level_tracker().summary_for(session.level_key)
         if stats is None:
             return self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
@@ -726,7 +728,7 @@ class MontageRenderMixin:
 
         tracker = self._montage_level_tracker()
         expected = self._montage_level_expected_indices(session)
-        tracker.ensure(session.level_key, expected)
+        tracker.ensure_expected(session.level_key, expected)
         pending = getattr(session, "pending_level_tiles", None)
         if pending is None:
             pending = deque()
@@ -766,7 +768,7 @@ class MontageRenderMixin:
 
         tracker = self._montage_level_tracker()
         expected = self._montage_level_expected_indices(session)
-        tracker.ensure(session.level_key, expected)
+        tracker.ensure_expected(session.level_key, expected)
         stats_start = perf_counter()
         added = 0
         for tile_number in tuple(dict(payloads or {})):
@@ -1458,7 +1460,6 @@ class MontageRenderMixin:
         if session is None or key is None or not self._is_current_montage_session(key[0], key[1]):
             return
         interactive = _interactive_active(self)
-        fast_drain = _vispy_tile_layer_fast_drain_enabled(self, session)
         budget = self._montage_callback_budget(
             "montage_tile_result",
             interactive=interactive,
@@ -1604,7 +1605,10 @@ class MontageRenderMixin:
         if force:
             if not session.pending_tiles and not session.loading_tiles and not session.active_tile_requests:
                 return _montage_commit_interval_ms(self, force=True)
-        return _montage_commit_interval_ms(self, force=False)
+        interval = _montage_commit_interval_ms(self, force=False)
+        if _vispy_tile_layer_fast_drain_enabled(self, session):
+            return min(int(interval), 8)
+        return interval
 
     @Qt.QtCore.Slot()
     def _flush_montage_canvas_commit(self):
@@ -1850,6 +1854,20 @@ class MontageRenderMixin:
                     user_levels=session.user_levels_override,
                     semantic_commit=semantic_commit,
                 )
+            elif fast_drain and self._commit_vispy_montage_tile_delta_direct(
+                session,
+                display_image,
+                rendered_geometry,
+                tile_state=tile_state,
+                base_tile_state=base_tile_state,
+                tile_delta=tile_delta,
+                semantic_source=semantic_source,
+                applied_level_source=session.applied_level_source,
+                histogram_plot_data=histogram_plot_data,
+                explicit_auto=explicit_auto,
+                semantic_commit=semantic_commit,
+            ):
+                pass
             else:
                 self._apply_progressive_display_image(
                     display_image,
@@ -1893,31 +1911,64 @@ class MontageRenderMixin:
         cold_count = int(getattr(report, "cold_count", 0) or 0)
         warm_count = int(getattr(report, "existing_items_shown", 0) or 0) + int(getattr(report, "relocated_tiles", 0) or 0)
         processed_count = max(1, cold_count + warm_count)
+        texture_upload_bytes = int(getattr(report, "texture_upload_bytes", 0) or 0)
+        backend_name = str(getattr(self.img_view, "rendering_backend_name", "pyqtgraph"))
         feedback = _latency_feedback(self)
         if feedback is not None:
+            cold_ms = 0.0
             if cold_count > 0:
                 cold_ms = float(getattr(report, "cold_work_ms", 0.0) or 0.0) or self._last_montage_canvas_commit_ms
                 feedback.observe(
                     "montage_cold_commit",
                     cold_ms,
                     count=cold_count,
-                    byte_count=int(getattr(report, "texture_upload_bytes", 0) or 0),
+                    byte_count=texture_upload_bytes,
                 )
+            commit_feedback_ms = self._last_montage_canvas_commit_ms
+            commit_feedback_bytes = texture_upload_bytes
+            vispy_backend = backend_name.lower() == "vispy"
+            vispy_uniform_only = bool(
+                vispy_backend
+                and cold_count == 0
+                and warm_count == 0
+                and texture_upload_bytes == 0
+            )
+            if vispy_backend and (cold_count > 0 or vispy_uniform_only):
+                if hasattr(self, "_record_ui_work"):
+                    self._record_ui_work(
+                        "montage_present_total",
+                        self._last_montage_canvas_commit_ms,
+                        count=processed_count,
+                        byte_count=texture_upload_bytes,
+                        work_class="presentation_upsert",
+                        backend=backend_name,
+                    )
+                else:
+                    feedback.observe(
+                        "montage_present_total",
+                        self._last_montage_canvas_commit_ms,
+                        count=processed_count,
+                        byte_count=texture_upload_bytes,
+                    )
+                commit_feedback_ms = max(0.0, self._last_montage_canvas_commit_ms - cold_ms)
+                commit_feedback_bytes = 0
+                if vispy_uniform_only:
+                    commit_feedback_ms = 0.0
             if hasattr(self, "_record_ui_work"):
                 self._record_ui_work(
                     "montage_commit",
-                    self._last_montage_canvas_commit_ms,
+                    commit_feedback_ms,
                     count=processed_count,
-                    byte_count=int(getattr(report, "texture_upload_bytes", 0) or 0),
+                    byte_count=commit_feedback_bytes,
                     work_class="presentation_upsert",
-                    backend=str(getattr(self.img_view, "rendering_backend_name", "pyqtgraph")),
+                    backend=backend_name,
                 )
             else:
                 feedback.observe(
                     "montage_commit",
-                    self._last_montage_canvas_commit_ms,
+                    commit_feedback_ms,
                     count=processed_count,
-                    byte_count=int(getattr(report, "texture_upload_bytes", 0) or 0),
+                    byte_count=commit_feedback_bytes,
                 )
         display_backlog = bool(session.deferred_display_tiles)
         session.note_committed()
@@ -1926,6 +1977,96 @@ class MontageRenderMixin:
         self._finish_montage_session_if_complete(session)
         schedule_near_viewport_montage_prefetch(self, session)
         self._retry_live_profile_after_montage_tile()
+
+    def _commit_vispy_montage_tile_delta_direct(
+        self,
+        session,
+        display_image,
+        geometry,
+        *,
+        tile_state,
+        base_tile_state,
+        tile_delta,
+        semantic_source,
+        applied_level_source,
+        histogram_plot_data,
+        explicit_auto: bool,
+        semantic_commit: bool,
+    ) -> bool:
+        if not _vispy_direct_tile_layer_backend(self, session):
+            return False
+        previous_frame = getattr(self, "_committed_display_frame", None)
+        if previous_frame is None or not isinstance(getattr(previous_frame, "value_source", None), TiledValueSource):
+            return False
+        if not display_geometry_coordinates_equal(getattr(previous_frame, "geometry", None), geometry):
+            return False
+        context = self._render_request_context(
+            document_key=_document_key(session.document),
+            request_key=session.key,
+            render_generation=session.render_generation,
+            semantic_key=session.level_key,
+        )
+        decision = decide_presentation(
+            PresentationInput(
+                payload=DisplayPayload(
+                    image=display_image,
+                    geometry=geometry,
+                    viewport_policy=ViewportPolicy.PRESERVE,
+                    rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
+                    histogram_plot_data=histogram_plot_data,
+                    tile_state=tile_state,
+                    base_tile_state=base_tile_state,
+                    tile_delta=tile_delta,
+                    tile_residency_budget_bytes=tile_residency_budget_bytes(self._memory_policy()),
+                ),
+                context=context,
+                previous_frame=previous_frame,
+                window_mode=session.window_mode,
+                force_auto=False,
+                commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+                semantic_source=semantic_source,
+                applied_level_source=applied_level_source,
+                user_levels=normalize_bounds(session.user_levels_override),
+            )
+        )
+        set_image_start = perf_counter()
+        backend_decision = self._montage_backend_decision_for_display(geometry, display_image.data)
+        if backend_decision.backend != "tile_layer":
+            return False
+        committer = self._display_committer()
+        committer.commit_tiled_delta(decision.display_presentation)
+        self._record_montage_backend_commit(backend_decision, "tile_layer")
+        self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
+        self.display_geometry = geometry
+
+        report = getattr(committer, "last_tile_commit_report", None)
+        semantic_frame_commit = bool(
+            semantic_commit
+            and (
+                bool(getattr(report, "presented_tiles", ()))
+                or not bool(getattr(report, "deferred_tiles", ()))
+            )
+        )
+        if semantic_frame_commit:
+            committed_state = getattr(committer, "last_tile_committed_state", None)
+            payloads = getattr(committed_state, "payloads", None)
+            if payloads is not None:
+                frame = replace(
+                    previous_frame,
+                    key=context.frame_key,
+                    levels=decision.levels,
+                    histogram_range=decision.histogram_range,
+                    value_source=TiledValueSource(payloads),
+                )
+                self._set_committed_display_frame(frame)
+                self._consume_pending_display_levels(session.user_levels_override)
+                self._note_display_level_source(decision)
+                refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
+                if callable(refresh_hover):
+                    refresh_hover()
+        self.apply_axis_flips()
+        self.img_view.setImageStale(False)
+        return True
 
     def _schedule_montage_final_display_drain(self, session) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
@@ -1950,6 +2091,11 @@ class MontageRenderMixin:
         ):
             return
         if bool(getattr(session, "display_committed", False)):
+            if _vispy_tile_layer_fast_drain_enabled(self, session):
+                session.final_commit_pending = True
+                session.flush_pending = True
+                if self._queue_montage_canvas_commit_flush():
+                    return
             self._schedule_montage_canvas_commit(session, force=False)
             return
         session.final_commit_pending = True
@@ -1996,7 +2142,14 @@ class MontageRenderMixin:
     def _sync_committed_montage_geometry(self, geometry) -> None:
         self.display_geometry = geometry
         frame = getattr(self, "_committed_display_frame", None)
-        if frame is not None:
+        if (
+            frame is not None
+            and frame.geometry != geometry
+            and not (
+                isinstance(getattr(frame, "value_source", None), TiledValueSource)
+                and display_geometry_coordinates_equal(frame.geometry, geometry)
+            )
+        ):
             self._set_committed_display_frame(replace(frame, geometry=geometry, scene=None))
         refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
         if callable(refresh_hover):
@@ -2683,6 +2836,10 @@ def _vispy_tile_layer_fast_drain_enabled(window, session) -> bool:
         return False
     if not bool(getattr(session, "display_committed", False)):
         return False
+    return _vispy_direct_tile_layer_backend(window, session)
+
+
+def _vispy_direct_tile_layer_backend(window, session) -> bool:
     if str(getattr(getattr(window, "img_view", None), "rendering_backend_name", "")).lower() != "vispy":
         return False
     capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))

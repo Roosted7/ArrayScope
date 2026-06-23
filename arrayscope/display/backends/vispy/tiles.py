@@ -195,6 +195,9 @@ class TextureAtlasPool:
         self.pages: list[TextureAtlasPage] = []
         self.resident_slots: dict[object, tuple[int, int]] = {}
         self.tile_slots: dict[int, tuple[int, int]] = {}
+        self.tile_resident_keys: dict[int, object] = {}
+        self.resident_tiles: dict[object, set[int]] = {}
+        self.tile_uvs: dict[int, tuple[float, float, float, float]] = {}
         self.source_ids: dict[object, object] = {}
         self.last_used: dict[object, int] = {}
         self.active_resident_keys: set[object] = set()
@@ -291,6 +294,9 @@ class TextureAtlasPool:
             self.pages.clear()
             self.resident_slots.clear()
             self.tile_slots.clear()
+            self.tile_resident_keys.clear()
+            self.resident_tiles.clear()
+            self.tile_uvs.clear()
             self.source_ids.clear()
             self.last_used.clear()
             self.active_resident_keys.clear()
@@ -365,11 +371,184 @@ class TextureAtlasPool:
         near_tiles: tuple[int, ...] = (),
         near_tile_source_ids: dict[int, object] | None = None,
         budget_bytes: int | None = None,
+        tile_delta=None,
     ) -> tuple[dict[int, tuple[float, float, float, float]], GpuMontageLayerStats]:
         # The window scheduler decides which ready tiles enter a visible
         # commit.  Do not queue or slice again here: once a payload reaches the
         # visible atlas commit, it must become presentable in that commit.
         start = perf_counter()
+        tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
+        dirty_all = dirty_tiles is None
+        dirty = set() if dirty_all else {int(tile) for tile in dirty_tiles}
+        if (
+            tile_delta is not None
+            and not dirty_all
+            and self.storage_mode is not None
+            and self.tile_shape == (tile_h, tile_w)
+            and self.tile_slots
+        ):
+            explicit_upserts = {int(key): value for key, value in dict(getattr(tile_delta, "upserts", {}) or {}).items()}
+            payload_map = {int(key): value for key, value in dict(payloads or {}).items()}
+            raw_active_tiles = getattr(tile_delta, "active_tiles", None)
+            active_tiles = (
+                tuple(int(tile) for tile in tuple(raw_active_tiles))
+                if raw_active_tiles is not None
+                else tuple(int(tile) for tile in payload_map)
+            )
+            active_set = set(active_tiles)
+            active_payloads = {
+                int(tile_number): payload_map[int(tile_number)]
+                for tile_number in active_set
+                if int(tile_number) in payload_map
+            }
+            delta_removals = set(int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ()))
+            delta_removals.update(int(tile) for tile in tuple(self.tile_slots) if int(tile) not in active_set)
+            delta_upserts = dict(explicit_upserts)
+            for tile_number in sorted(active_set.union(dirty)):
+                payload = payload_map.get(int(tile_number))
+                if payload is None:
+                    continue
+                resident_key = _resident_key(payload)
+                if (
+                    int(tile_number) in dirty
+                    or int(tile_number) not in self.tile_slots
+                    or self.tile_resident_keys.get(int(tile_number)) != resident_key
+                    or int(tile_number) not in self.tile_uvs
+                    or self.source_ids.get(resident_key) != payload.source_id
+                ):
+                    delta_upserts[int(tile_number)] = payload
+            storage_mode = self.storage_mode
+            delta_items = tuple(sorted(delta_upserts.items()))
+            if all(
+                _payload_supported_by_storage_mode(payload, storage_mode, rgb_already_windowed=rgb_already_windowed)
+                for _tile, payload in delta_items
+            ):
+                requested_capacity = self.requested_capacity(
+                    active_count=max(1, len(active_tiles)),
+                    reserve_count=max(
+                        len(active_tiles),
+                        int(reserve_count or 0),
+                    ),
+                    storage_mode=storage_mode,
+                    tile_shape=tile_shape,
+                    budget_bytes=budget_bytes,
+                )
+                rebuilt = self.ensure_layout(
+                    tile_shape=tile_shape,
+                    count=requested_capacity,
+                    storage_mode=storage_mode,
+                    budget_bytes=budget_bytes,
+                )
+                active_keys = {_resident_key(payload) for payload in active_payloads.values()}
+                for tile_number in tuple(delta_removals):
+                    old_key = self.tile_resident_keys.get(int(tile_number))
+                    self._clear_tile_mapping(int(tile_number))
+                for tile_number, payload in delta_items:
+                    old_key = self.tile_resident_keys.get(int(tile_number))
+                    resident_key = _resident_key(payload)
+                    active_keys.add(resident_key)
+                self.active_resident_keys = set(active_keys)
+                near = {int(tile) for tile in tuple(near_tiles or ())}
+                near_keys = self._near_resident_keys(near_tile_source_ids)
+                near_keys.update(_resident_key(payload) for tile_number, payload in delta_items if int(tile_number) in near)
+                uploads = 0
+                upload_bytes = 0
+                complex_uploads = 0
+                updated = 0
+                skipped = 0
+                deferred_tiles: list[int] = []
+                evictions_before = self.eviction_count
+                evicted_near_before = self.evicted_near_count
+
+                for tile_number, payload in delta_items:
+                    resident_key = _resident_key(payload)
+                    page_index, slot, newly_assigned = self._slot_for(resident_key, active_keys=active_keys, near_keys=near_keys)
+                    page = self.pages[int(page_index)]
+                    self._touch(resident_key)
+                    source_changed = self.source_ids.get(resident_key) != payload.source_id
+                    missing_uploaded_source = resident_key not in self.source_ids
+                    should_upload = bool(rebuilt or newly_assigned or source_changed or missing_uploaded_source or int(tile_number) in dirty)
+                    self._set_tile_mapping(
+                        int(tile_number),
+                        resident_key,
+                        int(page_index),
+                        int(slot),
+                        page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload)),
+                    )
+                    if not should_upload:
+                        skipped += 1
+                        continue
+                    scalar, color = _payload_texture_data(
+                        payload,
+                        tile_shape=(tile_h, tile_w),
+                        rgb_already_windowed=rgb_already_windowed,
+                        need_scalar=page.scalar_is_atlas,
+                        need_color=page.color_is_atlas,
+                    )
+                    y0, x0 = page.offset_for_slot(slot)
+                    if scalar is not None:
+                        page.scalar_texture.set_data(
+                            scalar,
+                            offset=(int(y0), int(x0)),
+                            copy=_upload_copy_required(scalar, payload, force=page.complex_is_atlas),
+                        )
+                        uploads += 1
+                        upload_bytes += int(scalar.nbytes)
+                        if page.complex_is_atlas:
+                            complex_uploads += 1
+                    if color is not None:
+                        page.color_texture.set_data(
+                            color,
+                            offset=(int(y0), int(x0)),
+                            copy=_upload_copy_required(color, payload),
+                        )
+                        uploads += 1
+                        upload_bytes += int(color.nbytes)
+                    self.source_ids[resident_key] = payload.source_id
+                    updated += 1
+
+                presented_tiles = tuple(
+                    int(tile_number)
+                    for tile_number, payload in sorted(active_payloads.items())
+                    if int(tile_number) in self.tile_slots
+                    and self.tile_resident_keys.get(int(tile_number)) == _resident_key(payload)
+                    and self.source_ids.get(_resident_key(payload)) == payload.source_id
+                )
+                presented_set = set(presented_tiles)
+                for tile_number in active_payloads:
+                    if int(tile_number) not in presented_set:
+                        deferred_tiles.append(int(tile_number))
+                elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt or delta_removals else 0.0
+                return self.tile_uvs, GpuMontageLayerStats(
+                    visible_items=len(presented_tiles),
+                    presented_tiles=presented_tiles,
+                    resident_items=self.resident_count,
+                    atlas_capacity=self.capacity,
+                    atlas_rebuilds=int(rebuilt),
+                    atlas_evictions=self.eviction_count - evictions_before,
+                    texture_uploads=uploads,
+                    texture_upload_bytes=upload_bytes,
+                    items_updated=updated,
+                    items_skipped=skipped + max(0, len(presented_tiles) - len(delta_items)),
+                    estimated_gpu_bytes=self.estimated_gpu_bytes,
+                    cpu_shadow_bytes=self.cpu_shadow_bytes,
+                    upload_ms=elapsed,
+                    page_count=len(self.pages),
+                    active_pages=len({self.tile_slots[int(tile)][0] for tile in presented_tiles if int(tile) in self.tile_slots}),
+                    device_max_texture_size=self.max_texture_size,
+                    budget_bytes=self.budget_bytes,
+                    near_resident_items=len(near_keys.intersection(self.source_ids)),
+                    warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
+                    evicted_near_items=self.evicted_near_count - evicted_near_before,
+                    lod_level=_max_payload_lod_level(delta_upserts),
+                    lod_factor=_max_payload_lod_factor(delta_upserts),
+                    source_texels_per_pixel=float(_max_payload_lod_factor(delta_upserts)),
+                    gutter_pixels=_max_payload_gutter(delta_upserts),
+                    mipmap_updates=0,
+                    mipmap_available=False,
+                    complex_texture_uploads=complex_uploads,
+                    deferred_tiles=tuple(deferred_tiles),
+                )
         raw_payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
         storage_mode = (
             _atlas_storage_mode(raw_payload_items, rgb_already_windowed=rgb_already_windowed)
@@ -382,7 +561,6 @@ class TextureAtlasPool:
             if _payload_supported_by_storage_mode(payload, storage_mode, rgb_already_windowed=rgb_already_windowed)
         )
         unsupported_items = len(raw_payload_items) - len(payload_items)
-        tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
         requested_capacity = self.requested_capacity(
             active_count=len(payload_items),
             reserve_count=max(len(payload_items), int(reserve_count or 0)),
@@ -396,8 +574,6 @@ class TextureAtlasPool:
             storage_mode=storage_mode,
             budget_bytes=budget_bytes,
         )
-        dirty_all = dirty_tiles is None
-        dirty = set() if dirty_all else {int(tile) for tile in dirty_tiles}
         active = {int(tile_number) for tile_number, _payload in payload_items}
         active_keys = {_resident_key(payload) for _tile_number, payload in payload_items}
         self.active_resident_keys = set(active_keys)
@@ -406,6 +582,8 @@ class TextureAtlasPool:
         near_keys.update(_resident_key(payload) for tile_number, payload in payload_items if int(tile_number) in near)
         uvs: dict[int, tuple[float, float, float, float]] = {}
         active_tile_slots: dict[int, tuple[int, int]] = {}
+        active_tile_keys: dict[int, object] = {}
+        active_tile_uvs: dict[int, tuple[float, float, float, float]] = {}
         uploads = 0
         upload_bytes = 0
         complex_uploads = 0
@@ -420,12 +598,14 @@ class TextureAtlasPool:
             resident_key = _resident_key(payload)
             page_index, slot, newly_assigned = self._slot_for(resident_key, active_keys=active_keys, near_keys=near_keys)
             active_tile_slots[int(tile_number)] = (int(page_index), int(slot))
+            active_tile_keys[int(tile_number)] = resident_key
             page = self.pages[int(page_index)]
             self._touch(resident_key)
             source_changed = self.source_ids.get(resident_key) != payload.source_id
             missing_uploaded_source = resident_key not in self.source_ids
             should_upload = bool(dirty_all or newly_assigned or source_changed or missing_uploaded_source or tile_number in dirty)
             uvs[tile_number] = page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload))
+            active_tile_uvs[int(tile_number)] = uvs[tile_number]
             if not should_upload:
                 skipped += 1
                 continue
@@ -474,11 +654,20 @@ class TextureAtlasPool:
             for tile, slot in active_tile_slots.items()
             if int(tile) in presented_set
         }
-        uvs = {
-            int(tile): uv
-            for tile, uv in uvs.items()
+        self.tile_resident_keys = {
+            int(tile): resident_key
+            for tile, resident_key in active_tile_keys.items()
             if int(tile) in presented_set
         }
+        self.resident_tiles = {}
+        for tile, resident_key in self.tile_resident_keys.items():
+            self.resident_tiles.setdefault(resident_key, set()).add(int(tile))
+        self.tile_uvs = {
+            int(tile): uv
+            for tile, uv in active_tile_uvs.items()
+            if int(tile) in presented_set
+        }
+        uvs = self.tile_uvs
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
         return uvs, GpuMontageLayerStats(
             visible_items=len(presented_tiles),
@@ -702,6 +891,7 @@ class TextureAtlasPool:
             )
         priority, _last, victim, page_index, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
         del priority
+        self._discard_tile_mappings_for_resident_key(victim)
         self.resident_slots.pop(victim, None)
         self.source_ids.pop(victim, None)
         self.last_used.pop(victim, None)
@@ -712,6 +902,47 @@ class TextureAtlasPool:
         page.slot_owners[int(slot)] = resident_key
         self.resident_slots[resident_key] = (int(page_index), int(slot))
         return int(page_index), int(slot), True
+
+    def _clear_tile_mapping(self, tile_number: int) -> None:
+        tile_number = int(tile_number)
+        old_key = self.tile_resident_keys.pop(tile_number, None)
+        if old_key is not None:
+            tiles = self.resident_tiles.get(old_key)
+            if tiles is not None:
+                tiles.discard(tile_number)
+                if not tiles:
+                    self.resident_tiles.pop(old_key, None)
+        self.tile_slots.pop(tile_number, None)
+        self.tile_uvs.pop(tile_number, None)
+
+    def _set_tile_mapping(
+        self,
+        tile_number: int,
+        resident_key: object,
+        page_index: int,
+        slot: int,
+        uv: tuple[float, float, float, float],
+    ) -> None:
+        tile_number = int(tile_number)
+        old_key = self.tile_resident_keys.get(tile_number)
+        if old_key is not None and old_key != resident_key:
+            tiles = self.resident_tiles.get(old_key)
+            if tiles is not None:
+                tiles.discard(tile_number)
+                if not tiles:
+                    self.resident_tiles.pop(old_key, None)
+        self.tile_slots[tile_number] = (int(page_index), int(slot))
+        self.tile_resident_keys[tile_number] = resident_key
+        self.resident_tiles.setdefault(resident_key, set()).add(tile_number)
+        self.tile_uvs[tile_number] = uv
+
+    def _discard_tile_mappings_for_resident_key(self, resident_key: object) -> None:
+        for tile_number in tuple(self.resident_tiles.pop(resident_key, set())):
+            tile_number = int(tile_number)
+            if self.tile_resident_keys.get(tile_number) == resident_key:
+                self.tile_resident_keys.pop(tile_number, None)
+                self.tile_slots.pop(tile_number, None)
+                self.tile_uvs.pop(tile_number, None)
 
     def _touch(self, resident_key: object) -> None:
         self._clock += 1
@@ -740,6 +971,9 @@ class GpuMontageLayer:
         self._pool = TextureAtlasPool(gloo, limits=self._device_limits)
         self._visuals_by_page: list[object] = []
         self._geometry_keys: dict[int, tuple[object, ...]] = {}
+        self._page_payloads_by_index: list[dict[int, DisplayTilePayload]] = []
+        self._montage_geometry_key: tuple[int, int, int, int, int] | None = None
+        self._atlas_serial: int = -1
         self._levels: tuple[float, float] = (0.0, 1.0)
         self._shader_mapping = None
         self._shader_mapping_key = None
@@ -762,6 +996,9 @@ class GpuMontageLayer:
         for visual in self._visuals_by_page:
             visual.visible = False
         self._geometry_keys.clear()
+        self._page_payloads_by_index.clear()
+        self._montage_geometry_key = None
+        self._atlas_serial = -1
         self._visible_items = 0
 
     def set_levels(self, levels) -> GpuMontageLayerStats:
@@ -853,40 +1090,32 @@ class GpuMontageLayer:
             near_tiles=near_tiles,
             near_tile_source_ids=near_tile_source_ids,
             budget_bytes=tile_residency_budget_bytes,
+            tile_delta=tile_delta,
         )
         self._ensure_visual_count(len(self._pool.pages))
         vertex_uploads = 0
         active_pages = set()
-        page_payloads_by_index: list[dict[int, DisplayTilePayload]] = [
-            {} for _page in self._pool.pages
-        ]
-        for tile, payload in payloads.items():
-            page_index, _slot = self._pool.tile_slots.get(int(tile), (-1, -1))
-            if 0 <= int(page_index) < len(page_payloads_by_index):
-                page_payloads_by_index[int(page_index)][int(tile)] = payload
+        page_payloads_by_index, dirty_pages = self._sync_page_payloads(
+            payloads,
+            presented_tiles=tuple(texture_stats.presented_tiles or ()),
+            montage=montage,
+            rgb_already_windowed=rgb_already_windowed,
+        )
         for page_index, page in enumerate(self._pool.pages):
             page_payloads = page_payloads_by_index[page_index]
             visual = self._visuals_by_page[page_index]
-            geometry_key = (
-                tuple(
-                    (
-                        int(key),
-                        int(self._pool.tile_slots[int(key)][1]),
-                        _payload_mode(payload, rgb_already_windowed=rgb_already_windowed),
-                        _payload_gutter(payload),
-                    )
-                    for key, payload in sorted(page_payloads.items())
-                ),
-                int(montage.tile_height),
-                int(montage.tile_width),
-                int(montage.columns),
-                int(montage.rows),
-                int(montage.gap),
-                id(page),
-                tuple(int(value) for value in page.atlas_shape),
-            )
             if page_payloads:
                 active_pages.add(page_index)
+            if page_index in dirty_pages or page_index not in self._geometry_keys:
+                geometry_key = _page_geometry_key(
+                    page_payloads,
+                    self._pool,
+                    page,
+                    montage,
+                    rgb_already_windowed=rgb_already_windowed,
+                )
+            else:
+                geometry_key = self._geometry_keys.get(page_index)
             if geometry_key != self._geometry_keys.get(page_index):
                 vertices, texcoords, modes = _quad_buffers(
                     montage,
@@ -959,6 +1188,45 @@ class GpuMontageLayer:
             deferred_tiles=deferred_tiles,
         )
         return self._last_stats
+
+    def _sync_page_payloads(self, payloads, *, presented_tiles, montage, rgb_already_windowed: bool):
+        page_count = len(self._pool.pages)
+        montage_key = (
+            int(montage.tile_height),
+            int(montage.tile_width),
+            int(montage.columns),
+            int(montage.rows),
+            int(montage.gap),
+        )
+        page_payloads_by_index: list[dict[int, DisplayTilePayload]] = [{} for _page in self._pool.pages]
+        active = {int(tile) for tile in tuple(presented_tiles or ())}
+        payload_map = {int(tile): payload for tile, payload in dict(payloads or {}).items()}
+        for tile in sorted(active):
+            payload = payload_map.get(int(tile))
+            if payload is None:
+                continue
+            page_index, _slot = self._pool.tile_slots.get(int(tile), (-1, -1))
+            if 0 <= int(page_index) < page_count:
+                page_payloads_by_index[int(page_index)][int(tile)] = payload
+        dirty_pages: set[int] = set()
+        full_refresh = (
+            len(self._page_payloads_by_index) != page_count
+            or self._montage_geometry_key != montage_key
+            or int(self._atlas_serial) != int(self._pool.serial)
+        )
+        for page_index in range(page_count):
+            if full_refresh or _page_geometry_key(
+                page_payloads_by_index[int(page_index)],
+                self._pool,
+                self._pool.pages[int(page_index)],
+                montage,
+                rgb_already_windowed=rgb_already_windowed,
+            ) != self._geometry_keys.get(int(page_index)):
+                dirty_pages.add(int(page_index))
+        self._page_payloads_by_index = page_payloads_by_index
+        self._montage_geometry_key = montage_key
+        self._atlas_serial = int(self._pool.serial)
+        return self._page_payloads_by_index, dirty_pages
 
     def warm_residency(
         self,
@@ -1450,6 +1718,28 @@ def _quad_buffers(montage, payloads, uvs, *, rgb_already_windowed: bool):
         np.asarray(vertices, dtype=np.float32).reshape((-1, 2)),
         np.asarray(texcoords, dtype=np.float32).reshape((-1, 2)),
         np.asarray(modes, dtype=np.float32).reshape((-1,)),
+    )
+
+
+def _page_geometry_key(payloads, pool, page, montage, *, rgb_already_windowed: bool) -> tuple[object, ...]:
+    return (
+        tuple(
+            (
+                int(key),
+                int(pool.tile_slots[int(key)][1]),
+                _payload_mode(payload, rgb_already_windowed=rgb_already_windowed),
+                _payload_gutter(payload),
+            )
+            for key, payload in sorted(dict(payloads or {}).items())
+            if int(key) in pool.tile_slots
+        ),
+        int(montage.tile_height),
+        int(montage.tile_width),
+        int(montage.columns),
+        int(montage.rows),
+        int(montage.gap),
+        id(page),
+        tuple(int(value) for value in page.atlas_shape),
     )
 
 

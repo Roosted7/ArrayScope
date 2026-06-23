@@ -43,21 +43,33 @@ class DisplayCommitter:
         self._validate_presentation(presentation)
         scene = display_scene_for_presentation(presentation)
         if isinstance(presentation, DisplayTiledPresentation):
-            report = self.backend.present_tiled(presentation)
-            if not isinstance(report, TileCommitReport):
-                report = TileCommitReport(
-                    presented_tiles=presentation.tile_state.active_payloads(presentation.tile_delta),
-                    removed_tiles=presentation.tile_delta.removals,
-                )
-            tile_state = presentation.base_tile_state.acknowledge_delta(presentation.tile_delta, report)
-            self.last_tile_commit_report = report
-            self.last_tile_committed_state = tile_state
+            self.commit_tiled_delta(presentation)
         else:
             self.last_tile_commit_report = None
             self.last_tile_committed_state = None
             self.backend.present_raster(presentation, mode=RasterCommitMode.TILE_LAYER)
         self.backend.set_profile_bounds(scene.bounds)
         return self._frame_for(presentation, key, scene, tile_state=self.last_tile_committed_state)
+
+    def commit_tiled_delta(self, presentation: DisplayTiledPresentation) -> TileCommitReport:
+        """Present a tiled delta and return the backend acknowledgement.
+
+        This is the hot-path primitive for progressive tile layers. It still
+        commits through the backend and records exactly what was accepted, but
+        it does not build a DisplayScene or CommittedDisplayFrame.
+        """
+
+        self._validate_presentation(presentation)
+        report = self.backend.present_tiled(presentation)
+        if not isinstance(report, TileCommitReport):
+            report = TileCommitReport(
+                presented_tiles=presentation.tile_state.active_payloads(presentation.tile_delta),
+                removed_tiles=presentation.tile_delta.removals,
+            )
+        tile_state = presentation.base_tile_state.acknowledge_delta(presentation.tile_delta, report)
+        self.last_tile_commit_report = report
+        self.last_tile_committed_state = tile_state
+        return report
 
     def _frame_for(
         self,
