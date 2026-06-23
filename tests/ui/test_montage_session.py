@@ -749,5 +749,10 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
     assert 0 in next_state.payloads
     assert next_state.payloads[0].source_index == 2
     assert next_delta.removals == ()
-    assert next_delta.upserts == {}
+    assert tuple(next_delta.upserts) == (0,)
+    shifted.acknowledge_tile_presentation(
+        next_delta,
+        TileCommitReport(presented_tiles=next_state.active_payloads(next_delta)),
+    )
+    assert 0 not in shifted.pending_payload_upserts
     assert 0 in shifted.presented_tiles

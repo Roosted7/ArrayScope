@@ -109,6 +109,7 @@ class MontageRenderSession:
     tile_source_ids: dict[int, object] = field(default_factory=dict)
     display_tile_payloads: dict[int, DisplayTilePayload] = field(default_factory=dict)
     dirty_payloads: OrderedDict[int, None] = field(default_factory=OrderedDict)
+    pending_payload_upserts: OrderedDict[int, None] = field(default_factory=OrderedDict)
     pending_removals: set[int] = field(default_factory=set)
     tile_presentation_state: TilePresentationState = field(default_factory=TilePresentationState)
     structure_revision: int = 0
@@ -391,6 +392,7 @@ class MontageRenderSession:
             self.display_tile_payloads[tile_number] = payload
             if seeded_state.get(tile_number) is not payload:
                 seeded_state[tile_number] = payload
+                self.pending_payload_upserts[tile_number] = None
                 changed_state = True
         if changed_state:
             self.tile_presentation_state = TilePresentationState(
@@ -479,8 +481,10 @@ class MontageRenderSession:
                 self.display_tile_payloads.pop(int(stale), None)
                 self.pending_removals.add(int(stale))
                 self.dirty_payloads.pop(int(stale), None)
+                self.pending_payload_upserts.pop(int(stale), None)
         lod_factor = self._selected_lod_factor()
         dirty_payload_tiles = set(int(tile) for tile in self.dirty_payloads)
+        dirty_payload_tiles.update(int(tile) for tile in self.pending_payload_upserts)
         dirty_payload_tiles.update(int(tile) for tile in self.deferred_display_tiles)
         for tile_number in sorted(dirty_payload_tiles):
             rendered = self.rendered_tiles.get(int(tile_number))
@@ -504,10 +508,12 @@ class MontageRenderSession:
             if payload is None:
                 continue
             previous = previous_payloads.get(int(tile_number))
-            if previous is payload:
+            force_upsert = int(tile_number) in self.pending_payload_upserts
+            if previous is payload and not force_upsert:
                 continue
             if (
-                previous is not None
+                not force_upsert
+                and previous is not None
                 and previous.source_id == payload.source_id
                 and previous.image is payload.image
                 and previous.histogram_data is payload.histogram_data
@@ -591,9 +597,11 @@ class MontageRenderSession:
         self.tile_presentation_state = acknowledged
         for tile in report.presented_tiles:
             self.dirty_payloads.pop(int(tile), None)
+            self.pending_payload_upserts.pop(int(tile), None)
         for tile in report.removed_tiles:
             self.pending_removals.discard(int(tile))
             self.dirty_payloads.pop(int(tile), None)
+            self.pending_payload_upserts.pop(int(tile), None)
             self.display_tile_payloads.pop(int(tile), None)
         for tile in report.deferred_tiles:
             if int(tile) in self.rendered_tiles:
@@ -681,6 +689,7 @@ class MontageRenderSession:
             or self.flush_pending
             or self.deferred_display_tiles
             or self.dirty_payloads
+            or self.pending_payload_upserts
             or self.pending_removals
         )
 
