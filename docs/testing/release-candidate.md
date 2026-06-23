@@ -68,7 +68,9 @@ Do not feed rendering benchmark JSONL into
 traces have different schemas.
 
 For scheduler/backend pacing changes, add a visible real-workflow profile on a
-real display. The plain JSONL run is the timing artifact:
+real display. The plain JSONL run is the timing artifact. Record cold and warm
+runs separately, and keep first useful display, exact-visible display, and full
+completion as separate results:
 
 ```bash
 python -m arrayscope.tools.profile_montage_workflow \
@@ -97,8 +99,16 @@ shows comparable pacing.
 Do not run this command with `QT_QPA_PLATFORM=offscreen` when making VisPy or GPU
 frame-pacing claims.
 
+Rendering benchmark evidence must include small, medium, and large tiled cases.
+For each case, report event-loop p95/p99/max gaps, cold upload/preparation
+work, warm rebind/visibility work, first useful display, and full completion.
+Profiler failures, missing profiler tools, or partial profiler output are
+degraded evidence rather than clean completion; record the tool status and do
+not use failed profiler output as benchmark support.
+
 ## Evidence to record
 
-Record the commit, clean/dirty state, CI run URL, platform skips, artifact
-paths, OS/session type, Python/Qt/PySide/PyQtGraph/VisPy versions, backend,
-dataset shape/dtype, and any diagnostics warning observed during manual checks.
+Record the git revision, clean/dirty state, CI run URL, command line, tool
+status, platform skips, artifact paths, OS/session type,
+Python/Qt/PySide/PyQtGraph/VisPy versions, backend, dataset shape/dtype, and
+any diagnostics warning observed during manual checks.

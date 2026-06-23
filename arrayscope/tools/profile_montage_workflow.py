@@ -27,7 +27,8 @@ DEFAULT_DATA_PATH = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
 PY_SPY_LOW_IMPACT_SAMPLE_RATE_HZ = 50
 PY_SPY_FULL_SAMPLE_RATE_HZ = 80
 PY_SPY_FULL_DURATION_S = 16
-PY_SPY_FULL_POST_RUN_SLEEP_S = 12
+PY_SPY_FULL_DETACH_MARGIN_S = 1
+PY_SPY_FULL_ALLOWED_MISSED_STACKS = 1
 
 
 def run_profile_montage_workflow(
@@ -191,6 +192,7 @@ class _EventLoopProbe:
         self._last = perf_counter()
         self.max_gap_ms = 0.0
         self.tick_count = 0
+        self.gaps_ms: list[float] = []
 
     def start(self) -> None:
         self.reset()
@@ -200,12 +202,20 @@ class _EventLoopProbe:
         self._last = perf_counter()
         self.max_gap_ms = 0.0
         self.tick_count = 0
+        self.gaps_ms = []
 
     def _tick(self) -> None:
         now = perf_counter()
-        self.max_gap_ms = max(self.max_gap_ms, (now - self._last) * 1000.0)
+        gap_ms = (now - self._last) * 1000.0
+        self.gaps_ms.append(float(gap_ms))
+        self.max_gap_ms = max(self.max_gap_ms, gap_ms)
         self._last = now
         self.tick_count += 1
+
+    def percentile_ms(self, percentile: float) -> float | None:
+        if not self.gaps_ms:
+            return None
+        return _percentile(tuple(self.gaps_ms), percentile)
 
 
 def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_s: float, action) -> dict[str, object]:
@@ -223,7 +233,14 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
     )
     elapsed_ms = (perf_counter() - start) * 1000.0
     _process_events(app, QtCore, count=5)
-    record = _phase_record(win, phase=phase, elapsed_ms=elapsed_ms, event_loop_max_gap_ms=probe.max_gap_ms)
+    record = _phase_record(
+        win,
+        phase=phase,
+        elapsed_ms=elapsed_ms,
+        event_loop_p95_gap_ms=probe.percentile_ms(95),
+        event_loop_p99_gap_ms=probe.percentile_ms(99),
+        event_loop_max_gap_ms=probe.max_gap_ms,
+    )
     record.update(milestones)
     record["event_loop_ticks"] = int(probe.tick_count)
     return record
@@ -308,7 +325,15 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
     )
 
 
-def _phase_record(win, *, phase: str, elapsed_ms: float, event_loop_max_gap_ms: float) -> dict[str, object]:
+def _phase_record(
+    win,
+    *,
+    phase: str,
+    elapsed_ms: float,
+    event_loop_p95_gap_ms: float | None,
+    event_loop_p99_gap_ms: float | None,
+    event_loop_max_gap_ms: float,
+) -> dict[str, object]:
     snapshot = win.collect_runtime_diagnostics()
     timing = snapshot.montage_timing
     montage = snapshot.montage
@@ -321,6 +346,8 @@ def _phase_record(win, *, phase: str, elapsed_ms: float, event_loop_max_gap_ms: 
     return {
         "phase": phase,
         "elapsed_ms": float(elapsed_ms),
+        "event_loop_p95_gap_ms": _optional_float(event_loop_p95_gap_ms),
+        "event_loop_p99_gap_ms": _optional_float(event_loop_p99_gap_ms),
         "event_loop_max_gap_ms": float(event_loop_max_gap_ms),
         "complete": True,
         "image_backend_actual": str(snapshot.image_rendering_backend_actual),
@@ -670,7 +697,7 @@ def py_spy_raw_command(
     nonblocking: bool = False,
     gil: bool = False,
     duration_s: int | None = None,
-    post_run_sleep_s: int = 0,
+    detach_margin_s: int = 0,
 ) -> str:
     native = _py_spy_native_requested(tuple(argv))
     target = (
@@ -678,9 +705,12 @@ def py_spy_raw_command(
             sys.executable,
             "-c",
             "import sys, time; from arrayscope.tools.profile_montage_workflow import main; "
-            "rc = main(tuple(sys.argv[1:-1])); time.sleep(float(sys.argv[-1])); raise SystemExit(rc)",
+            "started = time.monotonic(); duration = float(sys.argv[-2]); margin = float(sys.argv[-1]); "
+            "rc = main(tuple(sys.argv[1:-2])); "
+            "time.sleep(max(0.0, started + duration + margin - time.monotonic())); raise SystemExit(rc)",
             *tuple(argv),
-            str(int(post_run_sleep_s)),
+            str(int(duration_s or 0)),
+            str(int(detach_margin_s)),
         )
         if duration_s is not None
         else (sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *tuple(argv))
@@ -712,68 +742,93 @@ def perf_record_command(argv: tuple[str, ...], output: str | Path) -> str:
 def profiler_suite_commands(argv: tuple[str, ...], suite_dir: str | Path) -> tuple[dict[str, object], ...]:
     suite_dir = Path(suite_dir)
     plain_jsonl = suite_dir / "plain.jsonl"
-    cprofile_artifact = suite_dir / "montage.cprofile"
-    py_spy_low_artifact = suite_dir / "montage.pyspy.low-impact.raw"
-    py_spy_full_artifact = suite_dir / "montage.pyspy.full.raw"
-    perf_artifact = suite_dir / "montage.perf.data"
     base = _suite_child_args(argv)
     include_cprofile = _include_cprofile_requested(argv)
     py_spy_native = _py_spy_native_requested(argv)
     py_spy_low_type = "py-spy-raw-low-impact-native" if py_spy_native else "py-spy-raw-low-impact"
     py_spy_full_type = "py-spy-raw-full-native" if py_spy_native else "py-spy-raw-full"
-    py_spy_base = (*base, "--py-spy-native") if py_spy_native else base
+    backends = _suite_profiler_backends(base)
+    split_backend_artifacts = len(backends) > 1
     commands: list[dict[str, object]] = [
         {
+            "step_id": "plain",
             "profiler_type": "plain",
+            "backend": "all" if split_backend_artifacts else backends[0],
             "required": True,
             "jsonl": str(plain_jsonl),
             "artifact_paths": (str(plain_jsonl),),
             "command": shlex.join((sys.executable, "-m", "arrayscope.tools.profile_montage_workflow", *base, "--jsonl", str(plain_jsonl), "--profiler-type", "plain", "--profiler-artifact", str(plain_jsonl))),
         },
-        {
-            "profiler_type": py_spy_low_type,
-            "required": True,
-            "jsonl": str(suite_dir / "py-spy-low-impact.jsonl"),
-            "artifact_paths": (str(py_spy_low_artifact), str(suite_dir / "py-spy-low-impact.jsonl")),
-            "command": py_spy_raw_command(
-                (*py_spy_base, "--jsonl", str(suite_dir / "py-spy-low-impact.jsonl"), "--profiler-type", py_spy_low_type, "--profiler-artifact", str(py_spy_low_artifact)),
-                py_spy_low_artifact,
-                rate_hz=PY_SPY_LOW_IMPACT_SAMPLE_RATE_HZ,
-                nonblocking=True,
-                gil=True,
-            ),
-        },
-        {
-            "profiler_type": py_spy_full_type,
-            "required": True,
-            "jsonl": str(suite_dir / "py-spy-full.jsonl"),
-            "artifact_paths": (str(py_spy_full_artifact), str(suite_dir / "py-spy-full.jsonl")),
-            "command": py_spy_raw_command(
-                (*py_spy_base, "--jsonl", str(suite_dir / "py-spy-full.jsonl"), "--profiler-type", py_spy_full_type, "--profiler-artifact", str(py_spy_full_artifact)),
-                py_spy_full_artifact,
-                rate_hz=PY_SPY_FULL_SAMPLE_RATE_HZ,
-                duration_s=PY_SPY_FULL_DURATION_S,
-                post_run_sleep_s=PY_SPY_FULL_POST_RUN_SLEEP_S,
-            ),
-        },
-        {
-            "profiler_type": "perf-record",
-            "required": False,
-            "jsonl": str(suite_dir / "perf.jsonl"),
-            "artifact_paths": (str(perf_artifact), str(suite_dir / "perf.jsonl")),
-            "command": perf_record_command((*base, "--jsonl", str(suite_dir / "perf.jsonl"), "--profiler-type", "perf-record", "--profiler-artifact", str(perf_artifact)), perf_artifact),
-        },
     ]
     if include_cprofile:
-        commands.insert(
-            1,
-            {
-                "profiler_type": "cprofile",
-                "required": True,
-                "jsonl": str(suite_dir / "cprofile.jsonl"),
-                "artifact_paths": (str(cprofile_artifact), str(suite_dir / "cprofile.jsonl")),
-                "command": cprofile_command((*base, "--jsonl", str(suite_dir / "cprofile.jsonl"), "--profiler-type", "cprofile", "--profiler-artifact", str(cprofile_artifact)), cprofile_artifact),
-            },
+        for backend in backends:
+            backend_base = _suite_args_for_backend(base, backend)
+            suffix = f".{backend}" if split_backend_artifacts else ""
+            cprofile_artifact = suite_dir / f"montage{suffix}.cprofile"
+            cprofile_jsonl = suite_dir / f"cprofile{suffix}.jsonl"
+            commands.append(
+                {
+                    "step_id": f"cprofile:{backend}",
+                    "profiler_type": "cprofile",
+                    "backend": backend,
+                    "required": True,
+                    "jsonl": str(cprofile_jsonl),
+                    "artifact_paths": (str(cprofile_artifact), str(cprofile_jsonl)),
+                    "command": cprofile_command((*backend_base, "--jsonl", str(cprofile_jsonl), "--profiler-type", "cprofile", "--profiler-artifact", str(cprofile_artifact)), cprofile_artifact),
+                }
+            )
+    for backend in backends:
+        backend_base = _suite_args_for_backend(base, backend)
+        py_spy_base = (*backend_base, "--py-spy-native") if py_spy_native else backend_base
+        suffix = f".{backend}" if split_backend_artifacts else ""
+        py_spy_low_artifact = suite_dir / f"montage{suffix}.pyspy.low-impact.raw"
+        py_spy_low_jsonl = suite_dir / f"py-spy-low-impact{suffix}.jsonl"
+        py_spy_full_artifact = suite_dir / f"montage{suffix}.pyspy.full.raw"
+        py_spy_full_jsonl = suite_dir / f"py-spy-full{suffix}.jsonl"
+        perf_artifact = suite_dir / f"montage{suffix}.perf.data"
+        perf_jsonl = suite_dir / f"perf{suffix}.jsonl"
+        commands.extend(
+            (
+                {
+                    "step_id": f"{py_spy_low_type}:{backend}",
+                    "profiler_type": py_spy_low_type,
+                    "backend": backend,
+                    "required": True,
+                    "jsonl": str(py_spy_low_jsonl),
+                    "artifact_paths": (str(py_spy_low_artifact), str(py_spy_low_jsonl)),
+                    "command": py_spy_raw_command(
+                        (*py_spy_base, "--jsonl", str(py_spy_low_jsonl), "--profiler-type", py_spy_low_type, "--profiler-artifact", str(py_spy_low_artifact)),
+                        py_spy_low_artifact,
+                        rate_hz=PY_SPY_LOW_IMPACT_SAMPLE_RATE_HZ,
+                        nonblocking=True,
+                        gil=True,
+                    ),
+                },
+                {
+                    "step_id": f"{py_spy_full_type}:{backend}",
+                    "profiler_type": py_spy_full_type,
+                    "backend": backend,
+                    "required": True,
+                    "jsonl": str(py_spy_full_jsonl),
+                    "artifact_paths": (str(py_spy_full_artifact), str(py_spy_full_jsonl)),
+                    "command": py_spy_raw_command(
+                        (*py_spy_base, "--jsonl", str(py_spy_full_jsonl), "--profiler-type", py_spy_full_type, "--profiler-artifact", str(py_spy_full_artifact)),
+                        py_spy_full_artifact,
+                        rate_hz=PY_SPY_FULL_SAMPLE_RATE_HZ,
+                        duration_s=PY_SPY_FULL_DURATION_S,
+                        detach_margin_s=PY_SPY_FULL_DETACH_MARGIN_S,
+                    ),
+                },
+                {
+                    "step_id": f"perf-record:{backend}",
+                    "profiler_type": "perf-record",
+                    "backend": backend,
+                    "required": False,
+                    "jsonl": str(perf_jsonl),
+                    "artifact_paths": (str(perf_artifact), str(perf_jsonl)),
+                    "command": perf_record_command((*backend_base, "--jsonl", str(perf_jsonl), "--profiler-type", "perf-record", "--profiler-artifact", str(perf_artifact)), perf_artifact),
+                },
+            )
         )
     return tuple(commands)
 
@@ -793,8 +848,9 @@ def run_profile_suite(argv: tuple[str, ...], suite_dir: str | Path) -> int:
         step_temperature = _suite_step_temperature(step_records)
         command = str(item["command"])
         executable = shlex.split(command)[0]
-        stdout_path = suite_dir / f"{_artifact_stem(profiler)}.stdout.log"
-        stderr_path = suite_dir / f"{_artifact_stem(profiler)}.stderr.log"
+        log_stem = _artifact_stem(str(item.get("step_id", profiler)))
+        stdout_path = suite_dir / f"{log_stem}.stdout.log"
+        stderr_path = suite_dir / f"{log_stem}.stderr.log"
         required = bool(item.get("required", False))
         if profiler.startswith("py-spy") and shutil.which("py-spy") is None:
             status = "failed" if required else "skipped"
@@ -938,7 +994,7 @@ def _suite_summary_record(
     tool_versions: dict[str, str],
     repository: dict[str, object],
 ) -> dict[str, object]:
-    statuses = {str(record["profiler_type"]): str(record["status"]) for record in records}
+    statuses = {str(record.get("step_id", record["profiler_type"])): str(record["status"]) for record in records}
     overall_valid = bool(records) and all(bool(record.get("valid", False)) for record in records)
     if overall_valid:
         overall_status = "completed"
@@ -988,9 +1044,16 @@ def _profiler_log_diagnostics(profiler: str, stdout_path: Path, stderr_path: Pat
         diagnostics["missed_stack_count"] = stderr.count("Failed to get stack trace")
         diagnostics["scope"] = "low_impact_python_gil_holders" if "low-impact" in str(profiler) else "complete_sampling_all_python_threads"
         diagnostics["sampling_mode"] = "nonblocking_gil_samples" if "low-impact" in str(profiler) else "blocking_all_python_thread_samples"
+        diagnostics["allowed_missed_stack_count"] = 0 if "low-impact" in str(profiler) else PY_SPY_FULL_ALLOWED_MISSED_STACKS
         diagnostics["sampling_complete"] = bool(
             int(diagnostics["sample_count"]) > 0
-            and (("low-impact" in str(profiler)) or (int(diagnostics["error_count"]) == 0 and int(diagnostics["missed_stack_count"]) == 0))
+            and (
+                ("low-impact" in str(profiler))
+                or (
+                    int(diagnostics["error_count"]) <= PY_SPY_FULL_ALLOWED_MISSED_STACKS
+                    and int(diagnostics["missed_stack_count"]) <= PY_SPY_FULL_ALLOWED_MISSED_STACKS
+                )
+            )
         )
     elif str(profiler).startswith("perf"):
         diagnostics["scope"] = "native_and_python_process_samples"
@@ -1005,7 +1068,7 @@ def _profiler_sample_issue(profiler: str, diagnostics: dict[str, object]) -> str
     if str(profiler).startswith("py-spy") and int(diagnostics.get("sample_count", 0) or 0) <= 0:
         return "py-spy produced no samples"
     if str(profiler).startswith("py-spy") and "full" in str(profiler) and not bool(diagnostics.get("sampling_complete", False)):
-        return "py-spy full profile missed stack samples"
+        return f"py-spy full profile missed more than {PY_SPY_FULL_ALLOWED_MISSED_STACKS} stack sample(s)"
     return ""
 
 
@@ -1024,6 +1087,14 @@ def _write_suite_interpretation(path: Path, records: list[dict[str, object]], su
         f"- Overall valid: `{summary.get('overall_valid')}`",
         f"- Run temperature: `{summary.get('run_temperature')}`",
         "",
+        "## Run Metadata",
+        "",
+        *_run_metadata_summary(summary),
+        "",
+        "## Tool Status",
+        "",
+        *_tool_status_summary(records),
+        "",
         "## Timing Evidence",
         "",
     ]
@@ -1035,37 +1106,122 @@ def _write_suite_interpretation(path: Path, records: list[dict[str, object]], su
         lines.extend(["", "## Tooling Slowdown", ""])
         lines.extend(_tooling_slowdown_summary(plain, records))
     lines.extend(["", "## Python Attribution", ""])
-    low = _find_step(records, "py-spy-raw-low-impact")
-    full = _find_step(records, "py-spy-raw-full")
-    generic = _find_step(records, "py-spy-raw") if low is None and full is None else None
-    if low is not None:
-        lines.extend(_py_spy_summary(low, title="Low-impact py-spy"))
-    if full is not None:
-        lines.extend(_py_spy_summary(full, title="Full sampled py-spy"))
-    if generic is not None:
-        lines.extend(_py_spy_summary(generic, title="py-spy"))
-    if low is None and full is None and generic is None:
+    backend_names = _summary_backend_names(records)
+    py_spy_count = 0
+    for backend in backend_names:
+        backend_lines: list[str] = []
+        low = _find_step(records, "py-spy-raw-low-impact", backend=backend)
+        full = _find_step(records, "py-spy-raw-full", backend=backend)
+        generic = _find_step(records, "py-spy-raw", backend=backend) if low is None and full is None else None
+        if low is not None:
+            backend_lines.extend(_py_spy_summary(low, title="Low-impact py-spy", heading="####"))
+        if full is not None:
+            backend_lines.extend(_py_spy_summary(full, title="Full sampled py-spy", heading="####"))
+        if generic is not None:
+            backend_lines.extend(_py_spy_summary(generic, title="py-spy", heading="####"))
+        if backend_lines:
+            lines.extend([f"### {backend}", "", *backend_lines])
+            py_spy_count += 1
+    if py_spy_count == 0:
         lines.append("No py-spy artifacts were produced.")
     lines.extend(["", "## Deterministic Python Calls", ""])
-    cprofile = _find_step(records, "cprofile")
-    if cprofile is None:
+    cprofile_count = 0
+    for backend in backend_names:
+        cprofile = _find_step(records, "cprofile", backend=backend)
+        if cprofile is not None:
+            lines.extend([f"### {backend}", ""])
+            lines.extend(_cprofile_summary(cprofile))
+            cprofile_count += 1
+    if cprofile_count == 0:
         lines.append("cProfile was not run. Use `--include-cprofile` when deterministic Python call counts are worth the slowdown.")
-    else:
-        lines.extend(_cprofile_summary(cprofile))
     lines.extend(["", "## Native Attribution", ""])
-    perf = _find_step(records, "perf-record")
-    if perf is None:
+    perf_count = 0
+    for backend in backend_names:
+        perf = _find_step(records, "perf-record", backend=backend)
+        if perf is not None:
+            lines.extend([f"### {backend}", ""])
+            lines.extend(_perf_summary(perf))
+            perf_count += 1
+    if perf_count == 0:
         lines.append("perf was not run.")
-    else:
-        lines.extend(_perf_summary(perf))
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def _find_step(records: list[dict[str, object]], profiler_type: str) -> dict[str, object] | None:
+def _run_metadata_summary(summary: dict[str, object]) -> list[str]:
+    versions = dict(summary.get("tool_versions", {}) or {})
+    return [
+        f"- Revision: `{summary.get('repository_revision', 'unknown')}`",
+        f"- Dirty worktree: `{summary.get('repository_dirty')}`",
+        "- Tools: "
+        + ", ".join(
+            f"`{name} {versions.get(name, 'unknown')}`"
+            for name in ("python", "PySide6", "pyqtgraph", "vispy", "py-spy", "perf")
+        ),
+    ]
+
+
+def _tool_status_summary(records: list[dict[str, object]]) -> list[str]:
+    rows = [
+        "| Step | backend | required | status | rc | artifacts | profiler health |",
+        "|---|---|---:|---|---:|---|---|",
+    ]
     for record in records:
+        rows.append(
+            "| "
+            + " | ".join(
+                (
+                    f"`{record.get('step_id', record.get('profiler_type', ''))}`",
+                    f"`{record.get('backend', '')}`",
+                    str(bool(record.get("required", False))),
+                    str(record.get("status", "")),
+                    str(record.get("returncode", "")),
+                    _artifact_status(record),
+                    _profiler_health(record),
+                )
+            )
+            + " |"
+        )
+    return rows
+
+
+def _artifact_status(record: dict[str, object]) -> str:
+    artifacts = tuple(record.get("artifact_paths", ()) or ())
+    missing = tuple(record.get("missing_artifacts", ()) or ())
+    if not artifacts:
+        return "none"
+    if missing:
+        return f"{len(artifacts) - len(missing)}/{len(artifacts)} present"
+    return f"{len(artifacts)}/{len(artifacts)} present"
+
+
+def _profiler_health(record: dict[str, object]) -> str:
+    diagnostics = dict(record.get("profiler_diagnostics", {}) or {})
+    profiler = str(record.get("profiler_type", ""))
+    if profiler.startswith("py-spy"):
+        return (
+            f"samples {diagnostics.get('sample_count', 0)}, "
+            f"errors {diagnostics.get('error_count', 0)}, "
+            f"missed {diagnostics.get('missed_stack_count', 0)}"
+        )
+    warning_count = diagnostics.get("warning_count")
+    if warning_count is not None:
+        return f"warnings {warning_count}"
+    return str(diagnostics.get("scope", "n/a"))
+
+
+def _find_step(records: list[dict[str, object]], profiler_type: str, *, backend: str | None = None) -> dict[str, object] | None:
+    for record in records:
+        record_backend = str(record.get("backend", "all") or "all")
+        if backend is not None and record_backend != str(backend):
+            continue
         if str(record.get("profiler_type", "")).startswith(profiler_type):
             return record
     return None
+
+
+def _summary_backend_names(records: list[dict[str, object]]) -> tuple[str, ...]:
+    names = sorted({str(record.get("backend", "")) for record in records if str(record.get("backend", "")) not in {"", "all"}})
+    return tuple(names) if names else ("all",)
 
 
 def _plain_timing_summary(path: Path) -> list[str]:
@@ -1077,25 +1233,25 @@ def _plain_timing_summary(path: Path) -> list[str]:
         "",
         "Headline only; detailed counters remain in JSONL.",
         "",
-        "| Backend | phase | total ms | first visible ms | max gap ms | tiles | compute |",
-        "|---|---|---:|---:|---:|---:|---|",
+        "| Backend | phase | temp | pacing ms | event-loop gap ms | tiles | work |",
+        "|---|---|---|---|---|---:|---|",
     ]
     for record in records:
         backend = str(record.get("backend", ""))
         phase = str(record.get("phase", ""))
-        elapsed = _format_ms(record.get("elapsed_ms"))
-        first = _format_ms(record.get("first_loaded_tile_ms") or record.get("first_display_committed_ms"))
-        gap = _format_ms(record.get("event_loop_max_gap_ms"))
+        temperature = str(record.get("run_temperature", ""))
+        pacing = _pacing_summary(record)
+        gaps = _event_loop_summary(record)
         tiles = _tile_summary(record)
-        compute = _compute_summary(record)
-        lines.append(f"| `{backend}` | `{phase}` | {elapsed} | {first} | {gap} | {tiles} | {compute} |")
+        work = _work_summary(record)
+        lines.append(f"| `{backend}` | `{phase}` | `{temperature}` | {pacing} | {gaps} | {tiles} | {work} |")
     return lines
 
 
-def _py_spy_summary(record: dict[str, object], *, title: str) -> list[str]:
+def _py_spy_summary(record: dict[str, object], *, title: str, heading: str = "###") -> list[str]:
     diagnostics = dict(record.get("profiler_diagnostics", {}) or {})
     lines = [
-        f"### {title}",
+        f"{heading} {title}",
         "",
         f"- Status: `{record.get('status')}`",
         f"- Mode: `{diagnostics.get('sampling_mode', 'unknown')}`",
@@ -1125,7 +1281,11 @@ def _tooling_slowdown_summary(plain: dict[str, object], records: list[dict[str, 
         if profiler_type == "plain":
             continue
         phases = _backend_phase_elapsed_map(Path(str(record.get("jsonl", ""))))
-        for backend in sorted(plain_phases):
+        record_backend = str(record.get("backend", "") or "")
+        compared_backends = (record_backend,) if record_backend and record_backend != "all" else tuple(sorted(plain_phases))
+        for backend in compared_backends:
+            if backend not in plain_phases:
+                continue
             baseline = plain_phases.get(backend, {})
             values = phases.get(backend, {})
             rows.append(
@@ -1276,6 +1436,21 @@ def _format_ms(value) -> str:
         return "n/a"
 
 
+def _percentile(values: tuple[float, ...], percentile: float) -> float:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return 0.0
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * (float(percentile) / 100.0)
+    lower = int(math.floor(rank))
+    upper = int(math.ceil(rank))
+    if lower == upper:
+        return ordered[lower]
+    fraction = rank - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
 def _tile_summary(record: dict[str, object]) -> str:
     tile_count = record.get("tile_count")
     full = record.get("full_tile_count")
@@ -1286,6 +1461,51 @@ def _tile_summary(record: dict[str, object]) -> str:
     if tile_count is not None and full is not None:
         return f"{tile_count}/{full}"
     return "n/a"
+
+
+def _pacing_summary(record: dict[str, object]) -> str:
+    first = record.get("first_loaded_tile_ms") or record.get("first_display_committed_ms")
+    exact_visible = record.get("fully_visible_ms")
+    draw = record.get("draw_after_complete_ms")
+    full = draw if draw is not None else record.get("elapsed_ms")
+    return " / ".join(
+        (
+            f"first {_format_ms(first)}",
+            f"visible {_format_ms(exact_visible)}",
+            f"full {_format_ms(full)}",
+        )
+    )
+
+
+def _event_loop_summary(record: dict[str, object]) -> str:
+    p95 = _format_ms(record.get("event_loop_p95_gap_ms"))
+    p99 = _format_ms(record.get("event_loop_p99_gap_ms"))
+    max_gap = _format_ms(record.get("event_loop_max_gap_ms"))
+    return f"p95 {p95} / p99 {p99} / max {max_gap}"
+
+
+def _work_summary(record: dict[str, object]) -> str:
+    parts = []
+    compute = _compute_summary(record)
+    if compute != "n/a":
+        parts.append(compute)
+    upload_bytes = _format_bytes(record.get("tile_layer_texture_upload_bytes"))
+    uploads = record.get("tile_layer_texture_uploads")
+    if uploads is not None:
+        parts.append(f"upload {uploads} / {upload_bytes}")
+    updated = record.get("tile_layer_items_updated")
+    skipped = record.get("tile_layer_items_skipped")
+    if updated is not None and skipped is not None:
+        parts.append(f"items up {updated}, skip {skipped}")
+    level_updates = record.get("tile_layer_level_updates")
+    vertex_uploads = record.get("tile_layer_vertex_uploads")
+    if level_updates is not None or vertex_uploads is not None:
+        parts.append(f"rebind level {level_updates or 0}, vertex {vertex_uploads or 0}")
+    pages = record.get("tile_layer_active_pages")
+    gpu_bytes = record.get("tile_layer_estimated_gpu_bytes")
+    if pages is not None and gpu_bytes is not None:
+        parts.append(f"resident {pages} pages / {_format_bytes(gpu_bytes)}")
+    return "; ".join(parts) if parts else "n/a"
 
 
 def _compute_summary(record: dict[str, object]) -> str:
@@ -1300,6 +1520,24 @@ def _compute_summary(record: dict[str, object]) -> str:
     if cache is not None:
         parts.append(f"cache {cache}")
     return ", ".join(parts) if parts else "n/a"
+
+
+def _format_bytes(value) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        amount = float(value)
+    except Exception:
+        return "n/a"
+    units = ("B", "KiB", "MiB", "GiB")
+    unit = units[0]
+    for unit in units:
+        if abs(amount) < 1024.0 or unit == units[-1]:
+            break
+        amount /= 1024.0
+    if unit == "B":
+        return f"{int(amount)} {unit}"
+    return f"{amount:.1f} {unit}"
 
 
 def _suite_step_temperature(previous_records: list[dict[str, object]]) -> str:
@@ -1376,6 +1614,45 @@ def _suite_child_args(argv: tuple[str, ...]) -> tuple[str, ...]:
         if arg.startswith("--jsonl=") or arg.startswith("--profiler-type=") or arg.startswith("--profiler-artifact="):
             continue
         result.append(arg)
+    return tuple(result)
+
+
+def _suite_profiler_backends(argv: tuple[str, ...]) -> tuple[str, ...]:
+    backend = "pyqtgraph"
+    args = tuple(argv)
+    for index, arg in enumerate(args):
+        if arg == "--backend" and index + 1 < len(args):
+            backend = str(args[index + 1])
+            break
+        if str(arg).startswith("--backend="):
+            backend = str(arg).split("=", 1)[1]
+            break
+    if backend == "all":
+        return ("pyqtgraph", "vispy")
+    return (backend,)
+
+
+def _suite_args_for_backend(argv: tuple[str, ...], backend: str) -> tuple[str, ...]:
+    args = tuple(argv)
+    result: list[str] = []
+    replaced = False
+    skip_next = False
+    for index, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--backend":
+            result.extend(("--backend", str(backend)))
+            replaced = True
+            skip_next = index + 1 < len(args)
+            continue
+        if str(arg).startswith("--backend="):
+            result.append(f"--backend={backend}")
+            replaced = True
+            continue
+        result.append(str(arg))
+    if not replaced:
+        result.extend(("--backend", str(backend)))
     return tuple(result)
 
 

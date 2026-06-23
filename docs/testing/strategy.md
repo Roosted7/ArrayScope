@@ -48,9 +48,12 @@ Use them to prove bounded allocations, deterministic upload/rebind behavior, cal
 Record separately:
 
 - submission time;
-- event-loop drain/first presented frame;
-- callback max gap;
+- first useful display;
+- exact-visible frame;
+- full completion;
+- event-loop p95/p99/max gap;
 - preparation/upload counters and bytes;
+- cold upload/preparation versus warm rebind/visibility work;
 - cache/residency state;
 - process RSS.
 
@@ -58,11 +61,19 @@ Use `arrayscope.tools.profile_montage_workflow` when scheduler or backend
 changes may affect perceived pacing. It drives a real window through the
 bundled NIfTI dataset, full dim-2 tiled montage, and FFT-over-dim-2 montage.
 With `--jsonl`, the tool writes phase records with first-content timing, total
-phase timing, event-loop max gap, callback observations, tile upload bytes, and
-montage compute counters. Use those JSONL fields as the timing evidence.
+phase timing, event-loop gap statistics, callback observations, tile upload
+bytes, and montage compute counters. Use those JSONL fields as the timing
+evidence. Cold and warm runs are separate evidence: a warm resident pan, clean
+flush, or level-only update must not be folded into the cold initial-display
+number.
 Full-axis FFT montage should be stage-backed once the shared stage is available;
 hundreds of direct FFT tile computations are a scheduler/cache regression even
 if tiles eventually appear.
+
+Rendering benchmark coverage must include small, medium, and large tiled cases.
+Small tiled cases protect one-tile/small-tile latency in the unified tiled
+engine; medium cases catch item/page fan-in behavior; large cases expose
+residency pressure, event-loop starvation, and backend commit scaling.
 
 Wrap the workflow with external profilers only for attribution. Prefer a
 low-impact `py-spy record --format raw --rate 50 --nonblocking --gil` sample for
@@ -78,12 +89,15 @@ The built-in `--profile-suite` runner emits plain timing JSONL, low-impact
 py-spy, full sampled py-spy, and perf artifacts by default; cProfile is
 available with `--include-cprofile`. It prints the focused `suite-summary.md`
 interpretation to stdout and leaves raw JSONL/profiler details on disk. Treat
-`suite-manifest.jsonl` as authoritative: a complete suite requires
-`overall_valid: true`, every child command to return `0`, every expected
-artifact to be nonempty, and full sampled py-spy to report samples without
-missed-stack errors. Missing tools, profiler failures, or partial artifacts are
-degraded or failed evidence that must be fixed before using the suite as
-benchmark support.
+`suite-manifest.jsonl` as authoritative. Benchmark artifacts must record git
+revision, clean/dirty state, command line, platform, backend, and tool status.
+A complete suite requires `overall_valid: true`, every child command to return
+`0`, every expected artifact to be nonempty, and full sampled py-spy to report
+samples without missed-stack errors. Missing tools, profiler failures, partial
+artifacts, or unavailable stack samples are degraded evidence, not clean
+completion. Degraded evidence can help attribution, but it must not support a
+performance claim until the missing or failed tool status is recorded and the
+claim rests on a valid timing artifact.
 
 ## Manual and real-hardware tests
 

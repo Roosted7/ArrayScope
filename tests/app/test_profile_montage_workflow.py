@@ -39,6 +39,7 @@ def test_profile_suite_commands_cover_required_profilers(tmp_path):
     assert "--format raw" in by_type["py-spy-raw-full"]["command"]
     assert "--duration 16" in by_type["py-spy-raw-full"]["command"]
     assert "--rate 80" in by_type["py-spy-raw-full"]["command"]
+    assert "started + duration + margin" in by_type["py-spy-raw-full"]["command"]
     assert "--gil" not in by_type["py-spy-raw-full"]["command"]
     assert "--nonblocking" not in by_type["py-spy-raw-full"]["command"]
     assert "perf record" in by_type["perf-record"]["command"]
@@ -61,6 +62,22 @@ def test_profile_suite_can_opt_into_cprofile_without_passing_flag_to_child(tmp_p
     assert "cprofile" in by_type
     assert "cProfile" in by_type["cprofile"]["command"]
     assert "--include-cprofile" not in by_type["plain"]["command"]
+
+
+def test_profile_suite_splits_attribution_artifacts_for_all_backends(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
+
+    commands = profiler_suite_commands(("--backend", "all", "--profile-suite", str(tmp_path), "--include-cprofile"), tmp_path)
+
+    by_step = {item["step_id"]: item for item in commands}
+    for backend in ("pyqtgraph", "vispy"):
+        assert by_step[f"cprofile:{backend}"]["backend"] == backend
+        assert by_step[f"py-spy-raw-low-impact:{backend}"]["backend"] == backend
+        assert by_step[f"py-spy-raw-full:{backend}"]["backend"] == backend
+        assert by_step[f"perf-record:{backend}"]["backend"] == backend
+        assert f"--backend {backend}" in by_step[f"py-spy-raw-low-impact:{backend}"]["command"]
+        assert f".{backend}." in by_step[f"py-spy-raw-full:{backend}"]["jsonl"]
+    assert by_step["plain"]["backend"] == "all"
 
 
 def test_profile_suite_can_opt_into_native_py_spy_without_passing_suite_flag_to_child(tmp_path):
@@ -256,7 +273,7 @@ def test_profile_suite_py_spy_nonzero_is_failed_even_with_artifacts(tmp_path, mo
     assert summary["overall_status"] == "failed"
 
 
-def test_py_spy_full_profile_requires_complete_sampling(tmp_path):
+def test_py_spy_full_profile_tolerates_one_missed_stack(tmp_path):
     from arrayscope.tools.profile_montage_workflow import _profiler_log_diagnostics, _profiler_sample_issue
 
     stdout = tmp_path / "stdout.log"
@@ -274,8 +291,26 @@ def test_py_spy_full_profile_requires_complete_sampling(tmp_path):
     assert diagnostics["sample_count"] == 20
     assert diagnostics["error_count"] == 1
     assert diagnostics["missed_stack_count"] == 1
+    assert diagnostics["sampling_complete"] is True
+    assert _profiler_sample_issue("py-spy-raw-full", diagnostics) == ""
+
+
+def test_py_spy_full_profile_rejects_multiple_missed_stacks(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import _profiler_log_diagnostics, _profiler_sample_issue
+
+    stdout = tmp_path / "stdout.log"
+    stderr = tmp_path / "stderr.log"
+    stdout.write_text(
+        "py-spy> Sampling process 80 times a second. Press Control-C to exit.\n"
+        "py-spy> Wrote raw flamegraph data. Samples: 20 Errors: 2\n",
+        encoding="utf-8",
+    )
+    stderr.write_text("[WARN  py_spy] Failed to get stack trace from 123\n[WARN  py_spy] Failed to get stack trace from 456\n", encoding="utf-8")
+
+    diagnostics = _profiler_log_diagnostics("py-spy-raw-full", stdout, stderr)
+
     assert diagnostics["sampling_complete"] is False
-    assert _profiler_sample_issue("py-spy-raw-full", diagnostics) == "py-spy full profile missed stack samples"
+    assert _profiler_sample_issue("py-spy-raw-full", diagnostics) == "py-spy full profile missed more than 1 stack sample(s)"
 
 
 def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch):

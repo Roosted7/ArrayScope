@@ -62,11 +62,11 @@ image axes, render the full dim-2 tiled montage, apply FFT on dim 2, render the
 FFT montage, then close. Confirm the pacing by eye and keep the JSONL.
 
 For timing evidence, prefer the plain JSONL run above. It records
-request-to-first-content, total phase time, event-loop max gap, callback records,
-tile upload bytes, and montage compute counters. In particular, FFT montage runs
-should not show hundreds of direct tile computations when a reusable stage is
-available; the JSONL counters should show stage-backed tiles for full-axis FFT
-montages.
+request-to-first-content, exact-visible/full-completion timing, event-loop
+p95/p99/max gaps, callback records, tile upload bytes, warm/cold work counters,
+and montage compute counters. In particular, FFT montage runs should not show
+hundreds of direct tile computations when a reusable stage is available; the
+JSONL counters should show stage-backed tiles for full-axis FFT montages.
 
 For Python stack attribution, wrap the same visible workflow with a low-rate,
 nonblocking `py-spy` sample. Treat the JSONL from the same run as timing
