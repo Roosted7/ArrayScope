@@ -640,14 +640,13 @@ class VisPyImageView2D(ImageView2D):
                     force_levels=bool(data_unchanged and levels_changed),
                     force_mapping=bool(data_unchanged and mapping_changed),
                 )
-            stats_deferred_tiles = set(int(tile) for tile in tuple(getattr(stats, "deferred_tiles", ()) or ()))
             stats_presented_tiles = getattr(stats, "presented_tiles", None)
             stats_presented_set = (
                 None
                 if stats_presented_tiles is None
                 else {int(tile) for tile in tuple(stats_presented_tiles or ())}
             )
-            tiled_presentation_complete = not stats_deferred_tiles and (
+            tiled_presentation_complete = (
                 stats_presented_set is None or stats_presented_set == requested_presented_tiles
             )
             try:
@@ -731,13 +730,14 @@ class VisPyImageView2D(ImageView2D):
             tile_delta=tile_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes,
         )
-        self._schedule_vispy_warm_tile_residency(
-            warm_payloads,
-            geometry=geometry,
-            rgb_already_windowed=rgb_already_windowed,
-            tile_delta=tile_delta,
-            tile_residency_budget_bytes=tile_residency_budget_bytes,
-        )
+        if not (getattr(tile_delta, "upserts", None) or getattr(tile_delta, "removals", None)):
+            self._schedule_vispy_warm_tile_residency(
+                warm_payloads,
+                geometry=geometry,
+                rgb_already_windowed=rgb_already_windowed,
+                tile_delta=tile_delta,
+                tile_residency_budget_bytes=tile_residency_budget_bytes,
+            )
         return _tile_commit_report(tile_payloads, tile_delta, stats)
 
     def _schedule_vispy_warm_tile_residency(
@@ -1841,7 +1841,6 @@ class VisPyImageView2D(ImageView2D):
             mipmap_available=bool(getattr(stats, "mipmap_available", False)),
             complex_texture_uploads=int(getattr(stats, "complex_texture_uploads", 0)),
             shader_uniform_updates=int(getattr(stats, "shader_uniform_updates", 0)),
-            deferred_tiles=tuple(int(tile) for tile in tuple(getattr(stats, "deferred_tiles", ()) or ())),
         )
 
     def _request_vispy_tile_layer_redraw(self) -> None:

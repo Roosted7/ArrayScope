@@ -113,7 +113,6 @@ class TileCommitReport:
 
     presented_tiles: frozenset[int] = field(default_factory=frozenset)
     removed_tiles: frozenset[int] = field(default_factory=frozenset)
-    deferred_tiles: frozenset[int] = field(default_factory=frozenset)
     texture_uploads: int = 0
     texture_upload_bytes: int = 0
     pyqtgraph_items_created: int = 0
@@ -121,6 +120,7 @@ class TileCommitReport:
     resident_rebinds: int = 0
     existing_items_shown: int = 0
     relocated_tiles: int = 0
+    storage_rebuilds: int = 0
     cold_work_ms: float = 0.0
     visibility_work_ms: float = 0.0
     total_ms: float = 0.0
@@ -130,7 +130,6 @@ class TileCommitReport:
     def __post_init__(self) -> None:
         object.__setattr__(self, "presented_tiles", frozenset(int(tile) for tile in self.presented_tiles))
         object.__setattr__(self, "removed_tiles", frozenset(int(tile) for tile in self.removed_tiles))
-        object.__setattr__(self, "deferred_tiles", frozenset(int(tile) for tile in self.deferred_tiles))
         for name in (
             "texture_uploads",
             "texture_upload_bytes",
@@ -139,6 +138,7 @@ class TileCommitReport:
             "resident_rebinds",
             "existing_items_shown",
             "relocated_tiles",
+            "storage_rebuilds",
         ):
             object.__setattr__(self, name, max(0, int(getattr(self, name))))
         for name in ("cold_work_ms", "visibility_work_ms", "total_ms"):

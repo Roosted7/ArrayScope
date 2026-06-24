@@ -76,7 +76,6 @@ def _snapshot():
         montage=MontageRuntimeDiagnostics(
             active=False,
             display_mode="tile_layer",
-            deferred_display_tiles=6,
             backend_setting="auto",
             backend_chosen="tile_layer",
             backend_reason="RGB/complex montage canvas pixels 3000000 > 2000000",

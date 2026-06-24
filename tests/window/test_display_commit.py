@@ -93,9 +93,9 @@ def test_tiled_committer_keeps_fake_raster_out_of_committed_frame():
     assert view.bounds == (0.0, 0.0, 1.0, 1.0)
 
 
-def test_tiled_committer_excludes_deferred_payloads_from_committed_frame():
+def test_tiled_committer_excludes_unpresented_payloads_from_committed_frame():
     view = _FakeImageView()
-    view.report = TileCommitReport(deferred_tiles=(0,))
+    view.report = TileCommitReport(presented_tiles=())
     presentation = _presentation()
     committer = DisplayCommitter(view)
 

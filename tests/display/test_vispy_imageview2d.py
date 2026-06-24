@@ -873,7 +873,6 @@ def test_vispy_direct_tiled_scalar_presented_tiles_render_nonblack_without_level
             tile_residency_budget_bytes=64 * 1024 * 1024,
         )
         assert report.presented_tiles == frozenset({0, 1})
-        assert report.deferred_tiles == frozenset()
 
         for _ in range(20):
             qt_app.processEvents()
@@ -1496,7 +1495,6 @@ def test_vispy_scalar_tiled_geometry_retry_preserves_previous_frame(qt_app):
         )
 
         assert report.presented_tiles == frozenset({0, 1})
-        assert report.deferred_tiles == frozenset()
         assert not view._vispy_image.visible
         assert canvas_updates
 
@@ -1512,7 +1510,6 @@ def test_vispy_scalar_tiled_geometry_retry_preserves_previous_frame(qt_app):
         )
 
         assert retry_report.presented_tiles == frozenset({0, 1})
-        assert retry_report.deferred_tiles == frozenset()
         assert not view._vispy_image.visible
     finally:
         view.close()
@@ -1561,11 +1558,9 @@ def test_vispy_tile_level_preview_updates_all_pages_without_deferred_retry(qt_ap
         view._apply_histogram_preview_levels((0.2, 0.8))
         stats = layer.last_stats
 
-        assert stats.deferred_tiles == ()
         assert stats.presented_tiles == (0, 1, 2)
         assert tuple(float(value) for value in layer._levels) == (0.2, 0.8)
         assert all(tuple(getattr(visual, "_levels", ())) == (0.2, 0.8) for visual in layer._visuals_by_page[:3])
-        assert view._pending_tile_level_preview_levels is None
         assert canvas_updates
     finally:
         view.close()
@@ -1641,7 +1636,6 @@ def test_vispy_first_typed_tiled_commit_applies_payload_pixels_and_levels_before
 
         layer = view._vispy_gpu_montage_layer
         assert report.presented_tiles == frozenset({0, 1})
-        assert report.deferred_tiles == frozenset()
         assert layer.last_stats.presented_tiles == (0, 1)
         clean_delta = TilePresentationDelta(
             structure_revision=1,
@@ -1665,7 +1659,6 @@ def test_vispy_first_typed_tiled_commit_applies_payload_pixels_and_levels_before
             tile_residency_budget_bytes=64 * 1024 * 1024,
         )
 
-        assert retry_report.deferred_tiles == frozenset()
         assert retry_report.presented_tiles == frozenset({0, 1})
         assert layer.last_stats.presented_tiles == (0, 1)
         assert tuple(float(value) for value in layer._levels) == (0.0, float(np.nanmax(right.histogram_data)))
@@ -1674,7 +1667,6 @@ def test_vispy_first_typed_tiled_commit_applies_payload_pixels_and_levels_before
             assert layer._pool.source_ids.get(("source", payload.source_id)) == payload.source_id
         assert layer._shader_mapping is not None
         assert any(len(getattr(visual, "vertex_data", ())) > 0 for visual in layer._visuals_by_page)
-        assert view._pending_tile_level_preview_levels is None
     finally:
         view.close()
 
@@ -1728,11 +1720,40 @@ def test_vispy_first_class_tiled_warms_loaded_near_sources_after_visible_commit(
         for _ in range(10):
             qt_app.processEvents()
 
+        assert getattr(view, "_last_vispy_warm_tile_stats", None) is None
+
+        clean_delta = TilePresentationDelta(
+            structure_revision=1,
+            payload_revision=1,
+            visibility_revision=2,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=1,
+            active_tiles=(0,),
+            planned_tiles=(0, 1, 2),
+            near_tiles=(0, 1, 2),
+            near_tile_source_ids={index: payload.source_id for index, payload in payloads.items()},
+        )
+        view.setTiledMontagePresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState(payloads),
+            tile_delta=clean_delta,
+            histogramPlotData=None,
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+        clean_visible = view.lastImageUploadTiming()
+
+        for _ in range(10):
+            qt_app.processEvents()
+
         warm = view._last_vispy_warm_tile_stats
         assert warm is not None
         assert warm.items_updated == 2
         assert warm.resident_items == 3
-        assert view.lastImageUploadTiming().visible_bytes == visible.visible_bytes
+        assert view.lastImageUploadTiming().visible_bytes == clean_visible.visible_bytes
     finally:
         view.close()
 

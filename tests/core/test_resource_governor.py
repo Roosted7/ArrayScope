@@ -38,6 +38,15 @@ def test_governor_profile_tuning_controls_batch_defaults():
     assert decision.budget_ms == 11.0
 
 
+def test_vispy_presentation_starts_conservative_until_feedback():
+    governor = ResourceGovernor(_policy(MemoryProfileChoice.AGGRESSIVE), profile=MemoryProfileChoice.AGGRESSIVE)
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    assert decision.batch_limit == governor.latency_feedback.tuning.max_batch
+
+
 def test_ui_pressure_reduces_batch_and_workers():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0)
     memory = _memory()
@@ -90,6 +99,143 @@ def test_governor_byte_observations_reduce_byte_cap():
     decision = governor.decide_ui_work("montage_commit", interactive=False)
 
     assert 0 < decision.byte_cap < 32 * 1024 * 1024
+
+
+def test_presentation_byte_cap_covers_decided_batch_items():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_present_total",
+        12.0,
+        item_count=6,
+        byte_count=6 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    assert decision.byte_cap >= decision.batch_limit * 1024 * 1024
+
+
+def test_presentation_over_budget_sample_backs_off_next_decision_immediately():
+    governor = ResourceGovernor(_policy(MemoryProfileChoice.AGGRESSIVE), profile=MemoryProfileChoice.AGGRESSIVE)
+    governor.record_ui_observation(
+        "montage_present_total",
+        40.0,
+        item_count=20,
+        byte_count=20 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    assert decision.batch_limit <= 13
+    assert decision.byte_cap <= 14 * 1024 * 1024
+
+
+def test_presentation_over_budget_sample_scales_from_measured_cost_not_warning_threshold():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_present_total",
+        12.0,
+        item_count=12,
+        byte_count=12 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    assert decision.batch_limit == 12
+    assert decision.byte_cap >= 12 * 1024 * 1024
+
+
+def test_presentation_under_warning_sample_recovers_from_single_item_limit():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_present_total",
+        40.0,
+        item_count=12,
+        byte_count=12 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+    assert governor.decide_ui_work("montage_present_total", interactive=False).batch_limit == 7
+
+    governor.record_ui_observation(
+        "montage_present_total",
+        7.0,
+        item_count=4,
+        byte_count=4 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    assert decision.batch_limit > 7
+    assert decision.byte_cap > 4 * 1024 * 1024
+
+
+def test_presentation_feedback_records_but_filters_isolated_outlier():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_present_total",
+        10.0,
+        item_count=10,
+        byte_count=10 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+    before = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    governor.record_ui_observation(
+        "montage_present_total",
+        90.0,
+        item_count=10,
+        byte_count=10 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    after = governor.decide_ui_work("montage_present_total", interactive=False)
+    raw = governor.diagnostics().recent_ui_work_observations[-1]
+
+    assert raw.elapsed_ms == 90.0
+    assert after.batch_limit >= before.batch_limit // 2
+
+
+def test_repeated_presentation_outliers_are_learned():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_present_total",
+        10.0,
+        item_count=10,
+        byte_count=10 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+    governor.record_ui_observation(
+        "montage_present_total",
+        90.0,
+        item_count=10,
+        byte_count=10 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+    governor.record_ui_observation(
+        "montage_present_total",
+        95.0,
+        item_count=10,
+        byte_count=10 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    assert decision.batch_limit < 10
 
 
 def test_upload_telemetry_does_not_drive_global_ui_pressure():

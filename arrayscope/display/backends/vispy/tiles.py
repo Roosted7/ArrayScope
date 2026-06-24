@@ -61,7 +61,6 @@ class GpuMontageLayerStats:
     mipmap_available: bool = False
     complex_texture_uploads: int = 0
     shader_uniform_updates: int = 0
-    deferred_tiles: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -404,21 +403,20 @@ class TextureAtlasPool:
             delta_removals = set(int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ()))
             delta_removals.update(int(tile) for tile in tuple(self.tile_slots) if int(tile) not in active_set)
             delta_upserts = dict(explicit_upserts)
-            for tile_number in sorted(active_set.union(dirty)):
+            for tile_number in sorted(active_set):
                 payload = payload_map.get(int(tile_number))
                 if payload is None:
                     continue
                 resident_key = _resident_key(payload)
                 if (
-                    int(tile_number) in dirty
-                    or int(tile_number) not in self.tile_slots
+                    int(tile_number) not in self.tile_slots
                     or self.tile_resident_keys.get(int(tile_number)) != resident_key
                     or int(tile_number) not in self.tile_uvs
                     or self.source_ids.get(resident_key) != payload.source_id
                 ):
                     delta_upserts[int(tile_number)] = payload
             storage_mode = self.storage_mode
-            delta_items = tuple(sorted(delta_upserts.items()))
+            delta_items = tuple((int(tile), payload) for tile, payload in delta_upserts.items())
             if all(
                 _payload_supported_by_storage_mode(payload, storage_mode, rgb_already_windowed=rgb_already_windowed)
                 for _tile, payload in delta_items
@@ -432,6 +430,10 @@ class TextureAtlasPool:
                     storage_mode=storage_mode,
                     tile_shape=tile_shape,
                     budget_bytes=budget_bytes,
+                )
+                layout_invalidates_residency = (
+                    self.tile_shape != tile_shape
+                    or self.storage_mode != _normalize_storage_mode(storage_mode)
                 )
                 rebuilt = self.ensure_layout(
                     tile_shape=tile_shape,
@@ -456,7 +458,6 @@ class TextureAtlasPool:
                 complex_uploads = 0
                 updated = 0
                 skipped = 0
-                deferred_tiles: list[int] = []
                 evictions_before = self.eviction_count
                 evicted_near_before = self.evicted_near_count
 
@@ -467,7 +468,13 @@ class TextureAtlasPool:
                     self._touch(resident_key)
                     source_changed = self.source_ids.get(resident_key) != payload.source_id
                     missing_uploaded_source = resident_key not in self.source_ids
-                    should_upload = bool(rebuilt or newly_assigned or source_changed or missing_uploaded_source or int(tile_number) in dirty)
+                    should_upload = bool(
+                        layout_invalidates_residency
+                        or newly_assigned
+                        or source_changed
+                        or missing_uploaded_source
+                        or int(tile_number) in dirty
+                    )
                     self._set_tile_mapping(
                         int(tile_number),
                         resident_key,
@@ -514,17 +521,13 @@ class TextureAtlasPool:
                     and self.tile_resident_keys.get(int(tile_number)) == _resident_key(payload)
                     and self.source_ids.get(_resident_key(payload)) == payload.source_id
                 )
-                presented_set = set(presented_tiles)
-                for tile_number in active_payloads:
-                    if int(tile_number) not in presented_set:
-                        deferred_tiles.append(int(tile_number))
                 elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt or delta_removals else 0.0
                 return self.tile_uvs, GpuMontageLayerStats(
                     visible_items=len(presented_tiles),
                     presented_tiles=presented_tiles,
                     resident_items=self.resident_count,
                     atlas_capacity=self.capacity,
-                    atlas_rebuilds=int(rebuilt),
+                    atlas_rebuilds=int(layout_invalidates_residency),
                     atlas_evictions=self.eviction_count - evictions_before,
                     texture_uploads=uploads,
                     texture_upload_bytes=upload_bytes,
@@ -547,9 +550,8 @@ class TextureAtlasPool:
                     mipmap_updates=0,
                     mipmap_available=False,
                     complex_texture_uploads=complex_uploads,
-                    deferred_tiles=tuple(deferred_tiles),
                 )
-        raw_payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
+        raw_payload_items = tuple((int(key), value) for key, value in payloads.items())
         storage_mode = (
             _atlas_storage_mode(raw_payload_items, rgb_already_windowed=rgb_already_windowed)
             if raw_payload_items
@@ -589,7 +591,6 @@ class TextureAtlasPool:
         complex_uploads = 0
         updated = 0
         skipped = int(unsupported_items)
-        deferred_tiles: list[int] = []
         evictions_before = self.eviction_count
         evicted_near_before = self.evicted_near_count
         tile_h, tile_w = self.tile_shape or tile_shape
@@ -646,9 +647,6 @@ class TextureAtlasPool:
             and self.source_ids.get(_resident_key(payload)) == payload.source_id
         )
         presented_set = set(presented_tiles)
-        for tile_number, _payload in payload_items:
-            if int(tile_number) not in presented_set and int(tile_number) not in deferred_tiles:
-                deferred_tiles.append(int(tile_number))
         self.tile_slots = {
             int(tile): slot
             for tile, slot in active_tile_slots.items()
@@ -697,7 +695,6 @@ class TextureAtlasPool:
             mipmap_updates=0,
             mipmap_available=False,
             complex_texture_uploads=complex_uploads,
-            deferred_tiles=tuple(deferred_tiles),
         )
 
     def warm_payloads(
@@ -721,7 +718,7 @@ class TextureAtlasPool:
                 budget_bytes=self.budget_bytes,
                 warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
             )
-        payload_items = tuple(sorted((int(key), value) for key, value in payloads.items()))
+        payload_items = tuple((int(key), value) for key, value in payloads.items())
         requested_mode = _atlas_storage_mode(payload_items, rgb_already_windowed=rgb_already_windowed)
         if self.storage_mode is not None and self.storage_mode != requested_mode:
             # Warm work must never replace the active atlas layout.  A later
@@ -781,7 +778,7 @@ class TextureAtlasPool:
         # than the configured GPU budget.
         available_warm_keys = max(0, self.capacity - len(self.active_resident_keys))
         new_warm_budget = available_warm_keys
-        deferred = 0
+        skipped_budget = 0
         for _tile_number, payload in payload_items:
             if not _payload_supported_by_storage_mode(payload, self.storage_mode, rgb_already_windowed=rgb_already_windowed):
                 skipped += 1
@@ -793,7 +790,7 @@ class TextureAtlasPool:
                 continue
             if resident_key not in self.resident_slots and new_warm_budget <= 0:
                 skipped += 1
-                deferred += 1
+                skipped_budget += 1
                 continue
             if resident_key not in self.resident_slots:
                 new_warm_budget -= 1
@@ -860,8 +857,8 @@ class TextureAtlasPool:
             mipmap_available=False,
             complex_texture_uploads=complex_uploads,
             capacity_warning=(
-                f"deferred {deferred} warm tiles because the residency budget is full"
-                if deferred
+                f"skipped {skipped_budget} warm tiles because the residency budget is full"
+                if skipped_budget
                 else ""
             ),
         )
@@ -1146,11 +1143,9 @@ class GpuMontageLayer:
             visual.visible = page_index in active_pages
         for visual in self._visuals_by_page[len(self._pool.pages):]:
             visual.visible = False
-        deferred_tiles = tuple(sorted(int(tile) for tile in tuple(texture_stats.deferred_tiles or ())))
         effective_presented_tiles = tuple(
             int(tile)
             for tile in tuple(texture_stats.presented_tiles or ())
-            if int(tile) not in set(deferred_tiles)
         )
         self._visible_items = len(effective_presented_tiles)
         self._last_stats = GpuMontageLayerStats(
@@ -1185,7 +1180,6 @@ class GpuMontageLayer:
             mipmap_available=texture_stats.mipmap_available,
             complex_texture_uploads=texture_stats.complex_texture_uploads,
             shader_uniform_updates=level_updates + mapping_updates,
-            deferred_tiles=deferred_tiles,
         )
         return self._last_stats
 
@@ -1596,7 +1590,7 @@ def _payload_texture_data(
 def _fit_scalar(data, shape: tuple[int, int]) -> np.ndarray:
     arr = np.asarray(data, dtype=np.float32)
     if tuple(arr.shape[:2]) == tuple(shape) and arr.ndim == 2 and arr.flags.c_contiguous:
-        # Gloo retains the array in its deferred command queue.  Reusing the
+        # Gloo may retain the array in its command queue.  Reusing the
         # immutable payload plane avoids another full tile copy before upload.
         return arr
     out = np.zeros(shape, dtype=np.float32)
@@ -1668,7 +1662,7 @@ def _complex_rg_texture(data) -> np.ndarray:
 
 
 def _upload_copy_required(staging: np.ndarray, payload: DisplayTilePayload, *, force: bool = False) -> bool:
-    """Ask VisPy to retain temporary staging planes before deferred GL upload."""
+    """Ask VisPy to retain temporary staging planes before queued GL upload."""
 
     if force:
         return True

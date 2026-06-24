@@ -300,7 +300,6 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
                 "active_presented_tile_count": int(visibility_state["active_presented_tile_count"]),
                 "active_planned_tile_count": int(visibility_state["active_planned_tile_count"]),
                 "requested_tile_count": int(visibility_state["requested_tile_count"]),
-                "deferred_display_tile_count": int(visibility_state["deferred_display_tile_count"]),
                 "vispy_draw_count_start": int(draw_start),
                 "vispy_draw_count_complete": _vispy_draw_count(win),
                 "vispy_tile_presentation_request_count": _vispy_tile_presentation_request_count(win),
@@ -313,7 +312,7 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
     raise TimeoutError(
         "timed out waiting for montage completion: "
         f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
-        f"loading={snapshot.montage.loading_tiles} deferred={snapshot.montage.deferred_display_tiles} "
+        f"loading={snapshot.montage.loading_tiles} "
         f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
         f"completed={0 if session is None else len(getattr(session, 'pending_completed_tiles', ()) or ())} "
         f"stage_waiting={0 if session is None else sum(len(tiles) for tiles in getattr(session, 'stage_waiting_tiles', {}).values())} "
@@ -339,6 +338,7 @@ def _phase_record(
     montage = snapshot.montage
     resource = snapshot.resource_governor
     recent_callbacks = () if resource is None else tuple(resource.recent_over_warning_callbacks)
+    recent_ui_work = () if resource is None else tuple(resource.recent_ui_work_observations)
     feedback_channels = () if resource is None else tuple(resource.feedback_channels)
     ui_decisions = () if resource is None else tuple(resource.ui_decisions)
     lane_decisions = () if resource is None else tuple(resource.lane_decisions)
@@ -356,7 +356,6 @@ def _phase_record(
         "montage_loaded_tiles": int(montage.loaded_tiles),
         "montage_loading_tiles": int(montage.loading_tiles),
         "montage_pending_tiles": int(montage.pending_tiles),
-        "montage_deferred_display_tiles": int(montage.deferred_display_tiles),
         "montage_tile_compute_cache_hits": int(montage.tile_compute_cache_hits),
         "montage_tile_compute_stage_backed": int(montage.tile_compute_stage_backed),
         "montage_tile_compute_direct": int(montage.tile_compute_direct),
@@ -405,6 +404,7 @@ def _phase_record(
             for decision in lane_decisions
         ],
         "resource_ui_decisions": [asdict(decision) for decision in ui_decisions],
+        "recent_ui_work_observations": [asdict(observation) for observation in recent_ui_work],
         "recent_over_warning_callbacks": [asdict(callback) for callback in recent_callbacks],
     }
 
@@ -443,14 +443,12 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
             "fully_visible": False,
             "active_presented_tile_count": 0,
             "active_planned_tile_count": 0,
-            "deferred_display_tile_count": 0,
         }
     active = set(_active_planned_montage_tiles(session))
     expected = set(_expected_requested_montage_tiles(session))
     if not expected:
         expected = set(active)
     presented = {int(tile) for tile in tuple(getattr(session, "presented_tiles", ()) or ())}
-    deferred = tuple(int(tile) for tile in tuple(getattr(session, "deferred_display_tiles", ()) or ()))
     vispy = _vispy_presentation_diagnostics(win)
     overlay_count = _montage_overlay_count(win)
     overlays_above_tiles = bool(vispy.get("overlays_above_tiles", False))
@@ -472,9 +470,7 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
         or getattr(session, "attached_stage_requests", ())
         or getattr(session, "stage_waiting_tiles", ())
         or getattr(session, "final_commit_pending", False)
-        or getattr(session, "final_display_drain_pending", False)
         or getattr(session, "flush_pending", False)
-        or deferred
         or getattr(session, "dirty_payloads", ())
         or getattr(session, "pending_removals", ())
     )
@@ -492,7 +488,6 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
         "active_presented_tile_count": len(active_presented),
         "active_planned_tile_count": len(active),
         "requested_tile_count": len(expected),
-        "deferred_display_tile_count": len(deferred),
     }
 
 

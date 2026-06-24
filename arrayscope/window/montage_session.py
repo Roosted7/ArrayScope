@@ -45,6 +45,37 @@ def _viewport_tiles(
     )
 
 
+def _cap_tile_upserts(
+    upserts: dict[int, DisplayTilePayload],
+    *,
+    active_tiles: tuple[int, ...],
+    max_upserts: int | None,
+    max_upsert_bytes: int | None,
+) -> dict[int, DisplayTilePayload]:
+    if not upserts:
+        return {}
+    item_cap = None if max_upserts is None else max(0, int(max_upserts))
+    byte_cap = None if max_upsert_bytes is None else max(0, int(max_upsert_bytes))
+    if item_cap is None and byte_cap is None:
+        return upserts
+    if item_cap == 0 or byte_cap == 0:
+        return {}
+
+    del active_tiles
+    ordered = tuple((int(tile), payload) for tile, payload in upserts.items())
+    capped: dict[int, DisplayTilePayload] = {}
+    used_bytes = 0
+    for tile, payload in ordered:
+        if item_cap is not None and len(capped) >= item_cap:
+            break
+        payload_bytes = int(getattr(payload, "nbytes", 0) or 0)
+        if byte_cap is not None and capped and used_bytes + payload_bytes > byte_cap:
+            break
+        capped[int(tile)] = payload
+        used_bytes += max(0, payload_bytes)
+    return capped
+
+
 @dataclass
 class MontageRenderSession:
     session_id: int
@@ -86,7 +117,6 @@ class MontageRenderSession:
     flush_pending: bool = False
     last_commit_monotonic: float = 0.0
     final_commit_pending: bool = False
-    final_display_drain_pending: bool = False
     show_loading_overlays: bool = False
     defer_side_panels: bool = False
     display_committed: bool = False
@@ -129,7 +159,6 @@ class MontageRenderSession:
     _last_near_tiles: tuple[int, ...] = ()
     _near_tile_numbers_cache_key: tuple[object, ...] | None = None
     _near_tile_numbers_cache: tuple[int, ...] = ()
-    deferred_display_tiles: tuple[int, ...] = ()
     _tile_states_cached_revision: int = -1
     _tile_states_cached_tuple: tuple[MontageTileState, ...] = ()
 
@@ -368,6 +397,7 @@ class MontageRenderSession:
         for tile_number, rendered in self.rendered_tiles.items():
             tile_number = int(tile_number)
             previous = self.display_tile_payloads.get(tile_number)
+            owns_committed_presentation = tile_number in self.presented_tiles
             if previous is None:
                 base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
                 texture_data, _texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
@@ -379,6 +409,7 @@ class MontageRenderSession:
                     texture_data=texture_data,
                 )
                 previous = by_source.get(source_id)
+                owns_committed_presentation = previous is not None
             if previous is None:
                 continue
             if int(previous.tile_number) == tile_number and int(previous.source_index) == int(rendered.tile.source_index):
@@ -390,7 +421,7 @@ class MontageRenderSession:
                     source_index=int(rendered.tile.source_index),
                 )
             self.display_tile_payloads[tile_number] = payload
-            if seeded_state.get(tile_number) is not payload:
+            if owns_committed_presentation and seeded_state.get(tile_number) is not payload:
                 seeded_state[tile_number] = payload
                 self.pending_payload_upserts[tile_number] = None
                 changed_state = True
@@ -468,6 +499,8 @@ class MontageRenderSession:
         source_ids: dict[int, object] | None,
         *,
         cold_deadline_ms: float | None = None,
+        max_upserts: int | None = None,
+        max_upsert_bytes: int | None = None,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         source_ids = dict(source_ids or {})
         previous_state = self.tile_presentation_state
@@ -480,15 +513,26 @@ class MontageRenderSession:
                 self.dirty_payloads.pop(int(stale), None)
                 self.pending_payload_upserts.pop(int(stale), None)
         lod_factor = self._selected_lod_factor()
-        dirty_payload_tiles = set(int(tile) for tile in self.dirty_payloads)
-        dirty_payload_tiles.update(int(tile) for tile in self.pending_payload_upserts)
-        dirty_payload_tiles.update(int(tile) for tile in self.deferred_display_tiles)
-        for tile_number in sorted(dirty_payload_tiles):
+        dirty_payload_tiles = tuple(
+            dict.fromkeys(
+                (
+                    *(int(tile) for tile in self.dirty_payloads),
+                    *(int(tile) for tile in self.pending_payload_upserts),
+                )
+            )
+        )
+        for tile_number in dirty_payload_tiles:
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is not None:
                 self._ensure_display_tile_payload(int(tile_number), rendered, source_ids, lod_factor=lod_factor)
         current_payloads = self.display_tile_payloads
         current_loaded = set(self.rendered_tiles)
+        planned = tuple(
+            int(tile.montage_index)
+            for tile in tuple(self.visible_tiles)
+            if int(tile.montage_index) not in self.skipped_tiles
+        )
+        active = tuple(int(tile) for tile in planned if int(tile) in current_loaded)
         valid_tile_count = len(tuple(getattr(self.plan, "tiles", ()) or ()))
         removals = tuple(
             sorted(
@@ -500,7 +544,7 @@ class MontageRenderSession:
             )
         )
         upserts: dict[int, DisplayTilePayload] = {}
-        for tile_number in sorted(dirty_payload_tiles):
+        for tile_number in dirty_payload_tiles:
             payload = current_payloads.get(int(tile_number))
             if payload is None:
                 continue
@@ -519,12 +563,16 @@ class MontageRenderSession:
                 continue
             upserts[int(tile_number)] = payload
 
-        planned = tuple(
-            int(tile.montage_index)
-            for tile in tuple(self.visible_tiles)
-            if int(tile.montage_index) not in self.skipped_tiles
+        upserts = _cap_tile_upserts(
+            upserts,
+            active_tiles=active,
+            max_upserts=max_upserts,
+            max_upsert_bytes=max_upsert_bytes,
         )
-        active = tuple(int(tile) for tile in planned if int(tile) in current_loaded)
+        if max_upserts is not None or max_upsert_bytes is not None:
+            admitted = set(int(tile) for tile in upserts)
+            admitted.update(int(tile) for tile in self.presented_tiles)
+            active = tuple(int(tile) for tile in active if int(tile) in admitted)
         near = tuple(tile for tile in self._near_tile_numbers(margin_tiles=2) if int(tile) not in self.skipped_tiles)
         # Residency is keyed by the complete texture-content identity carried
         # by DisplayTilePayload.source_id, not the evaluator's base tile key.
@@ -543,7 +591,6 @@ class MontageRenderSession:
 
         force_refresh = False
         clear_reason = ""
-        self.deferred_display_tiles = ()
 
         base_revision = int(getattr(previous_state, "revision", 0))
         target_revision = base_revision + (1 if upserts or removals else 0)
@@ -598,10 +645,6 @@ class MontageRenderSession:
             self.dirty_payloads.pop(int(tile), None)
             self.pending_payload_upserts.pop(int(tile), None)
             self.display_tile_payloads.pop(int(tile), None)
-        for tile in report.deferred_tiles:
-            if int(tile) in self.rendered_tiles:
-                self.dirty_payloads[int(tile)] = None
-        self.deferred_display_tiles = tuple(int(tile) for tile in report.deferred_tiles)
         return acknowledged
 
     def mark_loading(self, tile: MontageTile) -> None:
@@ -680,9 +723,7 @@ class MontageRenderSession:
             or self.attached_stage_requests
             or self.stage_waiting_tiles
             or self.final_commit_pending
-            or self.final_display_drain_pending
             or self.flush_pending
-            or self.deferred_display_tiles
             or self.dirty_payloads
             or self.pending_payload_upserts
             or self.pending_removals
@@ -752,7 +793,6 @@ class MontageRenderSession:
     def note_committed(self) -> None:
         self.last_commit_monotonic = monotonic()
         self.final_commit_pending = False
-        self.final_display_drain_pending = False
         self.flush_pending = False
 
     def enqueue_pending_tile(self, tile: MontageTile) -> bool:

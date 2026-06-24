@@ -129,13 +129,11 @@ def test_tile_commit_report_uses_backend_presented_tile_ids_for_middle_holes():
     stats = TileLayerUpdateStats(
         visible_items=2,
         presented_tiles=(0, 2),
-        deferred_tiles=(),
     )
 
     report = _tile_commit_report(payloads, SimpleNamespace(removals=()), stats)
 
     assert report.presented_tiles == frozenset({0, 2})
-    assert report.deferred_tiles == frozenset({1})
 
 
 def test_update_image_data_fast_accepts_display_ready_rgb(qt_app):
@@ -386,7 +384,6 @@ def test_tiled_presentation_does_not_budget_ready_payload_visibility(qt_app):
         histogramRange=(0.0, 3.0),
     )
 
-    assert report.deferred_tiles == frozenset()
     assert report.presented_tiles == frozenset({0, 1, 2})
     view.close()
 
@@ -433,13 +430,11 @@ def test_first_typed_tiled_commit_applies_payload_pixels_and_levels_before_autol
     )
 
     states = view._montage_tile_layer.states
-    assert report.deferred_tiles == frozenset()
     assert set(states) == {0, 1}
     np.testing.assert_array_equal(states[0].item.image, left)
     np.testing.assert_array_equal(states[1].item.image, right)
     assert tuple(float(value) for value in states[0].item.levels) == (0.0, 25.0)
     assert tuple(float(value) for value in states[1].item.levels) == (0.0, 25.0)
-    assert view._pending_tile_level_preview_levels is None
     view.close()
 
 
@@ -517,7 +512,6 @@ def test_pyqtgraph_tiled_retarget_updates_shifted_active_payloads(qt_app):
         states = view._montage_tile_layer.states
         timing = view.lastImageUploadTiming()
         assert report.presented_tiles == frozenset({0, 1})
-        assert report.deferred_tiles == frozenset()
         np.testing.assert_array_equal(states[0].item.image, images[1])
         np.testing.assert_array_equal(states[1].item.image, images[2])
         assert states[0].source_index == 1
@@ -586,7 +580,6 @@ def test_pyqtgraph_clean_typed_tiled_commit_stays_noop(qt_app):
 
         timing = view.lastImageUploadTiming()
         assert report.presented_tiles == frozenset({0, 1})
-        assert report.deferred_tiles == frozenset()
         assert timing.tile_layer_items_updated == 0
         assert timing.tile_layer_image_replacements == 0
         assert timing.visible_bytes == 0
@@ -594,7 +587,7 @@ def test_pyqtgraph_clean_typed_tiled_commit_stays_noop(qt_app):
         view.close()
 
 
-def test_pyqtgraph_deferred_tiled_payload_keeps_existing_item_visible(qt_app, monkeypatch):
+def test_pyqtgraph_budgeted_tiled_payload_keeps_existing_item_visible(qt_app, monkeypatch):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
@@ -659,7 +652,7 @@ def test_pyqtgraph_deferred_tiled_payload_keeps_existing_item_visible(qt_app, mo
             histogramRange=(0.0, 20.0),
         )
 
-        assert report.deferred_tiles == frozenset({1})
+        assert report.presented_tiles == frozenset({0, 1})
         assert 1 in view._montage_tile_layer.states
         assert view._montage_tile_layer.states[1].item is original_item
         assert view._montage_tile_layer.states[1].visible is True

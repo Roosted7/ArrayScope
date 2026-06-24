@@ -120,10 +120,6 @@ class ImageView2D(QtWidgets.QWidget):
         self._upload_timing = None
         self._last_upload_timing = ImageUploadTiming()
         self._gui_callback_observer = None
-        self._pending_tile_level_preview_levels = None
-        self._tile_level_preview_retry_timer = QtCore.QTimer(self)
-        self._tile_level_preview_retry_timer.setSingleShot(True)
-        self._tile_level_preview_retry_timer.timeout.connect(self._flush_deferred_tile_level_preview)
         self._montage_display_mode = "canvas"
         self._montage_tile_layer = None
         self._montage_tile_layer_histogram_key = None
@@ -720,7 +716,6 @@ class ImageView2D(QtWidgets.QWidget):
             + int(getattr(stats, "existing_items_shown", 0))
             + int(getattr(stats, "relocated_tiles", 0))
             + int(getattr(stats, "level_updates", 0))
-            + len(tuple(getattr(stats, "deferred_tiles", ()) or ()))
         )
         if elapsed_ms > 0.0 or observed_items > 0:
             self._record_gui_callback_observation(
@@ -1149,8 +1144,6 @@ class ImageView2D(QtWidgets.QWidget):
             if self._montage_display_mode == "tile_layer":
                 stats = self._update_montage_tile_levels(levels)
                 self._record_tile_layer_stats(stats)
-                if tuple(getattr(stats, "deferred_tiles", ()) or ()):
-                    self._schedule_deferred_tile_level_preview(levels)
                 return
             if self._rgbBaseImage is None or self.histogramSource is None:
                 if self.imageItem is not None and self.imageDisp is not None and not self._is_rgb_image(self.image):
@@ -1167,26 +1160,9 @@ class ImageView2D(QtWidgets.QWidget):
             if started_timing:
                 self._finish_upload_timing()
 
-    def _schedule_deferred_tile_level_preview(self, levels) -> None:
-        self._pending_tile_level_preview_levels = (float(levels[0]), float(levels[1]))
-        timer = getattr(self, "_tile_level_preview_retry_timer", None)
-        if timer is not None and not timer.isActive():
-            timer.start(0)
-
-    def _flush_deferred_tile_level_preview(self) -> None:
-        levels = self._pending_tile_level_preview_levels
-        self._pending_tile_level_preview_levels = None
-        if levels is None:
-            return
-        self._apply_histogram_preview_levels(levels)
-
     def cancelHistogramLevelInteraction(self) -> None:
         if self._histogram_preview_controller is not None:
             self._histogram_preview_controller.cancel()
-        self._pending_tile_level_preview_levels = None
-        timer = getattr(self, "_tile_level_preview_retry_timer", None)
-        if timer is not None and timer.isActive():
-            timer.stop()
         if self._histogram_display_controller is not None:
             self._histogram_display_controller.cancel_manual_edit()
                 
@@ -2109,17 +2085,16 @@ def _tiled_montage_placeholder(display_shape, tile_payloads) -> np.ndarray:
 
 def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     payloads = dict(tile_payloads or {})
-    deferred = frozenset(int(tile) for tile in tuple(getattr(stats, "deferred_tiles", ()) or ()))
     backend_presented = getattr(stats, "presented_tiles", None)
     if backend_presented is not None:
         presented = frozenset(int(tile) for tile in tuple(backend_presented or ()) if int(tile) in payloads)
-        deferred = deferred.union(int(tile) for tile in payloads if int(tile) not in presented)
     else:
         visible_items = int(getattr(stats, "visible_items", len(payloads)) or 0)
         if visible_items < len(payloads):
             payload_order = tuple(sorted(int(tile) for tile in payloads))
-            deferred = deferred.union(payload_order[max(0, visible_items):])
-        presented = frozenset(int(tile) for tile in payloads if int(tile) not in deferred)
+            presented = frozenset(payload_order[:max(0, visible_items)])
+        else:
+            presented = frozenset(int(tile) for tile in payloads)
     texture_uploads = int(getattr(stats, "texture_uploads", 0) or 0)
     items_created = int(getattr(stats, "items_created", 0) or 0)
     rgb_window_tiles = int(getattr(stats, "rgb_window_tiles", 0) or 0)
@@ -2130,7 +2105,6 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     return TileCommitReport(
         presented_tiles=presented,
         removed_tiles=frozenset(getattr(tile_delta, "removals", ()) or ()),
-        deferred_tiles=deferred,
         texture_uploads=texture_uploads,
         texture_upload_bytes=int(getattr(stats, "texture_upload_bytes", 0) or 0),
         pyqtgraph_items_created=items_created,
@@ -2138,6 +2112,7 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
         resident_rebinds=resident,
         existing_items_shown=existing_items,
         relocated_tiles=relocated,
+        storage_rebuilds=int(getattr(stats, "storage_rebuilds", 0) or 0),
         cold_work_ms=float(getattr(stats, "upload_ms", 0.0) or 0.0),
     )
 

@@ -88,7 +88,7 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
     ``elapsed_ms``/``submission_ms`` measures CPU-side setter submission only.
     Set ``measure_presented=True`` (or ``ARRAYSCOPE_BENCH_PRESENTED=1``) to also
     observe first-frame scheduling and Qt event-loop starvation.  Neither field
-    is presented as GPU execution time because VisPy uploads are deferred.
+    is presented as GPU execution time because VisPy uploads execute asynchronously.
     Deterministic tests should gate on work counters rather than wall-clock time.
     """
 
@@ -693,7 +693,7 @@ def _measure_presented_action(view, action) -> _ActionMeasurement:
 
     This observes the first draw/paint callback and event-loop starvation.  It
     deliberately does not claim to be GPU execution time: VisPy's GL commands
-    and texture uploads are deferred, and a paint callback may still precede
+    and texture uploads execute asynchronously, and a paint callback may still precede
     the final compositor scan-out.
     """
 

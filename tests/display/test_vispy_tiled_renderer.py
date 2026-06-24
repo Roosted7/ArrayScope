@@ -777,10 +777,48 @@ def test_clean_complex_active_tile_reuploads_when_uploaded_source_proof_is_missi
     )
 
     assert recovered.presented_tiles == (0,)
-    assert recovered.deferred_tiles == ()
     assert recovered.items_updated == 1
     assert recovered.texture_uploads == 1
     assert layer._pool.source_ids[resident_key] == payloads[0].source_id
+
+
+def test_delta_uploads_only_admitted_upserts_when_dirty_list_is_broad():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    old_zero = payload(0, 0.0)
+    new_one = payload(1, 1.0)
+    waiting_two = payload(2, 2.0)
+    pool.update_payloads(
+        {0: old_zero},
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=4,
+    )
+    initial_updates = len(pool.pages[0].scalar_texture.updates)
+    delta = SimpleNamespace(
+        upserts={1: new_one},
+        removals=(),
+        active_tiles=(0, 1, 2),
+        planned_tiles=(0, 1, 2),
+        near_tiles=(0, 1, 2),
+        near_tile_source_ids={0: old_zero.source_id, 1: new_one.source_id},
+        force_refresh=False,
+    )
+
+    _uvs, stats = pool.update_payloads(
+        {0: old_zero, 1: new_one, 2: waiting_two},
+        tile_shape=(2, 2),
+        dirty_tiles=(0, 1, 2),
+        rgb_already_windowed=False,
+        reserve_count=4,
+        tile_delta=delta,
+    )
+
+    assert stats.items_updated == 2
+    assert stats.texture_uploads == 2
+    assert stats.presented_tiles == (0, 1, 2)
+    assert len(pool.pages[0].scalar_texture.updates) == initial_updates + 2
+    assert 2 in pool.tile_slots
 
 
 def test_atlas_uses_shape_only_gpu_allocation_and_subuploads():

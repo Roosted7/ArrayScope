@@ -70,7 +70,6 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         skipped_tiles=0 if session is None else len(session.skipped_tiles),
         visible_tiles=0 if session is None else len(session.visible_tiles),
         presented_tiles=0 if session is None else len(getattr(session, "presented_tiles", ())),
-        deferred_display_tiles=0 if session is None else len(getattr(session, "deferred_display_tiles", ())),
         overlay_count=overlay_count,
         attached_stage_requests=0 if session is None else len(getattr(session, "attached_stage_requests", ())),
         presentation_draw_count=int(presentation.get("draw_count", 0) or 0),

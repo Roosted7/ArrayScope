@@ -147,7 +147,6 @@ class DisplayPresentationMixin:
                 and (
                     not use_tile_layer
                     or bool(getattr(report, "presented_tiles", ()))
-                    or not bool(getattr(report, "deferred_tiles", ()))
                 )
             )
             if semantic_frame_commit:
@@ -267,7 +266,6 @@ class DisplayPresentationMixin:
                 and (
                     not use_tile_layer
                     or bool(getattr(report, "presented_tiles", ()))
-                    or not bool(getattr(report, "deferred_tiles", ()))
                 )
             )
             if semantic_frame_commit:

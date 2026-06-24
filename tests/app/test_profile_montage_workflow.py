@@ -424,7 +424,6 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
         stage_waiting_tiles={},
         final_commit_pending=False,
         flush_pending=False,
-        deferred_display_tiles=(),
         dirty_payloads={},
         pending_removals=set(),
         is_complete=lambda: True,
@@ -444,7 +443,6 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     assert app.calls >= 2
     assert result["active_presented_tile_count"] == 2
     assert result["active_planned_tile_count"] == 2
-    assert result["deferred_display_tile_count"] == 0
     assert result["fully_visible_ms"] is not None
     assert result["vispy_tile_presentation_draw_count"] == 4
 

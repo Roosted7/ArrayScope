@@ -45,7 +45,6 @@ class TileLayerUpdateStats:
     image_replacements: int = 0
     existing_items_shown: int = 0
     relocated_tiles: int = 0
-    deferred_tiles: tuple[int, ...] = ()
     # Backend-neutral diagnostics.  CPU tile layers leave these at zero;
     # GPU-backed implementations fill them so the diagnostics UI can expose
     # residency and upload behaviour instead of treating every tile layer as
@@ -323,7 +322,6 @@ class MontageTileLayer:
         dirty_set = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
         cold_deadline_ms = None if tile_delta is None else getattr(tile_delta, "cold_deadline_ms", None)
         cold_start = perf_counter()
-        deferred_tiles: list[int] = []
         cold_tiles_committed = 0
         update_start = perf_counter()
         levels = (float(levels[0]), float(levels[1]))
@@ -423,7 +421,6 @@ class MontageTileLayer:
             ):
                 if item_state is not None and item_state.visible:
                     active.add(int(tile_number))
-                deferred_tiles.append(int(tile_number))
                 continue
 
             if item_state is None:
@@ -485,11 +482,7 @@ class MontageTileLayer:
 
         return TileLayerUpdateStats(
             visible_items=int(visible_items),
-            presented_tiles=tuple(
-                int(tile)
-                for tile in sorted(active)
-                if int(tile) not in set(deferred_tiles)
-            ),
+            presented_tiles=tuple(int(tile) for tile in sorted(active)),
             items_created=int(items_created),
             items_updated=int(items_updated),
             items_skipped=int(items_skipped),
@@ -497,7 +490,6 @@ class MontageTileLayer:
             image_replacements=int(image_replacements),
             existing_items_shown=int(existing_items_shown),
             relocated_tiles=int(relocated_tiles),
-            deferred_tiles=tuple(deferred_tiles),
             upload_ms=(perf_counter() - update_start) * 1000.0,
         )
 

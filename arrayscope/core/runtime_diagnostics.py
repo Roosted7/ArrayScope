@@ -79,7 +79,6 @@ class MontageRuntimeDiagnostics:
     skipped_tiles: int = 0
     visible_tiles: int = 0
     presented_tiles: int = 0
-    deferred_display_tiles: int = 0
     overlay_count: int = 0
     attached_stage_requests: int = 0
     presentation_draw_count: int = 0
@@ -344,7 +343,7 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"  tiles visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
             f"presented={snapshot.montage.presented_tiles} "
             f"pending={snapshot.montage.pending_tiles} "
-            f"display_backlog={snapshot.montage.deferred_display_tiles} overlays={snapshot.montage.overlay_count}\n"
+            f"overlays={snapshot.montage.overlay_count}\n"
             f"  canvas={_bytes_or_na(snapshot.montage.canvas_bytes)}"
         ),
         (

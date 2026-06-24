@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
+from math import ceil
 from time import monotonic
 
 from arrayscope.core.compute_policy import ComputeLane, ComputePolicy
@@ -88,6 +89,7 @@ class ResourceGovernorDiagnostics:
     lane_decisions: tuple[LaneWorkerDecision, ...] = ()
     ui_decisions: tuple[UiWorkDecision, ...] = ()
     feedback_channels: tuple[FeedbackChannelDiagnostics, ...] = ()
+    recent_ui_work_observations: tuple[GuiCallbackObservation, ...] = ()
     recent_over_warning_callbacks: tuple[GuiCallbackObservation, ...] = ()
     telemetry_source: str = "n/a"
     system_cpu_percent: float | None = None
@@ -114,8 +116,16 @@ _PROFILE_TUNING = {
 _PRESSURE_TELEMETRY_ONLY_CHANNELS = frozenset(
     {
         "montage_cold_commit",
+        "montage_layout_commit",
         "montage_present_total",
         "tile_layer_commit",
+    }
+)
+
+_PRESENTATION_UPLOAD_CHANNELS = frozenset(
+    {
+        "montage_cold_commit",
+        "montage_present_total",
     }
 )
 
@@ -136,6 +146,8 @@ class ResourceGovernor:
     _last_lane_update_monotonic: dict[ComputeLane, float] = field(default_factory=dict)
     _lane_decisions: dict[ComputeLane, LaneWorkerDecision] = field(default_factory=dict)
     _ui_decisions: dict[str, UiWorkDecision] = field(default_factory=dict)
+    _feedback_outlier_streak: dict[str, int] = field(default_factory=dict)
+    _recent_ui_work_observations: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=512))
     _recent_over_warning_callbacks: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=32))
 
     def __post_init__(self) -> None:
@@ -182,28 +194,31 @@ class ResourceGovernor:
     ) -> None:
         count = max(1, int(item_count))
         byte_count = max(0, int(byte_count))
-        self.latency_feedback.observe(channel, elapsed_ms, count=count, byte_count=byte_count)
+        feedback_elapsed_ms = self._feedback_elapsed_ms(channel, elapsed_ms)
+        self.latency_feedback.observe(channel, feedback_elapsed_ms, count=count, byte_count=byte_count)
+        observation = GuiCallbackObservation(
+            channel=str(channel),
+            work_class=str(work_class or ""),
+            backend=str(backend or ""),
+            target_ms=float(self.latency_feedback.work_budget_ms(channel, interactive=False)),
+            warning_ms=WARNING_THRESHOLD_MS,
+            item_cap=max(1, count),
+            byte_cap=byte_count,
+            elapsed_ms=max(0.0, float(elapsed_ms)),
+            processed_items=count,
+            processed_bytes=byte_count,
+        )
+        self._recent_ui_work_observations.append(observation)
         if float(elapsed_ms) >= WARNING_THRESHOLD_MS:
-            self._recent_over_warning_callbacks.append(
-                GuiCallbackObservation(
-                    channel=str(channel),
-                    work_class=str(work_class or ""),
-                    backend=str(backend or ""),
-                    target_ms=float(self.latency_feedback.work_budget_ms(channel, interactive=False)),
-                    warning_ms=WARNING_THRESHOLD_MS,
-                    item_cap=max(1, count),
-                    byte_cap=byte_count,
-                    elapsed_ms=max(0.0, float(elapsed_ms)),
-                    processed_items=count,
-                    processed_bytes=byte_count,
-                )
-            )
+            self._recent_over_warning_callbacks.append(observation)
         self._pressure = self._pressure_with_ui(channel)
 
     def record_gui_callback_observation(self, observation: GuiCallbackObservation) -> None:
         count = max(1, int(observation.processed_items))
         byte_count = max(0, int(observation.processed_bytes))
-        self.latency_feedback.observe(observation.channel, observation.elapsed_ms, count=count, byte_count=byte_count)
+        feedback_elapsed_ms = self._feedback_elapsed_ms(observation.channel, observation.elapsed_ms)
+        self.latency_feedback.observe(observation.channel, feedback_elapsed_ms, count=count, byte_count=byte_count)
+        self._recent_ui_work_observations.append(observation)
         if observation.over_warning:
             self._recent_over_warning_callbacks.append(observation)
         self._pressure = self._pressure_with_ui(observation.channel)
@@ -246,20 +261,70 @@ class ResourceGovernor:
         channel = str(channel)
         feedback = self.latency_feedback
         budget = float(feedback.work_budget_ms(channel, interactive=interactive))
+        control_budget = (
+            max(float(budget), WARNING_THRESHOLD_MS + float(feedback.tuning.target_idle_ms))
+            if channel in _PRESENTATION_UPLOAD_CHANNELS
+            else float(budget)
+        )
         snapshot = feedback.channel_snapshot(channel)
         batch = int(feedback.batch_limit(channel, interactive=interactive))
         if snapshot.per_item_ewma_ms is not None and snapshot.per_item_ewma_ms > 0.0:
             batch = max(
                 int(feedback.tuning.min_batch),
-                min(int(feedback.tuning.max_batch), int(budget // max(0.25, snapshot.per_item_ewma_ms))),
+                min(int(feedback.tuning.max_batch), int(control_budget // max(0.25, snapshot.per_item_ewma_ms))),
             )
         default_byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
         byte_cap = default_byte_cap
         if snapshot.per_byte_ewma_ms is not None and snapshot.per_byte_ewma_ms > 0.0:
             byte_cap = max(
                 1024,
-                int(budget // max(1e-9, snapshot.per_byte_ewma_ms)),
+                int(control_budget // max(1e-9, snapshot.per_byte_ewma_ms)),
             )
+        if channel in _PRESENTATION_UPLOAD_CHANNELS and snapshot.last_count > 0 and snapshot.last_byte_count > 0:
+            bytes_per_item = int(ceil(float(snapshot.last_byte_count) / max(1.0, float(snapshot.last_count))))
+            byte_cap = max(int(byte_cap), int(bytes_per_item * max(1, batch)))
+        if (
+            channel in _PRESENTATION_UPLOAD_CHANNELS
+            and 0.0 < snapshot.last_elapsed_ms < WARNING_THRESHOLD_MS
+            and snapshot.last_count <= int(feedback.tuning.min_batch)
+            and snapshot.last_count >= batch
+        ):
+            scale = control_budget / max(0.25, float(snapshot.last_elapsed_ms))
+            measured_batch = int(ceil(float(snapshot.last_count) * scale))
+            batch = max(int(batch), min(int(feedback.tuning.max_batch), measured_batch))
+            if snapshot.last_byte_count > 0:
+                measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
+                byte_cap = max(int(byte_cap), measured_byte_cap)
+        elif (
+            channel in _PRESENTATION_UPLOAD_CHANNELS
+            and snapshot.last_elapsed_ms > float(control_budget)
+            and (snapshot.elapsed_ewma_ms or 0.0) > float(control_budget)
+            and snapshot.last_count > 0
+        ):
+            scale = float(control_budget) / max(0.25, float(snapshot.last_elapsed_ms))
+            measured_batch = int(float(snapshot.last_count) * scale)
+            batch = max(int(feedback.tuning.min_batch), min(int(batch), measured_batch))
+            if snapshot.last_byte_count > 0:
+                measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
+                byte_cap = max(1024, min(int(byte_cap), measured_byte_cap))
+            if (
+                snapshot.last_count <= int(feedback.tuning.min_batch)
+                and batch <= int(feedback.tuning.min_batch)
+                and snapshot.last_byte_count > 0
+            ):
+                batch = min(int(feedback.tuning.max_batch), int(feedback.tuning.min_batch) + 1)
+                byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
+        elif (
+            channel in _PRESENTATION_UPLOAD_CHANNELS
+            and 0.0 < snapshot.last_elapsed_ms < WARNING_THRESHOLD_MS
+            and snapshot.last_count >= batch
+        ):
+            scale = control_budget / max(0.25, float(snapshot.last_elapsed_ms))
+            measured_batch = int(ceil(float(snapshot.last_count) * scale))
+            batch = max(int(batch), min(int(feedback.tuning.max_batch), measured_batch))
+            if snapshot.last_byte_count > 0:
+                measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
+                byte_cap = max(int(byte_cap), measured_byte_cap)
         interval = int(feedback.commit_interval_ms(channel, interactive=interactive))
         if self._pressure.ui_pressure == ResourcePressure.HIGH:
             batch = max(1, batch // 2)
@@ -329,6 +394,7 @@ class ResourceGovernor:
             lane_decisions=tuple(self._lane_decisions[lane] for lane in ComputeLane if lane in self._lane_decisions),
             ui_decisions=tuple(self._ui_decisions[channel] for channel in sorted(self._ui_decisions)),
             feedback_channels=tuple(feedback_channels),
+            recent_ui_work_observations=tuple(self._recent_ui_work_observations),
             recent_over_warning_callbacks=tuple(self._recent_over_warning_callbacks),
             telemetry_source="n/a" if cpu is None else cpu.source,
             system_cpu_percent=None if cpu is None else cpu.system_cpu_percent,
@@ -354,6 +420,30 @@ class ResourceGovernor:
         ui = self._ui_pressure_from_channels()
         cache = ResourcePressure.NORMAL
         return ResourcePressureState(ui, headroom, memory, cache, f"available={available_fraction:.0%}, cpu_headroom={headroom:.0%}")
+
+    def _feedback_elapsed_ms(self, channel: str, elapsed_ms: float) -> float:
+        elapsed = max(0.0, float(elapsed_ms))
+        channel = str(channel)
+        if channel not in _PRESENTATION_UPLOAD_CHANNELS:
+            return elapsed
+        snapshot = self.latency_feedback.channel_snapshot(channel)
+        previous = snapshot.elapsed_ewma_ms
+        if previous is None or previous <= 0.0:
+            self._feedback_outlier_streak[channel] = 0
+            return elapsed
+        control_budget = max(
+            float(self.latency_feedback.work_budget_ms(channel, interactive=False)),
+            WARNING_THRESHOLD_MS + float(self.latency_feedback.tuning.target_idle_ms),
+        )
+        isolated_spike = elapsed > max(control_budget * 2.0, float(previous) * 3.0)
+        if isolated_spike:
+            streak = int(self._feedback_outlier_streak.get(channel, 0)) + 1
+            self._feedback_outlier_streak[channel] = streak
+            if streak < 2:
+                return max(float(previous), control_budget)
+            return elapsed
+        self._feedback_outlier_streak[channel] = 0
+        return elapsed
 
     def _pressure_with_ui(self, channel: str) -> ResourcePressureState:
         previous = self._pressure

@@ -24,7 +24,7 @@ class MontagePrefetchDecision:
 
 
 def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int | None = None) -> tuple[MontagePrefetchDecision, ...]:
-    if _busy(window):
+    if _busy(window, session):
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_visible_busy", "visible work is busy"),))
     if not window._is_current_montage_session(session.session_id, session.key):
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
@@ -170,7 +170,18 @@ def _stage_for_tile(window, session, tile):
     return value, candidate, plan
 
 
-def _busy(window) -> bool:
+def _busy(window, session=None) -> bool:
+    if session is not None and (
+        getattr(session, "pending_tiles", None)
+        or getattr(session, "loading_tiles", None)
+        or getattr(session, "active_tile_requests", None)
+        or getattr(session, "pending_completed_tiles", None)
+        or getattr(session, "dirty_payloads", None)
+        or getattr(session, "pending_removals", None)
+        or getattr(session, "active_stage_requests", None)
+        or getattr(session, "stage_waiting_tiles", None)
+    ):
+        return True
     return bool(
         window.visible_evaluation_controller.is_busy()
         or window.montage_tile_evaluation_controller.is_busy()
