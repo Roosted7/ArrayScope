@@ -153,7 +153,11 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
 
         assert calls == []
         assert second_sources == first_sources
-        assert all(str(source[0]) == "montage_tile" for source in second_sources.values())
+        base_sources = [
+            source[0] if len(source) > 1 and source[1] == "pyqtgraph_display" else source
+            for source in second_sources.values()
+        ]
+        assert all(str(source[0]) == "montage_tile" for source in base_sources)
         assert timing.tile_layer_visible_items == 2
         assert timing.tile_layer_items_updated == 0
         assert timing.tile_layer_items_skipped == 0

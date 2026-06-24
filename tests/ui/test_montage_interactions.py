@@ -1422,7 +1422,9 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_upload_canvas(
         timing = win.img_view.lastImageUploadTiming()
         assert timing.mode == "tile_layer"
         assert timing.tile_layer_visible_items > 0
-        assert timing.tile_layer_items_updated > 0
+        assert timing.tile_layer_items_updated == 0
+        assert timing.tile_layer_texture_uploads == 0
+        assert timing.visible_bytes == 0
     finally:
         win.close()
 

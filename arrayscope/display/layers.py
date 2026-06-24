@@ -37,6 +37,17 @@ class ViewLayerOwner:
         self._add_item(item, Z_TILE_IMAGE)
         self._tile_items[tile_number] = item
 
+    def move_tile_item(self, old_tile_number: int, new_tile_number: int, item) -> None:
+        old_tile_number = int(old_tile_number)
+        new_tile_number = int(new_tile_number)
+        if self._tile_items.get(old_tile_number) is item:
+            self._tile_items.pop(old_tile_number, None)
+        existing = self._tile_items.get(new_tile_number)
+        if existing is not None and existing is not item:
+            self.remove_tile_item(new_tile_number)
+        self._add_item(item, Z_TILE_IMAGE)
+        self._tile_items[new_tile_number] = item
+
     def remove_tile_item(self, tile_number: int) -> None:
         item = self._tile_items.pop(int(tile_number), None)
         if item is not None:

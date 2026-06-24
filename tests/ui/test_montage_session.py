@@ -1034,3 +1034,79 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
     )
     assert 0 not in shifted.pending_payload_upserts
     assert 0 in shifted.presented_tiles
+
+
+def test_resident_retarget_upserts_bypass_cold_priority_cap():
+    original = _session()
+    images = {
+        index: np.full((2, 2), float(index), dtype=np.float32)
+        for index in range(7)
+    }
+    original_sources = {index: ("tile-source", index) for index in range(4)}
+    for index in range(4):
+        image = images[index]
+        original.mark_loaded(
+            RenderedTile(
+                original.plan.tiles[index],
+                image,
+                image,
+                0.0,
+                image.shape,
+                image.nbytes,
+            )
+        )
+    state, delta = original.build_tile_presentation(original_sources)
+    original.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(presented_tiles=state.active_payloads(delta)),
+    )
+    original.mark_presented(state.active_payloads(delta))
+
+    shifted_state = ViewState.from_shape((2, 2, 7)).with_montage_axis(2, indices=(3, 4, 5, 6), text="3:7")
+    shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(3, 4, 5, 6), tile_shape=(2, 2), columns=4)
+    shifted = MontageRenderSession(
+        session_id=2,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        level_expected_indices=(3, 4, 5, 6),
+        plan=shifted_plan,
+        view_state=shifted_state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(10, 10),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=shifted_plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    shifted_sources = {tile: ("tile-source", tile + 3) for tile in range(4)}
+    for tile_number, source_index in enumerate((3, 4, 5, 6)):
+        image = images[source_index]
+        shifted.mark_loaded(
+            RenderedTile(
+                shifted_plan.tiles[tile_number],
+                image,
+                image,
+                0.0,
+                image.shape,
+                image.nbytes,
+            )
+        )
+
+    shifted.seed_display_tile_payloads(state.payloads, shifted_sources)
+    _next_state, next_delta = shifted.build_tile_presentation(
+        shifted_sources,
+        max_upserts=0,
+    )
+
+    assert 0 in next_delta.upserts
+    assert next_delta.upserts[0].source_index == 3
+    assert tuple(next_delta.upserts) == (0,)

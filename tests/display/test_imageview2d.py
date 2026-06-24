@@ -617,6 +617,7 @@ def test_pyqtgraph_tiled_retarget_updates_shifted_active_payloads(qt_app):
             levels=(0.0, 3.0),
             histogramRange=(0.0, 3.0),
         )
+        original_overlap_item = view._montage_tile_layer.states[1].item
 
         report = view.setTiledMontagePresentation(
             geometry=shifted_geometry,
@@ -642,9 +643,468 @@ def test_pyqtgraph_tiled_retarget_updates_shifted_active_payloads(qt_app):
         assert report.presented_tiles == frozenset({0, 1})
         np.testing.assert_array_equal(states[0].item.image, images[1])
         np.testing.assert_array_equal(states[1].item.image, images[2])
+        assert states[0].item is original_overlap_item
         assert states[0].source_index == 1
         assert states[1].source_index == 2
-        assert timing.tile_layer_items_updated == 2
+        assert timing.tile_layer_items_updated == 1
+        assert timing.tile_layer_relocated_tiles == 1
+        assert timing.tile_layer_image_replacements == 1
+        assert report.cold_count == 1
+        assert report.resident_rebinds == 1
+    finally:
+        view.close()
+
+
+def test_pyqtgraph_tiled_retarget_shuffles_lower_range_without_overwrite(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+    view = ImageView2D()
+    first_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=2, indices=(1, 2), text="1:3"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(1, 2), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    shifted_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    images = {
+        index: np.full((2, 2), float(index + 1), dtype=np.float32)
+        for index in range(3)
+    }
+    first_payloads = {
+        0: DisplayTilePayload(0, 1, images[1], None, ("payload", 1)),
+        1: DisplayTilePayload(1, 2, images[2], None, ("payload", 2)),
+    }
+    shifted_payloads = {
+        0: DisplayTilePayload(0, 0, images[0], None, ("payload", 0)),
+        1: DisplayTilePayload(1, 1, images[1], None, ("payload", 1)),
+    }
+    try:
+        view.setTiledMontagePresentation(
+            geometry=first_geometry,
+            tile_state=TilePresentationState(first_payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=1,
+                visibility_revision=1,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=1,
+                upserts=first_payloads,
+                active_tiles=(0, 1),
+                planned_tiles=(0, 1),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+        )
+        original_overlap_item = view._montage_tile_layer.states[0].item
+
+        report = view.setTiledMontagePresentation(
+            geometry=shifted_geometry,
+            tile_state=TilePresentationState(shifted_payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=2,
+                payload_revision=2,
+                visibility_revision=2,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=2,
+                upserts=shifted_payloads,
+                active_tiles=(0, 1),
+                planned_tiles=(0, 1),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+        )
+
+        states = view._montage_tile_layer.states
+        timing = view.lastImageUploadTiming()
+        assert report.presented_tiles == frozenset({0, 1})
+        np.testing.assert_array_equal(states[0].item.image, images[0])
+        np.testing.assert_array_equal(states[1].item.image, images[1])
+        assert states[1].item is original_overlap_item
+        assert states[0].source_index == 0
+        assert states[1].source_index == 1
+        assert timing.tile_layer_items_updated == 1
+        assert timing.tile_layer_relocated_tiles == 1
+        assert timing.tile_layer_image_replacements == 1
+        assert report.cold_count == 1
+        assert report.resident_rebinds == 1
+    finally:
+        view.close()
+
+
+def test_pyqtgraph_tiled_retarget_reuses_residents_for_cyclic_reorder(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+    view = ImageView2D()
+    first_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"),
+        display_shape=(2, 8),
+        montage=MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 2), columns=3, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    reordered_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=3, indices=(2, 0, 1), text="2,0,1"),
+        display_shape=(2, 8),
+        montage=MontageGeometry(indices=(2, 0, 1), tile_shape=(2, 2), columns=3, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    images = {
+        index: np.full((2, 2), float(index + 1), dtype=np.float32)
+        for index in range(3)
+    }
+    first_payloads = {
+        tile: DisplayTilePayload(tile, tile, images[tile], None, ("payload", tile))
+        for tile in range(3)
+    }
+    reordered_payloads = {
+        0: DisplayTilePayload(0, 2, images[2], None, ("payload", 2)),
+        1: DisplayTilePayload(1, 0, images[0], None, ("payload", 0)),
+        2: DisplayTilePayload(2, 1, images[1], None, ("payload", 1)),
+    }
+    try:
+        view.setTiledMontagePresentation(
+            geometry=first_geometry,
+            tile_state=TilePresentationState(first_payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=1,
+                visibility_revision=1,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=1,
+                upserts=first_payloads,
+                active_tiles=(0, 1, 2),
+                planned_tiles=(0, 1, 2),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+        )
+        original_items_by_source = {
+            int(state.source_index): state.item
+            for state in view._montage_tile_layer.states.values()
+        }
+
+        report = view.setTiledMontagePresentation(
+            geometry=reordered_geometry,
+            tile_state=TilePresentationState(reordered_payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=2,
+                payload_revision=2,
+                visibility_revision=2,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=2,
+                upserts=reordered_payloads,
+                active_tiles=(0, 1, 2),
+                planned_tiles=(0, 1, 2),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+        )
+
+        states = view._montage_tile_layer.states
+        timing = view.lastImageUploadTiming()
+        assert report.presented_tiles == frozenset({0, 1, 2})
+        assert states[0].item is original_items_by_source[2]
+        assert states[1].item is original_items_by_source[0]
+        assert states[2].item is original_items_by_source[1]
+        np.testing.assert_array_equal(states[0].item.image, images[2])
+        np.testing.assert_array_equal(states[1].item.image, images[0])
+        np.testing.assert_array_equal(states[2].item.image, images[1])
+        assert timing.tile_layer_items_updated == 0
+        assert timing.tile_layer_relocated_tiles == 3
+        assert timing.tile_layer_image_replacements == 0
+        assert report.cold_count == 0
+        assert report.resident_rebinds == 3
+    finally:
+        view.close()
+
+
+def test_pyqtgraph_tiled_active_delta_repairs_resident_retarget_without_explicit_upserts(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(2, 11),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,) * 4,
+    )
+    view = ImageView2D()
+    images = {
+        index: np.full((2, 2), float(index), dtype=np.float32)
+        for index in range(4)
+    }
+    initial_payloads = {
+        index: DisplayTilePayload(index, index, images[index], None, ("source", index))
+        for index in range(4)
+    }
+    shifted_payloads = {
+        0: DisplayTilePayload(0, 2, images[2], None, ("source", 2)),
+        1: DisplayTilePayload(1, 3, images[3], None, ("source", 3)),
+    }
+
+    def delta(revision: int, payloads, active_tiles, *, upserts=None):
+        return TilePresentationDelta(
+            structure_revision=revision,
+            payload_revision=revision,
+            visibility_revision=revision,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=revision,
+            upserts=payloads if upserts is None else upserts,
+            active_tiles=tuple(active_tiles),
+            planned_tiles=(0, 1, 2, 3),
+        )
+
+    try:
+        view.setTiledMontagePresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState(initial_payloads),
+            tile_delta=delta(1, initial_payloads, (0, 1, 2, 3)),
+            histogramPlotData=None,
+            levels=(0.0, 4.0),
+            histogramRange=(0.0, 4.0),
+        )
+        original_by_source = {
+            int(state.source_index): state.item
+            for state in view._montage_tile_layer.states.values()
+        }
+
+        report = view.setTiledMontagePresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState(shifted_payloads),
+            tile_delta=delta(2, shifted_payloads, (0, 1), upserts={}),
+            histogramPlotData=None,
+            levels=(0.0, 4.0),
+            histogramRange=(0.0, 4.0),
+        )
+
+        states = view._montage_tile_layer.states
+        timing = view.lastImageUploadTiming()
+        assert report.presented_tiles == frozenset({0, 1})
+        assert states[0].item is original_by_source[2]
+        assert states[1].item is original_by_source[3]
+        assert timing.tile_layer_items_updated == 0
+        assert timing.tile_layer_relocated_tiles == 2
+        assert report.resident_rebinds == 2
+    finally:
+        view.close()
+
+
+def test_pyqtgraph_fast_scroll_budget_keeps_old_slots_visible(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+    view = ImageView2D()
+    first_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(2, 11),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,) * 4,
+    )
+    jumped_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(2, columns=4, indices=(3, 4, 5, 6), text="3:7"),
+        display_shape=(2, 11),
+        montage=MontageGeometry(indices=(3, 4, 5, 6), tile_shape=(2, 2), columns=4, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,) * 4,
+    )
+    images = {
+        index: np.full((2, 2), float(index + 1), dtype=np.float32)
+        for index in range(7)
+    }
+    first_payloads = {
+        tile: DisplayTilePayload(tile, tile, images[tile], None, ("payload", tile))
+        for tile in range(4)
+    }
+    jumped_payloads = {
+        tile: DisplayTilePayload(tile, tile + 3, images[tile + 3], None, ("payload", tile + 3))
+        for tile in range(4)
+    }
+    try:
+        view.setTiledMontagePresentation(
+            geometry=first_geometry,
+            tile_state=TilePresentationState(first_payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=1,
+                visibility_revision=1,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=1,
+                upserts=first_payloads,
+                active_tiles=(0, 1, 2, 3),
+                planned_tiles=(0, 1, 2, 3),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 7.0),
+            histogramRange=(0.0, 7.0),
+        )
+        original_items = {
+            tile: view._montage_tile_layer.states[tile].item
+            for tile in range(4)
+        }
+
+        report = view.setTiledMontagePresentation(
+            geometry=jumped_geometry,
+            tile_state=TilePresentationState(jumped_payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=2,
+                payload_revision=2,
+                visibility_revision=2,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=2,
+                upserts=jumped_payloads,
+                active_tiles=(0, 1, 2, 3),
+                planned_tiles=(0, 1, 2, 3),
+                cold_deadline_ms=0.0,
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 7.0),
+            histogramRange=(0.0, 7.0),
+        )
+
+        states = view._montage_tile_layer.states
+        timing = view.lastImageUploadTiming()
+        assert report.presented_tiles == frozenset({0, 1, 2, 3})
+        assert report.committed_upserts == frozenset({0})
+        assert timing.tile_layer_items_updated == 1
+        assert set(states) == {0, 1, 2, 3}
+        for tile in range(4):
+            assert states[tile].visible is True
+            assert states[tile].item.image is not None
+        np.testing.assert_array_equal(states[0].item.image, images[3])
+        assert states[1].item is original_items[1]
+        assert states[2].item is original_items[2]
+        assert states[3].item is original_items[3]
+    finally:
+        view.close()
+
+
+def test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    view = ImageView2D()
+    first_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(2, 11),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,) * 4,
+    )
+    jumped_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(2, columns=4, indices=(3, 4, 5, 6), text="3:7"),
+        display_shape=(2, 11),
+        montage=MontageGeometry(indices=(3, 4, 5, 6), tile_shape=(2, 2), columns=4, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,) * 4,
+    )
+
+    def payload(tile: int, source: int) -> DisplayTilePayload:
+        rgb = np.full((2, 2, 3), (40 + source * 20) % 255, dtype=np.uint8)
+        hist = np.full((2, 2), float(source + 1), dtype=np.float32)
+        semantic = np.full((2, 2), complex(source + 1, source + 2), dtype=np.complex64)
+        return DisplayTilePayload(
+            tile,
+            source,
+            rgb,
+            hist,
+            ("complex-source", source, "shader", None),
+            texture_data=semantic,
+            texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+            semantic_data=semantic,
+            semantic_histogram_data=hist,
+        )
+
+    first_payloads = {tile: payload(tile, tile) for tile in range(4)}
+    jumped_payloads = {tile: payload(tile, tile + 3) for tile in range(4)}
+    try:
+        view.setTiledMontagePresentation(
+            geometry=first_geometry,
+            tile_state=TilePresentationState(first_payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=1,
+                visibility_revision=1,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=1,
+                upserts=first_payloads,
+                active_tiles=(0, 1, 2, 3),
+                planned_tiles=(0, 1, 2, 3),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 7.0),
+            histogramRange=(0.0, 7.0),
+            rgb_already_windowed=False,
+        )
+        original_items = {
+            tile: view._montage_tile_layer.states[tile].item
+            for tile in range(4)
+        }
+
+        report = view.setTiledMontagePresentation(
+            geometry=jumped_geometry,
+            tile_state=TilePresentationState(jumped_payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=2,
+                payload_revision=2,
+                visibility_revision=2,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=2,
+                upserts=jumped_payloads,
+                active_tiles=(0, 1, 2, 3),
+                planned_tiles=(0, 1, 2, 3),
+                cold_deadline_ms=0.0,
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 7.0),
+            histogramRange=(0.0, 7.0),
+            rgb_already_windowed=False,
+        )
+
+        states = view._montage_tile_layer.states
+        timing = view.lastImageUploadTiming()
+        assert report.presented_tiles == frozenset({0, 1, 2, 3})
+        assert report.committed_upserts == frozenset({0})
+        assert timing.tile_layer_items_updated == 1
+        assert timing.tile_layer_rgb_window_tiles == 1
+        assert set(states) == {0, 1, 2, 3}
+        for tile in range(4):
+            assert states[tile].visible is True
+            assert states[tile].item.image is not None
+        assert states[1].item is original_items[1]
+        assert states[2].item is original_items[2]
+        assert states[3].item is original_items[3]
     finally:
         view.close()
 

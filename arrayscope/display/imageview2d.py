@@ -2200,13 +2200,19 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     existing_items = int(getattr(stats, "existing_items_shown", 0) or 0)
     relocated = int(getattr(stats, "relocated_tiles", 0) or 0)
     updated = int(getattr(stats, "items_updated", 0) or 0)
-    resident = max(0, len(payloads) - texture_uploads - items_created - updated)
+    updated_tiles = tuple(int(tile) for tile in tuple(getattr(stats, "updated_tiles", ()) or ()))
+    pyqtgraph_data_updates = max(0, len(updated_tiles) - rgb_window_tiles) if texture_uploads <= 0 else 0
+    report_uploads = texture_uploads if texture_uploads > 0 else pyqtgraph_data_updates
+    report_upload_bytes = int(getattr(stats, "texture_upload_bytes", 0) or 0)
+    if report_upload_bytes <= 0 and updated_tiles:
+        report_upload_bytes = sum(int(getattr(payloads.get(int(tile)), "nbytes", 0) or 0) for tile in updated_tiles)
+    resident = max(0, max(existing_items, relocated))
     return TileCommitReport(
         presented_tiles=presented,
         committed_upserts=committed_upserts,
         removed_tiles=frozenset(getattr(tile_delta, "removals", ()) or ()),
-        texture_uploads=texture_uploads,
-        texture_upload_bytes=int(getattr(stats, "texture_upload_bytes", 0) or 0),
+        texture_uploads=report_uploads,
+        texture_upload_bytes=report_upload_bytes,
         pyqtgraph_items_created=items_created,
         cpu_windowed_tiles=rgb_window_tiles,
         resident_rebinds=resident,

@@ -94,6 +94,34 @@ def _cap_tile_upserts(
     return capped
 
 
+def _payload_residency_key(payload: DisplayTilePayload) -> tuple[object, object, object, object]:
+    # This is the scheduler-side version of the backend resident key: enough
+    # identity to tell a cheap tile retarget from new pixel work, without
+    # exposing PyQtGraph ImageItems or VisPy atlas slots to the session.
+    return (
+        payload.source_id,
+        id(payload.image),
+        None if payload.histogram_data is None else id(payload.histogram_data),
+        _shader_mapping_key(payload.shader_mapping),
+    )
+
+
+def _resident_retarget_upsert_tiles(
+    upserts: dict[int, DisplayTilePayload],
+    previous_payloads: dict[int, DisplayTilePayload],
+) -> set[int]:
+    if not upserts or not previous_payloads:
+        return set()
+    previous_tiles_by_key: dict[tuple[object, object, object, object], set[int]] = {}
+    for tile, payload in previous_payloads.items():
+        previous_tiles_by_key.setdefault(_payload_residency_key(payload), set()).add(int(tile))
+    return {
+        int(tile)
+        for tile, payload in upserts.items()
+        if any(previous_tile != int(tile) for previous_tile in previous_tiles_by_key.get(_payload_residency_key(payload), set()))
+    }
+
+
 @dataclass
 class MontageRenderSession:
     session_id: int
@@ -765,12 +793,34 @@ class MontageRenderSession:
                 continue
             upserts[int(tile_number)] = payload
 
-        upserts = _cap_tile_upserts(
-            upserts,
+        resident_retarget_tiles = _resident_retarget_upsert_tiles(upserts, previous_payloads)
+        resident_retarget_tiles.update(
+            int(tile)
+            for tile, payload in upserts.items()
+            if int(tile) in self.pending_payload_upserts
+            and previous_payloads.get(int(tile)) is payload
+        )
+        resident_retarget_upserts = {
+            int(tile): payload
+            for tile, payload in upserts.items()
+            if int(tile) in resident_retarget_tiles
+        }
+        cold_upserts = {
+            int(tile): payload
+            for tile, payload in upserts.items()
+            if int(tile) not in resident_retarget_tiles
+        }
+        capped_cold_upserts = _cap_tile_upserts(
+            cold_upserts,
             active_tiles=active,
             max_upserts=max_upserts,
             max_upsert_bytes=max_upsert_bytes,
         )
+        upserts = {
+            int(tile): payload
+            for tile, payload in upserts.items()
+            if int(tile) in resident_retarget_upserts or int(tile) in capped_cold_upserts
+        }
         if max_upserts is not None or max_upsert_bytes is not None:
             admitted = set(int(tile) for tile in upserts)
             admitted.update(int(tile) for tile in self.presented_tiles)

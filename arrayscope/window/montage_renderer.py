@@ -1842,10 +1842,15 @@ class MontageRenderMixin:
             self._vispy_tile_layer_fast_drain_enabled_count = int(
                 getattr(self, "_vispy_tile_layer_fast_drain_enabled_count", 0) or 0
             ) + int(bool(fast_drain))
+            tile_layer_limits = _tile_layer_upsert_limits(self, session, first_display_commit=not bool(session.display_committed))
             tile_state, tile_delta = session.build_tile_presentation(
                 tile_source_ids,
-                cold_deadline_ms=_montage_commit_budget_ms(self),
-                **_tile_layer_upsert_limits(self, session, first_display_commit=not bool(session.display_committed)),
+                cold_deadline_ms=(
+                    _montage_commit_budget_ms(self)
+                    if tile_layer_limits
+                    else None
+                ),
+                **tile_layer_limits,
             )
             if _vispy_direct_tile_layer_backend(self, session):
                 dirty_tiles = tuple(int(tile) for tile in dirty_tiles if int(tile) in set(tile_delta.upserts))
