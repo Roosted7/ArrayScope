@@ -416,31 +416,25 @@ def test_vispy_complex_windowed_rgb_preserves_high_magnitude_scale(qt_app):
         view.close()
 
 
-def test_vispy_tile_layer_uses_windowed_visuals_and_positions_loaded_tiles(qt_app):
+def test_vispy_legacy_tile_layer_requires_direct_payloads(qt_app):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
     view = VisPyImageView2D()
     rgb = np.full((2, 5, 3), 180, dtype=np.uint8)
     magnitude = np.arange(10, dtype=np.float32).reshape(2, 5)
     try:
-        view.setMontageTileLayerPresentation(
-            rgb,
-            histogramData=magnitude,
-            histogramPlotData=None,
-            geometry=_montage_geometry(),
-            levels=(0.0, 9.0),
-            histogramRange=(0.0, 9.0),
-            rgb_already_windowed=False,
-            montage_dirty_tiles=None,
-            montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1)},
-        )
-
-        states = view._vispy_tile_visuals
-        assert set(states) == {0, 1}
-        assert all(state.windowed_rgb for state in states.values())
-        assert states[0].windowed_visual.visible
-        assert tuple(float(value) for value in states[0].windowed_visual.transform.translate[:2]) == (0.0, 0.0)
-        assert tuple(float(value) for value in states[1].windowed_visual.transform.translate[:2]) == (3.0, 0.0)
+        with pytest.raises(ValueError, match="direct tile payloads"):
+            view.setMontageTileLayerPresentation(
+                rgb,
+                histogramData=magnitude,
+                histogramPlotData=None,
+                geometry=_montage_geometry(),
+                levels=(0.0, 9.0),
+                histogramRange=(0.0, 9.0),
+                rgb_already_windowed=False,
+                montage_dirty_tiles=None,
+                montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1)},
+            )
     finally:
         view.close()
 
@@ -520,16 +514,19 @@ def test_vispy_tiled_overlay_clear_waits_for_presenting_draw(qt_app):
 def test_vispy_tile_layer_bounds_cover_full_montage_not_viewport_canvas(qt_app):
     from arrayscope.display.viewport import ViewportPolicy
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload
 
     view = VisPyImageView2D()
-    rgb = np.full((2, 5, 3), 180, dtype=np.uint8)
-    magnitude = np.arange(10, dtype=np.float32).reshape(2, 5)
+    payloads = {
+        index: DisplayTilePayload(index, index, np.full((2, 2, 3), 180, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", index))
+        for index in range(4)
+    }
     try:
         view.resize(420, 220)
         view.show()
         view.setMontageTileLayerPresentation(
-            rgb,
-            histogramData=magnitude,
+            np.zeros((2, 5, 3), dtype=np.uint8),
+            histogramData=None,
             histogramPlotData=None,
             geometry=_shifted_montage_geometry(),
             levels=(0.0, 9.0),
@@ -537,7 +534,8 @@ def test_vispy_tile_layer_bounds_cover_full_montage_not_viewport_canvas(qt_app):
             viewport_policy=ViewportPolicy.FIT_ONCE,
             rgb_already_windowed=False,
             montage_dirty_tiles=None,
-            montage_tile_source_ids={index: ("tile", index) for index in range(4)},
+            montage_tile_source_ids={index: payload.source_id for index, payload in payloads.items()},
+            montage_tile_payloads=payloads,
         )
 
         rect = view._vispy_bounds_item.rect()
@@ -553,25 +551,29 @@ def test_vispy_tile_layer_bounds_cover_full_montage_not_viewport_canvas(qt_app):
 def test_vispy_tile_layer_level_preview_updates_uniforms_without_upload(qt_app, monkeypatch):
     import arrayscope.display.vispy_imageview2d as vispy_view
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload
 
     def fail_cpu_window(*args, **kwargs):
         raise AssertionError("VisPy tile shader level preview should not CPU-window RGB tiles")
 
     monkeypatch.setattr(vispy_view, "rgb_display_for_levels", fail_cpu_window)
     view = VisPyImageView2D()
-    rgb = np.full((2, 5, 3), 180, dtype=np.uint8)
-    magnitude = np.arange(10, dtype=np.float32).reshape(2, 5)
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2, 3), 180, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2, 3), 180, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", 1)),
+    }
     try:
         view.setMontageTileLayerPresentation(
-            rgb,
-            histogramData=magnitude,
+            np.zeros((2, 5, 3), dtype=np.uint8),
+            histogramData=None,
             histogramPlotData=None,
             geometry=_montage_geometry(),
             levels=(0.0, 9.0),
             histogramRange=(0.0, 9.0),
             rgb_already_windowed=False,
             montage_dirty_tiles=None,
-            montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1)},
+            montage_tile_source_ids={tile: payload.source_id for tile, payload in payloads.items()},
+            montage_tile_payloads=payloads,
         )
         view._apply_histogram_preview_levels((4.0, 9.0))
 
@@ -583,30 +585,34 @@ def test_vispy_tile_layer_level_preview_updates_uniforms_without_upload(qt_app, 
         assert timing.tile_layer_rgb_window_tiles == 0
         assert timing.tile_layer_upload_ms == 0.0
         assert timing.visible_bytes == 0
-        assert all(state.windowed_visual.levels == (4.0, 9.0) for state in view._vispy_tile_visuals.values())
+        assert view._vispy_gpu_montage_layer._levels == (4.0, 9.0)
     finally:
         view.close()
 
 
 def test_vispy_tile_layer_clean_flush_skips_existing_visual_uploads(qt_app):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload
 
     view = VisPyImageView2D()
-    rgb = np.full((2, 5, 3), 180, dtype=np.uint8)
-    magnitude = np.arange(10, dtype=np.float32).reshape(2, 5)
-    sources = {0: ("tile", 0), 1: ("tile", 1)}
+    payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2, 3), 180, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2, 3), 180, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", 1)),
+    }
+    sources = {tile: payload.source_id for tile, payload in payloads.items()}
     try:
         kwargs = dict(
-            histogramData=magnitude,
+            histogramData=None,
             histogramPlotData=None,
             geometry=_montage_geometry(),
             levels=(0.0, 9.0),
             histogramRange=(0.0, 9.0),
             rgb_already_windowed=False,
             montage_tile_source_ids=sources,
+            montage_tile_payloads=payloads,
         )
-        view.setMontageTileLayerPresentation(rgb, montage_dirty_tiles=None, **kwargs)
-        view.setMontageTileLayerPresentation(rgb, montage_dirty_tiles=(), **kwargs)
+        view.setMontageTileLayerPresentation(np.zeros((2, 5, 3), dtype=np.uint8), montage_dirty_tiles=None, **kwargs)
+        view.setMontageTileLayerPresentation(np.zeros((2, 5, 3), dtype=np.uint8), montage_dirty_tiles=(), **kwargs)
 
         timing = view.lastImageUploadTiming()
         assert timing.tile_layer_visible_items == 2
@@ -653,7 +659,7 @@ def test_vispy_direct_tiled_payloads_use_batched_gpu_layer(qt_app):
         assert timing.tile_layer_visible_items == 2
         assert timing.tile_layer_items_updated == 2
         assert timing.tile_layer_rgb_window_tiles == 0
-        assert not any(state.visible for state in view._vispy_tile_visuals.values())
+        assert not hasattr(view, "_vispy_tile_visuals")
         assert view._vispy_gpu_montage_layer.visual.visible
         for _ in range(20):
             qt_app.processEvents()

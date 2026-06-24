@@ -9,7 +9,6 @@ use VisPy's GPU texture scaling via ``texture_format='auto'`` and ``clim``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -43,20 +42,6 @@ from arrayscope.display.viewport import ViewportPolicy, coerce_viewport_policy
 
 if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
-
-
-@dataclass
-class _VisPyTileState:
-    image_visual: object | None = None
-    windowed_visual: object | None = None
-    visual: object | None = None
-    source_id: object | None = None
-    color_source_id: object | None = None
-    scalar_source_id: object | None = None
-    levels: tuple[float, float] | None = None
-    data_shape: tuple[int, ...] | None = None
-    visible: bool = False
-    windowed_rgb: bool = False
 
 
 class VisPyImageView2D(ImageView2D):
@@ -125,7 +110,6 @@ class VisPyImageView2D(ImageView2D):
             transforms=self._vispy_transforms,
             parent=self._vispy_view.scene,
         )
-        self._vispy_tile_visuals: dict[int, _VisPyTileState] = {}
         self._vispy_roi_visuals: dict[str, object] = {}
         self._vispy_roi_handle_visuals: dict[str, object] = {}
         self._vispy_selected_roi_id: str | None = None
@@ -267,11 +251,6 @@ class VisPyImageView2D(ImageView2D):
         return self.graphicsView.mapTo(parent, local)
 
     def clearMontageTileLayer(self) -> None:
-        for state in getattr(self, "_vispy_tile_visuals", {}).values():
-            _set_visual_visible(state.image_visual, False)
-            _set_visual_visible(state.windowed_visual, False)
-            state.visual = None
-            state.visible = False
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         if layer is not None:
             layer.clear()
@@ -338,10 +317,6 @@ class VisPyImageView2D(ImageView2D):
             image = getattr(self, "_vispy_image", None)
             if image is not None:
                 image.cmap = colormap
-            for state in getattr(self, "_vispy_tile_visuals", {}).values():
-                visual = getattr(state, "image_visual", None)
-                if visual is not None and len(tuple(getattr(state, "data_shape", ()) or ())) == 2:
-                    visual.cmap = colormap
         except Exception:
             pass
 
@@ -497,6 +472,8 @@ class VisPyImageView2D(ImageView2D):
     ) -> None:
         if geometry is None or getattr(geometry, "montage", None) is None:
             raise ValueError("tile-layer presentation requires montage geometry")
+        if montage_tile_payloads is None:
+            raise ValueError("VisPy montage presentation requires direct tile payloads; canvas fallback was removed")
         self._apply_vispy_tile_layer_presentation(
             img,
             histogramData=histogramData,
@@ -1607,127 +1584,7 @@ class VisPyImageView2D(ImageView2D):
                 force_levels=force_levels,
                 force_mapping=force_mapping,
             )
-        if img is None:
-            return TileLayerUpdateStats()
-        self._last_vispy_geometry = geometry
-        montage = geometry.montage
-        dirty = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
-        level_tuple = (float(levels[0]), float(levels[1]))
-        visible_items = 0
-        presented_tiles: list[int] = []
-        updated = 0
-        skipped = 0
-        rgb_tiles = 0
-        states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
-        canvas = np.asarray(img)
-        hist = None if histogram_data is None else np.asarray(histogram_data)
-        for tile_number, source_index in enumerate(montage.indices):
-            row = tile_number // montage.columns
-            col = tile_number % montage.columns
-            x0 = int(col * (montage.tile_width + montage.gap))
-            y0 = int(row * (montage.tile_height + montage.gap))
-            cx0 = x0 - int(geometry.montage_origin_x)
-            cy0 = y0 - int(geometry.montage_origin_y)
-            cx1 = cx0 + montage.tile_width
-            cy1 = cy0 + montage.tile_height
-            if cx1 <= 0 or cy1 <= 0 or cx0 >= canvas.shape[1] or cy0 >= canvas.shape[0]:
-                self._hide_vispy_tile(tile_number)
-                continue
-            kind = "loaded"
-            if states and tile_number < len(states):
-                kind = str(getattr(states[tile_number], "value", states[tile_number]))
-            if kind != "loaded":
-                self._hide_vispy_tile(tile_number)
-                continue
-            visible_items += 1
-            presented_tiles.append(int(tile_number))
-            source_id = None if tile_source_ids is None else tile_source_ids.get(tile_number)
-            sx0 = max(0, cx0)
-            sy0 = max(0, cy0)
-            sx1 = min(canvas.shape[1], cx1)
-            sy1 = min(canvas.shape[0], cy1)
-            if sx1 <= sx0 or sy1 <= sy0:
-                self._hide_vispy_tile(tile_number)
-                continue
-            tile_img = canvas[sy0:sy1, sx0:sx1, ...]
-            tile_hist = None if hist is None else hist[sy0:sy1, sx0:sx1]
-            use_windowed_rgb = self._should_use_windowed_rgb(
-                tile_img,
-                tile_hist,
-                rgb_already_windowed=rgb_already_windowed,
-            )
-            state = self._ensure_vispy_tile(tile_number, windowed_rgb=use_windowed_rgb)
-            color_source_id = id(tile_img) if use_windowed_rgb else None
-            scalar_source_id = id(tile_hist) if use_windowed_rgb and tile_hist is not None else None
-            levels_changed = state.levels != level_tuple
-            if force_levels and use_windowed_rgb and state.visible:
-                state.visual.set_levels(level_tuple)
-                state.levels = level_tuple
-                skipped += 1
-                continue
-            scalar_level_only = not use_windowed_rgb and not self._is_rgb_image(tile_img)
-            needs_data = (
-                dirty is None
-                or tile_number in dirty
-                or state.source_id != source_id
-                or state.windowed_rgb != bool(use_windowed_rgb)
-                or not state.visible
-                or (not use_windowed_rgb and levels_changed and not scalar_level_only)
-            )
-            if not needs_data:
-                if use_windowed_rgb and levels_changed:
-                    state.visual.set_levels(level_tuple)
-                    state.levels = level_tuple
-                elif scalar_level_only and levels_changed:
-                    try:
-                        state.visual.clim = level_tuple
-                    except Exception:
-                        pass
-                    state.levels = level_tuple
-                skipped += 1
-                continue
-            start = perf_counter()
-            if use_windowed_rgb:
-                tile_data = _contiguous_display(np.asarray(tile_img)[..., :3])
-                tile_scalar = _contiguous_scalar(tile_hist)
-                state.visual.set_data(
-                    tile_data,
-                    tile_scalar,
-                    levels=level_tuple,
-                    color_source_id=color_source_id,
-                    scalar_source_id=scalar_source_id,
-                    copy=False,
-                )
-                state.color_source_id = color_source_id
-                state.scalar_source_id = scalar_source_id
-            else:
-                tile_data = self._vispy_display_data(tile_img, tile_hist, level_tuple, rgb_already_windowed=rgb_already_windowed, timing_field="tile_layer_rgb_window_ms")
-                if self._is_rgb_image(tile_img) and not rgb_already_windowed:
-                    rgb_tiles += 1
-                state.visual.set_data(tile_data, copy=False)
-                if tile_data.ndim == 2:
-                    state.visual.clim = level_tuple
-                    self._apply_vispy_colormap_to_visual(state.visual)
-            state.visual.transform = self._vispy_transforms.STTransform(translate=(float(x0 + max(0, -cx0)), float(y0 + max(0, -cy0)), 0.0))
-            state.visual.visible = True
-            state.source_id = source_id
-            state.levels = level_tuple
-            state.data_shape = tuple(np.shape(tile_data))
-            state.visible = True
-            state.windowed_rgb = bool(use_windowed_rgb)
-            updated += 1
-            self._record_upload_timing("tile_layer_upload_ms", (perf_counter() - start) * 1000.0)
-        active = set(range(len(montage.indices)))
-        for tile_number in tuple(self._vispy_tile_visuals):
-            if tile_number not in active:
-                self._hide_vispy_tile(tile_number)
-        return TileLayerUpdateStats(
-            visible_items=visible_items,
-            presented_tiles=tuple(presented_tiles),
-            items_updated=updated,
-            items_skipped=skipped,
-            rgb_window_tiles=rgb_tiles,
-        )
+        raise ValueError("VisPy montage presentation requires direct tile payloads; canvas fallback was removed")
 
     def _update_vispy_direct_tile_layer(
         self,
@@ -1750,10 +1607,6 @@ class VisPyImageView2D(ImageView2D):
         if montage is None:
             return TileLayerUpdateStats()
         self._last_vispy_geometry = geometry
-        for state in getattr(self, "_vispy_tile_visuals", {}).values():
-            _set_visual_visible(state.image_visual, False)
-            _set_visual_visible(state.windowed_visual, False)
-            state.visible = False
         if tile_delta is not None:
             active_set = {int(tile) for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())}
             loaded_payloads = {
@@ -1813,8 +1666,6 @@ class VisPyImageView2D(ImageView2D):
         timing = self._upload_timing
         if timing is not None:
             timing["visible_bytes"] = int(timing["visible_bytes"]) + int(stats.texture_upload_bytes)
-        for tile_number in tuple(self._vispy_tile_visuals):
-            self._hide_vispy_tile(tile_number)
         return TileLayerUpdateStats(
             visible_items=int(stats.visible_items),
             presented_tiles=None if stats.presented_tiles is None else tuple(int(tile) for tile in stats.presented_tiles),
@@ -1879,42 +1730,6 @@ class VisPyImageView2D(ImageView2D):
             canvas.update()
         except Exception:
             self._vispy_canvas_update_pending = False
-
-    def _ensure_vispy_tile(self, tile_number: int, *, windowed_rgb: bool = False) -> _VisPyTileState:
-        tile_number = int(tile_number)
-        state = self._vispy_tile_visuals.get(tile_number)
-        if state is None:
-            state = _VisPyTileState()
-            self._vispy_tile_visuals[tile_number] = state
-        if windowed_rgb:
-            if state.windowed_visual is None:
-                state.windowed_visual = self._vispy_scene.visuals.create_visual_node(GpuMappedImageVisual)(
-                    parent=self._vispy_view.scene
-                )
-                state.windowed_visual.visible = False
-            _set_visual_visible(state.image_visual, False)
-            state.visual = state.windowed_visual
-        else:
-            if state.image_visual is None:
-                state.image_visual = self._vispy_visuals.Image(
-                    np.zeros((1, 1), dtype=np.float32),
-                    parent=self._vispy_view.scene,
-                    interpolation="nearest",
-                    texture_format="auto",
-                    method="auto",
-                    clim=self._vispy_last_levels,
-                )
-                state.image_visual.visible = False
-            _set_visual_visible(state.windowed_visual, False)
-            state.visual = state.image_visual
-        return state
-
-    def _hide_vispy_tile(self, tile_number: int) -> None:
-        state = self._vispy_tile_visuals.get(int(tile_number))
-        if state is not None:
-            _set_visual_visible(state.image_visual, False)
-            _set_visual_visible(state.windowed_visual, False)
-            state.visible = False
 
     def _sync_vispy_camera_to_view(self) -> None:
         try:
