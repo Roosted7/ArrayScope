@@ -1157,6 +1157,7 @@ def test_rgb_tile_layer_live_level_change_rewindows_pruned_sources(qt_app):
     assert timing.tile_layer_rgb_window_tiles == 2
     assert timing.tile_layer_items_updated == 2
     assert timing.tile_layer_items_skipped == 0
+    assert timing.tile_layer_level_updates == 2
     for tile, state in view._montage_tile_layer.states.items():
         assert tuple(state.levels) == (0.5, 1.0)
         assert not np.array_equal(state.item.image, before[tile])

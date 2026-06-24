@@ -88,6 +88,7 @@ def test_large_pyqtgraph_tile_preview_reports_level_work_without_texture_counter
 
     assert timing.tile_layer_visible_items > 8
     assert timing.tile_layer_rgb_window_tiles == timing.tile_layer_visible_items
+    assert timing.tile_layer_level_updates == timing.tile_layer_visible_items
     assert timing.tile_layer_texture_uploads == 0
     assert timing.tile_layer_level_update_pending_items == 0
 

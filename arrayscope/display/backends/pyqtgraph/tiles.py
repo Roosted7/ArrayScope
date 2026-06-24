@@ -165,6 +165,7 @@ class MontageTileLayer:
         image_replacements = 0
         existing_items_shown = 0
         relocated_tiles = 0
+        level_updates = 0
 
         for tile_number, source_index in enumerate(tuple(montage.indices)):
             state = states[tile_number] if tile_number < len(states) else "unloaded"
@@ -190,6 +191,7 @@ class MontageTileLayer:
                 continue
 
             item_state = self._states.get(tile_number)
+            existing_item = item_state is not None
             if item_state is None:
                 item = ImageItem(axisOrder="row-major")
                 self.layer_owner.add_tile_item(tile_number, item)
@@ -266,6 +268,7 @@ class MontageTileLayer:
                 image_replacements += int(updated and not items_created)
             elif levels_changed:
                 updated, windowed = self._update_tile_levels(item_state, levels)
+                level_updates += int(existing_item)
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
                 if not updated:
@@ -297,6 +300,8 @@ class MontageTileLayer:
             image_replacements=int(image_replacements),
             existing_items_shown=int(existing_items_shown),
             relocated_tiles=int(relocated_tiles),
+            level_updates=int(level_updates),
+            level_update_processed_items=int(level_updates),
         )
 
 
@@ -343,6 +348,7 @@ class MontageTileLayer:
         image_replacements = 0
         existing_items_shown = 0
         relocated_tiles = 0
+        level_updates = 0
         requested_upserts = (
             set(int(tile) for tile in tile_payloads)
             if tile_delta is None
@@ -392,6 +398,7 @@ class MontageTileLayer:
             hist_id = ("tile-source", source_id) if tile_hist is not None else None
             local_rect = (0, 0, int(width), int(height))
             item_state = self._states.get(tile_number)
+            existing_item = item_state is not None
             geometry_changed = item_state is None or tuple(item_state.local_rect) != local_rect
             source_changed = (
                 item_state is None
@@ -482,6 +489,7 @@ class MontageTileLayer:
                     committed_upserts.add(int(tile_number))
             elif levels_changed:
                 updated, windowed = self._update_tile_levels(item_state, levels)
+                level_updates += int(existing_item)
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
                 if not updated:
@@ -513,6 +521,8 @@ class MontageTileLayer:
             image_replacements=int(image_replacements),
             existing_items_shown=int(existing_items_shown),
             relocated_tiles=int(relocated_tiles),
+            level_updates=int(level_updates),
+            level_update_processed_items=int(level_updates),
             upload_ms=(perf_counter() - update_start) * 1000.0,
             level_update_pending_items=max(0, len(requested_upserts - committed_upserts)),
         )
@@ -550,6 +560,7 @@ class MontageTileLayer:
             items_updated=items_updated,
             items_skipped=items_skipped,
             rgb_window_tiles=rgb_window_tiles,
+            level_updates=processed,
             level_update_processed_items=processed,
             upload_ms=(perf_counter() - update_start) * 1000.0,
         )
