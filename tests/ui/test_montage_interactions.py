@@ -886,12 +886,15 @@ def test_montage_auto_window_button_applies_current_semantic_bounds_immediately(
         win.render(reason="test-montage")
         _process_events(qtbot, count=80)
         expected = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+        original_session = win._montage_session
 
         win.img_view.setLevels(2.0, 8.0)
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (2.0, 8.0)
 
         win.auto_window_levels()
 
+        assert win._montage_session is original_session
+        assert win._explicit_user_level_source is None
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == expected
         _process_events(qtbot, count=20)
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == expected

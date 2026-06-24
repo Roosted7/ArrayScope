@@ -423,29 +423,27 @@ class DisplayPresentationMixin:
         source_rank=LevelSourceRank.PREVIOUS_COMMITTED,
         semantic_key=None,
     ) -> LevelSource | None:
-        """Apply a level override consistently to Qt, frame, and montage state."""
+        """Apply a level override consistently to Qt, frame, and montage state.
+
+        The source override is exposed while the widget applies the levels so
+        tiled presentation callbacks can distinguish an automatic/programmatic
+        transition from a histogram gesture.
+        """
 
         levels = normalize_bounds(levels)
         if levels is None:
             return None
-        histogram_range = normalize_bounds(histogram_range) or normalize_bounds(self.img_view.getHistogramDataBounds()) or levels
-        apply_levels = getattr(self.img_view, "_apply_display_levels", None)
-        if callable(apply_levels):
-            apply_levels(levels[0], levels[1], emit_user=bool(emit_user))
-        else:
-            self.img_view.setLevels(levels[0], levels[1])
         frame = getattr(self, "_committed_display_frame", None)
-        if frame is not None:
-            if semantic_key is None:
-                semantic_key = frame.key.semantic_key
-            self._committed_display_frame = replace(
-                frame,
-                levels=levels,
-                histogram_range=histogram_range,
-            )
         session = getattr(self, "_montage_session", None)
+        if semantic_key is None and frame is not None:
+            semantic_key = frame.key.semantic_key
         if semantic_key is None and session is not None:
             semantic_key = getattr(session, "level_key", None)
+        histogram_range = (
+            normalize_bounds(histogram_range)
+            or normalize_bounds(self.img_view.getHistogramDataBounds())
+            or levels
+        )
         source = LevelSource(
             levels=levels,
             histogram_range=histogram_range,
@@ -455,6 +453,30 @@ class DisplayPresentationMixin:
             semantic_key=semantic_key,
             mode=self._current_window_mode(),
         )
+
+        previous_override = getattr(self, "_level_presentation_source_override", None)
+        self._level_presentation_source_override = source
+        try:
+            apply_levels = getattr(self.img_view, "_apply_display_levels", None)
+            if callable(apply_levels):
+                apply_levels(levels[0], levels[1], emit_user=bool(emit_user))
+            else:
+                self.img_view.setLevels(levels[0], levels[1])
+        finally:
+            self._level_presentation_source_override = previous_override
+
+        if source.rank != LevelSourceRank.EXPLICIT_USER:
+            self._explicit_user_level_source = None
+            if session is not None:
+                session.user_levels_override = None
+
+        frame = getattr(self, "_committed_display_frame", None)
+        if frame is not None:
+            self._committed_display_frame = replace(
+                frame,
+                levels=levels,
+                histogram_range=histogram_range,
+            )
         if session is not None:
             session.applied_level_source = source
         return source
@@ -502,18 +524,32 @@ class DisplayPresentationMixin:
 
         histogram_range = normalize_bounds(getattr(self.img_view, "getHistogramDataBounds", lambda: None)()) or levels
         mode = self._current_window_mode()
-        source = LevelSource(
-            levels=levels,
-            histogram_range=histogram_range,
-            rank=LevelSourceRank.EXPLICIT_USER if mode == "absolute" else LevelSourceRank.PREVIOUS_COMMITTED,
-            source_count=0,
-            expected_count=0,
-            semantic_key=getattr(session, "level_key", None),
-            mode=mode,
-        )
-        self._explicit_user_level_source = source
+        source_override = getattr(self, "_level_presentation_source_override", None)
+        if source_override is None:
+            source = LevelSource(
+                levels=levels,
+                histogram_range=histogram_range,
+                rank=LevelSourceRank.EXPLICIT_USER if mode == "absolute" else LevelSourceRank.PREVIOUS_COMMITTED,
+                source_count=0,
+                expected_count=0,
+                semantic_key=getattr(session, "level_key", None),
+                mode=mode,
+            )
+        else:
+            source = replace(
+                source_override,
+                levels=levels,
+                histogram_range=histogram_range,
+                semantic_key=getattr(session, "level_key", None),
+                mode=mode,
+            )
+        if source.rank == LevelSourceRank.EXPLICIT_USER:
+            self._explicit_user_level_source = source
+            session.user_levels_override = levels
+        else:
+            self._explicit_user_level_source = None
+            session.user_levels_override = None
         session.applied_level_source = source
-        session.user_levels_override = levels
         session.begin_level_presentation_update(levels)
 
         capabilities = image_view_backend_capabilities(self.img_view)

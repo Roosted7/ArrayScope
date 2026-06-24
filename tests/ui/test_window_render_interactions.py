@@ -368,7 +368,7 @@ def test_auto_window_resets_absolute_levels_once(qtbot):
         win.close()
 
 
-def test_auto_window_clears_pending_preview_and_renders_once_with_revert(qtbot, monkeypatch):
+def test_auto_window_clears_pending_preview_without_rerender_and_reverts(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -400,7 +400,7 @@ def test_auto_window_clears_pending_preview_and_renders_once_with_revert(qtbot, 
         win.auto_window_levels()
         _process_events(qtbot, count=30)
 
-        assert [call.get("reason") for call in render_calls] == ["auto-window"]
+        assert render_calls == []
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (100.0, 119.0)
         assert preview.pending_levels is None
         assert not preview.timer.isActive()
@@ -410,7 +410,7 @@ def test_auto_window_clears_pending_preview_and_renders_once_with_revert(qtbot, 
         widget.linkActivated.emit("action")
         _process_events(qtbot, count=30)
 
-        assert [call.get("reason") for call in render_calls] == ["auto-window", "auto-window-revert"]
+        assert render_calls == []
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (5.0, 15.0)
     finally:
         win.close()

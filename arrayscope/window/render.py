@@ -8,6 +8,7 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.view_state import ChannelMode
+from arrayscope.core.window_levels import LevelSourceRank
 from arrayscope.display.colormaps import named_colormap, phase_colormap
 from arrayscope.display.colormap_policy import resolved_colormap_name
 from arrayscope.display.planning import normalize_bounds
@@ -589,12 +590,25 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             cancel_level_interaction()
         previous_levels = normalize_bounds(self.img_view.getLevels())
         auto_bounds = normalize_bounds(self.img_view.getHistogramDataBounds())
-        auto_source = self._apply_display_level_override(auto_bounds, histogram_range=auto_bounds, emit_user=False)
-        self._pending_auto_level_source = auto_source
-        self._force_autolevel = True
-        self.render(reason="auto-window", force_autolevel=True)
-        if getattr(self, "_pending_auto_level_source", None) is auto_source:
+        has_committed_target = bool(
+            getattr(self, "_committed_display_frame", None) is not None
+            or bool(getattr(getattr(self, "_montage_session", None), "display_committed", False))
+        )
+        auto_source = self._apply_display_level_override(
+            auto_bounds,
+            histogram_range=auto_bounds,
+            emit_user=False,
+            source_rank=LevelSourceRank.PREVIOUS_COMMITTED,
+        )
+        if has_committed_target and auto_source is not None:
             self._pending_auto_level_source = None
+            self._force_autolevel = False
+        else:
+            self._pending_auto_level_source = auto_source
+            self._force_autolevel = True
+            self.render(reason="auto-window", force_autolevel=True)
+            if getattr(self, "_pending_auto_level_source", None) is auto_source:
+                self._pending_auto_level_source = None
         if previous_levels is not None:
             show_revert_action(
                 self,
@@ -612,8 +626,21 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             cancel_level_interaction()
         self._force_autolevel = False
         self._pending_auto_level_source = None
-        self._queue_display_levels(levels)
         session = getattr(self, "_montage_session", None)
+        has_committed_target = bool(
+            getattr(self, "_committed_display_frame", None) is not None
+            or bool(getattr(session, "display_committed", False))
+        )
+        if has_committed_target:
+            self._apply_display_level_override(
+                levels,
+                emit_user=True,
+                source_rank=LevelSourceRank.EXPLICIT_USER,
+            )
+            if session is not None:
+                session.force_auto = False
+            return
+        self._queue_display_levels(levels)
         if session is not None:
             session.force_auto = False
             session.user_levels_override = levels
