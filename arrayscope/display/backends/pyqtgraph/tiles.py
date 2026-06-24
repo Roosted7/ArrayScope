@@ -23,6 +23,7 @@ class TileLayerItemState:
     source_index: int
     item: ImageItem
     local_rect: tuple[int, int, int, int]
+    world_rect: tuple[int, int, int, int]
     source_array_id: object
     histogram_array_id: object | None
     levels: tuple[float, float]
@@ -200,6 +201,7 @@ class MontageTileLayer:
                     source_index=int(source_index),
                     item=item,
                     local_rect=(-1, -1, -1, -1),
+                    world_rect=(-1, -1, -1, -1),
                     source_array_id=0,
                     histogram_array_id=None,
                     levels=levels,
@@ -217,6 +219,7 @@ class MontageTileLayer:
             active.add(int(tile_number))
 
             local_rect = (int(dest_x0), int(dest_y0), int(width), int(height))
+            world_rect = (int(world_x), int(world_y), int(width), int(height))
             source_id = (
                 tile_source_ids.get(int(tile_number), id(img))
                 if tile_source_ids is not None
@@ -227,7 +230,10 @@ class MontageTileLayer:
                 if tile_source_ids is not None
                 else (None if histogram_data is None else id(histogram_data))
             )
-            geometry_changed = tuple(item_state.local_rect) != local_rect
+            geometry_changed = (
+                tuple(item_state.local_rect) != local_rect
+                or tuple(getattr(item_state, "world_rect", (-1, -1, -1, -1))) != world_rect
+            )
             source_changed = (
                 item_state.source_array_id != source_id
                 or item_state.histogram_array_id != hist_id
@@ -263,11 +269,13 @@ class MontageTileLayer:
                     local_rect=local_rect,
                     rgb_already_windowed=bool(rgb_already_windowed),
                 )
+                item_state.world_rect = world_rect
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
                 image_replacements += int(updated and not items_created)
             elif levels_changed:
                 updated, windowed = self._update_tile_levels(item_state, levels)
+                item_state.world_rect = world_rect
                 level_updates += int(existing_item)
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
@@ -277,6 +285,7 @@ class MontageTileLayer:
                 items_skipped += 1
                 item_state.levels = levels
                 item_state.visible = True
+                item_state.world_rect = world_rect
                 existing_items_shown += 1
                 relocated_tiles += int(geometry_changed)
 
@@ -390,6 +399,7 @@ class MontageTileLayer:
             col = tile_number % int(montage.columns)
             world_x = col * stride_x
             world_y = row * stride_y
+            world_rect = (int(world_x), int(world_y), int(width), int(height))
             source_id = (
                 tile_source_ids.get(int(tile_number), payload.source_id)
                 if tile_source_ids is not None
@@ -399,12 +409,16 @@ class MontageTileLayer:
             local_rect = (0, 0, int(width), int(height))
             item_state = self._states.get(tile_number)
             existing_item = item_state is not None
-            geometry_changed = item_state is None or tuple(item_state.local_rect) != local_rect
+            geometry_changed = (
+                item_state is None
+                or tuple(item_state.local_rect) != local_rect
+                or tuple(getattr(item_state, "world_rect", (-1, -1, -1, -1))) != world_rect
+            )
             source_changed = (
                 item_state is None
                 or item_state.source_array_id != source_id
                 or item_state.histogram_array_id != hist_id
-                or geometry_changed
+                or tuple(item_state.local_rect) != local_rect
                 or int(item_state.source_index) != int(source_index)
                 or bool(item_state.rgb_already_windowed) != bool(rgb_already_windowed)
             )
@@ -454,6 +468,7 @@ class MontageTileLayer:
                     source_index=int(source_index),
                     item=item,
                     local_rect=(-1, -1, -1, -1),
+                    world_rect=(-1, -1, -1, -1),
                     source_array_id=0,
                     histogram_array_id=None,
                     levels=levels,
@@ -481,6 +496,7 @@ class MontageTileLayer:
                     local_rect=local_rect,
                     rgb_already_windowed=bool(rgb_already_windowed),
                 )
+                item_state.world_rect = world_rect
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
                 image_replacements += int(updated and not items_created)
@@ -489,6 +505,7 @@ class MontageTileLayer:
                     committed_upserts.add(int(tile_number))
             elif levels_changed:
                 updated, windowed = self._update_tile_levels(item_state, levels)
+                item_state.world_rect = world_rect
                 level_updates += int(existing_item)
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
@@ -500,6 +517,7 @@ class MontageTileLayer:
                 items_skipped += 1
                 item_state.levels = levels
                 item_state.visible = True
+                item_state.world_rect = world_rect
                 existing_items_shown += 1
                 relocated_tiles += int(geometry_changed)
                 if int(tile_number) in requested_upserts:
@@ -775,6 +793,7 @@ def _direct_tile_order(
             and (
                 int(tile) not in state_map
                 or not bool(getattr(state_map[int(tile)], "visible", False))
+                or _direct_tile_geometry_changed(state_map[int(tile)], montage, int(tile), tile_payloads[int(tile)])
             )
         )
     seen: set[int] = set()
@@ -785,3 +804,25 @@ def _direct_tile_order(
         seen.add(int(tile))
         ordered.append(int(tile))
     return tuple(ordered)
+
+
+def _direct_tile_geometry_changed(state: TileLayerItemState, montage, tile_number: int, payload: DisplayTilePayload) -> bool:
+    data = np.asarray(payload.image)
+    if data.ndim < 2:
+        return False
+    tile_h = int(montage.tile_height)
+    tile_w = int(montage.tile_width)
+    width = min(tile_w, int(data.shape[1]))
+    height = min(tile_h, int(data.shape[0]))
+    if width <= 0 or height <= 0:
+        return False
+    stride_x = tile_w + int(montage.gap)
+    stride_y = tile_h + int(montage.gap)
+    row = int(tile_number) // int(montage.columns)
+    col = int(tile_number) % int(montage.columns)
+    expected_world = (int(col * stride_x), int(row * stride_y), int(width), int(height))
+    expected_local = (0, 0, int(width), int(height))
+    return (
+        tuple(getattr(state, "local_rect", (-1, -1, -1, -1))) != expected_local
+        or tuple(getattr(state, "world_rect", (-1, -1, -1, -1))) != expected_world
+    )

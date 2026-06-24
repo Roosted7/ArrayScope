@@ -313,6 +313,7 @@ def test_gpu_windowed_tile_shader_supports_complex_components():
     assert "float complex_component" in shader
     assert "if (u_component_mode > 2.5)" in shader
     assert "float intensity = 1.0;" in shader
+    assert "scalar = map_scale(length(z));" in shader
 
 
 def test_gpu_windowed_tile_mapping_tracks_component_uniform_without_texture_identity():

@@ -1379,14 +1379,16 @@ class GpuWindowedTileVisual(Visual):
             gl_FragColor = vec4(color, 1.0);
         } else {
             vec2 z = texture2D(u_scalar_texture, v_texcoord).rg;
-            float scalar = complex_component(z);
-            scalar = map_scale(scalar);
+            float component_scalar = complex_component(z);
+            float scalar = component_scalar;
             float span = max(u_levels.y - u_levels.x, 1e-12);
             float phase_index;
             float intensity = 1.0;
             if (u_component_mode > 2.5) {
+                scalar = map_scale(component_scalar);
                 phase_index = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
             } else {
+                scalar = map_scale(length(z));
                 intensity = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
                 float phase = atan(z.y, z.x);
                 phase_index = clamp((phase + 3.141592653589793) / 6.283185307179586, 0.0, 1.0);

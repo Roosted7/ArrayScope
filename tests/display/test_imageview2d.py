@@ -715,6 +715,88 @@ def test_pyqtgraph_clean_typed_tiled_commit_stays_noop(qt_app):
         view.close()
 
 
+def test_pyqtgraph_clean_typed_tiled_relayout_moves_existing_items(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+    view = ImageView2D()
+    payloads = {
+        index: DisplayTilePayload(
+            index,
+            index,
+            np.full((2, 2), float(index), dtype=np.float32),
+            None,
+            ("payload", index),
+        )
+        for index in range(4)
+    }
+    first_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(2, 11),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,) * 4,
+    )
+    relaid_geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(5, 5),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,) * 4,
+    )
+    try:
+        view.setTiledMontagePresentation(
+            geometry=first_geometry,
+            tile_state=TilePresentationState(payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=1,
+                visibility_revision=1,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=1,
+                upserts=payloads,
+                active_tiles=(0, 1, 2, 3),
+                planned_tiles=(0, 1, 2, 3),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+        )
+        assert view._montage_tile_layer.states[2].item.pos().x() == 6.0
+        assert view._montage_tile_layer.states[2].item.pos().y() == 0.0
+
+        report = view.setTiledMontagePresentation(
+            geometry=relaid_geometry,
+            tile_state=TilePresentationState(payloads),
+            tile_delta=TilePresentationDelta(
+                structure_revision=2,
+                payload_revision=1,
+                visibility_revision=2,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=2,
+                upserts={},
+                active_tiles=(0, 1, 2, 3),
+                planned_tiles=(0, 1, 2, 3),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+        )
+
+        timing = view.lastImageUploadTiming()
+        assert report.presented_tiles == frozenset({0, 1, 2, 3})
+        assert view._montage_tile_layer.states[2].item.pos().x() == 0.0
+        assert view._montage_tile_layer.states[2].item.pos().y() == 3.0
+        assert timing.tile_layer_items_updated == 0
+        assert timing.tile_layer_relocated_tiles == 2
+        assert timing.visible_bytes == 0
+    finally:
+        view.close()
+
+
 def test_pyqtgraph_budgeted_tiled_payload_keeps_existing_item_visible(qt_app, monkeypatch):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry

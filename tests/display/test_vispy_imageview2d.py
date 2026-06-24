@@ -304,6 +304,7 @@ def test_gpu_mapped_visual_shader_supports_raw_complex_components():
     assert "uniform float u_component_mode" in shader
     assert "float complex_component" in shader
     assert "if (u_component_mode > 2.5)" in shader
+    assert "scalar = length(z);" in shader
     assert "gl_FragColor = vec4(color, 1.0);" in shader
 
 

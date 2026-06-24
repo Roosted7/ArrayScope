@@ -71,9 +71,9 @@ class GpuMappedImageVisual(Visual):
         vec3 color = texture2D(u_color_texture, v_texcoord).rgb;
         if (u_mode > 2.5) {
             vec2 z = scalar_sample.rg;
-            scalar = complex_component(z);
             float phase_index;
             if (u_component_mode > 2.5) {
+                scalar = complex_component(z);
                 scalar = map_scale(scalar);
                 float span = max(u_levels.y - u_levels.x, 1e-12);
                 phase_index = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
@@ -87,6 +87,7 @@ class GpuMappedImageVisual(Visual):
             float phase = atan(z.y, z.x);
             phase_index = clamp((phase + 3.141592653589793) / 6.283185307179586, 0.0, 1.0);
             color = texture2D(u_lut_texture, vec2(phase_index, 0.5)).rgb;
+            scalar = length(z);
         } else if (u_mode > 1.5) {
             scalar = complex_component(scalar_sample.rg);
         }
