@@ -78,6 +78,8 @@ class TileLayerUpdateStats:
     complex_texture_uploads: int = 0
     shader_uniform_updates: int = 0
     upload_ms: float = 0.0
+    level_update_processed_items: int = 0
+    level_update_pending_items: int = 0
 
 
 class MontageTileLayer:
@@ -495,7 +497,13 @@ class MontageTileLayer:
             upload_ms=(perf_counter() - update_start) * 1000.0,
         )
 
-    def update_levels(self, levels, *, image=None, histogram_data=None) -> TileLayerUpdateStats:
+    def update_levels(
+        self,
+        levels,
+        *,
+        image=None,
+        histogram_data=None,
+    ) -> TileLayerUpdateStats:
         levels = (float(levels[0]), float(levels[1]))
         image_array = None if image is None else np.asarray(image)
         hist_array = None if histogram_data is None else np.asarray(histogram_data)
@@ -504,22 +512,25 @@ class MontageTileLayer:
         items_skipped = 0
         rgb_window_tiles = 0
         update_start = perf_counter()
+        processed = 0
         for state in tuple(self._states.values()):
             if not state.visible:
                 continue
             visible_items += 1
             updated, windowed = self._update_tile_levels(state, levels, image=image_array, histogram_data=hist_array)
+            processed += 1
             items_updated += int(updated)
             rgb_window_tiles += int(windowed)
             if not updated:
                 items_skipped += 1
-            self._prune_rgb_source_cache()
+        self._prune_rgb_source_cache()
         return TileLayerUpdateStats(
             visible_items=visible_items,
             presented_tiles=tuple(sorted(int(state.tile_number) for state in self._states.values() if state.visible)),
             items_updated=items_updated,
             items_skipped=items_skipped,
             rgb_window_tiles=rgb_window_tiles,
+            level_update_processed_items=processed,
             upload_ms=(perf_counter() - update_start) * 1000.0,
         )
 
@@ -679,7 +690,11 @@ class MontageTileLayer:
 
     def _prune_rgb_source_cache(self) -> None:
         budget = int(self._rgb_source_cache_budget_bytes)
-        states = [state for state in self._states.values() if state.rgb_base is not None or state.hist_source is not None]
+        states = [
+            state
+            for state in self._states.values()
+            if not bool(state.visible) and (state.rgb_base is not None or state.hist_source is not None)
+        ]
         if budget <= 0:
             for state in states:
                 state.rgb_base = None

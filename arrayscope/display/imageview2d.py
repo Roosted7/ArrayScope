@@ -25,7 +25,7 @@ from arrayscope.core.roi import (
     simplify_polyline,
 )
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
-from arrayscope.core.gui_callback_budget import GuiCallbackObservation
+from arrayscope.core.gui_callback_budget import GuiCallbackBudget, GuiCallbackObservation
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.histogram_controller import HistogramDisplayController, HistogramLevelPreviewController
@@ -120,6 +120,9 @@ class ImageView2D(QtWidgets.QWidget):
         self._upload_timing = None
         self._last_upload_timing = ImageUploadTiming()
         self._gui_callback_observer = None
+        self._gui_callback_budget_provider = None
+        self._background_task_submitter = None
+        self._level_presentation_change_handler = None
         self._montage_display_mode = "canvas"
         self._montage_tile_layer = None
         self._montage_tile_layer_histogram_key = None
@@ -221,6 +224,9 @@ class ImageView2D(QtWidgets.QWidget):
         self._layer_owner.add_profile_marker_items(self._profile_vline, self._profile_hline, self._profile_handle)
         self.view.sigRangeChanged.connect(self._on_view_range_changed)
 
+    def _histogram_preview_immediate(self) -> bool:
+        return True
+
     def setupUI(self):
         """Create the user interface"""
         # Main layout
@@ -272,6 +278,7 @@ class ImageView2D(QtWidgets.QWidget):
             "tile_layer_texture_submit_ms": 0.0,
             "tile_layer_vertex_uploads": 0,
             "tile_layer_level_updates": 0,
+            "tile_layer_level_update_pending_items": 0,
             "tile_layer_estimated_gpu_bytes": 0,
             "tile_layer_cpu_shadow_bytes": 0,
             "tile_layer_page_count": 0,
@@ -337,6 +344,7 @@ class ImageView2D(QtWidgets.QWidget):
             tile_layer_texture_submit_ms=float(timing["tile_layer_texture_submit_ms"]),
             tile_layer_vertex_uploads=int(timing["tile_layer_vertex_uploads"]),
             tile_layer_level_updates=int(timing["tile_layer_level_updates"]),
+            tile_layer_level_update_pending_items=int(timing["tile_layer_level_update_pending_items"]),
             tile_layer_estimated_gpu_bytes=int(timing["tile_layer_estimated_gpu_bytes"]),
             tile_layer_cpu_shadow_bytes=int(timing["tile_layer_cpu_shadow_bytes"]),
             tile_layer_page_count=int(timing["tile_layer_page_count"]),
@@ -364,6 +372,50 @@ class ImageView2D(QtWidgets.QWidget):
 
     def setGuiCallbackObserver(self, observer) -> None:
         self._gui_callback_observer = observer if callable(observer) else None
+
+    def setGuiCallbackBudgetProvider(self, provider) -> None:
+        self._gui_callback_budget_provider = provider if callable(provider) else None
+
+    def setBackgroundTaskSubmitter(self, submitter) -> None:
+        self._background_task_submitter = submitter if callable(submitter) else None
+
+    def setLevelPresentationChangeHandler(self, handler) -> None:
+        self._level_presentation_change_handler = handler if callable(handler) else None
+
+    def _submit_background_task(self, fn, *, on_done, key):
+        submitter = getattr(self, "_background_task_submitter", None)
+        if callable(submitter):
+            return submitter(fn, on_done=on_done, key=key)
+        return None
+
+    def _gui_callback_budget(
+        self,
+        channel: str,
+        *,
+        interactive: bool,
+        work_class: str,
+        item_cap: int | None = None,
+        byte_cap: int | None = None,
+    ) -> GuiCallbackBudget:
+        provider = getattr(self, "_gui_callback_budget_provider", None)
+        decision = provider(channel, interactive=interactive) if callable(provider) else None
+        return GuiCallbackBudget.for_decision(
+            channel,
+            decision,
+            interactive=interactive,
+            work_class=work_class,
+            backend=str(getattr(self, "rendering_backend_name", "pyqtgraph")),
+            item_cap=item_cap,
+            byte_cap=byte_cap,
+        )
+
+    def _record_gui_budget(self, budget: GuiCallbackBudget) -> None:
+        observation = budget.observation()
+        if observation.processed_items <= 0 and observation.elapsed_ms < observation.warning_ms:
+            return
+        observer = getattr(self, "_gui_callback_observer", None)
+        if callable(observer):
+            observer(observation)
 
     def _record_gui_callback_observation(
         self,
@@ -525,6 +577,7 @@ class ImageView2D(QtWidgets.QWidget):
             montage_dirty_tiles=montage_dirty_tiles,
             montage_tile_source_ids=montage_tile_source_ids,
             montage_tile_payloads=montage_tile_payloads,
+            tile_delta=tile_delta,
         )
 
     def _apply_tile_layer_presentation(
@@ -697,6 +750,7 @@ class ImageView2D(QtWidgets.QWidget):
         timing["tile_layer_texture_submit_ms"] = float(getattr(stats, "texture_submit_ms", 0.0) or 0.0)
         timing["tile_layer_vertex_uploads"] = int(stats.vertex_uploads)
         timing["tile_layer_level_updates"] = int(stats.level_updates)
+        timing["tile_layer_level_update_pending_items"] = int(getattr(stats, "level_update_pending_items", 0))
         timing["tile_layer_estimated_gpu_bytes"] = int(stats.estimated_gpu_bytes)
         timing["tile_layer_cpu_shadow_bytes"] = int(stats.cpu_shadow_bytes)
         timing["tile_layer_page_count"] = int(stats.page_count)
@@ -1139,8 +1193,9 @@ class ImageView2D(QtWidgets.QWidget):
     def setHistogramPreviewInterval(self, interval_ms: int) -> None:
         if self._histogram_preview_controller is not None:
             self._histogram_preview_controller.interval_ms = max(1, int(interval_ms))
+        self._histogram_retry_interval_ms = max(1, int(interval_ms))
 
-    def _apply_histogram_preview_levels(self, levels) -> None:
+    def _apply_histogram_preview_levels(self, levels, *, final: bool = False) -> None:
         levels = (float(levels[0]), float(levels[1]))
         started_timing = self._upload_timing is None
         if started_timing:
@@ -1148,6 +1203,9 @@ class ImageView2D(QtWidgets.QWidget):
         try:
             self._displayLevels = levels
             if self._montage_display_mode == "tile_layer":
+                handler = getattr(self, "_level_presentation_change_handler", None)
+                if callable(handler) and bool(handler(levels, final=bool(final))):
+                    return
                 stats = self._update_montage_tile_levels(levels)
                 self._record_tile_layer_stats(stats)
                 return
@@ -1202,17 +1260,24 @@ class ImageView2D(QtWidgets.QWidget):
         start = perf_counter()
         low = float(min_level)
         high = float(max_level)
+        previous = self._displayLevels
+        same_levels = (
+            previous is not None
+            and float(previous[0]) == low
+            and float(previous[1]) == high
+        )
         self._displayLevels = (low, high)
         if self._histogram_preview_controller is not None and self._applying_presentation:
             self._histogram_preview_controller.cancel()
-        applying = self._applying_presentation
-        self._applying_presentation = True
-        try:
-            self.histogram.setLevels(low, high)
-        finally:
-            self._applying_presentation = applying
+        if not same_levels:
+            applying = self._applying_presentation
+            self._applying_presentation = True
+            try:
+                self.histogram.setLevels(low, high)
+            finally:
+                self._applying_presentation = applying
         if update_image:
-            self._apply_histogram_preview_levels((low, high))
+            self._apply_histogram_preview_levels((low, high), final=True)
         self._record_upload_timing("level_sync_ms", (perf_counter() - start) * 1000.0)
         if emit_user:
             self.userLevelsChanged.emit()

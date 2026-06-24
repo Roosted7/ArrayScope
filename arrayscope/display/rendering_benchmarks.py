@@ -99,7 +99,9 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
     results = []
     scenarios = (
         _benchmark_scalar_level_preview,
+        _benchmark_large_histogram_plot_refresh,
         _benchmark_complex_tile_level_preview,
+        _benchmark_large_tile_level_preview,
         _benchmark_tile_level_uniform_update,
         _benchmark_clean_tile_flush,
         _benchmark_large_complex_tiled_initial,
@@ -174,6 +176,17 @@ def _benchmark_scalar_level_preview(view, *, measure_presented: bool) -> Renderi
     return _result(view, "scalar_level_preview", measurement)
 
 
+def _benchmark_large_histogram_plot_refresh(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    data = np.linspace(0.0, 1.0, 1024 * 1024, dtype=np.float32).reshape(1024, 1024)
+    view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    measurement = _measure_action(
+        view,
+        lambda: view._refresh_histogram_plot(auto_level=False),
+        measure_presented=measure_presented,
+    )
+    return _result(view, "large_histogram_plot_refresh", measurement)
+
+
 def _benchmark_complex_tile_level_preview(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
     placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(96, 96), count=2, columns=2)
     view.setMontageTileLayerPresentation(
@@ -206,6 +219,28 @@ def _benchmark_complex_tile_level_preview(view, *, measure_presented: bool) -> R
         measure_presented=measure_presented,
     )
     return _result(view, "complex_tile_level_preview", measurement)
+
+
+def _benchmark_large_tile_level_preview(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=96, columns=12)
+    view.setMontageTileLayerPresentation(
+        placeholder,
+        histogramData=None,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        rgb_already_windowed=False,
+        montage_dirty_tiles=None,
+        montage_tile_source_ids=sources,
+        montage_tile_payloads=payloads,
+    )
+    measurement = _measure_action(
+        view,
+        lambda: view._apply_histogram_preview_levels((0.35, 0.95)),
+        measure_presented=measure_presented,
+    )
+    return _result(view, "large_tile_level_preview", measurement)
 
 
 def _benchmark_tile_level_uniform_update(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
@@ -608,6 +643,7 @@ def _sum_upload_timings(timings) -> ImageUploadTiming:
         tile_layer_texture_upload_bytes=sum(int(timing.tile_layer_texture_upload_bytes) for timing in timings),
         tile_layer_vertex_uploads=sum(int(timing.tile_layer_vertex_uploads) for timing in timings),
         tile_layer_level_updates=sum(int(timing.tile_layer_level_updates) for timing in timings),
+        tile_layer_level_update_pending_items=sum(int(timing.tile_layer_level_update_pending_items) for timing in timings),
         tile_layer_estimated_gpu_bytes=int(last.tile_layer_estimated_gpu_bytes),
         tile_layer_cpu_shadow_bytes=int(last.tile_layer_cpu_shadow_bytes),
         tile_layer_page_count=int(last.tile_layer_page_count),

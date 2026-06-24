@@ -348,6 +348,12 @@ class DisplayControlBuildMixin:
         observer = None if governor is None else getattr(governor, "record_gui_callback_observation", None)
         if hasattr(self.img_view, "setGuiCallbackObserver") and callable(observer):
             self.img_view.setGuiCallbackObserver(observer)
+        if hasattr(self.img_view, "setGuiCallbackBudgetProvider"):
+            self.img_view.setGuiCallbackBudgetProvider(self._ui_work_decision)
+        if hasattr(self.img_view, "setBackgroundTaskSubmitter"):
+            self.img_view.setBackgroundTaskSubmitter(self._submit_histogram_background_task)
+        if hasattr(self.img_view, "setLevelPresentationChangeHandler"):
+            self.img_view.setLevelPresentationChangeHandler(self._on_level_presentation_changed)
         self.pixel_hud = PixelHud()
         self.img_view.setHudWidget(self.pixel_hud)
         self.image_tab_layout.addWidget(self.img_view)
@@ -376,6 +382,19 @@ class DisplayControlBuildMixin:
         
         # Add tab widget to the main layout
         self.layouts['topDown'].addWidget(self.tab_widget)
+
+    def _submit_histogram_background_task(self, fn, *, on_done, key):
+        controller = getattr(self, "prefetch_evaluation_controller", None)
+        if controller is None:
+            return None
+        decision = self._ui_work_decision("histogram_refresh", interactive=False)
+        memory_budget = getattr(decision, "byte_cap", 0) if decision is not None else self._prefetch_budget_bytes()
+        return controller.start_prefetch(
+            fn,
+            on_done=on_done,
+            key=key,
+            memory_budget_bytes=max(1, int(memory_budget or 0)),
+        )
 
     def _build_header_bar(self, filepath):
         self._reload_btn = QtWidgets.QToolButton()

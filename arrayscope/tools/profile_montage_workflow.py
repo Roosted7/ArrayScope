@@ -174,6 +174,17 @@ def run_profile_montage_workflow(
             action=apply_fft,
         )
         _append_record(records, jsonl, {**base, **fft_record, "run_temperature": "mixed"})
+
+        level_record = _run_phase(
+            app,
+            QtCore,
+            win,
+            probe,
+            phase="fft_level_refinement_preview",
+            timeout_s=timeout_s,
+            action=lambda: _apply_fft_level_refinement_preview(win, app=app, QtCore=QtCore),
+        )
+        _append_record(records, jsonl, {**base, **level_record, "run_temperature": "warm"})
         return tuple(records)
     finally:
         if win is not None:
@@ -218,11 +229,176 @@ class _EventLoopProbe:
         return _percentile(tuple(self.gaps_ms), percentile)
 
 
+def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[str, object]:
+    bounds = None
+    try:
+        bounds = win.img_view.getHistogramDataBounds()
+    except Exception:
+        bounds = None
+    if bounds is None:
+        try:
+            bounds = win.img_view.getLevels()
+        except Exception:
+            bounds = None
+    if bounds is None:
+        bounds = (0.0, 1.0)
+    low, high = (float(bounds[0]), float(bounds[1]))
+    if not math.isfinite(low) or not math.isfinite(high) or high <= low:
+        low, high = 0.0, 1.0
+    span = high - low
+    try:
+        base_levels = tuple(float(value) for value in win.img_view.getLevels())
+    except Exception:
+        base_levels = (low, high)
+    if (
+        len(base_levels) != 2
+        or not math.isfinite(base_levels[0])
+        or not math.isfinite(base_levels[1])
+        or base_levels[1] <= base_levels[0]
+    ):
+        base_levels = (low, high)
+    apply_preview = getattr(win.img_view, "_apply_histogram_preview_levels", None)
+    action_start = perf_counter()
+    first_half_stats = _new_histogram_loop_stats()
+    second_half_stats = _new_histogram_loop_stats()
+    for step in range(10):
+        offset = -0.05 * step * span
+        levels = (base_levels[0] + offset, base_levels[1] + offset)
+        draw_start = _vispy_draw_count(win)
+        preview_start = perf_counter()
+        try:
+            win.img_view.histogram.setLevels(float(levels[0]), float(levels[1]))
+        except Exception:
+            pass
+        target = first_half_stats if step < 5 else second_half_stats
+        if step < 5:
+            step_elapsed_ms = (perf_counter() - preview_start) * 1000.0
+            _add_histogram_loop_timing(target, None, step_elapsed_ms=step_elapsed_ms)
+            if app is not None and QtCore is not None:
+                _flush_histogram_widget_redraw(win, app, QtCore)
+        else:
+            if callable(apply_preview):
+                apply_preview(levels, final=True)
+            else:
+                win.img_view.setLevels(levels[0], levels[1])
+            if app is not None and QtCore is not None:
+                _wait_for_montage_complete(
+                    app,
+                    QtCore,
+                    win,
+                    timeout_s=5.0,
+                    start=preview_start,
+                    draw_start=draw_start,
+                )
+            timing = win.img_view.lastImageUploadTiming()
+            step_elapsed_ms = (perf_counter() - preview_start) * 1000.0
+            _add_histogram_loop_timing(target, timing, step_elapsed_ms=step_elapsed_ms)
+    finish = getattr(win.img_view, "_on_histogram_level_change_finished", None)
+    if callable(finish):
+        finish()
+    total_stats = _combine_histogram_loop_stats(first_half_stats, second_half_stats)
+    return {
+        "histogram_loop_steps": 10,
+        "histogram_loop_first_half_steps": 5,
+        "histogram_loop_second_half_steps": 5,
+        "histogram_loop_pacing": "5_histogram_redraw_then_5_full_render_redraw",
+        "histogram_loop_direction": "down_from_auto_default_5_percent_steps",
+        "histogram_loop_base_levels": [float(base_levels[0]), float(base_levels[1])],
+        "histogram_loop_action_ms": (perf_counter() - action_start) * 1000.0,
+        **_histogram_loop_record_fields("histogram_loop", total_stats),
+        **_histogram_loop_record_fields("histogram_loop_first_half", first_half_stats),
+        **_histogram_loop_record_fields("histogram_loop_second_half", second_half_stats),
+    }
+
+
+def _flush_histogram_widget_redraw(win, app, QtCore) -> None:
+    histogram = getattr(getattr(win, "img_view", None), "histogram", None)
+    if histogram is not None:
+        try:
+            histogram.update()
+        except Exception:
+            pass
+    _process_events(app, QtCore, count=2)
+
+
+def _new_histogram_loop_stats() -> dict[str, object]:
+    return {
+        "steps": 0,
+        "step_ms": [],
+        "rgb_window_ms": 0.0,
+        "rgb_window_tiles": 0,
+        "texture_uploads": 0,
+        "texture_upload_bytes": 0,
+        "level_updates": 0,
+        "shader_uniform_updates": 0,
+        "items_updated": 0,
+        "items_skipped": 0,
+    }
+
+
+def _add_histogram_loop_timing(stats: dict[str, object], timing, *, step_elapsed_ms: float) -> None:
+    stats["steps"] = int(stats["steps"]) + 1
+    cast_steps = stats["step_ms"]
+    assert isinstance(cast_steps, list)
+    cast_steps.append(float(step_elapsed_ms))
+    if timing is None:
+        return
+    stats["rgb_window_ms"] = float(stats["rgb_window_ms"]) + float(getattr(timing, "tile_layer_rgb_window_ms", 0.0) or 0.0)
+    stats["rgb_window_tiles"] = int(stats["rgb_window_tiles"]) + int(getattr(timing, "tile_layer_rgb_window_tiles", 0) or 0)
+    stats["texture_uploads"] = int(stats["texture_uploads"]) + int(getattr(timing, "tile_layer_texture_uploads", 0) or 0)
+    stats["texture_upload_bytes"] = int(stats["texture_upload_bytes"]) + int(getattr(timing, "tile_layer_texture_upload_bytes", 0) or 0)
+    stats["level_updates"] = int(stats["level_updates"]) + int(getattr(timing, "tile_layer_level_updates", 0) or 0)
+    stats["shader_uniform_updates"] = int(stats["shader_uniform_updates"]) + int(getattr(timing, "tile_layer_shader_uniform_updates", 0) or 0)
+    stats["items_updated"] = int(stats["items_updated"]) + int(getattr(timing, "tile_layer_items_updated", 0) or 0)
+    stats["items_skipped"] = int(stats["items_skipped"]) + int(getattr(timing, "tile_layer_items_skipped", 0) or 0)
+
+
+def _combine_histogram_loop_stats(*stats_items: dict[str, object]) -> dict[str, object]:
+    combined = _new_histogram_loop_stats()
+    combined_steps = combined["step_ms"]
+    assert isinstance(combined_steps, list)
+    for stats in stats_items:
+        combined["steps"] = int(combined["steps"]) + int(stats["steps"])
+        step_ms = stats["step_ms"]
+        assert isinstance(step_ms, list)
+        combined_steps.extend(float(value) for value in step_ms)
+        for key in (
+            "rgb_window_ms",
+            "rgb_window_tiles",
+            "texture_uploads",
+            "texture_upload_bytes",
+            "level_updates",
+            "shader_uniform_updates",
+            "items_updated",
+            "items_skipped",
+        ):
+            combined[key] = combined[key] + stats[key]
+    return combined
+
+
+def _histogram_loop_record_fields(prefix: str, stats: dict[str, object]) -> dict[str, object]:
+    step_ms = stats["step_ms"]
+    assert isinstance(step_ms, list)
+    return {
+        f"{prefix}_steps": int(stats["steps"]),
+        f"{prefix}_step_max_ms": max(step_ms) if step_ms else 0.0,
+        f"{prefix}_step_mean_ms": sum(step_ms) / len(step_ms) if step_ms else 0.0,
+        f"{prefix}_rgb_window_ms": float(stats["rgb_window_ms"]),
+        f"{prefix}_rgb_window_tiles": int(stats["rgb_window_tiles"]),
+        f"{prefix}_texture_uploads": int(stats["texture_uploads"]),
+        f"{prefix}_texture_upload_bytes": int(stats["texture_upload_bytes"]),
+        f"{prefix}_level_updates": int(stats["level_updates"]),
+        f"{prefix}_shader_uniform_updates": int(stats["shader_uniform_updates"]),
+        f"{prefix}_items_updated": int(stats["items_updated"]),
+        f"{prefix}_items_skipped": int(stats["items_skipped"]),
+    }
+
+
 def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_s: float, action) -> dict[str, object]:
     probe.reset()
     start = perf_counter()
     draw_start = _vispy_draw_count(win)
-    action()
+    action_result = action()
     milestones = _wait_for_montage_complete(
         app,
         QtCore,
@@ -241,6 +417,8 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
         event_loop_p99_gap_ms=probe.percentile_ms(99),
         event_loop_max_gap_ms=probe.max_gap_ms,
     )
+    if isinstance(action_result, dict):
+        record.update(action_result)
     record.update(milestones)
     record["event_loop_ticks"] = int(probe.tick_count)
     return record
@@ -372,18 +550,23 @@ def _phase_record(
         "last_render_sync_ms": _optional_float(snapshot.render_timing.last_render_sync_ms),
         "last_display_commit_ms": _optional_float(snapshot.render_timing.last_display_commit_ms),
         "last_canvas_commit_ms": _optional_float(timing.last_canvas_commit_ms),
+        "last_histogram_recompute_ms": _optional_float(timing.last_histogram_recompute_ms),
+        "last_level_sync_ms": _optional_float(timing.last_level_sync_ms),
         "last_tile_layer_upload_ms": _optional_float(timing.last_tile_layer_upload_ms),
         "last_tile_layer_rgb_window_ms": _optional_float(timing.last_tile_layer_rgb_window_ms),
         "last_overlay_update_ms": _optional_float(timing.last_overlay_update_ms),
         "tile_layer_visible_items": int(timing.tile_layer_visible_items),
         "tile_layer_items_updated": int(timing.tile_layer_items_updated),
         "tile_layer_items_skipped": int(timing.tile_layer_items_skipped),
+        "tile_layer_rgb_window_tiles": int(timing.tile_layer_rgb_window_tiles),
         "tile_layer_texture_uploads": int(timing.tile_layer_texture_uploads),
         "tile_layer_texture_upload_bytes": int(timing.tile_layer_texture_upload_bytes),
         "tile_layer_texture_prepare_ms": _optional_float(timing.tile_layer_texture_prepare_ms),
         "tile_layer_texture_submit_ms": _optional_float(timing.tile_layer_texture_submit_ms),
         "tile_layer_vertex_uploads": int(timing.tile_layer_vertex_uploads),
         "tile_layer_level_updates": int(timing.tile_layer_level_updates),
+        "tile_layer_level_update_pending_items": int(getattr(timing, "tile_layer_level_update_pending_items", 0)),
+        "tile_layer_shader_uniform_updates": int(timing.tile_layer_shader_uniform_updates),
         "tile_layer_estimated_gpu_bytes": int(timing.tile_layer_estimated_gpu_bytes),
         "tile_layer_page_count": int(timing.tile_layer_page_count),
         "tile_layer_active_pages": int(timing.tile_layer_active_pages),
@@ -1249,6 +1432,63 @@ def _plain_timing_summary(path: Path) -> list[str]:
     return lines
 
 
+def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
+    if not records:
+        return "No workflow timing records were produced.\n"
+    lines = [
+        "Workflow timing summary",
+        "| Backend | phase | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
+        "|---|---|---:|---:|---:|---|---|---:|---:|---|",
+    ]
+    for record in records:
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    f"`{record.get('backend', '')}`",
+                    f"`{record.get('phase', '')}`",
+                    _format_ms(record.get("elapsed_ms")),
+                    _format_ms(record.get("event_loop_max_gap_ms")),
+                    _histogram_loop_action_summary(record),
+                    _level_work_summary(record),
+                    _texture_work_summary(record),
+                    _format_ms(record.get("last_histogram_recompute_ms")),
+                    _format_ms(record.get("last_level_sync_ms")),
+                    _tile_summary(record),
+                )
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _histogram_loop_action_summary(record: dict[str, object]) -> str:
+    if "histogram_loop_action_ms" not in record:
+        return "n/a"
+    return (
+        f"hist {_format_ms(record.get('histogram_loop_first_half_step_mean_ms'))}; "
+        f"full {_format_ms(record.get('histogram_loop_second_half_step_mean_ms'))}; "
+        f"max {_format_ms(record.get('histogram_loop_step_max_ms'))}"
+    )
+
+
+def _level_work_summary(record: dict[str, object]) -> str:
+    rgb_tiles = int(record.get("histogram_loop_rgb_window_tiles", record.get("tile_layer_rgb_window_tiles", 0)) or 0)
+    uniform_updates = int(record.get("histogram_loop_level_updates", record.get("tile_layer_level_updates", 0)) or 0)
+    shader_uniform_updates = int(record.get("histogram_loop_shader_uniform_updates", record.get("tile_layer_shader_uniform_updates", 0)) or 0)
+    rgb_ms = _format_ms(record.get("histogram_loop_rgb_window_ms", record.get("last_tile_layer_rgb_window_ms")))
+    steps = record.get("histogram_loop_steps")
+    prefix = f"{steps}x; " if steps is not None else ""
+    return f"{prefix}rgb {rgb_tiles} / {rgb_ms}; level {uniform_updates}; shader {shader_uniform_updates}"
+
+
+def _texture_work_summary(record: dict[str, object]) -> str:
+    uploads = int(record.get("histogram_loop_texture_uploads", record.get("tile_layer_texture_uploads", 0)) or 0)
+    bytes_text = _format_bytes(record.get("histogram_loop_texture_upload_bytes", record.get("tile_layer_texture_upload_bytes")))
+    vertex = int(record.get("tile_layer_vertex_uploads", 0) or 0)
+    return f"upload {uploads} / {bytes_text}; vertex {vertex}"
+
+
 def _py_spy_summary(record: dict[str, object], *, title: str, heading: str = "###") -> list[str]:
     diagnostics = dict(record.get("profiler_diagnostics", {}) or {})
     lines = [
@@ -1701,18 +1941,22 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     jsonl = None if args.jsonl is None else Path(args.jsonl)
     if jsonl is not None and jsonl.exists():
         jsonl.unlink()
+    all_records: list[dict[str, object]] = []
     for backend in (("pyqtgraph", "vispy") if args.backend == "all" else (args.backend,)):
-        run_profile_montage_workflow(
-            data_path=args.data,
-            backend=backend,
-            jsonl=jsonl,
-            timeout_s=args.timeout_s,
-            max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
-            columns=None if args.columns <= 0 else args.columns,
-            load_mode=args.load_mode,
-            profiler_type=args.profiler_type,
-            profiler_artifact_paths=tuple(args.profiler_artifact or ()),
+        all_records.extend(
+            run_profile_montage_workflow(
+                data_path=args.data,
+                backend=backend,
+                jsonl=jsonl,
+                timeout_s=args.timeout_s,
+                max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
+                columns=None if args.columns <= 0 else args.columns,
+                load_mode=args.load_mode,
+                profiler_type=args.profiler_type,
+                profiler_artifact_paths=tuple(args.profiler_artifact or ()),
+            )
         )
+    print(_workflow_timing_summary(tuple(all_records)), end="")
     return 0
 
 

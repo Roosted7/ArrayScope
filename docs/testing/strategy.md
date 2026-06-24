@@ -60,11 +60,14 @@ Record separately:
 Use `arrayscope.tools.profile_montage_workflow` when scheduler or backend
 changes may affect perceived pacing. It drives a real window through the
 bundled NIfTI dataset, full dim-2 tiled montage, and FFT-over-dim-2 montage.
+After the FFT montage is visible it also performs a deterministic
+`fft_level_refinement_preview` level edit so histogram/level presentation
+latency is captured on the same onscreen tiled workflow.
 With `--jsonl`, the tool writes phase records with first-content timing, total
 phase timing, event-loop gap statistics, callback observations, tile upload
 bytes, and montage compute counters. Use those JSONL fields as the timing
 evidence. Cold and warm runs are separate evidence: a warm resident pan, clean
-flush, or level-only update must not be folded into the cold initial-display
+flush, histogram refinement, or level-only update must not be folded into the cold initial-display
 number.
 Full-axis FFT montage should be stage-backed once the shared stage is available;
 hundreds of direct FFT tile computations are a scheduler/cache regression even

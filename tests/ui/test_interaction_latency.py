@@ -173,6 +173,76 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
         win.close()
 
 
+def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monkeypatch):
+    clear_arrayscope_settings()
+    from types import SimpleNamespace
+
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(3 * 2 * 2, dtype=np.float32).reshape(2, 2, 3))
+    qtbot.addWidget(win)
+    try:
+        process_events(qtbot)
+        state = win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
+        plan = make_montage_plan(state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=3)
+        for tile in plan.tiles:
+            rgb = np.full((2, 2, 3), 80 + int(tile.source_index) * 20, dtype=np.uint8)
+            hist = np.full((2, 2), float(tile.source_index + 1), dtype=np.float32)
+            result = EvaluationResult(DisplayImage(rgb, histogram_data=hist), 0.0, rgb.shape, int(rgb.nbytes))
+            win.operation_evaluator.store_montage_tile_result(
+                tile,
+                montage_axis=2,
+                colormap_lut=None,
+                result=result,
+            )
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: pytest.fail("no tile evaluation expected"))
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
+
+        win._set_view_state(state)
+        win.update_montage_view()
+        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=500)
+        initial_level_values = dict(win._montage_session.tile_level_values)
+        initial_levels = next(iter(initial_level_values.values()))
+
+        decision = SimpleNamespace(batch_limit=1, budget_ms=100.0, interval_ms=1000, byte_cap=0)
+        monkeypatch.setattr(win, "_ui_work_decision", lambda _channel, *, interactive=False: decision)
+        win._montage_session.last_commit_monotonic = 0.0
+
+        win.img_view.setLevels(0.5, 4.0)
+        win._flush_montage_canvas_commit()
+        timing = win.img_view.lastImageUploadTiming()
+
+        assert timing.tile_layer_items_updated == 1
+        assert timing.tile_layer_rgb_window_tiles == 1
+        assert len(win._montage_session.pending_payload_upserts) == 0
+        assert win._montage_session.has_stale_level_presentations() is True
+        assert win._montage_session.pending_level_update is True
+
+        previous_revision = int(win._montage_session.level_revision)
+        with QtCore.QSignalBlocker(win.img_view.histogram.item):
+            win.img_view.histogram.setLevels(1.0, 3.5)
+        win.img_view._on_histogram_levels_changed()
+
+        assert tuple(float(value) for value in win.img_view.getLevels()) == (1.0, 3.5)
+        assert win._montage_session.desired_level_values == (1.0, 3.5)
+        assert int(win._montage_session.level_revision) == previous_revision + 1
+        assert win._montage_session.pending_level_update is True
+
+        win._montage_session.last_commit_monotonic = 0.0
+        win.img_view.setLevels(*initial_levels)
+        win._flush_montage_canvas_commit()
+        timing = win.img_view.lastImageUploadTiming()
+
+        assert timing.tile_layer_items_updated == 1
+        assert win._montage_session.has_stale_level_presentations() is False
+    finally:
+        win.close()
+
+
 def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtbot, monkeypatch):
     pytest.importorskip("vispy")
 

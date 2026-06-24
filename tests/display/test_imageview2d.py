@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -172,6 +173,27 @@ def test_separate_histogram_plot_source_drives_histogram_without_replacing_value
     view.histogram.setLevels(120.0, 180.0)
     view._on_histogram_levels_changed()
     assert tuple(float(value) for value in view.imageItem.levels) == (120.0, 180.0)
+    view.close()
+
+
+def test_large_histogram_refresh_uses_background_submitter(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    data = np.linspace(0.0, 1.0, 512 * 512, dtype=np.float32).reshape(512, 512)
+    submitted = []
+
+    def submit(fn, *, on_done, key):
+        submitted.append((fn, on_done, key))
+        return SimpleNamespace(scheduled=True)
+
+    view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    view.setBackgroundTaskSubmitter(submit)
+    submitted.clear()
+
+    assert view._refresh_histogram_plot(auto_level=False) is None
+    assert submitted
+    assert submitted[-1][2][0] == "histogram_plot"
     view.close()
 
 
@@ -385,6 +407,63 @@ def test_tiled_presentation_does_not_budget_ready_payload_visibility(qt_app):
     )
 
     assert report.presented_tiles == frozenset({0, 1, 2})
+    view.close()
+
+
+def test_rgb_tiled_payload_level_drag_updates_all_visible_tiles(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+    view = ImageView2D()
+    view._montage_tile_layer._rgb_source_cache_budget_bytes = 1
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
+        display_shape=(2, 11),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED,) * 4,
+    )
+    payloads = {}
+    for index in range(4):
+        image = np.full((2, 2, 3), 80 + index * 20, dtype=np.uint8)
+        hist = np.full((2, 2), float(index + 1), dtype=np.float32)
+        payloads[index] = DisplayTilePayload(index, index, image, hist, ("payload", index))
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=(0, 1, 2, 3),
+        planned_tiles=(0, 1, 2, 3),
+    )
+
+    view.setTiledMontagePresentation(
+        geometry=geometry,
+        tile_state=TilePresentationState(payloads),
+        tile_delta=delta,
+        histogramPlotData=None,
+        levels=(0.0, 4.0),
+        histogramRange=(0.0, 4.0),
+    )
+    before = {tile: np.array(state.item.image, copy=True) for tile, state in view._montage_tile_layer.states.items()}
+
+    view.setLevels(0.0, 5.0)
+
+    timing = view.lastImageUploadTiming()
+    assert timing.tile_layer_visible_items == 4
+    assert timing.tile_layer_items_updated == 4
+    assert timing.tile_layer_rgb_window_tiles == 4
+    assert timing.tile_layer_items_skipped == 0
+    for tile, state in view._montage_tile_layer.states.items():
+        assert tuple(state.levels) == (0.0, 5.0)
+        assert state.rgb_base is not None
+        assert state.hist_source is not None
+        assert not np.array_equal(state.item.image, before[tile])
     view.close()
 
 
@@ -971,7 +1050,8 @@ def test_rgb_tile_layer_pruned_source_cache_rewindows_from_canvas(qt_app):
     view._montage_tile_layer._rgb_source_cache_budget_bytes = 1
     view.setMontageTileLayerPresentation(canvas, histogramData=hist, histogramPlotData=None, geometry=geometry, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
 
-    assert all(state.rgb_base is None for state in view._montage_tile_layer.states.values())
+    assert all(state.rgb_base is not None for state in view._montage_tile_layer.states.values())
+    assert all(state.hist_source is not None for state in view._montage_tile_layer.states.values())
     before = {tile: np.array(state.item.image, copy=True) for tile, state in view._montage_tile_layer.states.items()}
     view.setMontageTileLayerPresentation(
         canvas,
@@ -1016,7 +1096,8 @@ def test_rgb_tile_layer_live_level_change_rewindows_pruned_sources(qt_app):
         histogramRange=(0.0, 1.0),
     )
 
-    assert all(state.rgb_base is None for state in view._montage_tile_layer.states.values())
+    assert all(state.rgb_base is not None for state in view._montage_tile_layer.states.values())
+    assert all(state.hist_source is not None for state in view._montage_tile_layer.states.values())
     before = {tile: np.array(state.item.image, copy=True) for tile, state in view._montage_tile_layer.states.items()}
     view.setLevels(0.5, 1.0)
 
@@ -1573,9 +1654,13 @@ def test_histogram_drag_preview_emits_user_level_once_on_finish(qt_app):
     with QtCore.QSignalBlocker(view.histogram.item):
         view.histogram.setLevels(0.1, 0.9)
     view._on_histogram_levels_changed()
+    assert user_calls == []
+    assert tuple(float(value) for value in view.getLevels()) == (0.1, 0.9)
     with QtCore.QSignalBlocker(view.histogram.item):
         view.histogram.setLevels(0.2, 0.8)
     view._on_histogram_levels_changed()
+    assert user_calls == []
+    assert tuple(float(value) for value in view.getLevels()) == (0.2, 0.8)
     view._on_histogram_level_change_finished()
 
     assert user_calls == [True]

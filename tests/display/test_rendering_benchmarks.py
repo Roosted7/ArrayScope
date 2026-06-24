@@ -36,8 +36,12 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_result
     assert {result.name for result in results} == {
         "pyqtgraph_scalar_level_preview",
         "vispy_scalar_level_preview",
+        "pyqtgraph_large_histogram_plot_refresh",
+        "vispy_large_histogram_plot_refresh",
         "pyqtgraph_complex_tile_level_preview",
         "vispy_complex_tile_level_preview",
+        "pyqtgraph_large_tile_level_preview",
+        "vispy_large_tile_level_preview",
         "pyqtgraph_tile_level_uniform_update",
         "vispy_tile_level_uniform_update",
         "pyqtgraph_clean_tile_flush",
@@ -76,6 +80,16 @@ def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(benchmark_
     assert vispy.tile_layer_upload_ms == 0.0
     assert vispy.visible_bytes == 0
     assert vispy.tile_layer_items_skipped == vispy.tile_layer_visible_items
+
+
+def test_large_pyqtgraph_tile_preview_reports_level_work_without_texture_counters(benchmark_results):
+    results = {result.name: result for result in benchmark_results}
+    timing = results["pyqtgraph_large_tile_level_preview"].timing
+
+    assert timing.tile_layer_visible_items > 8
+    assert timing.tile_layer_rgb_window_tiles == timing.tile_layer_visible_items
+    assert timing.tile_layer_texture_uploads == 0
+    assert timing.tile_layer_level_update_pending_items == 0
 
 
 def test_vispy_clean_tile_flush_skips_existing_visuals(benchmark_results):

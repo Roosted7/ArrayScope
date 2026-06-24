@@ -801,7 +801,8 @@ class VisPyImageView2D(ImageView2D):
             if timer is not None:
                 timer.start(8)
 
-    def _apply_histogram_preview_levels(self, levels) -> None:
+    def _apply_histogram_preview_levels(self, levels, *, final: bool = False) -> None:
+        del final
         levels = (float(levels[0]), float(levels[1]))
         started_timing = self._upload_timing is None
         if started_timing:

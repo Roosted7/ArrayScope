@@ -1355,14 +1355,15 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=3000)
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=3000)
         assert any(state.rgb_base is not None for state in win.img_view._montage_tile_layer.states.values())
-        first_item = next(iter(win.img_view._montage_tile_layer.states.values())).item
-        before = np.array(first_item.image, copy=True)
 
         low, high = win.img_view.getHistogramDataBounds()
-        win.img_view.setLevels((float(low) + float(high)) / 2.0, float(high))
-        _process_events(qtbot, count=10)
-
-        assert not np.array_equal(first_item.image, before)
+        desired = ((float(low) + float(high)) / 2.0, float(high))
+        win.img_view.setLevels(*desired)
+        qtbot.waitUntil(
+            lambda: all(tuple(state.levels) == desired for state in win.img_view._montage_tile_layer.states.values()),
+            timeout=1000,
+        )
+        assert win._montage_session.has_stale_level_presentations() is False
     finally:
         win.close()
 
@@ -1411,7 +1412,7 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_upload_canvas(
         win.img_view._on_histogram_level_change_finished()
 
         timing = win.img_view.lastImageUploadTiming()
-        assert timing.mode == "level_preview"
+        assert timing.mode == "tile_layer"
         assert timing.tile_layer_visible_items > 0
         assert timing.tile_layer_items_updated > 0
     finally:

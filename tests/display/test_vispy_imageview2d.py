@@ -97,6 +97,25 @@ def test_scalar_level_preview_updates_clim_without_rgb_work(qt_app):
         view.close()
 
 
+def test_vispy_histogram_drag_flushes_preview_without_debounce(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    data = np.linspace(0.0, 1.0, 32 * 32, dtype=np.float32).reshape(32, 32)
+    try:
+        view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+        view.histogram.setLevels(0.2, 0.8)
+        view._on_histogram_levels_changed()
+
+        timing = view.lastImageUploadTiming()
+        assert timing.mode == "vispy_level_preview"
+        assert not view._histogram_preview_controller.timer.isActive()
+        assert view._histogram_preview_controller.pending_levels is None
+        assert tuple(float(value) for value in view._vispy_image.clim) == (0.2, 0.8)
+    finally:
+        view.close()
+
+
 def test_vispy_tile_redraw_coalesces_canvas_updates_but_keeps_draw_wait(qt_app, monkeypatch):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 

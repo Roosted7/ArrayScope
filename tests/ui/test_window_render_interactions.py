@@ -71,6 +71,26 @@ def test_reload_button_uses_standard_tool_button_chrome(qtbot, tmp_path):
         win.close()
 
 
+def test_main_canvas_remains_embedded_in_window(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtWidgets
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(6 * 7, dtype=float).reshape(6, 7))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        assert win.layouts["topDown"].indexOf(win.tab_widget) >= 0
+        assert win.tab_widget.parent() is not None
+        assert win.img_view.parent() is win.image_tab
+        assert win.img_view.window() is win
+        top_levels = set(QtWidgets.QApplication.topLevelWidgets())
+        assert win.img_view not in top_levels
+        assert win.tab_widget not in top_levels
+    finally:
+        win.close()
+
+
 def test_hover_reads_display_without_scalar_evaluation(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore

@@ -14,6 +14,7 @@ import numpy as np
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.memory_policy import MiB, MemoryPolicy
+from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.ui.toasts import show_status_message
@@ -488,6 +489,51 @@ class DisplayPresentationMixin:
         if frame is None or not self._is_level_history_frame_usable(frame):
             return
         self._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range or frame.histogram_range)
+
+    def _on_level_presentation_changed(self, levels, *, final: bool = False) -> bool:
+        levels = normalize_bounds(levels)
+        if levels is None:
+            return False
+        session = getattr(self, "_montage_session", None)
+        if session is None or not bool(getattr(session, "display_committed", False)):
+            return False
+        if str(getattr(self.img_view, "montageDisplayMode", lambda: "canvas")()) not in {"tile_layer", "vispy_tile_layer"}:
+            return False
+
+        histogram_range = normalize_bounds(getattr(self.img_view, "getHistogramDataBounds", lambda: None)()) or levels
+        mode = self._current_window_mode()
+        source = LevelSource(
+            levels=levels,
+            histogram_range=histogram_range,
+            rank=LevelSourceRank.EXPLICIT_USER if mode == "absolute" else LevelSourceRank.PREVIOUS_COMMITTED,
+            source_count=0,
+            expected_count=0,
+            semantic_key=getattr(session, "level_key", None),
+            mode=mode,
+        )
+        self._explicit_user_level_source = source
+        session.applied_level_source = source
+        session.user_levels_override = levels
+        session.begin_level_presentation_update(levels)
+
+        capabilities = image_view_backend_capabilities(self.img_view)
+        if not (capabilities.direct_montage_tile_payloads and not capabilities.shader_windowing):
+            session.pending_level_update = False
+
+        frame = getattr(self, "_committed_display_frame", None)
+        if frame is not None and self._is_level_history_frame_usable(frame):
+            self._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range)
+
+        if bool(final):
+            committer = getattr(self, "_commit_montage_session_canvas", None)
+            if callable(committer) and not bool(getattr(self, "_montage_canvas_commit_active", False)):
+                committer(session, force=True)
+                return True
+
+        scheduler = getattr(self, "_schedule_montage_canvas_commit", None)
+        if callable(scheduler):
+            scheduler(session, force=bool(final))
+        return True
 
 
 def tile_residency_budget_bytes(policy: MemoryPolicy) -> int:

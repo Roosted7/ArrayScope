@@ -73,7 +73,7 @@ adding another branch to these classes.
 The existing timers are mostly bounded and stop when idle, but a cold interaction can still accumulate
 coalescing, queue-poll, viewport-settle, evaluation, and presentation latency. Setter timing alone is not a
 useful performance measure. The project still needs automated request-to-first-frame, frame-age,
-event-loop-gap, no-upload-pan, level-change, and queue-scaling benchmarks.
+event-loop-gap, no-upload-pan, level-change, histogram-refresh, and queue-scaling benchmarks.
 
 ### Backend migration
 

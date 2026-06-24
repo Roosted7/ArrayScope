@@ -1618,7 +1618,12 @@ class MontageRenderMixin:
             and not session.pending_tiles
             and not session.active_tile_requests
             and not session.pending_completed_tiles
-            and (getattr(session, "dirty_payloads", None) or getattr(session, "pending_removals", None))
+            and (
+                getattr(session, "dirty_payloads", None)
+                or getattr(session, "pending_payload_upserts", None)
+                or getattr(session, "pending_removals", None)
+                or (bool(getattr(session, "pending_level_update", False)) and session.has_stale_level_presentations())
+            )
         )
         if _viewport_interaction_active(self) and not needs_initial_commit:
             session.final_commit_pending = True
@@ -1718,7 +1723,7 @@ class MontageRenderMixin:
         try:
             display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
             level_stats = self._montage_level_stats_for_session(session)
-            explicit_auto = bool(getattr(session, "force_auto", False))
+            explicit_auto = bool(getattr(session, "force_auto", False) and normalize_bounds(session.user_levels_override) is None)
             semantic_commit = bool(session.rendered_tiles)
             decision_force_auto = bool(explicit_auto and semantic_commit)
             first_display_commit = not bool(session.display_committed)
@@ -1839,7 +1844,7 @@ class MontageRenderMixin:
             tile_state, tile_delta = session.build_tile_presentation(
                 tile_source_ids,
                 cold_deadline_ms=_montage_commit_budget_ms(self),
-                **_vispy_tile_upsert_limits(self, session, first_display_commit=not bool(session.display_committed)),
+                **_tile_layer_upsert_limits(self, session, first_display_commit=not bool(session.display_committed)),
             )
             if _vispy_direct_tile_layer_backend(self, session):
                 dirty_tiles = tuple(int(tile) for tile in dirty_tiles if int(tile) in set(tile_delta.upserts))
@@ -1852,13 +1857,14 @@ class MontageRenderMixin:
                 if session.pending_tiles:
                     self._schedule_montage_tiles(session)
                 return
-            explicit_auto = bool(getattr(session, "force_auto", False))
+            explicit_auto = bool(getattr(session, "force_auto", False) and normalize_bounds(session.user_levels_override) is None)
             if (
                 not first_display_commit
                 and not explicit_auto
                 and not getattr(tile_delta, "force_refresh", False)
                 and not getattr(tile_delta, "upserts", None)
                 and not getattr(tile_delta, "removals", None)
+                and not (bool(getattr(session, "pending_level_update", False)) and session.has_stale_level_presentations())
             ):
                 session.final_commit_pending = False
                 session.flush_pending = False
@@ -1949,7 +1955,9 @@ class MontageRenderMixin:
                     semantic_commit=semantic_commit,
                 )
             report = getattr(self._display_committer(), "last_tile_commit_report", None)
-            session.acknowledge_tile_presentation(tile_delta, report)
+            session.acknowledge_tile_presentation(tile_delta, report, levels=normalize_bounds(self.img_view.getLevels()))
+            if not session.has_stale_level_presentations():
+                session.pending_level_update = False
             presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)
             session.mark_presented(presented_tiles)
             session.display_committed = bool(session.presented_tiles)
@@ -2058,7 +2066,12 @@ class MontageRenderMixin:
                     count=processed_count,
                     byte_count=commit_feedback_bytes,
                 )
-        upload_backlog = bool(getattr(session, "dirty_payloads", None) or getattr(session, "pending_removals", None))
+        upload_backlog = bool(
+            getattr(session, "dirty_payloads", None)
+            or getattr(session, "pending_removals", None)
+            or getattr(session, "pending_payload_upserts", None)
+            or (bool(getattr(session, "pending_level_update", False)) and session.has_stale_level_presentations())
+        )
         session.note_committed()
         if upload_backlog:
             self._schedule_montage_ready_display_commit(session)
@@ -2161,7 +2174,9 @@ class MontageRenderMixin:
             getattr(session, "dirty_rects", None)
             or getattr(session, "dirty_tiles", None)
             or getattr(session, "dirty_payloads", None)
+            or getattr(session, "pending_payload_upserts", None)
             or getattr(session, "pending_removals", None)
+            or (bool(getattr(session, "pending_level_update", False)) and session.has_stale_level_presentations())
         ):
             return
         if bool(getattr(session, "display_committed", False)):
@@ -2944,6 +2959,34 @@ def _vispy_tile_upsert_limits(window, session, *, first_display_commit: bool) ->
         "max_upsert_bytes": max(1024, int(byte_cap)),
     }
     return limits
+
+
+def _tile_layer_upsert_limits(window, session, *, first_display_commit: bool) -> dict[str, int]:
+    if _vispy_direct_tile_layer_backend(window, session):
+        return _vispy_tile_upsert_limits(window, session, first_display_commit=first_display_commit)
+    capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
+    if not (
+        capabilities.direct_montage_tile_payloads
+        and not capabilities.shader_windowing
+        and bool(getattr(session, "pending_level_update", False))
+        and session.has_stale_level_presentations()
+    ):
+        return {}
+    decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
+        "tile_layer_commit",
+        interactive=_interactive_active(window),
+    )
+    batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
+    byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
+    if batch_limit <= 0:
+        feedback = _latency_feedback(window)
+        batch_limit = 8 if feedback is None else int(feedback.batch_limit("tile_layer_commit", interactive=_interactive_active(window)))
+    if byte_cap <= 0:
+        byte_cap = 8 * 1024 * 1024 if _interactive_active(window) else 32 * 1024 * 1024
+    return {
+        "max_upserts": max(1, int(batch_limit)),
+        "max_upsert_bytes": max(1024, int(byte_cap)),
+    }
 
 
 def _montage_commit_interval_ms(window, *, force: bool) -> int:

@@ -13,7 +13,7 @@ ArrayScope has outgrown the original “small PyQtGraph image viewer” architec
 | Reversible operation document and recipes | Established | Optimizer preserves public step history. |
 | Region planning, stage cache, cost/memory estimates | Substantial | Strong pure-core coverage; workload heuristics still need field evidence. |
 | Profiles and ROI inspection | Substantial | Shared semantics exist; full pointer/drag ownership is not yet backend-neutral. |
-| Histogram and window/level | Substantial, recently expanded | Adaptive bins/manual editing work is new and still performs some bounded NumPy work on the GUI thread. |
+| Histogram and window/level | Substantial, recently expanded | Adaptive plot binning is queued for larger sources; level changes remain renderer-owned presentation work. |
 | Progressive montage | Advanced but transitional | Correct lifecycle distinctions and bounded caches exist; orchestration remains large and timer-heavy. |
 | PyQtGraph backend | Default | Feature-complete baseline; many per-tile `ImageItem`s can become a CPU/scene bottleneck. |
 | VisPy backend | Experimental | First-class tiled atlas/shader path exists, but the widget still subclasses the complete PyQtGraph view. |

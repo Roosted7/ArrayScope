@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
-from math import ceil
+from concurrent.futures import ThreadPoolExecutor
+from time import perf_counter
+import weakref
 
 import numpy as np
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from arrayscope.display.histogram_plot import (
+    DEFAULT_HISTOGRAM_BIN_CAP,
+    MIN_HISTOGRAM_BIN_SCREEN_PX,
+    HistogramPlotRequest,
+    HistogramPlotResult,
+    compute_histogram_plot,
+    finite_increasing_pair,
+    sample_histogram_data,
+)
 from arrayscope.ui.icons import set_button_icon
 
 
-MIN_HISTOGRAM_BIN_SCREEN_PX = 5
-DEFAULT_HISTOGRAM_BIN_CAP = 500
 MIN_LEVEL_SPAN_FRACTION = 1e-12
+ASYNC_HISTOGRAM_SOURCE_SIZE = 256 * 256
+
+
+_HISTOGRAM_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arrayscope-histogram")
 
 
 class HistogramLevelPreviewController(QtCore.QObject):
@@ -29,6 +42,10 @@ class HistogramLevelPreviewController(QtCore.QObject):
         self.pending_levels = self._widget_levels()
         if self.pending_levels is None:
             return
+        immediate = getattr(self.owner, "_histogram_preview_immediate", None)
+        if callable(immediate) and bool(immediate()):
+            self.flush_preview(final=False)
+            return
         if not self.timer.isActive():
             self.timer.start(max(1, int(self.interval_ms)))
 
@@ -36,17 +53,17 @@ class HistogramLevelPreviewController(QtCore.QObject):
         levels = self._widget_levels()
         if levels is not None:
             self.pending_levels = levels
-        self.flush_preview()
+        self.flush_preview(final=True)
         self.owner.userLevelsChanged.emit()
 
-    def flush_preview(self) -> None:
+    def flush_preview(self, *, final: bool = False) -> None:
         if self.timer.isActive():
             self.timer.stop()
         levels = self.pending_levels
         self.pending_levels = None
         if levels is None:
             return
-        self.owner._apply_histogram_preview_levels(levels)
+        self.owner._apply_histogram_preview_levels(levels, final=bool(final))
 
     def cancel(self) -> None:
         self.pending_levels = None
@@ -67,15 +84,25 @@ class HistogramLevelPreviewController(QtCore.QObject):
 class HistogramDisplayController(QtCore.QObject):
     """Own adaptive histogram plotting and manual level editing."""
 
+    _histogram_ready = QtCore.Signal(object)
+
     def __init__(self, owner, *, min_bin_screen_px: int = MIN_HISTOGRAM_BIN_SCREEN_PX):
         super().__init__(owner)
         self.owner = owner
         self.min_bin_screen_px = max(1, int(min_bin_screen_px))
         self._refresh_pending = False
+        self._refresh_timer = QtCore.QTimer(owner)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self._refresh_from_timer)
+        self._generation = 0
+        self._closed = False
+        self._active_future = None
+        self._active_request_signature = None
         self._manual_popup: HistogramLevelEditPopup | None = None
         self._manual_start_levels: tuple[float, float] | None = None
         self._manual_region_mouse_click_event = None
         self._manual_region_installed = False
+        self._histogram_ready.connect(self._apply_histogram_result)
 
     def install(self) -> None:
         item = self._histogram_item()
@@ -93,7 +120,7 @@ class HistogramDisplayController(QtCore.QObject):
         if self._refresh_pending:
             return
         self._refresh_pending = True
-        QtCore.QTimer.singleShot(0, self._refresh_from_timer)
+        self._refresh_timer.start(0)
 
     def _refresh_from_timer(self) -> None:
         if not self._refresh_pending:
@@ -104,25 +131,105 @@ class HistogramDisplayController(QtCore.QObject):
     def cancel(self) -> None:
         """Cancel queued refresh work before the owning widget is destroyed."""
 
+        self._closed = True
+        self._generation += 1
         self._refresh_pending = False
+        if self._refresh_timer.isActive():
+            self._refresh_timer.stop()
+        self._active_request_signature = None
         self.close_popup()
 
     def refresh_histogram_plot(self, *, auto_level: bool = False) -> bool:
         item = self._histogram_item()
         if item is None or item.imageItem() is None:
             return False
-        histogram = adaptive_histogram_for_view(
+        request = histogram_plot_request_for_view(
             item.imageItem(),
             item,
             histogram_bounds=self.owner.getHistogramDataBounds(),
             min_bin_screen_px=self.min_bin_screen_px,
+            generation=self._generation + 1,
         )
-        if histogram is None:
+        if request is None:
             return False
-        x, y = histogram
-        if x is None or y is None:
-            return False
+        self._generation = int(request.generation)
+        if auto_level or np.asarray(request.data).size <= ASYNC_HISTOGRAM_SOURCE_SIZE:
+            result = compute_histogram_plot(request)
+            return self._apply_histogram_result(result, auto_level=auto_level)
+        self._schedule_histogram_job(request)
+        return True
 
+    def _schedule_histogram_job(self, request: HistogramPlotRequest) -> None:
+        self._closed = False
+        self._active_request_signature = _request_signature(request)
+        submit = getattr(self.owner, "_submit_background_task", None)
+        if callable(submit):
+            started = submit(
+                lambda request=request: compute_histogram_plot(request),
+                on_done=self._histogram_ready.emit,
+                key=("histogram_plot", request.source_identity, request.view_signature),
+            )
+            if getattr(started, "scheduled", False):
+                self._active_future = None
+                return
+            if str(getattr(started, "reason", "")) in {"limited", "idle", "cost"} and not self._closed:
+                self._refresh_pending = True
+                if not self._refresh_timer.isActive():
+                    self._refresh_timer.start(max(8, int(getattr(self.owner, "_histogram_retry_interval_ms", 33))))
+                return
+        self_ref = weakref.ref(self)
+
+        def done(future):
+            controller = self_ref()
+            if controller is None:
+                return
+            try:
+                result = future.result()
+            except Exception:
+                result = HistogramPlotResult(
+                    generation=int(request.generation),
+                    source_identity=request.source_identity,
+                    view_signature=request.view_signature,
+                    x=None,
+                    y=None,
+                    cancelled=True,
+                )
+            controller._histogram_ready.emit(result)
+
+        future = _HISTOGRAM_EXECUTOR.submit(compute_histogram_plot, request)
+        self._active_future = future
+        future.add_done_callback(done)
+
+    def _apply_histogram_result(self, result, *, auto_level: bool = False) -> bool:
+        if self._closed or not isinstance(result, HistogramPlotResult):
+            return False
+        if int(result.generation) != int(self._generation):
+            return False
+        if _result_signature(result) != self._active_request_signature and self._active_request_signature is not None:
+            return False
+        item = self._histogram_item()
+        if item is None or item.imageItem() is None:
+            return False
+        current = histogram_plot_request_for_view(
+            item.imageItem(),
+            item,
+            histogram_bounds=self.owner.getHistogramDataBounds(),
+            min_bin_screen_px=self.min_bin_screen_px,
+            generation=self._generation,
+        )
+        if current is None or _request_signature(current) != _result_signature(result):
+            return False
+        if not result.has_data:
+            return False
+        x = result.x
+        y = result.y
+        budget_getter = getattr(self.owner, "_gui_callback_budget", None)
+        budget = (
+            budget_getter("histogram_refresh", interactive=False, work_class="histogram_plot")
+            if callable(budget_getter)
+            else None
+        )
+        apply_start = perf_counter()
         item.plot.setData(x, y)
         region = getattr(item, "region", None)
         if region is not None:
@@ -136,6 +243,21 @@ class HistogramDisplayController(QtCore.QObject):
                 else:
                     with QtCore.QSignalBlocker(region):
                         region.setRegion((float(levels[0]), float(levels[1])))
+        if budget is not None:
+            budget.record_item(item_count=1)
+            recorder = getattr(self.owner, "_record_gui_budget", None)
+            if callable(recorder):
+                recorder(budget)
+        else:
+            recorder = getattr(self.owner, "_record_gui_callback_observation", None)
+            if callable(recorder):
+                recorder(
+                    channel="histogram_refresh",
+                    work_class="histogram_plot",
+                    elapsed_ms=(perf_counter() - apply_start) * 1000.0,
+                    item_count=1,
+                    byte_count=int(getattr(np.asarray(y), "nbytes", 0) if y is not None else 0),
+                )
         return True
 
     def begin_limit_edit(self, which: str, scene_pos=None) -> None:
@@ -578,52 +700,68 @@ def adaptive_histogram_for_view(
     min_bin_screen_px: int = MIN_HISTOGRAM_BIN_SCREEN_PX,
     bin_cap: int = DEFAULT_HISTOGRAM_BIN_CAP,
 ):
+    request = histogram_plot_request_for_view(
+        image_item,
+        histogram_item,
+        histogram_bounds=histogram_bounds,
+        min_bin_screen_px=min_bin_screen_px,
+        bin_cap=bin_cap,
+    )
+    if request is None:
+        return None
+    result = compute_histogram_plot(request)
+    if not result.has_data:
+        return None
+    return result.x, result.y
+
+
+def _sample_histogram_data(data: np.ndarray, *, target_image_size: int = 200) -> np.ndarray:
+    return sample_histogram_data(data, target_image_size=target_image_size)
+
+
+def histogram_plot_request_for_view(
+    image_item,
+    histogram_item,
+    *,
+    histogram_bounds=None,
+    min_bin_screen_px: int = MIN_HISTOGRAM_BIN_SCREEN_PX,
+    bin_cap: int = DEFAULT_HISTOGRAM_BIN_CAP,
+    generation: int = 0,
+) -> HistogramPlotRequest | None:
     data = getattr(image_item, "image", None)
     if data is None:
         return None
     data = np.asarray(data)
     if data.size == 0:
         return None
-    sampled = _sample_histogram_data(data)
-    sampled = sampled[np.isfinite(sampled)]
-    if sampled.size == 0:
-        return None
-
-    bounds = _finite_increasing_pair(histogram_bounds)
-    if bounds is None:
-        low = float(np.nanmin(sampled))
-        high = float(np.nanmax(sampled))
-        if not np.isfinite(low) or not np.isfinite(high):
-            return None
-        if high == low:
-            high = low + 1.0
-        bounds = (low, high)
-    low, high = bounds
-    span = high - low
-    if span <= 0.0:
-        return None
-
     visible_span = _visible_value_span(histogram_item)
-    if visible_span is None or visible_span <= 0.0:
-        visible_span = span
-    visible_span = max(min(float(visible_span), span), np.finfo(float).eps)
+    pixel_extent = _histogram_value_pixel_height(histogram_item)
+    view_signature = (
+        _finite_increasing_pair(histogram_bounds),
+        None if visible_span is None else round(float(visible_span), 9),
+        round(float(pixel_extent), 3),
+        int(min_bin_screen_px),
+        int(bin_cap),
+    )
+    return HistogramPlotRequest(
+        data=data,
+        source_identity=(id(data), tuple(data.shape), str(data.dtype)),
+        histogram_bounds=_finite_increasing_pair(histogram_bounds),
+        visible_value_span=visible_span,
+        pixel_extent=pixel_extent,
+        bin_cap=int(bin_cap),
+        min_bin_screen_px=int(min_bin_screen_px),
+        generation=int(generation),
+        view_signature=view_signature,
+    )
 
-    pixel_height = _histogram_value_pixel_height(histogram_item)
-    max_visible_bins = max(2, int(pixel_height / max(1, int(min_bin_screen_px))))
-    visible_bin_width = visible_span / max_visible_bins
-    requested_bins = max(2, int(ceil(span / max(visible_bin_width, np.finfo(float).eps))))
-    cap = max(2, min(int(bin_cap), int(sampled.size)))
-    bins = max(2, min(requested_bins, cap))
-    counts, edges = np.histogram(sampled, bins=bins, range=(low, high))
-    return edges[:-1], counts
+
+def _request_signature(request: HistogramPlotRequest):
+    return (request.source_identity, request.view_signature)
 
 
-def _sample_histogram_data(data: np.ndarray, *, target_image_size: int = 200) -> np.ndarray:
-    if data.ndim < 2:
-        return data.reshape(-1)
-    step0 = max(1, int(ceil(data.shape[0] / float(target_image_size))))
-    step1 = max(1, int(ceil(data.shape[1] / float(target_image_size))))
-    return data[::step0, ::step1].reshape(-1)
+def _result_signature(result: HistogramPlotResult):
+    return (result.source_identity, result.view_signature)
 
 
 def _visible_value_span(histogram_item) -> float | None:
@@ -663,17 +801,7 @@ def _histogram_value_pixel_height(histogram_item) -> float:
 
 
 def _finite_increasing_pair(values) -> tuple[float, float] | None:
-    if values is None:
-        return None
-    try:
-        low, high = values
-        low = float(low)
-        high = float(high)
-    except Exception:
-        return None
-    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
-        return None
-    return (low, high)
+    return finite_increasing_pair(values)
 
 
 def _float_validator(parent):

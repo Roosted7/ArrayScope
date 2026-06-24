@@ -46,6 +46,7 @@ class ImageUploadTiming:
     tile_layer_texture_submit_ms: float | None = None
     tile_layer_vertex_uploads: int = 0
     tile_layer_level_updates: int = 0
+    tile_layer_level_update_pending_items: int = 0
     tile_layer_estimated_gpu_bytes: int = 0
     tile_layer_cpu_shadow_bytes: int = 0
     tile_layer_page_count: int = 0

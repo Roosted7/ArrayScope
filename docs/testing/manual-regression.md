@@ -59,12 +59,13 @@ PATH=~/miniconda3/bin:$PATH direnv exec . python -m arrayscope.tools.profile_mon
 
 The window should visibly load the bundled NIfTI dataset, draw dims 0/1 as the
 image axes, render the full dim-2 tiled montage, apply FFT on dim 2, render the
-FFT montage, then close. Confirm the pacing by eye and keep the JSONL.
+FFT montage, perform the `fft_level_refinement_preview` level edit, then close.
+Confirm the pacing by eye and keep the JSONL.
 
 For timing evidence, prefer the plain JSONL run above. It records
 request-to-first-content, exact-visible/full-completion timing, event-loop
 p95/p99/max gaps, callback records, tile upload bytes, warm/cold work counters,
-and montage compute counters. In particular, FFT montage runs should not show
+histogram/level timings, and montage compute counters. In particular, FFT montage runs should not show
 hundreds of direct tile computations when a reusable stage is available; the
 JSONL counters should show stage-backed tiles for full-axis FFT montages.
 
