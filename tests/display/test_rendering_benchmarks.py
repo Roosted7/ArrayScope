@@ -177,3 +177,7 @@ def test_benchmark_jsonl_writer_emits_mergeable_sample_records(qt_app, tmp_path)
     assert "gpu_max_texture_size" in record["environment"]
     assert record["result"]["name"]
     assert record["result"]["timing"]["mode"]
+    assert "presentation_revision" in record["result"]
+    assert "presentation_stale_count" in record["result"]
+    assert "presentation_pending_count" in record["result"]
+    assert "presentation_settled" in record["result"]

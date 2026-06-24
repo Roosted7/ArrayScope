@@ -67,7 +67,9 @@ request-to-first-content, exact-visible/full-completion timing, event-loop
 p95/p99/max gaps, callback records, tile upload bytes, warm/cold work counters,
 histogram/level timings, and montage compute counters. In particular, FFT montage runs should not show
 hundreds of direct tile computations when a reusable stage is available; the
-JSONL counters should show stage-backed tiles for full-axis FFT montages.
+JSONL counters should show stage-backed tiles for full-axis FFT montages. Level-only transitions should
+also include `presentation_revision`, `presentation_stale_count`, `presentation_pending_count`, and
+`presentation_settled`; use those fields, not retained visibility alone, to confirm convergence.
 
 For Python stack attribution, wrap the same visible workflow with a low-rate,
 nonblocking `py-spy` sample. Treat the JSONL from the same run as timing

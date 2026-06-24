@@ -422,8 +422,49 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
     assert app.calls >= 3
     assert result["presentation_settled"] is True
     assert result["stale_level_tiles"] == 0
+    assert result["pending_level_tiles"] == 0
     assert result["level_revision"] == 7
     assert result["active_level_value_count"] == 1
+
+
+def test_profile_montage_level_state_uses_session_snapshot():
+    from arrayscope.tools.profile_montage_workflow import _montage_level_presentation_state
+
+    snapshot = SimpleNamespace(
+        revision=11,
+        target_levels=(2.0, 8.0),
+        stale_count=3,
+        pending_count=4,
+        settled=False,
+        active_tile_count=7,
+        active_presented_tile_count=5,
+    )
+    session = SimpleNamespace(
+        active_level_value_counts={(0.0, 1.0): 1, (2.0, 8.0): 2},
+        level_presentation_snapshot=lambda: snapshot,
+    )
+    win = SimpleNamespace(_montage_session=session)
+
+    state = _montage_level_presentation_state(win)
+
+    assert state["settled"] is False
+    assert state["pending"] is True
+    assert state["revision"] == 11
+    assert state["target_levels"] == [2.0, 8.0]
+    assert state["stale_tiles"] == 3
+    assert state["pending_tiles"] == 4
+    assert state["active_level_value_count"] == 2
+    assert state["active_tile_count"] == 7
+    assert state["active_presented_tile_count"] == 5
+
+
+def test_profile_timing_detects_immediate_level_work():
+    from arrayscope.tools.profile_montage_workflow import _timing_has_level_work
+
+    assert _timing_has_level_work(SimpleNamespace(tile_layer_shader_uniform_updates=2)) is True
+    assert _timing_has_level_work(SimpleNamespace(tile_layer_level_updates=1)) is True
+    assert _timing_has_level_work(SimpleNamespace(tile_layer_texture_uploads=3)) is False
+    assert _timing_has_level_work(None) is False
 
 
 def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():

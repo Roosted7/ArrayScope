@@ -221,6 +221,60 @@ def test_montage_render_session_does_not_acknowledge_deferred_visible_upsert():
     assert tuple(retry_state.payloads) == (0, 1)
 
 
+def test_level_snapshot_keeps_deferred_visible_upsert_pending_until_acknowledged():
+    session = _session()
+    session.pending_tiles.clear()
+    source_ids = {}
+    for tile in session.plan.tiles[:2]:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile", int(tile.montage_index))
+
+    first_state, first_delta = session.build_tile_presentation(source_ids)
+    session.acknowledge_tile_presentation(
+        first_delta,
+        TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)),
+        levels=(0.0, 1.0),
+    )
+    session.mark_presented(first_state.active_payloads(first_delta))
+
+    assert session.begin_level_presentation_update((2.0, 4.0)) is True
+    proposed, delta = session.build_tile_presentation(source_ids, max_upserts=1)
+    session.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(
+            presented_tiles=(0, 1),
+            committed_upserts=(0,),
+        ),
+        levels=(2.0, 4.0),
+    )
+    session.mark_presented((0, 1))
+
+    snapshot = session.level_presentation_snapshot()
+    assert tuple(proposed.payloads) == (0, 1)
+    assert snapshot.revision == 1
+    assert snapshot.target_levels == (2.0, 4.0)
+    assert snapshot.stale_count == 1
+    assert snapshot.pending_count == 1
+    assert snapshot.settled is False
+
+    retry_state, retry_delta = session.build_tile_presentation(source_ids)
+    assert tuple(retry_delta.upserts) == (1,)
+
+    session.acknowledge_tile_presentation(
+        retry_delta,
+        TileCommitReport(presented_tiles=retry_state.active_payloads(retry_delta)),
+        levels=(2.0, 4.0),
+    )
+    session.mark_presented(retry_state.active_payloads(retry_delta))
+    session.pending_level_update = session.has_stale_level_presentations()
+
+    snapshot = session.level_presentation_snapshot()
+    assert snapshot.stale_count == 0
+    assert snapshot.pending_count == 0
+    assert snapshot.settled is True
+
+
 def test_montage_render_session_caps_active_tiles_with_upsert_admission():
     session = _session()
     source_ids = {}
@@ -730,6 +784,8 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
 def test_level_presentation_finish_reuses_settled_generation():
     session = _session()
     session.level_presented_active_tiles = frozenset({0, 1})
+    session.tile_level_values = {0: (2.0, 4.0), 1: (2.0, 4.0)}
+    session.tile_level_revisions = {0: 7, 1: 7}
     session.active_level_value_counts = {(2.0, 4.0): 2}
     session.desired_level_values = (2.0, 4.0)
     session.level_revision = 7
@@ -743,6 +799,8 @@ def test_level_presentation_finish_reuses_settled_generation():
 def test_level_presentation_finish_drains_existing_generation_without_revising():
     session = _session()
     session.level_presented_active_tiles = frozenset({0, 1})
+    session.tile_level_values = {0: (2.0, 4.0), 1: (0.0, 1.0)}
+    session.tile_level_revisions = {0: 7, 1: 6}
     session.active_level_value_counts = {(2.0, 4.0): 1, (0.0, 1.0): 1}
     session.desired_level_values = (2.0, 4.0)
     session.level_revision = 7
@@ -768,6 +826,110 @@ def test_shader_level_acknowledgement_settles_all_active_tiles():
     assert session.active_level_value_counts == {(2.0, 4.0): 3}
     assert session.tile_level_values == {0: (2.0, 4.0), 2: (2.0, 4.0), 3: (2.0, 4.0)}
     assert session.tile_level_revisions == {0: 9, 2: 9, 3: 9}
+
+
+def test_stale_level_delta_cannot_acknowledge_newer_target():
+    session = _session()
+    session.pending_tiles.clear()
+    source_ids = {}
+    for tile in session.plan.tiles[:2]:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile", int(tile.montage_index))
+
+    first_state, first_delta = session.build_tile_presentation(source_ids)
+    session.acknowledge_tile_presentation(
+        first_delta,
+        TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)),
+        levels=(0.0, 1.0),
+    )
+    session.mark_presented(first_state.active_payloads(first_delta))
+
+    assert session.begin_level_presentation_update((2.0, 4.0)) is True
+    _old_state, old_delta = session.build_tile_presentation(source_ids)
+    assert old_delta.level_revision == 1
+
+    assert session.begin_level_presentation_update((3.0, 5.0)) is True
+    session.acknowledge_tile_presentation(
+        old_delta,
+        TileCommitReport(presented_tiles=(0, 1), committed_upserts=(0, 1)),
+        levels=(2.0, 4.0),
+    )
+
+    snapshot = session.level_presentation_snapshot()
+    assert snapshot.revision == 2
+    assert snapshot.target_levels == (3.0, 5.0)
+    assert snapshot.stale_count == 2
+    assert snapshot.pending_count == 2
+    assert snapshot.settled is False
+    assert session.tile_level_values == {0: (0.0, 1.0), 1: (0.0, 1.0)}
+
+
+def test_level_snapshot_tracks_active_set_changes_during_convergence():
+    session = _session()
+    session.level_revision = 4
+    session.visible_tile_numbers = frozenset({0, 1, 2})
+    session.level_presented_active_tiles = frozenset({0, 1, 2})
+    session.presented_tiles = {0, 1, 2}
+    session.display_tile_payloads = {index: object() for index in range(3)}
+    session.tile_level_values = {
+        0: (0.0, 1.0),
+        1: (2.0, 4.0),
+        2: (0.0, 1.0),
+    }
+    session.tile_level_revisions = {0: 3, 1: 4, 2: 3}
+    session.visible_tiles = tuple(session.plan.tiles[:3])
+    session.desired_level_values = (2.0, 4.0)
+    session.pending_level_update = True
+    session.update_level_presentation_scope()
+
+    snapshot = session.level_presentation_snapshot()
+    assert snapshot.active_presented_tile_count == 3
+    assert snapshot.stale_count == 2
+
+    session.visible_tiles = (session.plan.tiles[1],)
+    session.visible_tile_numbers = frozenset({1})
+    session.update_level_presentation_scope()
+
+    snapshot = session.level_presentation_snapshot()
+    assert snapshot.active_tile_count == 1
+    assert snapshot.active_presented_tile_count == 1
+    assert snapshot.stale_count == 0
+    assert snapshot.pending_count == 0
+    assert snapshot.settled is True
+
+
+def test_level_snapshot_tracks_tile_entering_active_set_during_convergence():
+    session = _session()
+    session.level_revision = 4
+    session.visible_tile_numbers = frozenset({0})
+    session.level_presented_active_tiles = frozenset({0})
+    session.presented_tiles = {0, 1}
+    session.display_tile_payloads = {0: object(), 1: object()}
+    session.tile_level_values = {
+        0: (2.0, 4.0),
+        1: (0.0, 1.0),
+    }
+    session.tile_level_revisions = {0: 4, 1: 3}
+    session.visible_tiles = (session.plan.tiles[0],)
+    session.desired_level_values = (2.0, 4.0)
+    session.pending_level_update = True
+    session.update_level_presentation_scope()
+
+    snapshot = session.level_presentation_snapshot()
+    assert snapshot.stale_count == 0
+    assert snapshot.pending_count == 0
+    assert snapshot.settled is True
+
+    session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
+    session.visible_tile_numbers = frozenset({0, 1})
+    session.update_level_presentation_scope()
+
+    snapshot = session.level_presentation_snapshot()
+    assert snapshot.active_presented_tile_count == 2
+    assert snapshot.stale_count == 1
+    assert snapshot.pending_count == 1
+    assert snapshot.settled is False
 
 
 def test_montage_render_session_commits_ready_payloads_atomically():

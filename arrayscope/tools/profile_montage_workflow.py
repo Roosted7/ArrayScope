@@ -277,8 +277,10 @@ def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[s
             if app is not None and QtCore is not None:
                 _flush_histogram_widget_redraw(win, app, QtCore)
         else:
+            immediate_timing = None
             if callable(apply_preview):
                 apply_preview(levels, final=True)
+                immediate_timing = win.img_view.lastImageUploadTiming()
             else:
                 win.img_view.setLevels(levels[0], levels[1])
             if app is not None and QtCore is not None:
@@ -291,7 +293,8 @@ def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[s
                     draw_start=draw_start,
                     require_presentation_settled=True,
                 )
-            timing = win.img_view.lastImageUploadTiming()
+            settled_timing = win.img_view.lastImageUploadTiming()
+            timing = immediate_timing if _timing_has_level_work(immediate_timing) else settled_timing
             step_elapsed_ms = (perf_counter() - preview_start) * 1000.0
             _add_histogram_loop_timing(target, timing, step_elapsed_ms=step_elapsed_ms)
     finish = getattr(win.img_view, "_on_histogram_level_change_finished", None)
@@ -310,6 +313,7 @@ def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[s
         "histogram_loop_final_level_settled": bool(final_level_state["settled"]),
         "histogram_loop_final_level_revision": int(final_level_state["revision"]),
         "histogram_loop_final_stale_level_tiles": int(final_level_state["stale_tiles"]),
+        "histogram_loop_final_pending_level_tiles": int(final_level_state["pending_tiles"]),
         "histogram_loop_final_active_level_value_count": int(final_level_state["active_level_value_count"]),
         **_histogram_loop_record_fields("histogram_loop", total_stats),
         **_histogram_loop_record_fields("histogram_loop_first_half", first_half_stats),
@@ -357,6 +361,20 @@ def _add_histogram_loop_timing(stats: dict[str, object], timing, *, step_elapsed
     stats["shader_uniform_updates"] = int(stats["shader_uniform_updates"]) + int(getattr(timing, "tile_layer_shader_uniform_updates", 0) or 0)
     stats["items_updated"] = int(stats["items_updated"]) + int(getattr(timing, "tile_layer_items_updated", 0) or 0)
     stats["items_skipped"] = int(stats["items_skipped"]) + int(getattr(timing, "tile_layer_items_skipped", 0) or 0)
+
+
+def _timing_has_level_work(timing) -> bool:
+    if timing is None:
+        return False
+    return any(
+        int(getattr(timing, field, 0) or 0) > 0
+        for field in (
+            "tile_layer_rgb_window_tiles",
+            "tile_layer_level_updates",
+            "tile_layer_shader_uniform_updates",
+            "tile_layer_items_updated",
+        )
+    )
 
 
 def _combine_histogram_loop_stats(*stats_items: dict[str, object]) -> dict[str, object]:
@@ -501,6 +519,7 @@ def _wait_for_montage_complete(
                 "presentation_settled": bool(level_state["settled"]),
                 "level_revision": int(level_state["revision"]),
                 "stale_level_tiles": int(level_state["stale_tiles"]),
+                "pending_level_tiles": int(level_state["pending_tiles"]),
                 "active_level_value_count": int(level_state["active_level_value_count"]),
                 "active_presented_tile_count": int(visibility_state["active_presented_tile_count"]),
                 "active_planned_tile_count": int(visibility_state["active_planned_tile_count"]),
@@ -541,8 +560,26 @@ def _montage_level_presentation_state(win) -> dict[str, object]:
             "settled": True,
             "pending": False,
             "revision": 0,
+            "target_levels": None,
             "stale_tiles": 0,
+            "pending_tiles": 0,
             "active_level_value_count": 0,
+            "active_tile_count": 0,
+            "active_presented_tile_count": 0,
+        }
+    snapshot_getter = getattr(session, "level_presentation_snapshot", None)
+    if callable(snapshot_getter):
+        snapshot = snapshot_getter()
+        return {
+            "settled": bool(snapshot.settled),
+            "pending": not bool(snapshot.settled),
+            "revision": int(snapshot.revision),
+            "target_levels": None if snapshot.target_levels is None else list(snapshot.target_levels),
+            "stale_tiles": int(snapshot.stale_count),
+            "pending_tiles": int(snapshot.pending_count),
+            "active_level_value_count": len(dict(getattr(session, "active_level_value_counts", {}) or {})),
+            "active_tile_count": int(snapshot.active_tile_count),
+            "active_presented_tile_count": int(snapshot.active_presented_tile_count),
         }
     pending = bool(getattr(session, "pending_level_update", False))
     stale = int(getattr(session, "level_stale_presentations", 0) or 0)
@@ -551,8 +588,12 @@ def _montage_level_presentation_state(win) -> dict[str, object]:
         "settled": not pending and stale <= 0,
         "pending": pending,
         "revision": int(getattr(session, "level_revision", 0) or 0),
+        "target_levels": None,
         "stale_tiles": max(0, stale),
+        "pending_tiles": max(0, stale) if pending else 0,
         "active_level_value_count": len(counts),
+        "active_tile_count": len(tuple(getattr(session, "visible_tiles", ()) or ())),
+        "active_presented_tile_count": len(tuple(getattr(session, "presented_tiles", ()) or ())),
     }
 
 
@@ -575,6 +616,7 @@ def _phase_record(
     ui_decisions = () if resource is None else tuple(resource.ui_decisions)
     lane_decisions = () if resource is None else tuple(resource.lane_decisions)
     vispy = _vispy_presentation_diagnostics(win)
+    level_state = _montage_level_presentation_state(win)
     return {
         "phase": phase,
         "elapsed_ms": float(elapsed_ms),
@@ -605,6 +647,13 @@ def _phase_record(
         "montage_retained_stage_index": montage.retained_stage_index,
         "montage_retained_stage_decision": str(montage.retained_stage_decision),
         "montage_repeated_expensive_stage_per_tile": bool(montage.repeated_expensive_stage_per_tile),
+        "presentation_revision": int(level_state["revision"]),
+        "presentation_target_levels": level_state["target_levels"],
+        "presentation_stale_count": int(level_state["stale_tiles"]),
+        "presentation_pending_count": int(level_state["pending_tiles"]),
+        "presentation_settled": bool(level_state["settled"]),
+        "presentation_active_tile_count": int(level_state["active_tile_count"]),
+        "presentation_active_presented_tile_count": int(level_state["active_presented_tile_count"]),
         "last_render_sync_ms": _optional_float(snapshot.render_timing.last_render_sync_ms),
         "last_display_commit_ms": _optional_float(snapshot.render_timing.last_display_commit_ms),
         "last_canvas_commit_ms": _optional_float(timing.last_canvas_commit_ms),

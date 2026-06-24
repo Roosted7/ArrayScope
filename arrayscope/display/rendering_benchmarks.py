@@ -35,6 +35,10 @@ class RenderingBenchmarkResult:
     frame_count: int = 0
     ui_max_gap_ms: float | None = None
     commit_count: int = 1
+    presentation_revision: int = 0
+    presentation_stale_count: int = 0
+    presentation_pending_count: int = 0
+    presentation_settled: bool = True
 
     @property
     def submission_ms(self) -> float:
@@ -589,17 +593,23 @@ def _result(
     commit_count: int = 1,
 ) -> RenderingBenchmarkResult:
     backend = str(getattr(view, "rendering_backend_name", type(view).__name__))
+    result_timing = view.lastImageUploadTiming() if timing is None else timing
+    pending_count = max(0, int(getattr(result_timing, "tile_layer_level_update_pending_items", 0) or 0))
     return RenderingBenchmarkResult(
         name=f"{backend}_{scenario}",
         backend=backend,
         scenario=scenario,
         elapsed_ms=float(measurement.submission_ms),
-        timing=view.lastImageUploadTiming() if timing is None else timing,
+        timing=result_timing,
         first_frame_ms=measurement.first_frame_ms,
         event_loop_drain_ms=measurement.event_loop_drain_ms,
         frame_count=int(measurement.frame_count),
         ui_max_gap_ms=measurement.ui_max_gap_ms,
         commit_count=max(1, int(commit_count)),
+        presentation_revision=0,
+        presentation_stale_count=pending_count,
+        presentation_pending_count=pending_count,
+        presentation_settled=pending_count == 0,
     )
 
 

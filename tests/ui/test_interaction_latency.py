@@ -221,6 +221,9 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         assert len(win._montage_session.pending_payload_upserts) == 0
         assert win._montage_session.has_stale_level_presentations() is True
         assert win._montage_session.pending_level_update is True
+        snapshot = win._montage_session.level_presentation_snapshot()
+        assert snapshot.pending_count > 0
+        assert snapshot.settled is False
 
         previous_revision = int(win._montage_session.level_revision)
         with QtCore.QSignalBlocker(win.img_view.histogram.item):
@@ -238,7 +241,10 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         timing = win.img_view.lastImageUploadTiming()
 
         assert timing.tile_layer_items_updated == 1
-        assert win._montage_session.has_stale_level_presentations() is False
+        snapshot = win._montage_session.level_presentation_snapshot()
+        assert snapshot.stale_count == 0
+        assert snapshot.pending_count == 0
+        assert snapshot.settled is True
     finally:
         win.close()
 

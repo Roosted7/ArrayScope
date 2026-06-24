@@ -9,6 +9,8 @@ A roadmap item is complete only when its exit gate is met. “Code exists” is 
 
 ### N5. Backend-aware presentation convergence
 
+**Status:** Done!
+
 **Goal:** every global presentation command reaches a deterministic, observable latest target without
 pretending that PyQtGraph and VisPy have the same physical cost.
 

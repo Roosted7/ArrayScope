@@ -67,6 +67,9 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
 - LOD diagnostics expose desired versus applied factor and the native-only reason.
 - PyQtGraph scalar/RGB per-tile level work is counted accurately for diagnostics and resource feedback.
 - Obsolete duplicate level-acknowledgement fields were removed.
+- Montage level convergence now has a single session snapshot for target revision, stale active tiles,
+  pending target work, and settled state. Profile and rendering benchmark records expose those fields
+  beside backend-specific physical work counters.
 
 ## Material risks
 
