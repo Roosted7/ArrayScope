@@ -557,8 +557,12 @@ class DisplayPresentationMixin:
         needs_level_work = bool(session.begin_level_presentation_update(levels))
 
         capabilities = image_view_backend_capabilities(self.img_view)
-        if not (capabilities.direct_montage_tile_payloads and not capabilities.shader_windowing):
+        if capabilities.shader_windowing:
+            session.acknowledge_uniform_level_presentation(levels)
+            needs_level_work = False
+        elif not capabilities.direct_montage_tile_payloads:
             session.pending_level_update = False
+            needs_level_work = False
 
         frame = getattr(self, "_committed_display_frame", None)
         if frame is not None and self._is_level_history_frame_usable(frame):

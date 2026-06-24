@@ -34,6 +34,7 @@ class HistogramLevelPreviewController(QtCore.QObject):
         self.owner = owner
         self.interval_ms = int(interval_ms)
         self.pending_levels = None
+        self.last_applied_levels = None
         self.timer = QtCore.QTimer(owner)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.flush_preview)
@@ -53,7 +54,15 @@ class HistogramLevelPreviewController(QtCore.QObject):
         levels = self._widget_levels()
         if levels is not None:
             self.pending_levels = levels
-        self.flush_preview(final=True)
+        if levels is not None and levels == self.last_applied_levels:
+            if self.timer.isActive():
+                self.timer.stop()
+            self.pending_levels = None
+            finalize = getattr(self.owner, "_finish_histogram_preview_levels", None)
+            if callable(finalize):
+                finalize(levels)
+        else:
+            self.flush_preview(final=True)
         self.owner.userLevelsChanged.emit()
 
     def flush_preview(self, *, final: bool = False) -> None:
@@ -64,6 +73,7 @@ class HistogramLevelPreviewController(QtCore.QObject):
         if levels is None:
             return
         self.owner._apply_histogram_preview_levels(levels, final=bool(final))
+        self.last_applied_levels = levels
 
     def cancel(self) -> None:
         self.pending_levels = None

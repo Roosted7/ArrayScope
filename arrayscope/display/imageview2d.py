@@ -1197,6 +1197,9 @@ class ImageView2D(QtWidgets.QWidget):
 
     def _apply_histogram_preview_levels(self, levels, *, final: bool = False) -> None:
         levels = (float(levels[0]), float(levels[1]))
+        preview = getattr(self, "_histogram_preview_controller", None)
+        if preview is not None:
+            preview.last_applied_levels = levels
         started_timing = self._upload_timing is None
         if started_timing:
             self._start_upload_timing("level_preview")
@@ -1223,6 +1226,21 @@ class ImageView2D(QtWidgets.QWidget):
         finally:
             if started_timing:
                 self._finish_upload_timing()
+
+    def _finish_histogram_preview_levels(self, levels) -> None:
+        """Finalize an already-applied preview without repeating pixel work.
+
+        PyQtGraph may still have deferred CPU tile redraws for this generation;
+        the presentation handler is therefore allowed to force-drain the
+        existing job.  Raster previews and settled tiled generations require no
+        second image conversion merely because the mouse button was released.
+        """
+
+        if self._montage_display_mode not in {"tile_layer", "vispy_tile_layer"}:
+            return
+        handler = getattr(self, "_level_presentation_change_handler", None)
+        if callable(handler):
+            handler((float(levels[0]), float(levels[1])), final=True)
 
     def cancelHistogramLevelInteraction(self) -> None:
         if self._histogram_preview_controller is not None:

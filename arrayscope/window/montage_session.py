@@ -328,6 +328,25 @@ class MontageRenderSession:
         self.pending_level_update = bool(needs_work)
         return bool(needs_work)
 
+    def acknowledge_uniform_level_presentation(self, levels) -> None:
+        """Accept one shader-level update for every active tiled surface.
+
+        A shader backend changes one shared presentation uniform rather than
+        redrawing individual payloads.  Record that as a single semantic
+        acknowledgement while keeping per-tile values available for the same
+        convergence diagnostics used by CPU-windowed backends.
+        """
+
+        target = (float(levels[0]), float(levels[1]))
+        self.desired_level_values = target
+        active = frozenset(int(tile) for tile in self.level_presented_active_tiles)
+        for tile in active:
+            self.tile_level_values[int(tile)] = target
+            self.tile_level_revisions[int(tile)] = int(self.level_revision)
+        self.active_level_value_counts = {target: len(active)} if active else {}
+        self.level_stale_presentations = 0
+        self.pending_level_update = False
+
     def expand_viewport_coverage(
         self,
         *,

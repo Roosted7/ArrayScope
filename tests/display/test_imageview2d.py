@@ -1721,6 +1721,58 @@ def test_histogram_drag_preview_emits_user_level_once_on_finish(qt_app):
     view.close()
 
 
+def test_histogram_finish_does_not_repeat_an_already_applied_preview(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtCore
+
+    view = ImageView2D()
+    view.setImage(np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
+    applied = []
+    view._apply_histogram_preview_levels = (
+        lambda levels, *, final=False: applied.append((tuple(float(value) for value in levels), bool(final)))
+    )
+
+    with QtCore.QSignalBlocker(view.histogram.item):
+        view.histogram.setLevels(0.2, 0.8)
+    view._on_histogram_levels_changed()
+    view._on_histogram_level_change_finished()
+
+    assert applied == [((0.2, 0.8), False)]
+    view.close()
+
+
+def test_histogram_finish_reapplies_target_after_programmatic_level_change(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtCore
+
+    view = ImageView2D()
+    view.setImage(np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
+    applied = []
+    original_apply = view._apply_histogram_preview_levels
+
+    def record(levels, *, final=False):
+        applied.append((tuple(float(value) for value in levels), bool(final)))
+        original_apply(levels, final=final)
+
+    view._apply_histogram_preview_levels = record
+    with QtCore.QSignalBlocker(view.histogram.item):
+        view.histogram.setLevels(0.2, 0.8)
+    view._on_histogram_levels_changed()
+    view._on_histogram_level_change_finished()
+    assert applied == [((0.2, 0.8), False)]
+
+    view._apply_display_levels(0.1, 0.9, emit_user=False)
+    applied.clear()
+    with QtCore.QSignalBlocker(view.histogram.item):
+        view.histogram.setLevels(0.2, 0.8)
+    # Simulate a finish signal arriving without an intermediate preview signal.
+    # The programmatic level update must have invalidated the old preview target.
+    view._on_histogram_level_change_finished()
+
+    assert applied == [((0.2, 0.8), True)]
+    view.close()
+
+
 def test_adaptive_histogram_uses_coarser_bins_when_zoomed_out(qt_app):
     from arrayscope.display.histogram_controller import _histogram_value_pixel_height
     from arrayscope.display.imageview2d import ImageView2D

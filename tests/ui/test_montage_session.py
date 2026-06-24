@@ -753,6 +753,23 @@ def test_level_presentation_finish_drains_existing_generation_without_revising()
     assert session.level_stale_presentations == 1
 
 
+def test_shader_level_acknowledgement_settles_all_active_tiles():
+    session = _session()
+    session.level_presented_active_tiles = frozenset({0, 2, 3})
+    session.desired_level_values = (2.0, 4.0)
+    session.level_revision = 9
+    session.pending_level_update = True
+    session.level_stale_presentations = 3
+
+    session.acknowledge_uniform_level_presentation((2.0, 4.0))
+
+    assert session.pending_level_update is False
+    assert session.level_stale_presentations == 0
+    assert session.active_level_value_counts == {(2.0, 4.0): 3}
+    assert session.tile_level_values == {0: (2.0, 4.0), 2: (2.0, 4.0), 3: (2.0, 4.0)}
+    assert session.tile_level_revisions == {0: 9, 2: 9, 3: 9}
+
+
 def test_montage_render_session_commits_ready_payloads_atomically():
     session = _session()
     session.pending_tiles.clear()

@@ -802,8 +802,10 @@ class VisPyImageView2D(ImageView2D):
                 timer.start(8)
 
     def _apply_histogram_preview_levels(self, levels, *, final: bool = False) -> None:
-        del final
         levels = (float(levels[0]), float(levels[1]))
+        preview = getattr(self, "_histogram_preview_controller", None)
+        if preview is not None:
+            preview.last_applied_levels = levels
         started_timing = self._upload_timing is None
         if started_timing:
             self._start_upload_timing("vispy_level_preview")
@@ -827,6 +829,9 @@ class VisPyImageView2D(ImageView2D):
                 )
                 self._record_tile_layer_stats(stats)
                 self._request_vispy_tile_layer_redraw()
+                handler = getattr(self, "_level_presentation_change_handler", None)
+                if callable(handler):
+                    handler(levels, final=bool(final))
                 return
             if self._is_windowed_rgb_vispy_main():
                 self._vispy_windowed_image.set_levels(levels)
