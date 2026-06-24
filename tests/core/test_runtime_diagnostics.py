@@ -79,6 +79,10 @@ def _snapshot():
             backend_setting="auto",
             backend_chosen="tile_layer",
             backend_reason="RGB/complex montage canvas pixels 3000000 > 2000000",
+            tile_lod_desired_factor=4,
+            tile_lod_applied_factor=1,
+            tile_lod_policy="native-only",
+            tile_lod_reason="desired LOD is deferred until asynchronous multi-resolution residency exists",
             tile_compute_cache_hits=3,
             tile_compute_stage_backed=4,
             tile_compute_direct=1,
@@ -216,6 +220,8 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Display mode: tile_layer" in text
     assert "Display backend: tile_layer (setting=auto, fallback=canvas)" in text
     assert "Display backend reason: RGB/complex montage" in text
+    assert "LOD policy: native-only desired=4 applied=1" in text
+    assert "LOD policy reason: desired LOD is deferred until asynchronous multi-resolution residency exists" in text
     assert "Reusable stage: stage=3 hit, repeated per tile=no" in text
     assert "Tile compute: cache_hit=3 stage_backed=4 direct=1 waiting_stage=2" in text
     assert "Lead direct tiles: 1" in text

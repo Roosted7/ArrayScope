@@ -97,6 +97,10 @@ class MontageRuntimeDiagnostics:
     backend_fallback_available: str = "canvas"
     backend_warning: str = ""
     show_loading_overlays: bool = False
+    tile_lod_desired_factor: int = 1
+    tile_lod_applied_factor: int = 1
+    tile_lod_policy: str = "native-only"
+    tile_lod_reason: str = ""
     tile_compute_cache_hits: int = 0
     tile_compute_stage_backed: int = 0
     tile_compute_direct: int = 0
@@ -609,6 +613,13 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         f"Display backend reason: {snapshot.montage.backend_reason or 'n/a'}",
         f"Warning: {snapshot.montage.backend_warning}" if snapshot.montage.backend_warning else "Warning: n/a",
         f"Loading overlays: {snapshot.montage.show_loading_overlays}",
+        (
+            "LOD policy: "
+            f"{snapshot.montage.tile_lod_policy} "
+            f"desired={snapshot.montage.tile_lod_desired_factor} "
+            f"applied={snapshot.montage.tile_lod_applied_factor}"
+        ),
+        f"LOD policy reason: {snapshot.montage.tile_lod_reason or 'n/a'}",
         (
             "Reusable stage: "
             f"stage={snapshot.montage.retained_stage_index if snapshot.montage.retained_stage_index is not None else 'n/a'} "

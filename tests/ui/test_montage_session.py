@@ -400,6 +400,8 @@ def test_zoomed_out_scalar_payload_keeps_exact_texture_on_ui_commit_path():
 
     assert session.desired_tile_lod_factor > 1
     assert session.tile_lod_factor == 1
+    assert session.tile_lod_policy == "native-only"
+    assert "asynchronous multi-resolution residency" in session.tile_lod_reason
     assert payload.lod.factor == 1
     assert payload.texture_data is image
     assert payload.texture_data.shape[:2] == payload.image.shape[:2]

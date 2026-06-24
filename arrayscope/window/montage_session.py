@@ -23,6 +23,13 @@ from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport,
 from arrayscope.window.montage_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
 
 
+LOD_POLICY_NATIVE_ONLY = "native-only"
+LOD_REASON_NATIVE_SCALE = "native-resolution texture is appropriate at the current scale"
+LOD_REASON_ASYNC_RESIDENCY_REQUIRED = (
+    "desired LOD is deferred until asynchronous multi-resolution residency can retain adjacent levels"
+)
+
+
 def _shader_mapping_key(mapping):
     return None if mapping is None else getattr(mapping, "identity_key", mapping)
 
@@ -168,6 +175,8 @@ class MontageRenderSession:
     priority_fairness_pops: int = 0
     tile_lod_factor: int = 1
     desired_tile_lod_factor: int = 1
+    tile_lod_policy: str = LOD_POLICY_NATIVE_ONLY
+    tile_lod_reason: str = LOD_REASON_NATIVE_SCALE
     _last_active_tiles: tuple[int, ...] = ()
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
@@ -538,6 +547,12 @@ class MontageRenderSession:
         # snapshot_display_tile_payloads(), which is a UI commit path.  Until a
         # worker/GPU LOD cache can retain adjacent levels, keep the exact texture
         # resident and let hardware filtering handle zoomed-out sampling.
+        self.tile_lod_policy = LOD_POLICY_NATIVE_ONLY
+        self.tile_lod_reason = (
+            LOD_REASON_ASYNC_RESIDENCY_REQUIRED
+            if int(desired) > 1
+            else LOD_REASON_NATIVE_SCALE
+        )
         self.tile_lod_factor = 1
         return 1
 
