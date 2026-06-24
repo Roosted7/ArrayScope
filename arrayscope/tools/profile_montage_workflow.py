@@ -289,6 +289,7 @@ def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[s
                     timeout_s=5.0,
                     start=preview_start,
                     draw_start=draw_start,
+                    require_presentation_settled=True,
                 )
             timing = win.img_view.lastImageUploadTiming()
             step_elapsed_ms = (perf_counter() - preview_start) * 1000.0
@@ -297,6 +298,7 @@ def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[s
     if callable(finish):
         finish()
     total_stats = _combine_histogram_loop_stats(first_half_stats, second_half_stats)
+    final_level_state = _montage_level_presentation_state(win)
     return {
         "histogram_loop_steps": 10,
         "histogram_loop_first_half_steps": 5,
@@ -305,6 +307,10 @@ def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[s
         "histogram_loop_direction": "down_from_auto_default_5_percent_steps",
         "histogram_loop_base_levels": [float(base_levels[0]), float(base_levels[1])],
         "histogram_loop_action_ms": (perf_counter() - action_start) * 1000.0,
+        "histogram_loop_final_level_settled": bool(final_level_state["settled"]),
+        "histogram_loop_final_level_revision": int(final_level_state["revision"]),
+        "histogram_loop_final_stale_level_tiles": int(final_level_state["stale_tiles"]),
+        "histogram_loop_final_active_level_value_count": int(final_level_state["active_level_value_count"]),
         **_histogram_loop_record_fields("histogram_loop", total_stats),
         **_histogram_loop_record_fields("histogram_loop_first_half", first_half_stats),
         **_histogram_loop_record_fields("histogram_loop_second_half", second_half_stats),
@@ -424,7 +430,16 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
     return record
 
 
-def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: float, draw_start: int) -> dict[str, float | int | bool | None]:
+def _wait_for_montage_complete(
+    app,
+    QtCore,
+    win,
+    *,
+    timeout_s: float,
+    start: float,
+    draw_start: int,
+    require_presentation_settled: bool = False,
+) -> dict[str, float | int | bool | None]:
     deadline = time.monotonic() + float(timeout_s)
     first_loaded_ms = None
     first_display_committed_ms = None
@@ -434,7 +449,9 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
     draw_after_complete_ms = None
     fully_visible_ms = None
     fully_visible_tile_request_count = None
+    presentation_settled_ms = None
     final_visibility_state: dict[str, object] = {}
+    final_level_state: dict[str, object] = {}
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
         session = getattr(win, "_montage_session", None)
@@ -457,6 +474,10 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
         )
         if logical_complete and first_logical_complete_ms is None:
             first_logical_complete_ms = (perf_counter() - start) * 1000.0
+        level_state = _montage_level_presentation_state(win)
+        final_level_state = level_state
+        if bool(level_state["settled"]) and presentation_settled_ms is None:
+            presentation_settled_ms = (perf_counter() - start) * 1000.0
         visibility_state = _montage_visibility_state(win, mode=str(mode))
         final_visibility_state = visibility_state
         fully_visible = bool(visibility_state["fully_visible"])
@@ -465,7 +486,8 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
             fully_visible_tile_request_count = _vispy_tile_presentation_request_count(win)
         current_request_count = _vispy_tile_presentation_request_count(win)
         final_drawn = _vispy_tile_presentation_draw_count(win) >= int(current_request_count)
-        if fully_visible and (not vispy_tiled or final_drawn):
+        presentation_ready = bool(level_state["settled"]) or not bool(require_presentation_settled)
+        if fully_visible and (not vispy_tiled or final_drawn) and presentation_ready:
             if vispy_tiled:
                 draw_after_complete_ms = (perf_counter() - start) * 1000.0
             return {
@@ -475,6 +497,11 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
                 "logical_complete_ms": first_logical_complete_ms,
                 "draw_after_complete_ms": draw_after_complete_ms,
                 "fully_visible_ms": fully_visible_ms,
+                "presentation_settled_ms": presentation_settled_ms,
+                "presentation_settled": bool(level_state["settled"]),
+                "level_revision": int(level_state["revision"]),
+                "stale_level_tiles": int(level_state["stale_tiles"]),
+                "active_level_value_count": int(level_state["active_level_value_count"]),
                 "active_presented_tile_count": int(visibility_state["active_presented_tile_count"]),
                 "active_planned_tile_count": int(visibility_state["active_planned_tile_count"]),
                 "requested_tile_count": int(visibility_state["requested_tile_count"]),
@@ -498,8 +525,35 @@ def _wait_for_montage_complete(app, QtCore, win, *, timeout_s: float, start: flo
         f"active_presented={final_visibility_state.get('active_presented_tile_count', 0)}/"
         f"{final_visibility_state.get('active_planned_tile_count', 0)} "
         f"overlays={_montage_overlay_count(win)} vispy_draws={_vispy_draw_count(win)} "
-        f"tile_draw={_vispy_tile_presentation_draw_count(win)}/{_vispy_tile_presentation_request_count(win)}"
+        f"tile_draw={_vispy_tile_presentation_draw_count(win)}/{_vispy_tile_presentation_request_count(win)} "
+        f"level_pending={final_level_state.get('pending', False)} "
+        f"level_stale={final_level_state.get('stale_tiles', 0)} "
+        f"level_values={final_level_state.get('active_level_value_count', 0)}"
     )
+
+
+def _montage_level_presentation_state(win) -> dict[str, object]:
+    """Return semantic completion for the current level generation."""
+
+    session = getattr(win, "_montage_session", None)
+    if session is None:
+        return {
+            "settled": True,
+            "pending": False,
+            "revision": 0,
+            "stale_tiles": 0,
+            "active_level_value_count": 0,
+        }
+    pending = bool(getattr(session, "pending_level_update", False))
+    stale = int(getattr(session, "level_stale_presentations", 0) or 0)
+    counts = dict(getattr(session, "active_level_value_counts", {}) or {})
+    return {
+        "settled": not pending and stale <= 0,
+        "pending": pending,
+        "revision": int(getattr(session, "level_revision", 0) or 0),
+        "stale_tiles": max(0, stale),
+        "active_level_value_count": len(counts),
+    }
 
 
 def _phase_record(

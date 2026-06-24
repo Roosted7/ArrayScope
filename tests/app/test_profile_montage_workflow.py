@@ -358,6 +358,74 @@ def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch
     assert hidden["profiler_artifact_paths"] == ["perf.data"]
 
 
+def test_profile_montage_completion_waits_for_level_generation_when_requested():
+    from arrayscope.tools.profile_montage_workflow import _wait_for_montage_complete
+
+    class FakeQtCore:
+        class QEventLoop:
+            class ProcessEventsFlag:
+                AllEvents = object()
+
+    class FakeImageView:
+        def montageDisplayMode(self):
+            return "tile_layer"
+
+        def montageTileOverlayCount(self):
+            return 0
+
+    session = SimpleNamespace(
+        visible_tiles=(SimpleNamespace(montage_index=0),),
+        skipped_tiles=set(),
+        presented_tiles={0},
+        display_committed=True,
+        pending_tiles=(),
+        loading_tiles=set(),
+        pending_completed_tiles=(),
+        active_tile_requests=set(),
+        active_stage_requests=set(),
+        attached_stage_requests=set(),
+        stage_waiting_tiles={},
+        final_commit_pending=False,
+        flush_pending=False,
+        dirty_payloads={},
+        pending_removals=set(),
+        pending_level_update=True,
+        level_stale_presentations=1,
+        level_revision=7,
+        active_level_value_counts={(0.0, 1.0): 1},
+        is_complete=lambda: False,
+    )
+    win = SimpleNamespace(img_view=FakeImageView(), _montage_session=session)
+
+    class FakeApp:
+        def __init__(self):
+            self.calls = 0
+
+        def processEvents(self, *_args):
+            self.calls += 1
+            if self.calls >= 3:
+                session.pending_level_update = False
+                session.level_stale_presentations = 0
+                session.active_level_value_counts = {(2.0, 4.0): 1}
+
+    app = FakeApp()
+    result = _wait_for_montage_complete(
+        app,
+        FakeQtCore,
+        win,
+        timeout_s=0.5,
+        start=0.0,
+        draw_start=0,
+        require_presentation_settled=True,
+    )
+
+    assert app.calls >= 3
+    assert result["presentation_settled"] is True
+    assert result["stale_level_tiles"] == 0
+    assert result["level_revision"] == 7
+    assert result["active_level_value_count"] == 1
+
+
 def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     from arrayscope.tools.profile_montage_workflow import _wait_for_montage_complete
 
