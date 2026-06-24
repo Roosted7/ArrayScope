@@ -197,6 +197,55 @@ def test_large_histogram_refresh_uses_background_submitter(qt_app):
     view.close()
 
 
+def test_large_histogram_auto_level_applies_bounds_before_refinement(qt_app, monkeypatch):
+    from arrayscope.display import histogram_controller
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    data = np.linspace(5.0, 15.0, 512 * 512, dtype=np.float32).reshape(512, 512)
+    submitted = []
+
+    def submit(fn, *, on_done, key):
+        submitted.append((fn, on_done, key))
+        return SimpleNamespace(scheduled=True)
+
+    def fail_sync_compute(_request):
+        raise AssertionError("large auto-window refinement should not run synchronously")
+
+    monkeypatch.setattr(histogram_controller, "compute_histogram_plot", fail_sync_compute)
+
+    view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(5.0, 15.0))
+    view.setBackgroundTaskSubmitter(submit)
+    submitted.clear()
+
+    assert view._histogram_display_controller.refresh_histogram_plot(auto_level=True) is True
+    assert tuple(float(value) for value in view.getLevels()) == (5.0, 15.0)
+    assert submitted
+    assert submitted[-1][2][0] == "histogram_plot"
+    view.close()
+
+
+def test_large_histogram_refinement_coalesces_matching_background_request(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    data = np.linspace(0.0, 1.0, 512 * 512, dtype=np.float32).reshape(512, 512)
+    submitted = []
+
+    def submit(fn, *, on_done, key):
+        submitted.append((fn, on_done, key))
+        return SimpleNamespace(scheduled=True)
+
+    view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    view.setBackgroundTaskSubmitter(submit)
+    submitted.clear()
+
+    assert view._histogram_display_controller.refresh_histogram_plot(auto_level=False) is True
+    assert view._histogram_display_controller.refresh_histogram_plot(auto_level=False) is True
+    assert len(submitted) == 1
+    view.close()
+
+
 def test_repeated_fast_updates_do_not_rebind_same_histogram_item(qt_app, monkeypatch):
     from arrayscope.display.imageview2d import ImageView2D
 

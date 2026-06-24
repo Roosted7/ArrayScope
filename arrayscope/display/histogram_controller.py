@@ -153,7 +153,19 @@ class HistogramDisplayController(QtCore.QObject):
         if request is None:
             return False
         self._generation = int(request.generation)
-        if auto_level or np.asarray(request.data).size <= ASYNC_HISTOGRAM_SOURCE_SIZE:
+        request_signature = _request_signature(request)
+        if auto_level:
+            auto_bounds = _finite_increasing_pair(self.owner.getHistogramDataBounds())
+            if auto_bounds is not None:
+                self.owner._apply_display_levels(float(auto_bounds[0]), float(auto_bounds[1]), emit_user=False)
+            if np.asarray(request.data).size > ASYNC_HISTOGRAM_SOURCE_SIZE:
+                self._schedule_histogram_job(request)
+                return True
+            self._active_request_signature = request_signature
+            result = compute_histogram_plot(request)
+            return self._apply_histogram_result(result, auto_level=False)
+        if np.asarray(request.data).size <= ASYNC_HISTOGRAM_SOURCE_SIZE:
+            self._active_request_signature = request_signature
             result = compute_histogram_plot(request)
             return self._apply_histogram_result(result, auto_level=auto_level)
         self._schedule_histogram_job(request)
@@ -161,13 +173,19 @@ class HistogramDisplayController(QtCore.QObject):
 
     def _schedule_histogram_job(self, request: HistogramPlotRequest) -> None:
         self._closed = False
-        self._active_request_signature = _request_signature(request)
+        signature = _request_signature(request)
+        if self._active_request_signature == signature:
+            return
+        self._active_request_signature = signature
+        previous_future = self._active_future
+        if previous_future is not None and not previous_future.done():
+            previous_future.cancel()
         submit = getattr(self.owner, "_submit_background_task", None)
         if callable(submit):
             started = submit(
                 lambda request=request: compute_histogram_plot(request),
                 on_done=self._histogram_ready.emit,
-                key=("histogram_plot", request.source_identity, request.view_signature),
+                key=("histogram_plot", request.source_identity),
             )
             if getattr(started, "scheduled", False):
                 self._active_future = None
@@ -205,7 +223,8 @@ class HistogramDisplayController(QtCore.QObject):
             return False
         if int(result.generation) != int(self._generation):
             return False
-        if _result_signature(result) != self._active_request_signature and self._active_request_signature is not None:
+        result_signature = _result_signature(result)
+        if result_signature != self._active_request_signature and self._active_request_signature is not None:
             return False
         item = self._histogram_item()
         if item is None or item.imageItem() is None:
@@ -217,7 +236,7 @@ class HistogramDisplayController(QtCore.QObject):
             min_bin_screen_px=self.min_bin_screen_px,
             generation=self._generation,
         )
-        if current is None or _request_signature(current) != _result_signature(result):
+        if current is None or _request_signature(current) != result_signature:
             return False
         if not result.has_data:
             return False
@@ -258,6 +277,9 @@ class HistogramDisplayController(QtCore.QObject):
                     item_count=1,
                     byte_count=int(getattr(np.asarray(y), "nbytes", 0) if y is not None else 0),
                 )
+        if self._active_request_signature == result_signature:
+            self._active_request_signature = None
+            self._active_future = None
         return True
 
     def begin_limit_edit(self, which: str, scene_pos=None) -> None:
