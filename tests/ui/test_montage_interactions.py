@@ -1361,7 +1361,12 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
 
         low, high = win.img_view.getHistogramDataBounds()
         desired = ((float(low) + float(high)) / 2.0, float(high))
+        # A user command must supersede automatic level work still attached to
+        # an otherwise committed progressive montage session.
+        win._montage_session.force_auto = True
         win.img_view.setLevels(*desired)
+        assert win._montage_session.force_auto is False
+        assert win._montage_session.desired_level_values == desired
         qtbot.waitUntil(
             lambda: all(tuple(state.levels) == desired for state in win.img_view._montage_tile_layer.states.values()),
             timeout=1000,

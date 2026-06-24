@@ -550,6 +550,10 @@ class DisplayPresentationMixin:
             self._explicit_user_level_source = None
             session.user_levels_override = None
         session.applied_level_source = source
+        # A concrete presentation command supersedes any automatic level pass
+        # that was attached to the still-draining montage session.  Otherwise
+        # queued initial commits can repeatedly restore their older auto range.
+        session.force_auto = False
         session.begin_level_presentation_update(levels)
 
         capabilities = image_view_backend_capabilities(self.img_view)

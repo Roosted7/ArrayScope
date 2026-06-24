@@ -1723,7 +1723,8 @@ class MontageRenderMixin:
         try:
             display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
             level_stats = self._montage_level_stats_for_session(session)
-            explicit_auto = bool(getattr(session, "force_auto", False) and normalize_bounds(session.user_levels_override) is None)
+            requested_levels = _session_requested_levels(session)
+            explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
             semantic_commit = bool(session.rendered_tiles)
             decision_force_auto = bool(explicit_auto and semantic_commit)
             first_display_commit = not bool(session.display_committed)
@@ -1752,7 +1753,7 @@ class MontageRenderMixin:
                     montage_level_key=session.level_key,
                     montage_dirty_tiles=dirty_tiles,
                     montage_tile_source_ids=tile_source_ids,
-                    user_levels=session.user_levels_override,
+                    user_levels=requested_levels,
                     semantic_commit=semantic_commit,
                 )
                 session.display_committed = bool(session.rendered_tiles)
@@ -1774,7 +1775,7 @@ class MontageRenderMixin:
                     montage_level_key=session.level_key,
                     montage_dirty_tiles=dirty_tiles,
                     montage_tile_source_ids=tile_source_ids,
-                    user_levels=session.user_levels_override,
+                    user_levels=requested_levels,
                     semantic_commit=semantic_commit,
                 )
             session.mark_presented(session.rendered_tiles.keys())
@@ -1857,7 +1858,8 @@ class MontageRenderMixin:
                 if session.pending_tiles:
                     self._schedule_montage_tiles(session)
                 return
-            explicit_auto = bool(getattr(session, "force_auto", False) and normalize_bounds(session.user_levels_override) is None)
+            requested_levels = _session_requested_levels(session)
+            explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
             if (
                 not first_display_commit
                 and not explicit_auto
@@ -1915,7 +1917,7 @@ class MontageRenderMixin:
                     tile_state=tile_state,
                     base_tile_state=base_tile_state,
                     tile_delta=tile_delta,
-                    user_levels=session.user_levels_override,
+                    user_levels=requested_levels,
                     semantic_commit=semantic_commit,
                 )
             elif fast_drain and self._commit_vispy_montage_tile_delta_direct(
@@ -1951,7 +1953,7 @@ class MontageRenderMixin:
                     tile_state=tile_state,
                     base_tile_state=base_tile_state,
                     tile_delta=tile_delta,
-                    user_levels=session.user_levels_override,
+                    user_levels=requested_levels,
                     semantic_commit=semantic_commit,
                 )
             report = getattr(self._display_committer(), "last_tile_commit_report", None)
@@ -2128,7 +2130,7 @@ class MontageRenderMixin:
                 commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_MONTAGE_PATCH,
                 semantic_source=semantic_source,
                 applied_level_source=applied_level_source,
-                user_levels=normalize_bounds(session.user_levels_override),
+                user_levels=_session_requested_levels(session),
             )
         )
         set_image_start = perf_counter()
@@ -2895,6 +2897,22 @@ def _attach_montage_tile_level_stats(display_image, tile):
         if stats is not None:
             return replace(display_image, level_stats=stats)
     return display_image
+
+
+def _session_requested_levels(session) -> tuple[float, float] | None:
+    """Return the exact level target for the current presentation session.
+
+    ``user_levels_override`` describes persistence/window-mode semantics.
+    ``desired_level_values`` is the latest presentation command and remains
+    authoritative while progressive PyQtGraph CPU redraws converge.  Keeping
+    these concepts separate prevents an in-flight automatic commit from
+    restoring older levels after a user or auto-window command.
+    """
+
+    return (
+        normalize_bounds(getattr(session, "desired_level_values", None))
+        or normalize_bounds(getattr(session, "user_levels_override", None))
+    )
 
 
 def _should_publish_montage_histogram_plot(first_display_commit: bool, explicit_auto: bool, stats: MontageLevelStats) -> bool:
