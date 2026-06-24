@@ -732,7 +732,10 @@ def test_pyqtgraph_budgeted_tiled_payload_keeps_existing_item_visible(qt_app, mo
         )
 
         assert report.presented_tiles == frozenset({0, 1})
+        assert report.committed_upserts == frozenset({0})
         assert 1 in view._montage_tile_layer.states
+        np.testing.assert_array_equal(view._montage_tile_layer.states[0].item.image, second_payloads[0].image)
+        np.testing.assert_array_equal(view._montage_tile_layer.states[1].item.image, first_payloads[1].image)
         assert view._montage_tile_layer.states[1].item is original_item
         assert view._montage_tile_layer.states[1].visible is True
         assert removed == []

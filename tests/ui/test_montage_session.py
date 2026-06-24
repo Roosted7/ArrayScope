@@ -193,6 +193,34 @@ def test_montage_render_session_retries_capped_payload_until_backend_acknowledge
     assert 0 not in session.dirty_payloads
 
 
+def test_montage_render_session_does_not_acknowledge_deferred_visible_upsert():
+    session = _session()
+    session.pending_tiles.clear()
+    source_ids = {}
+    for tile in session.plan.tiles[:2]:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile", int(tile.montage_index))
+
+    proposed, delta = session.build_tile_presentation(source_ids)
+    session.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(
+            presented_tiles=(0, 1),
+            committed_upserts=(0,),
+        ),
+    )
+
+    assert tuple(session.tile_presentation_state.payloads) == (0,)
+    assert 0 not in session.dirty_payloads
+    assert 1 in session.dirty_payloads
+
+    retry_state, retry_delta = session.build_tile_presentation(source_ids)
+
+    assert tuple(retry_delta.upserts) == (1,)
+    assert tuple(retry_state.payloads) == (0, 1)
+
+
 def test_montage_render_session_caps_active_tiles_with_upsert_admission():
     session = _session()
     source_ids = {}

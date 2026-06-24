@@ -38,6 +38,7 @@ class TileLayerItemState:
 class TileLayerUpdateStats:
     visible_items: int = 0
     presented_tiles: tuple[int, ...] | None = None
+    committed_upserts: tuple[int, ...] | None = None
     items_created: int = 0
     items_updated: int = 0
     items_skipped: int = 0
@@ -284,6 +285,11 @@ class MontageTileLayer:
         return TileLayerUpdateStats(
             visible_items=int(visible_items),
             presented_tiles=tuple(sorted(active)),
+            committed_upserts=(
+                None
+                if tile_delta is None
+                else tuple(sorted(int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {})))
+            ),
             items_created=int(items_created),
             items_updated=int(items_updated),
             items_skipped=int(items_skipped),
@@ -337,6 +343,12 @@ class MontageTileLayer:
         image_replacements = 0
         existing_items_shown = 0
         relocated_tiles = 0
+        requested_upserts = (
+            set(int(tile) for tile in tile_payloads)
+            if tile_delta is None
+            else set(int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {}))
+        )
+        committed_upserts: set[int] = set()
 
         tile_order = _direct_tile_order(montage, tile_payloads, tile_delta, self._states)
         for tile_number in tile_order:
@@ -466,18 +478,24 @@ class MontageTileLayer:
                 rgb_window_tiles += int(windowed)
                 image_replacements += int(updated and not items_created)
                 cold_tiles_committed += int(cold_candidate)
+                if updated and int(tile_number) in requested_upserts:
+                    committed_upserts.add(int(tile_number))
             elif levels_changed:
                 updated, windowed = self._update_tile_levels(item_state, levels)
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
                 if not updated:
                     items_skipped += 1
+                if updated and int(tile_number) in requested_upserts:
+                    committed_upserts.add(int(tile_number))
             else:
                 items_skipped += 1
                 item_state.levels = levels
                 item_state.visible = True
                 existing_items_shown += 1
                 relocated_tiles += int(geometry_changed)
+                if int(tile_number) in requested_upserts:
+                    committed_upserts.add(int(tile_number))
 
         for tile_number in tuple(self._states):
             if int(tile_number) not in active:
@@ -487,6 +505,7 @@ class MontageTileLayer:
         return TileLayerUpdateStats(
             visible_items=int(visible_items),
             presented_tiles=tuple(int(tile) for tile in sorted(active)),
+            committed_upserts=tuple(int(tile) for tile in sorted(committed_upserts)),
             items_created=int(items_created),
             items_updated=int(items_updated),
             items_skipped=int(items_skipped),
@@ -495,6 +514,7 @@ class MontageTileLayer:
             existing_items_shown=int(existing_items_shown),
             relocated_tiles=int(relocated_tiles),
             upload_ms=(perf_counter() - update_start) * 1000.0,
+            level_update_pending_items=max(0, len(requested_upserts - committed_upserts)),
         )
 
     def update_levels(

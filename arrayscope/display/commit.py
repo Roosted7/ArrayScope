@@ -64,6 +64,7 @@ class DisplayCommitter:
         if not isinstance(report, TileCommitReport):
             report = TileCommitReport(
                 presented_tiles=presentation.tile_state.active_payloads(presentation.tile_delta),
+                committed_upserts=presentation.tile_delta.upserts,
                 removed_tiles=presentation.tile_delta.removals,
             )
         tile_state = presentation.base_tile_state.acknowledge_delta(presentation.tile_delta, report)

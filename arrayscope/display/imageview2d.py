@@ -2166,6 +2166,16 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
             presented = frozenset(payload_order[:max(0, visible_items)])
         else:
             presented = frozenset(int(tile) for tile in payloads)
+    backend_committed = getattr(stats, "committed_upserts", None)
+    committed_upserts = (
+        None
+        if backend_committed is None
+        else frozenset(
+            int(tile)
+            for tile in tuple(backend_committed or ())
+            if int(tile) in dict(getattr(tile_delta, "upserts", {}) or {})
+        )
+    )
     texture_uploads = int(getattr(stats, "texture_uploads", 0) or 0)
     items_created = int(getattr(stats, "items_created", 0) or 0)
     rgb_window_tiles = int(getattr(stats, "rgb_window_tiles", 0) or 0)
@@ -2175,6 +2185,7 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     resident = max(0, len(payloads) - texture_uploads - items_created - updated)
     return TileCommitReport(
         presented_tiles=presented,
+        committed_upserts=committed_upserts,
         removed_tiles=frozenset(getattr(tile_delta, "removals", ()) or ()),
         texture_uploads=texture_uploads,
         texture_upload_bytes=int(getattr(stats, "texture_upload_bytes", 0) or 0),

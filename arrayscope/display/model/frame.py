@@ -112,6 +112,7 @@ class TileCommitReport:
     """
 
     presented_tiles: frozenset[int] = field(default_factory=frozenset)
+    committed_upserts: frozenset[int] | None = None
     removed_tiles: frozenset[int] = field(default_factory=frozenset)
     texture_uploads: int = 0
     texture_upload_bytes: int = 0
@@ -129,6 +130,12 @@ class TileCommitReport:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "presented_tiles", frozenset(int(tile) for tile in self.presented_tiles))
+        if self.committed_upserts is not None:
+            object.__setattr__(
+                self,
+                "committed_upserts",
+                frozenset(int(tile) for tile in self.committed_upserts),
+            )
         object.__setattr__(self, "removed_tiles", frozenset(int(tile) for tile in self.removed_tiles))
         for name in (
             "texture_uploads",
@@ -149,6 +156,20 @@ class TileCommitReport:
     @property
     def cold_count(self) -> int:
         return int(self.texture_uploads + self.pyqtgraph_items_created + self.cpu_windowed_tiles)
+
+    def accepted_upserts(self, delta: "TilePresentationDelta") -> set[int]:
+        if self.committed_upserts is not None:
+            return {
+                int(tile)
+                for tile in self.committed_upserts
+                if int(tile) in dict(delta.upserts)
+            }
+        presented = set(int(tile) for tile in self.presented_tiles)
+        return {
+            int(tile)
+            for tile in dict(delta.upserts)
+            if int(tile) in presented
+        }
 
 
 @dataclass(frozen=True)
@@ -235,11 +256,10 @@ class TilePresentationState:
             raise TypeError("tile presentation acknowledgement requires a TileCommitReport")
         if bool(report.stale) or int(delta.base_revision) != int(self.revision):
             return self
-        presented = set(int(tile) for tile in report.presented_tiles)
         accepted_upserts = {
             int(tile): payload
             for tile, payload in dict(delta.upserts).items()
-            if int(tile) in presented
+            if int(tile) in report.accepted_upserts(delta)
         }
         removals = set(int(tile) for tile in report.removed_tiles)
         if not accepted_upserts and not removals:

@@ -734,6 +734,7 @@ class MontageRenderSession:
         if report is None:
             report = TileCommitReport(
                 presented_tiles=self.tile_presentation_state.apply_delta(delta).active_payloads(delta),
+                committed_upserts=delta.upserts,
                 removed_tiles=delta.removals,
             )
         report = report if isinstance(report, TileCommitReport) else TileCommitReport()
@@ -743,37 +744,36 @@ class MontageRenderSession:
             and int(delta.level_revision) != int(self.level_revision)
         )
         if level_delta_stale:
-            report = replace(report, stale=True, presented_tiles=())
+            report = replace(report, stale=True, committed_upserts=())
         acknowledged = self.tile_presentation_state.acknowledge_delta(delta, report)
         self.tile_presentation_state = acknowledged
-        accepted_upserts = {int(tile) for tile in dict(delta.upserts)}
+        accepted_upserts = report.accepted_upserts(delta)
         committed_levels = None if levels is None else (float(levels[0]), float(levels[1]))
-        for tile in report.presented_tiles:
+        for tile in accepted_upserts:
             self.dirty_payloads.pop(int(tile), None)
-            if int(tile) in accepted_upserts:
-                previous_level_value = self.tile_level_values.get(int(tile))
-                self.pending_payload_upserts.pop(int(tile), None)
-                self.tile_level_revisions[int(tile)] = int(delta.level_revision)
-                if committed_levels is not None:
-                    if int(tile) in self.level_presented_active_tiles and previous_level_value is not None:
-                        previous_count = max(0, int(self.active_level_value_counts.get(previous_level_value, 0)) - 1)
-                        if previous_count:
-                            self.active_level_value_counts[previous_level_value] = previous_count
-                        else:
-                            self.active_level_value_counts.pop(previous_level_value, None)
-                    self.tile_level_values[int(tile)] = committed_levels
-                    if int(tile) in self.level_presented_active_tiles:
-                        self.active_level_value_counts[committed_levels] = int(
-                            self.active_level_value_counts.get(committed_levels, 0)
-                        ) + 1
-                if (
-                    bool(self.pending_level_update)
-                    and int(tile) in self.level_presented_active_tiles
-                    and int(delta.level_revision) == int(self.level_revision)
-                    and previous_level_value != self.desired_level_values
-                    and self.tile_level_values.get(int(tile)) == self.desired_level_values
-                ):
-                    self.level_stale_presentations = max(0, int(self.level_stale_presentations) - 1)
+            previous_level_value = self.tile_level_values.get(int(tile))
+            self.pending_payload_upserts.pop(int(tile), None)
+            self.tile_level_revisions[int(tile)] = int(delta.level_revision)
+            if committed_levels is not None:
+                if int(tile) in self.level_presented_active_tiles and previous_level_value is not None:
+                    previous_count = max(0, int(self.active_level_value_counts.get(previous_level_value, 0)) - 1)
+                    if previous_count:
+                        self.active_level_value_counts[previous_level_value] = previous_count
+                    else:
+                        self.active_level_value_counts.pop(previous_level_value, None)
+                self.tile_level_values[int(tile)] = committed_levels
+                if int(tile) in self.level_presented_active_tiles:
+                    self.active_level_value_counts[committed_levels] = int(
+                        self.active_level_value_counts.get(committed_levels, 0)
+                    ) + 1
+            if (
+                bool(self.pending_level_update)
+                and int(tile) in self.level_presented_active_tiles
+                and int(delta.level_revision) == int(self.level_revision)
+                and previous_level_value != self.desired_level_values
+                and self.tile_level_values.get(int(tile)) == self.desired_level_values
+            ):
+                self.level_stale_presentations = max(0, int(self.level_stale_presentations) - 1)
         for tile in report.removed_tiles:
             self.pending_removals.discard(int(tile))
             self.dirty_payloads.pop(int(tile), None)

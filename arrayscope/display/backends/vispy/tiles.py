@@ -32,6 +32,7 @@ except Exception:  # pragma: no cover - optional dependency import path
 class GpuMontageLayerStats:
     visible_items: int = 0
     presented_tiles: tuple[int, ...] | None = None
+    committed_upserts: tuple[int, ...] | None = None
     resident_items: int = 0
     atlas_capacity: int = 0
     atlas_rebuilds: int = 0
@@ -532,6 +533,11 @@ class TextureAtlasPool:
                 return self.tile_uvs, GpuMontageLayerStats(
                     visible_items=len(presented_tiles),
                     presented_tiles=presented_tiles,
+                    committed_upserts=tuple(
+                        int(tile)
+                        for tile in sorted(delta_upserts)
+                        if int(tile) in presented_tiles
+                    ),
                     resident_items=self.resident_count,
                     atlas_capacity=self.capacity,
                     atlas_rebuilds=int(layout_invalidates_residency),
@@ -1174,6 +1180,7 @@ class GpuMontageLayer:
         self._last_stats = GpuMontageLayerStats(
             visible_items=len(effective_presented_tiles),
             presented_tiles=effective_presented_tiles,
+            committed_upserts=tuple(texture_stats.committed_upserts or ()),
             resident_items=texture_stats.resident_items,
             atlas_capacity=texture_stats.atlas_capacity,
             atlas_rebuilds=texture_stats.atlas_rebuilds,
