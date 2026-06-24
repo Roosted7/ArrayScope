@@ -727,6 +727,32 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     assert image_view.calls == 1
 
 
+def test_level_presentation_finish_reuses_settled_generation():
+    session = _session()
+    session.level_presented_active_tiles = frozenset({0, 1})
+    session.active_level_value_counts = {(2.0, 4.0): 2}
+    session.desired_level_values = (2.0, 4.0)
+    session.level_revision = 7
+
+    assert session.begin_level_presentation_update((2.0, 4.0)) is False
+    assert session.level_revision == 7
+    assert session.pending_level_update is False
+    assert session.level_stale_presentations == 0
+
+
+def test_level_presentation_finish_drains_existing_generation_without_revising():
+    session = _session()
+    session.level_presented_active_tiles = frozenset({0, 1})
+    session.active_level_value_counts = {(2.0, 4.0): 1, (0.0, 1.0): 1}
+    session.desired_level_values = (2.0, 4.0)
+    session.level_revision = 7
+
+    assert session.begin_level_presentation_update((2.0, 4.0)) is True
+    assert session.level_revision == 7
+    assert session.pending_level_update is True
+    assert session.level_stale_presentations == 1
+
+
 def test_montage_render_session_commits_ready_payloads_atomically():
     session = _session()
     session.pending_tiles.clear()

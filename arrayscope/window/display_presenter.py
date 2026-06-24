@@ -554,7 +554,7 @@ class DisplayPresentationMixin:
         # that was attached to the still-draining montage session.  Otherwise
         # queued initial commits can repeatedly restore their older auto range.
         session.force_auto = False
-        session.begin_level_presentation_update(levels)
+        needs_level_work = bool(session.begin_level_presentation_update(levels))
 
         capabilities = image_view_backend_capabilities(self.img_view)
         if not (capabilities.direct_montage_tile_payloads and not capabilities.shader_windowing):
@@ -563,6 +563,9 @@ class DisplayPresentationMixin:
         frame = getattr(self, "_committed_display_frame", None)
         if frame is not None and self._is_level_history_frame_usable(frame):
             self._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range)
+
+        if not needs_level_work:
+            return True
 
         if bool(final):
             committer = getattr(self, "_commit_montage_session_canvas", None)

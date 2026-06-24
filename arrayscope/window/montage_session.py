@@ -303,15 +303,30 @@ class MontageRenderSession:
         else:
             self.level_stale_presentations = 0
 
-    def begin_level_presentation_update(self, levels) -> None:
-        self.desired_level_values = (float(levels[0]), float(levels[1]))
-        self.level_revision = int(self.level_revision) + 1
-        self.pending_level_update = True
-        self.level_stale_presentations = max(
-            0,
-            len(self.level_presented_active_tiles)
-            - int(self.active_level_value_counts.get(self.desired_level_values, 0)),
-        )
+    def begin_level_presentation_update(self, levels) -> bool:
+        """Start or continue a progressive level generation.
+
+        Histogram drags emit an immediate preview followed by a finish signal
+        carrying the same numeric levels.  Treat that finish signal as a
+        request to drain the existing generation, not as a new generation.
+        Reissuing an already-settled target is a no-op.
+
+        Returns ``True`` only while at least one currently presented tile still
+        needs the requested levels.  A new target is still retained when no
+        tile is active so subsequently materialized tiles inherit it.
+        """
+
+        target = (float(levels[0]), float(levels[1]))
+        same_target = self.desired_level_values == target
+        self.desired_level_values = target
+        if not same_target:
+            self.level_revision = int(self.level_revision) + 1
+
+        matching = int(self.active_level_value_counts.get(target, 0))
+        self.level_stale_presentations = max(0, len(self.level_presented_active_tiles) - matching)
+        needs_work = self.level_stale_presentations > 0
+        self.pending_level_update = bool(needs_work)
+        return bool(needs_work)
 
     def expand_viewport_coverage(
         self,
