@@ -1,99 +1,120 @@
 # Current state
 
-**Snapshot:** ArrayScope `0.8.0` release-candidate / v28 baseline, reviewed on 2026-06-22. The audit fixes described below are included in this RC baseline.
+**Snapshot:** ArrayScope v30 rendering-consistency review branch, reviewed on 2026-06-24. The supplied
+v30 histogram/benchmark work is preserved in commit `103ab67`; review fixes are separate commits on
+top.
 
-ArrayScope has outgrown the original “small PyQtGraph image viewer” architecture and is in a deliberate transition. The project already has many of the right semantic boundaries and safety mechanisms; the remaining risk is that normal-image, montage, PyQtGraph, and VisPy paths still compose those mechanisms differently.
+ArrayScope has a strong semantic/evaluation foundation and a high-risk rendering control plane. The
+project is not on the wrong overall path, but recent optimization work crossed enough queues, timers,
+backend contracts, and presentation identities that local changes can now violate distant behavior.
+The immediate priority is to stabilize and extract those state machines before adding more rendering
+features.
 
 ## Maturity map
 
 | Area | State | Notes |
 |---|---|---|
-| Basic launch, slicing, image/line display | Established | Broad automated coverage; still validate platform/Qt integration. |
-| Dimension roles, range parsing, axis flips/FFT shift | Established with recent change | Recent range/cropped-axis work deserves focused interaction regression. |
-| Reversible operation document and recipes | Established | Optimizer preserves public step history. |
-| Region planning, stage cache, cost/memory estimates | Substantial | Strong pure-core coverage; workload heuristics still need field evidence. |
-| Profiles and ROI inspection | Substantial | Shared semantics exist; full pointer/drag ownership is not yet backend-neutral. |
-| Histogram and window/level | Substantial, recently expanded | Adaptive plot binning is queued for larger sources; level changes remain renderer-owned presentation work. |
-| Progressive montage | Advanced but transitional | Correct lifecycle distinctions and bounded caches exist; orchestration remains large and timer-heavy. |
-| PyQtGraph backend | Default | Feature-complete baseline; many per-tile `ImageItem`s can become a CPU/scene bottleneck. |
-| VisPy backend | Experimental | First-class tiled atlas/shader path exists, but the widget still subclasses the complete PyQtGraph view. |
-| Diagnostics/benchmarks | Good internal foundation | Counters and JSONL traces are useful; real GPU/Wayland baselines are incomplete. |
-| Packaging/release story | RC-ready | Package/runtime version identity is aligned for `0.8.0`; CI and RC artifacts still need publication evidence before release. |
-| Documentation | Reorganized in this audit | Live guidance is now separated from archived phase notes. |
+| Basic launch, slicing, image/line display | Established | Broad automated coverage; platform/Qt integration still needs real-system checks. |
+| Dimension roles, ranges, flips/FFT shift | Established with recent change | Keep interaction regressions across cropped/ranged axes. |
+| Reversible operation document/recipes | Established | Optimizer preserves public step history. |
+| Region planning, stage cache, cost/memory estimates | Substantial | Strong Qt-free coverage; workload heuristics need field evidence. |
+| Profiles and ROI inspection | Substantial | Shared semantics exist; pointer/drag lifecycle is not fully backend-neutral. |
+| Histogram and window/level | Substantial, under stabilization | Semantic auto bounds and latest-only refinement exist; PyQtGraph binding remains brittle. |
+| Progressive montage | Advanced but over-concentrated | Correct lifecycle concepts exist; session/orchestrator ownership is too broad. |
+| PyQtGraph backend | Production fallback | Correctly requires progressive CPU/item convergence for some level changes; large item counts remain costly. |
+| VisPy backend | Experimental | Persistent textures/shader levels are promising; hybrid widget inheritance and real-hardware evidence remain gaps. |
+| LOD | Selection only; production native-only | Desired factor is computed, applied factor is intentionally 1 until async compatible residency exists. |
+| Diagnostics/benchmarks | Good internal base, recently corrected | Completion and PyQtGraph level-work counters now reflect convergence/work rather than visibility/image replacement. |
+| Documentation/ADRs | Updated for v30 findings | ADR 0040 and 0041 define level convergence and LOD prerequisites. |
 
 ## What is working well
 
-### Semantic state is mostly outside widgets
+### Semantic and physical identities are mostly explicit
 
-`ViewState`, `ArrayDocument`, operation declarations, geometry, frame/presentation models, and memory policy are largely Qt-free. This makes correctness testable and limits backend-specific meaning.
+`ViewState`, `ArrayDocument`, operation plans, display geometry, committed frames, level sources, tile
+payloads, and memory policy are mostly Qt-free. Materialization identity is separated from ordinary
+levels/LUT state. Requested, materialized, resident, and presented are named lifecycle states.
 
-### Expensive work has explicit models
+### Expensive work has real policy levers
 
-The project contains operation capability declarations, region plans, cost estimates, stage materialization/singleflight, separate caches, render decisions, cancellation tokens, lane worker policy, latency feedback, and a resource governor. This is a much stronger foundation than ad hoc “put it on a thread” code.
+The project has operation capabilities, region plans, cost estimates, stage materialization and
+singleflight, separate caches, cancellation/supersession keys, lane worker policy, GUI callback
+budgets, latency feedback, and a resource governor. These are worth preserving.
 
-### Montage repair established important invariants
+### Recent performance work improved important hot paths
 
-Recent work separates requested, materialized, resident, and presented tiles; rejects stale deltas; preserves retained residency; and distinguishes cold upload from warm rebind/visibility work. Automatic levels are tied to semantic coverage rather than merely to whether a histogram widget finished drawing.
+Active-plus-latest scheduling preserves useful visible progress. Stage-plan/candidate caching, direct
+tile deltas, stable texture identity, retained residency, dynamic tile priority, and separation of
+cold upload from warm visibility/rebind are sensible optimizations. VisPy level changes can remain
+uniform-only, while PyQtGraph can reuse the same priority/admission queue for CPU redraws.
 
-### Tests protect architecture as well as values
+### Tests increasingly protect lifecycle contracts
 
-The suite includes pure shape/value tests, property tests, UI interaction tests, architecture guards, memory stress, deterministic rendering counters, and smoke artifacts. Several tests intentionally prevent new renderer type-switches or widget-owned semantics.
+The suite now covers stale delta rejection, accepted-upsert acknowledgement, rapid level
+supersession, one-tile batches, auto-window within a committed session, zero-upload VisPy level
+updates, native-only LOD diagnostics, and benchmark convergence state.
 
-## Current transition
+## Correctness repairs in this review
 
-The target architecture in [ADR 0039](decisions/0039-unified-image-surface-and-deadline-scheduler.md) is only partly implemented.
-
-Implemented pieces include semantic display frames/presentations, backend capabilities/adapters, typed tile payloads, persistent VisPy residency, memory/resource policy, montage sessions, and active-plus-latest normal visible scheduling with supersession key/value freshness checks.
-Remaining gaps include:
-
-- one frame planner for both normal image and montage;
-- one deadline/admission model across visible, analysis, commit, and speculative lanes;
-- storage-neutral tiled geometry for very large single planes;
-- complete shared pointer capture and drag lifecycle;
-- composition of an `ImageViewShell` with a thin `ImageSurface`, replacing `VisPyImageView2D(ImageView2D)` inheritance.
+- Backend reports now distinguish drawable retained tiles from upserts actually accepted in a commit.
+- PyQtGraph progressive level generations retry deferred tiles and settle only after every active tile
+  acknowledges the latest target.
+- Auto-window no longer replaces a useful committed montage session.
+- A concrete level command supersedes older automatic work still attached to that session.
+- Benchmark completion uses target revision/stale coverage rather than “all tiles are visible.”
+- Large auto-window bounds apply immediately while detailed histogram refinement remains latest-only.
+- Per-view histogram background requests are coalesced instead of accumulating stale work.
+- LOD diagnostics expose desired versus applied factor and the native-only reason.
+- PyQtGraph scalar/RGB per-tile level work is counted accurately for diagnostics and resource feedback.
+- Obsolete duplicate level-acknowledgement fields were removed.
 
 ## Material risks
 
-### 1. GUI callback budgets are not globally enforceable yet
+### 1. The control plane is too concentrated
 
-Several callbacks still loop over a whole ready/waiting tile set, rebuild priorities, update many scene objects, or calculate histogram data in one event-loop turn. Item limits exist in some paths, but a universal item/byte/time contract does not.
+`window/montage_renderer.py` is about 3,070 lines and `window/montage_session.py` about 1,155 lines.
+The session owns compute/stage queues, payload admission, visibility, residency hints, level
+statistics, level generations, acknowledgement, and LOD intent. The renderer coordinates those plus
+Qt timers, committed frames, overlays, side panels, and diagnostics. This is the main reason fixes can
+break unrelated transitions.
 
-### 2. Normal-image and montage control flow can diverge
+### 2. Semantic parity is being confused with mechanical uniformity
 
-They use different orchestration modules, generation/cancellation behavior, and timer/coalescing paths. A correctness fix in one path does not automatically protect the other.
+PyQtGraph and VisPy must agree on target levels, values, source ranks, revisions, and completion. They
+must not be forced into one physical update method. PyQtGraph may need many bounded CPU/item updates;
+VisPy can update resident visuals through uniforms. ADR 0040 makes that distinction durable.
 
-### 3. Tile priority is not continuously retargeted
+### 3. Histogram ownership still crosses private PyQtGraph internals
 
-Recent priority work orders new plans around viewport center or the last hover point. Mouse movement itself only records a point; it does not safely reprioritize an already-active queue. Sorting on every mouse event would be worse, so this needs an indexed/coalesced design rather than another callback.
+`ImageView2D` manually rebinds `HistogramLUTItem.imageItem`, calls `_setImageLookupTable()`, and
+repeatedly disconnects `sigImageChanged` to avoid duplicate recomputation. This is understandable
+compatibility code, but it is version-sensitive and should be isolated behind a tested adapter or
+replaced with an ArrayScope-owned histogram plot/region shell.
 
-### 4. Renderer files remain too large
+### 4. LOD is intentionally unavailable, not merely failing to trigger
 
-`montage_renderer.py`, `imageview2d.py`, `vispy_imageview2d.py`, and the VisPy tiled backend each exceed roughly 1,700–2,000 lines. Size is a symptom: orchestration, lifecycle, interaction bridging, diagnostics, and concrete scene mechanics are still interleaved.
+The selector runs, but application is forced to factor one. The old implementation built CPU pyramids
+in a GUI commit path and mixed incompatible tile dimensions with fixed atlas assumptions. Re-enabling
+it would restore stalls and transition churn. ADR 0041 defines the required split.
 
-### 5. Timer and generation interactions are hard to reason about
+### 5. Timer interactions still imply ordering
 
-Debounce, quiet-period refresh, upload timers, warm-residency timers, prefetch timers, and slow-overlay timers can interact. Timers should be admission/rescheduling mechanisms, not the source of semantic ordering.
+Debounce, commit, warm-residency, prefetch, histogram, stage-wait, and overlay timers are useful
+rescheduling tools, but several flows still rely on when they happen to fire. Every callback needs an
+explicit target/revision and bounded work contract; timers must not own semantic order.
 
-### 6. Hardware evidence is incomplete
+### 6. Hardware evidence remains incomplete
 
-Headless tests can verify contracts and deterministic work counters. They cannot prove GPU upload latency, texture limits, Wayland behavior, pointer feel, frame pacing, or real memory pressure.
+Headless tests prove models and deterministic work counters. They do not prove OpenGL upload latency,
+texture limits, Wayland behavior, high-DPI pointer mapping, frame pacing, or interaction feel.
 
-### 7. Rapid local development increases integration risk
+## Current direction
 
-Recent work changed histogram, viewport, slicing, and tile priority behavior in quick succession. Before publication, keep the RC provenance, CI status, versioning, diagnostics trace, and benchmark baselines together.
+Do not discard the operation/evaluation core, display models, resource policy, or backend mechanics.
+Do discard the unsafe synchronous LOD route and stop adding cross-cutting behavior to the session and
+renderer. The next architecture step is incremental extraction of presentation-generation,
+admission, and stage-fan-in state machines with conformance tests, followed by unified frame planning
+and backend composition.
 
-## Audit fixes
-
-The restored v28 fixes include:
-
-- centered-slice and priority-aware montage test repairs, order-independent Qt settings cleanup, and empty Inspection-dock no-op refreshes;
-- bounded evaluation-group invalidation with pruned completed per-tile generation bookkeeping;
-- the `format_bytes` render-refusal import and single-action auto-window behavior when a manual histogram preview is open;
-- consolidated CI and release tag/package/runtime version guards;
-- canonical `0.8.0` package/runtime version identity and deterministic RC diagnostics artifacts;
-- concurrent multi-path CLI launches while preserving single-path blocking;
-- display resource shutdown and bounded benchmark lifecycle cleanup;
-- viewport minimum-overlap preservation after max-span clamping;
-- small hardening for montage priority inputs and early hover cleanup.
-
-The active priorities and acceptance gates are in the [roadmap](roadmap.md). The full evidence and comparison are in the [v28 audit](reviews/v28-project-audit.md), with supplemental status detail in [project-status.md](project-status.md).
+The ordered acceptance gates are in the [roadmap](roadmap.md). Full evidence and recommendations are
+in [the v30 rendering-consistency audit](reviews/v30-rendering-consistency-audit.md).

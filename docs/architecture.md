@@ -113,6 +113,19 @@ These terms are not interchangeable:
 
 Placeholders and dirty state clear only after presentation acknowledgement. Worker completion or queueing an upload is insufficient.
 
+### Presentation generations
+
+A global presentation command has one semantic target/revision, but convergence is capability-specific.
+PyQtGraph may require prioritized, budgeted CPU/item redraws for every active tile; VisPy can normally
+apply compatible level changes through shader uniforms. Retained visibility is not acknowledgement of
+the current target. A backend advances only the work it actually accepted, and completion means all
+currently active coverage is acknowledged at the latest revision. See
+[ADR 0040](decisions/0040-backend-aware-presentation-convergence.md).
+
+Persistence intent (for example an explicit user lock) is separate from the latest physical presentation
+target. A newer concrete target supersedes older automatic work without recreating the materialization
+session.
+
 ## Render flows
 
 ### Normal image (current)
@@ -142,7 +155,7 @@ state/viewport change
   -> acknowledgement and committed frame
 ```
 
-Pan/zoom retarget the session rather than recreating document work. Native-resolution persistent tiles are the production baseline; CPU LOD remains experimental.
+Pan/zoom retarget the session rather than recreating document work. Native-resolution persistent tiles are the production baseline. The LOD selector may report a desired factor, but the applied factor remains one until asynchronous materialization and compatible residency satisfy [ADR 0041](decisions/0041-lod-selection-materialization-and-residency.md).
 
 ### Target flow
 
@@ -167,7 +180,7 @@ through different physical mechanics without changing their meaning.
 - The visible operation stack is never silently rewritten by runtime optimization.
 - Worker callbacks never commit stale semantic or presentation revisions.
 - Camera-only changes do not restart array evaluation.
-- Levels/LUT edits do not evict unchanged texture data.
+- Levels/LUT edits do not evict unchanged source texture data; PyQtGraph may still require bounded CPU/item redraws while VisPy uses uniforms.
 - First pixels do not wait for a detailed histogram plot; they do require a valid semantic level source for the pixels shown.
 - GUI callbacks have item, byte, and elapsed-time limits; an item cap alone is not a time budget.
 - Cold upload/preparation is measured separately from warm rebind/visibility work.
@@ -178,6 +191,7 @@ through different physical mechanics without changing their meaning.
 - Clearing a backend requires an explicit reason such as context loss, replacement, document revision, or incompatible physical representation.
 - VisPy visible tile admission is coherent: placeholders clear only after texture data, geometry,
   visibility, and draw invalidation are consistent.
+- Desired and applied LOD are separate states; no commit performs synchronous pyramid construction.
 
 ## Placement guide
 
@@ -202,7 +216,9 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 - `VisPyImageView2D` still inherits the complete PyQtGraph `ImageView2D` and therefore keeps two scene/event systems in the same widget.
 - Normal and montage planning/scheduling remain separate.
 - Pointer capture and full drag lifecycle are only partly migrated to shared interaction state.
+- `MontageRenderSession` combines materialization, stage waits, admission, level convergence, acknowledgement, visibility/residency hints, and LOD intent.
 - Large renderer/backend modules still combine orchestration and mechanics.
+- Histogram binding still reaches into private PyQtGraph state.
 - Several timers serve as implicit sequencing. They must become bounded scheduler resubmission/admission signals, not semantic order.
 
 These are roadmap items, not invitations to perform a single broad rewrite. Each migration step must leave at least one runnable backend and retain semantic conformance tests.

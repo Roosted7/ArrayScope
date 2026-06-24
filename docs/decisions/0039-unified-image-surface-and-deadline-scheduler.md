@@ -132,7 +132,7 @@ Every path that mutates Qt or OpenGL state must obey all of these rules:
 - batches are bounded by items, bytes, and elapsed time;
 - callbacks publish partial progress and reschedule remaining work;
 - semantic histogram refinement never gates first pixel presentation;
-- histogram/level-only updates are not required to make already resident visible tiles drawable;
+- presentation-only edits do not invalidate source residency; backend capabilities determine whether convergence is an immediate uniform update or bounded per-tile redraw (ADR 0040);
 - the last valid frame remains visible until a replacement is usable.
 
 ### Unified tiled image surface
@@ -272,6 +272,14 @@ Unknown source identity is not a reason to clear a backend. Clears are explicit 
 with reasons such as context loss, backend replacement, semantic document revision, or incompatible
 texture representation changes. Stale presentation deltas are rejected by revision instead of being
 allowed to mutate newer state.
+
+## Revision after backend-aware level convergence
+
+ADR 0040 refines the level-only portion of this decision. Shared semantics do not imply identical
+physical commits. VisPy can normally converge resident tiles through shader uniforms. PyQtGraph may
+need prioritized, budgeted CPU re-windowing and ImageItem updates. Both use one target revision and
+explicit acknowledgement, but only the compatible shader path is physically immediate. Visibility
+is never acknowledgement of a replacement.
 
 ## Consequences
 

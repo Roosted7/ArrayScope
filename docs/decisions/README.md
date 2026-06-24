@@ -67,6 +67,8 @@ Status terminology:
 | [0037](0037-first-class-vispy-tiled-renderer.md) | VisPy tiled renderer | Preferred large-tiled target; validation ongoing. |
 | [0038](0038-render-backend-composition.md) | Backend composition | Partly implemented via adapters; inheritance remains. |
 | [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Current target, partly implemented. |
+| [0040](0040-backend-aware-presentation-convergence.md) | Backend-aware presentation convergence | Accepted; immediate correctness fixes implemented, extraction pending. |
+| [0041](0041-lod-selection-materialization-and-residency.md) | LOD selection/materialization/residency | Accepted design; production remains native-only. |
 
 ## Adding or changing a decision
 
