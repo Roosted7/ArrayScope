@@ -279,6 +279,8 @@ class MontageRenderMixin:
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
             pending_tiles=list(pending_tiles),
             tile_stage_keys=stage_plan["tile_stage_keys"],
+            tile_stage_plans=stage_plan["tile_stage_plans"],
+            tile_stage_candidates=stage_plan["tile_stage_candidates"],
             stage_waiting_tiles=stage_plan["stage_waiting_tiles"],
             attached_stage_requests=stage_plan["attached_stage_keys"],
             stage_values=stage_plan["stage_values"],
@@ -402,6 +404,8 @@ class MontageRenderMixin:
 
     def _merge_montage_stage_plan(self, session: MontageRenderSession, stage_plan) -> None:
         session.tile_stage_keys.update(stage_plan["tile_stage_keys"])
+        session.tile_stage_plans.update(stage_plan.get("tile_stage_plans", {}))
+        session.tile_stage_candidates.update(stage_plan.get("tile_stage_candidates", {}))
         for key, waiting in dict(stage_plan["stage_waiting_tiles"]).items():
             existing = session.stage_waiting_tiles.get(key, ())
             existing_numbers = {int(tile.montage_index) for tile in existing}
@@ -904,6 +908,8 @@ class MontageRenderMixin:
         document_key = stage_document_key(document)
         groups = {}
         tile_candidates = {}
+        tile_stage_plans = {}
+        tile_stage_candidates = {}
         for tile in tuple(missing_tiles):
             try:
                 request = request_for_image(tile.view_state)
@@ -920,6 +926,8 @@ class MontageRenderMixin:
             groups.setdefault(key, {"candidate": candidate, "tiles": [], "plan": plan, "request": request})
             groups[key]["tiles"].append(tile)
             tile_candidates[int(tile.montage_index)] = key
+            tile_stage_plans[int(tile.montage_index)] = plan
+            tile_stage_candidates[int(tile.montage_index)] = candidate
 
         tile_stage_keys = {}
         stage_waiting_tiles = {}
@@ -945,6 +953,8 @@ class MontageRenderMixin:
                 stage_values[key] = result.value
                 for tile in tiles:
                     tile_stage_keys[int(tile.montage_index)] = key
+                    tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
+                    tile_stage_candidates[int(tile.montage_index)] = candidate
                 continue
             if result.decision == "scheduled":
                 _direct_tiles, waiting_tiles = _lead_direct_tiles(tiles)
@@ -953,6 +963,8 @@ class MontageRenderMixin:
                     stage_waiting_tiles[key] = list(waiting_tiles)
                 for tile in waiting_tiles:
                     tile_stage_keys[int(tile.montage_index)] = key
+                    tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
+                    tile_stage_candidates[int(tile.montage_index)] = candidate
                     waiting_indices.add(int(tile.montage_index))
                 if _direct_tiles and _stage_fits_cache(candidate, self._memory_policy()):
                     for tile in _direct_tiles:
@@ -965,6 +977,8 @@ class MontageRenderMixin:
                 attached_stage_keys.add(key)
                 for tile in tiles:
                     tile_stage_keys[int(tile.montage_index)] = key
+                    tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
+                    tile_stage_candidates[int(tile.montage_index)] = candidate
                     waiting_indices.add(int(tile.montage_index))
                 if result.request is not None:
                     stage_requests.append((result.request, group["plan"]))
@@ -975,6 +989,8 @@ class MontageRenderMixin:
                 repeated_expensive_stage_per_tile = True
         return {
             "tile_stage_keys": tile_stage_keys,
+            "tile_stage_plans": tile_stage_plans,
+            "tile_stage_candidates": tile_stage_candidates,
             "stage_waiting_tiles": stage_waiting_tiles,
             "stage_values": stage_values,
             "lead_stage_warmups": lead_stage_warmups,
@@ -1279,16 +1295,19 @@ class MontageRenderMixin:
             stage_value = None if stage_key is None else getattr(session, "stage_values", {}).get(stage_key)
             if stage_value is not None:
                 request = request_for_image(tile.view_state)
-                plan = plan_slab(session.document, request)
-                candidates = tuple(getattr(plan.region_plan, "cache_candidates", ()))
-                candidate = next(
-                    (
-                        candidate
-                        for candidate in candidates
-                        if self.operation_evaluator.stage_materializer.key_for_candidate(stage_document_key(session.document), candidate) == stage_key
-                    ),
-                    None,
-                )
+                plan = getattr(session, "tile_stage_plans", {}).get(int(tile.montage_index))
+                candidate = getattr(session, "tile_stage_candidates", {}).get(int(tile.montage_index))
+                if plan is None or candidate is None:
+                    plan = plan_slab(session.document, request)
+                    candidates = tuple(getattr(plan.region_plan, "cache_candidates", ()))
+                    candidate = next(
+                        (
+                            candidate
+                            for candidate in candidates
+                            if self.operation_evaluator.stage_materializer.key_for_candidate(stage_document_key(session.document), candidate) == stage_key
+                        ),
+                        None,
+                    )
                 if candidate is not None:
                     slab = evaluate_slab_from_stage(
                         session.document,
@@ -1528,10 +1547,15 @@ class MontageRenderMixin:
                 shader_display=bool(getattr(session, "shader_display", False)),
             )
         compute_path = str(getattr(result, "compute_path", "direct") or "direct")
+        eval_ms = max(0.0, float(getattr(result, "eval_ms", 0.0) or 0.0))
         if compute_path == "stage_backed":
             session.tile_compute_stage_backed += 1
+            session.tile_compute_stage_backed_ms += eval_ms
+            session.tile_compute_stage_backed_max_ms = max(float(session.tile_compute_stage_backed_max_ms), eval_ms)
         else:
             session.tile_compute_direct += 1
+            session.tile_compute_direct_ms += eval_ms
+            session.tile_compute_direct_max_ms = max(float(session.tile_compute_direct_max_ms), eval_ms)
         self._update_montage_level_bounds_from_rendered(
             session.level_key,
             rendered,

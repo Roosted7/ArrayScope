@@ -55,6 +55,8 @@ class TileLayerUpdateStats:
     storage_evictions: int = 0
     texture_uploads: int = 0
     texture_upload_bytes: int = 0
+    texture_prepare_ms: float = 0.0
+    texture_submit_ms: float = 0.0
     vertex_uploads: int = 0
     level_updates: int = 0
     estimated_gpu_bytes: int = 0

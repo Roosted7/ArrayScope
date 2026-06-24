@@ -268,6 +268,8 @@ class ImageView2D(QtWidgets.QWidget):
             "tile_layer_storage_evictions": 0,
             "tile_layer_texture_uploads": 0,
             "tile_layer_texture_upload_bytes": 0,
+            "tile_layer_texture_prepare_ms": 0.0,
+            "tile_layer_texture_submit_ms": 0.0,
             "tile_layer_vertex_uploads": 0,
             "tile_layer_level_updates": 0,
             "tile_layer_estimated_gpu_bytes": 0,
@@ -331,6 +333,8 @@ class ImageView2D(QtWidgets.QWidget):
             tile_layer_storage_evictions=int(timing["tile_layer_storage_evictions"]),
             tile_layer_texture_uploads=int(timing["tile_layer_texture_uploads"]),
             tile_layer_texture_upload_bytes=int(timing["tile_layer_texture_upload_bytes"]),
+            tile_layer_texture_prepare_ms=float(timing["tile_layer_texture_prepare_ms"]),
+            tile_layer_texture_submit_ms=float(timing["tile_layer_texture_submit_ms"]),
             tile_layer_vertex_uploads=int(timing["tile_layer_vertex_uploads"]),
             tile_layer_level_updates=int(timing["tile_layer_level_updates"]),
             tile_layer_estimated_gpu_bytes=int(timing["tile_layer_estimated_gpu_bytes"]),
@@ -689,6 +693,8 @@ class ImageView2D(QtWidgets.QWidget):
         timing["tile_layer_storage_evictions"] = int(stats.storage_evictions)
         timing["tile_layer_texture_uploads"] = int(stats.texture_uploads)
         timing["tile_layer_texture_upload_bytes"] = int(stats.texture_upload_bytes)
+        timing["tile_layer_texture_prepare_ms"] = float(getattr(stats, "texture_prepare_ms", 0.0) or 0.0)
+        timing["tile_layer_texture_submit_ms"] = float(getattr(stats, "texture_submit_ms", 0.0) or 0.0)
         timing["tile_layer_vertex_uploads"] = int(stats.vertex_uploads)
         timing["tile_layer_level_updates"] = int(stats.level_updates)
         timing["tile_layer_estimated_gpu_bytes"] = int(stats.estimated_gpu_bytes)

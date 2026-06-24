@@ -147,8 +147,32 @@ def test_presentation_over_budget_sample_scales_from_measured_cost_not_warning_t
 
     decision = governor.decide_ui_work("montage_present_total", interactive=False)
 
-    assert decision.batch_limit == 12
+    assert decision.batch_limit > 12
     assert decision.byte_cap >= 12 * 1024 * 1024
+
+
+def test_presentation_probe_above_profile_cap_is_blocked_under_high_ui_pressure():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_present_total",
+        12.0,
+        item_count=12,
+        byte_count=12 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+    governor.record_ui_observation(
+        "montage_commit",
+        80.0,
+        item_count=12,
+        byte_count=0,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    assert decision.batch_limit <= 12
 
 
 def test_presentation_under_warning_sample_recovers_from_single_item_limit():

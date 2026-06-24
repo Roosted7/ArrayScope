@@ -1821,6 +1821,8 @@ class VisPyImageView2D(ImageView2D):
             storage_evictions=int(stats.atlas_evictions),
             texture_uploads=int(stats.texture_uploads),
             texture_upload_bytes=int(stats.texture_upload_bytes),
+            texture_prepare_ms=float(getattr(stats, "texture_prepare_ms", 0.0) or 0.0),
+            texture_submit_ms=float(getattr(stats, "texture_submit_ms", 0.0) or 0.0),
             vertex_uploads=int(stats.vertex_uploads),
             level_updates=int(stats.level_updates),
             estimated_gpu_bytes=int(stats.estimated_gpu_bytes),
@@ -1841,6 +1843,7 @@ class VisPyImageView2D(ImageView2D):
             mipmap_available=bool(getattr(stats, "mipmap_available", False)),
             complex_texture_uploads=int(getattr(stats, "complex_texture_uploads", 0)),
             shader_uniform_updates=int(getattr(stats, "shader_uniform_updates", 0)),
+            upload_ms=float(getattr(stats, "upload_ms", 0.0) or 0.0),
         )
 
     def _request_vispy_tile_layer_redraw(self) -> None:

@@ -102,6 +102,8 @@ class MontageRenderSession:
     active_tile_requests: set[int] = field(default_factory=set)
     presented_tiles: set[int] = field(default_factory=set)
     tile_stage_keys: dict[int, object] = field(default_factory=dict)
+    tile_stage_plans: dict[int, object] = field(default_factory=dict)
+    tile_stage_candidates: dict[int, object] = field(default_factory=dict)
     stage_waiting_tiles: dict[object, list[MontageTile]] = field(default_factory=dict)
     active_stage_requests: set[object] = field(default_factory=set)
     attached_stage_requests: set[object] = field(default_factory=set)
@@ -131,6 +133,10 @@ class MontageRenderSession:
     tile_compute_stage_backed: int = 0
     tile_compute_direct: int = 0
     tile_compute_waiting_for_stage: int = 0
+    tile_compute_stage_backed_ms: float = 0.0
+    tile_compute_direct_ms: float = 0.0
+    tile_compute_stage_backed_max_ms: float = 0.0
+    tile_compute_direct_max_ms: float = 0.0
     lead_direct_tiles: int = 0
     stage_backed_tiles_pending: int = 0
     retained_stage_index: int | None = None

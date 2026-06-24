@@ -1187,6 +1187,52 @@ def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypa
         win.close()
 
 
+def test_fft_montage_stage_cache_hit_keeps_per_tile_slab_plans(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.operations.pipeline import CenteredFFT
+    from arrayscope.operations.regions import region_text
+    from arrayscope.operations.stage_cache import StageValue
+    from arrayscope.operations.stage_materialization import StageMaterializationResult
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4))
+    qtbot.addWidget(win)
+    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **_kwargs: 1)
+    try:
+        _process_events(qtbot)
+        win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
+        win._set_document(win.operation_coordinator.document)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
+
+        materializer = win.operation_evaluator.stage_materializer
+
+        def cached_stage(document_key, candidate):
+            key = materializer.key_for_candidate(document_key, candidate)
+            data = np.zeros(tuple(candidate.shape), dtype=np.dtype(candidate.dtype))
+            value = StageValue(
+                data=data,
+                region=candidate.region,
+                stage_index=int(candidate.stage_index),
+                nbytes=int(data.nbytes),
+                priority=str(candidate.priority),
+            )
+            return StageMaterializationResult("hit", key, value=value)
+
+        monkeypatch.setattr(materializer, "request_stage", cached_stage)
+
+        win.update_montage_view()
+
+        session = win._montage_session
+        planned_regions = [
+            region_text(session.tile_stage_plans[index].region_plan.final_region)
+            for index in range(4)
+        ]
+
+        assert len(set(planned_regions)) == 4
+    finally:
+        win.close()
+
+
 def test_fft_montage_keeps_waiting_tiles_behind_in_flight_lead_warmup(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.operations.pipeline import CenteredFFT

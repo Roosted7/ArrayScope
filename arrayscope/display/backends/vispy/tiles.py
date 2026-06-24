@@ -45,6 +45,8 @@ class GpuMontageLayerStats:
     estimated_gpu_bytes: int = 0
     cpu_shadow_bytes: int = 0
     upload_ms: float = 0.0
+    texture_prepare_ms: float = 0.0
+    texture_submit_ms: float = 0.0
     page_count: int = 0
     active_pages: int = 0
     device_max_texture_size: int = 0
@@ -456,6 +458,8 @@ class TextureAtlasPool:
                 uploads = 0
                 upload_bytes = 0
                 complex_uploads = 0
+                texture_prepare_ms = 0.0
+                texture_submit_ms = 0.0
                 updated = 0
                 skipped = 0
                 evictions_before = self.eviction_count
@@ -485,16 +489,18 @@ class TextureAtlasPool:
                     if not should_upload:
                         skipped += 1
                         continue
-                    scalar, color = _payload_texture_data(
+                    scalar, color, prepare_ms = _prepare_payload_texture_data(
                         payload,
                         tile_shape=(tile_h, tile_w),
                         rgb_already_windowed=rgb_already_windowed,
                         need_scalar=page.scalar_is_atlas,
                         need_color=page.color_is_atlas,
                     )
+                    texture_prepare_ms += prepare_ms
                     y0, x0 = page.offset_for_slot(slot)
                     if scalar is not None:
-                        page.scalar_texture.set_data(
+                        texture_submit_ms += _upload_texture_plane(
+                            page.scalar_texture,
                             scalar,
                             offset=(int(y0), int(x0)),
                             copy=_upload_copy_required(scalar, payload, force=page.complex_is_atlas),
@@ -504,7 +510,8 @@ class TextureAtlasPool:
                         if page.complex_is_atlas:
                             complex_uploads += 1
                     if color is not None:
-                        page.color_texture.set_data(
+                        texture_submit_ms += _upload_texture_plane(
+                            page.color_texture,
                             color,
                             offset=(int(y0), int(x0)),
                             copy=_upload_copy_required(color, payload),
@@ -536,6 +543,8 @@ class TextureAtlasPool:
                     estimated_gpu_bytes=self.estimated_gpu_bytes,
                     cpu_shadow_bytes=self.cpu_shadow_bytes,
                     upload_ms=elapsed,
+                    texture_prepare_ms=texture_prepare_ms,
+                    texture_submit_ms=texture_submit_ms,
                     page_count=len(self.pages),
                     active_pages=len({self.tile_slots[int(tile)][0] for tile in presented_tiles if int(tile) in self.tile_slots}),
                     device_max_texture_size=self.max_texture_size,
@@ -589,6 +598,8 @@ class TextureAtlasPool:
         uploads = 0
         upload_bytes = 0
         complex_uploads = 0
+        texture_prepare_ms = 0.0
+        texture_submit_ms = 0.0
         updated = 0
         skipped = int(unsupported_items)
         evictions_before = self.eviction_count
@@ -611,16 +622,18 @@ class TextureAtlasPool:
                 skipped += 1
                 continue
 
-            scalar, color = _payload_texture_data(
+            scalar, color, prepare_ms = _prepare_payload_texture_data(
                 payload,
                 tile_shape=(tile_h, tile_w),
                 rgb_already_windowed=rgb_already_windowed,
                 need_scalar=self.scalar_is_atlas,
                 need_color=self.color_is_atlas,
             )
+            texture_prepare_ms += prepare_ms
             y0, x0 = page.offset_for_slot(slot)
             if scalar is not None:
-                page.scalar_texture.set_data(
+                texture_submit_ms += _upload_texture_plane(
+                    page.scalar_texture,
                     scalar,
                     offset=(int(y0), int(x0)),
                     copy=_upload_copy_required(scalar, payload, force=page.complex_is_atlas),
@@ -630,7 +643,8 @@ class TextureAtlasPool:
                 if page.complex_is_atlas:
                     complex_uploads += 1
             if color is not None:
-                page.color_texture.set_data(
+                texture_submit_ms += _upload_texture_plane(
+                    page.color_texture,
                     color,
                     offset=(int(y0), int(x0)),
                     copy=_upload_copy_required(color, payload),
@@ -681,6 +695,8 @@ class TextureAtlasPool:
             estimated_gpu_bytes=self.estimated_gpu_bytes,
             cpu_shadow_bytes=self.cpu_shadow_bytes,
             upload_ms=elapsed,
+            texture_prepare_ms=texture_prepare_ms,
+            texture_submit_ms=texture_submit_ms,
             page_count=len(self.pages),
             active_pages=len({self.tile_slots[int(tile)][0] for tile in active if int(tile) in self.tile_slots}),
             device_max_texture_size=self.max_texture_size,
@@ -767,6 +783,8 @@ class TextureAtlasPool:
         uploads = 0
         upload_bytes = 0
         complex_uploads = 0
+        texture_prepare_ms = 0.0
+        texture_submit_ms = 0.0
         updated = 0
         skipped = 0
         evictions_before = self.eviction_count
@@ -800,16 +818,18 @@ class TextureAtlasPool:
                 near_keys=near_keys,
             )
             page = self.pages[int(page_index)]
-            scalar, color = _payload_texture_data(
+            scalar, color, prepare_ms = _prepare_payload_texture_data(
                 payload,
                 tile_shape=(tile_h, tile_w),
                 rgb_already_windowed=rgb_already_windowed,
                 need_scalar=page.scalar_is_atlas,
                 need_color=page.color_is_atlas,
             )
+            texture_prepare_ms += prepare_ms
             y0, x0 = page.offset_for_slot(slot)
             if scalar is not None:
-                page.scalar_texture.set_data(
+                texture_submit_ms += _upload_texture_plane(
+                    page.scalar_texture,
                     scalar,
                     offset=(int(y0), int(x0)),
                     copy=_upload_copy_required(scalar, payload, force=page.complex_is_atlas),
@@ -819,7 +839,8 @@ class TextureAtlasPool:
                 if page.complex_is_atlas:
                     complex_uploads += 1
             if color is not None:
-                page.color_texture.set_data(
+                texture_submit_ms += _upload_texture_plane(
+                    page.color_texture,
                     color,
                     offset=(int(y0), int(x0)),
                     copy=_upload_copy_required(color, payload),
@@ -842,6 +863,8 @@ class TextureAtlasPool:
             estimated_gpu_bytes=self.estimated_gpu_bytes,
             cpu_shadow_bytes=self.cpu_shadow_bytes,
             upload_ms=elapsed,
+            texture_prepare_ms=texture_prepare_ms,
+            texture_submit_ms=texture_submit_ms,
             page_count=len(self.pages),
             active_pages=len({page_index for page_index, _slot in self.tile_slots.values()}),
             device_max_texture_size=self.max_texture_size,
@@ -1164,6 +1187,8 @@ class GpuMontageLayer:
             estimated_gpu_bytes=texture_stats.estimated_gpu_bytes,
             cpu_shadow_bytes=texture_stats.cpu_shadow_bytes,
             upload_ms=texture_stats.upload_ms,
+            texture_prepare_ms=texture_stats.texture_prepare_ms,
+            texture_submit_ms=texture_stats.texture_submit_ms,
             page_count=texture_stats.page_count,
             active_pages=len(active_pages),
             device_max_texture_size=texture_stats.device_max_texture_size,
@@ -1585,6 +1610,31 @@ def _payload_texture_data(
     scalar = _fit_scalar(image, (tile_h, tile_w)) if need_scalar else None
     color = np.zeros((tile_h, tile_w, 3), dtype=np.uint8) if need_color else None
     return scalar, color
+
+
+def _prepare_payload_texture_data(
+    payload: DisplayTilePayload,
+    *,
+    tile_shape: tuple[int, int],
+    rgb_already_windowed: bool,
+    need_scalar: bool,
+    need_color: bool,
+):
+    start = perf_counter()
+    scalar, color = _payload_texture_data(
+        payload,
+        tile_shape=tile_shape,
+        rgb_already_windowed=rgb_already_windowed,
+        need_scalar=need_scalar,
+        need_color=need_color,
+    )
+    return scalar, color, (perf_counter() - start) * 1000.0
+
+
+def _upload_texture_plane(texture, data: np.ndarray, *, offset: tuple[int, int], copy: bool) -> float:
+    start = perf_counter()
+    texture.set_data(data, offset=offset, copy=copy)
+    return (perf_counter() - start) * 1000.0
 
 
 def _fit_scalar(data, shape: tuple[int, int]) -> np.ndarray:

@@ -268,10 +268,17 @@ class ResourceGovernor:
         )
         snapshot = feedback.channel_snapshot(channel)
         batch = int(feedback.batch_limit(channel, interactive=interactive))
+        batch_max = int(feedback.tuning.max_batch)
+        if (
+            channel in _PRESENTATION_UPLOAD_CHANNELS
+            and not interactive
+            and self._pressure.ui_pressure != ResourcePressure.HIGH
+        ):
+            batch_max = max(batch_max, min(32, int(ceil(batch_max * 1.5))))
         if snapshot.per_item_ewma_ms is not None and snapshot.per_item_ewma_ms > 0.0:
             batch = max(
                 int(feedback.tuning.min_batch),
-                min(int(feedback.tuning.max_batch), int(control_budget // max(0.25, snapshot.per_item_ewma_ms))),
+                min(int(batch_max), int(control_budget // max(0.25, snapshot.per_item_ewma_ms))),
             )
         default_byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
         byte_cap = default_byte_cap
@@ -291,7 +298,7 @@ class ResourceGovernor:
         ):
             scale = control_budget / max(0.25, float(snapshot.last_elapsed_ms))
             measured_batch = int(ceil(float(snapshot.last_count) * scale))
-            batch = max(int(batch), min(int(feedback.tuning.max_batch), measured_batch))
+            batch = max(int(batch), min(int(batch_max), measured_batch))
             if snapshot.last_byte_count > 0:
                 measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
                 byte_cap = max(int(byte_cap), measured_byte_cap)
@@ -312,7 +319,7 @@ class ResourceGovernor:
                 and batch <= int(feedback.tuning.min_batch)
                 and snapshot.last_byte_count > 0
             ):
-                batch = min(int(feedback.tuning.max_batch), int(feedback.tuning.min_batch) + 1)
+                batch = min(int(batch_max), int(feedback.tuning.min_batch) + 1)
                 byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
         elif (
             channel in _PRESENTATION_UPLOAD_CHANNELS
@@ -321,7 +328,7 @@ class ResourceGovernor:
         ):
             scale = control_budget / max(0.25, float(snapshot.last_elapsed_ms))
             measured_batch = int(ceil(float(snapshot.last_count) * scale))
-            batch = max(int(batch), min(int(feedback.tuning.max_batch), measured_batch))
+            batch = max(int(batch), min(int(batch_max), measured_batch))
             if snapshot.last_byte_count > 0:
                 measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
                 byte_cap = max(int(byte_cap), measured_byte_cap)

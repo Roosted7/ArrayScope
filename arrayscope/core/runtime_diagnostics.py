@@ -42,6 +42,8 @@ class ImageUploadTiming:
     tile_layer_storage_evictions: int = 0
     tile_layer_texture_uploads: int = 0
     tile_layer_texture_upload_bytes: int = 0
+    tile_layer_texture_prepare_ms: float | None = None
+    tile_layer_texture_submit_ms: float | None = None
     tile_layer_vertex_uploads: int = 0
     tile_layer_level_updates: int = 0
     tile_layer_estimated_gpu_bytes: int = 0
@@ -98,6 +100,10 @@ class MontageRuntimeDiagnostics:
     tile_compute_stage_backed: int = 0
     tile_compute_direct: int = 0
     tile_compute_waiting_for_stage: int = 0
+    tile_compute_stage_backed_ms: float = 0.0
+    tile_compute_direct_ms: float = 0.0
+    tile_compute_stage_backed_max_ms: float = 0.0
+    tile_compute_direct_max_ms: float = 0.0
     lead_direct_tiles: int = 0
     stage_backed_tiles_pending: int = 0
     retained_stage_index: int | None = None
@@ -187,6 +193,8 @@ class MontageTimingDiagnostics:
     tile_layer_storage_evictions: int = 0
     tile_layer_texture_uploads: int = 0
     tile_layer_texture_upload_bytes: int = 0
+    tile_layer_texture_prepare_ms: float | None = None
+    tile_layer_texture_submit_ms: float | None = None
     tile_layer_vertex_uploads: int = 0
     tile_layer_level_updates: int = 0
     tile_layer_estimated_gpu_bytes: int = 0
