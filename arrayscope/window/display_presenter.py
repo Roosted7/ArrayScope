@@ -561,7 +561,7 @@ class DisplayPresentationMixin:
             session.acknowledge_uniform_level_presentation(levels)
             needs_level_work = False
         elif not capabilities.direct_montage_tile_payloads:
-            session.pending_level_update = False
+            session.set_level_update_pending(False)
             needs_level_work = False
 
         frame = getattr(self, "_committed_display_frame", None)

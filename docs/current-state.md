@@ -4,11 +4,11 @@
 v30 histogram/benchmark work is preserved in commit `103ab67`; review fixes are separate commits on
 top.
 
-ArrayScope has a strong semantic/evaluation foundation and a high-risk rendering control plane. The
-project is not on the wrong overall path, but recent optimization work crossed enough queues, timers,
-backend contracts, and presentation identities that local changes can now violate distant behavior.
-The immediate priority is to stabilize and extract those state machines before adding more rendering
-features.
+ArrayScope has a strong semantic/evaluation foundation and a recently extracted rendering control
+plane. The project is not on the wrong overall path; the immediate v30 risk was that recent
+optimization work crossed too many queues, timers, backend contracts, and presentation identities.
+N6 moved presentation-generation, tile-admission, level-convergence, and stage-fan-in state machines
+into Qt-free models so local rendering fixes are easier to reason about.
 
 ## Maturity map
 
@@ -20,7 +20,7 @@ features.
 | Region planning, stage cache, cost/memory estimates | Substantial | Strong Qt-free coverage; workload heuristics need field evidence. |
 | Profiles and ROI inspection | Substantial | Shared semantics exist; pointer/drag lifecycle is not fully backend-neutral. |
 | Histogram and window/level | Substantial, under stabilization | Semantic auto bounds and latest-only refinement exist; PyQtGraph binding remains brittle. |
-| Progressive montage | Advanced but over-concentrated | Correct lifecycle concepts exist; session/orchestrator ownership is too broad. |
+| Progressive montage | Advanced, stabilizing | Core control-plane state machines are extracted; renderer/session orchestration is still large. |
 | PyQtGraph backend | Production fallback | Correctly requires progressive CPU/item convergence for some level changes; large item counts remain costly. |
 | VisPy backend | Experimental | Persistent textures/shader levels are promising; hybrid widget inheritance and real-hardware evidence remain gaps. |
 | LOD | Selection only; production native-only | Desired factor is computed, applied factor is intentionally 1 until async compatible residency exists. |
@@ -73,13 +73,13 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
 
 ## Material risks
 
-### 1. The control plane is too concentrated
+### 1. Renderer/session orchestration remains large
 
-`window/montage_renderer.py` is about 3,070 lines and `window/montage_session.py` about 1,155 lines.
-The session owns compute/stage queues, payload admission, visibility, residency hints, level
-statistics, level generations, acknowledgement, and LOD intent. The renderer coordinates those plus
-Qt timers, committed frames, overlays, side panels, and diagnostics. This is the main reason fixes can
-break unrelated transitions.
+`window/montage_renderer.py` and `window/montage_session.py` are still substantial orchestration
+modules. N6 removed ownership of level generation, convergence strategy, admission caps, and stage
+fan-in from the session, but the renderer still coordinates Qt timers, committed frames, overlays,
+side panels, diagnostics, and backend commits. Future X1/X2 work should reuse the extracted models
+rather than growing another scheduler.
 
 ### 2. Semantic parity is being confused with mechanical uniformity
 
@@ -101,11 +101,12 @@ The selector runs, but application is forced to factor one. The old implementati
 in a GUI commit path and mixed incompatible tile dimensions with fixed atlas assumptions. Re-enabling
 it would restore stalls and transition churn. ADR 0041 defines the required split.
 
-### 5. Timer interactions still imply ordering
+### 5. Timer interactions still need audit discipline
 
 Debounce, commit, warm-residency, prefetch, histogram, stage-wait, and overlay timers are useful
-rescheduling tools, but several flows still rely on when they happen to fire. Every callback needs an
-explicit target/revision and bounded work contract; timers must not own semantic order.
+rescheduling tools. Montage commit/result fan-in/stage-wait/priority-retarget callbacks now carry
+explicit session/revision work tokens; future timer paths must keep that pattern and avoid owning
+semantic order.
 
 ### 6. Hardware evidence remains incomplete
 
@@ -114,11 +115,10 @@ texture limits, Wayland behavior, high-DPI pointer mapping, frame pacing, or int
 
 ## Current direction
 
-Do not discard the operation/evaluation core, display models, resource policy, or backend mechanics.
-Do discard the unsafe synchronous LOD route and stop adding cross-cutting behavior to the session and
-renderer. The next architecture step is incremental extraction of presentation-generation,
-admission, and stage-fan-in state machines with conformance tests, followed by unified frame planning
-and backend composition.
+Do not discard the operation/evaluation core, display models, resource policy, extracted
+control-plane models, or backend mechanics. Do discard the unsafe synchronous LOD route and stop adding
+cross-cutting behavior to the session and renderer. The next architecture step is making native-only
+LOD policy explicit and tested, followed by unified frame planning and backend composition.
 
 The ordered acceptance gates are in the [roadmap](roadmap.md). Full evidence and recommendations are
 in [the v30 rendering-consistency audit](reviews/v30-rendering-consistency-audit.md).

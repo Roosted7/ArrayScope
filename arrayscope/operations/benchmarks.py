@@ -191,7 +191,7 @@ def benchmark_live_profile_offscreen_unloaded_tile(shape=(16, 128, 128), dtype=n
 
 
 def benchmark_montage_priority_queue_retarget(shape=(8, 8, 1024), dtype=np.float32) -> BenchmarkResult:
-    from arrayscope.window.montage_priority import MontageTilePriorityQueue, TilePriorityContext
+    from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext
 
     state = ViewState.from_shape(shape).with_montage_axis(2, indices=tuple(range(shape[2])), columns=32, text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(shape[2])), tile_shape=shape[:2], columns=32)

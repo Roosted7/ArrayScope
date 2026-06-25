@@ -62,6 +62,12 @@ compatible physical representation, not levels/LUT. Level/window/LUT changes are
 updates, preferably shader/uniform updates where the backend supports them, and do not imply new
 source pixels.
 
+Presentation-generation and admission state are Qt-free. `PresentationGenerationTracker` owns the
+latest level target, revision, active coverage, pending work, and acknowledgement state.
+`TileAdmissionQueue` owns priority/aging/item/byte/deadline admission without knowing array semantics.
+`LevelConvergenceStrategy` keeps PyQtGraph progressive tile redraws and VisPy uniform updates behind
+one semantic convergence contract.
+
 A montage is one reason to have semantic regions, but not the only one. The target architecture also permits internal tiling of one huge plane without inventing a montage axis.
 
 ### Multi-resolution
@@ -117,6 +123,8 @@ Widget close now stops warm-tile work, cancels queued histogram refresh, and clo
 
 - Keep the last valid frame until a replacement is usable.
 - Reject stale commits by revision/key.
+- Timer callbacks carry explicit session/revision work tokens; timers reschedule bounded work but do
+  not establish semantic order.
 - Do not clear because an identity is merely unknown.
 - Apply backpressure before visible admission; once admitted, visible payloads commit coherently or
   the previous placeholder/retained frame remains in force.

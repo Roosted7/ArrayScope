@@ -225,7 +225,11 @@ class ArrayScopeWindow(
         stage_ready = False
         backlog = 0
         if session is not None:
-            stage_ready = bool(getattr(session, "stage_values", None) or getattr(session, "active_stage_requests", None) or getattr(session, "attached_stage_requests", None))
+            stage_ready = bool(
+                session.stage_fan_in.values
+                or session.stage_fan_in.active_requests
+                or session.stage_fan_in.attached_requests
+            )
             backlog = len(getattr(session, "pending_completed_tiles", ()) or ())
         return SchedulerBusyState(
             visible_busy=getattr(getattr(self, "visible_evaluation_controller", None), "is_busy", lambda: False)(),

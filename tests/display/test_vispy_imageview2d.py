@@ -1832,6 +1832,30 @@ def test_vispy_direct_tiled_histogram_only_commit_refreshes_histogram(qt_app, mo
         view.close()
 
 
+def test_vispy_normal_presentation_refreshes_histogram_curve(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    try:
+        data = np.arange(100, dtype=np.float32).reshape(10, 10)
+
+        view.setImagePresentation(
+            data,
+            histogramData=data,
+            histogramPlotData=None,
+            levels=(0.0, 99.0),
+            histogramRange=(0.0, 99.0),
+        )
+        qt_app.processEvents()
+
+        x, y = view.histogram.item.plot.getData()
+        assert x is not None and len(x) > 0
+        assert y is not None and len(y) > 0
+        assert getattr(view.histogramImageItem, "image", None) is not None
+    finally:
+        view.close()
+
+
 def test_vispy_direct_tiled_level_change_skips_structural_refresh(qt_app, monkeypatch):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
     from arrayscope.display.model.frame import DisplayTilePayload

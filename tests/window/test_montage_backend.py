@@ -441,6 +441,93 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app):
     assert win.tile_schedules == 1
 
 
+def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.operations.evaluator import _document_key
+    from arrayscope.operations.pipeline import ArrayDocument
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    class Window(QtCore.QObject, MontageRenderMixin):
+        def __init__(self, document, state, viewport_plan):
+            super().__init__()
+            self.document = document
+            self.view_state = state
+            self._viewport_plan = viewport_plan
+            self.tile_schedules = 0
+            self.commits = 0
+            self.img_view = SimpleNamespace(
+                rendering_capabilities=ImageViewBackendCapabilities(
+                    name="pyqtgraph",
+                    direct_montage_tile_payloads=True,
+                    persistent_tile_residency=False,
+                    shader_windowing=False,
+                ),
+                montageDisplayMode=lambda: "tile_layer",
+            )
+
+        def _montage_viewport_plan(self, view_state):
+            return self._viewport_plan
+
+        def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
+            return None
+
+        def _schedule_montage_tiles(self, session):
+            self.tile_schedules += 1
+
+        def _schedule_montage_canvas_commit(self, session, *, force=False):
+            self.commits += 1
+
+    document = ArrayDocument(np.zeros((2, 2, 4), dtype=np.float32))
+    state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=4, indices=tuple(range(4)), text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(2, 2), columns=4)
+    viewport_plan = MontageViewportPlan(
+        axis=2,
+        all_indices=tuple(range(4)),
+        viewport_shape=(4, 16),
+        tile_shape=(2, 2),
+        plan=plan,
+        view_range=((-1.0, 16.0), (-1.0, 4.0)),
+        shader_display=False,
+        persistent_tile_residency=False,
+    )
+    session = MontageRenderSession(
+        session_id=13,
+        key=montage_session_key(_document_key(document), state, viewport_plan, None),
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=tuple(range(4)),
+        plan=plan,
+        view_state=state,
+        document=document,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(4, 16),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={int(tile.montage_index): SimpleNamespace(tile=tile) for tile in plan.tiles},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    session.level_generation.target_levels = (2.0, 4.0)
+    session.set_level_update_pending(True)
+    win = Window(document, state, viewport_plan)
+    win._montage_session = session
+    win._viewport_interaction_active = False
+
+    assert win._try_update_montage_viewport_only() is True
+
+    assert win._montage_session is session
+    assert session.level_generation.target_levels == (2.0, 4.0)
+
+
 def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
@@ -542,10 +629,30 @@ def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
 
 
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
+    from arrayscope.window.montage_viewport import montage_viewport_retarget_policy
+    from arrayscope.window.montage_renderer import _persistent_direct_tile_layer_backend
+
     capabilities = ImageViewBackendCapabilities(
         name="vispy",
         direct_montage_tile_payloads=True,
         persistent_tile_residency=True,
+    )
+    persistent_nonvispy = ImageViewBackendCapabilities(
+        name="future-backend",
+        direct_montage_tile_payloads=True,
+        persistent_tile_residency=True,
+        shader_windowing=True,
+    )
+    direct_nonpersistent = ImageViewBackendCapabilities(
+        name="pyqtgraph",
+        direct_montage_tile_payloads=True,
+        persistent_tile_residency=False,
+    )
+    persistent_without_shader = ImageViewBackendCapabilities(
+        name="resident-cpu-backend",
+        direct_montage_tile_payloads=True,
+        persistent_tile_residency=True,
+        shader_windowing=False,
     )
     window = SimpleNamespace(
         img_view=SimpleNamespace(
@@ -562,6 +669,24 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
 
     assert _montage_viewport_update_delay_ms(window) == 90
     assert _montage_viewport_update_delay_ms(fallback) == 120
+    assert montage_viewport_retarget_policy(capabilities, "vispy_tile_layer").coverage_margin_tiles == 1
+    assert (
+        _persistent_direct_tile_layer_backend(
+            SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=persistent_nonvispy)),
+            SimpleNamespace(),
+        )
+        is True
+    )
+    assert (
+        _persistent_direct_tile_layer_backend(
+            SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
+            SimpleNamespace(),
+        )
+        is False
+    )
+    assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
+    assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").coverage_margin_tiles == 0
+    assert montage_viewport_retarget_policy(direct_nonpersistent, "canvas").enabled is False
 
 
 def test_recent_payload_cache_is_keyed_by_semantic_source_identity():
@@ -708,6 +833,7 @@ def test_forced_tile_layer_wins():
 
 def test_stage_wait_release_falls_back_to_direct_tile_evaluation():
     pytest.importorskip("pyqtgraph")
+    from arrayscope.operations.stage_fanin import StageFanInState
     from arrayscope.window.montage_renderer import MontageRenderMixin
 
     class _Window(MontageRenderMixin):
@@ -715,10 +841,12 @@ def test_stage_wait_release_falls_back_to_direct_tile_evaluation():
 
     class _Session:
         def __init__(self):
-            self.active_stage_requests = {"stage-key"}
-            self.attached_stage_requests = {"stage-key"}
-            self.stage_waiting_tiles = {"stage-key": [SimpleNamespace(montage_index=3)]}
-            self.tile_stage_keys = {3: "stage-key"}
+            self.stage_fan_in = StageFanInState(
+                active_requests={"stage-key"},
+                attached_requests={"stage-key"},
+                waiting_tiles={"stage-key": [SimpleNamespace(montage_index=3)]},
+                tile_stage_keys={3: "stage-key"},
+            )
             self.rendered_tiles = {}
             self.skipped_tiles = set()
             self.pending_tiles = []
@@ -731,16 +859,154 @@ def test_stage_wait_release_falls_back_to_direct_tile_evaluation():
 
     _Window()._release_stage_waiting_tiles_to_direct(session, "stage-key")
 
-    assert session.active_stage_requests == set()
-    assert session.attached_stage_requests == set()
-    assert session.stage_waiting_tiles == {}
-    assert session.tile_stage_keys == {}
+    assert session.stage_fan_in.active_requests == set()
+    assert session.stage_fan_in.attached_requests == set()
+    assert session.stage_fan_in.waiting_tiles == {}
+    assert session.stage_fan_in.tile_stage_keys == {}
     assert [tile.montage_index for tile in session.pending_tiles] == [3]
     assert session.loading_tiles == {3}
 
 
+def test_stage_activation_uses_bounded_batches_without_losing_waiting_tiles():
+    pytest.importorskip("pyqtgraph")
+    from arrayscope.core.gui_callback_budget import GuiCallbackBudget
+    from arrayscope.operations.stage_fanin import StageFanInState
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class _Window(MontageRenderMixin):
+        pass
+
+    class _Session:
+        def __init__(self):
+            self.stage_fan_in = StageFanInState(
+                waiting_tiles={"stage-key": [SimpleNamespace(montage_index=index) for index in range(5)]},
+                values={"stage-key": "stage-value"},
+            )
+            self.rendered_tiles = {}
+            self.skipped_tiles = set()
+            self.pending_tiles = []
+            self.loading_tiles = set()
+
+        def mark_loading(self, tile):
+            self.loading_tiles.add(int(tile.montage_index))
+
+    session = _Session()
+    budget = GuiCallbackBudget("montage_stage_wait", item_cap=3)
+
+    _Window()._activate_montage_stage_value(session, "stage-key", "stage-value", budget=budget)
+
+    assert [tile.montage_index for tile in session.pending_tiles] == [0, 1, 2]
+    assert [tile.montage_index for tile in session.stage_fan_in.waiting_tiles["stage-key"]] == [3, 4]
+    assert budget.processed_items == 3
+
+
+def test_ready_display_commit_refreshes_stale_commit_token_at_source(qt_app):
+    pytest.importorskip("pyqtgraph")
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.window.montage_renderer import MontageRenderMixin, _montage_work_token
+
+    class _Window(QtCore.QObject, MontageRenderMixin):
+        def __init__(self):
+            super().__init__()
+            self.img_view = SimpleNamespace(rendering_backend_name="pyqtgraph")
+
+        def _is_current_montage_session(self, session_id, key):
+            return True
+
+        def _flush_montage_canvas_commit(self):
+            return None
+
+    session = SimpleNamespace(
+        session_id=1,
+        key="session",
+        render_generation=2,
+        payload_revision=3,
+        level_revision=4,
+        viewport_revision=5,
+        dirty_tiles=[0],
+        dirty_rects=[],
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_removals=set(),
+        display_committed=False,
+        final_commit_pending=False,
+        flush_pending=False,
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+    )
+    win = _Window()
+    win._montage_session = session
+    win._montage_commit_token = ("commit", "stale")
+
+    win._schedule_montage_ready_display_commit(session)
+
+    assert win._montage_commit_token == _montage_work_token(session, "commit")
+    assert session.final_commit_pending is True
+    assert session.flush_pending is True
+
+
+def test_montage_commit_token_ignores_viewport_only_revision_changes():
+    from arrayscope.window.montage_renderer import _montage_work_token
+
+    session = SimpleNamespace(
+        session_id=1,
+        key="session",
+        render_generation=2,
+        payload_revision=3,
+        level_revision=4,
+        viewport_revision=5,
+    )
+    commit_token = _montage_work_token(session, "commit")
+    priority_token = _montage_work_token(session, "priority_retarget")
+
+    session.viewport_revision += 1
+
+    assert _montage_work_token(session, "commit") == commit_token
+    assert _montage_work_token(session, "priority_retarget") != priority_token
+
+
+def test_native_tiled_payloads_publish_semantic_histogram_for_partial_commit():
+    from arrayscope.core.window_levels import LevelSourceRank
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.montage_levels import MontageLevelStats
+    from arrayscope.window.montage_renderer import (
+        _should_publish_montage_histogram_plot,
+        _tiled_payloads_require_semantic_histogram_plot,
+    )
+
+    payloads = {
+        0: DisplayTilePayload(
+            tile_number=0,
+            source_index=0,
+            image=np.zeros((2, 2), dtype=np.float32),
+            histogram_data=None,
+            source_id=("native", 0),
+        )
+    }
+    stats = MontageLevelStats(
+        bounds=(0.0, 1.0),
+        source_indices=frozenset({0}),
+        expected_indices=frozenset({0, 1}),
+        rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        sample=np.asarray([0.0, 1.0], dtype=np.float32),
+    )
+
+    assert _tiled_payloads_require_semantic_histogram_plot(payloads) is True
+    assert (
+        _should_publish_montage_histogram_plot(
+            False,
+            False,
+            stats,
+            requires_semantic_plot=_tiled_payloads_require_semantic_histogram_plot(payloads),
+        )
+        is True
+    )
+    assert _should_publish_montage_histogram_plot(False, False, stats) is False
+
+
 def test_stage_wait_in_flight_is_not_actionable_timer_work():
     pytest.importorskip("pyqtgraph")
+    from arrayscope.operations.stage_fanin import StageFanInState
     from arrayscope.window.montage_renderer import MontageRenderMixin
 
     class _Cache:
@@ -758,8 +1024,7 @@ def test_stage_wait_in_flight_is_not_actionable_timer_work():
         operation_evaluator = _Evaluator()
 
     session = SimpleNamespace(
-        stage_values={},
-        stage_waiting_tiles={"stage-key": [SimpleNamespace(montage_index=3)]},
+        stage_fan_in=StageFanInState(waiting_tiles={"stage-key": [SimpleNamespace(montage_index=3)]}),
     )
 
     assert not _Window()._stage_wait_has_actionable_work(session, release_missing=True)
@@ -767,6 +1032,7 @@ def test_stage_wait_in_flight_is_not_actionable_timer_work():
 
 def test_stage_wait_completed_stage_is_actionable_timer_work():
     pytest.importorskip("pyqtgraph")
+    from arrayscope.operations.stage_fanin import StageFanInState
     from arrayscope.window.montage_renderer import MontageRenderMixin
 
     class _Cache:
@@ -784,8 +1050,7 @@ def test_stage_wait_completed_stage_is_actionable_timer_work():
         operation_evaluator = _Evaluator()
 
     session = SimpleNamespace(
-        stage_values={},
-        stage_waiting_tiles={"stage-key": [SimpleNamespace(montage_index=3)]},
+        stage_fan_in=StageFanInState(waiting_tiles={"stage-key": [SimpleNamespace(montage_index=3)]}),
     )
 
     assert _Window()._stage_wait_has_actionable_work(session, release_missing=True)

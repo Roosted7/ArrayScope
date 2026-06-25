@@ -1,6 +1,6 @@
 # ADR 0040: Backend-aware presentation convergence
 
-- **Status:** Accepted; partly implemented
+- **Status:** Implemented for the montage presentation path
 - **Date:** 2026-06-24
 - **Supersedes:** the backend-neutral interpretation of level-only commits in ADR 0039
 - **Related:** ADR 0031, ADR 0032, ADR 0033, ADR 0037, ADR 0038, ADR 0039
@@ -58,8 +58,8 @@ The target is authoritative independently of user-lock persistence. A new comman
 revision and supersedes every older automatic or interactive target. It does not recreate the render
 session or invalidate unchanged source payloads.
 
-The current implementation stores these concepts in MontageRenderSession; they should move into a
-focused PresentationGenerationTracker during the control-plane extraction.
+The implementation stores these concepts in `PresentationGenerationTracker`, with
+`MontageRenderSession` retaining only session orchestration and committed presentation ownership.
 
 ### PyQtGraph strategy: progressive CPU/item convergence
 
@@ -114,10 +114,10 @@ substitutes for one another.
 Detailed histogram plotting is a separate refinement lane. It may lag behind a valid semantic level
 source and must not gate first pixels.
 
-user_levels_override records window-mode/persistence intent. desired_level_values (or its future
-LevelPresentationTarget) records the latest physical presentation command. Automatic, restored, and
-explicit-user sources retain their own ranks. A newer concrete command clears obsolete force_auto
-work attached to the session.
+`user_levels_override` records window-mode/persistence intent.
+`PresentationGenerationTracker.target_levels` records the latest physical presentation command.
+Automatic, restored, and explicit-user sources retain their own ranks. A newer concrete command
+clears obsolete `force_auto` work attached to the session.
 
 ### Benchmark completion
 
@@ -138,7 +138,7 @@ Positive:
 Costs:
 
 - transient mixed levels are possible on PyQtGraph and must be exposed as in-progress, not hidden;
-- the session currently carries more generation bookkeeping until the tracker is extracted;
+- additional extracted model surface exists so generation/admission/fan-in can be tested without Qt;
 - backend conformance tests need both target-state assertions and different physical-work assertions;
 - final visual proof still requires real Qt/OpenGL/platform runs.
 
@@ -157,7 +157,7 @@ Costs:
 
 ## Migration and enforcement
 
-The v30 review implements the immediate corrections:
+The v30 review implemented the immediate corrections:
 
 - explicit `committed_upserts` acknowledgement;
 - latest-target revision/value tracking across partial commits;
@@ -167,5 +167,7 @@ The v30 review implements the immediate corrections:
 - regressions for deferred visible upserts, one-tile batches, rapid supersession, and stale automatic
   work.
 
-Follow-up extraction must preserve these tests while moving generation bookkeeping out of
-MontageRenderSession.
+The N6 control-plane extraction then moved generation bookkeeping into
+`PresentationGenerationTracker`, admission policy into `TileAdmissionQueue`, convergence behavior
+behind `LevelConvergenceStrategy`, and stage batching into `StageFanInState`. Legacy session aliases
+for these models were removed so future callers use the canonical owners directly.

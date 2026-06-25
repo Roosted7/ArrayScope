@@ -27,6 +27,15 @@ from arrayscope.display.model.montage_levels import (
     TileLevelStats,
     montage_level_key,
 )
+from arrayscope.display.model.presentation_generation import (
+    LevelPresentationTarget,
+    PresentationGenerationSnapshot,
+    PresentationGenerationTracker,
+)
+from arrayscope.display.model.tile_priority import (
+    MontageTilePriorityQueue,
+    TilePriorityContext,
+)
 
 __all__ = [
     "CanvasValueSource",
@@ -41,12 +50,17 @@ __all__ = [
     "DisplayTiledPresentation",
     "FrameValueSource",
     "MontageLevelStats",
+    "MontageTilePriorityQueue",
     "MontageLevelTracker",
+    "LevelPresentationTarget",
     "PresentationDecision",
+    "PresentationGenerationSnapshot",
+    "PresentationGenerationTracker",
     "PresentationInput",
     "RenderRequestContext",
     "TilePresentationDelta",
     "TilePresentationState",
+    "TilePriorityContext",
     "TileLevelStats",
     "TiledValueSource",
     "montage_level_key",

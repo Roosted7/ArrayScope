@@ -20,7 +20,14 @@ from arrayscope.display.montage import (
 )
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta, TilePresentationState
-from arrayscope.window.montage_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
+from arrayscope.display.model.level_convergence import ProgressiveTileLevelConvergence, UniformLevelConvergence
+from arrayscope.display.model.presentation_generation import (
+    PresentationGenerationSnapshot as LevelPresentationSnapshot,
+    PresentationGenerationTracker,
+)
+from arrayscope.display.model.tile_admission import TileAdmissionQueue
+from arrayscope.operations.stage_fanin import StageFanInState
+from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
 
 
 LOD_POLICY_NATIVE_ONLY = "native-only"
@@ -28,17 +35,6 @@ LOD_REASON_NATIVE_SCALE = "native-resolution texture is appropriate at the curre
 LOD_REASON_ASYNC_RESIDENCY_REQUIRED = (
     "desired LOD is deferred until asynchronous multi-resolution residency can retain adjacent levels"
 )
-
-
-@dataclass(frozen=True)
-class LevelPresentationSnapshot:
-    revision: int
-    target_levels: tuple[float, float] | None
-    stale_count: int
-    pending_count: int
-    settled: bool
-    active_tile_count: int
-    active_presented_tile_count: int
 
 
 def _shader_mapping_key(mapping):
@@ -61,37 +57,6 @@ def _viewport_tiles(
         ((rect[0], rect[2]), (rect[1], rect[3])),
         margin_tiles=max(0, int(margin_tiles)),
     )
-
-
-def _cap_tile_upserts(
-    upserts: dict[int, DisplayTilePayload],
-    *,
-    active_tiles: tuple[int, ...],
-    max_upserts: int | None,
-    max_upsert_bytes: int | None,
-) -> dict[int, DisplayTilePayload]:
-    if not upserts:
-        return {}
-    item_cap = None if max_upserts is None else max(0, int(max_upserts))
-    byte_cap = None if max_upsert_bytes is None else max(0, int(max_upsert_bytes))
-    if item_cap is None and byte_cap is None:
-        return upserts
-    if item_cap == 0 or byte_cap == 0:
-        return {}
-
-    del active_tiles
-    ordered = tuple((int(tile), payload) for tile, payload in upserts.items())
-    capped: dict[int, DisplayTilePayload] = {}
-    used_bytes = 0
-    for tile, payload in ordered:
-        if item_cap is not None and len(capped) >= item_cap:
-            break
-        payload_bytes = int(getattr(payload, "nbytes", 0) or 0)
-        if byte_cap is not None and capped and used_bytes + payload_bytes > byte_cap:
-            break
-        capped[int(tile)] = payload
-        used_bytes += max(0, payload_bytes)
-    return capped
 
 
 def _payload_residency_key(payload: DisplayTilePayload) -> tuple[object, object, object, object]:
@@ -147,14 +112,7 @@ class MontageRenderSession:
     pending_tiles: MontageTilePriorityQueue | deque[MontageTile] | list[MontageTile]
     active_tile_requests: set[int] = field(default_factory=set)
     presented_tiles: set[int] = field(default_factory=set)
-    tile_stage_keys: dict[int, object] = field(default_factory=dict)
-    tile_stage_plans: dict[int, object] = field(default_factory=dict)
-    tile_stage_candidates: dict[int, object] = field(default_factory=dict)
-    stage_waiting_tiles: dict[object, list[MontageTile]] = field(default_factory=dict)
-    active_stage_requests: set[object] = field(default_factory=set)
-    attached_stage_requests: set[object] = field(default_factory=set)
-    stage_values: dict[object, object] = field(default_factory=dict)
-    lead_stage_warmups: dict[int, object] = field(default_factory=dict)
+    stage_fan_in: StageFanInState = field(default_factory=StageFanInState)
     canvas: MontageViewportCanvas | None = None
     canvas_data: np.ndarray | None = None
     canvas_histogram_data: np.ndarray | None = None
@@ -193,19 +151,13 @@ class MontageRenderSession:
     dirty_payloads: OrderedDict[int, None] = field(default_factory=OrderedDict)
     pending_payload_upserts: OrderedDict[int, None] = field(default_factory=OrderedDict)
     pending_removals: set[int] = field(default_factory=set)
-    pending_level_update: bool = False
-    tile_level_revisions: dict[int, int] = field(default_factory=dict)
-    tile_level_values: dict[int, tuple[float, float]] = field(default_factory=dict)
-    desired_level_values: tuple[float, float] | None = None
     visible_tile_numbers: frozenset[int] = field(default_factory=frozenset)
-    level_presented_active_tiles: frozenset[int] = field(default_factory=frozenset)
-    active_level_value_counts: dict[tuple[float, float], int] = field(default_factory=dict)
-    level_stale_presentations: int = 0
+    level_generation: PresentationGenerationTracker = field(default_factory=PresentationGenerationTracker)
+    _level_update_pending: bool = False
     tile_presentation_state: TilePresentationState = field(default_factory=TilePresentationState)
     structure_revision: int = 0
     payload_revision: int = 0
     visibility_revision: int = 0
-    level_revision: int = 0
     histogram_revision: int = 0
     viewport_revision: int = 0
     tile_state_revision: int = 0
@@ -224,6 +176,14 @@ class MontageRenderSession:
     _tile_states_cached_revision: int = -1
     _tile_states_cached_tuple: tuple[MontageTileState, ...] = ()
 
+    @property
+    def level_revision(self) -> int:
+        return int(self.level_generation.revision)
+
+    @level_revision.setter
+    def level_revision(self, value: int) -> None:
+        self.level_generation.revision = int(value)
+
     def __post_init__(self) -> None:
         # These queues are drained throughout progressive rendering.  The
         # visible tile queue is indexed so viewport/hover retargeting updates
@@ -234,14 +194,6 @@ class MontageRenderSession:
             self.pending_tiles.set_context(context, max_items=len(self.pending_tiles))
         else:
             self.pending_tiles = MontageTilePriorityQueue(pending, context=context)
-        self.stage_waiting_tiles = {
-            key: (
-                value
-                if isinstance(value, MontageTilePriorityQueue)
-                else MontageTilePriorityQueue(tuple(value or ()), context=context)
-            )
-            for key, value in dict(self.stage_waiting_tiles or {}).items()
-        }
         self.pending_level_tiles = deque(self.pending_level_tiles)
         self.pending_level_sources = {
             int(source) for source in (self.pending_level_sources or ())
@@ -323,30 +275,21 @@ class MontageRenderSession:
         return additions, bool(presentation_changed)
 
     def update_level_presentation_scope(self) -> None:
+        if not self.display_tile_payloads and not self.presented_tiles:
+            return
         active = frozenset(
             int(tile.montage_index)
             for tile in tuple(self.visible_tiles)
             if int(tile.montage_index) in self.display_tile_payloads
             and int(tile.montage_index) in self.presented_tiles
         )
-        self.level_presented_active_tiles = active
-        counts: dict[tuple[float, float], int] = {}
-        for tile in active:
-            value = self.tile_level_values.get(int(tile))
-            if value is not None:
-                counts[value] = int(counts.get(value, 0)) + 1
-                if bool(self.pending_level_update) and value == self.desired_level_values:
-                    self.tile_level_revisions[int(tile)] = int(self.level_revision)
-        self.active_level_value_counts = counts
-        if bool(self.pending_level_update):
-            matching = sum(
-                1
-                for tile in active
-                if self._tile_matches_current_level_target(int(tile), self.desired_level_values)
+        self.level_generation.set_active_tiles(active)
+        if self.level_generation.target_levels is not None:
+            snapshot = self.level_generation.snapshot(
+                pending_upserts=tuple(self.pending_payload_upserts),
+                active_tile_count=len(self.visible_tile_numbers),
             )
-            self.level_stale_presentations = max(0, len(active) - matching)
-        else:
-            self.level_stale_presentations = 0
+            self._level_update_pending = not bool(snapshot.settled)
 
     def begin_level_presentation_update(self, levels) -> bool:
         """Start or continue a progressive level generation.
@@ -361,55 +304,29 @@ class MontageRenderSession:
         tile is active so subsequently materialized tiles inherit it.
         """
 
-        target = (float(levels[0]), float(levels[1]))
-        same_target = self.desired_level_values == target
-        self.desired_level_values = target
-        if not same_target:
-            self.level_revision = int(self.level_revision) + 1
-
-        for tile in self.level_presented_active_tiles:
-            if self.tile_level_values.get(int(tile)) == target:
-                self.tile_level_revisions[int(tile)] = int(self.level_revision)
-        matching = sum(
-            1
-            for tile in self.level_presented_active_tiles
-            if self._tile_matches_current_level_target(int(tile), target)
+        needs_work = ProgressiveTileLevelConvergence().begin(
+            self.level_generation,
+            levels,
+            source=self.applied_level_source,
+            active_tiles=self.level_generation.active_tiles,
         )
-        self.level_stale_presentations = max(0, len(self.level_presented_active_tiles) - matching)
-        needs_work = self.level_stale_presentations > 0
-        self.pending_level_update = bool(needs_work)
+        self._level_update_pending = bool(needs_work)
         return bool(needs_work)
 
     def level_presentation_snapshot(self) -> LevelPresentationSnapshot:
         """Return the current semantic convergence state for the level target."""
 
         self.update_level_presentation_scope()
-        target = self.desired_level_values
-        active = frozenset(int(tile) for tile in self.level_presented_active_tiles)
-        stale_tiles = frozenset(
-            int(tile)
-            for tile in active
-            if not self._tile_matches_current_level_target(int(tile), target)
-        ) if target is not None else frozenset()
-        pending_tiles = set(stale_tiles)
-        if target is not None:
-            pending_tiles.update(
-                int(tile)
-                for tile in self.pending_payload_upserts
-                if int(tile) in active
-                and not self._tile_matches_current_level_target(int(tile), target)
-            )
-        stale_count = len(stale_tiles)
-        pending_count = len(pending_tiles) if bool(self.pending_level_update) or pending_tiles else 0
-        return LevelPresentationSnapshot(
-            revision=int(self.level_revision),
-            target_levels=None if target is None else (float(target[0]), float(target[1])),
-            stale_count=int(stale_count),
-            pending_count=int(pending_count),
-            settled=stale_count == 0 and pending_count == 0,
+        return self.level_generation.snapshot(
+            pending_upserts=tuple(self.pending_payload_upserts),
             active_tile_count=len(self.visible_tile_numbers),
-            active_presented_tile_count=len(active),
         )
+
+    def has_pending_level_update(self) -> bool:
+        return bool(self._level_update_pending and not self.level_presentation_snapshot().settled)
+
+    def set_level_update_pending(self, pending: bool) -> None:
+        self._level_update_pending = bool(pending)
 
     def acknowledge_uniform_level_presentation(self, levels) -> None:
         """Accept one shader-level update for every active tiled surface.
@@ -420,15 +337,13 @@ class MontageRenderSession:
         convergence diagnostics used by CPU-windowed backends.
         """
 
-        target = (float(levels[0]), float(levels[1]))
-        self.desired_level_values = target
-        active = frozenset(int(tile) for tile in self.level_presented_active_tiles)
-        for tile in active:
-            self.tile_level_values[int(tile)] = target
-            self.tile_level_revisions[int(tile)] = int(self.level_revision)
-        self.active_level_value_counts = {target: len(active)} if active else {}
-        self.level_stale_presentations = 0
-        self.pending_level_update = False
+        UniformLevelConvergence().begin(
+            self.level_generation,
+            levels,
+            source=self.applied_level_source,
+            active_tiles=self.level_generation.active_tiles,
+        )
+        self._level_update_pending = False
 
     def expand_viewport_coverage(
         self,
@@ -462,15 +377,7 @@ class MontageRenderSession:
         # their cached wrappers across progressive batches.
         self.tile_source_ids.pop(index, None)
         self.display_tile_payloads.pop(index, None)
-        self.level_presented_active_tiles = frozenset(active for active in self.level_presented_active_tiles if int(active) != index)
-        self.tile_level_revisions.pop(index, None)
-        previous_level_value = self.tile_level_values.pop(index, None)
-        if previous_level_value is not None:
-            previous_count = max(0, int(self.active_level_value_counts.get(previous_level_value, 0)) - 1)
-            if previous_count:
-                self.active_level_value_counts[previous_level_value] = previous_count
-            else:
-                self.active_level_value_counts.pop(previous_level_value, None)
+        self.level_generation.forget_tile(index)
         self.dirty_payloads[index] = None
         self.active_tile_requests.discard(index)
         self.skipped_tiles.discard(index)
@@ -485,20 +392,8 @@ class MontageRenderSession:
             if index not in self.rendered_tiles:
                 continue
             self.presented_tiles.add(index)
-            was_active = index in self.level_presented_active_tiles
             if index in self.visible_tile_numbers and index in self.display_tile_payloads:
-                self.level_presented_active_tiles = frozenset((*self.level_presented_active_tiles, index))
-                level_value = self.tile_level_values.get(index)
-                if not was_active and level_value is not None:
-                    self.active_level_value_counts[level_value] = int(self.active_level_value_counts.get(level_value, 0)) + 1
-                    if bool(self.pending_level_update) and level_value == self.desired_level_values:
-                        self.tile_level_revisions[index] = int(self.level_revision)
-                if (
-                    not was_active
-                    and bool(self.pending_level_update)
-                    and not self._tile_matches_current_level_target(index, self.desired_level_values)
-                ):
-                    self.level_stale_presentations += 1
+                self.level_generation.set_active_tiles((*self.level_generation.active_tiles, index))
             self.loading_tiles.discard(index)
             self.skipped_tiles.discard(index)
             self.dirty_payloads.pop(index, None)
@@ -719,17 +614,7 @@ class MontageRenderSession:
                 self.pending_removals.add(int(stale))
                 self.dirty_payloads.pop(int(stale), None)
                 self.pending_payload_upserts.pop(int(stale), None)
-                self.tile_level_revisions.pop(int(stale), None)
-                previous_level_value = self.tile_level_values.pop(int(stale), None)
-                if previous_level_value is not None:
-                    previous_count = max(0, int(self.active_level_value_counts.get(previous_level_value, 0)) - 1)
-                    if previous_count:
-                        self.active_level_value_counts[previous_level_value] = previous_count
-                    else:
-                        self.active_level_value_counts.pop(previous_level_value, None)
-                self.level_presented_active_tiles = frozenset(
-                    active for active in self.level_presented_active_tiles if int(active) != int(stale)
-                )
+                self.level_generation.forget_tile(int(stale))
         lod_factor = self._selected_lod_factor()
         current_loaded = set(self.rendered_tiles)
         planned = tuple(
@@ -739,13 +624,13 @@ class MontageRenderSession:
         )
         active = tuple(int(tile) for tile in planned if int(tile) in current_loaded)
         stale_level_tiles = ()
-        if bool(self.pending_level_update):
+        if self.has_pending_level_update():
             stale_level_tiles = tuple(
                 int(tile)
                 for tile in self._prioritized_tile_numbers(active)
                 if int(tile) in self.display_tile_payloads
                 and int(tile) in previous_payloads
-                and not self._tile_matches_current_level_target(int(tile), self.desired_level_values)
+                and not self._tile_matches_current_level_target(int(tile), self.level_generation.target_levels)
             )
         dirty_payload_tiles = tuple(
             dict.fromkeys(
@@ -810,12 +695,19 @@ class MontageRenderSession:
             for tile, payload in upserts.items()
             if int(tile) not in resident_retarget_tiles
         }
-        capped_cold_upserts = _cap_tile_upserts(
-            cold_upserts,
-            active_tiles=active,
-            max_upserts=max_upserts,
-            max_upsert_bytes=max_upsert_bytes,
+        admission = TileAdmissionQueue(self._tile_priority_context()).admit(
+            tuple(cold_upserts),
+            retained=(),
+            cost_fn=lambda tile: int(getattr(cold_upserts[int(tile)], "nbytes", 0) or 0),
+            max_items=max_upserts,
+            max_bytes=max_upsert_bytes,
+            deadline_ms=cold_deadline_ms,
         )
+        capped_cold_upserts = {
+            int(tile): cold_upserts[int(tile)]
+            for tile in admission.admitted
+            if int(tile) in cold_upserts
+        }
         upserts = {
             int(tile): payload
             for tile, payload in upserts.items()
@@ -895,7 +787,7 @@ class MontageRenderSession:
             )
         report = report if isinstance(report, TileCommitReport) else TileCommitReport()
         level_delta_stale = bool(
-            self.pending_level_update
+            self.has_pending_level_update()
             and dict(delta.upserts)
             and int(delta.level_revision) != int(self.level_revision)
         )
@@ -905,48 +797,21 @@ class MontageRenderSession:
         self.tile_presentation_state = acknowledged
         accepted_upserts = report.accepted_upserts(delta)
         committed_levels = None if levels is None else (float(levels[0]), float(levels[1]))
+        if committed_levels is not None:
+            ProgressiveTileLevelConvergence().acknowledge(
+                self.level_generation,
+                target_revision=int(delta.level_revision),
+                accepted_tiles=accepted_upserts,
+                levels=committed_levels,
+            )
         for tile in accepted_upserts:
             self.dirty_payloads.pop(int(tile), None)
-            previous_level_value = self.tile_level_values.get(int(tile))
-            previous_level_matches = self._tile_matches_current_level_target(int(tile), self.desired_level_values)
             self.pending_payload_upserts.pop(int(tile), None)
-            self.tile_level_revisions[int(tile)] = int(delta.level_revision)
-            if committed_levels is not None:
-                if int(tile) in self.level_presented_active_tiles and previous_level_value is not None:
-                    previous_count = max(0, int(self.active_level_value_counts.get(previous_level_value, 0)) - 1)
-                    if previous_count:
-                        self.active_level_value_counts[previous_level_value] = previous_count
-                    else:
-                        self.active_level_value_counts.pop(previous_level_value, None)
-                self.tile_level_values[int(tile)] = committed_levels
-                if int(tile) in self.level_presented_active_tiles:
-                    self.active_level_value_counts[committed_levels] = int(
-                        self.active_level_value_counts.get(committed_levels, 0)
-                    ) + 1
-            if (
-                bool(self.pending_level_update)
-                and int(tile) in self.level_presented_active_tiles
-                and int(delta.level_revision) == int(self.level_revision)
-                and not previous_level_matches
-                and self.tile_level_values.get(int(tile)) == self.desired_level_values
-                and self.tile_level_revisions.get(int(tile)) == int(self.level_revision)
-            ):
-                self.level_stale_presentations = max(0, int(self.level_stale_presentations) - 1)
         for tile in report.removed_tiles:
             self.pending_removals.discard(int(tile))
             self.dirty_payloads.pop(int(tile), None)
             self.pending_payload_upserts.pop(int(tile), None)
-            self.tile_level_revisions.pop(int(tile), None)
-            previous_level_value = self.tile_level_values.pop(int(tile), None)
-            if previous_level_value is not None:
-                previous_count = max(0, int(self.active_level_value_counts.get(previous_level_value, 0)) - 1)
-                if previous_count:
-                    self.active_level_value_counts[previous_level_value] = previous_count
-                else:
-                    self.active_level_value_counts.pop(previous_level_value, None)
-            self.level_presented_active_tiles = frozenset(
-                active for active in self.level_presented_active_tiles if int(active) != int(tile)
-            )
+            self.level_generation.forget_tile(int(tile))
             self.display_tile_payloads.pop(int(tile), None)
         return acknowledged
 
@@ -965,8 +830,7 @@ class MontageRenderSession:
             self.pending_removals.add(index)
             self.dirty_payloads.pop(index, None)
             self.display_tile_payloads.pop(index, None)
-            self.tile_level_revisions.pop(index, None)
-            self.level_presented_active_tiles = frozenset(active for active in self.level_presented_active_tiles if int(active) != index)
+            self.level_generation.forget_tile(index)
             self.tile_source_ids.pop(index, None)
             self.discard_pending_tile(index)
             self.mark_tile_state(tile, MontageTileState.SKIPPED)
@@ -1024,27 +888,27 @@ class MontageRenderSession:
             or self.loading_tiles
             or self.pending_completed_tiles
             or self.active_tile_requests
-            or self.active_stage_requests
-            or self.attached_stage_requests
-            or self.stage_waiting_tiles
+            or self.stage_fan_in.active_requests
+            or self.stage_fan_in.attached_requests
+            or self.stage_fan_in.waiting_tiles
             or self.final_commit_pending
             or self.flush_pending
             or self.dirty_payloads
             or self.pending_payload_upserts
             or self.pending_removals
-            or self.pending_level_update
+            or self.has_pending_level_update()
         )
 
     def has_stale_level_presentations(self) -> bool:
         snapshot = self.level_presentation_snapshot()
-        return bool(self.pending_level_update and int(snapshot.stale_count) > 0)
+        return bool(self.has_pending_level_update() and int(snapshot.stale_count) > 0)
 
     def _tile_matches_current_level_target(self, tile: int, target: tuple[float, float] | None) -> bool:
         if target is None:
             return True
         return (
-            self.tile_level_values.get(int(tile)) == target
-            and self.tile_level_revisions.get(int(tile)) == int(self.level_revision)
+            self.level_generation.tile_values.get(int(tile)) == target
+            and self.level_generation.tile_revisions.get(int(tile)) == int(self.level_revision)
         )
 
     def initialize_canvas(self, canvas: MontageViewportCanvas) -> None:
@@ -1139,10 +1003,10 @@ class MontageRenderSession:
         return tile_numbers(self.pending_tiles)
 
     def append_stage_waiting_tiles(self, key, tiles) -> int:
-        waiting = self.stage_waiting_tiles.get(key)
+        waiting = self.stage_fan_in.waiting_tiles.get(key)
         if not isinstance(waiting, MontageTilePriorityQueue):
             waiting = MontageTilePriorityQueue(tuple(waiting or ()), context=self._tile_priority_context())
-            self.stage_waiting_tiles[key] = waiting
+            self.stage_fan_in.waiting_tiles[key] = waiting
         before = len(waiting)
         waiting.extend(tuple(tiles or ()))
         return max(0, len(waiting) - before)
@@ -1180,7 +1044,7 @@ class MontageRenderSession:
             max_items=max(1, int(max_items)),
         )
         remaining = max(0, int(max_items) - int(self.priority_retargeted_tiles))
-        for waiting in tuple(self.stage_waiting_tiles.values()):
+        for waiting in tuple(self.stage_fan_in.waiting_tiles.values()):
             if remaining <= 0:
                 break
             if hasattr(waiting, "set_context"):

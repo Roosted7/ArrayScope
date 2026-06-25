@@ -180,6 +180,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
 def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monkeypatch):
     clear_arrayscope_settings()
     from types import SimpleNamespace
+    from time import monotonic
 
     from pyqtgraph.Qt import QtCore
 
@@ -209,7 +210,7 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         win._set_view_state(state)
         win.update_montage_view()
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=500)
-        initial_level_values = dict(win._montage_session.tile_level_values)
+        initial_level_values = dict(win._montage_session.level_generation.tile_values)
         initial_levels = next(iter(initial_level_values.values()))
 
         decision = SimpleNamespace(batch_limit=1, budget_ms=100.0, interval_ms=1000, byte_cap=0)
@@ -224,7 +225,7 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         assert timing.tile_layer_rgb_window_tiles == 1
         assert len(win._montage_session.pending_payload_upserts) == 0
         assert win._montage_session.has_stale_level_presentations() is True
-        assert win._montage_session.pending_level_update is True
+        assert win._montage_session.has_pending_level_update() is True
         snapshot = win._montage_session.level_presentation_snapshot()
         assert snapshot.pending_count > 0
         assert snapshot.settled is False
@@ -235,9 +236,9 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         win.img_view._on_histogram_levels_changed()
 
         assert tuple(float(value) for value in win.img_view.getLevels()) == (1.0, 3.5)
-        assert win._montage_session.desired_level_values == (1.0, 3.5)
+        assert win._montage_session.level_generation.target_levels == (1.0, 3.5)
         assert int(win._montage_session.level_revision) == previous_revision + 1
-        assert win._montage_session.pending_level_update is True
+        assert win._montage_session.has_pending_level_update() is True
 
         win._montage_session.last_commit_monotonic = 0.0
         win.img_view.setLevels(*initial_levels)
@@ -256,6 +257,7 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
 def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_replacement(qtbot, monkeypatch):
     clear_arrayscope_settings()
     from types import SimpleNamespace
+    from time import monotonic
 
     from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.display.montage import make_montage_plan
@@ -296,10 +298,19 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
         assert timing.tile_layer_image_replacements == 0
         assert timing.visible_bytes == 0
         assert win._montage_session.has_stale_level_presentations() is True
-        assert win._montage_session.pending_level_update is True
+        assert win._montage_session.has_pending_level_update() is True
         snapshot = win._montage_session.level_presentation_snapshot()
         assert snapshot.pending_count > 0
         assert snapshot.settled is False
+
+        win._montage_session.last_commit_monotonic = monotonic()
+        before_stale = snapshot.stale_count
+        win._schedule_montage_canvas_commit(win._montage_session, force=False)
+        win._montage_session.viewport_revision += 1
+        win._flush_montage_canvas_commit()
+
+        snapshot = win._montage_session.level_presentation_snapshot()
+        assert snapshot.stale_count < before_stale
     finally:
         win.close()
 

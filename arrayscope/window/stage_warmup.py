@@ -103,7 +103,7 @@ def schedule_stage_warmup(window, view_state) -> StageWarmupDecision:
             return
         _record(window, StageWarmupDecision("completed", key=key, candidate_bytes=decision.candidate_bytes, budget_bytes=budget, reason="stage warmup complete"))
         session = getattr(window, "_montage_session", None)
-        if session is not None and key in getattr(session, "stage_waiting_tiles", {}):
+        if session is not None and key in session.stage_fan_in.waiting_tiles:
             activate = getattr(window, "_activate_cached_waiting_stages", None)
             if callable(activate):
                 activate(session, release_missing=False)

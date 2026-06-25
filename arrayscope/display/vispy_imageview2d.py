@@ -27,6 +27,7 @@ from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
 from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.imageview2d import _tile_commit_report
+from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import CursorIntent, hit_test_display_overlays
 from arrayscope.display.overlay_hit_test import hit_test_roi, roi_handle_points
@@ -164,6 +165,7 @@ class VisPyImageView2D(ImageView2D):
 
         self.histogram = pg.HistogramLUTWidget()
         self.layout.addWidget(self.histogram)
+        self._histogram_adapter = PyQtGraphHistogramAdapter(self.histogram)
 
         self._vispy_canvas.events.mouse_move.connect(self._on_vispy_mouse_move)
         try:

@@ -1,4 +1,4 @@
-from arrayscope.window.montage_priority import MontageTilePriorityQueue, TilePriorityContext
+from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext
 
 
 def _plan(count=9, columns=3):

@@ -533,14 +533,15 @@ def _wait_for_montage_complete(
         time.sleep(0.005)
     snapshot = win.collect_runtime_diagnostics()
     session = getattr(win, "_montage_session", None)
+    fan_in = None if session is None else getattr(session, "stage_fan_in", None)
     raise TimeoutError(
         "timed out waiting for montage completion: "
         f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
         f"loading={snapshot.montage.loading_tiles} "
         f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
         f"completed={0 if session is None else len(getattr(session, 'pending_completed_tiles', ()) or ())} "
-        f"stage_waiting={0 if session is None else sum(len(tiles) for tiles in getattr(session, 'stage_waiting_tiles', {}).values())} "
-        f"lead_warmups={0 if session is None else len(getattr(session, 'lead_stage_warmups', {}) or {})} "
+        f"stage_waiting={0 if fan_in is None else sum(len(tiles) for tiles in fan_in.waiting_tiles.values())} "
+        f"lead_warmups={0 if fan_in is None else len(fan_in.lead_warmups)} "
         f"active_presented={final_visibility_state.get('active_presented_tile_count', 0)}/"
         f"{final_visibility_state.get('active_planned_tile_count', 0)} "
         f"overlays={_montage_overlay_count(win)} vispy_draws={_vispy_draw_count(win)} "
@@ -577,13 +578,13 @@ def _montage_level_presentation_state(win) -> dict[str, object]:
             "target_levels": None if snapshot.target_levels is None else list(snapshot.target_levels),
             "stale_tiles": int(snapshot.stale_count),
             "pending_tiles": int(snapshot.pending_count),
-            "active_level_value_count": len(dict(getattr(session, "active_level_value_counts", {}) or {})),
+            "active_level_value_count": len(session.level_generation.value_counts()),
             "active_tile_count": int(snapshot.active_tile_count),
             "active_presented_tile_count": int(snapshot.active_presented_tile_count),
         }
-    pending = bool(getattr(session, "pending_level_update", False))
-    stale = int(getattr(session, "level_stale_presentations", 0) or 0)
-    counts = dict(getattr(session, "active_level_value_counts", {}) or {})
+    pending = bool(session.has_pending_level_update())
+    stale = int(session.level_presentation_snapshot().stale_count)
+    counts = session.level_generation.value_counts()
     return {
         "settled": not pending and stale <= 0,
         "pending": pending,
@@ -677,8 +678,12 @@ def _phase_record(
         "tile_layer_estimated_gpu_bytes": int(timing.tile_layer_estimated_gpu_bytes),
         "tile_layer_page_count": int(timing.tile_layer_page_count),
         "tile_layer_active_pages": int(timing.tile_layer_active_pages),
-        "vispy_fast_drain_last_enabled": bool(getattr(win, "_vispy_tile_layer_fast_drain_last_enabled", False)),
-        "vispy_fast_drain_enabled_count": int(getattr(win, "_vispy_tile_layer_fast_drain_enabled_count", 0) or 0),
+        "persistent_tile_layer_fast_drain_last_enabled": bool(
+            getattr(win, "_persistent_tile_layer_fast_drain_last_enabled", False)
+        ),
+        "persistent_tile_layer_fast_drain_enabled_count": int(
+            getattr(win, "_persistent_tile_layer_fast_drain_enabled_count", 0) or 0
+        ),
         "montage_overlay_count": _montage_overlay_count(win),
         "vispy_draw_count": int(vispy.get("draw_count", 0)),
         "vispy_tile_presentation_request_count": int(vispy.get("tile_presentation_request_count", 0)),
@@ -762,9 +767,9 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
         or getattr(session, "loading_tiles", ())
         or getattr(session, "pending_completed_tiles", ())
         or getattr(session, "active_tile_requests", ())
-        or getattr(session, "active_stage_requests", ())
-        or getattr(session, "attached_stage_requests", ())
-        or getattr(session, "stage_waiting_tiles", ())
+        or session.stage_fan_in.active_requests
+        or session.stage_fan_in.attached_requests
+        or session.stage_fan_in.waiting_tiles
         or getattr(session, "final_commit_pending", False)
         or getattr(session, "flush_pending", False)
         or getattr(session, "dirty_payloads", ())

@@ -68,6 +68,8 @@ Exit gate:
 
 ### N6. Extract the rendering control-plane state machines
 
+**Status:** Done!
+
 **Goal:** make local rendering fixes local again.
 
 `MontageRenderSession` and `montage_renderer.py` currently combine materialization, stage waits,
@@ -85,6 +87,8 @@ Work:
 - Extract stage-wait/result fan-in batching from the session.
 - Replace timer-implied ordering with explicit target/revision guards and resubmission reasons.
 - Keep compatibility shims behavior-free and remove dead duplicate acknowledgement concepts.
+- Remove legacy aliases after each extraction so tests, diagnostics, and profilers use the canonical
+  owner directly instead of preserving both the old and new APIs.
 - Add state-machine/property tests before moving callers.
 
 Exit gate:
@@ -95,6 +99,19 @@ Exit gate:
 - no timer establishes semantic order without a target/revision guard;
 - PyQtGraph and VisPy run the same semantic generation suite through separate strategy fixtures;
 - representative callback work stays within configured limits or explicitly reschedules.
+
+Completion notes:
+
+- `PresentationGenerationTracker`, `TileAdmissionQueue`, `LevelConvergenceStrategy`, and
+  `StageFanInState` are Qt-free and covered by focused state-machine/property tests.
+- `MontageRenderSession` delegates level convergence, tile admission, and stage fan-in to those models
+  while retaining montage identity, materialized tile state, payload cache, and canvas patch state.
+- Legacy session aliases for extracted generation and fan-in state were removed; call sites now use
+  `level_generation` and `stage_fan_in` directly.
+- Montage timers carry explicit session/revision work tokens for commit, result fan-in, stage wait,
+  and priority-retarget callbacks.
+- PyQtGraph and VisPy retain backend-specific physical mechanics while sharing the semantic generation
+  assertions.
 
 ### N7. Make native-only LOD an explicit, tested production policy
 

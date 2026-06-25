@@ -67,7 +67,7 @@ meaning, and backend adapters own concrete textures/items/visuals only.
 ### Orchestration
 
 - `window.normal_renderer` and `window.montage_renderer` currently coordinate the two visible paths.
-- `window.montage_session`, payload cache, viewport planning, and tile provider separate parts of montage lifecycle from the main window.
+- `window.montage_session`, payload cache, viewport planning, tile provider, and extracted control-plane models separate parts of montage lifecycle from the main window.
 - `window.evaluation_controller`, render generation, coalescing, prefetch, and stage warmup coordinate work around Qt.
 - `core.memory_policy`, compute policy, latency feedback, telemetry, and resource governor decide limits/admission inputs.
 
@@ -121,6 +121,8 @@ apply compatible level changes through shader uniforms. Retained visibility is n
 the current target. A backend advances only the work it actually accepted, and completion means all
 currently active coverage is acknowledged at the latest revision. See
 [ADR 0040](decisions/0040-backend-aware-presentation-convergence.md).
+`PresentationGenerationTracker` owns target/revision/active-coverage state; `LevelConvergenceStrategy`
+adapts PyQtGraph progressive redraw and VisPy uniform acknowledgement to that shared contract.
 
 Persistence intent (for example an explicit user lock) is separate from the latest physical presentation
 target. A newer concrete target supersedes older automatic work without recreating the materialization
@@ -216,7 +218,7 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 - `VisPyImageView2D` still inherits the complete PyQtGraph `ImageView2D` and therefore keeps two scene/event systems in the same widget.
 - Normal and montage planning/scheduling remain separate.
 - Pointer capture and full drag lifecycle are only partly migrated to shared interaction state.
-- `MontageRenderSession` combines materialization, stage waits, admission, level convergence, acknowledgement, visibility/residency hints, and LOD intent.
+- `MontageRenderSession` is still large, but level convergence, tile admission, and stage fan-in now delegate to Qt-free control-plane models.
 - Large renderer/backend modules still combine orchestration and mechanics.
 - Histogram binding still reaches into private PyQtGraph state.
 - Several timers serve as implicit sequencing. They must become bounded scheduler resubmission/admission signals, not semantic order.

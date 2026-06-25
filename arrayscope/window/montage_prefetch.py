@@ -178,8 +178,8 @@ def _busy(window, session=None) -> bool:
         or getattr(session, "pending_completed_tiles", None)
         or getattr(session, "dirty_payloads", None)
         or getattr(session, "pending_removals", None)
-        or getattr(session, "active_stage_requests", None)
-        or getattr(session, "stage_waiting_tiles", None)
+        or session.stage_fan_in.active_requests
+        or session.stage_fan_in.waiting_tiles
     ):
         return True
     return bool(

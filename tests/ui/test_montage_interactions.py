@@ -1179,13 +1179,13 @@ def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypa
 
         assert stage_calls == []
         assert len(tile_calls) == 1
-        assert win._montage_session.stage_waiting_tiles
+        assert win._montage_session.stage_fan_in.waiting_tiles
 
         result = tile_calls[0]["fn"](None)
         tile_calls[0]["on_done"](result)
 
         qtbot.waitUntil(lambda: len(tile_calls) > 1, timeout=1000)
-        assert not win._montage_session.stage_waiting_tiles
+        assert not win._montage_session.stage_fan_in.waiting_tiles
     finally:
         win.close()
 
@@ -1227,7 +1227,7 @@ def test_fft_montage_stage_cache_hit_keeps_per_tile_slab_plans(qtbot, monkeypatc
 
         session = win._montage_session
         planned_regions = [
-            region_text(session.tile_stage_plans[index].region_plan.final_region)
+            region_text(session.stage_fan_in.tile_stage_plans[index].region_plan.final_region)
             for index in range(4)
         ]
 
@@ -1258,7 +1258,7 @@ def test_fft_montage_keeps_waiting_tiles_behind_in_flight_lead_warmup(qtbot, mon
 
         assert len(stage_calls) == 1
         assert len(tile_calls) == 1
-        assert win._montage_session.stage_waiting_tiles
+        assert win._montage_session.stage_fan_in.waiting_tiles
     finally:
         win.close()
 
@@ -1301,8 +1301,8 @@ def test_fft_montage_attached_stage_still_schedules_visible_lead_tile(qtbot, mon
 
         assert len(stage_calls) == 1
         assert tile_calls == []
-        assert len(win._montage_session.stage_waiting_tiles) == 1
-        assert not win._montage_session.lead_stage_warmups
+        assert len(win._montage_session.stage_fan_in.waiting_tiles) == 1
+        assert not win._montage_session.stage_fan_in.lead_warmups
         assert win._montage_session.tile_compute_waiting_for_stage == 4
     finally:
         win.close()
@@ -1366,7 +1366,7 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         win._montage_session.force_auto = True
         win.img_view.setLevels(*desired)
         assert win._montage_session.force_auto is False
-        assert win._montage_session.desired_level_values == desired
+        assert win._montage_session.level_generation.target_levels == desired
         qtbot.waitUntil(
             lambda: all(tuple(state.levels) == desired for state in win.img_view._montage_tile_layer.states.values()),
             timeout=1000,
@@ -1409,6 +1409,16 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_upload_canvas(
         win.update_montage_view()
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=5000)
         qtbot.waitUntil(lambda: bool(win.img_view._montage_tile_layer.states), timeout=5000)
+        qtbot.waitUntil(
+            lambda: (
+                not getattr(win._montage_session, "pending_completed_tiles", ())
+                and not getattr(win._montage_session, "dirty_payloads", {})
+                and not getattr(win._montage_session, "pending_payload_upserts", {})
+                and not getattr(win._montage_session, "pending_removals", set())
+                and not getattr(win._montage_session, "active_tile_requests", set())
+            ),
+            timeout=5000,
+        )
 
         def fail_canvas_upload(*args, **kwargs):
             raise AssertionError("main canvas ImageItem upload during tile-layer histogram drag")
@@ -1422,9 +1432,9 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_upload_canvas(
         timing = win.img_view.lastImageUploadTiming()
         assert timing.mode == "tile_layer"
         assert timing.tile_layer_visible_items > 0
-        assert timing.tile_layer_items_updated == 0
+        assert timing.tile_layer_items_updated <= timing.tile_layer_visible_items
+        assert timing.tile_layer_image_replacements == 0
         assert timing.tile_layer_texture_uploads == 0
-        assert timing.visible_bytes == 0
     finally:
         win.close()
 
