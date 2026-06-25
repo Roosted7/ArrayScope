@@ -74,6 +74,92 @@ def test_hidden_inspection_panel_updates_overlay_without_dock_work(qtbot, monkey
         win.close()
 
 
+def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates_dock(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.display.frame_planner import FramePlanner
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.arange(8 * 8, dtype=float).reshape(8, 8)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    calls = []
+    original = win._compute_roi_inspection_snapshot
+    monkeypatch.setattr(
+        win,
+        "_compute_roi_inspection_snapshot",
+        lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1],
+    )
+    try:
+        win._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4), max_raster_pixels=16)
+        win.render(reason="test-tiled-roi")
+        _process_events(qtbot, count=30)
+        assert getattr(win._committed_display_frame, "is_tiled", False)
+
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=10)
+        calls.clear()
+        win.img_view.createRoi("rectangle", rect=(1, 1, 3, 3))
+        _process_events(qtbot, count=20)
+
+        assert calls == []
+        assert getattr(win, "_inspection_stale", False)
+        assert win.inspection_dock.roi_model.rowCount() == 0
+        assert win.img_view._roi_info_panel is not None
+        assert "n=9" in win.img_view._roi_info_panel.text()
+        assert "mean=18" in win.img_view._roi_info_panel.text()
+
+        win._show_inspection_dock()
+        qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=3000)
+        _process_events(qtbot, count=10)
+
+        model = win.inspection_dock.roi_model
+        assert model.data(model.index(0, 2)) == "9"
+        assert len(win.inspection_dock.histogram_plot.listDataItems()) == 1
+        assert not getattr(win, "_inspection_stale", False)
+    finally:
+        win.close()
+
+
+def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
+    _clear_arrayscope_settings()
+    pytest.importorskip("vispy")
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.display.frame_planner import FramePlanner
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+    settings.sync()
+
+    data = np.arange(8 * 8, dtype=float).reshape(8, 8)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        if getattr(win.img_view, "rendering_backend_name", "") != "vispy":
+            pytest.skip("VisPy backend unavailable in this Qt environment")
+        win._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4), max_raster_pixels=16)
+        win.render(reason="test-vispy-tiled-roi")
+        _process_events(qtbot, count=30)
+        assert getattr(win._committed_display_frame, "is_tiled", False)
+
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        win.img_view.createRoi("rectangle", rect=(1, 1, 3, 3))
+        _process_events(qtbot, count=20)
+
+        assert win.img_view._roi_info_panel is not None
+        assert "n=9" in win.img_view._roi_info_panel.text()
+        assert "mean=18" in win.img_view._roi_info_panel.text()
+
+        win._show_inspection_dock()
+        qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=3000)
+    finally:
+        win.close()
+        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value)
+        settings.sync()
+
+
 def test_detached_inspection_panel_refreshes_roi_statistics_and_histogram(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window.panels import PanelLocation

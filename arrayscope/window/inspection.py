@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import pyqtgraph.Qt as Qt
@@ -215,6 +216,23 @@ class InspectionWorkflowMixin:
                 self.view_state,
                 None if geometry is None else getattr(geometry, "montage", None),
             )
+        elif self._roi_uses_tiled_demand(selections):
+            frame = self._committed_tiled_frame()
+            scene = None if frame is None else getattr(frame, "scene", None)
+            value_source = None if frame is None else getattr(frame, "value_source", None)
+            payloads = {} if value_source is None else dict(getattr(value_source, "payloads", {}) or {})
+            image_key = (
+                "tiled-demand",
+                None if frame is None else getattr(frame, "key", None),
+                tuple(
+                    (int(region.region_id), tuple(float(value) for value in region.bounds), bool(region.resident))
+                    for region in tuple(getattr(scene, "regions", ()) or ())
+                ),
+                tuple(
+                    (int(key), getattr(payload, "source_id", None))
+                    for key, payload in sorted(payloads.items(), key=lambda item: int(item[0]))
+                ),
+            )
         else:
             image_key = None if image is None else (id(image), tuple(np.shape(image)), str(getattr(image, "dtype", None)))
         selection_key = tuple((selection.id, selection.enabled, selection.geometry) for selection in selections)
@@ -224,6 +242,8 @@ class InspectionWorkflowMixin:
     def _compute_roi_inspection_snapshot(self, key, image, selections, layers):
         if self._roi_uses_montage_demand(selections):
             return self._compute_montage_roi_inspection_snapshot(key, selections)
+        if self._roi_uses_tiled_demand(selections):
+            return self._compute_tiled_roi_inspection_snapshot(key, selections)
         stats_by_roi = OrderedDict()
         hist_inputs = []
         if image is not None:
@@ -264,6 +284,19 @@ class InspectionWorkflowMixin:
             return False
         geometry = getattr(self, "display_geometry", None)
         return bool(geometry is not None and getattr(geometry, "montage", None) is not None)
+
+    def _roi_uses_tiled_demand(self, selections) -> bool:
+        return bool(selections and self._committed_tiled_frame() is not None)
+
+    def _committed_tiled_frame(self):
+        frame = getattr(self, "_committed_display_frame", None)
+        if frame is None or not getattr(frame, "is_tiled", False):
+            return None
+        return frame
+
+    def _compute_tiled_roi_inspection_snapshot(self, key, selections):
+        stats_by_roi, hist_inputs = self._committed_tiled_roi_values(selections, collect_histograms=True)
+        return RoiInspectionSnapshot(key, stats_by_roi, comparison_histograms(hist_inputs, HistogramSpec(bins=96)))
 
     def _compute_montage_roi_inspection_snapshot(self, key, selections):
         stats_by_roi = OrderedDict()
@@ -366,6 +399,8 @@ class InspectionWorkflowMixin:
     def _roi_source_image(self):
         if not hasattr(self, "img_view"):
             return None
+        if self._committed_tiled_frame() is not None:
+            return None
         source = getattr(self.img_view, "histogramSource", None)
         if source is None:
             source = getattr(self.img_view, "image", None)
@@ -436,6 +471,9 @@ class InspectionWorkflowMixin:
         self.img_view.setRoiInfoText("\n".join(lines))
 
     def _hidden_roi_statistics(self, selections):
+        tiled = self._committed_tiled_roi_values(selections, collect_histograms=False)
+        if tiled is not None:
+            return tiled[0]
         image = self._roi_source_image()
         stats_by_roi = OrderedDict()
         if image is not None:
@@ -447,3 +485,72 @@ class InspectionWorkflowMixin:
                 except Exception:
                     continue
         return stats_by_roi
+
+    def _committed_tiled_roi_values(self, selections, *, collect_histograms: bool):
+        frame = self._committed_tiled_frame()
+        if frame is None:
+            return None
+        value_source = getattr(frame, "value_source", None)
+        scene = getattr(frame, "scene", None)
+        regions = tuple(getattr(scene, "regions", ()) or ())
+        if value_source is None or not regions:
+            return None
+
+        stats_by_roi = OrderedDict()
+        hist_inputs = []
+        for selection in selections:
+            if not selection.enabled:
+                continue
+            accumulator = RoiStatsAccumulator()
+            exact_values = []
+            for region, local_region, offset in self._roi_scene_regions(selection.geometry, regions):
+                committed = value_source.tile_region(
+                    SimpleNamespace(region_id=int(region.region_id), tile_number=int(region.region_id)),
+                    local_region,
+                )
+                if committed is None:
+                    continue
+                image, histogram_data, _source = committed
+                source = histogram_data if histogram_data is not None else image
+                values = roi_values_for_region(source, selection.geometry, offset=offset)
+                accumulator.add_values(values)
+                if collect_histograms:
+                    finite = np.asarray(values).ravel()
+                    finite = finite[np.isfinite(finite)]
+                    if finite.size and sum(value.size for value in exact_values) + finite.size <= 250_000:
+                        exact_values.append(finite.copy())
+            stats = accumulator.result()
+            stats_by_roi[selection.id] = (selection, stats)
+            if collect_histograms and exact_values:
+                hist_inputs.append((selection.label, np.concatenate(exact_values)))
+        return stats_by_roi, tuple(hist_inputs)
+
+    def _roi_scene_regions(self, geometry, regions):
+        bounds = roi_bounding_rect(geometry)
+        if bounds is None:
+            return ()
+        x0, y0, x1, y1 = bounds
+        selected = []
+        for region in regions:
+            if not getattr(region, "resident", False):
+                continue
+            rx0, ry0, rx1, ry1 = tuple(float(value) for value in region.bounds)
+            if rx1 < x0 or rx0 > x1 or ry1 < y0 or ry0 > y1:
+                continue
+            if geometry.kind == RoiKind.RECTANGLE:
+                sx0 = max(rx0, float(np.floor(x0)))
+                sx1 = min(rx1 + 1.0, float(np.ceil(x1)))
+                sy0 = max(ry0, float(np.floor(y0)))
+                sy1 = min(ry1 + 1.0, float(np.ceil(y1)))
+                if sx1 <= sx0 or sy1 <= sy0:
+                    continue
+                local_region = (
+                    slice(int(sy0 - ry0), int(sy1 - ry0)),
+                    slice(int(sx0 - rx0), int(sx1 - rx0)),
+                )
+                offset = (sx0, sy0)
+            else:
+                local_region = (slice(0, int(region.height)), slice(0, int(region.width)))
+                offset = (rx0, ry0)
+            selected.append((region, local_region, offset))
+        return tuple(selected)
