@@ -47,6 +47,17 @@ def test_vispy_presentation_starts_conservative_until_feedback():
     assert decision.batch_limit == governor.latency_feedback.tuning.max_batch
 
 
+def test_tile_layer_commit_uses_presentation_upload_feedback_ramp():
+    governor = ResourceGovernor(_policy(MemoryProfileChoice.BALANCED), profile=MemoryProfileChoice.BALANCED)
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+
+    governor.record_ui_observation("tile_layer_commit", 2.0, item_count=1, byte_count=4096)
+    decision = governor.decide_ui_work("tile_layer_commit", interactive=False)
+
+    assert decision.batch_limit > 1
+    assert decision.byte_cap >= 4096 * decision.batch_limit
+
+
 def test_ui_pressure_reduces_batch_and_workers():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0)
     memory = _memory()

@@ -126,6 +126,7 @@ _PRESENTATION_UPLOAD_CHANNELS = frozenset(
     {
         "montage_cold_commit",
         "montage_present_total",
+        "tile_layer_commit",
     }
 )
 

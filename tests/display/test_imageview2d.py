@@ -7,6 +7,12 @@ import pytest
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 
+def _clear_histogram_jobs(view) -> None:
+    controller = getattr(view, "_histogram_display_controller", None)
+    controller.cancel()
+    controller._closed = False
+
+
 def test_profile_marker_callback_replacement_and_programmatic_move(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
@@ -188,6 +194,7 @@ def test_large_histogram_refresh_uses_background_submitter(qt_app):
         return SimpleNamespace(scheduled=True)
 
     view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _clear_histogram_jobs(view)
     view.setBackgroundTaskSubmitter(submit)
     submitted.clear()
 
@@ -215,6 +222,7 @@ def test_large_histogram_auto_level_applies_bounds_before_refinement(qt_app, mon
     monkeypatch.setattr(histogram_controller, "compute_histogram_plot", fail_sync_compute)
 
     view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(5.0, 15.0))
+    _clear_histogram_jobs(view)
     view.setBackgroundTaskSubmitter(submit)
     submitted.clear()
 
@@ -237,6 +245,7 @@ def test_large_histogram_refinement_coalesces_matching_background_request(qt_app
         return SimpleNamespace(scheduled=True)
 
     view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _clear_histogram_jobs(view)
     view.setBackgroundTaskSubmitter(submit)
     submitted.clear()
 
@@ -244,6 +253,100 @@ def test_large_histogram_refinement_coalesces_matching_background_request(qt_app
     assert view._histogram_display_controller.refresh_histogram_plot(auto_level=False) is True
     assert len(submitted) == 1
     view.close()
+
+
+def test_large_histogram_refinement_replaces_pending_changed_request(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    data = np.linspace(0.0, 1.0, 512 * 512, dtype=np.float32).reshape(512, 512)
+    submitted = []
+
+    def submit(fn, *, on_done, key):
+        submitted.append((fn, on_done, key))
+        return SimpleNamespace(scheduled=True)
+
+    view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _clear_histogram_jobs(view)
+    view.setBackgroundTaskSubmitter(submit)
+    submitted.clear()
+
+    controller = view._histogram_display_controller
+    assert controller.refresh_histogram_plot(auto_level=False) is True
+    view.setHistogramDataBounds((0.0, 2.0))
+    assert controller.refresh_histogram_plot(auto_level=False) is True
+    view.setHistogramDataBounds((0.0, 3.0))
+    assert controller.refresh_histogram_plot(auto_level=False) is True
+
+    assert len(submitted) == 1
+
+    submitted[0][1](submitted[0][0]())
+    qt_app.processEvents()
+
+    assert len(submitted) == 2
+    assert controller._running_request_signature == controller._active_request_signature
+    view.close()
+
+
+def test_large_histogram_stale_result_after_newer_range_does_not_update_plot(qt_app, monkeypatch):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    data = np.linspace(0.0, 1.0, 512 * 512, dtype=np.float32).reshape(512, 512)
+    submitted = []
+
+    def submit(fn, *, on_done, key):
+        submitted.append((fn, on_done, key))
+        return SimpleNamespace(scheduled=True)
+
+    view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _clear_histogram_jobs(view)
+    view.setBackgroundTaskSubmitter(submit)
+    submitted.clear()
+    controller = view._histogram_display_controller
+
+    assert controller.refresh_histogram_plot(auto_level=False) is True
+    stale_result = submitted[0][0]()
+    view.setHistogramDataBounds((0.0, 2.0))
+    assert controller.refresh_histogram_plot(auto_level=False) is True
+    monkeypatch.setattr(view.histogram.item.plot, "setData", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale histogram result applied")))
+
+    submitted[0][1](stale_result)
+    qt_app.processEvents()
+
+    assert len(submitted) == 2
+    view.close()
+
+
+def test_large_histogram_close_ignores_late_result_and_clears_pending(qt_app, monkeypatch):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    data = np.linspace(0.0, 1.0, 512 * 512, dtype=np.float32).reshape(512, 512)
+    submitted = []
+
+    def submit(fn, *, on_done, key):
+        submitted.append((fn, on_done, key))
+        return SimpleNamespace(scheduled=True)
+
+    view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _clear_histogram_jobs(view)
+    view.setBackgroundTaskSubmitter(submit)
+    submitted.clear()
+    controller = view._histogram_display_controller
+
+    assert controller.refresh_histogram_plot(auto_level=False) is True
+    view.setHistogramDataBounds((0.0, 2.0))
+    assert controller.refresh_histogram_plot(auto_level=False) is True
+    result = submitted[0][0]()
+    monkeypatch.setattr(view.histogram.item.plot, "setData", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("late histogram result applied after close")))
+
+    view.close()
+    submitted[0][1](result)
+    qt_app.processEvents()
+
+    assert controller._closed is True
+    assert controller._pending_request is None
 
 
 def test_repeated_fast_updates_do_not_rebind_same_histogram_item(qt_app, monkeypatch):
@@ -456,6 +559,88 @@ def test_tiled_presentation_does_not_budget_ready_payload_visibility(qt_app):
     )
 
     assert report.presented_tiles == frozenset({0, 1, 2})
+    view.close()
+
+
+def test_scalar_tiled_level_delta_acknowledges_without_image_replacement(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    payloads = {
+        index: DisplayTilePayload(
+            index,
+            index,
+            np.full((2, 2), float(index + 1), dtype=np.float32),
+            None,
+            ("payload", index),
+        )
+        for index in range(2)
+    }
+    initial_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+    )
+    view.setTiledMontagePresentation(
+        geometry=geometry,
+        tile_state=TilePresentationState(payloads),
+        tile_delta=initial_delta,
+        histogramPlotData=None,
+        levels=(0.0, 3.0),
+        histogramRange=(0.0, 3.0),
+    )
+    before_images = {
+        tile: state.item.image
+        for tile, state in view._montage_tile_layer.states.items()
+    }
+    level_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=2,
+        visibility_revision=1,
+        level_revision=2,
+        histogram_revision=1,
+        viewport_revision=1,
+        base_revision=1,
+        target_revision=2,
+        upserts=payloads,
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+    )
+
+    report = view.setTiledMontagePresentation(
+        geometry=geometry,
+        tile_state=TilePresentationState(payloads),
+        tile_delta=level_delta,
+        histogramPlotData=None,
+        levels=(0.5, 2.5),
+        histogramRange=(0.0, 3.0),
+    )
+
+    timing = view.lastImageUploadTiming()
+    assert report.committed_upserts == frozenset({0, 1})
+    assert timing.tile_layer_level_updates == 2
+    assert timing.tile_layer_items_updated == 0
+    assert timing.tile_layer_image_replacements == 0
+    assert timing.visible_bytes == 0
+    for tile, state in view._montage_tile_layer.states.items():
+        assert state.item.image is before_images[tile]
+        assert tuple(float(value) for value in state.item.levels) == (0.5, 2.5)
     view.close()
 
 
@@ -1623,6 +1808,55 @@ def test_rgb_tile_layer_level_change_rewindows_cached_bases(qt_app):
     assert timing.tile_layer_upload_ms > 0.0
     for tile, state in view._montage_tile_layer.states.items():
         assert not np.array_equal(state.item.image, before[tile])
+    view.close()
+
+
+def test_scalar_tile_layer_level_change_only_sets_item_levels(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    canvas = np.arange(10, dtype=np.float32).reshape(2, 5)
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=canvas,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 9.0),
+        histogramRange=(0.0, 9.0),
+    )
+    before_images = {
+        tile: state.item.image
+        for tile, state in view._montage_tile_layer.states.items()
+    }
+    view.setMontageTileLayerPresentation(
+        canvas,
+        histogramData=canvas,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(1.0, 8.0),
+        histogramRange=(0.0, 9.0),
+        montage_dirty_tiles=(),
+    )
+
+    timing = view.lastImageUploadTiming()
+    assert timing.tile_layer_level_updates == 2
+    assert timing.tile_layer_items_updated == 0
+    assert timing.tile_layer_rgb_window_tiles == 0
+    assert timing.tile_layer_image_replacements == 0
+    assert timing.visible_bytes == 0
+    assert timing.tile_layer_upload_ms == 0.0
+    for state in view._montage_tile_layer.states.values():
+        assert tuple(float(value) for value in state.item.levels) == (1.0, 8.0)
+        assert state.item.image is before_images[state.tile_number]
     view.close()
 
 

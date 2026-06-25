@@ -87,12 +87,13 @@ PyQtGraph and VisPy must agree on target levels, values, source ranks, revisions
 must not be forced into one physical update method. PyQtGraph may need many bounded CPU/item updates;
 VisPy can update resident visuals through uniforms. ADR 0040 makes that distinction durable.
 
-### 3. Histogram ownership still crosses private PyQtGraph internals
+### 3. Histogram ownership is adapter-isolated but still version-sensitive
 
-`ImageView2D` manually rebinds `HistogramLUTItem.imageItem`, calls `_setImageLookupTable()`, and
-repeatedly disconnects `sigImageChanged` to avoid duplicate recomputation. This is understandable
-compatibility code, but it is version-sensitive and should be isolated behind a tested adapter or
-replaced with an ArrayScope-owned histogram plot/region shell.
+PyQtGraph histogram rebinding is isolated in `display/backends/pyqtgraph/histogram_adapter.py`, which
+owns `HistogramLUTWidget.setImageItem`, private `HistogramLUTItem.imageItem` rebinding, lookup-table
+refreshes, region refreshes, and `sigImageChanged` cleanup. This keeps `ImageView2D` out of PyQtGraph
+internals, but the adapter still depends on private API shape and needs explicit coverage when
+PyQtGraph changes.
 
 ### 4. LOD is intentionally unavailable, not merely failing to trigger
 

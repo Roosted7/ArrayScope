@@ -1,7 +1,5 @@
 from time import perf_counter
 from typing import TYPE_CHECKING
-import weakref
-import warnings
 
 import numpy as np
 from arrayscope.app.qt_binding import prefer_pyside6
@@ -39,6 +37,7 @@ from arrayscope.display.interaction import (
 from arrayscope.display.levels import finite_bounds
 from arrayscope.display.shader_mapping import default_gray_lut, normalize_lut_rgb
 from arrayscope.display.layers import ViewLayerOwner
+from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer, TileLayerUpdateStats
 from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
@@ -113,8 +112,7 @@ class ImageView2D(QtWidgets.QWidget):
         self.histogramSource = None
         self.histogramPlotSource = None
         self._rgbBaseImage = None
-        self._histogram_bound_item = None
-        self._histogram_known_item_ids = set()
+        self._histogram_adapter = None
         self._histogram_preview_controller = None
         self._histogram_display_controller = None
         self._upload_timing = None
@@ -241,6 +239,7 @@ class ImageView2D(QtWidgets.QWidget):
         # Histogram widget
         self.histogram = pg.HistogramLUTWidget()
         self.layout.addWidget(self.histogram)
+        self._histogram_adapter = PyQtGraphHistogramAdapter(self.histogram)
 
     def _start_upload_timing(self, mode: str) -> None:
         self._upload_timing = {
@@ -444,22 +443,6 @@ class ImageView2D(QtWidgets.QWidget):
             )
         )
 
-    def _disconnect_histogram_image_signal(self, item) -> None:
-        signal = getattr(item, "sigImageChanged", None)
-        if signal is None:
-            return
-        slot = self.histogram.item.imageChanged
-        # Pyqtgraph's public setImageItem connects every time it is called.  We
-        # own histogram refreshes explicitly so repeated image commits cannot
-        # accumulate duplicate histogram recomputation callbacks.
-        for _ in range(32):
-            try:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", message=".*Failed to disconnect.*", category=RuntimeWarning)
-                    signal.disconnect(slot)
-            except (TypeError, RuntimeError):
-                break
-
     def closeEvent(self, event) -> None:
         preview = getattr(self, "_histogram_preview_controller", None)
         if preview is not None:
@@ -470,22 +453,11 @@ class ImageView2D(QtWidgets.QWidget):
         super().closeEvent(event)
 
     def _bind_histogram_item(self, item) -> None:
-        if item is None or self._histogram_bound_item is item:
+        adapter = getattr(self, "_histogram_adapter", None)
+        if adapter is None:
             return
-        start = perf_counter()
-        item_id = id(item)
-        if item_id not in self._histogram_known_item_ids:
-            self.histogram.setImageItem(item)
-            self._histogram_known_item_ids.add(item_id)
-        else:
-            hist_item = self.histogram.item
-            hist_item.imageItem = weakref.ref(item)
-            if hasattr(hist_item, "_setImageLookupTable"):
-                hist_item._setImageLookupTable()
-            hist_item.regionChanged()
-        self._disconnect_histogram_image_signal(item)
-        self._histogram_bound_item = item
-        self._record_upload_timing("histogram_bind_ms", (perf_counter() - start) * 1000.0)
+        facts = adapter.bind_image_item(item)
+        self._record_upload_timing("histogram_bind_ms", facts.elapsed_ms)
 
     def _refresh_histogram_plot(self, *, auto_level: bool = False) -> None:
         start = perf_counter()
@@ -533,7 +505,8 @@ class ImageView2D(QtWidgets.QWidget):
                 timing["visible_bytes"] = int(timing["visible_bytes"]) + int(array.nbytes)
                 timing["visible_pixels"] = int(timing["visible_pixels"]) + int(np.prod(array.shape[:2]))
                 timing["fast_same_object"] = bool(timing["fast_same_object"] or same_object)
-        if emit_histogram_change and self._histogram_bound_item is item:
+        adapter = getattr(self, "_histogram_adapter", None)
+        if emit_histogram_change and adapter is not None and adapter.is_bound_item(item):
             self._refresh_histogram_plot(auto_level=False)
         return same_object
 

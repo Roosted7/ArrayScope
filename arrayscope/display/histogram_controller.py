@@ -108,11 +108,13 @@ class HistogramDisplayController(QtCore.QObject):
         self._closed = False
         self._active_future = None
         self._active_request_signature = None
+        self._running_request_signature = None
+        self._pending_request: HistogramPlotRequest | None = None
         self._manual_popup: HistogramLevelEditPopup | None = None
         self._manual_start_levels: tuple[float, float] | None = None
         self._manual_region_mouse_click_event = None
         self._manual_region_installed = False
-        self._histogram_ready.connect(self._apply_histogram_result)
+        self._histogram_ready.connect(self._handle_histogram_ready)
 
     def install(self) -> None:
         item = self._histogram_item()
@@ -147,6 +149,8 @@ class HistogramDisplayController(QtCore.QObject):
         if self._refresh_timer.isActive():
             self._refresh_timer.stop()
         self._active_request_signature = None
+        self._running_request_signature = None
+        self._pending_request = None
         self.close_popup()
 
     def refresh_histogram_plot(self, *, auto_level: bool = False) -> bool:
@@ -184,12 +188,28 @@ class HistogramDisplayController(QtCore.QObject):
     def _schedule_histogram_job(self, request: HistogramPlotRequest) -> None:
         self._closed = False
         signature = _request_signature(request)
-        if self._active_request_signature == signature:
-            return
         self._active_request_signature = signature
+        if self._active_request_signature == signature:
+            running_signature = self._running_request_signature
+            if running_signature == signature:
+                active_future = self._active_future
+                if active_future is None or not active_future.done():
+                    return
+                self._running_request_signature = None
+                self._active_future = None
+        if self._running_request_signature is not None:
+            self._pending_request = request
+            previous_future = self._active_future
+            if previous_future is not None and not previous_future.done() and previous_future.cancel():
+                self._running_request_signature = None
+                self._active_future = None
+            else:
+                return
         previous_future = self._active_future
         if previous_future is not None and not previous_future.done():
             previous_future.cancel()
+        self._pending_request = None
+        self._running_request_signature = signature
         submit = getattr(self.owner, "_submit_background_task", None)
         if callable(submit):
             started = submit(
@@ -201,6 +221,7 @@ class HistogramDisplayController(QtCore.QObject):
                 self._active_future = None
                 return
             if str(getattr(started, "reason", "")) in {"limited", "idle", "cost"} and not self._closed:
+                self._running_request_signature = None
                 self._refresh_pending = True
                 if not self._refresh_timer.isActive():
                     self._refresh_timer.start(max(8, int(getattr(self.owner, "_histogram_retry_interval_ms", 33))))
@@ -227,6 +248,29 @@ class HistogramDisplayController(QtCore.QObject):
         future = _HISTOGRAM_EXECUTOR.submit(compute_histogram_plot, request)
         self._active_future = future
         future.add_done_callback(done)
+
+    def _handle_histogram_ready(self, result) -> None:
+        try:
+            self._apply_histogram_result(result, auto_level=False)
+        finally:
+            self._finish_histogram_job(result)
+
+    def _finish_histogram_job(self, result) -> None:
+        if not isinstance(result, HistogramPlotResult):
+            return
+        result_signature = _result_signature(result)
+        if self._running_request_signature == result_signature:
+            self._running_request_signature = None
+            self._active_future = None
+        if self._closed:
+            self._pending_request = None
+            return
+        pending = self._pending_request
+        self._pending_request = None
+        if pending is not None and _request_signature(pending) != self._active_request_signature:
+            self._active_request_signature = _request_signature(pending)
+        if pending is not None:
+            self._schedule_histogram_job(pending)
 
     def _apply_histogram_result(self, result, *, auto_level: bool = False) -> bool:
         if self._closed or not isinstance(result, HistogramPlotResult):
@@ -289,7 +333,6 @@ class HistogramDisplayController(QtCore.QObject):
                 )
         if self._active_request_signature == result_signature:
             self._active_request_signature = None
-            self._active_future = None
         return True
 
     def begin_limit_edit(self, which: str, scene_pos=None) -> None:

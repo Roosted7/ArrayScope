@@ -276,10 +276,19 @@ def test_display_semantics_live_in_display_package():
 
 
 def test_histogram_imageitem_binding_is_centralized():
-    text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
-    assert "def _bind_histogram_item" in text
-    assert text.count(".setImageItem(") == 1
-    assert "self.histogram.setImageItem(item)" in text
+    adapter = (ROOT / "arrayscope" / "display" / "backends" / "pyqtgraph" / "histogram_adapter.py").read_text()
+    image_view = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
+
+    assert "def _bind_histogram_item" in image_view
+    assert "PyQtGraphHistogramAdapter" in image_view
+    assert ".setImageItem(" not in image_view
+    assert "sigImageChanged" not in image_view
+    assert "_setImageLookupTable" not in image_view
+    assert "regionChanged()" not in image_view
+    assert adapter.count(".setImageItem(") == 1
+    assert "sigImageChanged" in adapter
+    assert "_setImageLookupTable" in adapter
+    assert "regionChanged()" in adapter
 
 
 def test_montage_renderer_does_not_mutate_image_items_directly():

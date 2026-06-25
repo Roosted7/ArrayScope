@@ -604,7 +604,7 @@ class MontageTileLayer:
                 rgb_window_tiles += int(windowed)
                 if not updated:
                     items_skipped += 1
-                if updated and int(tile_number) in requested_upserts:
+                if int(tile_number) in requested_upserts:
                     committed_upserts.add(int(tile_number))
             else:
                 items_skipped += 1

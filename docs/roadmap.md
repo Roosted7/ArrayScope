@@ -40,6 +40,8 @@ See [ADR 0040](decisions/0040-backend-aware-presentation-convergence.md).
 
 ### N4. Histogram and level refinement discipline
 
+**Status:** Done!
+
 **Goal:** preserve responsive level control while maintaining semantic correctness.
 
 Work:
