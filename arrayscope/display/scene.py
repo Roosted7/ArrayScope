@@ -94,6 +94,7 @@ def display_scene_for_presentation(presentation) -> DisplayScene:
         storage=storage,
         payloads=payloads,
         tile_delta=tile_delta,
+        frame_plan=getattr(presentation, "frame_plan", None),
     )
 
 
@@ -103,10 +104,22 @@ def display_scene_for_geometry(
     storage: DisplayStorage | str = DisplayStorage.RASTER,
     payloads: Mapping[int, object] | None = None,
     tile_delta=None,
+    frame_plan=None,
 ) -> DisplayScene:
     """Build scene state without depending on a concrete presentation class."""
 
     storage = storage if isinstance(storage, DisplayStorage) else DisplayStorage(str(storage))
+    if frame_plan is not None and (
+        storage is DisplayStorage.TILED
+        or getattr(getattr(frame_plan, "layout", None), "value", getattr(frame_plan, "layout", None)) == DisplayLayout.SINGLE.value
+    ):
+        return _scene_for_frame_plan(
+            geometry,
+            storage=storage,
+            payloads=payloads,
+            tile_delta=tile_delta,
+            frame_plan=frame_plan,
+        )
     montage = geometry.montage
     if montage is None:
         height, width = geometry.display_shape
@@ -200,6 +213,75 @@ def _montage_scene_cached(
         storage=storage,
         regions=tuple(regions),
         bounds=_shape_bounds(full_height, full_width),
+    )
+
+
+def _scene_for_frame_plan(
+    geometry: DisplayGeometry,
+    *,
+    storage: DisplayStorage,
+    payloads: Mapping[int, object] | None,
+    tile_delta,
+    frame_plan,
+) -> DisplayScene:
+    payload_key_set = {int(key) for key in dict(payloads or {})}
+    if tile_delta is not None:
+        active = _unique_int_tuple(getattr(tile_delta, "active_tiles", ()) or ())
+        planned = _unique_int_tuple(getattr(tile_delta, "planned_tiles", ()) or ())
+        near = _unique_int_tuple(getattr(tile_delta, "near_tiles", ()) or ())
+    else:
+        active = tuple(int(value) for value in getattr(frame_plan, "active_region_ids", ()) or ())
+        planned = tuple(int(value) for value in getattr(frame_plan, "planned_region_ids", ()) or ())
+        near = tuple(int(value) for value in getattr(frame_plan, "near_region_ids", ()) or ())
+    regions = _frame_plan_regions_cached(
+        id(frame_plan),
+        tuple(getattr(frame_plan, "scene_region_signature", ()) or ()),
+        active,
+        planned,
+        near,
+        tuple(sorted(payload_key_set)),
+        storage,
+    )
+    if not regions:
+        return display_scene_for_geometry(geometry, storage=storage, payloads=payloads, frame_plan=None)
+    layout = getattr(frame_plan, "layout", None)
+    layout = layout if isinstance(layout, DisplayLayout) else DisplayLayout(str(getattr(layout, "value", layout or "single")))
+    return DisplayScene(
+        geometry=geometry,
+        layout=layout,
+        storage=storage,
+        regions=regions,
+        bounds=_shape_bounds(*geometry.display_shape),
+    )
+
+
+@lru_cache(maxsize=256)
+def _frame_plan_regions_cached(
+    frame_plan_id: int,
+    frame_regions: tuple[tuple[int, int | None, tuple[float, float, float, float]], ...],
+    active: tuple[int, ...],
+    planned: tuple[int, ...],
+    near: tuple[int, ...],
+    resident: tuple[int, ...],
+    storage: DisplayStorage,
+) -> tuple[DisplayRegion, ...]:
+    del frame_plan_id
+    active_ids = set(int(value) for value in active)
+    planned_ids = set(int(value) for value in planned)
+    near_ids = set(int(value) for value in near)
+    resident_ids = set(int(value) for value in resident)
+    return tuple(
+        DisplayRegion(
+            region_id=int(region_id),
+            source_index=None if source_index is None else int(source_index),
+            bounds=tuple(float(value) for value in bounds),
+            status="loaded",
+            active=int(region_id) in active_ids,
+            planned=int(region_id) in planned_ids,
+            near=int(region_id) in near_ids,
+            resident=int(region_id) in resident_ids or storage is DisplayStorage.RASTER,
+        )
+        for region_id, source_index, bounds in frame_regions
     )
 
 

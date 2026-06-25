@@ -176,6 +176,7 @@ def test_window_render_does_not_own_presentation_policy():
 
 def test_display_presentation_boundary_modules_exist():
     for rel in (
+        Path("arrayscope/display/frame_planner.py"),
         Path("arrayscope/display/model/frame.py"),
         Path("arrayscope/display/model/commit.py"),
         Path("arrayscope/display/planning.py"),
@@ -190,6 +191,18 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/window/display_presenter.py"),
     ):
         assert (ROOT / rel).exists()
+
+
+def test_display_presenter_uses_unified_frame_planner_for_frame_semantics():
+    text = (ROOT / "arrayscope" / "window" / "display_presenter.py").read_text()
+    assert "FramePlanner" in text
+    assert "_frame_plan_for_display" in text
+    assert "frame_plan=frame_plan" in text
+
+
+def test_tiled_display_committer_does_not_require_montage_geometry():
+    text = (ROOT / "arrayscope" / "display" / "commit.py").read_text()
+    assert "tiled display presentation requires montage geometry" not in text
 
 
 def test_display_presenter_does_not_infer_windowed_rgb_from_array_rank():

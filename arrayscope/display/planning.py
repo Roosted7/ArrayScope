@@ -176,6 +176,7 @@ def _presentation_for_payload(payload, *, levels, histogram_range):
         levels=levels,
         histogram_range=histogram_range,
         viewport_policy=payload.viewport_policy,
+        frame_plan=payload.frame_plan,
         rgb_already_windowed=payload.rgb_already_windowed,
     )
     if payload.tile_state is not None or payload.tile_delta is not None:

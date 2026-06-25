@@ -52,9 +52,9 @@ A progressive tile can be shown before a high-detail plot is complete, but autom
 ## Unified Tiled Surface
 
 ArrayScope presents normal images, large planes, and montages through one semantic tiled image
-surface. A small/stable image may collapse to one tile and one backend texture/item; a large single
-plane may use internal tiles; a montage uses multiple semantic tile regions. Those are optimizations
-and layouts inside one presentation model, not separate semantic renderers.
+surface. A small/stable image may collapse to one raster commit or one backend texture/item; a large
+single plane may use internal tiles; a montage uses multiple semantic tile regions. Those are
+optimizations and layouts inside one presentation model, not separate semantic renderers.
 
 A tiled presentation is a set of semantic regions and payloads. PyQtGraph uses persistent per-tile
 image items; VisPy uses atlas/texture-backed visuals. Tile identity is based on materialized data and
@@ -68,7 +68,9 @@ latest level target, revision, active coverage, pending work, and acknowledgemen
 `LevelConvergenceStrategy` keeps PyQtGraph progressive tile redraws and VisPy uniform updates behind
 one semantic convergence contract.
 
-A montage is one reason to have semantic regions, but not the only one. The target architecture also permits internal tiling of one huge plane without inventing a montage axis.
+A montage is one reason to have semantic regions, but not the only one. Internal tiling of one huge
+plane is implemented without inventing a montage axis; `FramePlan` region bounds and data slices are
+the source of truth for backend tile placement.
 
 ### Multi-resolution
 
@@ -108,6 +110,7 @@ It may not own:
 ### PyQtGraph
 
 The default path is mature and provides the complete feature baseline. Its tiled implementation avoids rebuilding a full montage canvas, but large item counts and per-item updates can become GUI/scene-graph bottlenecks. Warm item visibility/geometry changes should not be reported as cold CPU windowing/upload.
+It accepts typed tiled presentations for internally tiled single planes as well as montages.
 
 ### VisPy
 
@@ -116,6 +119,8 @@ VisPy is the preferred backend for sustained large tiled rendering, pending smal
 platform validation. Its active visible commit should be a coherent GPU presentation transaction:
 admitted payloads are acknowledged only after texture data, atlas/page geometry, visibility, and draw
 invalidation are consistent.
+Its atlas/quad path uses frame-plan tile geometry for internally tiled single planes and montage
+geometry for montage presentations.
 
 Widget close now stops warm-tile work, cancels queued histogram refresh, and closes the VisPy canvas. This is necessary cleanup, not the final composition architecture.
 

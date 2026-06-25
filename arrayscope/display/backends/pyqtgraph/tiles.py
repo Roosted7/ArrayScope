@@ -10,6 +10,7 @@ import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 
 from arrayscope.display.model.frame import DisplayTilePayload
+from arrayscope.display.tile_layout import tile_layout_map, tile_layout_regions
 
 from arrayscope.display.image_upload import rgb_display_for_levels
 
@@ -137,6 +138,7 @@ class MontageTileLayer:
         tile_source_ids: dict[int, object] | None = None,
         tile_payloads: dict[int, DisplayTilePayload] | None = None,
         tile_delta=None,
+        frame_plan=None,
     ) -> TileLayerUpdateStats:
         if tile_payloads is not None:
             return self._update_direct_payload_presentation(
@@ -147,6 +149,7 @@ class MontageTileLayer:
                 dirty_tiles=dirty_tiles,
                 tile_source_ids=tile_source_ids,
                 tile_delta=tile_delta,
+                frame_plan=frame_plan,
             )
         montage = geometry.montage
         tile_h = int(montage.tile_height)
@@ -335,14 +338,11 @@ class MontageTileLayer:
         dirty_tiles: tuple[int, ...] | None,
         tile_source_ids: dict[int, object] | None = None,
         tile_delta=None,
+        frame_plan=None,
     ) -> TileLayerUpdateStats:
-        montage = geometry.montage
-        if montage is None:
+        layout = tile_layout_map(geometry, frame_plan=frame_plan)
+        if not layout:
             return TileLayerUpdateStats()
-        tile_h = int(montage.tile_height)
-        tile_w = int(montage.tile_width)
-        stride_x = tile_w + int(montage.gap)
-        stride_y = tile_h + int(montage.gap)
         requested_active = {
             int(tile)
             for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())
@@ -379,7 +379,7 @@ class MontageTileLayer:
         self._discard_direct_reuse_pool()
 
         tile_order = _direct_tile_order(
-            montage,
+            layout,
             tile_payloads,
             tile_delta,
             self._states,
@@ -392,7 +392,7 @@ class MontageTileLayer:
         # decide whether any data upload is needed.  For PyQtGraph the
         # resident storage is the ImageItem state itself.
         preclaim_specs = _direct_preclaim_specs(
-            montage,
+            layout,
             tile_order,
             tile_payloads,
             states=states,
@@ -428,7 +428,10 @@ class MontageTileLayer:
                     rgb_already_windowed=bool(rgb_already_windowed),
                 )
         for tile_number in tile_order:
-            source_index = montage.indices[int(tile_number)] if int(tile_number) < len(tuple(montage.indices)) else int(tile_number)
+            region = layout.get(int(tile_number))
+            if region is None:
+                continue
+            source_index = int(region.source_index) if region.source_index is not None else int(tile_number)
             state_value = "loaded"
             if states and tile_number < len(states):
                 state_value = str(getattr(states[tile_number], "value", states[tile_number]))
@@ -447,8 +450,8 @@ class MontageTileLayer:
             if tile_data.ndim < 2:
                 self._hide_tile(tile_number)
                 continue
-            width = min(tile_w, int(tile_data.shape[1]))
-            height = min(tile_h, int(tile_data.shape[0]))
+            width = min(int(region.width), int(tile_data.shape[1]))
+            height = min(int(region.height), int(tile_data.shape[0]))
             if width <= 0 or height <= 0:
                 self._hide_tile(tile_number)
                 continue
@@ -456,10 +459,8 @@ class MontageTileLayer:
                 tile_data = tile_data[:height, :width, ...]
             tile_hist = None if payload.histogram_data is None else np.asarray(payload.histogram_data)[:height, :width]
 
-            row = tile_number // int(montage.columns)
-            col = tile_number % int(montage.columns)
-            world_x = col * stride_x
-            world_y = row * stride_y
+            world_x = int(region.x)
+            world_y = int(region.y)
             world_rect = (int(world_x), int(world_y), int(width), int(height))
             base_source_id = (
                 tile_source_ids.get(int(tile_number), payload.source_id)
@@ -997,7 +998,7 @@ def _direct_payload_source_id(base_source_id: object, payload: DisplayTilePayloa
 
 
 def _direct_tile_order(
-    montage,
+    layout: dict[int, object],
     tile_payloads: dict[int, DisplayTilePayload],
     tile_delta,
     state_map: dict[int, TileLayerItemState] | None = None,
@@ -1007,7 +1008,7 @@ def _direct_tile_order(
     rgb_already_windowed: bool = False,
 ) -> tuple[int, ...]:
     if tile_delta is None:
-        return tuple(int(index) for index in range(len(tuple(montage.indices))))
+        return tuple(sorted(int(tile) for tile in layout))
     candidates: list[int] = []
     candidates.extend(int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ()))
     candidates.extend(int(tile) for tile in tuple(getattr(tile_delta, "upserts", ()) or ()))
@@ -1023,10 +1024,10 @@ def _direct_tile_order(
             and (
                 int(tile) not in state_map
                 or not bool(getattr(state_map[int(tile)], "visible", False))
-                or _direct_tile_geometry_changed(state_map[int(tile)], montage, int(tile), tile_payloads[int(tile)])
+                or _direct_tile_geometry_changed(state_map[int(tile)], layout, int(tile), tile_payloads[int(tile)])
                 or _direct_tile_binding_stale(
                     state_map.get(int(tile)),
-                    montage,
+                    layout,
                     int(tile),
                     tile_payloads[int(tile)],
                     tile_states=tile_states,
@@ -1047,7 +1048,7 @@ def _direct_tile_order(
 
 def _direct_tile_binding_stale(
     state: TileLayerItemState | None,
-    montage,
+    layout: dict[int, object],
     tile_number: int,
     payload: DisplayTilePayload,
     *,
@@ -1061,11 +1062,14 @@ def _direct_tile_binding_stale(
         state_value = str(getattr(tile_states[tile_number], "value", tile_states[tile_number]))
     if state_value == "skipped":
         return False
+    region = layout.get(tile_number)
+    if region is None:
+        return False
     tile_data = np.asarray(payload.image)
     if tile_data.ndim < 2:
         return False
-    width = min(int(montage.tile_width), int(tile_data.shape[1]))
-    height = min(int(montage.tile_height), int(tile_data.shape[0]))
+    width = min(int(region.width), int(tile_data.shape[1]))
+    height = min(int(region.height), int(tile_data.shape[0]))
     if width <= 0 or height <= 0:
         return False
     base_source_id = (
@@ -1085,18 +1089,19 @@ def _direct_tile_binding_stale(
 
 
 def _direct_preclaim_specs(
-    montage,
+    layout: dict[int, object],
     tile_order: tuple[int, ...],
     tile_payloads: dict[int, DisplayTilePayload],
     *,
     states: tuple[object, ...],
     tile_source_ids: dict[int, object] | None,
 ) -> dict[int, tuple[object, object | None, tuple[int, int, int, int]]]:
-    tile_h = int(montage.tile_height)
-    tile_w = int(montage.tile_width)
     specs: dict[int, tuple[object, object | None, tuple[int, int, int, int]]] = {}
     for tile_number in tile_order:
         tile_number = int(tile_number)
+        region = layout.get(tile_number)
+        if region is None:
+            continue
         state_value = "loaded"
         if states and tile_number < len(states):
             state_value = str(getattr(states[tile_number], "value", states[tile_number]))
@@ -1106,8 +1111,8 @@ def _direct_preclaim_specs(
         tile_data = np.asarray(payload.image)
         if tile_data.ndim < 2:
             continue
-        width = min(tile_w, int(tile_data.shape[1]))
-        height = min(tile_h, int(tile_data.shape[0]))
+        width = min(int(region.width), int(tile_data.shape[1]))
+        height = min(int(region.height), int(tile_data.shape[0]))
         if width <= 0 or height <= 0:
             continue
         base_source_id = (
@@ -1144,21 +1149,18 @@ def _direct_cold_hole_count(
     return cold
 
 
-def _direct_tile_geometry_changed(state: TileLayerItemState, montage, tile_number: int, payload: DisplayTilePayload) -> bool:
+def _direct_tile_geometry_changed(state: TileLayerItemState, layout: dict[int, object], tile_number: int, payload: DisplayTilePayload) -> bool:
     data = np.asarray(payload.image)
     if data.ndim < 2:
         return False
-    tile_h = int(montage.tile_height)
-    tile_w = int(montage.tile_width)
-    width = min(tile_w, int(data.shape[1]))
-    height = min(tile_h, int(data.shape[0]))
+    region = layout.get(int(tile_number))
+    if region is None:
+        return False
+    width = min(int(region.width), int(data.shape[1]))
+    height = min(int(region.height), int(data.shape[0]))
     if width <= 0 or height <= 0:
         return False
-    stride_x = tile_w + int(montage.gap)
-    stride_y = tile_h + int(montage.gap)
-    row = int(tile_number) // int(montage.columns)
-    col = int(tile_number) % int(montage.columns)
-    expected_world = (int(col * stride_x), int(row * stride_y), int(width), int(height))
+    expected_world = (int(region.x), int(region.y), int(width), int(height))
     expected_local = (0, 0, int(width), int(height))
     return (
         tuple(getattr(state, "local_rect", (-1, -1, -1, -1))) != expected_local

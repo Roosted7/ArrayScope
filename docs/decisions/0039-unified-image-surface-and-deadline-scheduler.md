@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed; accepted as the target direction for the post-v27 rendering work.
+Partly implemented. The unified `FramePlanner` and montage-optional typed tiled image surface are
+implemented and tested for normal images, large internally tiled planes, and montages. The explicit
+deadline scheduler/work graph and backend composition parts remain target architecture.
 
 ## Context
 
@@ -245,6 +247,26 @@ sampling geometry assumes one tile shape.
 Each step must preserve a runnable backend and land with semantic conformance tests. Compatibility
 shims may remain during migration but cannot acquire new behavior.
 
+## Revision after X1 unified frame planner
+
+The X1 implementation completes the unified surface portion of this ADR:
+
+1. `FramePlanner` produces one `FramePlan`/`FrameRegion` model for small normal images, internally
+   tiled large planes, and montages. Region IDs, active/planned/near sets, bounds, and data slices are
+   the semantic layout contract.
+2. `DisplayTiledPresentation` no longer requires montage geometry. Backend adapters pass the
+   `FramePlan` into PyQtGraph and VisPy tiled surfaces so large single planes draw from frame-plan
+   regions rather than fake montage tiles.
+3. Committed tiled frames use `TiledValueSource` payloads for value/region semantics. Placeholder
+   images are backend-shell compatibility data only, not the owner of inspection semantics.
+4. Scene conversion uses the current tile delta for active/planned/near state and caches region
+   conversion by frame-plan signature, so viewport retargets do not leak stale activity and unchanged
+   plans avoid rebuilding every region.
+5. The benchmark scenario for large normal tiled presentation now performs a real typed tiled commit
+   and asserts backend tiled-surface counters.
+
+This does not finish the scheduler half of the ADR. Visible materialization admission and optional
+work scoring belong to roadmap X2; full backend composition belongs to X3.
 
 ## Revision after the tiled-montage repair
 

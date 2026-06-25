@@ -20,7 +20,9 @@ from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget, should_yield_after_item
 from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
+from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
+from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
 from arrayscope.display.imageview2d import MontageTileOverlay
 from arrayscope.display.montage import (
@@ -81,6 +83,16 @@ MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
 
 
 class MontageRenderMixin:
+    def _montage_frame_planner(self) -> FramePlanner:
+        provider = getattr(self, "_frame_planner", None)
+        if provider is not None:
+            return provider()
+        planner = getattr(self, "_montage_frame_planner_instance", None)
+        if planner is None:
+            planner = FramePlanner()
+            self._montage_frame_planner_instance = planner
+        return planner
+
     def _montage_tile_layer_policy(self, geometry, data) -> bool:
         return self._montage_backend_policy(geometry, data).backend == "tile_layer"
 
@@ -256,6 +268,20 @@ class MontageRenderMixin:
         pending_tiles = [tile for tile in missing_tiles if int(tile.montage_index) not in stage_plan["waiting_indices"]]
         session_key = montage_session_key(_document_key(document), view_state, viewport_plan, colormap_lut)
         level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
+        frame_plan = self._montage_frame_planner().plan(
+            target=FrameTarget(
+                semantic_key=session_key,
+                viewport_key=current_range,
+                presentation_key=(str(window_mode), normalize_bounds(user_levels), bool(force_auto)),
+                quality="exact-visible",
+            ),
+            view_state=view_state,
+            display_shape=plan.display_shape,
+            backend_capabilities=image_view_backend_capabilities(self.img_view),
+            viewport_shape=viewport_shape,
+            view_range=current_range,
+            memory_policy=policy,
+        )
         session_id = int(getattr(self, "_montage_session_id", 0)) + 1
         self._montage_session_id = session_id
         session = MontageRenderSession(
@@ -264,6 +290,7 @@ class MontageRenderMixin:
             render_generation=render_generation,
             level_key=level_key,
             level_expected_indices=tuple(int(index) for index in all_indices),
+            frame_plan=frame_plan,
             plan=plan,
             view_state=view_state,
             document=document,
@@ -459,6 +486,21 @@ class MontageRenderMixin:
             near_margin_tiles=retarget_policy.near_margin_tiles,
             priority_focus=viewport_plan.priority_focus,
             priority_retarget_limit=_montage_priority_retarget_batch_limit(self, interactive=_interactive_active(self)),
+        )
+        memory_policy = self._memory_policy() if hasattr(self, "_memory_policy") else None
+        session.frame_plan = self._montage_frame_planner().plan(
+            target=FrameTarget(
+                semantic_key=session.key,
+                viewport_key=viewport_plan.view_range,
+                presentation_key=(str(session.window_mode), normalize_bounds(getattr(session, "user_levels_override", None)), bool(getattr(session, "force_auto", False))),
+                quality="exact-visible",
+            ),
+            view_state=view_state,
+            display_shape=viewport_plan.plan.display_shape,
+            backend_capabilities=capabilities,
+            viewport_shape=viewport_plan.viewport_shape,
+            view_range=viewport_plan.view_range,
+            memory_policy=memory_policy,
         )
         additions = viewport_plan.prioritize_tiles(additions)
         self._prune_stale_montage_tile_work(session)
@@ -1746,6 +1788,7 @@ class MontageRenderMixin:
                     montage_level_key=session.level_key,
                     montage_dirty_tiles=dirty_tiles,
                     montage_tile_source_ids=tile_source_ids,
+                    frame_plan=session.frame_plan,
                     user_levels=requested_levels,
                     semantic_commit=semantic_commit,
                 )
@@ -1768,6 +1811,7 @@ class MontageRenderMixin:
                     montage_level_key=session.level_key,
                     montage_dirty_tiles=dirty_tiles,
                     montage_tile_source_ids=tile_source_ids,
+                    frame_plan=session.frame_plan,
                     user_levels=requested_levels,
                     semantic_commit=semantic_commit,
                 )
@@ -1925,6 +1969,7 @@ class MontageRenderMixin:
                     tile_state=tile_state,
                     base_tile_state=base_tile_state,
                     tile_delta=tile_delta,
+                    frame_plan=session.frame_plan,
                     user_levels=requested_levels,
                     semantic_commit=semantic_commit,
                 )
@@ -1961,6 +2006,7 @@ class MontageRenderMixin:
                     tile_state=tile_state,
                     base_tile_state=base_tile_state,
                     tile_delta=tile_delta,
+                    frame_plan=session.frame_plan,
                     user_levels=requested_levels,
                     semantic_commit=semantic_commit,
                 )
@@ -2124,6 +2170,7 @@ class MontageRenderMixin:
                     image=display_image,
                     geometry=geometry,
                     viewport_policy=ViewportPolicy.PRESERVE,
+                    frame_plan=session.frame_plan,
                     rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
                     histogram_plot_data=histogram_plot_data,
                     tile_state=tile_state,

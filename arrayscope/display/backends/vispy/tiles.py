@@ -21,6 +21,7 @@ from arrayscope.display.shader_mapping import (
     shader_component_uniform,
 )
 from arrayscope.display.model.frame import DisplayTilePayload
+from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
 
 try:
     from vispy.visuals import Visual
@@ -1095,21 +1096,25 @@ class GpuMontageLayer:
         shader_mapping=None,
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
     ) -> GpuMontageLayerStats:
-        montage = getattr(geometry, "montage", None)
-        if montage is None:
+        layout = tile_layout_map(geometry, frame_plan=frame_plan)
+        if not layout:
             self.clear()
             return GpuMontageLayerStats()
         payloads = {int(key): value for key, value in dict(payloads or {}).items()}
         reserve_count = max(
-            _atlas_reserve_count(geometry, minimum=len(payloads)),
+            _atlas_reserve_count(geometry, minimum=len(payloads), frame_plan=frame_plan),
             len(tuple(getattr(tile_delta, "planned_tiles", ()) or ())),
         )
         near_tiles = tuple(getattr(tile_delta, "near_tiles", ()) or ())
         near_tile_source_ids = dict(getattr(tile_delta, "near_tile_source_ids", {}) or {})
         uvs, texture_stats = self._pool.update_payloads(
             payloads,
-            tile_shape=_atlas_tile_shape_for_payloads(payloads, fallback=(int(montage.tile_height), int(montage.tile_width))),
+            tile_shape=_atlas_tile_shape_for_payloads(
+                payloads,
+                fallback=_layout_tile_shape(layout),
+            ),
             dirty_tiles=dirty_tiles,
             rgb_already_windowed=rgb_already_windowed,
             reserve_count=reserve_count,
@@ -1124,7 +1129,7 @@ class GpuMontageLayer:
         page_payloads_by_index, dirty_pages = self._sync_page_payloads(
             payloads,
             presented_tiles=tuple(texture_stats.presented_tiles or ()),
-            montage=montage,
+            layout=layout,
             rgb_already_windowed=rgb_already_windowed,
         )
         for page_index, page in enumerate(self._pool.pages):
@@ -1137,14 +1142,14 @@ class GpuMontageLayer:
                     page_payloads,
                     self._pool,
                     page,
-                    montage,
+                    layout,
                     rgb_already_windowed=rgb_already_windowed,
                 )
             else:
                 geometry_key = self._geometry_keys.get(page_index)
             if geometry_key != self._geometry_keys.get(page_index):
                 vertices, texcoords, modes = _quad_buffers(
-                    montage,
+                    layout,
                     page_payloads,
                     uvs,
                     rgb_already_windowed=rgb_already_windowed,
@@ -1215,14 +1220,13 @@ class GpuMontageLayer:
         )
         return self._last_stats
 
-    def _sync_page_payloads(self, payloads, *, presented_tiles, montage, rgb_already_windowed: bool):
+    def _sync_page_payloads(self, payloads, *, presented_tiles, layout, rgb_already_windowed: bool):
         page_count = len(self._pool.pages)
-        montage_key = (
-            int(montage.tile_height),
-            int(montage.tile_width),
-            int(montage.columns),
-            int(montage.rows),
-            int(montage.gap),
+        layout_key = (
+            tuple(
+                (int(region.tile_number), int(region.x), int(region.y), int(region.width), int(region.height))
+                for region in sorted(layout.values(), key=lambda item: int(item.tile_number))
+            ),
         )
         page_payloads_by_index: list[dict[int, DisplayTilePayload]] = [{} for _page in self._pool.pages]
         active = {int(tile) for tile in tuple(presented_tiles or ())}
@@ -1237,7 +1241,7 @@ class GpuMontageLayer:
         dirty_pages: set[int] = set()
         full_refresh = (
             len(self._page_payloads_by_index) != page_count
-            or self._montage_geometry_key != montage_key
+            or self._montage_geometry_key != layout_key
             or int(self._atlas_serial) != int(self._pool.serial)
         )
         for page_index in range(page_count):
@@ -1245,12 +1249,12 @@ class GpuMontageLayer:
                 page_payloads_by_index[int(page_index)],
                 self._pool,
                 self._pool.pages[int(page_index)],
-                montage,
+                layout,
                 rgb_already_windowed=rgb_already_windowed,
             ) != self._geometry_keys.get(int(page_index)):
                 dirty_pages.add(int(page_index))
         self._page_payloads_by_index = page_payloads_by_index
-        self._montage_geometry_key = montage_key
+        self._montage_geometry_key = layout_key
         self._atlas_serial = int(self._pool.serial)
         return self._page_payloads_by_index, dirty_pages
 
@@ -1741,27 +1745,21 @@ def _upload_copy_required(staging: np.ndarray, payload: DisplayTilePayload, *, f
     return True
 
 
-def _quad_buffers(montage, payloads, uvs, *, rgb_already_windowed: bool):
+def _quad_buffers(layout, payloads, uvs, *, rgb_already_windowed: bool):
     vertices = []
     texcoords = []
     modes = []
-    tile_w = int(montage.tile_width)
-    tile_h = int(montage.tile_height)
-    stride_x = tile_w + int(montage.gap)
-    stride_y = tile_h + int(montage.gap)
-    tile_count = len(montage.indices)
     for tile_number, payload in sorted((int(key), value) for key, value in dict(payloads).items()):
-        if tile_number < 0 or tile_number >= tile_count:
+        region = layout.get(int(tile_number))
+        if region is None:
             continue
         uv = uvs.get(int(tile_number))
         if uv is None:
             continue
-        row = int(tile_number) // int(montage.columns)
-        col = int(tile_number) % int(montage.columns)
-        x0 = float(col * stride_x)
-        y0 = float(row * stride_y)
-        x1 = x0 + tile_w
-        y1 = y0 + tile_h
+        x0 = float(region.x)
+        y0 = float(region.y)
+        x1 = x0 + float(region.width)
+        y1 = y0 + float(region.height)
         u0, v0, u1, v1 = uv
         vertices.extend(((x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)))
         texcoords.extend(((u0, v0), (u1, v0), (u1, v1), (u0, v0), (u1, v1), (u0, v1)))
@@ -1774,23 +1772,22 @@ def _quad_buffers(montage, payloads, uvs, *, rgb_already_windowed: bool):
     )
 
 
-def _page_geometry_key(payloads, pool, page, montage, *, rgb_already_windowed: bool) -> tuple[object, ...]:
+def _page_geometry_key(payloads, pool, page, layout, *, rgb_already_windowed: bool) -> tuple[object, ...]:
     return (
         tuple(
             (
                 int(key),
                 int(pool.tile_slots[int(key)][1]),
+                int(layout[int(key)].x),
+                int(layout[int(key)].y),
+                int(layout[int(key)].width),
+                int(layout[int(key)].height),
                 _payload_mode(payload, rgb_already_windowed=rgb_already_windowed),
                 _payload_gutter(payload),
             )
             for key, payload in sorted(dict(payloads or {}).items())
-            if int(key) in pool.tile_slots
+            if int(key) in pool.tile_slots and int(key) in layout
         ),
-        int(montage.tile_height),
-        int(montage.tile_width),
-        int(montage.columns),
-        int(montage.rows),
-        int(montage.gap),
         id(page),
         tuple(int(value) for value in page.atlas_shape),
     )
@@ -1917,7 +1914,7 @@ def _atlas_grid(*, tile_shape: tuple[int, int], capacity: int, max_texture_size:
     return columns, rows
 
 
-def _atlas_reserve_count(geometry, *, minimum: int) -> int:
+def _atlas_reserve_count(geometry, *, minimum: int, frame_plan=None) -> int:
     """Reserve slots for the complete non-skipped visible montage set.
 
     Progressive sessions begin with most tiles in ``unloaded`` state.  Counting
@@ -1927,8 +1924,11 @@ def _atlas_reserve_count(geometry, *, minimum: int) -> int:
     explicitly marked skipped.
     """
 
-    montage = getattr(geometry, "montage", None)
-    indices = tuple(getattr(montage, "indices", ()) or ())
+    indices = (
+        tuple(range(planned_tile_count(geometry, frame_plan=frame_plan, minimum=0)))
+        if frame_plan is not None
+        else tuple(getattr(getattr(geometry, "montage", None), "indices", ()) or ())
+    )
     states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
     if not indices and not states:
         return max(1, int(minimum))
@@ -1941,6 +1941,14 @@ def _atlas_reserve_count(geometry, *, minimum: int) -> int:
             skipped += 1
     expected = max(0, planned - skipped)
     return max(1, int(minimum), int(expected))
+
+
+def _layout_tile_shape(layout) -> tuple[int, int]:
+    if not layout:
+        return (1, 1)
+    heights = {int(region.height) for region in layout.values()}
+    widths = {int(region.width) for region in layout.values()}
+    return (max(1, max(heights)), max(1, max(widths)))
 
 
 def _payload_mode(payload: DisplayTilePayload, *, rgb_already_windowed: bool) -> int:

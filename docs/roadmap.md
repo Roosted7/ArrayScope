@@ -155,6 +155,8 @@ Completion notes:
 
 ### X1. Unified frame planner and tiled image surface
 
+**Status:** Done!
+
 **Goal:** normal images and montages become one semantic presentation pipeline.
 
 Work:
@@ -174,7 +176,60 @@ Exit gate:
 - conformance tests pass across one-tile, small-tile, large-tile, and montage cases on both backends;
 - existing public interactions remain available throughout migration.
 
-### X2. Backend composition
+Completion notes:
+
+- `FramePlanner` plans normal images, internally tiled large single planes, and montages as one
+  semantic `FramePlan`/`FrameRegion` model with cached active/planned/near region IDs.
+- `DisplayTiledPresentation` and both backend adapters accept montage-optional tiled geometry. Real
+  PyQtGraph item tests and VisPy atlas/quad tests cover non-montage tiled single-plane commits.
+- Large normal frames can commit through the same typed tiled surface as montage tiles. The committed
+  frame owns tiled value semantics, so hover/value/ROI reads come from payloads rather than a
+  placeholder canvas.
+- Montage viewport retargets recompute the frame plan with the new active/near set, and scene
+  conversion uses the current tile delta so stale frame-plan activity cannot leak into committed
+  semantics.
+- Shared tile-layout helpers keep backend placement logic out of semantic code and avoid scanning the
+  complete montage population for active-payload quad generation.
+- Rendering benchmarks now include a real `normal_large_tiled_initial` commit on both backends and
+  assert tiled-surface work counters instead of only proving that a plan was produced.
+
+### X2. Deadline work graph and visible admission
+
+**Goal:** replace debounce/timer-shaped render ordering with explicit frame-value work admission.
+
+X1 unified the semantic frame surface, but it did not implement ADR 0039's `WorkGraph`/
+`DeadlineScheduler` half. That work should be its own gate rather than hidden inside backend
+composition or hardware benchmarking.
+
+Work:
+
+- Introduce a Qt-free `WorkGraph` for visible planning/cache lookup, materialization, display
+  preparation, backend commit, histogram refinement, profile/ROI work, stage materialization, and
+  speculative residency.
+- Admit work by frame target, quality tier, supersession key, deadline, estimated cost, and expected
+  value instead of by quiet-period timers alone.
+- Keep camera-only retargeting and presentation-only edits from restarting source materialization.
+- Make GUI result fan-in itself budgeted by item, byte, and elapsed time, with explicit resubmission
+  reasons.
+- Preserve active-plus-latest visible semantics while allowing already-running reusable work to finish
+  when it is cheaper than cancellation/restart.
+- Publish deterministic counters for queued, admitted, dropped, superseded, completed, and rescheduled
+  work by lane.
+- Keep the existing N6 `TileAdmissionQueue`, `PresentationGenerationTracker`, and `StageFanInState`
+  as component models rather than replacing them with another scheduler.
+
+Exit gate:
+
+- continuous pan/zoom/level interaction cannot starve exact visible work indefinitely;
+- worker-result bursts cannot produce an unbounded GUI callback;
+- hidden panels and speculative residency admit no work without available budget/value;
+- stale work is dropped before it can mutate the visible presentation set;
+- request-to-first-frame, event-loop gap, and work-counter benchmarks cover normal, internally tiled
+  large-plane, and montage paths;
+- tests prove camera-only, presentation-only, semantic, and document-revision changes have distinct
+  cancellation/materialization behavior.
+
+### X3. Backend composition
 
 **Goal:** replace backend inheritance with a shared shell and thin image surfaces.
 
@@ -194,7 +249,7 @@ Exit gate:
 - backend replacement/context loss has explicit lifecycle tests;
 - feature-parity tests target the surface contract rather than widget class internals.
 
-### X3. Shared pointer capture and drag lifecycle
+### X4. Shared pointer capture and drag lifecycle
 
 **Goal:** one semantic interaction controller governs both backends.
 
@@ -212,7 +267,7 @@ Exit gate:
 - no duplicate semantic ROI/profile drag logic remains;
 - pointer loss cannot leave a stuck active tool or cursor.
 
-### X4. Hardware evidence and residency policy
+### X5. Hardware evidence and residency policy
 
 **Goal:** base GPU and multi-resolution decisions on real device behavior.
 

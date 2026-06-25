@@ -548,6 +548,75 @@ def test_vispy_tile_layer_bounds_cover_full_montage_not_viewport_canvas(qt_app):
         view.close()
 
 
+def test_vispy_typed_tiled_single_plane_uses_frame_plan_geometry(qt_app):
+    from arrayscope.core.scheduler import FrameTarget
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+    from arrayscope.display.frame_planner import FramePlanner
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.viewport import ViewportPolicy
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    state = ViewState.from_shape((4, 4)).with_image_axes(0, 1)
+    frame_plan = FramePlanner(internal_tile_shape=(2, 2), max_raster_pixels=4).plan(
+        target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
+        view_state=state,
+        display_shape=(4, 4),
+        backend_capabilities=VISPY_CAPABILITIES,
+    )
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+    payloads = {
+        region.region_id: DisplayTilePayload(
+            region.region_id,
+            region.region_id,
+            image[region.data_slices],
+            image[region.data_slices],
+            ("single", region.region_id),
+        )
+        for region in frame_plan.regions
+    }
+    tile_state = TilePresentationState(payloads, revision=1)
+    tile_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        base_revision=0,
+        target_revision=1,
+        upserts=payloads,
+        active_tiles=frame_plan.active_region_ids,
+        planned_tiles=frame_plan.planned_region_ids,
+        near_tiles=frame_plan.near_region_ids,
+    )
+    view = VisPyImageView2D()
+    try:
+        report = view.setTiledMontagePresentation(
+            geometry=frame_plan.geometry,
+            tile_state=tile_state,
+            tile_delta=tile_delta,
+            histogramPlotData=None,
+            levels=(0.0, 15.0),
+            histogramRange=(0.0, 15.0),
+            viewport_policy=ViewportPolicy.PRESERVE,
+            tile_residency_budget_bytes=1024 * 1024,
+            frame_plan=frame_plan,
+        )
+
+        stats = view._vispy_gpu_montage_layer.last_stats
+        visual = view._vispy_gpu_montage_layer._visuals_by_page[0]
+        assert view.montageDisplayMode() == "vispy_tile_layer"
+        assert sorted(report.presented_tiles) == [0, 1, 2, 3]
+        assert sorted(report.accepted_upserts(tile_delta)) == [0, 1, 2, 3]
+        assert stats.visible_items == 4
+        assert stats.resident_items == 4
+        assert visual.vertex_data.shape == (24, 2)
+        assert (float(visual.vertex_data[:, 0].max()), float(visual.vertex_data[:, 1].max())) == (4.0, 4.0)
+    finally:
+        view.close()
+
+
 def test_vispy_tile_layer_level_preview_updates_uniforms_without_upload(qt_app, monkeypatch):
     import arrayscope.display.vispy_imageview2d as vispy_view
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D

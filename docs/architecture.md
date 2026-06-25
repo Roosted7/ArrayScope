@@ -138,11 +138,15 @@ state/document change
   -> cache lookup + render cost decision
   -> synchronous / chunked / background evaluation
   -> DisplayImage + semantic geometry/levels
+  -> FramePlanner chooses raster or typed tiled storage
   -> presentation planning and commit
   -> committed frame
 ```
 
-The last valid frame remains visible during slow or refused work. The current path is coherent but still separate from montage scheduling.
+The last valid frame remains visible during slow or refused work. Small images may commit as a raster
+frame; large single planes can commit as typed tiled regions through the same backend surface used by
+montages. Evaluation scheduling still has separate normal/montage orchestration, but committed
+presentation semantics no longer depend on pretending that a large plane is a montage.
 
 ### Montage (current)
 
@@ -159,7 +163,7 @@ state/viewport change
 
 Pan/zoom retarget the session rather than recreating document work. Native-resolution persistent tiles are the production baseline. The LOD selector may report a desired factor, but the applied factor remains one until asynchronous materialization and compatible residency satisfy [ADR 0041](decisions/0041-lod-selection-materialization-and-residency.md).
 
-### Target flow
+### Remaining target flow
 
 [ADR 0039](decisions/0039-unified-image-surface-and-deadline-scheduler.md) defines the intended convergence:
 
@@ -175,6 +179,8 @@ ViewIntent
 A small plane, huge plane, one-tile montage, and many-tile montage should share semantic planning.
 One-tile and small-tile cases are optimized inside the tiled engine; backend surfaces may commit them
 through different physical mechanics without changing their meaning.
+The `FramePlanner` and typed tiled surface portions are implemented; the explicit `WorkGraph`/
+`DeadlineScheduler` and backend composition portions remain X2/X3 roadmap work.
 
 ## Non-negotiable invariants
 
@@ -216,7 +222,8 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 ## Known architectural debt
 
 - `VisPyImageView2D` still inherits the complete PyQtGraph `ImageView2D` and therefore keeps two scene/event systems in the same widget.
-- Normal and montage planning/scheduling remain separate.
+- Normal and montage evaluation scheduling remain separate, even though frame planning and committed
+  tiled presentation semantics are now unified.
 - Pointer capture and full drag lifecycle are only partly migrated to shared interaction state.
 - `MontageRenderSession` is still large, but level convergence, tile admission, and stage fan-in now delegate to Qt-free control-plane models.
 - Large renderer/backend modules still combine orchestration and mechanics.

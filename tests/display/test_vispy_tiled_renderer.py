@@ -23,6 +23,7 @@ from arrayscope.display.backends.vispy.tiles import (
     query_gpu_device_limits,
     take_payload_batch,
 )
+from arrayscope.display.tile_layout import TileLayoutRegion
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, TexturePlaneKind
 from arrayscope.display.model.frame import DisplayTilePayload
 
@@ -248,11 +249,11 @@ def test_atlas_reserve_includes_pending_visible_tiles():
 
 
 def test_complex_payload_quad_buffers_use_phase_color_shader_mode():
-    montage = SimpleNamespace(indices=(0,), tile_width=2, tile_height=2, columns=1, rows=1, gap=0)
+    layout = {0: TileLayoutRegion(tile_number=0, source_index=0, x=0, y=0, width=2, height=2)}
     payload = complex_payload(0)
 
     _vertices, _texcoords, modes = _quad_buffers(
-        montage,
+        layout,
         {0: payload},
         {0: (0.0, 0.0, 1.0, 1.0)},
         rgb_already_windowed=False,
@@ -1048,16 +1049,9 @@ def test_speculative_payload_batches_are_bounded_by_items_and_bytes():
 
 
 def test_quad_generation_iterates_active_payloads_not_the_complete_plan():
-    class Indices:
-        def __len__(self):
-            return 100_000
-
-        def __iter__(self):
-            raise AssertionError("complete montage population must not be scanned")
-
-    montage = SimpleNamespace(indices=Indices(), tile_width=2, tile_height=2, columns=100, rows=1000, gap=0)
+    layout = {12_345: TileLayoutRegion(tile_number=12_345, source_index=12_345, x=90, y=246, width=2, height=2)}
     vertices, _texcoords, _modes = _quad_buffers(
-        montage,
+        layout,
         {12_345: payload(12_345, 1.0)},
         {12_345: (0.0, 0.0, 1.0, 1.0)},
         rgb_already_windowed=False,

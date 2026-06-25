@@ -111,6 +111,7 @@ class ImageViewMethodBackendAdapter:
             rgb_already_windowed=presentation.rgb_already_windowed,
             shader_mapping=presentation.shader_mapping,
             tile_residency_budget_bytes=presentation.tile_residency_budget_bytes,
+            frame_plan=presentation.frame_plan,
         )
 
     def set_profile_bounds(self, bounds: tuple[float, float, float, float]) -> None:

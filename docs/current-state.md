@@ -1,14 +1,15 @@
 # Current state
 
-**Snapshot:** ArrayScope v30 rendering-consistency review branch, reviewed on 2026-06-24. The supplied
-v30 histogram/benchmark work is preserved in commit `103ab67`; review fixes are separate commits on
-top.
+**Snapshot:** ArrayScope v31 unified-frame-planner branch, reviewed on 2026-06-25. The v30
+rendering-consistency repairs are preserved, and X1 unified frame planning/tiled surface work is now
+implemented on top.
 
 ArrayScope has a strong semantic/evaluation foundation and a recently extracted rendering control
 plane. The project is not on the wrong overall path; the immediate v30 risk was that recent
 optimization work crossed too many queues, timers, backend contracts, and presentation identities.
 N6 moved presentation-generation, tile-admission, level-convergence, and stage-fan-in state machines
-into Qt-free models so local rendering fixes are easier to reason about.
+into Qt-free models so local rendering fixes are easier to reason about. X1 then put normal images,
+large single planes, and montages behind the same `FramePlanner`/typed tiled presentation contract.
 
 ## Maturity map
 
@@ -20,12 +21,13 @@ into Qt-free models so local rendering fixes are easier to reason about.
 | Region planning, stage cache, cost/memory estimates | Substantial | Strong Qt-free coverage; workload heuristics need field evidence. |
 | Profiles and ROI inspection | Substantial | Shared semantics exist; pointer/drag lifecycle is not fully backend-neutral. |
 | Histogram and window/level | Substantial, under stabilization | Semantic auto bounds and latest-only refinement exist; PyQtGraph binding remains brittle. |
-| Progressive montage | Advanced, stabilizing | Core control-plane state machines are extracted; renderer/session orchestration is still large. |
+| Frame planning and tiled presentation | Implemented foundation | `FramePlanner` covers single images, internally tiled large planes, and montages; real PyQtGraph/VisPy tests cover montage-optional tiled commits. |
+| Progressive montage | Advanced, stabilizing | Core control-plane state machines are extracted; viewport retargets now refresh frame-plan activity; renderer/session orchestration is still large. |
 | PyQtGraph backend | Production fallback | Correctly requires progressive CPU/item convergence for some level changes; large item counts remain costly. |
 | VisPy backend | Experimental | Persistent textures/shader levels are promising; hybrid widget inheritance and real-hardware evidence remain gaps. |
 | LOD | Explicit native-only production policy | Demand selection records desired/applied factor, per-axis texels, policy, and reason; applied factor remains 1 until async compatible residency exists. |
-| Diagnostics/benchmarks | Good internal base, recently corrected | Completion and PyQtGraph level-work counters now reflect convergence/work rather than visibility/image replacement. |
-| Documentation/ADRs | Updated for v30 findings | ADR 0040 and 0041 define level convergence and LOD prerequisites. |
+| Diagnostics/benchmarks | Good internal base, recently corrected | Completion, level-work, and large-normal tiled-surface counters now reflect real committed backend work. |
+| Documentation/ADRs | Updated for v31 findings | X1 is complete; ADR 0039 remains partly implemented because X2 deadline work graph and X3 backend composition remain. |
 
 ## What is working well
 
@@ -47,6 +49,8 @@ Active-plus-latest scheduling preserves useful visible progress. Stage-plan/cand
 tile deltas, stable texture identity, retained residency, dynamic tile priority, and separation of
 cold upload from warm visibility/rebind are sensible optimizations. VisPy level changes can remain
 uniform-only, while PyQtGraph can reuse the same priority/admission queue for CPU redraws.
+Large normal single-plane presentations can now use the typed tiled backend path rather than being
+forced through a composed raster surface.
 
 ### Tests increasingly protect lifecycle contracts
 
@@ -70,6 +74,12 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
 - Montage level convergence now has a single session snapshot for target revision, stale active tiles,
   pending target work, and settled state. Profile and rendering benchmark records expose those fields
   beside backend-specific physical work counters.
+- Normal, internally tiled large-plane, one-tile montage, and multi-tile montage presentations now
+  share `FramePlanner`, `DisplayTiledPresentation`, tile layout, and committed tiled value-source
+  semantics.
+- Backend scene conversion uses cached frame-plan region signatures and current tile-delta active/
+  planned/near sets, avoiding stale viewport-retarget semantics and repeated full region rebuilding
+  when the plan is unchanged.
 
 ## Material risks
 
@@ -77,9 +87,9 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
 
 `window/montage_renderer.py` and `window/montage_session.py` are still substantial orchestration
 modules. N6 removed ownership of level generation, convergence strategy, admission caps, and stage
-fan-in from the session, but the renderer still coordinates Qt timers, committed frames, overlays,
-side panels, diagnostics, and backend commits. Future X1/X2 work should reuse the extracted models
-rather than growing another scheduler.
+fan-in from the session, and X1 unified frame planning/presentation semantics, but the renderer still
+coordinates Qt timers, committed frames, overlays, side panels, diagnostics, and backend commits.
+Future X2/X3/X5 work should reuse the extracted models rather than growing another scheduler.
 
 ### 2. Semantic parity is being confused with mechanical uniformity
 
@@ -116,11 +126,11 @@ texture limits, Wayland behavior, high-DPI pointer mapping, frame pacing, or int
 
 ## Current direction
 
-Do not discard the operation/evaluation core, display models, resource policy, extracted
-control-plane models, or backend mechanics. Do discard the unsafe synchronous LOD route and stop adding
-cross-cutting behavior to the session and renderer. The next architecture steps are unified frame
-planning and backend composition; non-native LOD waits for the ADR 0041 async materialization and
-compatible-residency gates.
+Do not discard the operation/evaluation core, display models, unified frame planner, typed tiled
+surface, resource policy, extracted control-plane models, or backend mechanics. Do discard the unsafe
+synchronous LOD route and stop adding cross-cutting behavior to the session and renderer. The next
+architecture steps are the deadline work graph and backend composition; non-native LOD waits for the
+ADR 0041 async materialization and compatible-residency gates.
 
 The ordered acceptance gates are in the [roadmap](roadmap.md). Full evidence and recommendations are
 in [the v30 rendering-consistency audit](reviews/v30-rendering-consistency-audit.md).

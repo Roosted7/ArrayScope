@@ -3,8 +3,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ViewState
+from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.display.shader_mapping import TexturePlaneKind
@@ -141,4 +144,68 @@ def test_tiled_value_source_reads_exact_semantic_data_not_lod_texture():
     assert value == semantic[3, 2]
     np.testing.assert_array_equal(region, semantic[2:4, 1:3])
     np.testing.assert_array_equal(hist, semantic[2:4, 1:3])
+    assert kind == "committed_tile_payload"
+
+
+def test_tiled_single_plane_commits_without_montage_geometry():
+    view = _FakeImageView()
+    state = ViewState.from_shape((4, 4)).with_image_axes(0, 1)
+    frame_plan = FramePlanner(internal_tile_shape=(2, 2), max_raster_pixels=4).plan(
+        target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
+        view_state=state,
+        display_shape=(4, 4),
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+    )
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+    payloads = {
+        region.region_id: DisplayTilePayload(
+            tile_number=region.region_id,
+            source_index=region.region_id,
+            image=image[region.data_slices],
+            histogram_data=image[region.data_slices],
+            source_id=("single", region.region_id),
+            semantic_data=image[region.data_slices],
+            semantic_histogram_data=image[region.data_slices],
+        )
+        for region in frame_plan.regions
+    }
+    base_state = TilePresentationState()
+    tile_state = TilePresentationState(payloads)
+    tile_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        base_revision=0,
+        upserts=payloads,
+        active_tiles=frame_plan.active_region_ids,
+        planned_tiles=frame_plan.planned_region_ids,
+        near_tiles=frame_plan.near_region_ids,
+    )
+    presentation = DisplayTiledPresentation(
+        geometry=frame_plan.geometry,
+        levels=(0.0, 15.0),
+        histogram_range=(0.0, 15.0),
+        viewport_policy=ViewportPolicy.PRESERVE,
+        tile_state=tile_state,
+        base_tile_state=base_state,
+        tile_delta=tile_delta,
+        tile_residency_budget_bytes=1024,
+        frame_plan=frame_plan,
+    )
+
+    frame = DisplayCommitter(view).commit_tile_layer(
+        presentation,
+        DisplayFrameKey(("doc",), ("single",), 1),
+    )
+
+    assert view.commit["geometry"].montage is None
+    assert frame.scene.layout.value == "single"
+    assert frame.scene.storage.value == "tiled"
+    assert frame.value_source.value_at(SimpleNamespace(tile_number=3, local_y=1, local_x=1)) == 15.0
+    region, hist, kind = frame.value_source.tile_region(SimpleNamespace(region_id=3), (slice(0, 2), slice(0, 2)))
+    np.testing.assert_array_equal(region, image[2:4, 2:4])
+    np.testing.assert_array_equal(hist, image[2:4, 2:4])
     assert kind == "committed_tile_payload"

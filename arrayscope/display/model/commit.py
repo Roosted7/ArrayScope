@@ -54,6 +54,7 @@ class DisplayPayload:
     image: DisplayImage
     geometry: DisplayGeometry
     viewport_policy: ViewportPolicy
+    frame_plan: Any = None
     rgb_already_windowed: bool = False
     histogram_plot_data: np.ndarray | None = None
     montage_dirty_tiles: tuple[int, ...] | None = None
@@ -81,6 +82,7 @@ class DisplayRasterPresentation:
     levels: tuple[float, float]
     histogram_range: tuple[float, float]
     viewport_policy: ViewportPolicy
+    frame_plan: Any = None
     rgb_already_windowed: bool = False
     montage_dirty_tiles: tuple[int, ...] | None = None
     montage_tile_source_ids: dict[int, object] | None = None
@@ -100,6 +102,7 @@ class DisplayTiledPresentation:
     base_tile_state: TilePresentationState
     tile_delta: TilePresentationDelta
     tile_residency_budget_bytes: int
+    frame_plan: Any = None
     histogram_plot_data: np.ndarray | None = None
     rgb_already_windowed: bool = False
     shader_mapping: ShaderMapping | None = None

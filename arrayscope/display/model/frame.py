@@ -360,7 +360,14 @@ class TiledValueSource(FrameValueSource):
     def tile_region(self, tile, region: tuple[slice, slice]):
         if tile is None:
             return None
-        payload = self.payloads.get(int(tile.montage_index))
+        tile_number = getattr(tile, "montage_index", None)
+        if tile_number is None:
+            tile_number = getattr(tile, "region_id", None)
+        if tile_number is None:
+            tile_number = getattr(tile, "tile_number", None)
+        if tile_number is None:
+            return None
+        payload = self.payloads.get(int(tile_number))
         if payload is None:
             return None
         y_slice, x_slice = region

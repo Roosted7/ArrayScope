@@ -16,7 +16,10 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
+from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ViewState
+from arrayscope.display.backend_contract import image_view_backend_capabilities
+from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_REASON_NATIVE_SCALE
@@ -110,6 +113,10 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
         measure_presented = os.environ.get("ARRAYSCOPE_BENCH_PRESENTED") == "1"
     results = []
     scenarios = (
+        _benchmark_normal_small_initial,
+        _benchmark_normal_large_tiled_initial,
+        _benchmark_one_tile_montage_initial,
+        _benchmark_multi_tile_montage_initial,
         _benchmark_scalar_level_preview,
         _benchmark_large_histogram_plot_refresh,
         _benchmark_complex_tile_level_preview,
@@ -186,6 +193,106 @@ def _benchmark_scalar_level_preview(view, *, measure_presented: bool) -> Renderi
         measure_presented=measure_presented,
     )
     return _result(view, "scalar_level_preview", measurement)
+
+
+def _benchmark_normal_small_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    data = np.linspace(0.0, 1.0, 128 * 128, dtype=np.float32).reshape(128, 128)
+    state = ViewState.from_shape(data.shape).with_image_axes(0, 1)
+    FramePlanner().plan(
+        target=FrameTarget(("normal-small", data.shape), None, None, "exact-visible"),
+        view_state=state,
+        display_shape=data.shape,
+        backend_capabilities=image_view_backend_capabilities(view),
+    )
+    measurement = _measure_action(
+        view,
+        lambda: view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0)),
+        measure_presented=measure_presented,
+    )
+    return _result(view, "normal_small_initial", measurement)
+
+
+def _benchmark_normal_large_tiled_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    state = ViewState.from_shape((1024, 1024)).with_image_axes(0, 1)
+    planner = FramePlanner(internal_tile_shape=(256, 256), max_raster_pixels=256 * 256)
+    plan = planner.plan(
+        target=FrameTarget(("normal-large", state.shape), None, None, "exact-visible"),
+        view_state=state,
+        display_shape=state.shape,
+        backend_capabilities=image_view_backend_capabilities(view),
+    )
+    tile_state = _single_plane_tile_state(plan)
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=tile_state.payloads,
+        active_tiles=plan.active_region_ids,
+        planned_tiles=plan.planned_region_ids,
+        near_tiles=plan.near_region_ids,
+        force_refresh=True,
+    )
+    measurement = _measure_action(
+        view,
+        lambda: view.setTiledMontagePresentation(
+            geometry=plan.geometry,
+            tile_state=tile_state,
+            tile_delta=delta,
+            histogramPlotData=None,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=512 * 1024 * 1024,
+            frame_plan=plan,
+        ),
+        measure_presented=measure_presented,
+    )
+    return _result(view, "normal_large_tiled_initial", measurement)
+
+
+def _benchmark_one_tile_montage_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(128, 128), count=1, columns=1)
+    measurement = _measure_action(
+        view,
+        lambda: view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            montage_dirty_tiles=None,
+            montage_tile_source_ids=sources,
+            montage_tile_payloads=payloads,
+        ),
+        measure_presented=measure_presented,
+    )
+    return _result(view, "one_tile_montage_initial", measurement)
+
+
+def _benchmark_multi_tile_montage_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=16, columns=4)
+    measurement = _measure_action(
+        view,
+        lambda: view.setMontageTileLayerPresentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            rgb_already_windowed=False,
+            montage_dirty_tiles=None,
+            montage_tile_source_ids=sources,
+            montage_tile_payloads=payloads,
+        ),
+        measure_presented=measure_presented,
+    )
+    return _result(view, "multi_tile_montage_initial", measurement)
 
 
 def _benchmark_large_histogram_plot_refresh(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
@@ -590,6 +697,36 @@ def _direct_tile_layer_inputs(*, tile_shape=(32, 32), count=2, columns=2):
         sources[index] = source_id
     placeholder = np.broadcast_to(np.zeros((1, 1, 3), dtype=np.uint8), (height, width, 3))
     return placeholder, None, geometry, sources, payloads
+
+
+def _single_plane_tile_state(frame_plan) -> TilePresentationState:
+    payloads: dict[int, DisplayTilePayload] = {}
+    height, width = tuple(int(value) for value in frame_plan.geometry.display_shape[:2])
+    denom = max(1, height + width - 2)
+    for region in frame_plan.regions:
+        y_slice, x_slice = region.data_slices
+        y0 = int(0 if y_slice.start is None else y_slice.start)
+        y1 = int(height if y_slice.stop is None else y_slice.stop)
+        x0 = int(0 if x_slice.start is None else x_slice.start)
+        x1 = int(width if x_slice.stop is None else x_slice.stop)
+        y = np.arange(y0, y1, dtype=np.float32)[:, None]
+        x = np.arange(x0, x1, dtype=np.float32)[None, :]
+        histogram = ((x + y) / float(denom)).astype(np.float32)
+        image = np.empty((max(0, y1 - y0), max(0, x1 - x0), 3), dtype=np.uint8)
+        image[..., 0] = np.clip(255.0 * histogram, 0, 255).astype(np.uint8)
+        image[..., 1] = np.clip(255.0 * x / max(1, width - 1), 0, 255).astype(np.uint8)
+        image[..., 2] = np.clip(255.0 * y / max(1, height - 1), 0, 255).astype(np.uint8)
+        payloads[int(region.region_id)] = DisplayTilePayload(
+            int(region.region_id),
+            int(region.region_id),
+            image,
+            histogram,
+            ("normal_tile", frame_plan.semantic_key, int(region.region_id)),
+            semantic_data=histogram,
+            semantic_histogram_data=histogram,
+            source_shape=histogram.shape,
+        )
+    return TilePresentationState(payloads)
 
 
 def _result(

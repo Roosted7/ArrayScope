@@ -106,8 +106,6 @@ class DisplayCommitter:
 
     def _validate_presentation(self, presentation: DisplayPresentation) -> None:
         if isinstance(presentation, DisplayTiledPresentation):
-            if getattr(presentation.geometry, "montage", None) is None:
-                raise ValueError("tiled display presentation requires montage geometry")
             for tile_number, payload in dict(presentation.tile_state.payloads).items():
                 if int(tile_number) != int(payload.tile_number):
                     raise ValueError("tile payload key must match tile_number")

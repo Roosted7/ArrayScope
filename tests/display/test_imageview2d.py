@@ -512,6 +512,74 @@ def test_tile_layer_direct_payloads_avoid_canvas_slicing(qt_app):
     view.close()
 
 
+def test_typed_tiled_single_plane_uses_real_pyqtgraph_items(qt_app):
+    from arrayscope.core.scheduler import FrameTarget
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
+    from arrayscope.display.frame_planner import FramePlanner
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.viewport import ViewportPolicy
+
+    state = ViewState.from_shape((4, 4)).with_image_axes(0, 1)
+    frame_plan = FramePlanner(internal_tile_shape=(2, 2), max_raster_pixels=4).plan(
+        target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
+        view_state=state,
+        display_shape=(4, 4),
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+    )
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+    payloads = {
+        region.region_id: DisplayTilePayload(
+            region.region_id,
+            region.region_id,
+            image[region.data_slices],
+            image[region.data_slices],
+            ("single", region.region_id),
+        )
+        for region in frame_plan.regions
+    }
+    tile_state = TilePresentationState(payloads, revision=1)
+    tile_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        base_revision=0,
+        target_revision=1,
+        upserts=payloads,
+        active_tiles=frame_plan.active_region_ids,
+        planned_tiles=frame_plan.planned_region_ids,
+        near_tiles=frame_plan.near_region_ids,
+    )
+    view = ImageView2D()
+    try:
+        report = view.setTiledMontagePresentation(
+            geometry=frame_plan.geometry,
+            tile_state=tile_state,
+            tile_delta=tile_delta,
+            histogramPlotData=None,
+            levels=(0.0, 15.0),
+            histogramRange=(0.0, 15.0),
+            viewport_policy=ViewportPolicy.PRESERVE,
+            frame_plan=frame_plan,
+        )
+
+        assert view.montageDisplayMode() == "tile_layer"
+        assert sorted(report.presented_tiles) == [0, 1, 2, 3]
+        assert sorted(report.accepted_upserts(tile_delta)) == [0, 1, 2, 3]
+        states = view._montage_tile_layer.states
+        assert set(states) == {0, 1, 2, 3}
+        assert states[0].item.pos().x() == 0.0
+        assert states[1].item.pos().x() == 2.0
+        assert states[2].item.pos().y() == 2.0
+        np.testing.assert_array_equal(states[3].item.image, image[2:4, 2:4])
+    finally:
+        view.close()
+
+
 def test_tiled_presentation_does_not_budget_ready_payload_visibility(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry

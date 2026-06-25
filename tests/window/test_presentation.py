@@ -1,6 +1,9 @@
 import numpy as np
 
+from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ViewState
+from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
+from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping
@@ -76,6 +79,26 @@ def test_normal_relative_level_reuse_uses_committed_frame():
 
     assert decision.levels == (225.0, 275.0)
     assert decision.histogram_range == (200.0, 300.0)
+
+
+def test_normal_presentation_preserves_frame_plan_semantics():
+    payload = _payload(np.zeros((4, 4), dtype=np.float32))
+    frame_plan = FramePlanner(internal_tile_shape=(2, 2), max_raster_pixels=4).plan(
+        target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
+        view_state=payload.geometry.view_state.with_image_axes(0, 1),
+        display_shape=(4, 4),
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+    )
+    payload = DisplayPayload(
+        image=payload.image,
+        geometry=DisplayGeometry(frame_plan.geometry.view_state, (4, 4)),
+        viewport_policy=payload.viewport_policy,
+        frame_plan=frame_plan,
+    )
+
+    decision = decide_presentation(_input(payload))
+
+    assert decision.display_presentation.frame_plan is frame_plan
 
 
 def test_normal_absolute_level_reuse_uses_committed_frame():

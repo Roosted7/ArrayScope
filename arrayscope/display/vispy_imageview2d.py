@@ -471,8 +471,9 @@ class VisPyImageView2D(ImageView2D):
         shader_mapping=None,
         tile_delta: "TilePresentationDelta | None" = None,
         tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
     ) -> None:
-        if geometry is None or getattr(geometry, "montage", None) is None:
+        if geometry is None or (getattr(geometry, "montage", None) is None and frame_plan is None):
             raise ValueError("tile-layer presentation requires montage geometry")
         if montage_tile_payloads is None:
             raise ValueError("VisPy montage presentation requires direct tile payloads; canvas fallback was removed")
@@ -491,6 +492,7 @@ class VisPyImageView2D(ImageView2D):
             shader_mapping=shader_mapping,
             tile_delta=tile_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes,
+            frame_plan=frame_plan,
         )
 
     def _apply_vispy_tile_layer_presentation(
@@ -510,6 +512,7 @@ class VisPyImageView2D(ImageView2D):
         shader_mapping=None,
         tile_delta: "TilePresentationDelta | None" = None,
         tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
     ) -> None:
         self._start_upload_timing("vispy_tile_layer")
         applying = self._applying_presentation
@@ -528,6 +531,7 @@ class VisPyImageView2D(ImageView2D):
             structure_key = _tiled_structure_key(
                 geometry,
                 rgb_already_windowed=rgb_already_windowed,
+                frame_plan=frame_plan,
             )
             histogram_key = _tiled_histogram_key(histogramData, histogramPlotData, histogramRange)
             viewport_key = (
@@ -618,6 +622,7 @@ class VisPyImageView2D(ImageView2D):
                     tile_residency_budget_bytes=tile_residency_budget_bytes,
                     force_levels=bool(data_unchanged and levels_changed),
                     force_mapping=bool(data_unchanged and mapping_changed),
+                    frame_plan=frame_plan,
                 )
             stats_presented_tiles = getattr(stats, "presented_tiles", None)
             stats_presented_set = (
@@ -684,6 +689,7 @@ class VisPyImageView2D(ImageView2D):
         rgb_already_windowed: bool = False,
         shader_mapping=None,
         tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
     ) -> None:
         tile_payloads = tile_state.active_payloads(tile_delta)
         warm_payloads = {
@@ -708,6 +714,7 @@ class VisPyImageView2D(ImageView2D):
             shader_mapping=shader_mapping,
             tile_delta=tile_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes,
+            frame_plan=frame_plan,
         )
         if not (getattr(tile_delta, "upserts", None) or getattr(tile_delta, "removals", None)):
             self._schedule_vispy_warm_tile_residency(
@@ -1567,10 +1574,11 @@ class VisPyImageView2D(ImageView2D):
         tile_residency_budget_bytes: int = 0,
         force_levels: bool = False,
         force_mapping: bool = False,
+        frame_plan=None,
     ):
         from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
-        if geometry is None or getattr(geometry, "montage", None) is None:
+        if geometry is None or (getattr(geometry, "montage", None) is None and frame_plan is None):
             return TileLayerUpdateStats()
         if tile_payloads is not None:
             return self._update_vispy_direct_tile_layer(
@@ -1585,6 +1593,7 @@ class VisPyImageView2D(ImageView2D):
                 tile_residency_budget_bytes=tile_residency_budget_bytes,
                 force_levels=force_levels,
                 force_mapping=force_mapping,
+                frame_plan=frame_plan,
             )
         raise ValueError("VisPy montage presentation requires direct tile payloads; canvas fallback was removed")
 
@@ -1602,11 +1611,11 @@ class VisPyImageView2D(ImageView2D):
         tile_residency_budget_bytes: int = 0,
         force_levels: bool = False,
         force_mapping: bool = False,
+        frame_plan=None,
     ):
         from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
 
-        montage = geometry.montage
-        if montage is None:
+        if geometry is None or (getattr(geometry, "montage", None) is None and frame_plan is None):
             return TileLayerUpdateStats()
         self._last_vispy_geometry = geometry
         if tile_delta is not None:
@@ -1644,6 +1653,7 @@ class VisPyImageView2D(ImageView2D):
                     shader_mapping=shader_mapping,
                     tile_delta=tile_delta,
                     tile_residency_budget_bytes=tile_residency_budget_bytes,
+                    frame_plan=frame_plan,
                 )
             except Exception as exc:
                 from arrayscope.display.backends.vispy.tiles import AtlasCapacityError, GpuMontageLayerStats
@@ -1825,7 +1835,7 @@ def _shader_mapping_key(mapping):
     return None if mapping is None else getattr(mapping, "identity_key", mapping)
 
 
-def _tiled_structure_key(geometry, *, rgb_already_windowed):
+def _tiled_structure_key(geometry, *, rgb_already_windowed, frame_plan=None):
     montage = getattr(geometry, "montage", None)
     if montage is None:
         montage_key = None
@@ -1843,6 +1853,13 @@ def _tiled_structure_key(geometry, *, rgb_already_windowed):
     return (
         tuple(int(value) for value in tuple(getattr(geometry, "display_shape", ()))[:2]),
         montage_key,
+        tuple(
+            (
+                int(getattr(region, "region_id")),
+                tuple(float(value) for value in getattr(region, "bounds")),
+            )
+            for region in tuple(getattr(frame_plan, "regions", ()) or ())
+        ),
         bool(rgb_already_windowed),
     )
 

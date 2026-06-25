@@ -535,6 +535,7 @@ class ImageView2D(QtWidgets.QWidget):
         montage_tile_source_ids: dict[int, object] | None = None,
         montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
         tile_delta=None,
+        frame_plan=None,
     ) -> None:
         if geometry is None or getattr(geometry, "montage", None) is None:
             raise ValueError("tile-layer presentation requires montage geometry")
@@ -551,6 +552,7 @@ class ImageView2D(QtWidgets.QWidget):
             montage_tile_source_ids=montage_tile_source_ids,
             montage_tile_payloads=montage_tile_payloads,
             tile_delta=tile_delta,
+            frame_plan=frame_plan,
         )
 
     def _apply_tile_layer_presentation(
@@ -568,6 +570,7 @@ class ImageView2D(QtWidgets.QWidget):
         montage_tile_source_ids: dict[int, object] | None = None,
         montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
         tile_delta=None,
+        frame_plan=None,
     ) -> None:
         self._start_upload_timing("tile_layer")
         applying = self._applying_presentation
@@ -595,6 +598,7 @@ class ImageView2D(QtWidgets.QWidget):
                 montage_tile_source_ids=montage_tile_source_ids,
                 montage_tile_payloads=montage_tile_payloads,
                 tile_delta=tile_delta,
+                frame_plan=frame_plan,
             )
             self._record_tile_layer_stats(stats)
             histogram_key = self._tile_layer_histogram_key(
@@ -657,6 +661,7 @@ class ImageView2D(QtWidgets.QWidget):
         rgb_already_windowed: bool = False,
         shader_mapping=None,
         tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
     ) -> None:
         """Commit a first-class tiled presentation through this backend.
 
@@ -683,10 +688,11 @@ class ImageView2D(QtWidgets.QWidget):
             montage_tile_source_ids={key: payload.source_id for key, payload in tile_payloads.items()},
             montage_tile_payloads=tile_payloads,
             tile_delta=tile_delta,
+            frame_plan=frame_plan,
         )
         return _tile_commit_report(tile_payloads, tile_delta, stats)
 
-    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None) -> TileLayerUpdateStats:
+    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None, frame_plan=None) -> TileLayerUpdateStats:
         if self._montage_tile_layer is None:
             return TileLayerUpdateStats()
         return self._montage_tile_layer.update_presentation(
@@ -699,6 +705,7 @@ class ImageView2D(QtWidgets.QWidget):
             tile_source_ids=montage_tile_source_ids,
             tile_payloads=montage_tile_payloads,
             tile_delta=tile_delta,
+            frame_plan=frame_plan,
         )
 
     def _record_tile_layer_stats(self, stats: TileLayerUpdateStats) -> None:
