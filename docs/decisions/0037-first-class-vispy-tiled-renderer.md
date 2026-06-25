@@ -2,9 +2,11 @@
 
 ## Status
 
-Accepted and extended. VisPy is the preferred backend for sustained large tiled rendering, pending
-small-view latency and platform validation. The first-class tiled renderer now includes raw
-scalar/complex VisPy shader mapping and CPU-side tiled LOD payloads. Backend ownership is still refined by
+Accepted and extended, with its original CPU-side LOD payload plan superseded by
+[0041 — Separate LOD selection, materialization, and residency](0041-lod-selection-materialization-and-residency.md).
+VisPy is the preferred backend for sustained large tiled rendering, pending small-view latency and
+platform validation. The first-class tiled renderer now includes raw scalar/complex VisPy shader
+mapping and native-resolution persistent tile residency. Backend ownership is still refined by
 [0038 — Compose rendering backends behind shared presentation semantics](0038-render-backend-composition.md);
 that composition cleanup remains separate work.
 
@@ -46,9 +48,9 @@ VisPy tiled montage rendering uses `arrayscope.display.backends.vispy.tiles`:
 - raw complex phase-color tiles upload complex texture planes and compute magnitude, phase/LUT color,
   log/symlog scale, and window intensity in the VisPy shader;
 - complex display should move toward shader-side mapping instead of CPU RGB re-windowing;
-- zoomed-out tiled montages can upload CPU-reduced LOD texture planes with gutter texels for
-  linear-filtered seams, while exact semantic data remains owned by the tile payload for hover,
-  ROI/profile, export, histogram, and level decisions;
+- zoomed-out tiled montages currently keep native-resolution payloads resident and report desired
+  versus applied LOD separately; non-native payloads require the asynchronous materialization and
+  compatible residency design in ADR 0041;
 - warm residency is separate lower-priority work and must yield to visible materialization,
   visible residency, and admitted visible commit fan-in;
 - PyQtGraph remains the interaction, histogram, ROI, profile, HUD, and context-menu owner.
@@ -73,9 +75,10 @@ shader-capable path receives raw scalar or complex texture planes. Histogram and
 semantic CPU samples of the scalar field the shader windows, not rendered RGB output and not
 downsampled LOD textures.
 
-Tile LOD payload materialization is cached across compatible sessions by semantic source identity.
-Panning should promote resident/previously materialized payloads immediately instead of showing them
-as missing while the evaluator catches up.
+Native payload wrappers and residency are cached across compatible sessions by semantic source
+identity. Panning should promote resident/previously materialized native payloads immediately instead
+of showing them as missing while the evaluator catches up. Non-native LOD materialization and
+adjacent-level retention are future work governed by ADR 0041.
 
 The VisPy camera follows the PyQtGraph `ViewBox` through a coalesced range/flip sync so pan/zoom does
 not synchronously push camera state for every range-change signal.
@@ -93,7 +96,8 @@ not synchronously push camera state for every range-change signal.
 - Dirty direct tiled commits update only dirty payload counters.
 - Level/window/LUT-only commits update uniforms without changing texture residency identity.
 - Raw complex tiled payloads allocate complex atlas storage and render phase color, not grayscale.
-- LOD texture payloads preserve full-resolution geometry and exact semantic value sources.
+- Native-only LOD diagnostics report desired and applied factors separately, and payloads preserve
+  full-resolution geometry and exact semantic value sources.
 - Warm residency is budgeted independently and yields to visible residency under pressure.
 - Panning/reindexing reuses resident semantic sources and does not schedule redundant tile renders.
 - Benchmark scenarios for large tiled initial commit, clean flush, dirty tile commit, level preview,
@@ -103,4 +107,5 @@ not synchronously push camera state for every range-change signal.
 
 - Production perf gates on target GPU/compositor combinations after collecting stable baselines.
 - GPU mipmap generation remains an optional filtering refinement where the active VisPy/OpenGL stack
-  supports it; CPU/data-side LOD remains the authoritative uploaded-pixel selection.
+  supports it. CPU/data-side non-native LOD is not a production path until ADR 0041's materialization,
+  compatible-residency, transition, and evidence gates are met.

@@ -99,6 +99,9 @@ class MontageRuntimeDiagnostics:
     show_loading_overlays: bool = False
     tile_lod_desired_factor: int = 1
     tile_lod_applied_factor: int = 1
+    tile_lod_desired_factor_xy: tuple[int, int] = (1, 1)
+    tile_lod_applied_factor_xy: tuple[int, int] = (1, 1)
+    tile_lod_source_texels_per_pixel_xy: tuple[float, float] = (0.0, 0.0)
     tile_lod_policy: str = "native-only"
     tile_lod_reason: str = ""
     tile_compute_cache_hits: int = 0
@@ -617,7 +620,11 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             "LOD policy: "
             f"{snapshot.montage.tile_lod_policy} "
             f"desired={snapshot.montage.tile_lod_desired_factor} "
-            f"applied={snapshot.montage.tile_lod_applied_factor}"
+            f"desired_xy={snapshot.montage.tile_lod_desired_factor_xy} "
+            f"applied={snapshot.montage.tile_lod_applied_factor} "
+            f"applied_xy={snapshot.montage.tile_lod_applied_factor_xy} "
+            f"source_texels_per_pixel_xy=({snapshot.montage.tile_lod_source_texels_per_pixel_xy[0]:.2f}, "
+            f"{snapshot.montage.tile_lod_source_texels_per_pixel_xy[1]:.2f})"
         ),
         f"LOD policy reason: {snapshot.montage.tile_lod_reason or 'n/a'}",
         (

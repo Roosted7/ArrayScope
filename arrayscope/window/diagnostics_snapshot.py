@@ -50,6 +50,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         histogram = getattr(canvas, "histogram_data", None)
         if histogram is not None:
             canvas_bytes += int(getattr(histogram, "nbytes", 0))
+    lod_decision = None if session is None else getattr(session, "lod_policy_decision", None)
+    lod_demand = None if lod_decision is None else getattr(lod_decision, "demand", None)
     montage = MontageRuntimeDiagnostics(
         active=session is not None,
         session_id=None if session is None else int(session.session_id),
@@ -85,10 +87,19 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         backend_fallback_available="canvas",
         backend_warning=str(getattr(window, "_last_montage_backend_warning", "") or ""),
         show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
-        tile_lod_desired_factor=1 if session is None else int(getattr(session, "desired_tile_lod_factor", 1) or 1),
-        tile_lod_applied_factor=1 if session is None else int(getattr(session, "tile_lod_factor", 1) or 1),
-        tile_lod_policy="native-only" if session is None else str(getattr(session, "tile_lod_policy", "native-only") or "native-only"),
-        tile_lod_reason="" if session is None else str(getattr(session, "tile_lod_reason", "") or ""),
+        tile_lod_desired_factor=1 if lod_demand is None else int(getattr(lod_demand, "desired_factor", 1) or 1),
+        tile_lod_applied_factor=1 if lod_decision is None else int(getattr(lod_decision, "applied_factor", 1) or 1),
+        tile_lod_desired_factor_xy=(1, 1)
+        if lod_demand is None
+        else tuple(int(value) for value in getattr(lod_demand, "desired_factor_xy", (1, 1))),
+        tile_lod_applied_factor_xy=(1, 1)
+        if lod_decision is None
+        else tuple(int(value) for value in getattr(lod_decision, "applied_factor_xy", (1, 1))),
+        tile_lod_source_texels_per_pixel_xy=(0.0, 0.0)
+        if lod_demand is None
+        else tuple(float(value) for value in getattr(lod_demand, "source_texels_per_pixel_xy", (0.0, 0.0))),
+        tile_lod_policy="native-only" if lod_decision is None else str(getattr(lod_decision, "policy", "native-only") or "native-only"),
+        tile_lod_reason="" if lod_decision is None else str(getattr(lod_decision, "reason", "") or ""),
         tile_compute_cache_hits=0 if session is None else int(getattr(session, "tile_compute_cache_hits", 0) or 0),
         tile_compute_stage_backed=0 if session is None else int(getattr(session, "tile_compute_stage_backed", 0) or 0),
         tile_compute_direct=0 if session is None else int(getattr(session, "tile_compute_direct", 0) or 0),

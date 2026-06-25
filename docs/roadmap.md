@@ -115,6 +115,8 @@ Completion notes:
 
 ### N7. Make native-only LOD an explicit, tested production policy
 
+**Status:** Done!
+
 **Goal:** eliminate misleading “selected but not applied” behavior while preparing a safe
 multi-resolution implementation.
 
@@ -135,6 +137,19 @@ Exit gate for this item (not for enabling LOD):
 - an implementation plan and benchmark matrix satisfy ADR 0041 before multi-resolution coding starts.
 
 See [ADR 0041](decisions/0041-lod-selection-materialization-and-residency.md).
+
+Completion notes:
+
+- `arrayscope.display.lod` now exposes Qt-free LOD demand and native-only policy decisions with
+  desired/applied factors, per-axis source texels, policy, and reason.
+- `MontageRenderSession` stores one canonical `lod_policy_decision`; payloads remain native
+  `LodInfo(level=0, factor=1, gutter=0)` until async compatible residency exists.
+- The synchronous CPU pyramid/gutter construction entrypoints were removed from production code and
+  guarded by architecture tests.
+- Runtime diagnostics, profile JSONL, benchmark records, session tests, and LOD model tests cover the
+  native-only contract.
+- The future multi-resolution implementation and benchmark matrix are recorded in
+  [the LOD proposal](proposals/lod-multires-implementation-plan.md).
 
 ## Next — converge the architecture after the control plane is stable
 

@@ -215,6 +215,28 @@ def test_imageview2d_display_ownership_helpers_are_split_out():
     assert "class ProfileMarkerOwner" in (ROOT / "arrayscope" / "display" / "profile_marker.py").read_text()
 
 
+def test_production_lod_has_no_synchronous_pyramid_entrypoints():
+    forbidden = {
+        "build_tile_lod_pyramid",
+        "apply_tile_gutter",
+        "lod_info_for_texture",
+        "_box_reduce_2x2",
+        "_reduction_dtype",
+    }
+    offenders = []
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        rel = path.relative_to(ROOT)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(rel))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in forbidden:
+                offenders.append(f"{rel}:{node.lineno}:def {node.name}")
+            if isinstance(node, ast.ImportFrom) and node.module == "arrayscope.display.lod":
+                for alias in node.names:
+                    if alias.name in forbidden:
+                        offenders.append(f"{rel}:{node.lineno}:import {alias.name}")
+    assert offenders == []
+
+
 def test_image_view_graphics_items_are_added_only_by_layer_owner():
     offenders = []
     allowed = {Path("arrayscope/display/layers.py")}

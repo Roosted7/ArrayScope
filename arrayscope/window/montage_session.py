@@ -8,7 +8,7 @@ from time import monotonic
 
 import numpy as np
 
-from arrayscope.display.lod import LodInfo, select_lod_factor
+from arrayscope.display.lod import LodInfo, LodPolicyDecision, native_lod_policy
 from arrayscope.display.montage import (
     MontagePlan,
     MontageTile,
@@ -28,13 +28,6 @@ from arrayscope.display.model.presentation_generation import (
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
-
-
-LOD_POLICY_NATIVE_ONLY = "native-only"
-LOD_REASON_NATIVE_SCALE = "native-resolution texture is appropriate at the current scale"
-LOD_REASON_ASYNC_RESIDENCY_REQUIRED = (
-    "desired LOD is deferred until asynchronous multi-resolution residency can retain adjacent levels"
-)
 
 
 def _shader_mapping_key(mapping):
@@ -164,10 +157,9 @@ class MontageRenderSession:
     priority_focus: tuple[float, float] | None = None
     priority_retargeted_tiles: int = 0
     priority_fairness_pops: int = 0
-    tile_lod_factor: int = 1
-    desired_tile_lod_factor: int = 1
-    tile_lod_policy: str = LOD_POLICY_NATIVE_ONLY
-    tile_lod_reason: str = LOD_REASON_NATIVE_SCALE
+    lod_policy_decision: LodPolicyDecision = field(
+        default_factory=lambda: native_lod_policy(None, (1, 1), (1, 1))
+    )
     _last_active_tiles: tuple[int, ...] = ()
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
@@ -204,6 +196,7 @@ class MontageRenderSession:
         } or {int(item.tile.source_index) for item in self.pending_refined_level_tiles}
         self.pending_completed_tiles = deque(self.pending_completed_tiles)
         self.visible_tile_numbers = frozenset(int(tile.montage_index) for tile in tuple(self.visible_tiles or ()))
+        self._selected_lod_factor()
         self.update_level_presentation_scope()
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)
@@ -550,25 +543,14 @@ class MontageRenderSession:
         )
 
     def _selected_lod_factor(self) -> int:
-        desired = select_lod_factor(
+        previous = self.lod_policy_decision.demand.desired_factor
+        self.lod_policy_decision = native_lod_policy(
             self.view_range,
             self.viewport_shape,
             self.plan.tile_shape,
-            previous_factor=self.desired_tile_lod_factor,
+            previous_factor=previous,
         )
-        self.desired_tile_lod_factor = int(desired)
-        # CPU pyramid construction used to happen synchronously from
-        # snapshot_display_tile_payloads(), which is a UI commit path.  Until a
-        # worker/GPU LOD cache can retain adjacent levels, keep the exact texture
-        # resident and let hardware filtering handle zoomed-out sampling.
-        self.tile_lod_policy = LOD_POLICY_NATIVE_ONLY
-        self.tile_lod_reason = (
-            LOD_REASON_ASYNC_RESIDENCY_REQUIRED
-            if int(desired) > 1
-            else LOD_REASON_NATIVE_SCALE
-        )
-        self.tile_lod_factor = 1
-        return 1
+        return int(self.lod_policy_decision.applied_factor)
 
     def _planned_lod_info(self, rendered: RenderedTile, *, factor: int) -> LodInfo:
         del factor

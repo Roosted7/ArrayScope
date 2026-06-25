@@ -64,7 +64,7 @@ Status terminology:
 | [0032](0032-semantic-montage-histograms.md) | Semantic levels/histograms | Implemented contract. |
 | [0033](0033-responsive-montage-display-upload.md) | Responsive upload | Partly implemented; callback budgets remain active work. |
 | [0036](0036-vispy-rendering-backend-experiment.md) | VisPy experiment | Experiment completed; led to 0037/0038. |
-| [0037](0037-first-class-vispy-tiled-renderer.md) | VisPy tiled renderer | Preferred large-tiled target; validation ongoing. |
+| [0037](0037-first-class-vispy-tiled-renderer.md) | VisPy tiled renderer | Preferred large-tiled target; CPU-side LOD portions superseded by 0041. |
 | [0038](0038-render-backend-composition.md) | Backend composition | Partly implemented via adapters; inheritance remains. |
 | [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Current target, partly implemented. |
 | [0040](0040-backend-aware-presentation-convergence.md) | Backend-aware presentation convergence | Implemented for the montage presentation path; broader unified surface work remains X1/X2. |

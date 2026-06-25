@@ -1,10 +1,18 @@
-"""CPU-side tile LOD helpers for montage rendering."""
+"""Tile LOD demand and native-only production policy."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
+
+
+LOD_POLICY_NATIVE_ONLY = "native-only"
+LOD_REASON_NATIVE_SCALE = "native-resolution texture is appropriate at the current scale"
+LOD_REASON_ASYNC_RESIDENCY_REQUIRED = (
+    "desired LOD is deferred until asynchronous multi-resolution residency can retain adjacent levels"
+)
+LOD_REASON_INVALID_VIEW = "native resolution selected because viewport LOD demand could not be measured"
 
 
 @dataclass(frozen=True)
@@ -24,7 +32,47 @@ class LodInfo:
         object.__setattr__(self, "gutter", max(0, int(self.gutter)))
 
 
-def select_lod_factor(
+@dataclass(frozen=True)
+class LodDemand:
+    desired_level: int
+    desired_factor: int
+    desired_factor_xy: tuple[int, int]
+    acceptable_levels: tuple[int, ...]
+    source_texels_per_pixel_xy: tuple[float, float]
+    reason: str
+
+    def __post_init__(self) -> None:
+        level = max(0, int(self.desired_level))
+        factor = max(1, int(self.desired_factor))
+        factor_xy = _factor2(self.desired_factor_xy)
+        texels_xy = _float2(self.source_texels_per_pixel_xy)
+        levels = tuple(sorted({max(0, int(value)) for value in tuple(self.acceptable_levels or (level,))}))
+        object.__setattr__(self, "desired_level", level)
+        object.__setattr__(self, "desired_factor", factor)
+        object.__setattr__(self, "desired_factor_xy", factor_xy)
+        object.__setattr__(self, "acceptable_levels", levels or (level,))
+        object.__setattr__(self, "source_texels_per_pixel_xy", texels_xy)
+        object.__setattr__(self, "reason", str(self.reason))
+
+
+@dataclass(frozen=True)
+class LodPolicyDecision:
+    demand: LodDemand
+    applied_level: int = 0
+    applied_factor: int = 1
+    applied_factor_xy: tuple[int, int] = (1, 1)
+    policy: str = LOD_POLICY_NATIVE_ONLY
+    reason: str = LOD_REASON_NATIVE_SCALE
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "applied_level", max(0, int(self.applied_level)))
+        object.__setattr__(self, "applied_factor", max(1, int(self.applied_factor)))
+        object.__setattr__(self, "applied_factor_xy", _factor2(self.applied_factor_xy))
+        object.__setattr__(self, "policy", str(self.policy))
+        object.__setattr__(self, "reason", str(self.reason))
+
+
+def select_lod_demand(
     view_range,
     viewport_shape: tuple[int, int],
     tile_shape: tuple[int, int],
@@ -32,65 +80,88 @@ def select_lod_factor(
     target_max: float = 2.0,
     previous_factor: int | None = None,
     hysteresis: float = 0.15,
-) -> int:
-    """Choose a power-of-two source decimation factor for the current view."""
+) -> LodDemand:
+    """Return desired display quality without promising materialization."""
 
     del tile_shape
+    native = LodDemand(
+        desired_level=0,
+        desired_factor=1,
+        desired_factor_xy=(1, 1),
+        acceptable_levels=(0,),
+        source_texels_per_pixel_xy=(0.0, 0.0),
+        reason=LOD_REASON_INVALID_VIEW,
+    )
     if view_range is None:
-        return 1
+        return native
     try:
         x_range, y_range = view_range
         world_w = abs(float(x_range[1]) - float(x_range[0]))
         world_h = abs(float(y_range[1]) - float(y_range[0]))
     except Exception:
-        return 1
+        return native
     viewport_h, viewport_w = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
-    texels_per_pixel = max(world_w / viewport_w, world_h / viewport_h)
-    if not np.isfinite(texels_per_pixel) or texels_per_pixel <= float(target_max):
-        return 1
-    factor = 1
-    while texels_per_pixel / (factor * 2) >= float(target_min):
-        factor *= 2
-    factor = max(1, int(factor))
+    texels_x = world_w / viewport_w
+    texels_y = world_h / viewport_h
+    if not np.isfinite(texels_x) or not np.isfinite(texels_y) or texels_x < 0.0 or texels_y < 0.0:
+        return native
+    factor_x = _desired_factor_for_texels(texels_x, target_min=target_min, target_max=target_max)
+    factor_y = _desired_factor_for_texels(texels_y, target_min=target_min, target_max=target_max)
+    factor = max(factor_x, factor_y)
+    texels_per_pixel = max(texels_x, texels_y)
     if previous_factor is None:
-        return factor
-    previous = max(1, int(previous_factor))
-    hysteresis = max(0.0, min(0.45, float(hysteresis)))
-    if factor > previous:
-        promote_at = 2.0 * previous * float(target_min) * (1.0 + hysteresis)
-        if texels_per_pixel < promote_at:
-            return previous
-    elif factor < previous:
-        demote_below = previous * float(target_min) * (1.0 - hysteresis)
-        if texels_per_pixel >= demote_below:
-            return previous
-    return factor
+        desired = factor
+    else:
+        desired = _apply_scalar_hysteresis(
+            factor,
+            texels_per_pixel=texels_per_pixel,
+            previous_factor=previous_factor,
+            target_min=target_min,
+            hysteresis=hysteresis,
+        )
+    desired_factor_xy = _hysteresis_adjusted_factor_xy((factor_x, factor_y), desired)
+    level = _level_for_factor(desired)
+    acceptable_levels = tuple(range(max(0, level - 1), level + 2))
+    reason = _demand_reason((texels_x, texels_y), desired=desired)
+    return LodDemand(
+        desired_level=level,
+        desired_factor=desired,
+        desired_factor_xy=desired_factor_xy,
+        acceptable_levels=acceptable_levels,
+        source_texels_per_pixel_xy=(texels_x, texels_y),
+        reason=reason,
+    )
 
 
-def build_tile_lod_pyramid(data, *, max_level: int | None = None) -> tuple[np.ndarray, ...]:
-    """Build a finite-aware 2x2 box-reduced pyramid.
+def native_lod_policy(
+    view_range,
+    viewport_shape: tuple[int, int],
+    tile_shape: tuple[int, int],
+    *,
+    previous_factor: int | None = None,
+) -> LodPolicyDecision:
+    """Return the production policy: demand may exceed native; applied never does."""
 
-    NaN and Inf samples are ignored. A reduced pixel is NaN only when all
-    contributing samples are non-finite.
-    """
-
-    current = np.asarray(data)
-    pyramid = [np.ascontiguousarray(current)]
-    level = 0
-    while min(current.shape[:2]) > 1 and (max_level is None or level < int(max_level)):
-        current = _box_reduce_2x2(current)
-        pyramid.append(np.ascontiguousarray(current))
-        level += 1
-    return tuple(pyramid)
-
-
-def apply_tile_gutter(data, gutter: int = 1) -> np.ndarray:
-    gutter = max(0, int(gutter))
-    arr = np.asarray(data)
-    if gutter == 0:
-        return np.ascontiguousarray(arr)
-    pad_width = [(gutter, gutter), (gutter, gutter)] + [(0, 0)] * max(0, arr.ndim - 2)
-    return np.pad(arr, tuple(pad_width), mode="edge")
+    demand = select_lod_demand(
+        view_range,
+        viewport_shape,
+        tile_shape,
+        previous_factor=previous_factor,
+    )
+    if demand.reason == LOD_REASON_INVALID_VIEW:
+        reason = LOD_REASON_INVALID_VIEW
+    elif demand.desired_factor > 1:
+        reason = LOD_REASON_ASYNC_RESIDENCY_REQUIRED
+    else:
+        reason = LOD_REASON_NATIVE_SCALE
+    return LodPolicyDecision(
+        demand=demand,
+        applied_level=0,
+        applied_factor=1,
+        applied_factor_xy=(1, 1),
+        policy=LOD_POLICY_NATIVE_ONLY,
+        reason=reason,
+    )
 
 
 def inner_uv_for_gutter(texture_shape: tuple[int, int], gutter: int = 1) -> tuple[float, float, float, float]:
@@ -106,39 +177,77 @@ def inner_uv_for_gutter(texture_shape: tuple[int, int], gutter: int = 1) -> tupl
     )
 
 
-def lod_info_for_texture(
-    *,
-    level: int,
+def _desired_factor_for_texels(texels_per_pixel: float, *, target_min: float, target_max: float) -> int:
+    if not np.isfinite(texels_per_pixel) or texels_per_pixel <= float(target_max):
+        return 1
+    factor = 1
+    while texels_per_pixel / (factor * 2) >= float(target_min):
+        factor *= 2
+    return max(1, int(factor))
+
+
+def _apply_scalar_hysteresis(
     factor: int,
-    source_shape: tuple[int, int],
-    texture_shape: tuple[int, int],
-    gutter: int = 0,
-) -> LodInfo:
-    return LodInfo(level=level, factor=factor, source_shape=source_shape, texture_shape=texture_shape, gutter=gutter)
+    *,
+    texels_per_pixel: float,
+    previous_factor: int,
+    target_min: float,
+    hysteresis: float,
+) -> int:
+    previous = max(1, int(previous_factor))
+    factor = max(1, int(factor))
+    hysteresis = max(0.0, min(0.45, float(hysteresis)))
+    if factor > previous:
+        promote_at = 2.0 * previous * float(target_min) * (1.0 + hysteresis)
+        if texels_per_pixel < promote_at:
+            return previous
+    elif factor < previous:
+        demote_below = previous * float(target_min) * (1.0 - hysteresis)
+        if texels_per_pixel >= demote_below:
+            return previous
+    return factor
 
 
-def _box_reduce_2x2(data) -> np.ndarray:
-    arr = np.asarray(data)
-    h, w = arr.shape[:2]
-    out_shape = ((h + 1) // 2, (w + 1) // 2) + tuple(arr.shape[2:])
-    work = np.full((out_shape[0] * 2, out_shape[1] * 2) + tuple(arr.shape[2:]), np.nan, dtype=_reduction_dtype(arr))
-    work[:h, :w, ...] = arr.astype(work.dtype, copy=False)
-    blocks = work.reshape(out_shape[0], 2, out_shape[1], 2, *arr.shape[2:])
-    finite = np.isfinite(blocks)
-    sums = np.where(finite, blocks, 0).sum(axis=(1, 3))
-    counts = finite.sum(axis=(1, 3))
-    with np.errstate(invalid="ignore", divide="ignore"):
-        reduced = sums / counts
-    reduced = np.where(counts > 0, reduced, np.nan)
-    if np.iscomplexobj(arr):
-        return reduced.astype(np.result_type(arr.dtype, np.complex64), copy=False)
-    return reduced.astype(np.float32, copy=False)
+def _level_for_factor(factor: int) -> int:
+    factor = max(1, int(factor))
+    return max(0, int(np.log2(factor)))
 
 
-def _reduction_dtype(arr) -> np.dtype:
-    if np.iscomplexobj(arr):
-        return np.dtype(np.complex64 if np.dtype(arr.dtype).itemsize <= 8 else np.complex128)
-    return np.dtype(np.float32)
+def _hysteresis_adjusted_factor_xy(raw_xy: tuple[int, int], desired: int) -> tuple[int, int]:
+    desired = max(1, int(desired))
+    raw_x, raw_y = _factor2(raw_xy)
+    raw_max = max(raw_x, raw_y)
+    if raw_max == desired:
+        return (raw_x, raw_y)
+    if raw_max > desired:
+        return (min(raw_x, desired), min(raw_y, desired))
+    return (
+        desired if raw_x == raw_max else raw_x,
+        desired if raw_y == raw_max else raw_y,
+    )
+
+
+def _demand_reason(texels_xy: tuple[float, float], *, desired: int) -> str:
+    texels_x, texels_y = texels_xy
+    if desired <= 1:
+        return LOD_REASON_NATIVE_SCALE
+    lo = max(1e-12, min(texels_x, texels_y))
+    hi = max(texels_x, texels_y)
+    if hi / lo >= 4.0:
+        return "zoomed-out anisotropic viewport prefers coarser display LOD on one axis"
+    return "zoomed-out viewport prefers coarser display LOD"
+
+
+def _factor2(values) -> tuple[int, int]:
+    x, y = tuple(values)[:2]
+    return (max(1, int(x)), max(1, int(y)))
+
+
+def _float2(values) -> tuple[float, float]:
+    x, y = tuple(values)[:2]
+    x = float(x)
+    y = float(y)
+    return (x if np.isfinite(x) else 0.0, y if np.isfinite(y) else 0.0)
 
 
 def _shape2(shape) -> tuple[int, int]:
@@ -150,9 +259,13 @@ def _shape2(shape) -> tuple[int, int]:
 
 __all__ = [
     "LodInfo",
-    "select_lod_factor",
-    "build_tile_lod_pyramid",
-    "apply_tile_gutter",
+    "LodDemand",
+    "LodPolicyDecision",
+    "LOD_POLICY_NATIVE_ONLY",
+    "LOD_REASON_NATIVE_SCALE",
+    "LOD_REASON_ASYNC_RESIDENCY_REQUIRED",
+    "LOD_REASON_INVALID_VIEW",
+    "select_lod_demand",
+    "native_lod_policy",
     "inner_uv_for_gutter",
-    "lod_info_for_texture",
 ]

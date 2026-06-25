@@ -23,7 +23,7 @@ into Qt-free models so local rendering fixes are easier to reason about.
 | Progressive montage | Advanced, stabilizing | Core control-plane state machines are extracted; renderer/session orchestration is still large. |
 | PyQtGraph backend | Production fallback | Correctly requires progressive CPU/item convergence for some level changes; large item counts remain costly. |
 | VisPy backend | Experimental | Persistent textures/shader levels are promising; hybrid widget inheritance and real-hardware evidence remain gaps. |
-| LOD | Selection only; production native-only | Desired factor is computed, applied factor is intentionally 1 until async compatible residency exists. |
+| LOD | Explicit native-only production policy | Demand selection records desired/applied factor, per-axis texels, policy, and reason; applied factor remains 1 until async compatible residency exists. |
 | Diagnostics/benchmarks | Good internal base, recently corrected | Completion and PyQtGraph level-work counters now reflect convergence/work rather than visibility/image replacement. |
 | Documentation/ADRs | Updated for v30 findings | ADR 0040 and 0041 define level convergence and LOD prerequisites. |
 
@@ -97,9 +97,10 @@ PyQtGraph changes.
 
 ### 4. LOD is intentionally unavailable, not merely failing to trigger
 
-The selector runs, but application is forced to factor one. The old implementation built CPU pyramids
-in a GUI commit path and mixed incompatible tile dimensions with fixed atlas assumptions. Re-enabling
-it would restore stalls and transition churn. ADR 0041 defines the required split.
+The selector runs, records per-axis source-texel demand, and the native-only policy applies factor
+one. The old implementation built CPU pyramids in a GUI commit path and mixed incompatible tile
+dimensions with fixed atlas assumptions; the production callable path is gone and guarded. ADR 0041
+defines the required split before non-native LOD can be enabled.
 
 ### 5. Timer interactions still need audit discipline
 
@@ -117,8 +118,9 @@ texture limits, Wayland behavior, high-DPI pointer mapping, frame pacing, or int
 
 Do not discard the operation/evaluation core, display models, resource policy, extracted
 control-plane models, or backend mechanics. Do discard the unsafe synchronous LOD route and stop adding
-cross-cutting behavior to the session and renderer. The next architecture step is making native-only
-LOD policy explicit and tested, followed by unified frame planning and backend composition.
+cross-cutting behavior to the session and renderer. The next architecture steps are unified frame
+planning and backend composition; non-native LOD waits for the ADR 0041 async materialization and
+compatible-residency gates.
 
 The ordered acceptance gates are in the [roadmap](roadmap.md). Full evidence and recommendations are
 in [the v30 rendering-consistency audit](reviews/v30-rendering-consistency-audit.md).

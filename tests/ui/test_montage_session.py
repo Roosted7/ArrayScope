@@ -451,11 +451,16 @@ def test_zoomed_out_scalar_payload_keeps_exact_texture_on_ui_commit_path():
     session.mark_loaded(rendered)
 
     payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    decision = session.lod_policy_decision
 
-    assert session.desired_tile_lod_factor > 1
-    assert session.tile_lod_factor == 1
-    assert session.tile_lod_policy == "native-only"
-    assert "asynchronous multi-resolution residency" in session.tile_lod_reason
+    assert decision.demand.desired_factor > 1
+    assert decision.demand.desired_factor_xy[0] > 1
+    assert decision.demand.desired_factor_xy[1] > 1
+    assert decision.applied_factor == 1
+    assert decision.applied_factor_xy == (1, 1)
+    assert decision.demand.source_texels_per_pixel_xy == (32.0, 32.0)
+    assert decision.policy == "native-only"
+    assert "asynchronous multi-resolution residency" in decision.reason
     assert payload.lod.factor == 1
     assert payload.texture_data is image
     assert payload.texture_data.shape[:2] == payload.image.shape[:2]
@@ -532,8 +537,10 @@ def test_zoomed_out_complex_payload_keeps_exact_semantics_and_texture():
     session.mark_loaded(rendered)
 
     payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    decision = session.lod_policy_decision
 
-    assert session.desired_tile_lod_factor > 1
+    assert decision.demand.desired_factor > 1
+    assert decision.applied_factor == 1
     assert payload.texture_kind == TexturePlaneKind.COMPLEX_RG32F
     assert payload.lod.factor == 1
     assert np.iscomplexobj(payload.texture_data)

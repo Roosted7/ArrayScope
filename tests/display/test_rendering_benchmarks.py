@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -65,7 +66,32 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_result
         assert result.ui_max_gap_ms is None
         assert result.commit_count >= 1
         assert result.timing.mode
+        assert result.lod_policy == "native-only"
+        assert result.lod_applied_factor == 1
+        assert result.lod_applied_factor_xy == (1, 1)
+        assert result.lod_desired_factor == result.lod_applied_factor
+        assert result.lod_desired_factor >= 1
+        assert len(result.lod_source_texels_per_pixel_xy) == 2
     assert_optional_perf_gates(results)
+
+
+def test_benchmark_result_does_not_mask_backend_applied_lod():
+    from arrayscope.core.runtime_diagnostics import ImageUploadTiming
+    from arrayscope.display.rendering_benchmarks import _ActionMeasurement, _result
+
+    view = SimpleNamespace(rendering_backend_name="test", lastImageUploadTiming=lambda: ImageUploadTiming())
+    timing = ImageUploadTiming(
+        mode="test",
+        tile_layer_lod_factor=4,
+        tile_layer_source_texels_per_pixel=8.0,
+    )
+
+    result = _result(view, "non_native_probe", _ActionMeasurement(submission_ms=0.0), timing=timing)
+
+    assert result.lod_applied_factor == 4
+    assert result.lod_applied_factor_xy == (4, 4)
+    assert result.lod_policy == "backend-reported"
+    assert "non-native applied" in result.lod_reason
 
 
 def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(benchmark_results):

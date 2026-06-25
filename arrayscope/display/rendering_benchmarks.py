@@ -19,6 +19,7 @@ from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.imageview2d import ImageView2D
+from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_REASON_NATIVE_SCALE
 from arrayscope.display.montage import MontageTileState
 from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
@@ -39,6 +40,13 @@ class RenderingBenchmarkResult:
     presentation_stale_count: int = 0
     presentation_pending_count: int = 0
     presentation_settled: bool = True
+    lod_desired_factor: int = 1
+    lod_applied_factor: int = 1
+    lod_desired_factor_xy: tuple[int, int] = (1, 1)
+    lod_applied_factor_xy: tuple[int, int] = (1, 1)
+    lod_source_texels_per_pixel_xy: tuple[float, float] = (0.0, 0.0)
+    lod_policy: str = "native-only"
+    lod_reason: str = "native-resolution texture is appropriate at the current scale"
 
     @property
     def submission_ms(self) -> float:
@@ -595,6 +603,14 @@ def _result(
     backend = str(getattr(view, "rendering_backend_name", type(view).__name__))
     result_timing = view.lastImageUploadTiming() if timing is None else timing
     pending_count = max(0, int(getattr(result_timing, "tile_layer_level_update_pending_items", 0) or 0))
+    applied_lod = max(1, int(getattr(result_timing, "tile_layer_lod_factor", 1) or 1))
+    source_texels = max(0.0, float(getattr(result_timing, "tile_layer_source_texels_per_pixel", 0.0) or 0.0))
+    lod_policy = LOD_POLICY_NATIVE_ONLY if applied_lod == 1 else "backend-reported"
+    lod_reason = (
+        LOD_REASON_NATIVE_SCALE
+        if applied_lod == 1
+        else "backend timing reported a non-native applied LOD factor"
+    )
     return RenderingBenchmarkResult(
         name=f"{backend}_{scenario}",
         backend=backend,
@@ -610,6 +626,13 @@ def _result(
         presentation_stale_count=pending_count,
         presentation_pending_count=pending_count,
         presentation_settled=pending_count == 0,
+        lod_desired_factor=applied_lod,
+        lod_applied_factor=applied_lod,
+        lod_desired_factor_xy=(applied_lod, applied_lod),
+        lod_applied_factor_xy=(applied_lod, applied_lod),
+        lod_source_texels_per_pixel_xy=(source_texels, source_texels),
+        lod_policy=lod_policy,
+        lod_reason=lod_reason,
     )
 
 
