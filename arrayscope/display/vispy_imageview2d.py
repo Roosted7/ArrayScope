@@ -23,6 +23,7 @@ import pyqtgraph as pg
 
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES
 from arrayscope.display.imageview2d import ImageViewShell
+from arrayscope.display.imageview2d import ArrayScopeGraphicsView
 from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
 from arrayscope.display.imageview2d import _tiled_montage_placeholder
@@ -52,11 +53,13 @@ class VisPyImageView2D(ImageViewShell):
     renderer code can switch to it through the image-view factory without a new
     set of shims.  The first experimental version focuses on the hot path:
     scalar image/window-level display and montage tile-layer uploads.  PyQtGraph
-    still owns the histogram widget, ROI editing, profile marker, HUD, and mouse
-    interaction overlay.
+    still owns the histogram widget and mouse event plumbing; VisPy owns the
+    pixel and overlay visuals for this backend.
     """
 
     rendering_capabilities = VISPY_CAPABILITIES
+    draws_qgraphics_roi_items = False
+    draws_qgraphics_profile_marker_items = False
 
     def setupUI(self):
         self._vispy_scene, self._vispy_visuals, self._vispy_transforms, self._vispy_panzoom_camera, self._vispy_gloo = _import_vispy()
@@ -151,7 +154,7 @@ class VisPyImageView2D(ImageViewShell):
         self._vispy_canvas_native.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._display_stack.addWidget(self._vispy_canvas_native)
 
-        self.graphicsView = pg.GraphicsView()
+        self.graphicsView = ArrayScopeGraphicsView(self)
         self.graphicsView.setBackground(None)
         self.graphicsView.setStyleSheet("background: transparent; border: 0px;")
         self.graphicsView.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -237,6 +240,9 @@ class VisPyImageView2D(ImageViewShell):
 
     def interaction_event_owner(self) -> str:
         return "shared-controller"
+
+    def _paints_qgraphics_scene(self) -> bool:
+        return False
 
     def reset_surface(self, reason: str) -> None:
         warm_timer = getattr(self, "_vispy_warm_tile_timer", None)

@@ -63,6 +63,8 @@ meaning, and backend adapters own concrete textures/items/visuals only.
 - `display.geometry` maps committed world/canvas/tile coordinates to array indices and profile states.
 - `display.layers` owns image-view graphics-item insertion and z-order.
 - Concrete PyQtGraph/VisPy modules own upload, texture, atlas, shader, visual, and scene mechanics only.
+- `window.montage_viewport` owns Qt-free montage viewport reflow and source-local ROI remapping; renderers
+  apply those decisions but do not redefine auto/manual semantics.
 
 ### Orchestration
 
@@ -163,6 +165,13 @@ state/viewport change
 
 Pan/zoom retarget the session rather than recreating document work. Native-resolution persistent tiles are the production baseline. The LOD selector may report a desired factor, but the applied factor remains one until asynchronous materialization and compatible residency satisfy [ADR 0041](decisions/0041-lod-selection-materialization-and-residency.md).
 
+Montage resize and layout reflow are viewport retargets, not semantic scope changes. Manual resize
+preserves screen zoom through `ViewportController`; same-source column reflow may translate the range
+by source-local focus but must not add another zoom change. Fit and genuinely near-auto views
+recompute fitted ranges. ROI selections are remapped by `source_index` plus tile-local coordinate only
+when the source set is unchanged. See
+[ADR 0042](decisions/0042-montage-viewport-reflow-and-roi-ownership.md).
+
 ### Remaining target flow
 
 [ADR 0039](decisions/0039-unified-image-surface-and-deadline-scheduler.md) defines the intended convergence:
@@ -212,6 +221,7 @@ capture and drag-lifecycle migration.
 | Cache/stage behavior | `operations.cache`, `stage_cache`, evaluator |
 | Frame/presentation meaning | `display.model`, `planning`, `commit` |
 | Coordinate conversion | `display.geometry` |
+| Montage viewport reflow and source-local ROI remapping | `window.montage_viewport` |
 | Texture/atlas/visual mechanics | `display.backends.*` |
 | Hover/drag/cursor policy | `display.interaction`, hit testing |
 | Widget controls/layout | `ui.*`, focused `window.*` controller |
@@ -229,6 +239,8 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 - Normal and montage evaluation scheduling remain separate, even though frame planning and committed
   tiled presentation semantics are now unified.
 - `MontageRenderSession` is still large, but level convergence, tile admission, and stage fan-in now delegate to Qt-free control-plane models.
+- `montage_renderer.py` remains large, but montage resize/reflow and ROI layout semantics now delegate
+  to Qt-free viewport helpers per ADR 0042.
 - Large renderer/backend modules still combine orchestration and mechanics.
 - Histogram binding still reaches into private PyQtGraph state.
 - Several timers serve as implicit sequencing. They must become bounded scheduler resubmission/admission signals, not semantic order.

@@ -188,6 +188,9 @@ Completion notes:
 - Montage viewport retargets recompute the frame plan with the new active/near set, and scene
   conversion uses the current tile delta so stale frame-plan activity cannot leak into committed
   semantics.
+- Montage resize/layout reflow now follows ADR 0042: manual resize preserves screen zoom in the
+  viewport controller, same-source layout changes translate by source-local focus without another
+  zoom change, and ROI selections remap through canonical source-local geometry.
 - Shared tile-layout helpers keep backend placement logic out of semantic code and avoid scanning the
   complete montage population for active-payload quad generation.
 - Rendering benchmarks now include a real `normal_large_tiled_initial` commit on both backends and

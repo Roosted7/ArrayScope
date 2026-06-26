@@ -31,7 +31,10 @@ The v30 review repairs the immediate level/histogram/benchmark issues and record
 - [ADR 0040](decisions/0040-backend-aware-presentation-convergence.md): one semantic presentation
   generation with backend-specific convergence and exact acknowledgement;
 - [ADR 0041](decisions/0041-lod-selection-materialization-and-residency.md): production remains
-  native-only until LOD demand, asynchronous materialization, and compatible residency are separate.
+  native-only until LOD demand, asynchronous materialization, and compatible residency are separate;
+- [ADR 0042](decisions/0042-montage-viewport-reflow-and-roi-ownership.md): montage resize/reflow is
+  a Qt-free viewport decision, with manual ranges protected from auto refit and ROI geometry remapped
+  by source-local coordinates.
 
 ## Main risks
 
@@ -41,7 +44,9 @@ The main risk is no longer missing abstractions in the evaluation core. It is th
 many lifecycle state machines in `MontageRenderSession` and `montage_renderer.py`: compute/stage
 queues, payload admission, viewport/residency hints, semantic level coverage, level convergence,
 acknowledgement, committed frames, and timers. The roadmap now places Qt-free state-machine extraction
-before more renderer unification.
+before more renderer unification. Montage resize/reflow and source-local ROI remapping have now moved
+out to `window.montage_viewport`, reducing this risk for viewport-specific behavior without making the
+renderer small yet.
 
 ### Histogram backend coupling
 

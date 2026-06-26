@@ -76,6 +76,7 @@ def test_vispy_surface_exposes_lifecycle_contract(qt_app):
         assert surface.capabilities.name == "vispy"
         assert surface.capabilities.native_pointer_interaction is False
         assert surface.interaction_event_owner() == "shared-controller"
+        assert not view._paints_qgraphics_scene()
         surface.apply_camera((2, 3), ViewportPolicy.PRESERVE)
         diagnostics = surface.presentation_diagnostics()
         assert diagnostics["backend"] == "vispy"
@@ -88,6 +89,42 @@ def test_vispy_surface_exposes_lifecycle_contract(qt_app):
         assert surface.presentation_diagnostics()["last_reset_reason"] == "test-context-loss"
         surface.teardown_surface()
         surface.teardown_surface()
+    finally:
+        view.close()
+
+
+def test_vispy_manual_resize_uses_shared_viewport_transaction(qt_app):
+    from arrayscope.display.imageview2d import ArrayScopeGraphicsView
+    from arrayscope.display.viewport import ViewportMode
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    try:
+        assert isinstance(view.graphicsView, ArrayScopeGraphicsView)
+        view.resize(520, 420)
+        view.show()
+        qt_app.processEvents()
+        view.setImage(np.zeros((100, 100), dtype=np.float32))
+        qt_app.processEvents()
+        view.getView().setRange(xRange=(-50.0, 150.0), yRange=(-40.0, 160.0), padding=0)
+        qt_app.processEvents()
+        view.viewport_controller.mode = ViewportMode.USER
+        before_size = view.graphicsView.viewport().size()
+        before_range = view.getView().viewRange()
+
+        view.resize(340, 420)
+        qt_app.processEvents()
+
+        after_size = view.graphicsView.viewport().size()
+        after_range = view.getView().viewRange()
+        before_x_units = (before_range[0][1] - before_range[0][0]) / before_size.width()
+        before_y_units = (before_range[1][1] - before_range[1][0]) / before_size.height()
+        after_x_units = (after_range[0][1] - after_range[0][0]) / after_size.width()
+        after_y_units = (after_range[1][1] - after_range[1][0]) / after_size.height()
+        assert after_x_units == pytest.approx(before_x_units)
+        assert after_y_units == pytest.approx(before_y_units)
+        assert view._vispy_camera_key[0] == pytest.approx(tuple(after_range[0]))
+        assert view._vispy_camera_key[1] == pytest.approx(tuple(after_range[1]))
     finally:
         view.close()
 
@@ -2181,7 +2218,7 @@ def test_vispy_widget_overlays_are_parented_above_gl_surface(qt_app):
         view.close()
 
 
-def test_vispy_roi_visuals_mirror_pyqtgraph_rois(qt_app):
+def test_vispy_roi_visuals_do_not_register_pyqtgraph_scene_items(qt_app):
     from arrayscope.display.interaction import InteractionTarget
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
@@ -2191,6 +2228,8 @@ def test_vispy_roi_visuals_mirror_pyqtgraph_rois(qt_app):
         view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
         selection = view.createRoi("rectangle", rect=(3.0, 4.0, 8.0, 6.0), color=(255, 32, 16))
 
+        pyqt_item, _selection = view._roi_items[selection.id]
+        assert pyqt_item.scene() is None
         visual = view._vispy_roi_visuals.get(selection.id)
         assert visual is not None
         assert visual.visible
@@ -2310,6 +2349,12 @@ def test_vispy_profile_marker_has_vispy_crosshair_visuals(qt_app):
         view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
         view.setProfileMarker(8.0, 9.0, visible=True)
 
+        assert view._profile_vline.scene() is None
+        assert view._profile_hline.scene() is None
+        assert view._profile_handle.scene() is None
+        assert not view._profile_vline.isVisible()
+        assert not view._profile_hline.isVisible()
+        assert not view._profile_handle.isVisible()
         assert {"profile_v", "profile_h", "profile_handle_x", "profile_handle_y", "profile_handle_dot"} <= set(view._vispy_profile_visuals)
         assert all(visual.visible for visual in view._vispy_profile_visuals.values())
         assert view._vispy_profile_visuals["profile_handle_dot"].order == 10_002

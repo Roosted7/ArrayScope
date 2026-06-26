@@ -2625,6 +2625,38 @@ def test_imageview_resets_view_range_when_shape_changes(qt_app):
     view.close()
 
 
+def test_imageview_manual_resize_preserves_screen_zoom_after_layout(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.viewport import ViewportMode
+
+    view = ImageView2D()
+    try:
+        view.resize(500, 400)
+        view.show()
+        qt_app.processEvents()
+        view.setImage(np.zeros((100, 100), dtype=float))
+        qt_app.processEvents()
+        view.getView().setRange(xRange=(-50.0, 150.0), yRange=(-50.0, 150.0), padding=0)
+        qt_app.processEvents()
+        view.viewport_controller.mode = ViewportMode.USER
+        before_size = view.graphicsView.viewport().size()
+        before = view.getView().viewRange()
+
+        view.resize(300, 400)
+        qt_app.processEvents()
+
+        after_size = view.graphicsView.viewport().size()
+        after = view.getView().viewRange()
+        before_x_units = (before[0][1] - before[0][0]) / before_size.width()
+        before_y_units = (before[1][1] - before[1][0]) / before_size.height()
+        after_x_units = (after[0][1] - after[0][0]) / after_size.width()
+        after_y_units = (after[1][1] - after[1][0]) / after_size.height()
+        assert after_x_units == pytest.approx(before_x_units)
+        assert after_y_units == pytest.approx(before_y_units)
+    finally:
+        view.close()
+
+
 def test_imageview_limits_zoom_out_to_recoverable_content(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 

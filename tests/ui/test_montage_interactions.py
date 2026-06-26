@@ -319,6 +319,45 @@ def test_montage_tile_count_increase_auto_adjusts_when_near_auto(qtbot):
         win.close()
 
 
+def test_montage_manual_resize_is_single_camera_transaction(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.display.viewport import ViewportMode
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((20, 20, 30), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        win.resize(900, 700)
+        win.show()
+        _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_montage_axis(2, columns=None, indices=tuple(range(30)), text=":"))
+        win.render(reason="test-montage-resize")
+        _process_events(qtbot, count=80)
+        view = win.img_view.getView()
+        view.setRange(xRange=(-100.0, 300.0), yRange=(-100.0, 300.0), padding=0)
+        _process_events(qtbot, count=5)
+        win.img_view.viewport_controller.mode = ViewportMode.USER
+        before_size = win.img_view.graphicsView.viewport().size()
+        before = view.viewRange()
+        range_changes = []
+        view.sigRangeChanged.connect(lambda *_args: range_changes.append(view.viewRange()))
+
+        win.resize(500, 700)
+        _process_events(qtbot, count=20)
+
+        after_size = win.img_view.graphicsView.viewport().size()
+        after = view.viewRange()
+        before_x_units = (before[0][1] - before[0][0]) / before_size.width()
+        before_y_units = (before[1][1] - before[1][0]) / before_size.height()
+        after_x_units = (after[0][1] - after[0][0]) / after_size.width()
+        after_y_units = (after[1][1] - after[1][0]) / after_size.height()
+        assert after_x_units == pytest.approx(before_x_units)
+        assert after_y_units == pytest.approx(before_y_units)
+        assert range_changes == []
+    finally:
+        win.close()
+
+
 def test_montage_auto_fit_skips_when_fit_mode_is_enabled(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets

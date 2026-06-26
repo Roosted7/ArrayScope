@@ -66,11 +66,53 @@ if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
+class ArrayScopeGraphicsView(pg.GraphicsView):
+    def __init__(self, owner):
+        super().__init__()
+        self._arrayscope_owner = owner
+
+    def paintEvent(self, event):
+        owner = getattr(self, "_arrayscope_owner", None)
+        if owner is not None and not bool(owner._paints_qgraphics_scene()):
+            event.accept()
+            return
+        super().paintEvent(event)
+
+    def resizeEvent(self, event):
+        owner = getattr(self, "_arrayscope_owner", None)
+        if owner is None or getattr(owner, "image", None) is None:
+            super().resizeEvent(event)
+            return
+        base_view_range = owner.view.viewRange()
+        blocker = QtCore.QSignalBlocker(owner.view)
+        try:
+            super().resizeEvent(event)
+            previous_viewport_size = _previous_viewport_size_from_resize_event(
+                owner.graphicsView.viewport().size(),
+                event,
+                fallback=owner.viewport_controller.last_viewport_size,
+            )
+            owner._apply_viewport_resize(
+                previous_viewport_size=previous_viewport_size,
+                base_view_range=base_view_range,
+                notify=False,
+            )
+            owner._notify_viewport_content_resized()
+            owner._remember_accepted_view_range()
+            owner.viewport_controller.note_user_range_changed(owner.view.viewRange())
+            owner._sync_profile_marker_visibility()
+            owner._sync_backend_camera_to_view()
+        finally:
+            del blocker
+
+
 class ImageViewShell(QtWidgets.QWidget):
     # Backends that implement the typed tile-payload method can bypass CPU
     # montage canvas composition.  Renderer orchestration checks this
     # capability rather than branching on a backend name.
     rendering_capabilities = PYQTGRAPH_CAPABILITIES
+    draws_qgraphics_roi_items = True
+    draws_qgraphics_profile_marker_items = True
 
     # Emitted only for explicit user edits of the histogram/LUT levels.
     userLevelsChanged = QtCore.Signal()
@@ -230,7 +272,8 @@ class ImageViewShell(QtWidgets.QWidget):
         make_item_passive(self._profile_vline)
         make_item_passive(self._profile_hline)
         make_item_passive(self._profile_handle)
-        self._layer_owner.add_profile_marker_items(self._profile_vline, self._profile_hline, self._profile_handle)
+        if self.draws_qgraphics_profile_marker_items:
+            self._layer_owner.add_profile_marker_items(self._profile_vline, self._profile_hline, self._profile_handle)
         self.view.sigRangeChanged.connect(self._on_view_range_changed)
         app = QtWidgets.QApplication.instance()
         if app is not None:
@@ -242,6 +285,9 @@ class ImageViewShell(QtWidgets.QWidget):
     def _histogram_preview_immediate(self) -> bool:
         return True
 
+    def _paints_qgraphics_scene(self) -> bool:
+        return True
+
     def setupUI(self):
         """Create the user interface"""
         # Main layout
@@ -250,7 +296,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self.layout.setSpacing(0)
         
         # Graphics view for image display
-        self.graphicsView = pg.GraphicsView()
+        self.graphicsView = ArrayScopeGraphicsView(self)
         self.layout.addWidget(self.graphicsView, 1)  # Give it most of the space
         
         # Histogram widget
@@ -1519,7 +1565,8 @@ class ImageViewShell(QtWidgets.QWidget):
             self._profile_vline.setValue(float(x))
             self._profile_hline.setValue(float(y))
             self._sync_profile_marker_visibility()
-            self.view.update()
+            if self.draws_qgraphics_profile_marker_items:
+                self.view.update()
         finally:
             self._profile_marker_updating = False
         self._last_profile_marker_position = (float(x), float(y))
@@ -1588,7 +1635,8 @@ class ImageViewShell(QtWidgets.QWidget):
             self._profile_handle.setPos(x, y)
             self._profile_vline.setValue(x)
             self._profile_hline.setValue(y)
-            self.view.update()
+            if self.draws_qgraphics_profile_marker_items:
+                self.view.update()
         finally:
             self._profile_marker_updating = False
         if self._profile_marker_callback is not None:
@@ -1629,6 +1677,7 @@ class ImageViewShell(QtWidgets.QWidget):
         if visible and self._profile_handle is not None:
             pos = self._profile_handle.pos()
             visible = _point_inside_view_range(self.view.viewRange(), float(pos.x()), float(pos.y()))
+        visible = visible and self.draws_qgraphics_profile_marker_items
         if self._profile_vline is not None:
             self._profile_vline.setVisible(visible)
         if self._profile_hline is not None:
@@ -1883,7 +1932,8 @@ class ImageViewShell(QtWidgets.QWidget):
         roi_id = str(selection.id)
         self._roi_items[roi_id] = (item, selection)
         self._roi_hit_index.upsert(selection)
-        self._layer_owner.add_roi_item(roi_id, item)
+        if self.draws_qgraphics_roi_items:
+            self._layer_owner.add_roi_item(roi_id, item)
         self._sync_roi_item_style(roi_id)
         self.roiCreated.emit(selection)
         return selection
@@ -1977,16 +2027,23 @@ class ImageViewShell(QtWidgets.QWidget):
         target = state.capture if state.capture is not None else state.hover
         roi_id = target.object_id if target is not None and target.kind == "roi" else None
         profile_part = target.part if target is not None and target.kind == "profile" else None
-        previous_roi_id = self._interaction_visual_roi_id
-        self._interaction_visual_roi_id = None if roi_id is None else str(roi_id)
-        for current_id in {previous_roi_id, self._interaction_visual_roi_id}:
-            if current_id is not None:
-                self._sync_roi_item_style(current_id)
-        if self._interaction_visual_profile_part != profile_part:
+        if self.draws_qgraphics_roi_items:
+            previous_roi_id = self._interaction_visual_roi_id
+            self._interaction_visual_roi_id = None if roi_id is None else str(roi_id)
+            for current_id in {previous_roi_id, self._interaction_visual_roi_id}:
+                if current_id is not None:
+                    self._sync_roi_item_style(current_id)
+        else:
+            self._interaction_visual_roi_id = None if roi_id is None else str(roi_id)
+        if self.draws_qgraphics_profile_marker_items and self._interaction_visual_profile_part != profile_part:
             self._interaction_visual_profile_part = profile_part
             self._sync_profile_interaction_visuals()
+        elif not self.draws_qgraphics_profile_marker_items:
+            self._interaction_visual_profile_part = profile_part
 
     def _sync_roi_item_style(self, roi_id: str) -> None:
+        if not self.draws_qgraphics_roi_items:
+            return
         item_selection = self._roi_items.get(str(roi_id))
         if item_selection is None:
             return
@@ -2160,14 +2217,6 @@ class ImageViewShell(QtWidgets.QWidget):
 
     # --- Qt Events -----------------------------------------------------
     def eventFilter(self, obj, event):
-        if obj is self.graphicsView.viewport() and event.type() == QtCore.QEvent.Type.Resize:
-            if self.image is not None:
-                self._viewport_applying = True
-                try:
-                    self.viewport_controller.resize(self.view, self.image.shape[:2], event.size(), display_rect=self._current_image_viewport_rect())
-                finally:
-                    self._viewport_applying = False
-                self._notify_viewport_content_resized()
         if (
             obj is self.graphicsView.viewport()
             and event.type() == QtCore.QEvent.Type.Wheel
@@ -2195,6 +2244,53 @@ class ImageViewShell(QtWidgets.QWidget):
         handler = getattr(parent, "_on_image_viewport_resized", None)
         if callable(handler):
             handler()
+
+    def _sync_backend_camera_to_view(self) -> None:
+        sync_camera = getattr(self, "_sync_vispy_camera_to_view", None)
+        if callable(sync_camera):
+            sync_camera()
+
+    def _apply_viewport_resize(
+        self,
+        viewport_size=None,
+        *,
+        previous_viewport_size=None,
+        base_view_range=None,
+        block_range_signals: bool = False,
+        notify: bool = True,
+    ) -> None:
+        if self.image is None:
+            return
+        viewport_size = self.graphicsView.viewport().size() if viewport_size is None else viewport_size
+        self._viewport_applying = True
+        square_pixels = getattr(self, "displayMode", "square_pixels") == "square_pixels"
+        blocker = QtCore.QSignalBlocker(self.view) if block_range_signals else None
+        applied_range = None
+        try:
+            if square_pixels:
+                self.view.setAspectLocked(False)
+            applied_range = self.viewport_controller.resize(
+                self.view,
+                self.image.shape[:2],
+                viewport_size,
+                display_rect=self._current_image_viewport_rect(),
+                previous_viewport_size=previous_viewport_size,
+                base_view_range=base_view_range,
+            )
+        finally:
+            if square_pixels:
+                self.view.setAspectLocked(True, ratio=1.0)
+                if applied_range is not None:
+                    self.view.setRange(xRange=applied_range[0], yRange=applied_range[1], padding=0)
+            if blocker is not None:
+                del blocker
+            self._viewport_applying = False
+        if block_range_signals:
+            self._remember_accepted_view_range()
+            self.viewport_controller.note_user_range_changed(self.view.viewRange())
+            self._sync_profile_marker_visibility()
+        if notify:
+            self._notify_viewport_content_resized()
 
     def event(self, event):
         if event.type() in (
@@ -2395,6 +2491,20 @@ def _image_origin(geometry) -> tuple[float, float]:
         float(getattr(geometry, "montage_origin_x", 0)),
         float(getattr(geometry, "montage_origin_y", 0)),
     )
+
+
+def _previous_viewport_size_from_resize_event(current_viewport_size, event, *, fallback=None):
+    try:
+        old_size = event.oldSize()
+        new_size = event.size()
+        if old_size.isValid() and new_size.isValid():
+            width = float(current_viewport_size.width()) + float(old_size.width() - new_size.width())
+            height = float(current_viewport_size.height()) + float(old_size.height() - new_size.height())
+            if width > 0.0 and height > 0.0:
+                return (width, height)
+    except Exception:
+        pass
+    return fallback
 
 
 def _world_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, float, float]:

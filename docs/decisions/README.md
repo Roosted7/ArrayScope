@@ -69,6 +69,7 @@ Status terminology:
 | [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Partly implemented; unified frame planner, typed tiled surface, X2 work graph, X3 backend composition, and X4 shared pointer capture are done. |
 | [0040](0040-backend-aware-presentation-convergence.md) | Backend-aware presentation convergence | Implemented for tiled presentation. |
 | [0041](0041-lod-selection-materialization-and-residency.md) | LOD selection/materialization/residency | Accepted design; production remains native-only. |
+| [0042](0042-montage-viewport-reflow-and-roi-ownership.md) | Montage viewport reflow and ROI ownership | Implemented for tiled montage. |
 
 ## Adding or changing a decision
 

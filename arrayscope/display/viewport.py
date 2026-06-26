@@ -57,6 +57,7 @@ class ViewportController:
     mode: ViewportMode = ViewportMode.AUTO_UNTOUCHED
     last_display_shape: tuple[int, int] | None = None
     last_display_rect: tuple[float, float, float, float] | None = None
+    last_viewport_size: tuple[float, float] | None = None
     last_auto_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None
 
     def note_user_range_changed(self, view_range=None):
@@ -72,6 +73,7 @@ class ViewportController:
         previous_rect = self.last_display_rect
         self.last_display_shape = image_shape
         self.last_display_rect = display_rect
+        self.last_viewport_size = _viewport_size_tuple(viewport_size)
         intent = _intent_from_policy(policy)
 
         if intent == ViewportIntent.FIT:
@@ -126,16 +128,49 @@ class ViewportController:
         _set_one_to_one(view_box, image_shape, viewport_size, display_rect=_display_rect(image_shape, display_rect))
         self.mode = ViewportMode.USER
 
-    def resize(self, view_box, image_shape, viewport_size, display_rect=None):
+    def resize(
+        self,
+        view_box,
+        image_shape,
+        viewport_size,
+        display_rect=None,
+        *,
+        previous_viewport_size=None,
+        base_view_range=None,
+    ):
         if image_shape is None:
-            return
+            return None
+        previous_viewport_size = (
+            self.last_viewport_size
+            if previous_viewport_size is None
+            else _viewport_size_tuple(previous_viewport_size)
+        )
+        self.last_viewport_size = _viewport_size_tuple(viewport_size)
         display_rect = _display_rect(tuple(int(v) for v in image_shape[:2]), display_rect or self.last_display_rect)
+        if base_view_range is None:
+            base_view_range = view_box.viewRange()
         if self.mode == ViewportMode.FIT:
             _fit(view_box, display_rect=display_rect)
-        elif self.mode == ViewportMode.AUTO_UNTOUCHED and self._current_view_is_near_auto(view_box):
+            return _normalize_view_range(view_box.viewRange())
+        elif self.mode == ViewportMode.AUTO_UNTOUCHED and self._current_view_is_near_auto(view_box, base_view_range=base_view_range):
             self._auto_square_fit(view_box, viewport_size, display_rect=display_rect)
+            return _normalize_view_range(view_box.viewRange())
         elif self.mode == ViewportMode.AUTO_UNTOUCHED:
             self.mode = ViewportMode.USER
+            return _preserve_screen_zoom_for_resize(
+                view_box,
+                previous_viewport_size,
+                self.last_viewport_size,
+                base_view_range=base_view_range,
+            )
+        elif self.mode == ViewportMode.USER:
+            return _preserve_screen_zoom_for_resize(
+                view_box,
+                previous_viewport_size,
+                self.last_viewport_size,
+                base_view_range=base_view_range,
+            )
+        return None
 
     def is_near_auto(self, view_range=None, *, tolerance_fraction: float = 0.02) -> bool:
         target = self.last_auto_view_range
@@ -152,11 +187,11 @@ class ViewportController:
         view_box.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
         self.last_auto_view_range = view_range
 
-    def _current_view_is_near_auto(self, view_box) -> bool:
+    def _current_view_is_near_auto(self, view_box, *, base_view_range=None) -> bool:
         if self.last_auto_view_range is None:
             return True
         try:
-            return self.is_near_auto(view_box.viewRange())
+            return self.is_near_auto(view_box.viewRange() if base_view_range is None else base_view_range)
         except Exception:
             return False
 
@@ -226,6 +261,12 @@ def _normalize_view_range(view_range) -> tuple[tuple[float, float], tuple[float,
         (float(view_range[0][0]), float(view_range[0][1])),
         (float(view_range[1][0]), float(view_range[1][1])),
     )
+
+
+def _viewport_size_tuple(viewport_size) -> tuple[float, float]:
+    if isinstance(viewport_size, (tuple, list)) and len(viewport_size) >= 2:
+        return (max(1.0, float(viewport_size[0])), max(1.0, float(viewport_size[1])))
+    return (max(1.0, float(viewport_size.width())), max(1.0, float(viewport_size.height())))
 
 
 def constrain_view_range(
@@ -345,6 +386,47 @@ def _preserve_center_for_shape(view_box, image_shape, *, display_rect=None):
     cx = max(float(x0), min(float(x1), (float(view_range[0][0]) + float(view_range[0][1])) * 0.5))
     cy = max(float(y0), min(float(y1), (float(view_range[1][0]) + float(view_range[1][1])) * 0.5))
     view_box.setRange(xRange=(cx - x_span * 0.5, cx + x_span * 0.5), yRange=(cy - y_span * 0.5, cy + y_span * 0.5), padding=0)
+
+
+def screen_zoom_resize_view_range(view_range, previous_viewport_size, current_viewport_size):
+    if previous_viewport_size is None or current_viewport_size is None:
+        return None
+    previous_width, previous_height = previous_viewport_size
+    current_width, current_height = current_viewport_size
+    if previous_width <= 0.0 or previous_height <= 0.0 or current_width <= 0.0 or current_height <= 0.0:
+        return None
+    try:
+        view_range = _normalize_view_range(view_range)
+    except Exception:
+        return None
+    x_span = float(view_range[0][1]) - float(view_range[0][0])
+    y_span = float(view_range[1][1]) - float(view_range[1][0])
+    if not _finite_values(x_span, y_span):
+        return None
+    cx = (float(view_range[0][0]) + float(view_range[0][1])) * 0.5
+    cy = (float(view_range[1][0]) + float(view_range[1][1])) * 0.5
+    next_x_span = x_span * (float(current_width) / float(previous_width))
+    next_y_span = y_span * (float(current_height) / float(previous_height))
+    return (
+        (cx - next_x_span * 0.5, cx + next_x_span * 0.5),
+        (cy - next_y_span * 0.5, cy + next_y_span * 0.5),
+    )
+
+
+def _preserve_screen_zoom_for_resize(view_box, previous_viewport_size, current_viewport_size, *, base_view_range=None):
+    view_range = screen_zoom_resize_view_range(
+        view_box.viewRange() if base_view_range is None else base_view_range,
+        previous_viewport_size,
+        current_viewport_size,
+    )
+    if view_range is None:
+        return None
+    view_box.setRange(
+        xRange=view_range[0],
+        yRange=view_range[1],
+        padding=0,
+    )
+    return view_range
 
 
 def _display_rect(image_shape, display_rect=None) -> tuple[float, float, float, float]:

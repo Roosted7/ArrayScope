@@ -32,6 +32,14 @@ Use this checklist for release candidates and rendering/UI changes. Historical p
 - Changing levels/LUT does not trigger tile re-materialization/re-upload counters.
 - Pan/zoom preserves semantic session and does not rerun operations.
 - Cropped image-axis ranges map coordinates and profiles correctly.
+- In montage mode, resize the viewport while zoomed in and while far zoomed out; manual content
+  should keep the same screen scale, showing less content when smaller and more when larger, unless
+  the view was truly near the remembered auto range.
+- In montage mode, resize while Fit is locked and while untouched near-auto; the fitted view should
+  hug/recompute consistently without a manual revert surprise.
+- Change the applied montage column layout with the same source indices; ROI geometry and statistics
+  should follow the same source-local data. Scroll the tiled dimension to a different source set; ROI
+  world positions should remain stable and sample the new content under them.
 
 ## Responsiveness stress
 

@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import types
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -41,3 +42,14 @@ def test_histogram_ignores_nonfinite_values():
     result = histograms.histogram([0, 1, np.nan, np.inf], histograms.HistogramSpec(bins=2))
 
     assert int(np.sum(result.counts)) == 2
+
+
+def test_complex_histogram_uses_magnitude_without_cast_warning():
+    values = np.array([3 + 4j, 5 + 12j, np.nan + 1j * np.nan], dtype=np.complex64)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", np.exceptions.ComplexWarning)
+        result = histograms.histogram(values, histograms.HistogramSpec(bins=2))
+
+    assert int(np.sum(result.counts)) == 2
+    np.testing.assert_allclose(result.edges[[0, -1]], np.array([5.0, 13.0]))

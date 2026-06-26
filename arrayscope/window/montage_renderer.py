@@ -71,8 +71,8 @@ from arrayscope.window.montage_viewport import (
     montage_viewport_retarget_policy,
     montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
     prioritize_montage_tiles,
-    remap_montage_view_range,
-    square_montage_fit_view_range,
+    remap_montage_roi_selections,
+    retarget_montage_viewport_plan,
 )
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, fallback_level_source, normalize_bounds
@@ -182,7 +182,67 @@ class MontageRenderMixin:
             return
         self._montage_live_layout_reflow = True
         self._montage_viewport_update_pending = False
+        self._retarget_montage_resize_camera_only()
         self._schedule_montage_viewport_update(delay_ms=0)
+
+    def _retarget_montage_resize_camera_only(self) -> bool:
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+            return False
+        capabilities = image_view_backend_capabilities(self.img_view)
+        try:
+            display_mode = str(self.img_view.montageDisplayMode())
+        except Exception:
+            display_mode = ""
+        if not montage_viewport_retarget_policy(capabilities, display_mode).enabled:
+            return False
+        view_state = self.view_state
+        if view_state.montage_axis is None:
+            return False
+        viewport_plan = self._montage_viewport_plan(view_state)
+        colormap_lut = self._evaluation_colormap_lut(
+            view_state,
+            shader_display=bool(capabilities.shader_windowing),
+        )
+        expected_key = montage_session_key(
+            _document_key(self.document),
+            view_state,
+            viewport_plan,
+            colormap_lut,
+        )
+        if session.key != expected_key:
+            return False
+        previous_plan = getattr(session, "plan", None)
+        viewport_plan = self._retargeted_montage_viewport_plan(session, viewport_plan)
+        self._remap_montage_rois_for_layout_reflow(previous_plan, viewport_plan.plan)
+        session.retarget_viewport(
+            view_range=viewport_plan.view_range,
+            viewport_shape=viewport_plan.viewport_shape,
+            plan=viewport_plan.plan,
+            coverage_margin_tiles=0,
+            near_margin_tiles=0,
+            priority_focus=viewport_plan.priority_focus,
+            priority_retarget_limit=1,
+        )
+        session.frame_plan = self._montage_frame_planner().plan(
+            target=FrameTarget(
+                semantic_key=session.key,
+                viewport_key=viewport_plan.view_range,
+                presentation_key=(
+                    str(session.window_mode),
+                    normalize_bounds(getattr(session, "user_levels_override", None)),
+                    bool(getattr(session, "force_auto", False)),
+                ),
+                quality="exact-visible",
+            ),
+            view_state=view_state,
+            display_shape=viewport_plan.plan.display_shape,
+            backend_capabilities=capabilities,
+            viewport_shape=viewport_plan.viewport_shape,
+            view_range=viewport_plan.view_range,
+            memory_policy=self._memory_policy() if hasattr(self, "_memory_policy") else None,
+        )
+        return True
 
     def update_montage_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         for attribute in (
@@ -226,6 +286,9 @@ class MontageRenderMixin:
             viewport_shape = viewport_plan.viewport_shape
             tile_shape = viewport_plan.tile_shape
             plan = viewport_plan.plan
+        self._montage_live_layout_reflow = False
+        previous_session_plan = getattr(getattr(self, "_montage_session", None), "plan", None)
+        self._remap_montage_rois_for_layout_reflow(previous_session_plan, plan)
         current_range = viewport_plan.view_range
         canvas_rect = montage_rect_for_viewport(plan, view_range=current_range, viewport_shape=viewport_shape)
         display_tiles = viewport_plan.candidate_tiles(margin_tiles=0)
@@ -528,8 +591,12 @@ class MontageRenderMixin:
             colormap_lut,
         )
         if session.key != expected_key:
+            self._montage_live_layout_reflow = False
             return False
+        self._montage_live_layout_reflow = False
+        previous_plan = getattr(session, "plan", None)
         viewport_plan = self._retargeted_montage_viewport_plan(session, viewport_plan)
+        self._remap_montage_rois_for_layout_reflow(previous_plan, viewport_plan.plan)
 
         additions, presentation_changed = session.retarget_viewport(
             view_range=viewport_plan.view_range,
@@ -1418,56 +1485,76 @@ class MontageRenderMixin:
         return True
 
     def _retargeted_montage_viewport_plan(self, session, viewport_plan: MontageViewportPlan) -> MontageViewportPlan:
-        previous_plan = getattr(session, "plan", None)
-        next_plan = viewport_plan.plan
-        if previous_plan is None or next_plan is None:
-            return viewport_plan
-        layout_changed = getattr(previous_plan, "geometry", None) != getattr(next_plan, "geometry", None)
-        viewport_shape_changed = tuple(getattr(session, "viewport_shape", ())) != tuple(viewport_plan.viewport_shape)
         skip_remap = bool(getattr(self, "_skip_next_montage_viewport_remap", False))
         if skip_remap:
             self._skip_next_montage_viewport_remap = False
-        if not layout_changed and not viewport_shape_changed:
-            return viewport_plan
-        current_range = viewport_plan.view_range
-        if current_range is None:
-            return viewport_plan
-        if skip_remap:
-            return viewport_plan
 
         viewport_controller = getattr(self.img_view, "viewport_controller", None)
-        previous_full_range = _plan_full_view_range(previous_plan)
-        auto_like = bool(
+        current_range = viewport_plan.view_range
+        fit_locked = bool(viewport_controller is not None and viewport_controller.is_fit_locked())
+        near_auto = bool(
             viewport_controller is not None
-            and (
-                viewport_controller.is_fit_locked()
-                or viewport_controller.is_near_auto(current_range)
-            )
-        ) or _view_range_contains_near(current_range, previous_full_range)
-        if auto_like:
-            if viewport_controller is not None and viewport_controller.is_fit_locked():
-                next_range = _plan_full_view_range(next_plan)
-            else:
-                next_range = square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)
-                if viewport_controller is not None:
-                    viewport_controller.last_auto_view_range = next_range
-        else:
-            focus = _montage_priority_focus(self, current_range)
-            next_range = remap_montage_view_range(
-                previous_plan,
-                next_plan,
-                current_range,
-                getattr(session, "viewport_shape", viewport_plan.viewport_shape),
-                viewport_plan.viewport_shape,
-                focus=focus,
-            )
-            if next_range is None:
-                return viewport_plan
+            and current_range is not None
+            and viewport_controller.is_near_auto(current_range)
+        )
+        focus = None if current_range is None else _montage_priority_focus(self, current_range)
+        reflow = retarget_montage_viewport_plan(
+            getattr(session, "plan", None),
+            viewport_plan,
+            getattr(session, "viewport_shape", viewport_plan.viewport_shape),
+            fit_locked=fit_locked,
+            near_auto=near_auto,
+            skip_remap=skip_remap,
+            focus=focus,
+        )
+        if viewport_controller is not None and reflow.last_auto_view_range is not None:
+            viewport_controller.last_auto_view_range = reflow.last_auto_view_range
+        if reflow.view_range_to_apply is not None:
+            self._set_montage_view_range(reflow.view_range_to_apply)
+        view_range = reflow.viewport_plan.view_range
+        return replace(
+            reflow.viewport_plan,
+            priority_focus=None if view_range is None else _montage_priority_focus(self, view_range),
+        )
 
-        if view_ranges_near(current_range, next_range, tolerance_fraction=1e-9):
-            return replace(viewport_plan, view_range=next_range, priority_focus=_montage_priority_focus(self, next_range))
-        self._set_montage_view_range(next_range)
-        return replace(viewport_plan, view_range=next_range, priority_focus=_montage_priority_focus(self, next_range))
+    def _remap_montage_rois_for_layout_reflow(self, previous_plan, next_plan) -> None:
+        if previous_plan is None or next_plan is None:
+            return
+        if getattr(previous_plan, "geometry", None) == getattr(next_plan, "geometry", None):
+            return
+        img_view = getattr(self, "img_view", None)
+        selections_fn = getattr(img_view, "roiSelections", None)
+        if not callable(selections_fn):
+            return
+        selections = tuple(selections_fn() or ())
+        remapped_selections = remap_montage_roi_selections(previous_plan, next_plan, selections)
+        updates = [
+            (previous, current.geometry)
+            for previous, current in zip(selections, remapped_selections)
+            if current.geometry != previous.geometry
+        ]
+        if not updates:
+            return
+        set_geometry = getattr(img_view, "_set_roi_geometry", None)
+        if callable(set_geometry):
+            for selection, geometry in updates:
+                set_geometry(selection.id, geometry, emit=True, sync_item=True)
+        else:
+            selected_id = getattr(getattr(self, "roi_store", None), "selected_id", None)
+            setter = getattr(img_view, "setRoiSelections", None)
+            if callable(setter):
+                setter(remapped_selections, selected_id=selected_id)
+        roi_store = getattr(self, "roi_store", None)
+        if roi_store is not None:
+            selected_id = getattr(roi_store, "selected_id", None)
+            self.roi_store = roi_store.replace_all(selections_fn()).select(selected_id)
+            dock = getattr(self, "inspection_dock", None)
+            set_rois = getattr(dock, "set_rois", None)
+            if callable(set_rois):
+                set_rois(self.roi_store.selections)
+        schedule_refresh = getattr(self, "_schedule_refresh_inspection_dock", None)
+        if callable(schedule_refresh):
+            schedule_refresh("montage-layout-reflow")
 
     def _evaluate_montage_tile_snapshot(self, session, tile, token=None):
         start = perf_counter()
@@ -2514,13 +2601,15 @@ class MontageRenderMixin:
             restore()
 
     def _maybe_auto_fit_montage_tiles(self, geometry) -> bool:
+        if bool(getattr(self, "_montage_live_layout_reflow", False)):
+            return False
         montage = getattr(geometry, "montage", geometry)
         if montage is None or not getattr(montage, "indices", ()):
             self._last_montage_autofit_signature = None
             return False
         tile_count = len(tuple(montage.indices))
         full_range = _montage_full_view_range(montage)
-        signature = _montage_autofit_signature(montage, full_range)
+        signature = _montage_autofit_signature(montage)
         revert_previous_signature = getattr(self, "_last_montage_revert_signature", None)
         self._last_montage_revert_signature = signature
         scope_grew_for_revert = bool(
@@ -3013,11 +3102,6 @@ def _montage_full_view_range(montage):
     return ((0.0, float(max(1, width))), (0.0, float(max(1, height))))
 
 
-def _plan_full_view_range(plan):
-    height, width = tuple(int(value) for value in plan.display_shape[:2])
-    return ((0.0, float(max(1, width))), (0.0, float(max(1, height))))
-
-
 def _visible_montage_tile_count(montage, view_range) -> int:
     x0, x1 = sorted((float(view_range[0][0]), float(view_range[0][1])))
     y0, y1 = sorted((float(view_range[1][0]), float(view_range[1][1])))
@@ -3067,35 +3151,37 @@ def _should_auto_fit_montage_view(
 ) -> bool:
     if int(tile_count) <= 0:
         return False
+    controller_near_auto = bool(viewport_controller is not None and viewport_controller.is_near_auto(view_range))
     if int(visible_count) <= 0:
+        return bool(viewport_controller is None or controller_near_auto)
+    if view_ranges_near(view_range, full_range):
         return True
-    if _view_range_contains_near(view_range, full_range):
-        return True
-    return bool(viewport_controller is not None and viewport_controller.is_near_auto(view_range))
+    return controller_near_auto
 
 
-def _montage_autofit_signature(montage, full_range) -> tuple[int, float, float, int, int]:
-    width = max(0.0, float(full_range[0][1]) - float(full_range[0][0]))
-    height = max(0.0, float(full_range[1][1]) - float(full_range[1][0]))
+def _montage_autofit_signature(montage) -> tuple[tuple[int, ...], int, int, int]:
     return (
-        len(tuple(getattr(montage, "indices", ()) or ())),
-        width,
-        height,
-        int(getattr(montage, "columns", 0) or 0),
-        int(getattr(montage, "rows", 0) or 0),
+        tuple(int(index) for index in tuple(getattr(montage, "indices", ()) or ())),
+        int(getattr(montage, "tile_width", 0) or 0),
+        int(getattr(montage, "tile_height", 0) or 0),
+        int(getattr(montage, "gap", 0) or 0),
     )
 
 
 def _montage_autofit_scope_grew(previous, current) -> bool:
     try:
-        previous_count, previous_width, previous_height, _previous_columns, _previous_rows = previous
-        current_count, current_width, current_height, _current_columns, _current_rows = current
+        previous_indices, previous_width, previous_height, previous_gap = previous
+        current_indices, current_width, current_height, current_gap = current
     except Exception:
         return True
+    previous_set = set(int(index) for index in tuple(previous_indices))
+    current_set = set(int(index) for index in tuple(current_indices))
     return (
-        int(current_count) > int(previous_count)
-        or float(current_width) > float(previous_width)
-        or float(current_height) > float(previous_height)
+        len(current_set) > len(previous_set)
+        or current_set > previous_set
+        or int(current_width) > int(previous_width)
+        or int(current_height) > int(previous_height)
+        or int(current_gap) > int(previous_gap)
     )
 
 
@@ -3465,6 +3551,14 @@ def _montage_priority_focus(window, view_range) -> tuple[float, float] | None:
         except Exception:
             pass
     try:
+        plan = getattr(getattr(window, "_montage_session", None), "plan", None)
+        viewport_shape = getattr(getattr(window, "_montage_session", None), "viewport_shape", None)
+        if plan is not None:
+            rect = montage_rect_for_viewport(plan, view_range=view_range, viewport_shape=viewport_shape)
+            return (
+                (float(rect[0]) + float(rect[2])) * 0.5,
+                (float(rect[1]) + float(rect[3])) * 0.5,
+            )
         x_range, y_range = view_range
         return (
             (float(x_range[0]) + float(x_range[1])) * 0.5,

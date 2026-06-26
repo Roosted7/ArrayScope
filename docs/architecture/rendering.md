@@ -76,6 +76,18 @@ A montage is one reason to have semantic regions, but not the only one. Internal
 plane is implemented without inventing a montage axis; `FramePlan` region bounds and data slices are
 the source of truth for backend tile placement.
 
+Montage resize and column reflow use shared viewport policy. `ViewportController` preserves manual
+screen zoom across widget resize; then the Qt-free `montage_viewport` policy handles montage-specific
+layout retargeting. The renderer supplies the current Fit/near-auto facts and applies the returned
+`MontageViewportReflow`. Manual views do not refit because the viewport grew, shrank, changed aspect,
+or temporarily intersects zero tiles. Near-auto re-entry requires all four current edges to be near the
+next fitted auto range. When the same source indices are laid out in different columns, manual reflow
+translates by `source_index` and tile-local focus without applying another zoom change. When the tiled
+dimension scrolls to a different source set, the range remains in world coordinates and samples the
+new content. ROI geometry follows the same source-local rule through canonical
+`RoiSelection` remapping. See
+[ADR 0042](../decisions/0042-montage-viewport-reflow-and-roi-ownership.md).
+
 ### Multi-resolution
 
 Production residency currently favors native-resolution tiles. Arbitrary CPU-reduced sizes must not be placed into fixed atlas slots whose sampling assumes one tile shape. Future multi-resolution storage requires compatible classes: separate pages per LOD/shape, arrays grouped by dimensions, or a virtual texture/page table.
@@ -107,7 +119,8 @@ It may not own:
 - which ROI/profile target wins;
 - whether levels are user-locked;
 - cache/document identity;
-- the meaning of a viewport request.
+- the meaning of a viewport request;
+- montage reflow or ROI source-local remapping semantics.
 
 ## Current backends
 

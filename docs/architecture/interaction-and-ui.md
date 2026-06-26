@@ -40,6 +40,14 @@ The pure range constraint keeps a minimum recoverable overlap with content while
 
 Backend camera mechanics may differ, but fit/preserve/reset/1:1 meaning is shared.
 
+Montage resize and layout reflow use the same shared meaning. Fit and untouched near-auto views may
+recompute a square-pixel fitted range; manual resize keeps screen zoom stable, so shrinking the
+viewport shows less content at the same scale and growing it shows more. Manual column reflow does
+not refit. If the same montage sources move to new tile positions, the viewport can translate by
+source-local focus; if the source set changes because the tiled dimension scrolled, the world range
+stays stable and samples the new content. See
+[ADR 0042](../decisions/0042-montage-viewport-reflow-and-roi-ownership.md).
+
 ## Committed-frame pointer semantics
 
 Pointer coordinates are interpreted against the frame currently shown. The mapping uses committed geometry and value source, so a queued state change cannot make hover report values from a different slice than the visible pixels.
@@ -62,6 +70,9 @@ are clamped to the committed image bounds.
 ## ROI and profiles
 
 Qt graphics items are views of Qt-free ROI/profile models. Sampling/statistics live in `core.roi`, `core.histograms`, geometry, and profile coordination.
+For montage layout reflow, canonical ROI selections remap by source index and tile-local coordinate
+when the source set is unchanged. Graphics items mirror that selection state; backend-specific ROI
+items do not own alternate reflow rules.
 
 Recommended interaction sequence:
 

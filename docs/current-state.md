@@ -82,6 +82,12 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
 - Backend scene conversion uses cached frame-plan region signatures and current tile-delta active/
   planned/near sets, avoiding stale viewport-retarget semantics and repeated full region rebuilding
   when the plan is unchanged.
+- Montage resize/layout reflow now has explicit viewport owners. `ViewportController` preserves
+  manual screen zoom across resize; Qt-free montage reflow translates same-source layout changes
+  without adding another zoom change. Fit and true near-auto views are the only resize paths that
+  refit. ROI selections remap by source index and tile-local coordinate when the same montage sources
+  move. See
+  [ADR 0042](decisions/0042-montage-viewport-reflow-and-roi-ownership.md).
 
 ## Material risks
 
@@ -90,7 +96,8 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
 `window/montage_renderer.py` and `window/montage_session.py` are still substantial orchestration
 modules. N6 removed ownership of level generation, convergence strategy, admission caps, and stage
 fan-in from the session, X1 unified frame planning/presentation semantics, and X2 added work-graph
-admission/counters, but the renderer still coordinates Qt timers, committed frames, overlays, side
+admission/counters. ADR 0042 also moved montage resize/reflow and ROI layout semantics out to a
+Qt-free viewport helper. The renderer still coordinates Qt timers, committed frames, overlays, side
 panels, diagnostics, and backend commits. Future X4/X5 work should reuse the extracted models rather
 than growing another scheduler.
 

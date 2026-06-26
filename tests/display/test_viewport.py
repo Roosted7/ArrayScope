@@ -162,6 +162,26 @@ def test_auto_untouched_resize_refits_square_pixels_without_stretching():
     assert y_range == pytest.approx([0.0, 10.0])
 
 
+def test_user_resize_preserves_manual_center_and_screen_zoom():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(
+        view,
+        (10, 10),
+        _size(100, 100),
+        policy=ViewportPolicy.PRESERVE,
+        display_rect=(0.0, 0.0, 10.0, 10.0),
+    )
+    view.setRange(xRange=(2.0, 6.0), yRange=(3.0, 9.0), padding=0)
+    controller.note_user_range_changed(view.viewRange())
+
+    controller.resize(view, (10, 10), _size(220, 120), display_rect=(0.0, 0.0, 10.0, 10.0))
+
+    assert controller.mode == ViewportMode.USER
+    assert view.viewRange()[0] == pytest.approx([-0.4, 8.4])
+    assert view.viewRange()[1] == pytest.approx([2.4, 9.6])
+
+
 def test_user_range_change_near_auto_does_not_demote_auto_mode():
     controller = ViewportController()
     view = FakeViewBox()
@@ -180,6 +200,37 @@ def test_user_range_change_far_from_auto_demotes_auto_mode():
     controller.note_user_range_changed(((3.0, 13.0), (0.0, 10.0)))
 
     assert controller.mode == ViewportMode.USER
+
+
+def test_resize_with_stale_auto_mode_preserves_far_from_auto_view():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(view, (10, 10), _size(100, 100), policy=ViewportPolicy.PRESERVE)
+    view.setRange(xRange=(100.0, 120.0), yRange=(200.0, 220.0), padding=0)
+
+    controller.resize(view, (10, 10), _size(200, 100), display_rect=(0.0, 0.0, 10.0, 10.0))
+
+    assert controller.mode == ViewportMode.USER
+    assert view.viewRange() == [[90.0, 130.0], [200.0, 220.0]]
+
+
+def test_user_resize_shrink_shows_less_content_at_same_screen_zoom():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(
+        view,
+        (10, 10),
+        _size(200, 100),
+        policy=ViewportPolicy.PRESERVE,
+        display_rect=(0.0, 0.0, 10.0, 10.0),
+    )
+    view.setRange(xRange=(-10.0, 30.0), yRange=(0.0, 20.0), padding=0)
+    controller.note_user_range_changed(view.viewRange())
+
+    controller.resize(view, (10, 10), _size(100, 100), display_rect=(0.0, 0.0, 10.0, 10.0))
+
+    assert controller.mode == ViewportMode.USER
+    assert view.viewRange() == [[0.0, 20.0], [0.0, 20.0]]
 
 
 def test_square_pixel_fit_view_range_preserves_content_aspect_inside_wide_viewport():

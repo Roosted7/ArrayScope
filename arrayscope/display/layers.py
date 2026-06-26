@@ -62,7 +62,8 @@ class ViewLayerOwner:
         self._roi_items[roi_id] = item
 
     def remove_roi_item(self, roi_id: str) -> None:
-        item = self._roi_items.pop(str(roi_id), None)
+        roi_id = str(roi_id)
+        item = self._roi_items.pop(roi_id, None)
         if item is not None:
             self._remove_item(item)
 
