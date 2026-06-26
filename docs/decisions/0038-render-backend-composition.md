@@ -84,10 +84,12 @@ arrayscope/display/
   widget.py               # shared Qt shell: histogram, HUD, ROI info, signals
 ```
 
-This is a destination, not a flag-day move.  Existing public widget methods remain the migration
-boundary while implementation is extracted by responsibility.  `VisPyImageView2D(ImageView2D)` may
-remain temporarily, but the end state is a shared shell containing an `ImageRenderBackend`, not a
-backend inheriting another backend.
+This is implemented as the X3 backend-composition boundary. The built-in method-adapter migration
+boundary has been retired for production commits: `DisplayCommitter` talks to an `ImageSurface`, and
+`VisPyImageView2D` no longer subclasses the PyQtGraph concrete `ImageView2D`. `ImageSurface` covers
+presentation commits, camera application, overlay coordinate mapping, diagnostics, context-loss reset,
+teardown, and declared interaction-event ownership. Native pointer capture and drag lifecycle remain
+tracked by the X4 interaction roadmap item.
 
 ## Consequences
 
@@ -101,11 +103,11 @@ Positive:
 
 Trade-offs:
 
-- The current hybrid surface remains during migration and still pays some dual-scene and Qt stacking
-  cost.
+- The current VisPy surface still pays Qt stacking cost because the VisPy canvas is passive under the
+  shared PyQtGraph overlay shell.
 - The backend protocol must stay semantic while still permitting different mechanics; exposing every
   VisPy or PyQtGraph primitive through it would create a lowest-common-denominator abstraction.
-- Native VisPy pointer interaction is deferred until the shared interaction controller no longer
+- Native VisPy pointer interaction is deferred until the X4 shared interaction controller no longer
   depends on `QGraphicsItem` event ownership.
 
 ## Migration sequence

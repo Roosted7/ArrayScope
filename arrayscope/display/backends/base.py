@@ -1,19 +1,11 @@
-"""Semantic rendering-backend boundary.
-
-The display orchestration layer commits ArrayScope presentations through this
-small protocol. Concrete graphics-library methods stay behind adapters so the
-window/controller code does not need to know whether pixels are drawn by
-PyQtGraph, VisPy, or a future backend.
-"""
+"""Semantic image-surface boundary."""
 
 from __future__ import annotations
 
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-import numpy as np
-
-from arrayscope.display.backend_contract import ImageViewBackendCapabilities, image_view_backend_capabilities
+from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 
 if TYPE_CHECKING:
     from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
@@ -29,14 +21,14 @@ class RasterCommitMode(Enum):
 
 
 @runtime_checkable
-class ImageRenderBackend(Protocol):
-    """Backend operations expressed in ArrayScope display semantics."""
-
-    @property
-    def view(self): ...
+class ImageSurface(Protocol):
+    """Concrete pixel surface expressed in ArrayScope display semantics."""
 
     @property
     def capabilities(self) -> ImageViewBackendCapabilities: ...
+
+    @property
+    def widget(self): ...
 
     def current_raster_shape(self) -> tuple[int, int] | None: ...
 
@@ -46,135 +38,49 @@ class ImageRenderBackend(Protocol):
 
     def set_profile_bounds(self, bounds: tuple[float, float, float, float]) -> None: ...
 
+    def apply_camera(
+        self,
+        image_shape: tuple[int, int],
+        viewport_policy,
+        *,
+        image_origin: tuple[float, float] = (0.0, 0.0),
+        content_rect: tuple[float, float, float, float] | None = None,
+    ) -> None: ...
 
-class ImageViewMethodBackendAdapter:
-    """Migration adapter for the existing ImageView2D public methods.
+    def map_scene_to_overlay(self, scene_pos): ...
 
-    This is deliberately the only place where semantic presentations are
-    translated to the legacy widget method vocabulary. PyQtGraph and VisPy
-    adapters inherit this translation while retaining separate capability and
-    implementation modules.
-    """
+    def current_viewport_rect(self) -> tuple[float, float, float, float] | None: ...
 
-    expected_backend_name: str | None = None
+    def presentation_diagnostics(self) -> dict[str, object]: ...
 
-    def __init__(self, view):
-        self._view = view
-        self._capabilities = image_view_backend_capabilities(view)
-        expected = self.expected_backend_name
-        if expected is not None and self._capabilities.name != expected:
-            raise ValueError(
-                f"{type(self).__name__} requires backend {expected!r}, "
-                f"got {self._capabilities.name!r}"
-            )
+    def interaction_event_owner(self) -> str: ...
 
-    @property
-    def view(self):
-        return self._view
+    def reset_surface(self, reason: str) -> None: ...
 
-    @property
-    def capabilities(self) -> ImageViewBackendCapabilities:
-        return self._capabilities
-
-    def current_raster_shape(self) -> tuple[int, int] | None:
-        image = getattr(self._view, "image", None)
-        if image is None:
-            return None
-        shape = tuple(np.shape(image)[:2])
-        return (int(shape[0]), int(shape[1])) if len(shape) == 2 else None
-
-    def present_raster(self, presentation: "DisplayRasterPresentation", *, mode: RasterCommitMode) -> None:
-        mode = RasterCommitMode(mode)
-        if mode is RasterCommitMode.FULL:
-            self._present_raster_full(presentation)
-            return
-        if mode is RasterCommitMode.FAST:
-            self._present_raster_fast(presentation)
-            return
-        if mode is RasterCommitMode.TILE_LAYER:
-            self._present_legacy_raster_tile_layer(presentation)
-            return
-        raise ValueError(f"unsupported raster commit mode: {mode}")
-
-    def present_tiled(self, presentation: "DisplayTiledPresentation"):
-        commit = getattr(self._view, "setTiledMontagePresentation", None)
-        if not callable(commit):
-            raise TypeError("image view does not implement first-class tiled presentation commits")
-        return commit(
-            geometry=presentation.geometry,
-            tile_state=presentation.tile_state,
-            tile_delta=presentation.tile_delta,
-            histogramPlotData=presentation.histogram_plot_data,
-            levels=presentation.levels,
-            histogramRange=presentation.histogram_range,
-            viewport_policy=presentation.viewport_policy,
-            rgb_already_windowed=presentation.rgb_already_windowed,
-            shader_mapping=presentation.shader_mapping,
-            tile_residency_budget_bytes=presentation.tile_residency_budget_bytes,
-            frame_plan=presentation.frame_plan,
-        )
-
-    def set_profile_bounds(self, bounds: tuple[float, float, float, float]) -> None:
-        setter = getattr(self._view, "setProfileMarkerBoundsRect", None)
-        if callable(setter):
-            setter(bounds)
-
-    def _present_raster_full(self, presentation: "DisplayRasterPresentation") -> None:
-        self._view.setImagePresentation(
-            presentation.data,
-            histogramData=presentation.histogram_data,
-            histogramPlotData=presentation.histogram_plot_data,
-            levels=presentation.levels,
-            histogramRange=presentation.histogram_range,
-            viewport_policy=presentation.viewport_policy,
-            rgb_already_windowed=presentation.rgb_already_windowed,
-            image_origin=_image_origin(presentation.geometry),
-            geometry=presentation.geometry,
-            shader_mapping=presentation.shader_mapping,
-            texture_kind=presentation.texture_kind,
-            semantic_data=presentation.semantic_data,
-            lod=presentation.lod,
-        )
-
-    def _present_raster_fast(self, presentation: "DisplayRasterPresentation") -> None:
-        self._view.updateImagePresentationFast(
-            presentation.data,
-            histogramData=presentation.histogram_data,
-            histogramPlotData=presentation.histogram_plot_data,
-            levels=presentation.levels,
-            histogramRange=presentation.histogram_range,
-            rgb_already_windowed=presentation.rgb_already_windowed,
-            image_origin=_image_origin(presentation.geometry),
-            geometry=presentation.geometry,
-            shader_mapping=presentation.shader_mapping,
-            texture_kind=presentation.texture_kind,
-            semantic_data=presentation.semantic_data,
-            lod=presentation.lod,
-        )
-
-    def _present_legacy_raster_tile_layer(self, presentation: "DisplayRasterPresentation") -> None:
-        commit = getattr(self._view, "setMontageTileLayerPresentation", None)
-        if not callable(commit):
-            raise TypeError("image view does not implement montage tile-layer presentation commits")
-        commit(
-            presentation.data,
-            histogramData=presentation.histogram_data,
-            histogramPlotData=presentation.histogram_plot_data,
-            geometry=presentation.geometry,
-            levels=presentation.levels,
-            histogramRange=presentation.histogram_range,
-            viewport_policy=presentation.viewport_policy,
-            rgb_already_windowed=presentation.rgb_already_windowed,
-            montage_dirty_tiles=presentation.montage_dirty_tiles,
-            montage_tile_source_ids=presentation.montage_tile_source_ids,
-            montage_tile_payloads=None,
-        )
+    def teardown_surface(self) -> None: ...
 
 
-def _image_origin(geometry) -> tuple[float, float]:
-    if getattr(geometry, "montage", None) is None:
-        return (0.0, 0.0)
-    return (
-        float(getattr(geometry, "montage_origin_x", 0)),
-        float(getattr(geometry, "montage_origin_y", 0)),
-    )
+def surface_for_view(view) -> ImageSurface:
+    """Return the concrete surface owned by an image-view shell."""
+
+    missing = object()
+    surface = getattr(view, "surface", missing)
+    if isinstance(surface, ImageSurface):
+        return surface
+    if isinstance(view, ImageSurface):
+        return view
+    view_type = _qualified_type_name(view)
+    if surface is missing:
+        detail = "missing .surface"
+    elif surface is None:
+        detail = ".surface is None"
+    else:
+        detail = f".surface is {_qualified_type_name(surface)}, which does not implement ImageSurface"
+    raise TypeError(f"{view_type} does not expose an ImageSurface ({detail})")
+
+
+def _qualified_type_name(value) -> str:
+    cls = type(value)
+    module = getattr(cls, "__module__", "")
+    name = getattr(cls, "__qualname__", getattr(cls, "__name__", str(cls)))
+    return name if module in {"", "builtins"} else f"{module}.{name}"

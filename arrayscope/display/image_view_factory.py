@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from arrayscope.app.settings_state import ImageRenderingBackendChoice
-from arrayscope.display.imageview2d import ImageView2D
+from arrayscope.display.backends.pyqtgraph import PyQtGraphSurface
 
 
 def create_image_view(settings=None, *, notify=None):
@@ -17,14 +17,14 @@ def create_image_view(settings=None, *, notify=None):
     choice = getattr(settings, "image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH)
     if getattr(choice, "value", choice) == ImageRenderingBackendChoice.VISPY.value:
         try:
-            from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+            from arrayscope.display.backends.vispy import VisPySurface
 
-            view = VisPyImageView2D()
+            view = VisPySurface()
             view._notify_status = notify
             return view
         except Exception as exc:
             if callable(notify):
                 notify(f"VisPy renderer unavailable; using PyQtGraph ({exc})")
-    view = ImageView2D()
+    view = PyQtGraphSurface()
     view._notify_status = notify
     return view

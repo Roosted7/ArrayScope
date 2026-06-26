@@ -541,7 +541,7 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
             self.view_state = state
             self._viewport_plan = viewport_plan
             self.scheduled = []
-            self.img_view = SimpleNamespace(rendering_backend_name="pyqtgraph")
+            self.img_view = SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
 
         def _montage_viewport_plan(self, view_state):
             return self._viewport_plan
@@ -908,7 +908,7 @@ def test_ready_display_commit_refreshes_stale_commit_token_at_source(qt_app):
     class _Window(QtCore.QObject, MontageRenderMixin):
         def __init__(self):
             super().__init__()
-            self.img_view = SimpleNamespace(rendering_backend_name="pyqtgraph")
+            self.img_view = SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
 
         def _is_current_montage_session(self, session_id, key):
             return True

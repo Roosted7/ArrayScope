@@ -25,6 +25,7 @@ from arrayscope.core.roi import (
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget, GuiCallbackObservation
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
+from arrayscope.display.backends import RasterCommitMode
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.histogram_controller import HistogramDisplayController, HistogramLevelPreviewController
 from arrayscope.display.image_upload import ensure_imageitem_array, rgb_display_for_levels
@@ -61,13 +62,11 @@ if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
-class ImageView2D(QtWidgets.QWidget):
+class ImageViewShell(QtWidgets.QWidget):
     # Backends that implement the typed tile-payload method can bypass CPU
     # montage canvas composition.  Renderer orchestration checks this
     # capability rather than branching on a backend name.
-    rendering_backend_name = "pyqtgraph"
     rendering_capabilities = PYQTGRAPH_CAPABILITIES
-    supports_direct_montage_tile_payloads = rendering_capabilities.direct_montage_tile_payloads
 
     # Emitted only for explicit user edits of the histogram/LUT levels.
     userLevelsChanged = QtCore.Signal()
@@ -100,6 +99,8 @@ class ImageView2D(QtWidgets.QWidget):
             If specified, this ImageItem will be used for display
         """
         super().__init__(parent)
+        self.surface = self
+        self._surface_teardown_done = False
         
         self.image = None
         self.imageDisp = None
@@ -221,7 +222,6 @@ class ImageView2D(QtWidgets.QWidget):
         self._profile_handle.sigPositionChangeFinished.connect(self._finish_profile_capture)
         self._layer_owner.add_profile_marker_items(self._profile_vline, self._profile_hline, self._profile_handle)
         self.view.sigRangeChanged.connect(self._on_view_range_changed)
-
     def _histogram_preview_immediate(self) -> bool:
         return True
 
@@ -403,7 +403,7 @@ class ImageView2D(QtWidgets.QWidget):
             decision,
             interactive=interactive,
             work_class=work_class,
-            backend=str(getattr(self, "rendering_backend_name", "pyqtgraph")),
+            backend=self.capabilities.name,
             item_cap=item_cap,
             byte_cap=byte_cap,
         )
@@ -432,7 +432,7 @@ class ImageView2D(QtWidgets.QWidget):
             GuiCallbackObservation(
                 channel=str(channel),
                 work_class=str(work_class),
-                backend=str(getattr(self, "rendering_backend_name", "pyqtgraph")),
+                backend=self.capabilities.name,
                 target_ms=8.0,
                 warning_ms=16.0,
                 item_cap=max(1, int(item_count)),
@@ -444,12 +444,7 @@ class ImageView2D(QtWidgets.QWidget):
         )
 
     def closeEvent(self, event) -> None:
-        preview = getattr(self, "_histogram_preview_controller", None)
-        if preview is not None:
-            preview.cancel()
-        display = getattr(self, "_histogram_display_controller", None)
-        if display is not None:
-            display.cancel()
+        self.teardown_surface()
         super().closeEvent(event)
 
     def _bind_histogram_item(self, item) -> None:
@@ -959,6 +954,149 @@ class ImageView2D(QtWidgets.QWidget):
             semantic_data=semantic_data,
             lod=lod,
         )
+
+    @property
+    def widget(self):
+        return self
+
+    @property
+    def capabilities(self):
+        return self.rendering_capabilities
+
+    def current_raster_shape(self) -> tuple[int, int] | None:
+        image = getattr(self, "image", None)
+        if image is None:
+            return None
+        shape = tuple(np.shape(image))
+        if len(shape) < 2:
+            return None
+        return (int(shape[0]), int(shape[1]))
+
+    def present_raster(self, presentation, *, mode: RasterCommitMode) -> None:
+        mode = RasterCommitMode(mode)
+        if mode is RasterCommitMode.FULL:
+            self.setImagePresentation(
+                presentation.data,
+                histogramData=presentation.histogram_data,
+                histogramPlotData=presentation.histogram_plot_data,
+                levels=presentation.levels,
+                histogramRange=presentation.histogram_range,
+                viewport_policy=presentation.viewport_policy,
+                rgb_already_windowed=presentation.rgb_already_windowed,
+                image_origin=_image_origin(presentation.geometry),
+                geometry=presentation.geometry,
+                shader_mapping=presentation.shader_mapping,
+                texture_kind=presentation.texture_kind,
+                semantic_data=presentation.semantic_data,
+                lod=presentation.lod,
+            )
+            return
+        if mode is RasterCommitMode.FAST:
+            self.updateImagePresentationFast(
+                presentation.data,
+                histogramData=presentation.histogram_data,
+                histogramPlotData=presentation.histogram_plot_data,
+                levels=presentation.levels,
+                histogramRange=presentation.histogram_range,
+                rgb_already_windowed=presentation.rgb_already_windowed,
+                image_origin=_image_origin(presentation.geometry),
+                geometry=presentation.geometry,
+                shader_mapping=presentation.shader_mapping,
+                texture_kind=presentation.texture_kind,
+                semantic_data=presentation.semantic_data,
+                lod=presentation.lod,
+            )
+            return
+        if mode is RasterCommitMode.TILE_LAYER:
+            self.setMontageTileLayerPresentation(
+                presentation.data,
+                histogramData=presentation.histogram_data,
+                histogramPlotData=presentation.histogram_plot_data,
+                geometry=presentation.geometry,
+                levels=presentation.levels,
+                histogramRange=presentation.histogram_range,
+                viewport_policy=presentation.viewport_policy,
+                rgb_already_windowed=presentation.rgb_already_windowed,
+                montage_dirty_tiles=presentation.montage_dirty_tiles,
+                montage_tile_source_ids=presentation.montage_tile_source_ids,
+                montage_tile_payloads=None,
+            )
+            return
+        raise ValueError(f"unsupported raster commit mode: {mode}")
+
+    def present_tiled(self, presentation):
+        return self.setTiledMontagePresentation(
+            geometry=presentation.geometry,
+            tile_state=presentation.tile_state,
+            tile_delta=presentation.tile_delta,
+            histogramPlotData=presentation.histogram_plot_data,
+            levels=presentation.levels,
+            histogramRange=presentation.histogram_range,
+            viewport_policy=presentation.viewport_policy,
+            rgb_already_windowed=presentation.rgb_already_windowed,
+            shader_mapping=presentation.shader_mapping,
+            tile_residency_budget_bytes=presentation.tile_residency_budget_bytes,
+            frame_plan=presentation.frame_plan,
+        )
+
+    def set_profile_bounds(self, bounds: tuple[float, float, float, float]) -> None:
+        self.setProfileMarkerBoundsRect(bounds)
+
+    def apply_camera(
+        self,
+        image_shape: tuple[int, int],
+        viewport_policy,
+        *,
+        image_origin: tuple[float, float] = (0.0, 0.0),
+        content_rect: tuple[float, float, float, float] | None = None,
+    ) -> None:
+        self._apply_viewport_policy(
+            tuple(int(value) for value in image_shape[:2]),
+            viewport_policy,
+            image_origin=image_origin,
+            content_rect=content_rect,
+        )
+
+    def map_scene_to_overlay(self, scene_pos):
+        return self._map_scene_to_display_overlay(scene_pos)
+
+    def current_viewport_rect(self) -> tuple[float, float, float, float] | None:
+        return self._current_image_viewport_rect()
+
+    def presentation_diagnostics(self) -> dict[str, object]:
+        timing = self.lastImageUploadTiming()
+        return {
+            "backend": self.capabilities.name,
+            "mode": str(getattr(timing, "mode", "")),
+            "interaction_event_owner": self.interaction_event_owner(),
+            "native_pointer_interaction": bool(self.capabilities.native_pointer_interaction),
+            "montage_display_mode": self.montageDisplayMode(),
+            "last_reset_reason": str(getattr(self, "_last_surface_reset_reason", "")),
+        }
+
+    def interaction_event_owner(self) -> str:
+        return "pyqtgraph"
+
+    def reset_surface(self, reason: str) -> None:
+        self._last_surface_reset_reason = str(reason)
+        self.clearMontageTileLayer()
+        self.clearMontageTileOverlays()
+        overlay = getattr(self, "_evaluation_overlay", None)
+        if overlay is not None:
+            overlay.hide()
+        self.setImageStale(False)
+
+    def teardown_surface(self) -> None:
+        if self._surface_teardown_done:
+            return
+        self._surface_teardown_done = True
+        preview = getattr(self, "_histogram_preview_controller", None)
+        if preview is not None:
+            preview.cancel()
+        display = getattr(self, "_histogram_display_controller", None)
+        if display is not None:
+            display.cancel()
+        self.clearMontageTileOverlays()
 
     def updateImageDataFast(
         self,
@@ -2086,6 +2224,21 @@ class ImageView2D(QtWidgets.QWidget):
     def resizeEvent(self, event):
         """On resize, if in 'fit' mode keep the image fully visible."""
         super().resizeEvent(event)
+
+
+class ImageView2D(ImageViewShell):
+    """PyQtGraph-backed shell used by the default display factory."""
+
+    pass
+
+
+def _image_origin(geometry) -> tuple[float, float]:
+    if getattr(geometry, "montage", None) is None:
+        return (0.0, 0.0)
+    return (
+        float(getattr(geometry, "montage_origin_x", 0)),
+        float(getattr(geometry, "montage_origin_y", 0)),
+    )
 
 
 def _world_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, float, float]:

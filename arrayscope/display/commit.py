@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from arrayscope.display.backends import RasterCommitMode, backend_adapter_for_view
+from arrayscope.display.backends import RasterCommitMode, surface_for_view
 from arrayscope.display.scene import DisplayScene, display_scene_for_presentation
 from arrayscope.display.model.frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TileCommitReport, TiledValueSource
 from arrayscope.display.model.commit import DisplayPresentation, DisplayRasterPresentation, DisplayTiledPresentation
@@ -12,8 +12,8 @@ from arrayscope.display.model.commit import DisplayPresentation, DisplayRasterPr
 
 class DisplayCommitter:
     def __init__(self, image_view):
-        self.backend = backend_adapter_for_view(image_view)
-        self.image_view = self.backend.view
+        self.surface = surface_for_view(image_view)
+        self.image_view = image_view
         self.last_tile_commit_report: TileCommitReport | None = None
         self.last_tile_committed_state = None
 
@@ -23,8 +23,8 @@ class DisplayCommitter:
         presentation = self._require_raster(presentation, "full")
         self._validate_presentation(presentation)
         scene = display_scene_for_presentation(presentation)
-        self.backend.present_raster(presentation, mode=RasterCommitMode.FULL)
-        self.backend.set_profile_bounds(scene.bounds)
+        self.surface.present_raster(presentation, mode=RasterCommitMode.FULL)
+        self.surface.set_profile_bounds(scene.bounds)
         return self._frame_for(presentation, key, scene)
 
     def commit_fast(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
@@ -32,11 +32,11 @@ class DisplayCommitter:
         self.last_tile_committed_state = None
         presentation = self._require_raster(presentation, "fast")
         self._validate_presentation(presentation)
-        if self.backend.current_raster_shape() != tuple(presentation.geometry.display_shape):
+        if self.surface.current_raster_shape() != tuple(presentation.geometry.display_shape):
             raise ValueError("fast display commit requires an existing image with the same display shape")
         scene = display_scene_for_presentation(presentation)
-        self.backend.present_raster(presentation, mode=RasterCommitMode.FAST)
-        self.backend.set_profile_bounds(scene.bounds)
+        self.surface.present_raster(presentation, mode=RasterCommitMode.FAST)
+        self.surface.set_profile_bounds(scene.bounds)
         return self._frame_for(presentation, key, scene)
 
     def commit_tile_layer(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
@@ -47,8 +47,8 @@ class DisplayCommitter:
         else:
             self.last_tile_commit_report = None
             self.last_tile_committed_state = None
-            self.backend.present_raster(presentation, mode=RasterCommitMode.TILE_LAYER)
-        self.backend.set_profile_bounds(scene.bounds)
+            self.surface.present_raster(presentation, mode=RasterCommitMode.TILE_LAYER)
+        self.surface.set_profile_bounds(scene.bounds)
         return self._frame_for(presentation, key, scene, tile_state=self.last_tile_committed_state)
 
     def commit_tiled_delta(self, presentation: DisplayTiledPresentation) -> TileCommitReport:
@@ -60,7 +60,7 @@ class DisplayCommitter:
         """
 
         self._validate_presentation(presentation)
-        report = self.backend.present_tiled(presentation)
+        report = self.surface.present_tiled(presentation)
         if not isinstance(report, TileCommitReport):
             report = TileCommitReport(
                 presented_tiles=presentation.tile_state.active_payloads(presentation.tile_delta),

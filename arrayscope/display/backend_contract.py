@@ -47,8 +47,14 @@ VISPY_CAPABILITIES = ImageViewBackendCapabilities(
 
 
 def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
-    """Return capabilities for a view, with compatibility for older plugins."""
+    """Return capabilities for a view or its composed image surface."""
 
+    if view is None:
+        return ImageViewBackendCapabilities(name="pyqtgraph")
+    surface = getattr(view, "surface", None)
+    surface_capabilities = getattr(surface, "capabilities", None)
+    if isinstance(surface_capabilities, ImageViewBackendCapabilities):
+        return surface_capabilities
     capabilities = getattr(view, "rendering_capabilities", None)
     if isinstance(capabilities, ImageViewBackendCapabilities):
         return capabilities
@@ -63,16 +69,4 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
             native_pointer_interaction=bool(getattr(capabilities, "native_pointer_interaction", True)),
         )
 
-    name = str(getattr(view, "rendering_backend_name", "pyqtgraph") or "pyqtgraph").lower()
-    direct = bool(getattr(view, "supports_direct_montage_tile_payloads", False))
-    if name == "vispy":
-        return ImageViewBackendCapabilities(
-            name=name,
-            direct_montage_tile_payloads=direct,
-            prefers_tiled_montages=True,
-            supports_montage_canvas=False,
-            persistent_tile_residency=True,
-            shader_windowing=True,
-            native_pointer_interaction=False,
-        )
-    return ImageViewBackendCapabilities(name=name, direct_montage_tile_payloads=direct)
+    return ImageViewBackendCapabilities(name="pyqtgraph")

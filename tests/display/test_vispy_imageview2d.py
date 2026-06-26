@@ -57,8 +57,37 @@ def test_factory_constructs_vispy_backend(qt_app):
 
     view = create_image_view(AppSettingsState(image_rendering_backend=ImageRenderingBackendChoice.VISPY))
     try:
-        assert type(view).__name__ == "VisPyImageView2D"
-        assert view.rendering_backend_name == "vispy"
+        assert type(view).__name__ == "VisPySurface"
+        assert view.surface.capabilities.name == "vispy"
+    finally:
+        view.close()
+
+
+def test_vispy_surface_exposes_lifecycle_contract(qt_app):
+    from arrayscope.display.backends import surface_for_view
+    from arrayscope.display.backends.vispy.surface import VisPySurface
+    from arrayscope.display.viewport import ViewportPolicy
+
+    view = VisPySurface()
+    try:
+        surface = surface_for_view(view)
+
+        assert surface.widget is view
+        assert surface.capabilities.name == "vispy"
+        assert surface.capabilities.native_pointer_interaction is False
+        assert surface.interaction_event_owner() == "pyqtgraph-overlay"
+        surface.apply_camera((2, 3), ViewportPolicy.PRESERVE)
+        diagnostics = surface.presentation_diagnostics()
+        assert diagnostics["backend"] == "vispy"
+        assert diagnostics["interaction_event_owner"] == "pyqtgraph-overlay"
+        assert diagnostics["native_pointer_interaction"] is False
+
+        view._vispy_pending_warm_tile_payloads = {1: object()}
+        surface.reset_surface("test-context-loss")
+        assert view._vispy_pending_warm_tile_payloads == {}
+        assert surface.presentation_diagnostics()["last_reset_reason"] == "test-context-loss"
+        surface.teardown_surface()
+        surface.teardown_surface()
     finally:
         view.close()
 

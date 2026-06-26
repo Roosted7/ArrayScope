@@ -155,10 +155,11 @@ class DisplayPresentationMixin:
 
             set_image_start = perf_counter()
             backend_decision = self._montage_backend_decision_for_display(geometry, display_image.data)
+            capabilities = image_view_backend_capabilities(self.img_view)
             use_tile_layer = (
                 isinstance(decision.display_presentation, DisplayTiledPresentation)
                 or backend_decision.backend == "tile_layer"
-            ) and hasattr(self.img_view, "setTiledMontagePresentation")
+            ) and capabilities.direct_montage_tile_payloads
             if use_tile_layer:
                 frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
                 actual_backend = "tile_layer"
@@ -282,15 +283,14 @@ class DisplayPresentationMixin:
             can_fast = (
                 decision.allow_fast_commit
                 and viewport_policy == ViewportPolicy.PRESERVE
-                and getattr(self.img_view, "image", None) is not None
-                and tuple(getattr(self.img_view.image, "shape", ())[:2]) == tuple(display_image.data.shape[:2])
-                and hasattr(self.img_view, "updateImagePresentationFast")
+                and self._display_committer().surface.current_raster_shape() == tuple(display_image.data.shape[:2])
             )
             backend_decision = self._montage_backend_decision_for_display(geometry, display_image.data)
+            capabilities = image_view_backend_capabilities(self.img_view)
             use_tile_layer = (
                 isinstance(decision.display_presentation, DisplayTiledPresentation)
                 or backend_decision.backend == "tile_layer"
-            ) and hasattr(self.img_view, "setTiledMontagePresentation")
+            ) and capabilities.direct_montage_tile_payloads
             if use_tile_layer:
                 frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
                 actual_backend = "tile_layer"

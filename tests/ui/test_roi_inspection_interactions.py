@@ -126,6 +126,7 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.display.frame_planner import FramePlanner
     from arrayscope.window import ArrayScopeWindow
 
@@ -137,7 +138,7 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        if getattr(win.img_view, "rendering_backend_name", "") != "vispy":
+        if image_view_backend_capabilities(win.img_view).name != "vispy":
             pytest.skip("VisPy backend unavailable in this Qt environment")
         win._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4), max_raster_pixels=16)
         win.render(reason="test-vispy-tiled-roi")

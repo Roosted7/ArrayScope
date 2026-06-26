@@ -1,3 +1,8 @@
-from arrayscope.display.backends.pyqtgraph.adapter import PyQtGraphBackendAdapter
+def __getattr__(name: str):
+    if name == "PyQtGraphSurface":
+        from arrayscope.display.backends.pyqtgraph.surface import PyQtGraphSurface
 
-__all__ = ["PyQtGraphBackendAdapter"]
+        return PyQtGraphSurface
+    raise AttributeError(name)
+
+__all__ = ["PyQtGraphSurface"]

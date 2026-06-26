@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from arrayscope.display.backend_contract import ImageViewBackendCapabilities
+
 
 pytest.importorskip("vispy")
 
@@ -10,11 +12,11 @@ pytest.importorskip("vispy")
 def benchmark_results(qt_app):
     from pyqtgraph.Qt import QtWidgets
 
-    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.backends.pyqtgraph.surface import PyQtGraphSurface
+    from arrayscope.display.backends.vispy.surface import VisPySurface
     from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
-    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
-    view_types = (ImageView2D, VisPyImageView2D)
+    view_types = (PyQtGraphSurface, VisPySurface)
     before = sum(
         isinstance(widget, view_types)
         for widget in QtWidgets.QApplication.topLevelWidgets()
@@ -90,7 +92,10 @@ def test_benchmark_result_does_not_mask_backend_applied_lod():
     from arrayscope.core.runtime_diagnostics import ImageUploadTiming
     from arrayscope.display.rendering_benchmarks import _ActionMeasurement, _result
 
-    view = SimpleNamespace(rendering_backend_name="test", lastImageUploadTiming=lambda: ImageUploadTiming())
+    view = SimpleNamespace(
+        rendering_capabilities=ImageViewBackendCapabilities(name="test"),
+        lastImageUploadTiming=lambda: ImageUploadTiming(),
+    )
     timing = ImageUploadTiming(
         mode="test",
         tile_layer_lod_factor=4,

@@ -22,7 +22,7 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES
-from arrayscope.display.imageview2d import ImageView2D
+from arrayscope.display.imageview2d import ImageViewShell
 from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
 from arrayscope.display.imageview2d import _tiled_montage_placeholder
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
-class VisPyImageView2D(ImageView2D):
+class VisPyImageView2D(ImageViewShell):
     """ImageView2D variant that renders pixels with VisPy.
 
     The class deliberately preserves the public ImageView2D API.  Existing
@@ -56,9 +56,7 @@ class VisPyImageView2D(ImageView2D):
     interaction overlay.
     """
 
-    rendering_backend_name = "vispy"
     rendering_capabilities = VISPY_CAPABILITIES
-    supports_direct_montage_tile_payloads = rendering_capabilities.direct_montage_tile_payloads
 
     def setupUI(self):
         self._vispy_scene, self._vispy_visuals, self._vispy_transforms, self._vispy_panzoom_camera, self._vispy_gloo = _import_vispy()
@@ -189,17 +187,7 @@ class VisPyImageView2D(ImageView2D):
 
 
     def closeEvent(self, event) -> None:
-        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
-        if warm_timer is not None:
-            warm_timer.stop()
-        self._vispy_pending_warm_tile_payloads = {}
-        self._vispy_pending_warm_tile_context = {}
-        canvas = getattr(self, "_vispy_canvas", None)
-        if canvas is not None:
-            try:
-                canvas.close()
-            except Exception:
-                pass
+        self.teardown_surface()
         super().closeEvent(event)
 
     def _on_vispy_draw(self, *_args) -> None:
@@ -241,6 +229,46 @@ class VisPyImageView2D(ImageView2D):
             "overlay_visual_max_order": overlay_max,
             "overlays_above_tiles": bool(tile_min is not None and overlay_max is not None and overlay_max >= tile_min),
         }
+
+    def presentation_diagnostics(self) -> dict[str, object]:
+        diagnostics = super().presentation_diagnostics()
+        diagnostics.update(self.vispyPresentationDiagnostics())
+        diagnostics["interaction_event_owner"] = self.interaction_event_owner()
+        return diagnostics
+
+    def interaction_event_owner(self) -> str:
+        return "pyqtgraph-overlay"
+
+    def reset_surface(self, reason: str) -> None:
+        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
+        if warm_timer is not None:
+            warm_timer.stop()
+        self._vispy_pending_warm_tile_payloads = {}
+        self._vispy_pending_warm_tile_context = {}
+        super().reset_surface(reason)
+        self._vispy_main_data_id = None
+        self._vispy_main_color_source_id = None
+        self._vispy_main_scalar_source_id = None
+        self._last_vispy_main_source_shader_mapping = None
+        self._last_vispy_main_shader_mapping = None
+        self._last_vispy_main_texture_kind = None
+        self._vispy_canvas_update_pending = False
+
+    def teardown_surface(self) -> None:
+        if getattr(self, "_surface_teardown_done", False):
+            return
+        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
+        if warm_timer is not None:
+            warm_timer.stop()
+        self._vispy_pending_warm_tile_payloads = {}
+        self._vispy_pending_warm_tile_context = {}
+        canvas = getattr(self, "_vispy_canvas", None)
+        if canvas is not None:
+            try:
+                canvas.close()
+            except Exception:
+                pass
+        super().teardown_surface()
 
     def _display_overlay_parent(self):
         return getattr(self, "_display_container", self.graphicsView)

@@ -65,16 +65,50 @@ def _presentation():
 
 class _FakeImageView:
     def __init__(self):
+        self.surface = self
+        self.widget = self
+        self.capabilities = PYQTGRAPH_CAPABILITIES
         self.commit = None
         self.bounds = None
         self.report = None
 
-    def setTiledMontagePresentation(self, **kwargs):
-        self.commit = kwargs
+    def current_raster_shape(self):
+        return None
+
+    def present_raster(self, presentation, *, mode):
+        self.commit = (mode, presentation)
+
+    def present_tiled(self, presentation):
+        self.commit = {
+            "tile_state": presentation.tile_state,
+            "tile_delta": presentation.tile_delta,
+            "geometry": presentation.geometry,
+        }
         return self.report
 
-    def setProfileMarkerBoundsRect(self, bounds):
+    def set_profile_bounds(self, bounds):
         self.bounds = bounds
+
+    def apply_camera(self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0), content_rect=None):
+        self.camera = (tuple(image_shape), viewport_policy, tuple(image_origin), content_rect)
+
+    def map_scene_to_overlay(self, scene_pos):
+        return scene_pos
+
+    def current_viewport_rect(self):
+        return None
+
+    def presentation_diagnostics(self):
+        return {"backend": self.capabilities.name, "interaction_event_owner": self.interaction_event_owner()}
+
+    def interaction_event_owner(self):
+        return "fake"
+
+    def reset_surface(self, reason):
+        self.reset_reason = str(reason)
+
+    def teardown_surface(self):
+        self.teardown_called = True
 
 
 def test_tiled_committer_keeps_fake_raster_out_of_committed_frame():
@@ -94,6 +128,16 @@ def test_tiled_committer_keeps_fake_raster_out_of_committed_frame():
     assert isinstance(frame.value_source, TiledValueSource)
     assert frame.value_source.payloads == presentation.tile_state.payloads
     assert view.bounds == (0.0, 0.0, 1.0, 1.0)
+
+
+def test_committer_cache_identity_tracks_shell_not_surface_widget():
+    view = _FakeImageView()
+    view.widget = object()
+
+    committer = DisplayCommitter(view)
+
+    assert committer.image_view is view
+    assert committer.surface is view
 
 
 def test_tiled_committer_excludes_unpresented_payloads_from_committed_frame():

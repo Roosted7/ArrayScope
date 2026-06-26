@@ -204,7 +204,7 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
         win.show()
         _process_events(qt_app, count=20)
 
-        assert win.img_view.rendering_backend_name == "vispy"
+        assert win.img_view.surface.capabilities.name == "vispy"
         selection = win.img_view.createRoi("rectangle", rect=(18.0, 20.0, 34.0, 28.0), color=(255, 32, 16))
         assert selection.id in getattr(win.img_view, "_vispy_roi_visuals", {})
         assert selection.id in getattr(win.img_view, "_vispy_roi_handle_visuals", {})

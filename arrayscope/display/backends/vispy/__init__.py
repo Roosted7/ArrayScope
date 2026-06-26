@@ -1,3 +1,8 @@
-from arrayscope.display.backends.vispy.adapter import VisPyBackendAdapter
+def __getattr__(name: str):
+    if name == "VisPySurface":
+        from arrayscope.display.backends.vispy.surface import VisPySurface
 
-__all__ = ["VisPyBackendAdapter"]
+        return VisPySurface
+    raise AttributeError(name)
+
+__all__ = ["VisPySurface"]

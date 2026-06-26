@@ -1,10 +1,6 @@
 from types import SimpleNamespace
 
-from arrayscope.display.backend_contract import (
-    ImageViewBackendCapabilities,
-    VISPY_CAPABILITIES,
-    image_view_backend_capabilities,
-)
+from arrayscope.display.backend_contract import ImageViewBackendCapabilities, image_view_backend_capabilities
 
 
 def test_explicit_backend_capabilities_are_preserved():
@@ -13,13 +9,8 @@ def test_explicit_backend_capabilities_are_preserved():
     assert image_view_backend_capabilities(SimpleNamespace(rendering_capabilities=capabilities)) is capabilities
 
 
-def test_legacy_vispy_plugin_gets_conservative_hybrid_capabilities():
-    capabilities = image_view_backend_capabilities(
-        SimpleNamespace(rendering_backend_name="vispy", supports_direct_montage_tile_payloads=True)
-    )
+def test_missing_backend_capabilities_default_to_pyqtgraph_baseline():
+    capabilities = image_view_backend_capabilities(SimpleNamespace())
 
-    assert capabilities.name == VISPY_CAPABILITIES.name
-    assert capabilities.prefers_tiled_montages is True
-    assert capabilities.supports_montage_canvas is False
-    assert capabilities.persistent_tile_residency is True
-    assert capabilities.native_pointer_interaction is False
+    assert capabilities.name == "pyqtgraph"
+    assert capabilities.direct_montage_tile_payloads is False

@@ -16,6 +16,7 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
+from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.work_graph import WorkGraph, WorkItem, WorkLane
 from arrayscope.core.view_state import ViewState
@@ -739,7 +740,7 @@ def _result(
     timing: ImageUploadTiming | None = None,
     commit_count: int = 1,
 ) -> RenderingBenchmarkResult:
-    backend = str(getattr(view, "rendering_backend_name", type(view).__name__))
+    backend = image_view_backend_capabilities(view).name
     result_timing = view.lastImageUploadTiming() if timing is None else timing
     pending_count = max(0, int(getattr(result_timing, "tile_layer_level_update_pending_items", 0) or 0))
     applied_lod = max(1, int(getattr(result_timing, "tile_layer_lod_factor", 1) or 1))

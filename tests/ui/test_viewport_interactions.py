@@ -122,7 +122,7 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
         win = ArrayScopeWindow(np.arange(20 * 30, dtype=np.float32).reshape(20, 30))
         qtbot.addWidget(win)
         _process_events(qtbot, count=20)
-        assert win.img_view.rendering_backend_name == "vispy"
+        assert win.img_view.surface.capabilities.name == "vispy"
         y_dim, x_dim = win.view_state.image_axes
 
         win._set_view_state(win.view_state.with_axis_flipped(y_dim, True).with_axis_flipped(x_dim, True))

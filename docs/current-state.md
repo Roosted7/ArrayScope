@@ -26,10 +26,10 @@ commit, retained warmup, and speculative work publish explicit admission and lif
 | Frame planning and tiled presentation | Implemented foundation | `FramePlanner` covers single images, internally tiled large planes, and montages; real PyQtGraph/VisPy tests cover montage-optional tiled commits. |
 | Progressive montage | Advanced, stabilizing | Core control-plane state machines are extracted; viewport retargets now refresh frame-plan activity; renderer/session orchestration is still large. |
 | PyQtGraph backend | Production fallback | Correctly requires progressive CPU/item convergence for some level changes; large item counts remain costly. |
-| VisPy backend | Experimental | Persistent textures/shader levels are promising; hybrid widget inheritance and real-hardware evidence remain gaps. |
+| VisPy backend | Experimental | Persistent textures/shader levels are promising; native pointer capture and real-hardware evidence remain gaps. |
 | LOD | Explicit native-only production policy | Demand selection records desired/applied factor, per-axis texels, policy, and reason; applied factor remains 1 until async compatible residency exists. |
 | Diagnostics/benchmarks | Good internal base, recently corrected | Completion, level-work, work-graph, and large-normal tiled-surface counters now reflect committed backend work and rejected optional admission. |
-| Documentation/ADRs | Updated for v32 findings | X1 and X2 are complete; ADR 0039 remains partly implemented because X3 backend composition remains. |
+| Documentation/ADRs | Updated for v32 findings | X1, X2, and X3 are complete; X4 now owns shared pointer capture/drag lifecycle work. |
 
 ## What is working well
 
@@ -91,7 +91,7 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
 modules. N6 removed ownership of level generation, convergence strategy, admission caps, and stage
 fan-in from the session, X1 unified frame planning/presentation semantics, and X2 added work-graph
 admission/counters, but the renderer still coordinates Qt timers, committed frames, overlays, side
-panels, diagnostics, and backend commits. Future X3/X5 work should reuse the extracted models rather
+panels, diagnostics, and backend commits. Future X4/X5 work should reuse the extracted models rather
 than growing another scheduler.
 
 ### 2. Semantic parity is being confused with mechanical uniformity
@@ -132,8 +132,10 @@ texture limits, Wayland behavior, high-DPI pointer mapping, frame pacing, or int
 Do not discard the operation/evaluation core, display models, unified frame planner, typed tiled
 surface, resource policy, extracted control-plane models, or backend mechanics. Do discard the unsafe
 synchronous LOD route and stop adding cross-cutting behavior to the session and renderer. The next
-architecture step is backend composition; non-native LOD waits for the ADR 0041 async materialization
-and compatible-residency gates.
+architecture step is shared pointer capture and drag lifecycle: the surface contract exists, VisPy no
+longer inherits the PyQtGraph concrete view, backend reset/teardown is explicit, and the current VisPy
+canvas stays passive while the shared overlay shell owns interaction events. Non-native LOD waits for
+the ADR 0041 async materialization and compatible-residency gates.
 
 The ordered acceptance gates are in the [roadmap](roadmap.md). Full evidence and recommendations are
 in [the v30 rendering-consistency audit](reviews/v30-rendering-consistency-audit.md).

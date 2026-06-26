@@ -343,7 +343,7 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
         win.img_view.getView().setRange(xRange=(0.0, 4.0), yRange=(0.0, 2.0), padding=0)
         process_events(qtbot)
 
-        assert win.img_view.rendering_backend_name == "vispy"
+        assert win.img_view.surface.capabilities.name == "vispy"
         assert scheduled
     finally:
         if win is not None:

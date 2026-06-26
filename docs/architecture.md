@@ -179,8 +179,9 @@ ViewIntent
 A small plane, huge plane, one-tile montage, and many-tile montage should share semantic planning.
 One-tile and small-tile cases are optimized inside the tiled engine; backend surfaces may commit them
 through different physical mechanics without changing their meaning.
-The `FramePlanner`, typed tiled surface, and explicit `WorkGraph` admission portions are implemented;
-backend composition remains X3 roadmap work.
+The `FramePlanner`, typed tiled surface, explicit `WorkGraph` admission, and
+`ImageViewShell`/`ImageSurface` boundary are implemented. X4 now owns the remaining shared pointer
+capture and drag-lifecycle migration.
 
 ## Non-negotiable invariants
 
@@ -221,7 +222,10 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 
 ## Known architectural debt
 
-- `VisPyImageView2D` still inherits the complete PyQtGraph `ImageView2D` and therefore keeps two scene/event systems in the same widget.
+- `VisPyImageView2D` now inherits the shared `ImageViewShell` rather than the PyQtGraph concrete
+  `ImageView2D`. The VisPy canvas is passive and mouse-transparent; the shared PyQtGraph overlay shell
+  is the single interaction-event owner until X4 moves pointer capture and drag lifecycle into a
+  backend-neutral controller.
 - Normal and montage evaluation scheduling remain separate, even though frame planning and committed
   tiled presentation semantics are now unified.
 - Pointer capture and full drag lifecycle are only partly migrated to shared interaction state.

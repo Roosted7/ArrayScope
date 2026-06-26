@@ -118,7 +118,11 @@ It accepts typed tiled presentations for internally tiled single planes as well 
 
 ### VisPy
 
-VisPy supports shader mapping and persistent tiled residency with atlas-backed drawing. It can avoid repeated CPU windowing and reduce many-item overhead. It remains experimental because `VisPyImageView2D` still subclasses the full PyQtGraph widget, so two scene/event systems and lifecycle models coexist.
+VisPy supports shader mapping and persistent tiled residency with atlas-backed drawing. It can avoid
+repeated CPU windowing and reduce many-item overhead. `VisPySurface` now reaches presentation commits
+through the shared `ImageSurface` contract rather than inheriting the PyQtGraph concrete surface.
+The VisPy canvas remains passive and mouse-transparent; interaction events are owned by the shared
+overlay shell until X4 moves drag/capture ownership fully into the semantic interaction controller.
 VisPy is the preferred backend for sustained large tiled rendering, pending small-view latency and
 platform validation. Its active visible commit should be a coherent GPU presentation transaction:
 admitted payloads are acknowledged only after texture data, atlas/page geometry, visibility, and draw
@@ -126,7 +130,7 @@ invalidation are consistent.
 Its atlas/quad path uses frame-plan tile geometry for internally tiled single planes and montage
 geometry for montage presentations.
 
-Widget close now stops warm-tile work, cancels queued histogram refresh, and closes the VisPy canvas. This is necessary cleanup, not the final composition architecture.
+Widget close stops warm-tile work, cancels queued histogram refresh, and closes the VisPy canvas.
 
 ## Presentation performance contract
 
@@ -148,4 +152,9 @@ Widget close now stops warm-tile work, cancels queued histogram refresh, and clo
 
 ## Migration direction
 
-The destination is a shared `ImageViewShell` containing controls, HUD, viewport, interaction controller, and an `ImageSurface` implementation. PyQtGraph and VisPy surfaces should implement the same semantic conformance tests. Remove backend inheritance only in incremental steps that preserve a runnable default path.
+`ImageViewShell` is the shared widget contract for controls, histogram, HUD, viewport intent,
+interaction state, and display timing. PyQtGraph and VisPy expose concrete `ImageSurface`
+implementations with declared capabilities; `DisplayCommitter` commits semantic raster/tiled
+presentations directly to that surface contract. The contract also covers camera application, overlay
+coordinate mapping, diagnostics, context-loss reset, teardown, and declared interaction-event
+ownership. X4 completes the remaining pointer/drag lifecycle migration.

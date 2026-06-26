@@ -211,13 +211,58 @@ def test_display_presenter_does_not_infer_windowed_rgb_from_array_rank():
     assert "rgb_already_windowed=display_image.data.ndim" not in text
 
 
-def test_imageview2d_owns_internal_montage_tile_layer_path():
+def test_image_view_shell_exposes_surface_contract():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
+    backend_text = (ROOT / "arrayscope" / "display" / "backends" / "base.py").read_text()
     layer_text = (ROOT / "arrayscope" / "display" / "backends" / "pyqtgraph" / "tiles.py").read_text()
+    assert "class ImageViewShell" in text
+    assert "class ImageView2D(ImageViewShell)" in text
+    assert "class ImageSurface" in backend_text
+    assert "def surface_for_view" in backend_text
+    for method in (
+        "def apply_camera",
+        "def map_scene_to_overlay",
+        "def current_viewport_rect",
+        "def presentation_diagnostics",
+        "def interaction_event_owner",
+        "def reset_surface",
+        "def teardown_surface",
+    ):
+        assert method in backend_text
     assert "setMontageTileLayerPresentation" in text
+    assert "def present_tiled" in text
     assert "MontageTileLayer" in text
     assert "TileLayerItemState" in layer_text
     assert "montageDisplayMode" in text
+
+
+def test_vispy_view_inherits_shell_not_pyqtgraph_concrete_view():
+    text = (ROOT / "arrayscope" / "display" / "vispy_imageview2d.py").read_text()
+    assert "from arrayscope.display.imageview2d import ImageViewShell" in text
+    assert "class VisPyImageView2D(ImageViewShell)" in text
+    assert "class VisPyImageView2D(ImageView2D)" not in text
+
+
+def test_builtin_backend_method_adapters_are_removed():
+    backend_text = (ROOT / "arrayscope" / "display" / "backends" / "base.py").read_text()
+    committer_text = (ROOT / "arrayscope" / "display" / "commit.py").read_text()
+    presenter_text = (ROOT / "arrayscope" / "window" / "display_presenter.py").read_text()
+    assert "ImageViewMethodBackendAdapter" not in backend_text
+    assert "backend_adapter_for_view" not in committer_text
+    assert "surface_for_view" in committer_text
+    assert 'hasattr(self.img_view, "setTiledMontagePresentation")' not in presenter_text
+
+
+def test_backend_identity_uses_declared_surface_capabilities():
+    offenders = []
+    forbidden = ("rendering_backend_name", "supports_direct_montage_tile_payloads")
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        rel = path.relative_to(ROOT)
+        text = path.read_text()
+        for token in forbidden:
+            if token in text:
+                offenders.append(f"{rel}:{token}")
+    assert offenders == []
 
 
 def test_imageview2d_display_ownership_helpers_are_split_out():

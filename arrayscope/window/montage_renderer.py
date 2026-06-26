@@ -105,7 +105,7 @@ class MontageRenderMixin:
             previous_upload_ms=float(getattr(self, "_last_set_image_ms", 0.0) or 0.0),
             patched_tiles=int(getattr(self, "_montage_patched_tiles_last_flush", 0) or 0),
             current_mode=str(getattr(self.img_view, "montageDisplayMode", lambda: "canvas")()),
-            renderer_backend=getattr(self.img_view, "rendering_backend_name", "pyqtgraph"),
+            renderer_backend=image_view_backend_capabilities(self.img_view).name,
             renderer_capabilities=image_view_backend_capabilities(self.img_view),
             very_slow_upload_ms=MONTAGE_VERY_SLOW_UPLOAD_MS,
         )
@@ -1930,8 +1930,6 @@ class MontageRenderMixin:
         capabilities = image_view_backend_capabilities(self.img_view)
         if not capabilities.direct_montage_tile_payloads:
             return None
-        if not hasattr(self.img_view, "setMontageTileLayerPresentation"):
-            return None
         tile_states = session.ensure_tile_states()
         placeholder = _montage_tile_layer_placeholder(session)
         geometry = DisplayGeometry(
@@ -2137,7 +2135,7 @@ class MontageRenderMixin:
         processed_count = max(1, cold_count + warm_count)
         texture_upload_bytes = int(getattr(report, "texture_upload_bytes", 0) or 0)
         storage_rebuilds = int(getattr(report, "storage_rebuilds", 0) or 0)
-        backend_name = str(getattr(self.img_view, "rendering_backend_name", "pyqtgraph"))
+        backend_name = image_view_backend_capabilities(self.img_view).name
         feedback = _latency_feedback(self)
         if feedback is not None:
             cold_ms = 0.0
@@ -2679,7 +2677,7 @@ class MontageRenderMixin:
             decision,
             interactive=interactive,
             work_class=work_class,
-            backend=str(getattr(self.img_view, "rendering_backend_name", "pyqtgraph")),
+            backend=image_view_backend_capabilities(self.img_view).name,
             item_cap=item_cap,
             byte_cap=byte_cap,
         )

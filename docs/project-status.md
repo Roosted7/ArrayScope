@@ -57,9 +57,11 @@ Diagnostics now report desired/applied factor and policy rather than silently ap
 
 ### Backend migration and hardware evidence
 
-`VisPyImageView2D` still subclasses the full PyQtGraph view. Real OpenGL, Wayland/X11, Windows/macOS,
-high-DPI, context-loss, texture-limit, frame-pacing, and interaction evidence is incomplete. Keep
-PyQtGraph as the safe default until conformance and platform traces justify a change.
+The VisPy path now commits through the shared `ImageSurface` contract rather than subclassing the
+PyQtGraph concrete view. Its canvas remains passive while the shared overlay shell owns interaction
+events; native pointer/drag lifecycle is X4 work. Real OpenGL, Wayland/X11, Windows/macOS, high-DPI,
+texture-limit, frame-pacing, and interaction evidence remain incomplete. Keep PyQtGraph as the safe
+default until conformance and platform traces justify a change.
 
 ## Release blockers
 

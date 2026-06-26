@@ -3,43 +3,60 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES
-from arrayscope.display.backends import (
-    PyQtGraphBackendAdapter,
-    RasterCommitMode,
-    VisPyBackendAdapter,
-    backend_adapter_for_view,
-)
+from arrayscope.display.backends import RasterCommitMode, surface_for_view
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
+from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 from arrayscope.display.shader_mapping import ShaderMapping
+from arrayscope.display.viewport import ViewportPolicy
 
 
-class _FakeView:
-    def __init__(self, *, vispy=False):
-        if vispy:
-            self.rendering_capabilities = VISPY_CAPABILITIES
-        self.image = np.zeros((2, 3), dtype=np.float32)
+class _FakeSurface:
+    def __init__(self):
+        self.capabilities = VISPY_CAPABILITIES
+        self.widget = object()
         self.calls = []
 
-    def setImagePresentation(self, data, **kwargs):
-        self.calls.append(("full", data, kwargs))
+    def current_raster_shape(self):
+        return (2, 3)
 
-    def updateImagePresentationFast(self, data, **kwargs):
-        self.calls.append(("fast", data, kwargs))
+    def present_raster(self, presentation, *, mode):
+        self.calls.append(("raster", RasterCommitMode(mode), presentation))
 
-    def setMontageTileLayerPresentation(self, data, **kwargs):
-        self.calls.append(("legacy_tiles", data, kwargs))
+    def present_tiled(self, presentation):
+        self.calls.append(("tiled", None, presentation))
 
-    def setTiledMontagePresentation(self, **kwargs):
-        self.calls.append(("tiles", None, kwargs))
+    def set_profile_bounds(self, bounds):
+        self.calls.append(("bounds", tuple(bounds), None))
 
-    def setProfileMarkerBoundsRect(self, bounds):
-        self.calls.append(("bounds", bounds, {}))
+    def apply_camera(self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0), content_rect=None):
+        self.calls.append(("camera", tuple(image_shape), viewport_policy, tuple(image_origin), content_rect))
+
+    def map_scene_to_overlay(self, scene_pos):
+        self.calls.append(("map_scene", scene_pos, None))
+        return scene_pos
+
+    def current_viewport_rect(self):
+        return None
+
+    def presentation_diagnostics(self):
+        return {
+            "backend": self.capabilities.name,
+            "interaction_event_owner": self.interaction_event_owner(),
+        }
+
+    def interaction_event_owner(self):
+        return "fake"
+
+    def reset_surface(self, reason):
+        self.calls.append(("reset", str(reason), None))
+
+    def teardown_surface(self):
+        self.calls.append(("teardown", None, None))
 
 
 def _raster_presentation(*, montage=False):
@@ -101,48 +118,65 @@ def _tiled_presentation():
     )
 
 
-def test_factory_selects_and_caches_builtin_adapters_by_capability():
-    pyqt_view = _FakeView()
-    vispy_view = _FakeView(vispy=True)
+def test_surface_resolver_uses_shell_owned_surface():
+    surface = _FakeSurface()
+    view = SimpleNamespace(surface=surface)
 
-    pyqt_adapter = backend_adapter_for_view(pyqt_view)
-    vispy_adapter = backend_adapter_for_view(vispy_view)
-
-    assert isinstance(pyqt_adapter, PyQtGraphBackendAdapter)
-    assert isinstance(vispy_adapter, VisPyBackendAdapter)
-    assert backend_adapter_for_view(pyqt_view) is pyqt_adapter
-    assert backend_adapter_for_view(vispy_view) is vispy_adapter
+    assert surface_for_view(view) is surface
 
 
-def test_adapters_translate_shared_raster_and_tiled_semantics():
-    for view in (_FakeView(), _FakeView(vispy=True)):
-        adapter = backend_adapter_for_view(view)
-        raster = _raster_presentation(montage=True)
-        tiled = _tiled_presentation()
-
-        adapter.present_raster(raster, mode=RasterCommitMode.FULL)
-        adapter.present_raster(raster, mode=RasterCommitMode.FAST)
-        adapter.present_raster(raster, mode=RasterCommitMode.TILE_LAYER)
-        adapter.present_tiled(tiled)
-        adapter.set_profile_bounds((0.0, 0.0, 2.0, 1.0))
-
-        assert [call[0] for call in view.calls] == ["full", "fast", "legacy_tiles", "tiles", "bounds"]
-        assert view.calls[0][2]["levels"] == raster.levels
-        assert view.calls[0][2]["image_origin"] == (0.0, 0.0)
-        assert view.calls[3][2]["tile_state"] == tiled.tile_state
-        assert view.calls[3][2]["tile_delta"] == tiled.tile_delta
-        assert view.calls[3][2]["shader_mapping"] is tiled.shader_mapping
+def test_surface_resolver_rejects_objects_without_surface_contract():
+    with pytest.raises(TypeError, match="SimpleNamespace.*missing \\.surface"):
+        surface_for_view(SimpleNamespace())
 
 
-def test_factory_accepts_custom_semantic_backend_without_rewrapping():
-    backend = SimpleNamespace(
-        view=object(),
-        capabilities=SimpleNamespace(name="custom"),
-        current_raster_shape=lambda: None,
-        present_raster=lambda *_args, **_kwargs: None,
-        present_tiled=lambda *_args, **_kwargs: None,
-        set_profile_bounds=lambda *_args, **_kwargs: None,
-    )
-    view = SimpleNamespace(render_backend_adapter=backend)
+def test_surface_resolver_explains_nonconforming_surface():
+    view = SimpleNamespace(surface=object())
 
-    assert backend_adapter_for_view(view) is backend
+    with pytest.raises(TypeError, match=r"\.surface is object, which does not implement ImageSurface"):
+        surface_for_view(view)
+
+
+def test_surface_contract_commits_shared_raster_and_tiled_semantics():
+    surface = _FakeSurface()
+    raster = _raster_presentation(montage=True)
+    tiled = _tiled_presentation()
+
+    surface.present_raster(raster, mode=RasterCommitMode.FULL)
+    surface.present_raster(raster, mode=RasterCommitMode.FAST)
+    surface.present_tiled(tiled)
+    surface.set_profile_bounds((0.0, 0.0, 2.0, 1.0))
+
+    assert [call[0] for call in surface.calls] == ["raster", "raster", "tiled", "bounds"]
+    assert surface.calls[0][1] is RasterCommitMode.FULL
+    assert surface.calls[1][1] is RasterCommitMode.FAST
+    assert surface.calls[2][2].tile_state == tiled.tile_state
+
+
+def test_pyqtgraph_surface_exposes_lifecycle_contract(qt_app):
+    from arrayscope.display.backends.pyqtgraph.surface import PyQtGraphSurface
+
+    view = PyQtGraphSurface()
+    try:
+        surface = surface_for_view(view)
+
+        assert surface.widget is view
+        assert surface.capabilities.name == "pyqtgraph"
+        assert surface.interaction_event_owner() == "pyqtgraph"
+        view.image = np.zeros((4, 5, 3), dtype=np.uint8)
+        assert surface.current_raster_shape() == (4, 5)
+        view.image = np.zeros((4,), dtype=np.float32)
+        assert surface.current_raster_shape() is None
+        view.image = None
+        surface.apply_camera((2, 3), ViewportPolicy.PRESERVE)
+        assert surface.current_viewport_rect() is None
+        diagnostics = surface.presentation_diagnostics()
+        assert diagnostics["backend"] == "pyqtgraph"
+        assert diagnostics["interaction_event_owner"] == "pyqtgraph"
+
+        surface.reset_surface("test-context-loss")
+        assert surface.presentation_diagnostics()["last_reset_reason"] == "test-context-loss"
+        surface.teardown_surface()
+        surface.teardown_surface()
+    finally:
+        view.close()

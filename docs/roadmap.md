@@ -255,6 +255,8 @@ Completion notes:
 
 ### X3. Backend composition
 
+**Status:** Done!
+
 **Goal:** replace backend inheritance with a shared shell and thin image surfaces.
 
 Work:
@@ -272,6 +274,23 @@ Exit gate:
 - only one active scene/event system owns image interaction per backend;
 - backend replacement/context loss has explicit lifecycle tests;
 - feature-parity tests target the surface contract rather than widget class internals.
+
+Progress notes:
+
+- `ImageViewShell` is the canonical display shell name and owns the semantic widget state used by the
+  window. Built-in views expose an `ImageSurface` contract directly through `surface`.
+- `DisplayCommitter` commits raster and tiled presentations to `ImageSurface` instead of the retired
+  built-in method-adapter scaffold.
+- `VisPyImageView2D` now inherits `ImageViewShell`, not the PyQtGraph concrete `ImageView2D` class.
+- The `ImageSurface` contract covers raster/tiled presentation, camera application, overlay
+  coordinate mapping, diagnostics, context-loss reset, teardown, and declared interaction-event
+  ownership.
+- PyQtGraph owns its own interaction scene. The current VisPy surface keeps the VisPy canvas passive
+  and mouse-transparent while the shared PyQtGraph overlay shell owns interaction events, so two
+  active event systems no longer compete. Native VisPy pointer capture remains X4 interaction work,
+  not backend-composition debt.
+- Surface lifecycle and feature-parity tests now target the contract and cover backend reset/teardown
+  behavior for the built-in surfaces.
 
 ### X4. Shared pointer capture and drag lifecycle
 

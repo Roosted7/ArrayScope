@@ -13,6 +13,7 @@ from arrayscope.core.runtime_diagnostics import (
     WindowRuntimeDiagnostics,
 )
 from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.operations import fft_backend
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.regions import region_text
@@ -169,7 +170,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     )
 
     image_backend_selected = getattr(getattr(getattr(window, "app_settings", None), "image_rendering_backend", "pyqtgraph"), "value", "pyqtgraph")
-    image_backend_actual = str(getattr(getattr(window, "img_view", None), "rendering_backend_name", "pyqtgraph"))
+    image_backend_actual = image_view_backend_capabilities(getattr(window, "img_view", None)).name
 
     return WindowRuntimeDiagnostics(
         memory_policy=policy,
