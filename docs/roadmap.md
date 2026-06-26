@@ -283,16 +283,17 @@ Progress notes:
   built-in method-adapter scaffold.
 - `VisPyImageView2D` now inherits `ImageViewShell`, not the PyQtGraph concrete `ImageView2D` class.
 - The `ImageSurface` contract covers raster/tiled presentation, camera application, overlay
-  coordinate mapping, diagnostics, context-loss reset, teardown, and declared interaction-event
-  ownership.
-- PyQtGraph owns its own interaction scene. The current VisPy surface keeps the VisPy canvas passive
-  and mouse-transparent while the shared PyQtGraph overlay shell owns interaction events, so two
-  active event systems no longer compete. Native VisPy pointer capture remains X4 interaction work,
-  not backend-composition debt.
+  coordinate mapping, diagnostics, context-loss reset, teardown, interaction-state visual sync, and
+  declared shared interaction-event ownership.
+- The current VisPy surface keeps the VisPy canvas passive and mouse-transparent while the shared Qt
+  pointer driver owns ROI/profile capture and drag lifecycle for both built-in surfaces, so two active
+  event systems no longer compete.
 - Surface lifecycle and feature-parity tests now target the contract and cover backend reset/teardown
   behavior for the built-in surfaces.
 
 ### X4. Shared pointer capture and drag lifecycle
+
+**Status:** Done!
 
 **Goal:** one semantic interaction controller governs both backends.
 
@@ -309,6 +310,20 @@ Exit gate:
 - both backends execute the same interaction state-machine tests;
 - no duplicate semantic ROI/profile drag logic remains;
 - pointer loss cannot leave a stuck active tool or cursor.
+
+Progress notes:
+
+- `DisplayInteractionController` now owns hover, pointer capture, drag update, cancellation, and cursor
+  intent for the built-in PyQtGraph and VisPy surfaces.
+- PyQtGraph ROI/profile graphics items are passive overlay views; VisPy mirrors shared interaction
+  state for hover/capture emphasis rather than running a parallel cursor/hit-test policy.
+- ROI hit candidates are indexed by display-space cells before exact semantic hit testing, so ordinary
+  pointer motion does not scan every ROI or allocate full ROI snapshots.
+- Hit testing uses unclamped display coordinates while active drags clamp committed image coordinates,
+  so off-frame margin clicks cannot start edge-overlay drags.
+- The shared Qt pointer driver cancels active capture on tool changes, frame replacement, target
+  removal, window/application deactivation, button loss, and widget teardown.
+- PyQtGraph and VisPy run the same viewport-event ROI/profile drag and off-frame hit-test checks.
 
 ### X5. Hardware evidence and residency policy
 

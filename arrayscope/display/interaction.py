@@ -1,9 +1,8 @@
-"""Qt-free pointer, hover, and drawing interaction state.
+"""Qt-free pointer, hover, capture, and drawing interaction state.
 
-Render backends may draw overlays differently, but they must consume one
-semantic interaction state. During migration, native PyQtGraph ROI items still
-own their drag mechanics; hover and one-shot drawing already use this shared
-state, and native drag capture can move here incrementally.
+Render backends may draw overlays differently, but they consume one semantic
+interaction state. Widgets translate pointer events into this controller; they
+do not own ROI/profile drag semantics.
 """
 
 from __future__ import annotations
@@ -87,6 +86,7 @@ class DisplayInteractionState:
     drag_profile_position: tuple[float, float] | None = None
     pending_draw_tool: str | None = None
     drawing_points: tuple[tuple[float, float], ...] = ()
+    last_cancel_reason: str | None = None
     revision: int = 0
 
     @property
@@ -95,11 +95,9 @@ class DisplayInteractionState:
             return CursorIntent.CLOSED_HAND
         if self.pending_draw_tool is not None or self.phase in {PointerPhase.DRAWING_ARMED, PointerPhase.DRAWING}:
             return CursorIntent.CROSSHAIR
-        if self.tool in CROSSHAIR_TOOLS:
-            return CursorIntent.CROSSHAIR
         target = self.hover
         if target is None:
-            return CursorIntent.DEFAULT
+            return CursorIntent.CROSSHAIR if self.tool in CROSSHAIR_TOOLS else CursorIntent.DEFAULT
         if target.kind == "profile":
             if target.part == "center":
                 return CursorIntent.OPEN_HAND
@@ -128,7 +126,10 @@ class DisplayInteractionController:
         tool = str(tool)
         if tool not in ALLOWED_INSPECTION_TOOLS:
             raise ValueError(f"unknown inspection tool: {tool}")
-        return self._replace(tool=tool, hover=None, capture=None)
+        return self._replace(
+            tool=tool,
+            **_idle_updates(hover=None, cancel_reason="tool-change"),
+        )
 
     def set_pointer(self, point: tuple[float, float] | None) -> DisplayInteractionState:
         normalized = None if point is None else (float(point[0]), float(point[1]))
@@ -139,9 +140,13 @@ class DisplayInteractionController:
         updates = {"hover": target}
         if point is not None:
             updates["pointer"] = normalized
+        if self._state.phase is PointerPhase.DRAGGING:
+            updates.pop("hover", None)
         return self._replace(**updates)
 
     def clear_hover(self) -> DisplayInteractionState:
+        if self._state.phase is PointerPhase.DRAGGING:
+            return self._state
         return self._replace(hover=None)
 
     def arm_drawing(self, tool: str) -> DisplayInteractionState:
@@ -154,6 +159,7 @@ class DisplayInteractionController:
             drawing_points=(),
             capture=None,
             hover=None,
+            last_cancel_reason=None,
         )
 
     def begin_drawing(self, point: tuple[float, float]) -> bool:
@@ -165,6 +171,7 @@ class DisplayInteractionController:
             pointer=normalized,
             drawing_points=(normalized,),
             hover=None,
+            last_cancel_reason=None,
         )
         return True
 
@@ -189,16 +196,18 @@ class DisplayInteractionController:
             drawing_points=(),
             capture=None,
             hover=None,
+            last_cancel_reason=None,
         )
         return result
 
-    def cancel_drawing(self) -> DisplayInteractionState:
+    def cancel_drawing(self, reason: str = "drawing-cancel") -> DisplayInteractionState:
         return self._replace(
             phase=PointerPhase.IDLE,
             pending_draw_tool=None,
             drawing_points=(),
             capture=None,
             hover=None,
+            last_cancel_reason=str(reason),
         )
 
     def begin_capture(
@@ -222,6 +231,7 @@ class DisplayInteractionController:
             drag_geometry=roi_geometry,
             drag_initial_profile_position=profile,
             drag_profile_position=profile,
+            last_cancel_reason=None,
         )
 
     def update_capture(self, point: tuple[float, float]) -> DragResult | None:
@@ -293,8 +303,21 @@ class DisplayInteractionController:
             drag_geometry=None,
             drag_initial_profile_position=None,
             drag_profile_position=None,
+            last_cancel_reason=None,
         )
         return result
+
+    def cancel_capture(self, reason: str = "capture-cancel") -> DisplayInteractionState:
+        return self._replace(**_idle_updates(hover=None, cancel_reason=reason))
+
+    def cancel_active(self, reason: str = "cancel") -> DisplayInteractionState:
+        if self._state.phase is PointerPhase.DRAWING:
+            return self.cancel_drawing(reason)
+        if self._state.phase is PointerPhase.DRAWING_ARMED:
+            return self._replace(**_idle_updates(hover=None, cancel_reason=reason))
+        if self._state.phase is PointerPhase.DRAGGING:
+            return self.cancel_capture(reason)
+        return self._replace(hover=None, last_cancel_reason=str(reason))
 
     def _replace(self, **changes) -> DisplayInteractionState:
         candidate = replace(self._state, **changes)
@@ -308,6 +331,7 @@ def hit_test_display_overlays(
     point: tuple[float, float],
     *,
     roi_selections: Iterable[object] = (),
+    roi_selections_topmost: bool = False,
     profile_position: tuple[float, float] | None = None,
     profile_bounds: tuple[float, float, float, float] | None = None,
     tolerance: float,
@@ -326,7 +350,8 @@ def hit_test_display_overlays(
         if min(x0, x1) <= x <= max(x0, x1) and abs(y - py) <= tolerance:
             return InteractionTarget("profile", part="horizontal")
 
-    for selection in reversed(tuple(roi_selections)):
+    selections = roi_selections if roi_selections_topmost else reversed(tuple(roi_selections))
+    for selection in selections:
         geometry = getattr(selection, "geometry", None)
         if geometry is None:
             continue
@@ -408,6 +433,27 @@ def _roi_target(selection, geometry, hit: RoiHit) -> InteractionTarget:
 
 def _point_distance(a: tuple[float, float], b: tuple[float, float]) -> float:
     return float(hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1])))
+
+
+def _idle_updates(
+    *,
+    hover: InteractionTarget | None,
+    cancel_reason: str | None,
+) -> dict[str, object]:
+    return {
+        "phase": PointerPhase.IDLE,
+        "hover": hover,
+        "capture": None,
+        "drag_origin": None,
+        "drag_point": None,
+        "drag_initial_geometry": None,
+        "drag_geometry": None,
+        "drag_initial_profile_position": None,
+        "drag_profile_position": None,
+        "pending_draw_tool": None,
+        "drawing_points": (),
+        "last_cancel_reason": None if cancel_reason is None else str(cancel_reason),
+    }
 
 
 __all__ = [

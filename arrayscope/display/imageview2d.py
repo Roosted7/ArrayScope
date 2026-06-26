@@ -19,7 +19,6 @@ from arrayscope.core.roi import (
     RoiKind,
     RoiSelection,
     close_polygon,
-    roi_bounding_rect,
     simplify_polyline,
 )
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
@@ -32,6 +31,8 @@ from arrayscope.display.image_upload import ensure_imageitem_array, rgb_display_
 from arrayscope.display.interaction import (
     CursorIntent,
     DisplayInteractionController,
+    DisplayInteractionState,
+    DragResult,
     InteractionTarget,
     PointerPhase,
 )
@@ -41,13 +42,16 @@ from arrayscope.display.layers import ViewLayerOwner
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer, TileLayerUpdateStats
 from arrayscope.display.model.frame import TileCommitReport
+from arrayscope.display.overlay_hit_test import RoiHitIndex
 from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
 from arrayscope.display.profile_marker import ProfileMarkerOwner
+from arrayscope.display.pointer_interaction import QtPointerInteractionDriver
 from arrayscope.display.roi_items import (
     MovableInfoPanel,
     default_roi_label,
-    geometry_from_item,
     item_for_roi,
+    make_item_passive,
+    sync_item_to_roi_geometry,
 )
 from arrayscope.display.viewport import (
     MIN_VIEWPORT_CONTENT_FRACTION,
@@ -136,8 +140,14 @@ class ImageViewShell(QtWidgets.QWidget):
         self._evaluation_overlay = None
         self._roi_info_panel = None
         self.interaction_controller = DisplayInteractionController()
+        self._pointer_interaction = QtPointerInteractionDriver(self, self.interaction_controller)
+        self._interaction_application = None
         self._last_profile_marker_position: tuple[float, float] | None = None
         self._roi_items = {}
+        self._roi_hit_index = RoiHitIndex()
+        self._highlighted_roi_id: str | None = None
+        self._interaction_visual_roi_id: str | None = None
+        self._interaction_visual_profile_part: str | None = None
         self._montage_tile_overlay_item = None
         self._montage_tile_overlay_items = []
         self._roi_counter = 0
@@ -198,15 +208,15 @@ class ImageViewShell(QtWidgets.QWidget):
         self._histogramDataBounds = (0.0, 1.0)
 
         marker_pen = pg.mkPen((230, 60, 30, 180), width=1)
-        self._profile_vline = pg.InfiniteLine(angle=90, movable=True, pen=marker_pen)
-        self._profile_hline = pg.InfiniteLine(angle=0, movable=True, pen=marker_pen)
+        self._profile_vline = pg.InfiniteLine(angle=90, movable=False, pen=marker_pen)
+        self._profile_hline = pg.InfiniteLine(angle=0, movable=False, pen=marker_pen)
         self._profile_handle = pg.TargetItem(
             pos=(0, 0),
             size=14,
             symbol="o",
             pen=pg.mkPen((230, 60, 30, 220), width=2),
             brush=pg.mkBrush(230, 60, 30, 80),
-            movable=True,
+            movable=False,
         )
         self._profile_vline.setVisible(False)
         self._profile_hline.setVisible(False)
@@ -217,11 +227,18 @@ class ImageViewShell(QtWidgets.QWidget):
         self._profile_vline.sigPositionChanged.connect(lambda *_args: self._on_profile_marker_changed("vertical"))
         self._profile_hline.sigPositionChanged.connect(lambda *_args: self._on_profile_marker_changed("horizontal"))
         self._profile_handle.sigPositionChanged.connect(lambda *_args: self._on_profile_handle_changed("center"))
-        self._profile_vline.sigPositionChangeFinished.connect(self._finish_profile_capture)
-        self._profile_hline.sigPositionChangeFinished.connect(self._finish_profile_capture)
-        self._profile_handle.sigPositionChangeFinished.connect(self._finish_profile_capture)
+        make_item_passive(self._profile_vline)
+        make_item_passive(self._profile_hline)
+        make_item_passive(self._profile_handle)
         self._layer_owner.add_profile_marker_items(self._profile_vline, self._profile_hline, self._profile_handle)
         self.view.sigRangeChanged.connect(self._on_view_range_changed)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                app.applicationStateChanged.connect(self._on_application_state_changed)
+                self._interaction_application = app
+            except Exception:
+                pass
     def _histogram_preview_immediate(self) -> bool:
         return True
 
@@ -444,6 +461,7 @@ class ImageViewShell(QtWidgets.QWidget):
         )
 
     def closeEvent(self, event) -> None:
+        self._cancel_interaction("widget-close")
         self.teardown_surface()
         super().closeEvent(event)
 
@@ -534,6 +552,7 @@ class ImageViewShell(QtWidgets.QWidget):
     ) -> None:
         if geometry is None or getattr(geometry, "montage", None) is None:
             raise ValueError("tile-layer presentation requires montage geometry")
+        self._cancel_active_capture_for_frame_replacement()
         self._apply_tile_layer_presentation(
             img,
             histogramData=histogramData,
@@ -817,6 +836,7 @@ class ImageViewShell(QtWidgets.QWidget):
         if img.ndim != 2 and not is_rgb:
             raise ValueError("ImageView2D only supports 2D scalar or RGB images")
 
+        self._cancel_active_capture_for_frame_replacement()
         self._start_upload_timing("full")
         previous_shape = None if self.image is None else tuple(self.image.shape[:2])
         try:
@@ -1075,9 +1095,10 @@ class ImageViewShell(QtWidgets.QWidget):
         }
 
     def interaction_event_owner(self) -> str:
-        return "pyqtgraph"
+        return "shared-controller"
 
     def reset_surface(self, reason: str) -> None:
+        self._cancel_interaction("surface-reset")
         self._last_surface_reset_reason = str(reason)
         self.clearMontageTileLayer()
         self.clearMontageTileOverlays()
@@ -1089,6 +1110,7 @@ class ImageViewShell(QtWidgets.QWidget):
     def teardown_surface(self) -> None:
         if self._surface_teardown_done:
             return
+        self._cancel_interaction("surface-teardown")
         self._surface_teardown_done = True
         preview = getattr(self, "_histogram_preview_controller", None)
         if preview is not None:
@@ -1096,6 +1118,13 @@ class ImageViewShell(QtWidgets.QWidget):
         display = getattr(self, "_histogram_display_controller", None)
         if display is not None:
             display.cancel()
+        app = getattr(self, "_interaction_application", None)
+        if app is not None:
+            try:
+                app.applicationStateChanged.disconnect(self._on_application_state_changed)
+            except Exception:
+                pass
+            self._interaction_application = None
         self.clearMontageTileOverlays()
 
     def updateImageDataFast(
@@ -1126,6 +1155,7 @@ class ImageViewShell(QtWidgets.QWidget):
         if img.ndim != 2 and not is_rgb:
             raise ValueError("ImageView2D only supports 2D scalar or RGB images")
 
+        self._cancel_active_capture_for_frame_replacement()
         self._start_upload_timing("fast")
         applying = self._applying_presentation
         self._applying_presentation = True
@@ -1540,7 +1570,6 @@ class ImageViewShell(QtWidgets.QWidget):
             self._profile_handle.setPos(x, y)
         finally:
             self._profile_marker_updating = False
-        self._observe_profile_capture(str(part), (x, y))
         if self._profile_marker_callback is not None:
             self._profile_marker_callback(x, y)
 
@@ -1562,30 +1591,8 @@ class ImageViewShell(QtWidgets.QWidget):
             self.view.update()
         finally:
             self._profile_marker_updating = False
-        self._observe_profile_capture(str(part), (x, y))
         if self._profile_marker_callback is not None:
             self._profile_marker_callback(x, y)
-
-    def _observe_profile_capture(self, part: str, position: tuple[float, float]) -> None:
-        state = self.interaction_controller.state
-        target = InteractionTarget("profile", part=str(part))
-        if state.phase is not PointerPhase.DRAGGING or state.capture is None or state.capture.kind != "profile":
-            origin = self._last_profile_marker_position or position
-            self.interaction_controller.begin_capture(
-                target,
-                origin,
-                profile_position=origin,
-            )
-        self.interaction_controller.observe_profile_position(position)
-        self._last_profile_marker_position = (float(position[0]), float(position[1]))
-
-    def _finish_profile_capture(self, *_args) -> None:
-        state = self.interaction_controller.state
-        if state.capture is not None and state.capture.kind == "profile":
-            self.interaction_controller.end_capture()
-        position = self.profileMarkerPosition()
-        if position is not None:
-            self._last_profile_marker_position = position
 
     def _update_profile_line_bounds(self):
         if self.image is None:
@@ -1791,27 +1798,10 @@ class ImageViewShell(QtWidgets.QWidget):
         if self._hud_widget is not None:
             self._hud_widget.hide()
 
-    @property
-    def _inspection_tool(self):
-        """Compatibility view of the shared interaction state."""
-
-        return self.interaction_controller.state.tool
-
-    @property
-    def _pending_roi_draw_tool(self):
-        return self.interaction_controller.state.pending_draw_tool
-
-    @property
-    def _drawing_active(self):
-        return self.interaction_controller.state.phase is PointerPhase.DRAWING
-
-    @property
-    def _drawing_points(self):
-        return self.interaction_controller.state.drawing_points
-
     def setInspectionTool(self, tool):
         state = self.interaction_controller.set_tool(tool)
-        self._apply_interaction_cursor(state.cursor_intent)
+        self._set_roi_drawing_preview(None, ())
+        self.sync_interaction_state(state)
 
     def inspectionTool(self):
         return self.interaction_controller.state.tool
@@ -1825,13 +1815,17 @@ class ImageViewShell(QtWidgets.QWidget):
         except ValueError:
             return False
         self._set_roi_drawing_preview(state.pending_draw_tool, ())
-        self._apply_interaction_cursor(state.cursor_intent)
+        self.sync_interaction_state(state)
         return True
 
     def cancelPendingRoiDrawing(self):
         state = self.interaction_controller.cancel_drawing()
         self._set_roi_drawing_preview(None, ())
+        self.sync_interaction_state(state)
+
+    def sync_interaction_state(self, state: DisplayInteractionState) -> None:
         self._apply_interaction_cursor(state.cursor_intent)
+        self._sync_pyqtgraph_interaction_visuals(state)
 
     def _apply_interaction_cursor(self, intent: CursorIntent) -> None:
         cursor_shapes = {
@@ -1846,8 +1840,10 @@ class ImageViewShell(QtWidgets.QWidget):
         shape = cursor_shapes.get(CursorIntent(intent))
         if shape is None:
             self.getView().unsetCursor()
+            self.graphicsView.viewport().unsetCursor()
         else:
             self.getView().setCursor(shape)
+            self.graphicsView.viewport().setCursor(shape)
 
     def createRoi(self, kind, *, points=None, rect=None, line_width=1.0, label=None, color=None):
         kind = kind if isinstance(kind, RoiKind) else RoiKind(getattr(kind, "value", kind))
@@ -1880,24 +1876,29 @@ class ImageViewShell(QtWidgets.QWidget):
             color=color,
         )
         item = item_for_roi(selection)
+        make_item_passive(item)
         self._roi_items[roi_id] = (item, selection)
+        self._roi_hit_index.upsert(selection)
         self._layer_owner.add_roi_item(roi_id, item)
-        started = getattr(item, "sigRegionChangeStarted", None)
-        changed = getattr(item, "sigRegionChanged", None)
-        finished = getattr(item, "sigRegionChangeFinished", None)
-        if started is not None:
-            started.connect(lambda _item=item, roi_id=roi_id: self._on_roi_item_change_started(roi_id))
-        if changed is not None:
-            changed.connect(lambda _item=item, roi_id=roi_id: self._on_roi_item_changed(roi_id, final=False))
-        if finished is not None:
-            finished.connect(lambda _item=item, roi_id=roi_id: self._on_roi_item_changed(roi_id, final=True))
+        self._sync_roi_item_style(roi_id)
         self.roiCreated.emit(selection)
         return selection
 
     def removeRoi(self, roi_id):
-        item_selection = self._roi_items.pop(str(roi_id), None)
+        roi_id = str(roi_id)
+        state = self.interaction_controller.state
+        if state.capture is not None and state.capture.kind == "roi" and state.capture.object_id == roi_id:
+            self._cancel_interaction("target-removed")
+        item_selection = self._roi_items.pop(roi_id, None)
         if item_selection is None:
             return False
+        self._roi_hit_index.remove(roi_id)
+        if self._highlighted_roi_id == roi_id:
+            self._highlighted_roi_id = None
+        if self._interaction_visual_roi_id == roi_id:
+            self._interaction_visual_roi_id = None
+        if state.hover is not None and state.hover.kind == "roi" and state.hover.object_id == roi_id:
+            self.sync_interaction_state(self.interaction_controller.clear_hover())
         item, _selection = item_selection
         self._layer_owner.remove_roi_item(roi_id)
         self.roiDeleted.emit(str(roi_id))
@@ -1906,44 +1907,31 @@ class ImageViewShell(QtWidgets.QWidget):
     def clearRois(self):
         for roi_id in tuple(self._roi_items):
             self.removeRoi(roi_id)
+        self._roi_hit_index.clear()
 
     def roiSelections(self):
         return tuple(selection for _item, selection in self._roi_items.values())
 
+    def roiHitCandidates(self, point: tuple[float, float], *, tolerance: float):
+        return self._roi_hit_index.candidates(point, tolerance=tolerance)
+
     def highlightRoi(self, roi_id):
         roi_id = str(roi_id)
-        for current_id, (item, selection) in self._roi_items.items():
-            width = 4 if current_id == roi_id else 2
-            item.setPen(pg.mkPen(selection.color + (255,), width=width))
-        return roi_id in self._roi_items
+        if roi_id not in self._roi_items:
+            return False
+        previous = self._highlighted_roi_id
+        self._highlighted_roi_id = roi_id
+        for current_id in {previous, roi_id}:
+            if current_id is not None:
+                self._sync_roi_item_style(current_id)
+        return True
 
-    def _on_roi_item_change_started(self, roi_id) -> None:
+    def _set_roi_geometry(self, roi_id: str, geometry: RoiGeometry, *, emit: bool, sync_item: bool = True) -> bool:
+        roi_id = str(roi_id)
         item_selection = self._roi_items.get(str(roi_id))
         if item_selection is None:
-            return
-        _item, selection = item_selection
-        hover = self.interaction_controller.state.hover
-        target = hover if hover is not None and hover.kind == "roi" and hover.object_id == str(roi_id) else None
-        if target is None:
-            target = InteractionTarget(
-                "roi",
-                object_id=str(roi_id),
-                part="body",
-                geometry_kind=selection.geometry.kind.value,
-            )
-        anchor = _roi_geometry_anchor(selection.geometry)
-        self.interaction_controller.begin_capture(
-            target,
-            anchor,
-            roi_geometry=selection.geometry,
-        )
-
-    def _on_roi_item_changed(self, roi_id, *, final: bool = True):
-        item_selection = self._roi_items.get(str(roi_id))
-        if item_selection is None:
-            return
+            return False
         item, selection = item_selection
-        geometry = geometry_from_item(item, selection.geometry)
         changed = geometry != selection.geometry
         updated = RoiSelection(
             id=selection.id,
@@ -1953,14 +1941,69 @@ class ImageViewShell(QtWidgets.QWidget):
             color=selection.color,
         )
         self._roi_items[str(roi_id)] = (item, updated)
-        state = self.interaction_controller.state
-        if state.capture is None or state.capture.kind != "roi" or state.capture.object_id != str(roi_id):
-            self._on_roi_item_change_started(roi_id)
-        self.interaction_controller.observe_capture_geometry(geometry)
-        if changed:
+        self._roi_hit_index.upsert(updated)
+        if sync_item:
+            self._sync_roi_item_to_geometry(item, geometry)
+            self._sync_roi_item_style(roi_id)
+        if changed and emit:
             self.roiChanged.emit(str(roi_id), geometry)
-        if final:
-            self.interaction_controller.end_capture()
+        return changed
+
+    def _sync_roi_item_to_geometry(self, item, geometry: RoiGeometry) -> None:
+        sync_item_to_roi_geometry(item, geometry)
+
+    def _sync_pyqtgraph_interaction_visuals(self, state: DisplayInteractionState) -> None:
+        target = state.capture if state.capture is not None else state.hover
+        roi_id = target.object_id if target is not None and target.kind == "roi" else None
+        profile_part = target.part if target is not None and target.kind == "profile" else None
+        previous_roi_id = self._interaction_visual_roi_id
+        self._interaction_visual_roi_id = None if roi_id is None else str(roi_id)
+        for current_id in {previous_roi_id, self._interaction_visual_roi_id}:
+            if current_id is not None:
+                self._sync_roi_item_style(current_id)
+        if self._interaction_visual_profile_part != profile_part:
+            self._interaction_visual_profile_part = profile_part
+            self._sync_profile_interaction_visuals()
+
+    def _sync_roi_item_style(self, roi_id: str) -> None:
+        item_selection = self._roi_items.get(str(roi_id))
+        if item_selection is None:
+            return
+        item, selection = item_selection
+        highlighted = str(roi_id) == self._highlighted_roi_id
+        interactive = str(roi_id) == self._interaction_visual_roi_id
+        width = 4.0 if highlighted else 3.25 if interactive else 2.0
+        color = tuple(selection.color)
+        if interactive:
+            color = tuple(min(255, int(value) + 70) for value in color[:3])
+        item.setPen(pg.mkPen(color + (255,), width=width))
+
+    def _sync_profile_interaction_visuals(self) -> None:
+        marker_pen = (
+            pg.mkPen((255, 125, 55, 230), width=2)
+            if self._interaction_visual_profile_part
+            else pg.mkPen((230, 60, 30, 180), width=1)
+        )
+        handle_pen = (
+            pg.mkPen((255, 255, 255, 240), width=2)
+            if self._interaction_visual_profile_part
+            else pg.mkPen((230, 60, 30, 220), width=2)
+        )
+        handle_brush = (
+            pg.mkBrush(255, 125, 55, 120)
+            if self._interaction_visual_profile_part
+            else pg.mkBrush(230, 60, 30, 80)
+        )
+        for line in (self._profile_vline, self._profile_hline):
+            if line is not None and hasattr(line, "setPen"):
+                line.setPen(marker_pen)
+        if self._profile_handle is not None:
+            set_pen = getattr(self._profile_handle, "setPen", None)
+            if callable(set_pen):
+                set_pen(handle_pen)
+            set_brush = getattr(self._profile_handle, "setBrush", None)
+            if callable(set_brush):
+                set_brush(handle_brush)
 
     def _default_line_points(self):
         x, y, width, height = self._default_rect()
@@ -2115,6 +2158,8 @@ class ImageViewShell(QtWidgets.QWidget):
             return True
         if obj is self.graphicsView.viewport() and self._handle_roi_drawing_event(event):
             return True
+        if obj is self.graphicsView.viewport() and self._handle_pointer_interaction_event(event):
+            return True
         if (
             obj is self.graphicsView.viewport()
             and self.viewport_controller.is_fit_locked()
@@ -2122,6 +2167,19 @@ class ImageViewShell(QtWidgets.QWidget):
         ):
             self._show_fit_mode_interaction_reminder()
         return super().eventFilter(obj, event)
+
+    def event(self, event):
+        if event.type() in (
+            QtCore.QEvent.Type.WindowDeactivate,
+            QtCore.QEvent.Type.FocusOut,
+            QtCore.QEvent.Type.Hide,
+        ):
+            self._cancel_interaction("window-deactivate")
+        return super().event(event)
+
+    def _on_application_state_changed(self, state) -> None:
+        if state != QtCore.Qt.ApplicationState.ApplicationActive:
+            self._cancel_interaction("application-deactivate")
 
     def _is_fit_locked_pan_attempt(self, event) -> bool:
         event_type = event.type()
@@ -2154,6 +2212,55 @@ class ImageViewShell(QtWidgets.QWidget):
         except TypeError:
             notify("Fit mode is enabled; turn off Fit to pan or zoom.")
 
+    def _handle_pointer_interaction_event(self, event) -> bool:
+        return self._pointer_interaction.handle_event(event)
+
+    def _begin_pointer_capture(self, target: InteractionTarget, point: tuple[float, float]) -> bool:
+        if target.kind == "roi" and target.object_id is not None:
+            item_selection = self._roi_items.get(str(target.object_id))
+            if item_selection is None:
+                return False
+            _item, selection = item_selection
+            state = self.interaction_controller.begin_capture(target, point, roi_geometry=selection.geometry)
+            self.sync_interaction_state(state)
+            return True
+        if target.kind == "profile":
+            position = self.profileMarkerPosition()
+            if position is None:
+                return False
+            state = self.interaction_controller.begin_capture(target, point, profile_position=position)
+            self.sync_interaction_state(state)
+            return True
+        return False
+
+    def _apply_drag_result(self, result: DragResult | None) -> None:
+        if result is None:
+            return
+        target = result.target
+        if target.kind == "roi" and target.object_id is not None and result.geometry is not None:
+            self._set_roi_geometry(str(target.object_id), result.geometry, emit=True, sync_item=True)
+            return
+        if target.kind == "profile" and result.profile_position is not None:
+            self._apply_profile_drag_position(result.profile_position)
+
+    def _apply_profile_drag_position(self, position: tuple[float, float]) -> None:
+        x, y = self._clamp_profile_point(float(position[0]), float(position[1]))
+        previous = self.profileMarkerPosition()
+        if previous is not None and (
+            float(previous[0]),
+            float(previous[1]),
+        ) == (float(x), float(y)):
+            return
+        self.setProfileMarker(x, y, visible=True)
+        if self._profile_marker_callback is not None:
+            self._profile_marker_callback(float(x), float(y))
+
+    def _cancel_interaction(self, reason: str) -> None:
+        self._pointer_interaction.cancel(reason)
+
+    def _cancel_active_capture_for_frame_replacement(self) -> None:
+        self._pointer_interaction.cancel_active_capture_for_frame_replacement()
+
     def _current_image_world_rect(self):
         if self.image is None:
             return None
@@ -2175,7 +2282,8 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def _handle_roi_drawing_event(self, event):
         state = self.interaction_controller.state
-        if state.pending_draw_tool is None and not self._drawing_active:
+        drawing_active = state.phase is PointerPhase.DRAWING
+        if state.pending_draw_tool is None and not drawing_active:
             return False
         event_type = event.type()
         if event_type == QtCore.QEvent.Type.MouseButtonPress and event.button() == QtCore.Qt.MouseButton.LeftButton:
@@ -2185,7 +2293,7 @@ class ImageViewShell(QtWidgets.QWidget):
             state = self.interaction_controller.state
             self._set_roi_drawing_preview(state.pending_draw_tool, state.drawing_points)
             return True
-        if event_type == QtCore.QEvent.Type.MouseMove and self._drawing_active:
+        if event_type == QtCore.QEvent.Type.MouseMove and drawing_active:
             point = self._event_image_point(event)
             if point is None:
                 return True
@@ -2193,7 +2301,7 @@ class ImageViewShell(QtWidgets.QWidget):
                 state = self.interaction_controller.state
                 self._set_roi_drawing_preview(state.pending_draw_tool, state.drawing_points)
             return True
-        if event_type == QtCore.QEvent.Type.MouseButtonRelease and self._drawing_active:
+        if event_type == QtCore.QEvent.Type.MouseButtonRelease and drawing_active:
             result = self.interaction_controller.finish_drawing()
             self._set_roi_drawing_preview(None, ())
             if result is not None:
@@ -2212,14 +2320,34 @@ class ImageViewShell(QtWidgets.QWidget):
         del tool, points
 
     def _event_image_point(self, event):
+        point = self._event_display_point(event)
+        if point is None:
+            return None
+        x, y = point
+        x0, y0, x1, y1 = self._current_image_world_rect()
+        return (
+            max(float(x0), min(float(x), float(x1))),
+            max(float(y0), min(float(y), float(y1))),
+        )
+
+    def _event_overlay_point(self, event):
+        point = self._event_display_point(event)
+        if point is None:
+            return None
+        x, y = point
+        x0, y0, x1, y1 = self._current_image_world_rect()
+        if float(x) < min(x0, x1) or float(x) > max(x0, x1):
+            return None
+        if float(y) < min(y0, y1) or float(y) > max(y0, y1):
+            return None
+        return (float(x), float(y))
+
+    def _event_display_point(self, event):
         if self.image is None:
             return None
         scene_pos = self.graphicsView.mapToScene(event.pos())
         view_point = self.view.mapSceneToView(scene_pos)
-        x0, y0, x1, y1 = self._current_image_world_rect()
-        x = max(float(x0), min(float(view_point.x()), float(x1)))
-        y = max(float(y0), min(float(view_point.y()), float(y1)))
-        return (x, y)
+        return (float(view_point.x()), float(view_point.y()))
 
     def resizeEvent(self, event):
         """On resize, if in 'fit' mode keep the image fully visible."""
@@ -2378,13 +2506,3 @@ def _point_inside_view_range(view_range, x: float, y: float) -> bool:
     except Exception:
         return True
     return x0 <= float(x) <= x1 and y0 <= float(y) <= y1
-
-
-def _roi_geometry_anchor(geometry: RoiGeometry) -> tuple[float, float]:
-    bounds = roi_bounding_rect(geometry)
-    if bounds is not None:
-        return (
-            (float(bounds[0]) + float(bounds[2])) * 0.5,
-            (float(bounds[1]) + float(bounds[3])) * 0.5,
-        )
-    return (0.0, 0.0)

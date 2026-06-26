@@ -104,6 +104,9 @@ class _FakeImageView:
     def interaction_event_owner(self):
         return "fake"
 
+    def sync_interaction_state(self, state):
+        self.interaction_state = state
+
     def reset_surface(self, reason):
         self.reset_reason = str(reason)
 

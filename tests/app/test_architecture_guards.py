@@ -225,6 +225,7 @@ def test_image_view_shell_exposes_surface_contract():
         "def current_viewport_rect",
         "def presentation_diagnostics",
         "def interaction_event_owner",
+        "def sync_interaction_state",
         "def reset_surface",
         "def teardown_surface",
     ):

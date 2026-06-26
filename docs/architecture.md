@@ -223,12 +223,11 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 ## Known architectural debt
 
 - `VisPyImageView2D` now inherits the shared `ImageViewShell` rather than the PyQtGraph concrete
-  `ImageView2D`. The VisPy canvas is passive and mouse-transparent; the shared PyQtGraph overlay shell
-  is the single interaction-event owner until X4 moves pointer capture and drag lifecycle into a
-  backend-neutral controller.
+  `ImageView2D`. The VisPy canvas is passive and mouse-transparent; the shared pointer interaction
+  controller owns ROI/profile hit priority, capture, drag lifecycle, cancellation, and cursor intent
+  for both built-in surfaces.
 - Normal and montage evaluation scheduling remain separate, even though frame planning and committed
   tiled presentation semantics are now unified.
-- Pointer capture and full drag lifecycle are only partly migrated to shared interaction state.
 - `MontageRenderSession` is still large, but level convergence, tile admission, and stage fan-in now delegate to Qt-free control-plane models.
 - Large renderer/backend modules still combine orchestration and mechanics.
 - Histogram binding still reaches into private PyQtGraph state.

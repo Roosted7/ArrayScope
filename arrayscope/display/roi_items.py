@@ -28,38 +28,58 @@ def item_for_roi(selection):
     pen = pg.mkPen(selection.color + (220,), width=2)
     hover_pen = pg.mkPen(selection.color + (255,), width=3)
     if geometry.kind == RoiKind.LINE:
-        return pg.LineSegmentROI(geometry.points[:2], pen=pen, hoverPen=hover_pen, movable=True)
+        return pg.LineSegmentROI(geometry.points[:2], pen=pen, hoverPen=hover_pen, movable=False)
     if geometry.kind == RoiKind.RECTANGLE:
         x, y, width, height = geometry.rect
-        return pg.RectROI((x, y), (width, height), pen=pen, hoverPen=hover_pen, movable=True)
+        return pg.RectROI((x, y), (width, height), pen=pen, hoverPen=hover_pen, movable=False)
     if geometry.kind in (RoiKind.POLYLINE, RoiKind.FREEHAND_POLYGON):
         return pg.PolyLineROI(
             geometry.points,
             closed=geometry.kind == RoiKind.FREEHAND_POLYGON,
             pen=pen,
             hoverPen=hover_pen,
-            movable=True,
+            movable=False,
         )
     raise ValueError(f"unsupported ROI kind: {geometry.kind}")
 
 
-def geometry_from_item(item, previous):
-    state = item.getState()
-    if previous.kind == RoiKind.RECTANGLE:
-        pos = state["pos"]
-        size = state["size"]
-        return RoiGeometry(previous.kind, rect=(float(pos.x()), float(pos.y()), float(size.x()), float(size.y())))
-    if previous.kind in (RoiKind.LINE, RoiKind.POLYLINE, RoiKind.FREEHAND_POLYGON):
-        pos = state.get("pos")
-        dx = 0.0 if pos is None else float(pos.x())
-        dy = 0.0 if pos is None else float(pos.y())
-        points = tuple((float(point.x()) + dx, float(point.y()) + dy) for point in state.get("points", ()))
-        if previous.kind == RoiKind.FREEHAND_POLYGON:
-            from arrayscope.core.roi import close_polygon
+def make_item_passive(item) -> None:
+    """Prevent a graphics item from owning pointer semantics."""
 
-            points = close_polygon(points)
-        return RoiGeometry(previous.kind, points=points, line_width=previous.line_width, closed=previous.closed)
-    return previous
+    for name, value in (
+        ("setAcceptedMouseButtons", QtCore.Qt.MouseButton.NoButton),
+        ("setAcceptHoverEvents", False),
+    ):
+        method = getattr(item, name, None)
+        if callable(method):
+            try:
+                method(value)
+            except Exception:
+                pass
+
+
+def sync_item_to_roi_geometry(item, geometry: RoiGeometry) -> None:
+    """Mirror semantic ROI geometry into a PyQtGraph ROI item."""
+
+    if geometry.kind == RoiKind.RECTANGLE and geometry.rect is not None:
+        x, y, width, height = geometry.rect
+        item.setPos(float(x), float(y))
+        if hasattr(item, "setSize"):
+            item.setSize((float(width), float(height)))
+        return
+    points = tuple((float(x), float(y)) for x, y in geometry.points)
+    if geometry.kind == RoiKind.FREEHAND_POLYGON and len(points) > 1 and points[0] == points[-1]:
+        points = points[:-1]
+    if hasattr(item, "setPoints"):
+        item.setPoints(points)
+        item.setPos(0.0, 0.0)
+        return
+    if hasattr(item, "setState"):
+        state = dict(item.saveState()) if hasattr(item, "saveState") else {}
+        state.update({"pos": (0.0, 0.0), "points": points})
+        state.setdefault("size", (1.0, 1.0))
+        state.setdefault("angle", 0.0)
+        item.setState(state)
 
 
 class MovableInfoPanel(QtWidgets.QLabel):
@@ -94,4 +114,3 @@ class MovableInfoPanel(QtWidgets.QLabel):
     def mouseReleaseEvent(self, event):
         self._drag_offset = None
         event.accept()
-

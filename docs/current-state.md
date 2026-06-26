@@ -21,15 +21,15 @@ commit, retained warmup, and speculative work publish explicit admission and lif
 | Dimension roles, ranges, flips/FFT shift | Established with recent change | Keep interaction regressions across cropped/ranged axes. |
 | Reversible operation document/recipes | Established | Optimizer preserves public step history. |
 | Region planning, stage cache, cost/memory estimates | Substantial | Strong Qt-free coverage; workload heuristics need field evidence. |
-| Profiles and ROI inspection | Substantial | Shared semantics exist; pointer/drag lifecycle is not fully backend-neutral. |
+| Profiles and ROI inspection | Substantial | Shared pointer capture/drag lifecycle now owns ROI/profile semantics with indexed hover candidates; hardware parity checks remain. |
 | Histogram and window/level | Substantial, under stabilization | Semantic auto bounds and latest-only refinement exist; PyQtGraph binding remains brittle. |
 | Frame planning and tiled presentation | Implemented foundation | `FramePlanner` covers single images, internally tiled large planes, and montages; real PyQtGraph/VisPy tests cover montage-optional tiled commits. |
 | Progressive montage | Advanced, stabilizing | Core control-plane state machines are extracted; viewport retargets now refresh frame-plan activity; renderer/session orchestration is still large. |
 | PyQtGraph backend | Production fallback | Correctly requires progressive CPU/item convergence for some level changes; large item counts remain costly. |
-| VisPy backend | Experimental | Persistent textures/shader levels are promising; native pointer capture and real-hardware evidence remain gaps. |
+| VisPy backend | Experimental | Persistent textures/shader levels are promising; real-hardware evidence remains a gap. |
 | LOD | Explicit native-only production policy | Demand selection records desired/applied factor, per-axis texels, policy, and reason; applied factor remains 1 until async compatible residency exists. |
 | Diagnostics/benchmarks | Good internal base, recently corrected | Completion, level-work, work-graph, and large-normal tiled-surface counters now reflect committed backend work and rejected optional admission. |
-| Documentation/ADRs | Updated for v32 findings | X1, X2, and X3 are complete; X4 now owns shared pointer capture/drag lifecycle work. |
+| Documentation/ADRs | Updated for v32 findings | X1, X2, X3, and X4 shared pointer capture are implemented; X5 hardware evidence remains. |
 
 ## What is working well
 
@@ -132,10 +132,10 @@ texture limits, Wayland behavior, high-DPI pointer mapping, frame pacing, or int
 Do not discard the operation/evaluation core, display models, unified frame planner, typed tiled
 surface, resource policy, extracted control-plane models, or backend mechanics. Do discard the unsafe
 synchronous LOD route and stop adding cross-cutting behavior to the session and renderer. The next
-architecture step is shared pointer capture and drag lifecycle: the surface contract exists, VisPy no
-longer inherits the PyQtGraph concrete view, backend reset/teardown is explicit, and the current VisPy
-canvas stays passive while the shared overlay shell owns interaction events. Non-native LOD waits for
-the ADR 0041 async materialization and compatible-residency gates.
+architecture step is hardware-backed evidence and residency policy: the surface contract exists,
+VisPy no longer inherits the PyQtGraph concrete view, backend reset/teardown is explicit, and shared
+pointer capture/drag lifecycle owns ROI/profile interaction for both built-in surfaces. Non-native
+LOD waits for the ADR 0041 async materialization and compatible-residency gates.
 
 The ordered acceptance gates are in the [roadmap](roadmap.md). Full evidence and recommendations are
 in [the v30 rendering-consistency audit](reviews/v30-rendering-consistency-audit.md).

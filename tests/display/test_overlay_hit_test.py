@@ -1,7 +1,7 @@
 import pytest
 
-from arrayscope.core.roi import RoiGeometry, RoiKind
-from arrayscope.display.overlay_hit_test import hit_test_roi, point_segment_distance, roi_handle_points
+from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
+from arrayscope.display.overlay_hit_test import RoiHitIndex, hit_test_roi, point_segment_distance, roi_handle_points
 
 
 def test_point_segment_distance_clamps_to_segment_ends():
@@ -40,3 +40,41 @@ def test_closed_freehand_does_not_duplicate_first_handle():
 
     assert roi_handle_points(geometry) == ((0.0, 0.0), (4.0, 0.0), (4.0, 4.0))
     assert hit_test_roi(geometry, (2.0, 2.0), tolerance=0.2) is not None
+
+
+def test_roi_hit_index_returns_local_topmost_candidates_and_tracks_updates():
+    index = RoiHitIndex(cell_size=4.0)
+    bottom = RoiSelection("bottom", "Bottom", RoiGeometry(RoiKind.RECTANGLE, rect=(0.0, 0.0, 3.0, 3.0)))
+    top = RoiSelection("top", "Top", RoiGeometry(RoiKind.RECTANGLE, rect=(1.0, 1.0, 3.0, 3.0)))
+    far = RoiSelection("far", "Far", RoiGeometry(RoiKind.RECTANGLE, rect=(20.0, 20.0, 2.0, 2.0)))
+
+    index.upsert(bottom)
+    index.upsert(top)
+    index.upsert(far)
+
+    assert [selection.id for selection in index.candidates((2.0, 2.0), tolerance=0.1)] == ["top", "bottom"]
+    assert [selection.id for selection in index.candidates((21.0, 21.0), tolerance=0.1)] == ["far"]
+
+    moved_top = RoiSelection("top", "Top", RoiGeometry(RoiKind.RECTANGLE, rect=(30.0, 30.0, 3.0, 3.0)))
+    index.upsert(moved_top)
+
+    assert [selection.id for selection in index.candidates((2.0, 2.0), tolerance=0.1)] == ["bottom"]
+    assert [selection.id for selection in index.candidates((31.0, 31.0), tolerance=0.1)] == ["top"]
+
+
+def test_roi_hit_index_stops_cell_collection_at_global_threshold(monkeypatch):
+    index = RoiHitIndex(cell_size=1.0, max_cells_per_roi=3)
+    visited = []
+
+    def many_cells(_bounds):
+        for value in range(10):
+            visited.append(value)
+            yield (value, 0)
+
+    monkeypatch.setattr(index, "_cell_range", many_cells)
+
+    cells, global_entry = index._cells_for_bounds((0.0, 0.0, 100.0, 100.0))
+
+    assert cells == ()
+    assert global_entry is True
+    assert visited == [0, 1, 2, 3]

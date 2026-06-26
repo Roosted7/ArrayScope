@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 
 if TYPE_CHECKING:
+    from arrayscope.display.interaction import DisplayInteractionState
     from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
     from arrayscope.display.model.frame import TileCommitReport
 
@@ -54,6 +55,8 @@ class ImageSurface(Protocol):
     def presentation_diagnostics(self) -> dict[str, object]: ...
 
     def interaction_event_owner(self) -> str: ...
+
+    def sync_interaction_state(self, state: "DisplayInteractionState") -> None: ...
 
     def reset_surface(self, reason: str) -> None: ...
 

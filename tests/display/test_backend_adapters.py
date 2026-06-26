@@ -52,6 +52,9 @@ class _FakeSurface:
     def interaction_event_owner(self):
         return "fake"
 
+    def sync_interaction_state(self, state):
+        self.calls.append(("interaction", state, None))
+
     def reset_surface(self, reason):
         self.calls.append(("reset", str(reason), None))
 
@@ -162,7 +165,7 @@ def test_pyqtgraph_surface_exposes_lifecycle_contract(qt_app):
 
         assert surface.widget is view
         assert surface.capabilities.name == "pyqtgraph"
-        assert surface.interaction_event_owner() == "pyqtgraph"
+        assert surface.interaction_event_owner() == "shared-controller"
         view.image = np.zeros((4, 5, 3), dtype=np.uint8)
         assert surface.current_raster_shape() == (4, 5)
         view.image = np.zeros((4,), dtype=np.float32)
@@ -172,7 +175,7 @@ def test_pyqtgraph_surface_exposes_lifecycle_contract(qt_app):
         assert surface.current_viewport_rect() is None
         diagnostics = surface.presentation_diagnostics()
         assert diagnostics["backend"] == "pyqtgraph"
-        assert diagnostics["interaction_event_owner"] == "pyqtgraph"
+        assert diagnostics["interaction_event_owner"] == "shared-controller"
 
         surface.reset_surface("test-context-loss")
         assert surface.presentation_diagnostics()["last_reset_reason"] == "test-context-loss"

@@ -44,6 +44,61 @@ def test_hover_cursor_intent_is_backend_neutral():
     assert controller.end_capture().target.object_id == "r1"
 
 
+def test_hover_is_ignored_while_capture_is_active():
+    controller = DisplayInteractionController()
+    capture = InteractionTarget("roi", "r1", "body", "rectangle")
+    other = InteractionTarget("profile", part="center")
+
+    controller.begin_capture(capture, (2, 3))
+    state = controller.set_hover(other, point=(4, 5))
+
+    assert state.capture == capture
+    assert state.hover == capture
+    assert state.pointer == (4.0, 5.0)
+
+
+def test_capture_finish_and_cancel_have_distinct_lifecycle():
+    controller = DisplayInteractionController()
+    target = InteractionTarget("roi", "r1", "body", "rectangle")
+
+    controller.begin_capture(target, (2, 3))
+    controller.update_capture((4, 6))
+    finished = controller.end_capture()
+
+    assert finished.delta == (2.0, 3.0)
+    assert controller.state.phase is PointerPhase.IDLE
+    assert controller.state.capture is None
+    assert controller.state.last_cancel_reason is None
+
+    controller.begin_capture(target, (2, 3))
+    state = controller.cancel_capture("button-lost")
+
+    assert state.phase is PointerPhase.IDLE
+    assert state.capture is None
+    assert state.last_cancel_reason == "button-lost"
+    assert controller.drag_result() is None
+
+
+def test_tool_change_cancels_active_capture_and_drawing():
+    controller = DisplayInteractionController()
+
+    controller.begin_capture(InteractionTarget("roi", "r1", "body", "rectangle"), (2, 3))
+    state = controller.set_tool("profile")
+
+    assert state.phase is PointerPhase.IDLE
+    assert state.capture is None
+    assert state.tool == "profile"
+    assert state.last_cancel_reason == "tool-change"
+
+    controller.arm_drawing("roi_freehand")
+    controller.begin_drawing((1, 1))
+    state = controller.set_tool("cursor")
+
+    assert state.phase is PointerPhase.IDLE
+    assert state.pending_draw_tool is None
+    assert state.drawing_points == ()
+
+
 def test_hit_test_prioritizes_profile_then_topmost_roi():
     bottom = RoiSelection(
         id="bottom",

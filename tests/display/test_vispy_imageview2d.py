@@ -75,11 +75,11 @@ def test_vispy_surface_exposes_lifecycle_contract(qt_app):
         assert surface.widget is view
         assert surface.capabilities.name == "vispy"
         assert surface.capabilities.native_pointer_interaction is False
-        assert surface.interaction_event_owner() == "pyqtgraph-overlay"
+        assert surface.interaction_event_owner() == "shared-controller"
         surface.apply_camera((2, 3), ViewportPolicy.PRESERVE)
         diagnostics = surface.presentation_diagnostics()
         assert diagnostics["backend"] == "vispy"
-        assert diagnostics["interaction_event_owner"] == "pyqtgraph-overlay"
+        assert diagnostics["interaction_event_owner"] == "shared-controller"
         assert diagnostics["native_pointer_interaction"] is False
 
         view._vispy_pending_warm_tile_payloads = {1: object()}
@@ -2133,7 +2133,7 @@ def test_vispy_widget_overlays_are_parented_above_gl_surface(qt_app):
 
 
 def test_vispy_roi_visuals_mirror_pyqtgraph_rois(qt_app):
-    from pyqtgraph.Qt import QtCore
+    from arrayscope.display.interaction import InteractionTarget
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
     view = VisPyImageView2D()
@@ -2155,8 +2155,12 @@ def test_vispy_roi_visuals_mirror_pyqtgraph_rois(qt_app):
         view.highlightRoi(selection.id)
         assert view._vispy_roi_visuals[selection.id].visible
         assert all(handle.visible for handle in view._vispy_roi_handle_visuals[selection.id])
-        assert view._vispy_roi_cursor_for_point(6.0, 7.0).shape() == QtCore.Qt.CursorShape.SizeAllCursor
-        assert view._vispy_roi_cursor_for_point(11.0, 10.0).shape() == QtCore.Qt.CursorShape.SizeFDiagCursor
+        state = view.interaction_controller.set_hover(
+            InteractionTarget("roi", object_id=selection.id, part="handle", geometry_kind="rectangle", handle_index=0),
+            point=(11.0, 10.0),
+        )
+        view.sync_interaction_state(state)
+        assert view._vispy_hovered_roi_id == selection.id
 
         assert view.removeRoi(selection.id)
         assert selection.id not in view._vispy_roi_visuals
@@ -2166,6 +2170,7 @@ def test_vispy_roi_visuals_mirror_pyqtgraph_rois(qt_app):
 
 
 def test_vispy_roi_visuals_update_during_live_region_changes(qt_app):
+    from arrayscope.display.interaction import InteractionTarget
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
     view = VisPyImageView2D()
@@ -2175,11 +2180,14 @@ def test_vispy_roi_visuals_update_during_live_region_changes(qt_app):
     try:
         view.setImagePresentation(data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
         selection = view.createRoi("rectangle", rect=(3.0, 4.0, 8.0, 6.0), color=(255, 32, 16))
-        item, _selection = view._roi_items[selection.id]
         handle_visual = view._vispy_roi_handle_visuals[selection.id][0]
 
-        item.setPos(5.0, 7.0)
-        qt_app.processEvents()
+        view._begin_pointer_capture(
+            InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="rectangle"),
+            (6.0, 7.0),
+        )
+        result = view.interaction_controller.update_capture((8.0, 10.0))
+        view._apply_drag_result(result)
 
         assert len(changed) == 1
         live_selection = dict((roi.id, roi) for roi in view.roiSelections())[selection.id]
@@ -2192,7 +2200,7 @@ def test_vispy_roi_visuals_update_during_live_region_changes(qt_app):
 
 
 def test_vispy_line_roi_has_reused_endpoint_handles_and_hover_cursor(qt_app):
-    from pyqtgraph.Qt import QtCore
+    from arrayscope.display.interaction import InteractionTarget
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
     view = VisPyImageView2D()
@@ -2203,12 +2211,19 @@ def test_vispy_line_roi_has_reused_endpoint_handles_and_hover_cursor(qt_app):
         marker = view._vispy_roi_handle_visuals[selection.id][0]
 
         assert marker.visible
-        assert view._vispy_roi_cursor_for_point(3.0, 4.0).shape() == QtCore.Qt.CursorShape.SizeAllCursor
-        assert view._vispy_roi_cursor_for_point(7.0, 6.0).shape() == QtCore.Qt.CursorShape.SizeAllCursor
+        state = view.interaction_controller.set_hover(
+            InteractionTarget("roi", object_id=selection.id, part="handle", geometry_kind="line", handle_index=0),
+            point=(3.0, 4.0),
+        )
+        view.sync_interaction_state(state)
+        assert view._vispy_hovered_roi_id == selection.id
 
-        item, _selection = view._roi_items[selection.id]
-        item.setPos(1.0, 2.0)
-        qt_app.processEvents()
+        view._begin_pointer_capture(
+            InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="line"),
+            (7.0, 6.0),
+        )
+        result = view.interaction_controller.update_capture((8.0, 8.0))
+        view._apply_drag_result(result)
 
         assert view._vispy_roi_handle_visuals[selection.id][0] is marker
     finally:
@@ -2235,7 +2250,7 @@ def test_vispy_freehand_drawing_preview_reuses_one_visual(qt_app):
 
 
 def test_vispy_profile_marker_has_vispy_crosshair_visuals(qt_app):
-    from pyqtgraph.Qt import QtCore
+    from arrayscope.display.interaction import InteractionTarget
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
     view = VisPyImageView2D()
@@ -2249,16 +2264,19 @@ def test_vispy_profile_marker_has_vispy_crosshair_visuals(qt_app):
         assert {"profile_v", "profile_h", "profile_handle_x", "profile_handle_y", "profile_handle_dot"} <= set(view._vispy_profile_visuals)
         assert all(visual.visible for visual in view._vispy_profile_visuals.values())
         assert view._vispy_profile_visuals["profile_handle_dot"].order == 10_002
-        assert view._vispy_profile_cursor_for_point(8.0, 9.0).shape() == QtCore.Qt.CursorShape.OpenHandCursor
+        state = view.interaction_controller.set_hover(InteractionTarget("profile", part="center"), point=(8.0, 9.0))
+        view.sync_interaction_state(state)
+        assert view._vispy_profile_hover_part == "center"
 
-        view._profile_handle.setPos(10.0, 11.0)
-        qt_app.processEvents()
+        view._begin_pointer_capture(InteractionTarget("profile", part="center"), (8.0, 9.0))
+        result = view.interaction_controller.update_capture((10.0, 11.0))
+        view._apply_drag_result(result)
 
         assert moved
         assert moved[-1] == (10.0, 11.0)
         assert view.profileMarkerPosition() == (10.0, 11.0)
         assert all(visual.visible for visual in view._vispy_profile_visuals.values())
-        assert view._vispy_profile_cursor_for_point(10.0, 11.0).shape() == QtCore.Qt.CursorShape.OpenHandCursor
+        assert view._vispy_profile_hover_part == "center"
 
         view.hideProfileMarker()
         assert all(not visual.visible for visual in view._vispy_profile_visuals.values())

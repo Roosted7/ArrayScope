@@ -65,9 +65,9 @@ Status terminology:
 | [0033](0033-responsive-montage-display-upload.md) | Responsive upload | Partly implemented; callback budgets remain active work. |
 | [0036](0036-vispy-rendering-backend-experiment.md) | VisPy experiment | Experiment completed; led to 0037/0038. |
 | [0037](0037-first-class-vispy-tiled-renderer.md) | VisPy tiled renderer | Preferred large-tiled target; CPU-side LOD portions superseded by 0041. |
-| [0038](0038-render-backend-composition.md) | Backend composition | Implemented; surfaces own presentation/lifecycle while X4 owns shared pointer capture. |
-| [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Partly implemented; unified frame planner, typed tiled surface, X2 work graph, and X3 backend composition are done. |
-| [0040](0040-backend-aware-presentation-convergence.md) | Backend-aware presentation convergence | Implemented for tiled presentation; pointer drag lifecycle remains X4. |
+| [0038](0038-render-backend-composition.md) | Backend composition | Implemented; surfaces own presentation/lifecycle and mirror shared interaction state. |
+| [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Partly implemented; unified frame planner, typed tiled surface, X2 work graph, X3 backend composition, and X4 shared pointer capture are done. |
+| [0040](0040-backend-aware-presentation-convergence.md) | Backend-aware presentation convergence | Implemented for tiled presentation. |
 | [0041](0041-lod-selection-materialization-and-residency.md) | LOD selection/materialization/residency | Accepted design; production remains native-only. |
 
 ## Adding or changing a decision

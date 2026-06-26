@@ -88,8 +88,8 @@ This is implemented as the X3 backend-composition boundary. The built-in method-
 boundary has been retired for production commits: `DisplayCommitter` talks to an `ImageSurface`, and
 `VisPyImageView2D` no longer subclasses the PyQtGraph concrete `ImageView2D`. `ImageSurface` covers
 presentation commits, camera application, overlay coordinate mapping, diagnostics, context-loss reset,
-teardown, and declared interaction-event ownership. Native pointer capture and drag lifecycle remain
-tracked by the X4 interaction roadmap item.
+teardown, interaction-state visual sync, and declared shared interaction-event ownership. X4 later
+moved pointer capture and drag lifecycle into the shared interaction controller.
 
 ## Consequences
 
@@ -104,11 +104,11 @@ Positive:
 Trade-offs:
 
 - The current VisPy surface still pays Qt stacking cost because the VisPy canvas is passive under the
-  shared PyQtGraph overlay shell.
+  shared interaction shell.
 - The backend protocol must stay semantic while still permitting different mechanics; exposing every
   VisPy or PyQtGraph primitive through it would create a lowest-common-denominator abstraction.
-- Native VisPy pointer interaction is deferred until the X4 shared interaction controller no longer
-  depends on `QGraphicsItem` event ownership.
+- Native VisPy canvas event handling remains unnecessary for semantic interaction while the shared Qt
+  pointer driver owns capture and drag lifecycle for both built-in surfaces.
 
 ## Migration sequence
 

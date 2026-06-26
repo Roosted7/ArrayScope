@@ -9,6 +9,6 @@ class PyQtGraphSurface(ImageView2D):
     surface_kind = "pyqtgraph"
 
     def interaction_event_owner(self) -> str:
-        return "pyqtgraph"
+        return "shared-controller"
 
 __all__ = ["PyQtGraphSurface"]

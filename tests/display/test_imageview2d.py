@@ -13,6 +13,41 @@ def _clear_histogram_jobs(view) -> None:
     controller._closed = False
 
 
+def _viewport_pos_for_image_point(view, x: float, y: float):
+    from pyqtgraph.Qt import QtCore
+
+    scene_pos = view.getView().mapViewToScene(QtCore.QPointF(float(x), float(y)))
+    return QtCore.QPointF(view.graphicsView.mapFromScene(scene_pos))
+
+
+def _send_viewport_mouse(view, event_type, image_point, *, button=None, buttons=None):
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    if button is None:
+        button = QtCore.Qt.MouseButton.NoButton
+    if buttons is None:
+        buttons = button
+    event = QtGui.QMouseEvent(
+        event_type,
+        _viewport_pos_for_image_point(view, *image_point),
+        button,
+        buttons,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    return view.eventFilter(view.graphicsView.viewport(), event)
+
+
+def _view_class(backend):
+    if backend == "pyqtgraph":
+        from arrayscope.display.imageview2d import ImageView2D
+
+        return ImageView2D
+    pytest.importorskip("vispy")
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    return VisPyImageView2D
+
+
 def test_profile_marker_callback_replacement_and_programmatic_move(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
@@ -2248,9 +2283,7 @@ def test_imageview_creates_polyline_and_freehand_rois(qt_app):
     view = ImageView2D()
     view.setImage(np.zeros((10, 12), dtype=float))
     created = []
-    changed = []
     view.roiCreated.connect(lambda selection: created.append(selection))
-    view.roiChanged.connect(lambda roi_id, geometry: changed.append((roi_id, geometry)))
 
     polyline = view.createRoi(RoiKind.POLYLINE, points=((1, 1), (5, 2), (8, 7)))
     freehand = view.createRoi(RoiKind.FREEHAND_POLYGON, points=((2, 2), (7, 2), (7, 8), (2, 8)))
@@ -2260,12 +2293,6 @@ def test_imageview_creates_polyline_and_freehand_rois(qt_app):
     assert freehand.geometry.kind.value == RoiKind.FREEHAND_POLYGON.value
     assert freehand.geometry.points[0] == freehand.geometry.points[-1]
     assert len(view.roiSelections()) == 2
-
-    item, _selection = view._roi_items[polyline.id]
-    item.setPos(1, 0)
-    view._on_roi_item_changed(polyline.id)
-    assert changed[-1][0] == polyline.id
-    assert changed[-1][1].points[0] == (2.0, 1.0)
 
     assert view.removeRoi(polyline.id)
     assert len(view.roiSelections()) == 1
@@ -2321,48 +2348,229 @@ def test_imageview_inspection_tool_validation(qt_app):
     view.close()
 
 
-def test_native_roi_drag_is_reflected_in_shared_capture_state(qt_app):
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_roi_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
+    from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.roi import RoiKind
-    from arrayscope.display.imageview2d import ImageView2D
     from arrayscope.display.interaction import PointerPhase
 
-    view = ImageView2D()
+    view = _view_class(backend)()
+    view.resize(320, 260)
+    view.show()
     view.setImage(np.zeros((20, 20), dtype=float))
+    view.getView().setRange(xRange=(0, 20), yRange=(0, 20), padding=0)
     selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
-    item, _stored = view._roi_items[selection.id]
+    changed = []
+    view.roiChanged.connect(lambda roi_id, geometry: changed.append((roi_id, geometry)))
 
-    view._on_roi_item_change_started(selection.id)
-    item.setPos(3.0, 4.0)
-    view._on_roi_item_changed(selection.id, final=False)
+    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonPress, (4.0, 5.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert _send_viewport_mouse(
+        view,
+        QtCore.QEvent.Type.MouseMove,
+        (6.0, 7.0),
+        buttons=QtCore.Qt.MouseButton.LeftButton,
+    )
 
     assert view.interactionState().phase is PointerPhase.DRAGGING
     assert view.interactionState().capture.object_id == selection.id
-    assert view.interactionState().drag_geometry is not None
+    assert changed[-1][1].rect == pytest.approx((4.0, 5.0, 4.0, 5.0), abs=0.06)
 
-    view._on_roi_item_changed(selection.id, final=True)
+    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonRelease, (6.0, 7.0), button=QtCore.Qt.MouseButton.LeftButton)
     assert view.interactionState().phase is PointerPhase.IDLE
+    assert dict((roi.id, roi) for roi in view.roiSelections())[selection.id].geometry.rect == pytest.approx((4.0, 5.0, 4.0, 5.0), abs=0.06)
     view.close()
 
 
-def test_profile_drag_is_reflected_in_shared_capture_state(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
+    from pyqtgraph.Qt import QtCore
+
     from arrayscope.display.interaction import PointerPhase
 
-    view = ImageView2D()
+    view = _view_class(backend)()
+    view.resize(320, 260)
+    view.show()
     view.setImage(np.zeros((20, 20), dtype=float))
+    view.getView().setRange(xRange=(0, 20), yRange=(0, 20), padding=0)
     view.setProfileMarker(5.0, 6.0, visible=True)
+    moved = []
+    view.set_profile_marker_callback(lambda x, y: moved.append((x, y)))
 
-    view._observe_profile_capture("vertical", (8.0, 6.0))
+    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonPress, (5.0, 8.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert _send_viewport_mouse(
+        view,
+        QtCore.QEvent.Type.MouseMove,
+        (8.0, 8.0),
+        buttons=QtCore.Qt.MouseButton.LeftButton,
+    )
 
     state = view.interactionState()
     assert state.phase is PointerPhase.DRAGGING
     assert state.capture.kind == "profile"
     assert state.capture.part == "vertical"
-    assert state.drag_profile_position == (8.0, 6.0)
+    assert state.drag_profile_position == pytest.approx((8.0, 6.0), abs=0.06)
+    assert len(moved) == 1
+    assert moved[-1] == pytest.approx((8.0, 6.0), abs=0.06)
 
-    view._finish_profile_capture()
+    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonRelease, (8.0, 8.0), button=QtCore.Qt.MouseButton.LeftButton)
     assert view.interactionState().phase is PointerPhase.IDLE
+    assert view.profileMarkerPosition() == pytest.approx((8.0, 6.0), abs=0.06)
+    assert len(moved) == 1
     view.close()
+
+
+@pytest.mark.parametrize(
+    ("action", "reason"),
+    (
+        ("mode-change", "tool-change"),
+        ("frame-replacement", "frame-replacement"),
+        ("target-removal", "target-removed"),
+        ("window-deactivate", "window-deactivate"),
+    ),
+)
+def test_pointer_capture_is_cancelled_by_interruptions(qt_app, action, reason):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.interaction import InteractionTarget, PointerPhase
+
+    view = ImageView2D()
+    try:
+        view.setImage(np.zeros((20, 20), dtype=float))
+        selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
+        assert view._begin_pointer_capture(
+            InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="rectangle"),
+            (4.0, 5.0),
+        )
+        assert view.interactionState().phase is PointerPhase.DRAGGING
+
+        if action == "mode-change":
+            view.setInspectionTool("profile")
+        elif action == "frame-replacement":
+            view.setImage(np.ones((20, 20), dtype=float))
+        elif action == "target-removal":
+            view.removeRoi(selection.id)
+        elif action == "window-deactivate":
+            view.event(QtCore.QEvent(QtCore.QEvent.Type.WindowDeactivate))
+
+        assert view.interactionState().phase is PointerPhase.IDLE
+        assert view.interactionState().capture is None
+        assert view.interactionState().last_cancel_reason == reason
+    finally:
+        view.close()
+
+
+def test_pointer_capture_is_cancelled_by_close(qt_app):
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.interaction import InteractionTarget, PointerPhase
+
+    view = ImageView2D()
+    view.setImage(np.zeros((20, 20), dtype=float))
+    selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
+    assert view._begin_pointer_capture(
+        InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="rectangle"),
+        (4.0, 5.0),
+    )
+
+    view.close()
+
+    assert view.interactionState().phase is PointerPhase.IDLE
+    assert view.interactionState().capture is None
+
+
+@pytest.mark.parametrize("phase", ("armed", "drawing"))
+def test_frame_replacement_cancels_roi_drawing_lifecycle(qt_app, phase):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.interaction import PointerPhase
+
+    view = ImageView2D()
+    try:
+        view.resize(320, 260)
+        view.show()
+        view.setImage(np.zeros((20, 20), dtype=float))
+        view.getView().setRange(xRange=(0, 20), yRange=(0, 20), padding=0)
+        assert view.beginRoiDrawingOnce("roi_freehand")
+        if phase == "drawing":
+            assert _send_viewport_mouse(
+                view,
+                QtCore.QEvent.Type.MouseButtonPress,
+                (4.0, 5.0),
+                button=QtCore.Qt.MouseButton.LeftButton,
+            )
+            assert view.interactionState().phase is PointerPhase.DRAWING
+        else:
+            assert view.interactionState().phase is PointerPhase.DRAWING_ARMED
+
+        view.setImage(np.ones((20, 20), dtype=float))
+
+        assert view.interactionState().phase is PointerPhase.IDLE
+        assert view.interactionState().pending_draw_tool is None
+        assert view.interactionState().drawing_points == ()
+        assert view.interactionState().last_cancel_reason == "frame-replacement"
+    finally:
+        view.close()
+
+
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_pointer_hit_testing_ignores_margin_outside_committed_frame(qt_app, backend):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.display.interaction import PointerPhase
+
+    view = _view_class(backend)()
+    try:
+        view.resize(320, 260)
+        view.show()
+        view.setImage(np.zeros((20, 20), dtype=float))
+        view.getView().setRange(xRange=(0, 20), yRange=(0, 20), padding=0)
+        view.createRoi(RoiKind.RECTANGLE, rect=(0.0, 3.0, 4.0, 5.0))
+
+        for image_point in ((-10.0, 5.0), (-0.05, 5.0)):
+            handled = _send_viewport_mouse(
+                view,
+                QtCore.QEvent.Type.MouseButtonPress,
+                image_point,
+                button=QtCore.Qt.MouseButton.LeftButton,
+            )
+
+            assert handled is False
+            assert view.interactionState().phase is PointerPhase.IDLE
+            assert view.interactionState().capture is None
+    finally:
+        view.close()
+
+
+def test_pyqtgraph_roi_and_profile_visuals_mirror_interaction_state(qt_app):
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.interaction import InteractionTarget
+
+    view = ImageView2D()
+    try:
+        view.setImage(np.zeros((20, 20), dtype=float))
+        selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
+        item, _stored = view._roi_items[selection.id]
+        base_width = item.pen.widthF()
+
+        state = view.interaction_controller.set_hover(
+            InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="rectangle"),
+            point=(4.0, 5.0),
+        )
+        view.sync_interaction_state(state)
+        assert item.pen.widthF() > base_width
+
+        view.setProfileMarker(5.0, 6.0, visible=True)
+        state = view.interaction_controller.set_hover(InteractionTarget("profile", part="center"), point=(5.0, 6.0))
+        view.sync_interaction_state(state)
+        assert view._interaction_visual_profile_part == "center"
+    finally:
+        view.close()
 
 
 def test_imageview_preserves_view_range_for_same_shape_by_default(qt_app):

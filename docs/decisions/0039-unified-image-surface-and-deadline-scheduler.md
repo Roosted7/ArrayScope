@@ -272,6 +272,13 @@ than broad queue scans, local budget/dedupe gates run before optional graph admi
 stage warmup is treated as optional even though exact visible stage materialization shares the stage
 lane. Full backend composition still belongs to X3.
 
+X4 implemented the interaction portion of this migration: Qt pointer events now feed the shared
+interaction controller, which owns ROI/profile hover, capture, drag updates, cancellation, and cursor
+intent for both built-in surfaces. Backend surfaces mirror that state instead of duplicating semantic
+drag policy. ROI hover uses indexed display-space candidates before exact semantic hit testing, and
+hit tests use unclamped display coordinates so margin clicks cannot start drags against clamped edge
+points.
+
 ## Revision after the tiled-montage repair
 
 The post-review repair clarifies three invariants that the scheduler and backend protocol must enforce

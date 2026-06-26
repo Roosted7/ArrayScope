@@ -121,8 +121,8 @@ It accepts typed tiled presentations for internally tiled single planes as well 
 VisPy supports shader mapping and persistent tiled residency with atlas-backed drawing. It can avoid
 repeated CPU windowing and reduce many-item overhead. `VisPySurface` now reaches presentation commits
 through the shared `ImageSurface` contract rather than inheriting the PyQtGraph concrete surface.
-The VisPy canvas remains passive and mouse-transparent; interaction events are owned by the shared
-overlay shell until X4 moves drag/capture ownership fully into the semantic interaction controller.
+The VisPy canvas remains passive and mouse-transparent; the shared pointer interaction controller
+owns drag/capture semantics while the VisPy surface mirrors hover and capture visuals.
 VisPy is the preferred backend for sustained large tiled rendering, pending small-view latency and
 platform validation. Its active visible commit should be a coherent GPU presentation transaction:
 admitted payloads are acknowledged only after texture data, atlas/page geometry, visibility, and draw
@@ -156,5 +156,5 @@ Widget close stops warm-tile work, cancels queued histogram refresh, and closes 
 interaction state, and display timing. PyQtGraph and VisPy expose concrete `ImageSurface`
 implementations with declared capabilities; `DisplayCommitter` commits semantic raster/tiled
 presentations directly to that surface contract. The contract also covers camera application, overlay
-coordinate mapping, diagnostics, context-loss reset, teardown, and declared interaction-event
-ownership. X4 completes the remaining pointer/drag lifecycle migration.
+coordinate mapping, diagnostics, context-loss reset, teardown, interaction-state visual sync, and
+declared shared interaction-event ownership.

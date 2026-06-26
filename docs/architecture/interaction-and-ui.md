@@ -44,15 +44,20 @@ Backend camera mechanics may differ, but fit/preserve/reset/1:1 meaning is share
 
 Pointer coordinates are interpreted against the frame currently shown. The mapping uses committed geometry and value source, so a queued state change cannot make hover report values from a different slice than the visible pixels.
 
-The shared interaction controller increasingly owns:
+The shared interaction controller owns:
 
 - active tool;
 - hovered/selected ROI or profile element;
 - hit priority and semantic target;
+- pointer capture and drag lifecycle;
 - cursor intent;
 - handle selection.
 
-Backends draw that state. Complete pointer capture, drag lifecycle, and event ownership still need migration from concrete widgets.
+Backends draw that state. Qt pointer events are normalized by the shared pointer driver; PyQtGraph
+items and VisPy visuals mirror semantic ROI/profile state rather than owning drag behavior.
+Pointer hover first queries an indexed display-space ROI candidate set and then applies exact
+backend-independent hit testing. Hit testing uses real display coordinates; only active drag updates
+are clamped to the committed image bounds.
 
 ## ROI and profiles
 
@@ -91,6 +96,8 @@ A command palette is useful when it calls the same semantic command handlers as 
 - Keep the previous valid frame during work.
 - Show concise progress, degraded, stale, or refusal state without blocking dialogs.
 - Do not let hover flood computation or reprioritize a full queue per mouse event.
+- Do not scan every ROI or rebuild overlay snapshots on every mouse move; maintain bounded candidate
+  structures and perform exact geometry checks only on nearby candidates.
 - Coalesce high-frequency intent before expensive planning, but do not use debounce to starve exact progress indefinitely.
 - Keep keyboard, menu, and direct-control routes behaviorally consistent.
 - Any new visible mode must define how it composes with existing image/line/montage, ROI, channel, and viewport state.

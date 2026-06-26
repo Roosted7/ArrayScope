@@ -58,10 +58,10 @@ Diagnostics now report desired/applied factor and policy rather than silently ap
 ### Backend migration and hardware evidence
 
 The VisPy path now commits through the shared `ImageSurface` contract rather than subclassing the
-PyQtGraph concrete view. Its canvas remains passive while the shared overlay shell owns interaction
-events; native pointer/drag lifecycle is X4 work. Real OpenGL, Wayland/X11, Windows/macOS, high-DPI,
-texture-limit, frame-pacing, and interaction evidence remain incomplete. Keep PyQtGraph as the safe
-default until conformance and platform traces justify a change.
+PyQtGraph concrete view. Its canvas remains passive while the shared pointer driver owns ROI/profile
+capture and drag lifecycle for both built-in surfaces. Real OpenGL, Wayland/X11, Windows/macOS,
+high-DPI, texture-limit, frame-pacing, and interaction evidence remain incomplete. Keep PyQtGraph as
+the safe default until conformance and platform traces justify a change.
 
 ## Release blockers
 

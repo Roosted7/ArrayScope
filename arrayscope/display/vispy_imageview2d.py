@@ -29,8 +29,8 @@ from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.imageview2d import _tile_commit_report
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.image_upload import rgb_display_for_levels
-from arrayscope.display.interaction import CursorIntent, hit_test_display_overlays
-from arrayscope.display.overlay_hit_test import hit_test_roi, roi_handle_points
+from arrayscope.display.interaction import DisplayInteractionState
+from arrayscope.display.overlay_hit_test import roi_handle_points
 from arrayscope.display.backends.vispy.raster import (
     GpuMappedImageVisual,
     _coerce_texture_kind,
@@ -145,7 +145,6 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_main_shader_mapping = None
         self._last_vispy_main_texture_kind = None
         self._vispy_display_shape: tuple[int, int] = (1, 1)
-        self._vispy_roi_cursor_active = False
         self._vispy_camera_sync_pending = False
         self._vispy_camera_key = None
         self._vispy_canvas_native = self._vispy_canvas.native
@@ -237,7 +236,7 @@ class VisPyImageView2D(ImageViewShell):
         return diagnostics
 
     def interaction_event_owner(self) -> str:
-        return "pyqtgraph-overlay"
+        return "shared-controller"
 
     def reset_surface(self, reason: str) -> None:
         warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
@@ -1020,23 +1019,15 @@ class VisPyImageView2D(ImageViewShell):
             self._upsert_vispy_roi(current_id, selection.geometry, selection.color)
         return result
 
-    def _on_roi_item_changed(self, roi_id, *, final: bool = True):
-        self._sync_roi_item_state(roi_id, emit=True, final=final)
-
-    def _sync_roi_item_state(self, roi_id, *, emit: bool, final: bool = True) -> None:
+    def _set_roi_geometry(self, roi_id: str, geometry, *, emit: bool, sync_item: bool = True) -> bool:
+        changed = super()._set_roi_geometry(roi_id, geometry, emit=emit, sync_item=sync_item)
         item_selection = self._roi_items.get(str(roi_id))
         if item_selection is None:
             self._remove_vispy_roi(roi_id)
-            return
+            return changed
         _item, selection = item_selection
-        if emit:
-            super()._on_roi_item_changed(roi_id, final=final)
-            item_selection = self._roi_items.get(str(roi_id))
-            if item_selection is None:
-                self._remove_vispy_roi(roi_id)
-                return
-            _item, selection = item_selection
         self._upsert_vispy_roi(selection.id, selection.geometry, selection.color)
+        return changed
 
     def _upsert_vispy_roi(self, roi_id, geometry, color, *, width: float | None = None) -> None:
         points = _vispy_roi_points(geometry)
@@ -1145,94 +1136,13 @@ class VisPyImageView2D(ImageViewShell):
         except Exception:
             return 2.0
 
-    def setInspectionTool(self, tool):
-        result = super().setInspectionTool(tool)
-        self._clear_vispy_hover_feedback()
-        return result
-
-    def eventFilter(self, obj, event):
-        if obj is self.graphicsView.viewport():
-            if event.type() == QtCore.QEvent.Type.MouseMove:
-                self._update_vispy_roi_cursor(event)
-            elif event.type() == QtCore.QEvent.Type.Leave:
-                self._clear_vispy_hover_feedback()
-        return super().eventFilter(obj, event)
-
-    def _clear_vispy_hover_feedback(self) -> None:
-        self.interaction_controller.clear_hover()
-        self._set_vispy_profile_hover_part(None)
-        self._set_vispy_hovered_roi(None)
-        viewport = self.graphicsView.viewport()
-        if self._vispy_roi_cursor_active:
-            viewport.unsetCursor()
-            self._vispy_roi_cursor_active = False
-
-    def _update_vispy_roi_cursor(self, event) -> None:
-        if self._pending_roi_draw_tool is not None or self._drawing_active:
-            return
-        if self._inspection_tool in {"roi_line", "roi_rectangle", "roi_polyline", "roi_freehand"}:
-            return
-        scene_pos = self.graphicsView.mapToScene(event.pos())
-        view_pos = self.view.mapSceneToView(scene_pos)
-        point = (float(view_pos.x()), float(view_pos.y()))
-        profile_position = self.profileMarkerPosition()
-        profile_bounds = self._current_profile_bounds() if profile_position is not None else None
-        target = hit_test_display_overlays(
-            point,
-            roi_selections=self.roiSelections(),
-            profile_position=profile_position,
-            profile_bounds=profile_bounds,
-            tolerance=self._vispy_handle_world_size(),
-        )
-        interaction = self.interaction_controller.set_hover(target, point=point)
+    def sync_interaction_state(self, state: DisplayInteractionState) -> None:
+        super().sync_interaction_state(state)
+        target = state.capture if state.capture is not None else state.hover
         profile_part = target.part if target is not None and target.kind == "profile" else None
         roi_id = target.object_id if target is not None and target.kind == "roi" else None
         self._set_vispy_profile_hover_part(profile_part)
         self._set_vispy_hovered_roi(roi_id)
-        cursor = self._cursor_for_interaction_intent(interaction.cursor_intent)
-        viewport = self.graphicsView.viewport()
-        if cursor is None:
-            if self._vispy_roi_cursor_active:
-                viewport.unsetCursor()
-                self._vispy_roi_cursor_active = False
-            return
-        viewport.setCursor(cursor)
-        self._vispy_roi_cursor_active = True
-
-    @staticmethod
-    def _cursor_for_interaction_intent(intent: CursorIntent):
-        shapes = {
-            CursorIntent.CROSSHAIR: QtCore.Qt.CursorShape.CrossCursor,
-            CursorIntent.MOVE: QtCore.Qt.CursorShape.SizeAllCursor,
-            CursorIntent.OPEN_HAND: QtCore.Qt.CursorShape.OpenHandCursor,
-            CursorIntent.CLOSED_HAND: QtCore.Qt.CursorShape.ClosedHandCursor,
-            CursorIntent.RESIZE_HORIZONTAL: QtCore.Qt.CursorShape.SizeHorCursor,
-            CursorIntent.RESIZE_VERTICAL: QtCore.Qt.CursorShape.SizeVerCursor,
-            CursorIntent.RESIZE_DIAGONAL: QtCore.Qt.CursorShape.SizeFDiagCursor,
-        }
-        shape = shapes.get(CursorIntent(intent))
-        return None if shape is None else QtGui.QCursor(shape)
-
-    def _vispy_roi_cursor_for_point(self, x: float, y: float):
-        result = self._vispy_roi_hit_for_point(float(x), float(y))
-        if result is None:
-            return None
-        _roi_id, hit, geometry = result
-        return self._cursor_for_vispy_roi_hit(hit, geometry)
-
-    def _vispy_roi_hit_for_point(self, x: float, y: float):
-        tolerance = self._vispy_handle_world_size()
-        for roi_id, (_item, selection) in reversed(tuple(self._roi_items.items())):
-            hit = hit_test_roi(selection.geometry, (float(x), float(y)), tolerance=tolerance)
-            if hit is not None:
-                return str(roi_id), hit, selection.geometry
-        return None
-
-    def _cursor_for_vispy_roi_hit(self, hit, geometry):
-        kind = str(getattr(getattr(geometry, "kind", ""), "value", getattr(geometry, "kind", "")))
-        if hit.part == "handle" and kind == "rectangle":
-            return QtGui.QCursor(QtCore.Qt.CursorShape.SizeFDiagCursor)
-        return QtGui.QCursor(QtCore.Qt.CursorShape.SizeAllCursor)
 
     def _set_vispy_hovered_roi(self, roi_id: str | None) -> None:
         roi_id = None if roi_id is None else str(roi_id)
@@ -1246,35 +1156,6 @@ class VisPyImageView2D(ImageViewShell):
                 continue
             _item, selection = item_selection
             self._upsert_vispy_roi(selection.id, selection.geometry, selection.color)
-
-    def _vispy_profile_cursor_for_point(self, x: float, y: float):
-        return self._cursor_for_vispy_profile_hit(self._vispy_profile_hit_for_point(float(x), float(y)))
-
-    def _vispy_profile_hit_for_point(self, x: float, y: float) -> str | None:
-        if not bool(getattr(self, "_profile_marker_requested_visible", False)):
-            return None
-        position = self.profileMarkerPosition()
-        if position is None:
-            return None
-        px, py = (float(position[0]), float(position[1]))
-        tolerance = self._vispy_handle_world_size()
-        if abs(float(x) - px) <= tolerance and abs(float(y) - py) <= tolerance:
-            return "center"
-        x0, y0, x1, y1 = self._current_profile_bounds()
-        if min(y0, y1) <= float(y) <= max(y0, y1) and abs(float(x) - px) <= tolerance:
-            return "vertical"
-        if min(x0, x1) <= float(x) <= max(x0, x1) and abs(float(y) - py) <= tolerance:
-            return "horizontal"
-        return None
-
-    def _cursor_for_vispy_profile_hit(self, part: str | None):
-        if part == "center":
-            return QtGui.QCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-        if part == "vertical":
-            return QtGui.QCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-        if part == "horizontal":
-            return QtGui.QCursor(QtCore.Qt.CursorShape.SizeVerCursor)
-        return None
 
     def _set_vispy_profile_hover_part(self, part: str | None) -> None:
         part = None if part is None else str(part)
@@ -1366,7 +1247,7 @@ class VisPyImageView2D(ImageViewShell):
 
     def _set_roi_drawing_preview(self, tool, points) -> None:
         if tool is not None:
-            self._clear_vispy_hover_feedback()
+            self.sync_interaction_state(self.interaction_controller.clear_hover())
         points = np.asarray(tuple(points or ()), dtype=np.float32).reshape((-1, 2))
         visual = getattr(self, "_vispy_roi_drawing_preview", None)
         if tool is None or len(points) < 2:
