@@ -2496,6 +2496,40 @@ def test_roi_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
 
 
 @pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_out_of_bounds_roi_can_be_dragged_back_into_content(qt_app, backend):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.display.interaction import PointerPhase
+
+    view = _view_class(backend)()
+    view.resize(360, 260)
+    view.show()
+    view.setImage(np.zeros((10, 10), dtype=float))
+    view.getView().setRange(xRange=(0, 24), yRange=(0, 10), padding=0)
+    selection = view.createRoi(RoiKind.RECTANGLE, rect=(20.0, 2.0, 2.0, 3.0))
+    changed = []
+    view.roiChanged.connect(lambda roi_id, geometry: changed.append((roi_id, geometry)))
+
+    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonPress, (21.0, 3.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert view.interactionState().phase is PointerPhase.DRAGGING
+    assert view.interactionState().capture.object_id == selection.id
+
+    assert _send_viewport_mouse(
+        view,
+        QtCore.QEvent.Type.MouseMove,
+        (9.0, 3.0),
+        buttons=QtCore.Qt.MouseButton.LeftButton,
+    )
+
+    assert changed[-1][1].rect == pytest.approx((7.0, 2.0, 2.0, 3.0), abs=0.06)
+    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonRelease, (9.0, 3.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert view.interactionState().phase is PointerPhase.IDLE
+    assert dict((roi.id, roi) for roi in view.roiSelections())[selection.id].geometry.rect == pytest.approx((7.0, 2.0, 2.0, 3.0), abs=0.06)
+    view.close()
+
+
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
 def test_set_roi_selections_preserves_id_counter_for_next_roi(qt_app, backend):
     from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
 

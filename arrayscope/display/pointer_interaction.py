@@ -38,7 +38,10 @@ class QtPointerInteractionDriver:
                 return True
             point = self._owner._event_image_point(event)
             if point is not None:
-                result = self._controller.update_capture(point)
+                result = self._controller.update_capture(
+                    point,
+                    roi_constraint_rect=self._owner._current_image_world_rect(),
+                )
                 self._owner._apply_drag_result(result)
                 self._owner.sync_interaction_state(self._controller.state)
             event.accept()

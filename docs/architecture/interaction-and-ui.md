@@ -65,7 +65,10 @@ Backends draw that state. Qt pointer events for semantic overlays are normalized
 driver; PyQtGraph items and VisPy visuals mirror ROI/profile state rather than owning drag behavior.
 Pointer hover first queries an indexed display-space ROI candidate set and then applies exact
 backend-independent hit testing. Hit testing uses real display coordinates; only active drag updates
-are clamped to the committed image bounds.
+are clamped to the committed image bounds. If a montage range shrink leaves an ROI outside the
+current tiles, the ROI remains there so expanding the range can recover it; when the user grabs its
+body, the shared interaction controller translates the ROI back to the nearest allowed committed
+content bounds without changing the ROI kind or size.
 
 Background viewport navigation is separate from overlay drag semantics. `display.view_navigation`
 owns backend-neutral pan/zoom range math, and `display.view_navigation_driver` translates backend

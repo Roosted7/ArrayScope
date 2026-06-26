@@ -155,6 +155,29 @@ def test_line_endpoint_and_body_drags_share_pure_geometry_rules():
     assert moved.points == ((3.0, 1.0), (7.0, 5.0))
 
 
+def test_body_drag_can_snap_out_of_bounds_roi_into_content_rect():
+    geometry = RoiGeometry(RoiKind.RECTANGLE, rect=(20.0, 2.0, 2.0, 3.0))
+    target = InteractionTarget("roi", "roi-1", "body", "rectangle")
+    controller = DisplayInteractionController()
+
+    controller.begin_capture(target, (21.0, 3.0), roi_geometry=geometry)
+    result = controller.update_capture((9.0, 3.0), roi_constraint_rect=(0.0, 0.0, 9.0, 9.0))
+
+    assert result.geometry.rect == (7.0, 2.0, 2.0, 3.0)
+    assert controller.state.drag_geometry == result.geometry
+
+
+def test_handle_drag_does_not_translate_roi_to_content_rect():
+    geometry = RoiGeometry(RoiKind.RECTANGLE, rect=(20.0, 2.0, 2.0, 3.0))
+    target = InteractionTarget("roi", "roi-1", "handle", "rectangle", handle_index=0)
+    controller = DisplayInteractionController()
+
+    controller.begin_capture(target, (22.0, 5.0), roi_geometry=geometry)
+    result = controller.update_capture((9.0, 3.0), roi_constraint_rect=(0.0, 0.0, 9.0, 9.0))
+
+    assert result.geometry.rect == (20.0, 2.0, -11.0, 1.0)
+
+
 def test_profile_drag_parts_constrain_semantic_axes():
     position = (4.0, 7.0)
 

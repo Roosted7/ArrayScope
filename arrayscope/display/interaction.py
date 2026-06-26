@@ -12,7 +12,7 @@ from enum import Enum
 from math import hypot
 from typing import Iterable
 
-from arrayscope.core.roi import RoiGeometry, RoiKind, translate_roi_geometry
+from arrayscope.core.roi import RoiGeometry, RoiKind, clamp_roi_geometry_to_rect, translate_roi_geometry
 from arrayscope.display.overlay_hit_test import RoiHit, hit_test_roi
 
 
@@ -234,7 +234,12 @@ class DisplayInteractionController:
             last_cancel_reason=None,
         )
 
-    def update_capture(self, point: tuple[float, float]) -> DragResult | None:
+    def update_capture(
+        self,
+        point: tuple[float, float],
+        *,
+        roi_constraint_rect: tuple[float, float, float, float] | None = None,
+    ) -> DragResult | None:
         state = self._state
         if state.phase is not PointerPhase.DRAGGING or state.capture is None or state.drag_origin is None:
             return None
@@ -250,6 +255,8 @@ class DisplayInteractionController:
                 origin=state.drag_origin,
                 point=normalized,
             )
+            if roi_constraint_rect is not None and state.capture.part != "handle":
+                geometry = clamp_roi_geometry_to_rect(geometry, roi_constraint_rect)
         elif state.capture.kind == "profile" and state.drag_initial_profile_position is not None:
             profile = drag_profile_position(
                 state.drag_initial_profile_position,

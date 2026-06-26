@@ -246,6 +246,39 @@ def translate_roi_geometry(geometry: RoiGeometry, dx: float, dy: float) -> RoiGe
     return replace(geometry, points=points, rect=rect)
 
 
+def clamp_roi_geometry_to_rect(
+    geometry: RoiGeometry,
+    rect: tuple[float, float, float, float],
+) -> RoiGeometry:
+    """Translate ROI geometry just enough for its bounds to touch or fit a rect."""
+
+    geometry = geometry if isinstance(geometry, RoiGeometry) else RoiGeometry(**geometry)
+    bounds = roi_bounding_rect(geometry)
+    if bounds is None:
+        return geometry
+    x0, y0, x1, y1 = (float(value) for value in rect)
+    rx0, rx1 = (min(x0, x1), max(x0, x1))
+    ry0, ry1 = (min(y0, y1), max(y0, y1))
+    bx0, by0, bx1, by1 = bounds
+    dx = _clamp_span_translation(float(bx0), float(bx1), rx0, rx1)
+    dy = _clamp_span_translation(float(by0), float(by1), ry0, ry1)
+    if dx == 0.0 and dy == 0.0:
+        return geometry
+    return translate_roi_geometry(geometry, dx, dy)
+
+
+def _clamp_span_translation(inner_min: float, inner_max: float, outer_min: float, outer_max: float) -> float:
+    if inner_max < outer_min:
+        return outer_min - inner_min
+    if inner_min > outer_max:
+        return outer_max - inner_max
+    if inner_min < outer_min and inner_max <= outer_max:
+        return outer_min - inner_min
+    if inner_max > outer_max and inner_min >= outer_min:
+        return outer_max - inner_max
+    return 0.0
+
+
 def roi_bounding_rect(geometry: RoiGeometry) -> tuple[float, float, float, float] | None:
     geometry = geometry if isinstance(geometry, RoiGeometry) else RoiGeometry(**geometry)
     if geometry.kind == RoiKind.RECTANGLE and geometry.rect is not None:

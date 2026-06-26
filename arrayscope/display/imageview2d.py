@@ -2434,16 +2434,7 @@ class ImageViewShell(QtWidgets.QWidget):
         )
 
     def _event_overlay_point(self, event):
-        point = self._event_display_point(event)
-        if point is None:
-            return None
-        x, y = point
-        x0, y0, x1, y1 = self._current_image_world_rect()
-        if float(x) < min(x0, x1) or float(x) > max(x0, x1):
-            return None
-        if float(y) < min(y0, y1) or float(y) > max(y0, y1):
-            return None
-        return (float(x), float(y))
+        return self._event_display_point(event)
 
     def _event_display_point(self, event):
         if self.image is None:
