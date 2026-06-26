@@ -2,9 +2,9 @@
 
 ## Status
 
-Partly implemented. The unified `FramePlanner` and montage-optional typed tiled image surface are
-implemented and tested for normal images, large internally tiled planes, and montages. The explicit
-deadline scheduler/work graph and backend composition parts remain target architecture.
+Partly implemented. The unified `FramePlanner`, montage-optional typed tiled image surface, and
+explicit `WorkGraph` admission/counter model are implemented and tested for normal images, large
+internally tiled planes, montages, and side work. Backend composition remains target architecture.
 
 ## Context
 
@@ -265,8 +265,12 @@ The X1 implementation completes the unified surface portion of this ADR:
 5. The benchmark scenario for large normal tiled presentation now performs a real typed tiled commit
    and asserts backend tiled-surface counters.
 
-This does not finish the scheduler half of the ADR. Visible materialization admission and optional
-work scoring belong to roadmap X2; full backend composition belongs to X3.
+X2 then implemented the scheduler/admission half of this ADR through `arrayscope.core.work_graph`.
+Visible materialization, GUI fan-in, backend commit, side-analysis, stage, and speculative work now
+publish explicit work items and lane counters. Supersession uses keyed queued-work indexes rather
+than broad queue scans, local budget/dedupe gates run before optional graph admission, and retained
+stage warmup is treated as optional even though exact visible stage materialization shares the stage
+lane. Full backend composition still belongs to X3.
 
 ## Revision after the tiled-montage repair
 

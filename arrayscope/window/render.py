@@ -7,7 +7,9 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
+from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.core.window_levels import LevelSourceRank
 from arrayscope.display.colormaps import named_colormap, phase_colormap
 from arrayscope.display.colormap_policy import resolved_colormap_name
@@ -181,6 +183,12 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             )
 
         request_key = self.operation_evaluator.scalar_key(view_state, index, document=document)
+        frame_target = FrameTarget(
+            semantic_key=request_key,
+            viewport_key=("pixel", tuple(int(value) for value in index)),
+            presentation_key=("pixel-hover",),
+            quality="exact-visible",
+        )
 
         def done_result(result):
             if request_id != getattr(self, "_pixel_request_id", 0):
@@ -189,7 +197,28 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
                 return
             done(self.operation_evaluator.store_scalar_result(view_state, index, result))
 
-        self.pixel_evaluation_controller.start(evaluate, on_done=done_result, on_error=lambda _exc: None, slow_ms=0)
+        self.pixel_evaluation_controller.start_latest(
+            evaluate,
+            key=request_key,
+            priority=EvalPriority.HOVER_EXACT,
+            replace_group="pixel-hover",
+            frame_target=frame_target,
+            supersession_key="pixel-hover",
+            supersession_value=(request_id, request_key),
+            work_item=WorkItem(
+                key=("pixel_hover", request_key),
+                lane=WorkLane.PROFILE_ROI_HOVER,
+                frame_target=frame_target,
+                supersession_key="pixel-hover",
+                supersession_value=(request_id, request_key),
+                estimated_bytes=8,
+                expected_value=1.0,
+                reusable_output=True,
+            ),
+            on_done=done_result,
+            on_error=lambda _exc: None,
+            slow_ms=0,
+        )
 
     def _commit_pixel_value(self, value, x_i, y_i, context, pos):
         try:
@@ -379,6 +408,29 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             key=tuple(request_keys.values()),
             priority=EvalPriority.LIVE_PROFILE,
             replace_group="live-profile",
+            frame_target=FrameTarget(
+                semantic_key=tuple(request_keys.values()),
+                viewport_key=("profile", tuple(profile_axes), tuple(point)),
+                presentation_key=("live-profile",),
+                quality="exact-visible",
+            ),
+            supersession_key="live-profile",
+            supersession_value=tuple(request_keys.values()),
+            work_item=WorkItem(
+                key=("live_profile", tuple(request_keys.values())),
+                lane=WorkLane.PROFILE_ROI_HOVER,
+                frame_target=FrameTarget(
+                    semantic_key=tuple(request_keys.values()),
+                    viewport_key=("profile", tuple(profile_axes), tuple(point)),
+                    presentation_key=("live-profile",),
+                    quality="exact-visible",
+                ),
+                supersession_key="live-profile",
+                supersession_value=tuple(request_keys.values()),
+                estimated_bytes=int(self._prefetch_budget_bytes()),
+                expected_value=2.0,
+                reusable_output=True,
+            ),
             on_done=done,
             on_error=error,
         )
@@ -757,6 +809,29 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             key=tuple(request_keys.values()),
             priority=EvalPriority.LIVE_PROFILE,
             replace_group="profile-plot",
+            frame_target=FrameTarget(
+                semantic_key=tuple(request_keys.values()),
+                viewport_key=("profile-panel", tuple(profile_axes)),
+                presentation_key=("profile-plot",),
+                quality="exact-visible",
+            ),
+            supersession_key="profile-plot",
+            supersession_value=tuple(request_keys.values()),
+            work_item=WorkItem(
+                key=("profile_plot", tuple(request_keys.values())),
+                lane=WorkLane.PROFILE_ROI_HOVER,
+                frame_target=FrameTarget(
+                    semantic_key=tuple(request_keys.values()),
+                    viewport_key=("profile-panel", tuple(profile_axes)),
+                    presentation_key=("profile-plot",),
+                    quality="exact-visible",
+                ),
+                supersession_key="profile-plot",
+                supersession_value=tuple(request_keys.values()),
+                estimated_bytes=int(self._prefetch_budget_bytes()),
+                expected_value=1.5,
+                reusable_output=True,
+            ),
             on_done=done,
             on_error=lambda exc: show_status_message(self, f"Profile update failed: {exc}"),
         )

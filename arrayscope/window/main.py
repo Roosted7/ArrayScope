@@ -14,6 +14,7 @@ from arrayscope.core.resource_governor import ResourceGovernor, SchedulerBusySta
 from arrayscope.core.resource_telemetry import sample_resource_snapshot
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.core.roi_store import RoiStore
+from arrayscope.core.work_graph import WorkGraph
 from arrayscope.export.workflow import ExportWorkflowMixin
 from arrayscope.ui.dimension_controls import DimensionControlMixin
 from arrayscope.ui.display_controls import DisplayControlBuildMixin
@@ -86,6 +87,7 @@ class ArrayScopeWindow(
         )
         self._init_compare_document(data)
         self._render_generation = RenderGeneration()
+        self.work_graph = WorkGraph()
         self.visible_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.visible_workers, name="visible")
         self.evaluation_controller = self.visible_evaluation_controller
         self.montage_tile_evaluation_controller = EvaluationController(

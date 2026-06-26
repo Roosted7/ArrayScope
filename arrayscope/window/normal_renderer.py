@@ -16,6 +16,7 @@ from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
+from arrayscope.core.work_graph import WorkItem, WorkLane, complete_inline_work as _complete_inline_work
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
@@ -85,10 +86,50 @@ class NormalImageRenderMixin:
         colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
         request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document, shader_display=shader_display)
         render_generation = self._capture_render_generation()
+        frame_target = FrameTarget(
+            semantic_key=request_key,
+            viewport_key=None,
+            presentation_key=(
+                str(window_mode),
+                _normalize_levels(user_levels),
+                bool(force_auto),
+            ),
+            quality="exact-visible",
+        )
+        _complete_inline_work(
+            self,
+            WorkItem(
+                key=("normal_visible_planning", request_key),
+                lane=WorkLane.VISIBLE_PLANNING,
+                frame_target=frame_target,
+                supersession_key="visible-image",
+                supersession_value=(
+                    frame_target.semantic_key,
+                    frame_target.viewport_key,
+                    frame_target.presentation_key,
+                ),
+                estimated_bytes=self._estimated_image_display_bytes(view_state),
+            ),
+        )
         cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut, shader_display=shader_display)
         if cached is not None:
             self._last_render_was_degraded = False
             geometry = DisplayGeometry(view_state=view_state, display_shape=cached.data.shape[:2])
+            _complete_inline_work(
+                self,
+                WorkItem(
+                    key=("normal_backend_commit", request_key, "cached"),
+                    lane=WorkLane.BACKEND_COMMIT,
+                    frame_target=frame_target,
+                    supersession_key="visible-image",
+                    supersession_value=(
+                        frame_target.semantic_key,
+                        frame_target.viewport_key,
+                        frame_target.presentation_key,
+                    ),
+                    estimated_bytes=int(getattr(cached.data, "nbytes", 0) or 0),
+                ),
+            )
             self._apply_display_image(
                 cached,
                 geometry=geometry,
@@ -170,6 +211,21 @@ class NormalImageRenderMixin:
                 self._degraded_rendered_view = display_image
                 self._last_render_was_degraded = True
                 geometry = DisplayGeometry(view_state=preview_state, display_shape=display_image.data.shape[:2])
+                _complete_inline_work(
+                    self,
+                    WorkItem(
+                        key=("normal_backend_commit", preview_key),
+                        lane=WorkLane.BACKEND_COMMIT,
+                        frame_target=frame_target,
+                        supersession_key="visible-image",
+                        supersession_value=(
+                            frame_target.semantic_key,
+                            frame_target.viewport_key,
+                            ("preview", decision.degraded_factor, frame_target.presentation_key),
+                        ),
+                        estimated_bytes=int(getattr(display_image.data, "nbytes", 0) or 0),
+                    ),
+                )
                 self._apply_display_image(
                     display_image,
                     geometry=geometry,
@@ -191,6 +247,28 @@ class NormalImageRenderMixin:
                 key=preview_key,
                 priority=EvalPriority.VISIBLE_IMAGE,
                 replace_group="visible-image",
+                frame_target=frame_target,
+                supersession_key="visible-image",
+                supersession_value=(
+                    frame_target.semantic_key,
+                    frame_target.viewport_key,
+                    ("preview", decision.degraded_factor, frame_target.presentation_key),
+                ),
+                work_item=WorkItem(
+                    key=("normal_preview_materialization", preview_key),
+                    lane=WorkLane.VISIBLE_MATERIALIZATION,
+                    frame_target=frame_target,
+                    quality="retained-preview",
+                    supersession_key="visible-image",
+                    supersession_value=(
+                        frame_target.semantic_key,
+                        frame_target.viewport_key,
+                        ("preview", decision.degraded_factor, frame_target.presentation_key),
+                    ),
+                    estimated_cpu_ms=float(getattr(decision, "budget_ms", 0.0) or 0.0),
+                    estimated_bytes=int(estimated_bytes),
+                    reusable_output=False,
+                ),
                 on_done=done_preview,
                 on_error=lambda exc: show_status_message(self, f"Preview update failed: {exc}"),
                 on_stale=lambda: None,
@@ -266,6 +344,21 @@ class NormalImageRenderMixin:
             if display_image is None:
                 return
             geometry = DisplayGeometry(view_state=view_state, display_shape=display_image.data.shape[:2])
+            _complete_inline_work(
+                self,
+                WorkItem(
+                    key=("normal_backend_commit", request_key, self._capture_render_generation()),
+                    lane=WorkLane.BACKEND_COMMIT,
+                    frame_target=frame_target,
+                    supersession_key="visible-image",
+                    supersession_value=(
+                        frame_target.semantic_key,
+                        frame_target.viewport_key,
+                        frame_target.presentation_key,
+                    ),
+                    estimated_bytes=int(getattr(display_image.data, "nbytes", 0) or 0),
+                ),
+            )
             self._apply_display_image(
                 display_image,
                 geometry=geometry,
@@ -288,16 +381,6 @@ class NormalImageRenderMixin:
             show_status_message(self, f"Image update failed: {exc}")
 
         submitted_at = perf_counter()
-        frame_target = FrameTarget(
-            semantic_key=request_key,
-            viewport_key=None,
-            presentation_key=(
-                str(window_mode),
-                _normalize_levels(user_levels),
-                bool(force_auto),
-            ),
-            quality="exact-visible",
-        )
         self.visible_evaluation_controller.start_active_plus_latest(
             evaluate,
             key=request_key,
@@ -309,6 +392,21 @@ class NormalImageRenderMixin:
                 frame_target.semantic_key,
                 frame_target.viewport_key,
                 frame_target.presentation_key,
+            ),
+            work_item=WorkItem(
+                key=("normal_visible_materialization", request_key),
+                lane=WorkLane.VISIBLE_MATERIALIZATION,
+                frame_target=frame_target,
+                quality=frame_target.quality,
+                supersession_key="visible-image",
+                supersession_value=(
+                    frame_target.semantic_key,
+                    frame_target.viewport_key,
+                    frame_target.presentation_key,
+                ),
+                estimated_cpu_ms=float(getattr(decision, "budget_ms", 0.0) or 0.0),
+                estimated_bytes=int(estimated_bytes),
+                reusable_output=True,
             ),
             on_done=done,
             on_error=error,

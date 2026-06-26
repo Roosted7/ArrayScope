@@ -66,7 +66,11 @@ Presentation-generation and admission state are Qt-free. `PresentationGeneration
 latest level target, revision, active coverage, pending work, and acknowledgement state.
 `TileAdmissionQueue` owns priority/aging/item/byte/deadline admission without knowing array semantics.
 `LevelConvergenceStrategy` keeps PyQtGraph progressive tile redraws and VisPy uniform updates behind
-one semantic convergence contract.
+one semantic convergence contract. `WorkGraph` sits above these component models and owns lane-level
+frame-value admission/counters for visible planning, materialization, display preparation, GUI fan-in,
+backend commit, side analysis, stage materialization, and speculative residency. Work visibility is
+carried by target quality as well as lane: exact visible stage materialization is visible work, while
+retained stage warmup is optional and subject to available-budget admission.
 
 A montage is one reason to have semantic regions, but not the only one. Internal tiling of one huge
 plane is implemented without inventing a montage axis; `FramePlan` region bounds and data slices are
@@ -136,6 +140,10 @@ Widget close now stops warm-tile work, cancels queued histogram refresh, and clo
 - Bound cold preparation/upload by items, bytes, and elapsed time.
 - Do not count a batch of many tiles as one feedback item.
 - Separate submission time, preparation time, upload bytes/time, queue delay, and first-frame/presented age.
+- Publish work-graph counters by lane so dropped, superseded, reusable, and budget-blocked work are
+  observable separately from backend physical work.
+- Run local prefetch/warmup gates before graph admission; rejected optional work must not appear as
+  active admitted work.
 - Changes to levels/LUT/scale should update uniforms or prepared display state without re-materializing unchanged source pixels.
 
 ## Migration direction

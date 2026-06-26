@@ -5,6 +5,8 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 
 from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import stage_document_key
 from arrayscope.operations.render_plan import MAX_IDLE_PREFETCH_SLICES, PREFETCH_IDLE_DELAY_MS
@@ -104,6 +106,21 @@ class RenderPrefetchMixin:
                     ),
                     key=prefetch_key,
                     memory_budget_bytes=policy.prefetch_budget_bytes,
+                    work_item=WorkItem(
+                        key=("prefetch_image", prefetch_key),
+                        lane=WorkLane.SPECULATIVE_RESIDENCY,
+                        frame_target=FrameTarget(
+                            semantic_key=prefetch_key,
+                            viewport_key=("slice", axis, index),
+                            presentation_key=("prefetch",),
+                            quality="retained",
+                        ),
+                        supersession_key=("prefetch-image", axis, index),
+                        supersession_value=prefetch_key,
+                        estimated_bytes=int(policy.prefetch_budget_bytes),
+                        expected_value=1.0,
+                        reusable_output=True,
+                    ),
                 )
                 self._note_prefetch_start(started)
                 if started.scheduled:
@@ -195,6 +212,21 @@ class RenderPrefetchMixin:
                     ),
                     key=request_key_cache[profile_state],
                     memory_budget_bytes=self._prefetch_budget_bytes(),
+                    work_item=WorkItem(
+                        key=("prefetch_profile", request_key_cache[profile_state]),
+                        lane=WorkLane.PROFILE_ROI_HOVER,
+                        frame_target=FrameTarget(
+                            semantic_key=request_key_cache[profile_state],
+                            viewport_key=("marker", int(x), int(y)),
+                            presentation_key=("prefetch-profile",),
+                            quality="retained",
+                        ),
+                        supersession_key=("prefetch-profile", profile_state),
+                        supersession_value=request_key_cache[profile_state],
+                        estimated_bytes=int(self._prefetch_budget_bytes()),
+                        expected_value=0.5,
+                        reusable_output=True,
+                    ),
                 )
                 self._note_prefetch_start(started)
                 if started.scheduled:

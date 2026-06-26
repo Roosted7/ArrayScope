@@ -195,11 +195,12 @@ Completion notes:
 
 ### X2. Deadline work graph and visible admission
 
+**Status:** Done!
+
 **Goal:** replace debounce/timer-shaped render ordering with explicit frame-value work admission.
 
-X1 unified the semantic frame surface, but it did not implement ADR 0039's `WorkGraph`/
-`DeadlineScheduler` half. That work should be its own gate rather than hidden inside backend
-composition or hardware benchmarking.
+X1 unified the semantic frame surface. X2 implements ADR 0039's `WorkGraph`/deadline-admission half
+as its own gate rather than hiding it inside backend composition or hardware benchmarking.
 
 Work:
 
@@ -228,6 +229,29 @@ Exit gate:
   large-plane, and montage paths;
 - tests prove camera-only, presentation-only, semantic, and document-revision changes have distinct
   cancellation/materialization behavior.
+
+Completion notes:
+
+- `arrayscope.core.work_graph` now provides Qt-free `WorkGraph`, `WorkItem`, lane, admission, and
+  counter models for visible planning/materialization, display preparation, backend commit, GUI
+  fan-in, side analysis, stage materialization, and speculative residency.
+- `EvaluationController` visible submissions now carry admitted work items when a window graph is
+  present. Active-plus-latest behavior is preserved, queued obsolete work collapses by supersession
+  key/value through a keyed queue index rather than a whole-queue scan, and stale reusable completions
+  are counted without presenting stale pixels.
+- Queued work re-admission does not advance supersession state, and budget-blocked queued work is
+  counted by blocked state rather than by how often `admit_ready()` is polled.
+- Normal rendering, montage planning, stage/tile materialization, bounded result fan-in, backend
+  commits, profile/ROI work, stage warmup, and prefetch now publish lane-specific work metadata.
+- Local idle, memory, dedupe, and in-flight caps run before optional work enters the graph, so rejected
+  prefetch/warmup does not leave phantom active work. Retained stage warmup is optional work; exact
+  visible stage materialization remains visible work.
+- Runtime diagnostics and JSONL include a `Work Graph` section with queued, admitted, dropped,
+  superseded, completed, failed, rescheduled, reusable-finished, deadline-missed, and budget-blocked
+  counters by lane. Rendering benchmark records expose graph-derived backend-commit work counters.
+- Focused model, controller, runtime-diagnostic, render-scheduler, frame-planner, pan/level, and
+  presentation-only interaction tests cover the X2 contracts. Real hardware evidence is still part of
+  X5, not this gate.
 
 ### X3. Backend composition
 

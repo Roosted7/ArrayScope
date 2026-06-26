@@ -24,9 +24,9 @@ import numpy as np
 
 
 DEFAULT_DATA_PATH = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
-PY_SPY_LOW_IMPACT_SAMPLE_RATE_HZ = 50
-PY_SPY_FULL_SAMPLE_RATE_HZ = 80
-PY_SPY_FULL_DURATION_S = 16
+PY_SPY_LOW_IMPACT_SAMPLE_RATE_HZ = 25
+PY_SPY_FULL_SAMPLE_RATE_HZ = 50
+PY_SPY_FULL_DURATION_S = 30
 PY_SPY_FULL_DETACH_MARGIN_S = 1
 PY_SPY_FULL_ALLOWED_MISSED_STACKS = 1
 
@@ -1114,6 +1114,7 @@ def profiler_suite_commands(argv: tuple[str, ...], suite_dir: str | Path) -> tup
                         (*py_spy_base, "--jsonl", str(py_spy_full_jsonl), "--profiler-type", py_spy_full_type, "--profiler-artifact", str(py_spy_full_artifact)),
                         py_spy_full_artifact,
                         rate_hz=PY_SPY_FULL_SAMPLE_RATE_HZ,
+                        nonblocking=True,
                         duration_s=PY_SPY_FULL_DURATION_S,
                         detach_margin_s=PY_SPY_FULL_DETACH_MARGIN_S,
                     ),

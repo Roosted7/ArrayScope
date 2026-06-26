@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import argparse
 import gc
 import json
@@ -17,6 +17,7 @@ import numpy as np
 
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.work_graph import WorkGraph, WorkItem, WorkLane
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.frame_planner import FramePlanner
@@ -50,6 +51,7 @@ class RenderingBenchmarkResult:
     lod_source_texels_per_pixel_xy: tuple[float, float] = (0.0, 0.0)
     lod_policy: str = "native-only"
     lod_reason: str = "native-resolution texture is appropriate at the current scale"
+    work_graph_counters: dict[str, dict[str, int]] = field(default_factory=dict)
 
     @property
     def submission_ms(self) -> float:
@@ -770,7 +772,33 @@ def _result(
         lod_source_texels_per_pixel_xy=(source_texels, source_texels),
         lod_policy=lod_policy,
         lod_reason=lod_reason,
+        work_graph_counters=_backend_commit_work_counters(
+            backend=backend,
+            scenario=scenario,
+            commit_count=max(1, int(commit_count)),
+        ),
     )
+
+
+def _backend_commit_work_counters(*, backend: str, scenario: str, commit_count: int) -> dict[str, dict[str, int]]:
+    graph = WorkGraph()
+    for index in range(max(1, int(commit_count))):
+        target = FrameTarget(
+            semantic_key=("benchmark", str(backend), str(scenario)),
+            viewport_key=None,
+            presentation_key=("backend-commit", int(index)),
+            quality="exact-visible",
+        )
+        graph.complete_inline(
+            WorkItem(
+                key=("benchmark_backend_commit", str(backend), str(scenario), int(index)),
+                lane=WorkLane.BACKEND_COMMIT,
+                frame_target=target,
+                supersession_key=("benchmark-backend-commit", str(backend), str(scenario), int(index)),
+                supersession_value=int(index),
+            )
+        )
+    return dict(graph.diagnostics().lanes)
 
 
 def _sum_upload_timings(timings) -> ImageUploadTiming:

@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.core.scheduler import EvalPriority
+from arrayscope.core.scheduler import EvalPriority, FrameTarget
+from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.operations.evaluator import stage_document_key
 from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked, stage_materialization_allowed_chunk_axes
 from arrayscope.operations.slabs import plan_slab, request_for_image
@@ -122,6 +123,29 @@ def schedule_stage_warmup(window, view_state) -> StageWarmupDecision:
         key=("stage_warmup", result.key),
         priority=EvalPriority.PREFETCH,
         replace_group=f"stage-warmup:{hash(result.key)}",
+        frame_target=FrameTarget(
+            semantic_key=result.key,
+            viewport_key=None,
+            presentation_key=("stage-warmup",),
+            quality="retained",
+        ),
+        supersession_key=("stage-warmup", result.key),
+        supersession_value=result.key,
+        work_item=WorkItem(
+            key=("stage_warmup", result.key),
+            lane=WorkLane.STAGE_MATERIALIZATION,
+            frame_target=FrameTarget(
+                semantic_key=result.key,
+                viewport_key=None,
+                presentation_key=("stage-warmup",),
+                quality="retained",
+            ),
+            supersession_key=("stage-warmup", result.key),
+            supersession_value=result.key,
+            estimated_bytes=0 if decision.candidate_bytes is None else int(decision.candidate_bytes),
+            expected_value=0.5,
+            reusable_output=True,
+        ),
         on_done=done,
         on_error=error,
         on_stale=lambda key=result.key: window.operation_evaluator.stage_materializer.cancel(key),

@@ -18,7 +18,7 @@ def test_profile_montage_workflow_py_spy_command_mentions_external_sampler():
     assert "arrayscope.tools.profile_montage_workflow" in command
     assert "--backend all" in command
     assert "--native" not in command
-    assert "--rate 50" in command
+    assert "--rate 25" in command
     assert "--gil" in command
     assert "--nonblocking" in command
 
@@ -33,15 +33,15 @@ def test_profile_suite_commands_cover_required_profilers(tmp_path):
     assert "py-spy record" in by_type["py-spy-raw-low-impact"]["command"]
     assert "--format raw" in by_type["py-spy-raw-low-impact"]["command"]
     assert "--native" not in by_type["py-spy-raw-low-impact"]["command"]
-    assert "--rate 50" in by_type["py-spy-raw-low-impact"]["command"]
+    assert "--rate 25" in by_type["py-spy-raw-low-impact"]["command"]
     assert "--gil" in by_type["py-spy-raw-low-impact"]["command"]
     assert "--nonblocking" in by_type["py-spy-raw-low-impact"]["command"]
     assert "--format raw" in by_type["py-spy-raw-full"]["command"]
-    assert "--duration 16" in by_type["py-spy-raw-full"]["command"]
-    assert "--rate 80" in by_type["py-spy-raw-full"]["command"]
+    assert "--duration 30" in by_type["py-spy-raw-full"]["command"]
+    assert "--rate 50" in by_type["py-spy-raw-full"]["command"]
     assert "started + duration + margin" in by_type["py-spy-raw-full"]["command"]
     assert "--gil" not in by_type["py-spy-raw-full"]["command"]
-    assert "--nonblocking" not in by_type["py-spy-raw-full"]["command"]
+    assert "--nonblocking" in by_type["py-spy-raw-full"]["command"]
     assert "perf record" in by_type["perf-record"]["command"]
     assert "-F 99" in by_type["perf-record"]["command"]
     assert "--profile-suite" not in by_type["plain"]["command"]
@@ -279,7 +279,7 @@ def test_py_spy_full_profile_tolerates_one_missed_stack(tmp_path):
     stdout = tmp_path / "stdout.log"
     stderr = tmp_path / "stderr.log"
     stdout.write_text(
-        "py-spy> Sampling process 80 times a second. Press Control-C to exit.\n"
+        "py-spy> Sampling process 50 times a second. Press Control-C to exit.\n"
         "py-spy> Wrote raw flamegraph data. Samples: 20 Errors: 1\n",
         encoding="utf-8",
     )
@@ -287,7 +287,7 @@ def test_py_spy_full_profile_tolerates_one_missed_stack(tmp_path):
 
     diagnostics = _profiler_log_diagnostics("py-spy-raw-full", stdout, stderr)
 
-    assert diagnostics["sample_rate_hz"] == 80
+    assert diagnostics["sample_rate_hz"] == 50
     assert diagnostics["sample_count"] == 20
     assert diagnostics["error_count"] == 1
     assert diagnostics["missed_stack_count"] == 1
@@ -301,7 +301,7 @@ def test_py_spy_full_profile_rejects_multiple_missed_stacks(tmp_path):
     stdout = tmp_path / "stdout.log"
     stderr = tmp_path / "stderr.log"
     stdout.write_text(
-        "py-spy> Sampling process 80 times a second. Press Control-C to exit.\n"
+        "py-spy> Sampling process 50 times a second. Press Control-C to exit.\n"
         "py-spy> Wrote raw flamegraph data. Samples: 20 Errors: 2\n",
         encoding="utf-8",
     )

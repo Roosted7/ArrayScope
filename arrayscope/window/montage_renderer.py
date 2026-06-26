@@ -22,6 +22,7 @@ from arrayscope.core.gui_callback_budget import GuiCallbackBudget, should_yield_
 from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
+from arrayscope.core.work_graph import WorkItem, WorkLane, complete_inline_work as _complete_inline_work
 from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
 from arrayscope.display.imageview2d import MontageTileOverlay
@@ -334,6 +335,20 @@ class MontageRenderMixin:
         )
         session.shader_display = bool(shader_display)
         self._montage_session = session
+        _complete_inline_work(
+            self,
+            WorkItem(
+                key=("montage_visible_planning", session.key, int(session.session_id)),
+                lane=WorkLane.VISIBLE_PLANNING,
+                frame_target=session.frame_plan.target,
+                supersession_key=("montage-visible", session.key),
+                supersession_value=int(session.session_id),
+                estimated_cpu_ms=float(self._last_montage_viewport_plan_ms or 0.0)
+                + float(self._last_montage_cache_resolve_ms or 0.0)
+                + float(self._last_montage_stage_plan_ms or 0.0),
+                estimated_bytes=int(single_estimate) * max(1, len(tuple(display_tiles or ()))),
+            ),
+        )
         if pending_auto_level_source is not None:
             self._pending_auto_level_source = None
         self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
@@ -1066,6 +1081,19 @@ class MontageRenderMixin:
                 key=("stage", request.key),
                 priority=EvalPriority.VISIBLE_IMAGE,
                 replace_group=f"montage-stage:{int(session.session_id)}:{hash(request.key)}",
+                frame_target=session.frame_plan.target,
+                supersession_key=("montage-stage", request.key),
+                supersession_value=(session.key, int(session.session_id)),
+                work_item=WorkItem(
+                    key=("montage_stage_materialization", request.key, int(session.session_id)),
+                    lane=WorkLane.STAGE_MATERIALIZATION,
+                    frame_target=session.frame_plan.target,
+                    quality=session.frame_plan.target.quality,
+                    supersession_key=("montage-stage", request.key),
+                    supersession_value=(session.key, int(session.session_id)),
+                    estimated_bytes=int(getattr(request.candidate, "estimated_nbytes", 0) or 0),
+                    reusable_output=True,
+                ),
                 on_done=lambda value, session_id=session.session_id, key=request.key: self._on_montage_stage_done(session_id, key, value),
                 on_error=lambda exc, session_id=session.session_id, key=request.key: self._on_montage_stage_error(session_id, key, exc),
                 on_stale=lambda key=request.key: self.operation_evaluator.stage_materializer.cancel(key),
@@ -1161,6 +1189,19 @@ class MontageRenderMixin:
             if budget.should_yield():
                 break
         self._last_montage_stage_attach_wait_ms = (perf_counter() - wait_start) * 1000.0
+        if budget.processed_items:
+            _complete_inline_work(
+                self,
+                WorkItem(
+                    key=("montage_stage_wait_fan_in", session.key, int(session.session_id), int(session.stage_fan_in.has_waiting())),
+                    lane=WorkLane.GUI_FAN_IN,
+                    frame_target=session.frame_plan.target,
+                    supersession_key=("montage-stage-wait", session.key),
+                    supersession_value=int(session.session_id),
+                    estimated_cpu_ms=float(self._last_montage_stage_attach_wait_ms),
+                    estimated_bytes=int(budget.processed_bytes),
+                ),
+            )
         self._record_gui_budget(budget)
         if session.pending_tiles:
             self._schedule_montage_tiles(session)
@@ -1179,6 +1220,18 @@ class MontageRenderMixin:
             self._activate_or_release_waiting_stage(session, key, release_missing=release_missing, budget=budget)
             if budget.should_yield():
                 break
+        if budget.processed_items:
+            _complete_inline_work(
+                self,
+                WorkItem(
+                    key=("montage_cached_stage_fan_in", session.key, int(session.session_id), bool(release_missing)),
+                    lane=WorkLane.GUI_FAN_IN,
+                    frame_target=session.frame_plan.target,
+                    supersession_key=("montage-stage-wait", session.key),
+                    supersession_value=int(session.session_id),
+                    estimated_bytes=int(budget.processed_bytes),
+                ),
+            )
         self._record_gui_budget(budget)
         if self._stage_wait_has_actionable_work(session, release_missing=release_missing):
             self._schedule_montage_attached_stage_waits(session)
@@ -1304,6 +1357,19 @@ class MontageRenderMixin:
             key=("montage_tile", session.key, int(tile.montage_index)),
             priority=EvalPriority.VISIBLE_IMAGE,
             replace_group=f"montage-tile:{session_id}:{int(tile.montage_index)}",
+            frame_target=session.frame_plan.target,
+            supersession_key=("montage-tile", int(tile.montage_index)),
+            supersession_value=(session.key, session_id),
+            work_item=WorkItem(
+                key=("montage_tile_materialization", session.key, session_id, int(tile.montage_index)),
+                lane=WorkLane.VISIBLE_MATERIALIZATION,
+                frame_target=session.frame_plan.target,
+                quality=session.frame_plan.target.quality,
+                supersession_key=("montage-tile", int(tile.montage_index)),
+                supersession_value=(session.key, session_id),
+                estimated_bytes=int(estimate_display_image_bytes(session.frame_plan.tile_shape, dtype=session.output_dtype, rgb=session.rgb)),
+                reusable_output=True,
+            ),
             on_done=done,
             on_error=error,
             on_stale=lambda: None,
@@ -1541,6 +1607,18 @@ class MontageRenderMixin:
             elapsed_ms = (perf_counter() - flush_start) * 1000.0
             self._last_montage_tile_result_flush_ms = elapsed_ms
             self._last_montage_tile_result_flush_count = int(processed)
+            _complete_inline_work(
+                self,
+                WorkItem(
+                    key=("montage_tile_result_fan_in", session.key, int(session.session_id), tuple(int(tile.montage_index) for tile in processed_tiles)),
+                    lane=WorkLane.GUI_FAN_IN,
+                    frame_target=session.frame_plan.target,
+                    supersession_key=("montage-fan-in", session.key),
+                    supersession_value=int(session.session_id),
+                    estimated_cpu_ms=float(elapsed_ms),
+                    estimated_bytes=int(budget.processed_bytes),
+                ),
+            )
             self._record_gui_budget(budget)
             first_visible_committed = False
             if first_vispy_display and (getattr(session, "dirty_tiles", None) or getattr(session, "dirty_payloads", None)):
@@ -1825,6 +1903,18 @@ class MontageRenderMixin:
         finally:
             self._montage_canvas_commit_active = False
         self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
+        _complete_inline_work(
+            self,
+            WorkItem(
+                key=("montage_backend_commit", session.key, int(session.session_id), int(session.tile_presentation_state.revision), "canvas"),
+                lane=WorkLane.BACKEND_COMMIT,
+                frame_target=session.frame_plan.target,
+                supersession_key=("montage-backend-commit", session.key),
+                supersession_value=int(session.session_id),
+                estimated_cpu_ms=float(self._last_montage_canvas_commit_ms),
+                estimated_bytes=int(getattr(canvas.data, "nbytes", 0) or 0),
+            ),
+        )
         feedback = _latency_feedback(self)
         if feedback is not None:
             if hasattr(self, "_record_ui_work"):
@@ -2030,6 +2120,18 @@ class MontageRenderMixin:
             self._montage_canvas_commit_active = False
         self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
         report = getattr(self._display_committer(), "last_tile_commit_report", None)
+        _complete_inline_work(
+            self,
+            WorkItem(
+                key=("montage_backend_commit", session.key, int(session.session_id), int(tile_state.revision), "tile_layer"),
+                lane=WorkLane.BACKEND_COMMIT,
+                frame_target=session.frame_plan.target,
+                supersession_key=("montage-backend-commit", session.key),
+                supersession_value=int(session.session_id),
+                estimated_cpu_ms=float(self._last_montage_canvas_commit_ms),
+                estimated_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
+            ),
+        )
         cold_count = int(getattr(report, "cold_count", 0) or 0)
         warm_count = int(getattr(report, "existing_items_shown", 0) or 0) + int(getattr(report, "relocated_tiles", 0) or 0)
         processed_count = max(1, cold_count + warm_count)

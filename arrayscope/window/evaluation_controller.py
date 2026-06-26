@@ -10,6 +10,7 @@ from arrayscope.app.errors import handle_ui_exception, traceback_text
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.core.scheduler import EvalPriority, EvalRequest, FrameProgress, FrameTarget, PrefetchStart, SchedulerDiagnostics
+from arrayscope.core.work_graph import WorkItem
 
 prefer_pyside6()
 
@@ -125,6 +126,7 @@ class EvaluationController(Qt.QtCore.QObject):
         self._supersession_values = {}
         self._frame_progress = {}
         self._prefetch_keys = set()
+        self._prefetch_work_items = {}
         self._max_prefetch = 32
         self._shutting_down = False
         self._completed_count = 0
@@ -169,6 +171,8 @@ class EvaluationController(Qt.QtCore.QObject):
         self._pending.clear()
         self._handlers.clear()
         self._remove_not_started_runnables()
+        for key in tuple(self._prefetch_keys):
+            self._note_prefetch_work_dropped(key)
         self._prefetch_keys.clear()
         if not self._runnables:
             self._poll_timer.stop()
@@ -205,17 +209,37 @@ class EvaluationController(Qt.QtCore.QObject):
         self._shutting_down = True
         return self.clear_queued()
 
-    def start(self, fn, *, on_done, on_error=None, on_stale=None, on_slow=None, slow_ms=100):
+    def start(
+        self,
+        fn,
+        *,
+        on_done,
+        on_error=None,
+        on_stale=None,
+        on_slow=None,
+        slow_ms=100,
+        priority=EvalPriority.HOVER_EXACT,
+        key=None,
+        replace_group="default",
+        frame_target: FrameTarget | None = None,
+        supersession_key=None,
+        supersession_value=_UNSET,
+        work_item: WorkItem | None = None,
+    ):
         return self.start_latest(
             fn,
-            key=("compat", self.generation + 1),
-            priority=EvalPriority.VISIBLE_IMAGE,
-            replace_group="default",
+            key=("compat", self.generation + 1) if key is None else key,
+            priority=priority,
+            replace_group=replace_group,
             on_done=on_done,
             on_error=on_error,
             on_stale=on_stale,
             on_slow=on_slow,
             slow_ms=slow_ms,
+            frame_target=frame_target,
+            supersession_key=supersession_key,
+            supersession_value=supersession_value,
+            work_item=work_item,
         )
 
     def start_latest(
@@ -235,9 +259,15 @@ class EvaluationController(Qt.QtCore.QObject):
         frame_target: FrameTarget | None = None,
         supersession_key=None,
         supersession_value=_UNSET,
+        work_item: WorkItem | None = None,
     ):
         replace_group = str(replace_group)
+        priority = EvalPriority(priority)
         supersession_value = self._normalize_supersession_value(supersession_key, supersession_value)
+        if not self._admit_work_item(priority, work_item):
+            if on_stale is not None:
+                on_stale()
+            return None
         if supersession_key is None:
             self.clear_group(replace_group)
             group_generation = self.advance_group(replace_group)
@@ -253,7 +283,7 @@ class EvaluationController(Qt.QtCore.QObject):
         generation = self.generation
         request = EvalRequest(
             key=key,
-            priority=EvalPriority(priority),
+            priority=priority,
             generation=generation,
             replace_group=replace_group,
             group_generation=group_generation,
@@ -261,6 +291,7 @@ class EvaluationController(Qt.QtCore.QObject):
             frame_target=frame_target,
             supersession_key=supersession_key,
             supersession_value=supersession_value,
+            work_item=work_item,
         )
         token = CancellationToken()
         self._pending.add(generation)
@@ -303,9 +334,15 @@ class EvaluationController(Qt.QtCore.QObject):
         frame_target: FrameTarget | None = None,
         supersession_key=None,
         supersession_value=_UNSET,
+        work_item: WorkItem | None = None,
     ):
         replace_group = str(replace_group)
+        priority = EvalPriority(priority)
         supersession_value = self._normalize_supersession_value(supersession_key, supersession_value)
+        if not self._admit_work_item(priority, work_item):
+            if on_stale is not None:
+                on_stale()
+            return None
         self._collapse_group_queued(replace_group, supersession_key=supersession_key)
         self.generation += 1
         generation = self.generation
@@ -316,7 +353,7 @@ class EvaluationController(Qt.QtCore.QObject):
             self._advance_supersession(replace_group, supersession_key, supersession_value)
         request = EvalRequest(
             key=key,
-            priority=EvalPriority(priority),
+            priority=priority,
             generation=generation,
             replace_group=replace_group,
             group_generation=group_generation,
@@ -324,6 +361,7 @@ class EvaluationController(Qt.QtCore.QObject):
             frame_target=frame_target,
             supersession_key=supersession_key,
             supersession_value=supersession_value,
+            work_item=work_item,
         )
         token = CancellationToken()
         self._pending.add(generation)
@@ -348,7 +386,17 @@ class EvaluationController(Qt.QtCore.QObject):
         self._ensure_polling()
         return generation
 
-    def start_prefetch(self, fn, on_done=None, *, key=None, memory_budget_bytes=None, idle_elapsed=None, blocked_reason=None):
+    def start_prefetch(
+        self,
+        fn,
+        on_done=None,
+        *,
+        key=None,
+        memory_budget_bytes=None,
+        idle_elapsed=None,
+        blocked_reason=None,
+        work_item: WorkItem | None = None,
+    ):
         if self._shutting_down:
             return PrefetchStart(False, "closed")
         if blocked_reason:
@@ -367,7 +415,20 @@ class EvaluationController(Qt.QtCore.QObject):
         if len(self._prefetch_keys) >= self._max_prefetch:
             self._prefetch_limited_count += 1
             return PrefetchStart(False, "limited")
+        graph = self._work_graph()
+        if graph is not None and work_item is not None:
+            visible_backlog = bool(getattr(graph, "visible_backlog", 0))
+            decision = graph.submit(
+                work_item,
+                available_budget=not visible_backlog,
+                visible_backlog=visible_backlog,
+            )
+            if not decision.admitted:
+                self._note_prefetch_blocked(decision.reason)
+                return PrefetchStart(False, decision.reason)
         self._prefetch_keys.add(key)
+        if work_item is not None:
+            self._prefetch_work_items[key] = work_item
         self._prefetch_scheduled_count += 1
         runnable = _PrefetchRunnable(fn, self._queue, key, notify_queue=self._notify_queue_event)
         self._runnables[key] = runnable
@@ -380,6 +441,7 @@ class EvaluationController(Qt.QtCore.QObject):
     def cancel_prefetch(self) -> None:
         for key in tuple(self._prefetch_keys):
             self._prefetch_keys.discard(key)
+            self._note_prefetch_work_dropped(key)
             self._runnables.pop(key, None)
             self._handlers.pop(key, None)
         self.pool.clear()
@@ -413,6 +475,15 @@ class EvaluationController(Qt.QtCore.QObject):
         pending = len(self._pending)
         queued = max(0, len(self._runnables) - running)
         progress = self._diagnostic_frame_progress()
+        work_lanes = tuple(
+            sorted(
+                {
+                    str(getattr(getattr(request, "work_item", None), "lane", ""))
+                    for request in self._requests.values()
+                    if getattr(request, "work_item", None) is not None
+                }
+            )
+        )
         return SchedulerDiagnostics(
             name=self.name,
             max_workers=int(self.pool.maxThreadCount()),
@@ -436,6 +507,8 @@ class EvaluationController(Qt.QtCore.QObject):
             presented_target=progress.presented,
             active_target=progress.active,
             queued_latest_target=progress.queued_latest,
+            work_lanes=work_lanes,
+            work_graph=None if self._work_graph() is None else self._work_graph().diagnostics(),
         )
 
     def _emit_slow(self, generation, callback):
@@ -490,6 +563,7 @@ class EvaluationController(Qt.QtCore.QObject):
             if kind == "prefetch_done":
                 self._prefetch_keys.discard(key)
                 self._runnables.pop(key, None)
+                self._note_prefetch_work_finished(key, failed=False)
                 on_done, _on_error, _on_stale, _on_reuse = self._handlers.pop(key, (None, None, None, None))
                 if on_done is not None:
                     try:
@@ -503,6 +577,7 @@ class EvaluationController(Qt.QtCore.QObject):
             if kind == "prefetch_failed":
                 self._prefetch_keys.discard(key)
                 self._runnables.pop(key, None)
+                self._note_prefetch_work_finished(key, failed=True)
                 self._handlers.pop(key, None)
                 continue
             if kind == "finished":
@@ -538,23 +613,28 @@ class EvaluationController(Qt.QtCore.QObject):
         self._cleanup_generation(generation)
         on_done, _on_error, on_stale, on_reuse = self._handlers.pop(generation, (None, None, None, None))
         if on_done is None:
+            self._note_work_finished(request, stale=stale, failed=False)
             if replace_group is not None:
                 self._refresh_frame_progress(replace_group)
             return
         if stale:
             self._stale_count += 1
+            reused = False
             if on_reuse is not None:
                 try:
                     on_reuse(value)
                     self._stale_reused_count += 1
+                    reused = True
                 except Exception as exc:
                     handle_ui_exception("stale evaluation reuse callback", exc)
+            self._note_work_finished(request, stale=True, failed=False, reusable=reused)
             if on_stale is not None:
                 on_stale()
             if replace_group is not None:
                 self._refresh_frame_progress(replace_group)
             return
         self._completed_count += 1
+        self._note_work_finished(request, stale=False, failed=False)
         on_done(value)
         if replace_group is not None:
             self._refresh_frame_progress(replace_group, presented=target)
@@ -565,6 +645,7 @@ class EvaluationController(Qt.QtCore.QObject):
         replace_group = None if request is None else request.replace_group
         self._cleanup_generation(generation)
         _on_done, on_error, on_stale, _on_reuse = self._handlers.pop(generation, (None, None, None, None))
+        self._note_work_finished(request, stale=stale, failed=True)
         if stale:
             self._stale_count += 1
             if on_stale is not None:
@@ -584,6 +665,8 @@ class EvaluationController(Qt.QtCore.QObject):
         request = self._requests.get(generation)
         replace_group = None if request is None else request.replace_group
         _on_done, _on_error, on_stale, _on_reuse = self._handlers.pop(generation, (None, None, None, None))
+        if request is not None:
+            self._note_work_dropped(request)
         self._cleanup_generation(generation)
         if stale and on_stale is not None:
             self._stale_count += 1
@@ -731,3 +814,56 @@ class EvaluationController(Qt.QtCore.QObject):
             self._prefetch_visible_busy_blocked_count += 1
         elif reason == "cost":
             self._prefetch_cost_blocked_count += 1
+
+    def _work_graph(self):
+        return getattr(self.parent(), "work_graph", None)
+
+    def _admit_work_item(self, priority: EvalPriority, work_item: WorkItem | None) -> bool:
+        graph = self._work_graph()
+        if graph is None:
+            return True
+        if priority == EvalPriority.VISIBLE_IMAGE and work_item is None:
+            raise ValueError("visible evaluation submissions require an admitted WorkItem")
+        if work_item is None:
+            return True
+        visible_backlog = bool(getattr(graph, "visible_backlog", 0))
+        decision = graph.submit(
+            work_item,
+            available_budget=priority != EvalPriority.PREFETCH or not visible_backlog,
+            visible_backlog=visible_backlog,
+        )
+        return bool(decision.admitted)
+
+    def _note_work_finished(self, request, *, stale: bool, failed: bool, reusable: bool = False) -> None:
+        graph = self._work_graph()
+        item = None if request is None else getattr(request, "work_item", None)
+        if graph is None or item is None:
+            return
+        if failed:
+            graph.fail(item.key, stale=stale)
+        else:
+            graph.complete(item.key, stale=stale, reusable_output=reusable)
+
+    def _note_work_dropped(self, request) -> None:
+        graph = self._work_graph()
+        item = None if request is None else getattr(request, "work_item", None)
+        if graph is None or item is None:
+            return
+        graph.drop(item.key)
+
+    def _note_prefetch_work_finished(self, key, *, failed: bool) -> None:
+        graph = self._work_graph()
+        item = self._prefetch_work_items.pop(key, None)
+        if graph is None or item is None:
+            return
+        if failed:
+            graph.fail(item.key)
+        else:
+            graph.complete(item.key)
+
+    def _note_prefetch_work_dropped(self, key) -> None:
+        graph = self._work_graph()
+        item = self._prefetch_work_items.pop(key, None)
+        if graph is None or item is None:
+            return
+        graph.drop(item.key)

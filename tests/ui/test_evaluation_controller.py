@@ -190,6 +190,111 @@ def test_active_plus_latest_preserves_started_work_and_collapses_queued(qt_app):
     assert diagnostics.presented_target == queued_new_target
 
 
+def test_visible_controller_requires_work_item_when_parent_has_work_graph(qt_app):
+    import pytest
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.work_graph import WorkGraph
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    parent = QtCore.QObject()
+    parent.work_graph = WorkGraph()
+    controller = EvaluationController(parent=parent, max_workers=1)
+
+    with pytest.raises(ValueError, match="visible evaluation submissions require"):
+        controller.start_latest(
+            lambda: "value",
+            key="visible",
+            priority=EvalPriority.VISIBLE_IMAGE,
+            replace_group="visible",
+            on_done=lambda _value: None,
+        )
+
+
+def test_generic_start_is_not_visible_work_when_parent_has_work_graph(qt_app):
+    from pyqtgraph.Qt import QtCore, QtTest
+
+    from arrayscope.core.work_graph import WorkGraph
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    parent = QtCore.QObject()
+    parent.work_graph = WorkGraph()
+    controller = EvaluationController(parent=parent, max_workers=1)
+    done = []
+
+    controller.start(lambda: "value", on_done=done.append)
+
+    QtTest.QTest.qWait(80)
+    qt_app.processEvents()
+
+    assert done == ["value"]
+    assert parent.work_graph.diagnostics().lanes == {}
+
+
+def test_controller_reports_work_graph_reusable_stale_completion(qt_app):
+    from pyqtgraph.Qt import QtCore, QtTest
+
+    from arrayscope.core.scheduler import FrameTarget
+    from arrayscope.core.work_graph import WorkGraph, WorkItem, WorkLane
+    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+
+    parent = QtCore.QObject()
+    parent.work_graph = WorkGraph()
+    controller = EvaluationController(parent=parent, max_workers=1)
+    old_target = FrameTarget("old", None, "presentation", "exact-visible")
+    new_target = FrameTarget("new", None, "presentation", "exact-visible")
+
+    controller.start_active_plus_latest(
+        lambda: (time.sleep(0.08), "old")[1],
+        key="old",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        frame_target=old_target,
+        supersession_key="visible-image",
+        supersession_value="old",
+        work_item=WorkItem(
+            key=("visible", "old"),
+            lane=WorkLane.VISIBLE_MATERIALIZATION,
+            frame_target=old_target,
+            supersession_key="visible-image",
+            supersession_value="old",
+            reusable_output=True,
+        ),
+        on_done=lambda _value: None,
+        on_reuse_stale=lambda _value: None,
+    )
+    for _ in range(20):
+        QtTest.QTest.qWait(10)
+        qt_app.processEvents()
+        if controller._started:
+            break
+
+    controller.start_active_plus_latest(
+        lambda: "new",
+        key="new",
+        priority=EvalPriority.VISIBLE_IMAGE,
+        replace_group="visible",
+        frame_target=new_target,
+        supersession_key="visible-image",
+        supersession_value="new",
+        work_item=WorkItem(
+            key=("visible", "new"),
+            lane=WorkLane.VISIBLE_MATERIALIZATION,
+            frame_target=new_target,
+            supersession_key="visible-image",
+            supersession_value="new",
+        ),
+        on_done=lambda _value: None,
+    )
+
+    QtTest.QTest.qWait(220)
+    qt_app.processEvents()
+
+    counters = parent.work_graph.diagnostics().lanes["visible_materialization"]
+    assert counters["reusable_finished"] == 1
+    assert counters["completed"] == 1
+
+
 def test_active_plus_latest_reuses_stale_completion_without_on_done(qt_app):
     from pyqtgraph.Qt import QtTest
 
@@ -653,6 +758,76 @@ def test_start_prefetch_zero_memory_budget_blocks_with_cost_reason(qt_app):
     assert not started.scheduled
     assert started.reason == "cost"
     assert controller.diagnostics().prefetch_cost_blocked == 1
+
+
+def test_prefetch_local_budget_block_does_not_admit_work_graph_item(qt_app):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.scheduler import FrameTarget
+    from arrayscope.core.work_graph import WorkGraph, WorkItem, WorkLane
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    parent = QtCore.QObject()
+    parent.work_graph = WorkGraph()
+    controller = EvaluationController(parent=parent, max_workers=1)
+    item = WorkItem(
+        key=("prefetch", "blocked"),
+        lane=WorkLane.SPECULATIVE_RESIDENCY,
+        frame_target=FrameTarget("near", None, "prefetch", "retained"),
+        expected_value=1.0,
+    )
+
+    started = controller.start_prefetch(
+        lambda: "prefetch",
+        key="blocked",
+        memory_budget_bytes=0,
+        work_item=item,
+    )
+
+    assert not started.scheduled
+    assert started.reason == "cost"
+    diagnostics = parent.work_graph.diagnostics()
+    assert diagnostics.active == 0
+    assert diagnostics.queued == 0
+    assert diagnostics.lanes == {}
+
+
+def test_prefetch_work_graph_admission_yields_to_visible_backlog(qt_app):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.scheduler import FrameTarget
+    from arrayscope.core.work_graph import WorkGraph, WorkItem, WorkLane
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    parent = QtCore.QObject()
+    parent.work_graph = WorkGraph()
+    target = FrameTarget("visible", None, "presentation", "exact-visible")
+    assert parent.work_graph.submit(
+        WorkItem(
+            key="visible",
+            lane=WorkLane.VISIBLE_MATERIALIZATION,
+            frame_target=target,
+        )
+    ).admitted
+    controller = EvaluationController(parent=parent, max_workers=1)
+
+    started = controller.start_prefetch(
+        lambda: "prefetch",
+        key="nearby",
+        memory_budget_bytes=1,
+        work_item=WorkItem(
+            key=("prefetch", "nearby"),
+            lane=WorkLane.SPECULATIVE_RESIDENCY,
+            frame_target=FrameTarget("nearby", None, "prefetch", "retained"),
+            expected_value=1.0,
+        ),
+    )
+
+    assert not started.scheduled
+    assert started.reason == "budget"
+    diagnostics = parent.work_graph.diagnostics()
+    assert diagnostics.active == 1
+    assert diagnostics.lanes["speculative_residency"]["blocked_by_budget"] == 1
 
 
 def test_start_prefetch_no_longer_accepts_idle_deadline_ms(qt_app):

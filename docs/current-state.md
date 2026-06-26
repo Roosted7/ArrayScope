@@ -1,8 +1,8 @@
 # Current state
 
-**Snapshot:** ArrayScope v31 unified-frame-planner branch, reviewed on 2026-06-25. The v30
-rendering-consistency repairs are preserved, and X1 unified frame planning/tiled surface work is now
-implemented on top.
+**Snapshot:** ArrayScope v32 deadline-work-graph branch, reviewed on 2026-06-26. The v30
+rendering-consistency repairs are preserved. X1 unified frame planning/tiled surface work and X2
+deadline work admission are now implemented on top.
 
 ArrayScope has a strong semantic/evaluation foundation and a recently extracted rendering control
 plane. The project is not on the wrong overall path; the immediate v30 risk was that recent
@@ -10,6 +10,8 @@ optimization work crossed too many queues, timers, backend contracts, and presen
 N6 moved presentation-generation, tile-admission, level-convergence, and stage-fan-in state machines
 into Qt-free models so local rendering fixes are easier to reason about. X1 then put normal images,
 large single planes, and montages behind the same `FramePlanner`/typed tiled presentation contract.
+X2 added a Qt-free `WorkGraph` above those models so visible, side-analysis, stage, fan-in, backend
+commit, retained warmup, and speculative work publish explicit admission and lifecycle counters.
 
 ## Maturity map
 
@@ -26,8 +28,8 @@ large single planes, and montages behind the same `FramePlanner`/typed tiled pre
 | PyQtGraph backend | Production fallback | Correctly requires progressive CPU/item convergence for some level changes; large item counts remain costly. |
 | VisPy backend | Experimental | Persistent textures/shader levels are promising; hybrid widget inheritance and real-hardware evidence remain gaps. |
 | LOD | Explicit native-only production policy | Demand selection records desired/applied factor, per-axis texels, policy, and reason; applied factor remains 1 until async compatible residency exists. |
-| Diagnostics/benchmarks | Good internal base, recently corrected | Completion, level-work, and large-normal tiled-surface counters now reflect real committed backend work. |
-| Documentation/ADRs | Updated for v31 findings | X1 is complete; ADR 0039 remains partly implemented because X2 deadline work graph and X3 backend composition remain. |
+| Diagnostics/benchmarks | Good internal base, recently corrected | Completion, level-work, work-graph, and large-normal tiled-surface counters now reflect committed backend work and rejected optional admission. |
+| Documentation/ADRs | Updated for v32 findings | X1 and X2 are complete; ADR 0039 remains partly implemented because X3 backend composition remains. |
 
 ## What is working well
 
@@ -87,9 +89,10 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
 
 `window/montage_renderer.py` and `window/montage_session.py` are still substantial orchestration
 modules. N6 removed ownership of level generation, convergence strategy, admission caps, and stage
-fan-in from the session, and X1 unified frame planning/presentation semantics, but the renderer still
-coordinates Qt timers, committed frames, overlays, side panels, diagnostics, and backend commits.
-Future X2/X3/X5 work should reuse the extracted models rather than growing another scheduler.
+fan-in from the session, X1 unified frame planning/presentation semantics, and X2 added work-graph
+admission/counters, but the renderer still coordinates Qt timers, committed frames, overlays, side
+panels, diagnostics, and backend commits. Future X3/X5 work should reuse the extracted models rather
+than growing another scheduler.
 
 ### 2. Semantic parity is being confused with mechanical uniformity
 
@@ -129,8 +132,8 @@ texture limits, Wayland behavior, high-DPI pointer mapping, frame pacing, or int
 Do not discard the operation/evaluation core, display models, unified frame planner, typed tiled
 surface, resource policy, extracted control-plane models, or backend mechanics. Do discard the unsafe
 synchronous LOD route and stop adding cross-cutting behavior to the session and renderer. The next
-architecture steps are the deadline work graph and backend composition; non-native LOD waits for the
-ADR 0041 async materialization and compatible-residency gates.
+architecture step is backend composition; non-native LOD waits for the ADR 0041 async materialization
+and compatible-residency gates.
 
 The ordered acceptance gates are in the [roadmap](roadmap.md). Full evidence and recommendations are
 in [the v30 rendering-consistency audit](reviews/v30-rendering-consistency-audit.md).

@@ -206,6 +206,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         schedulers=tuple(schedulers),
         render=render,
         montage=montage,
+        work_graph=None if getattr(window, "work_graph", None) is None else window.work_graph.diagnostics(),
         canvas_preserve=(
             window.layout_manager.canvas_preserver.diagnostics()
             if hasattr(getattr(window, "layout_manager", None), "canvas_preserver")

@@ -32,9 +32,28 @@ A persistent `MontageSession` tracks target, requested/materialized/presented se
 
 Reusable stages use singleflight. Nearby slice/tile work and warm residency are lower priority, gated by memory, scheduler busy state, feedback, and resource-governor decisions.
 
-## Target scheduler behavior
+## Work graph admission
 
-The next scheduler should hold explicit presented, active, and latest-queued targets. A new interaction replaces queued obsolete work but does not automatically kill an active item that is nearly complete or produces reusable cache data.
+ArrayScope now owns a Qt-free `WorkGraph` above the Qt worker controllers. It records visible
+planning/cache lookup, visible materialization, display preparation, backend commit, GUI fan-in,
+histogram refinement, ROI/profile/hover work, stage materialization, and speculative residency as
+lane-specific `WorkItem`s. A work item carries a frame target, quality, supersession key/value,
+deadline, estimated CPU/byte cost, dependencies, expected value, and reusable-output policy.
+
+The graph admits exact visible work before optional work, drops stale queued work before admission,
+preserves already-running reusable visible work when a newer target arrives, and records deterministic
+counters for queued, admitted, dropped, superseded, completed, failed, rescheduled,
+reusable-finished, deadline-missed, and budget-blocked work by lane. Supersession is indexed by
+supersession key, so replacing a target touches only the affected queued family instead of scanning
+unrelated profile, ROI, stage, or prefetch queues. Re-admitting queued work never advances the current
+supersession value; if the queued value is stale it is dropped before it can become visible. Repeated
+budget polling reports the same queued blocked item once until its state changes.
+
+## Scheduler behavior
+
+Visible controllers hold explicit presented, active, and latest-queued targets. A new interaction
+replaces queued obsolete work but does not automatically kill an active item that is nearly complete
+or produces reusable cache data.
 
 A work item needs at least:
 
@@ -52,6 +71,11 @@ After hard visible deadlines, optional admission should be value-based rather th
 expected value = probability of use × latency saved × quality gain / estimated cost
 ```
 
+Local gates run before graph admission. Idle state, memory cost, dedupe, and in-flight caps reject
+prefetch and retained warmup before a `WorkItem` becomes active, which keeps diagnostics from showing
+work that never actually ran. `STAGE_MATERIALIZATION` can represent exact visible tile dependencies or
+retained stage warmup; retained quality is optional and must yield to visible backlog.
+
 ## GUI-thread contract
 
 All paths that mutate Qt or OpenGL state follow these limits:
@@ -66,7 +90,10 @@ All paths that mutate Qt or OpenGL state follow these limits:
 - result fan-in is budgeted before visible admission; ready tile bursts must be admitted in bounded
   item/byte/time batches rather than drained unconditionally.
 
-Current code does not yet enforce this everywhere. In particular, stage-wait release, priority rebuilds, histogram refresh, and some presentation updates need traces at large tile counts.
+`EvaluationController`, montage tile result fan-in, stage-wait release, and backend commit paths now
+publish bounded callback observations and work-graph counters. Priority rebuilds, histogram refresh,
+and some presentation updates still need broader large-tile-count traces before release-level
+performance claims.
 
 ## Cancellation and supersession
 

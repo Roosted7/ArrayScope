@@ -50,6 +50,7 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
             "Memory",
             "Caches",
             "Schedulers",
+            "Work Graph",
             "Render",
             "Canvas Preserve",
             "Montage",

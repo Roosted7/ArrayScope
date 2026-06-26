@@ -97,12 +97,14 @@ def test_benchmark_result_does_not_mask_backend_applied_lod():
         tile_layer_source_texels_per_pixel=8.0,
     )
 
-    result = _result(view, "non_native_probe", _ActionMeasurement(submission_ms=0.0), timing=timing)
+    result = _result(view, "non_native_probe", _ActionMeasurement(submission_ms=0.0), timing=timing, commit_count=2)
 
     assert result.lod_applied_factor == 4
     assert result.lod_applied_factor_xy == (4, 4)
     assert result.lod_policy == "backend-reported"
     assert "non-native applied" in result.lod_reason
+    assert result.work_graph_counters["backend_commit"]["admitted"] == 2
+    assert result.work_graph_counters["backend_commit"]["completed"] == 2
 
 
 def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(benchmark_results):

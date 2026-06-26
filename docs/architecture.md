@@ -179,8 +179,8 @@ ViewIntent
 A small plane, huge plane, one-tile montage, and many-tile montage should share semantic planning.
 One-tile and small-tile cases are optimized inside the tiled engine; backend surfaces may commit them
 through different physical mechanics without changing their meaning.
-The `FramePlanner` and typed tiled surface portions are implemented; the explicit `WorkGraph`/
-`DeadlineScheduler` and backend composition portions remain X2/X3 roadmap work.
+The `FramePlanner`, typed tiled surface, and explicit `WorkGraph` admission portions are implemented;
+backend composition remains X3 roadmap work.
 
 ## Non-negotiable invariants
 

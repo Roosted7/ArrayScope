@@ -13,6 +13,8 @@ from pyqtgraph.Qt import QtWidgets
 from arrayscope.core.compare import CompareDocument, compatible_roi_shape
 from arrayscope.core.histograms import HistogramSpec, comparison_histograms
 from arrayscope.core.roi import RoiKind, RoiStatsAccumulator, roi_bounding_rect, roi_statistics, roi_values, roi_values_for_region
+from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.operations.tile_regions import TileRegionRequest
 from arrayscope.window.tile_data_provider import TileDataProvider
@@ -187,6 +189,30 @@ class InspectionWorkflowMixin:
                 key=key,
                 priority=EvalPriority.SELECTED_ROI,
                 replace_group="roi-inspection",
+                frame_target=FrameTarget(
+                    semantic_key=key,
+                    viewport_key=("roi", tuple(selection.id for selection in selections if selection.enabled)),
+                    presentation_key=("roi-inspection",),
+                    quality="exact-visible",
+                ),
+                supersession_key="roi-inspection",
+                supersession_value=key,
+                work_item=WorkItem(
+                    key=("roi_inspection", key),
+                    lane=WorkLane.PROFILE_ROI_HOVER,
+                    frame_target=FrameTarget(
+                        semantic_key=key,
+                        viewport_key=("roi", tuple(selection.id for selection in selections if selection.enabled)),
+                        presentation_key=("roi-inspection",),
+                        quality="exact-visible",
+                    ),
+                    supersession_key="roi-inspection",
+                    supersession_value=key,
+                    estimated_cpu_ms=0.0,
+                    estimated_bytes=int(work_size),
+                    expected_value=2.0,
+                    reusable_output=False,
+                ),
                 on_done=lambda snapshot, key=key: self._apply_roi_inspection_snapshot_if_current(key, snapshot),
                 on_error=lambda exc: self._finish_roi_inspection_error(),
                 slow_ms=0,

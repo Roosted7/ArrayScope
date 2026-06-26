@@ -280,6 +280,7 @@ class WindowRuntimeDiagnostics:
     render_timing: RenderTimingDiagnostics = field(default_factory=RenderTimingDiagnostics)
     montage_timing: MontageTimingDiagnostics = field(default_factory=MontageTimingDiagnostics)
     render_coalescer: RenderCoalescerDiagnostics = field(default_factory=RenderCoalescerDiagnostics)
+    work_graph: object | None = None
     stage_materialization: object | None = None
     stage_warmup: object | None = None
     montage_prefetch: tuple[object, ...] = ()
@@ -299,6 +300,7 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
         "Feedback": "\n".join(_feedback_lines(snapshot.resource_governor)),
         "Montage": "\n".join(_montage_lines(snapshot)),
         "Render": "\n".join(_render_lines(snapshot)),
+        "Work Graph": "\n".join(_work_graph_lines(snapshot.work_graph)),
         "Schedulers": "\n".join(_scheduler_lines(snapshot.schedulers)),
         "Caches": "\n".join(
             (
@@ -923,6 +925,9 @@ def _scheduler_lines(schedulers: tuple[object, ...]) -> tuple[str, ...]:
                 ("stale_reused", getattr(scheduler, "stale_reused", 0)),
             )
         )
+        lanes = tuple(getattr(scheduler, "work_lanes", ()) or ())
+        if lanes:
+            event_parts.append("lanes=" + ",".join(str(lane) for lane in lanes))
         if not active_parts and not event_parts:
             idle.append(str(scheduler.name))
             continue
@@ -938,6 +943,38 @@ def _scheduler_lines(schedulers: tuple[object, ...]) -> tuple[str, ...]:
         lines.append("Inactive:")
         lines.extend(f"  - {name}" for name in idle)
     return tuple(lines) or ("n/a",)
+
+
+def _work_graph_lines(work_graph) -> tuple[str, ...]:
+    if work_graph is None:
+        return ("n/a",)
+    lanes = dict(getattr(work_graph, "lanes", {}) or {})
+    lines = [
+        f"active={int(getattr(work_graph, 'active', 0) or 0)} "
+        f"queued={int(getattr(work_graph, 'queued', 0) or 0)} "
+        f"completed_keys={int(getattr(work_graph, 'completed_keys', 0) or 0)}"
+    ]
+    if not lanes:
+        lines.append("lanes: n/a")
+        return tuple(lines)
+    for lane, counters in sorted(lanes.items()):
+        counters = dict(counters or {})
+        parts = _nonzero_parts(
+            (
+                ("queued", counters.get("queued", 0)),
+                ("admitted", counters.get("admitted", 0)),
+                ("dropped", counters.get("dropped", 0)),
+                ("superseded", counters.get("superseded", 0)),
+                ("completed", counters.get("completed", 0)),
+                ("failed", counters.get("failed", 0)),
+                ("rescheduled", counters.get("rescheduled", 0)),
+                ("reusable", counters.get("reusable_finished", 0)),
+                ("deadline", counters.get("deadline_missed", 0)),
+                ("blocked", counters.get("blocked_by_budget", 0)),
+            )
+        )
+        lines.append(f"{lane}: " + (", ".join(parts) if parts else "idle"))
+    return tuple(lines)
 
 
 def _nonzero_parts(fields: tuple[tuple[str, object], ...]) -> list[str]:

@@ -41,6 +41,7 @@ class EvalRequest:
     frame_target: FrameTarget | None = None
     supersession_key: object | None = None
     supersession_value: object | None = None
+    work_item: object | None = None
 
 
 @dataclass(frozen=True)
@@ -73,3 +74,5 @@ class SchedulerDiagnostics:
     presented_target: FrameTarget | None = None
     active_target: FrameTarget | None = None
     queued_latest_target: FrameTarget | None = None
+    work_lanes: tuple[str, ...] = ()
+    work_graph: object | None = None

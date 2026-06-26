@@ -104,6 +104,8 @@ def test_prefetch_limits_to_two_neighbors(qtbot):
 def test_prefetch_skips_while_visible_controller_busy(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.core.scheduler import FrameTarget
+    from arrayscope.core.work_graph import WorkItem, WorkLane
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
@@ -117,6 +119,16 @@ def test_prefetch_skips_while_visible_controller_busy(qtbot):
             key="busy",
             priority=0,
             replace_group="visible",
+            frame_target=FrameTarget("busy", None, "presentation", "exact-visible"),
+            supersession_key="visible-image",
+            supersession_value="busy",
+            work_item=WorkItem(
+                key=("visible", "busy"),
+                lane=WorkLane.VISIBLE_MATERIALIZATION,
+                frame_target=FrameTarget("busy", None, "presentation", "exact-visible"),
+                supersession_key="visible-image",
+                supersession_value="busy",
+            ),
             on_done=lambda _value: None,
         )
         win._prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
