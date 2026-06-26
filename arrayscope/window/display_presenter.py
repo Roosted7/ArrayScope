@@ -181,6 +181,9 @@ class DisplayPresentationMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
+                show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
+                if callable(show_pending_montage_revert):
+                    show_pending_montage_revert()
                 refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
                 if callable(refresh_hover):
                     refresh_hover()
@@ -315,6 +318,9 @@ class DisplayPresentationMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
+                show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
+                if callable(show_pending_montage_revert):
+                    show_pending_montage_revert()
                 refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
                 if callable(refresh_hover):
                     refresh_hover()

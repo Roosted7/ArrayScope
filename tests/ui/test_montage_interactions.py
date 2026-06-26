@@ -286,7 +286,7 @@ def test_switching_to_larger_montage_auto_fits_when_tiles_would_be_hidden(qtbot)
         win.close()
 
 
-def test_montage_tile_count_increase_keeps_view_when_most_tiles_are_visible(qtbot):
+def test_montage_tile_count_increase_auto_adjusts_when_near_auto(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
     from arrayscope.window import ArrayScopeWindow
@@ -312,8 +312,9 @@ def test_montage_tile_count_increase_keeps_view_when_most_tiles_are_visible(qtbo
 
         after = win.img_view.getView().viewRange()
         assert after[0] == pytest.approx(before[0])
-        assert after[1] == pytest.approx(before[1])
-        assert win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel") is None
+        assert after[1] != pytest.approx(before[1])
+        assert after[1][0] <= 0.0
+        assert after[1][1] >= 8.0
     finally:
         win.close()
 

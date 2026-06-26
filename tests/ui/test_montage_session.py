@@ -673,6 +673,100 @@ def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
     assert 2 not in {tile.montage_index for tile in additions}
 
 
+def test_retarget_viewport_adopts_replacement_plan_with_same_geometry():
+    session = _session()
+    previous = session.plan
+    replacement = make_montage_plan(
+        session.view_state,
+        axis=2,
+        indices=(0, 1, 2, 3),
+        tile_shape=(2, 2),
+        columns=4,
+    )
+
+    session.retarget_viewport(
+        view_range=None,
+        viewport_shape=(10, 10),
+        plan=replacement,
+        coverage_margin_tiles=1,
+        near_margin_tiles=2,
+    )
+
+    assert replacement is not previous
+    assert replacement.geometry == previous.geometry
+    assert session.plan is replacement
+    assert not session._layout_geometry_changed_pending
+
+
+def test_layout_reflow_repositions_materialized_tiles_without_payload_upserts():
+    state = ViewState.from_shape((2, 2, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
+    first_plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=2)
+    second_plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=3)
+    session = MontageRenderSession(
+        session_id=1,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        level_expected_indices=tuple(range(6)),
+        plan=first_plan,
+        view_state=state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(100, 100),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=first_plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    source_ids = {}
+    for tile in first_plan.tiles:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
+
+    first_state, first_delta = session.build_tile_presentation(source_ids)
+    session.acknowledge_tile_presentation(
+        first_delta,
+        TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)),
+    )
+    session.mark_presented(first_state.active_payloads(first_delta))
+
+    additions, changed = session.retarget_viewport(
+        view_range=None,
+        viewport_shape=(100, 100),
+        plan=second_plan,
+        coverage_margin_tiles=1,
+        near_margin_tiles=2,
+    )
+    second_state, second_delta = session.build_tile_presentation(source_ids)
+
+    assert changed
+    assert additions == ()
+    assert session.plan is second_plan
+    assert second_delta.upserts == {}
+    assert second_delta.removals == ()
+    assert session.presentation_geometry_changed
+    assert set(second_state.active_payloads(second_delta)) == {0, 1, 2, 3, 4, 5}
+    session.acknowledge_tile_presentation(
+        second_delta,
+        TileCommitReport(presented_tiles=second_state.active_payloads(second_delta)),
+    )
+    session.mark_presented(second_state.active_payloads(second_delta))
+
+    _clean_state, clean_delta = session.build_tile_presentation(source_ids)
+
+    assert clean_delta.upserts == {}
+    assert clean_delta.removals == ()
+    assert not session.presentation_geometry_changed
+
+
 def test_montage_render_session_passes_cold_deadline_without_slicing_upserts():
     session = _session()
     session.pending_tiles.clear()

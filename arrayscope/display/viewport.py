@@ -57,9 +57,12 @@ class ViewportController:
     mode: ViewportMode = ViewportMode.AUTO_UNTOUCHED
     last_display_shape: tuple[int, int] | None = None
     last_display_rect: tuple[float, float, float, float] | None = None
+    last_auto_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None
 
-    def note_user_range_changed(self):
+    def note_user_range_changed(self, view_range=None):
         if self.mode not in (ViewportMode.FIT, ViewportMode.ONE_TO_ONE):
+            if view_range is not None and self.mode == ViewportMode.AUTO_UNTOUCHED and self.is_near_auto(view_range):
+                return
             self.mode = ViewportMode.USER
 
     def apply_after_image(self, view_box, image_shape, viewport_size, *, policy=ViewportPolicy.PRESERVE, display_rect=None):
@@ -91,16 +94,20 @@ class ViewportController:
                 _fit(view_box, display_rect=display_rect)
             else:
                 self.mode = ViewportMode.AUTO_UNTOUCHED
-                _fit(view_box, display_rect=display_rect)
+                self._auto_square_fit(view_box, viewport_size, display_rect=display_rect)
             return
 
         if rect_changed_only and intent == ViewportIntent.PRESERVE:
             if self.mode == ViewportMode.FIT:
                 _fit(view_box, display_rect=display_rect)
+            elif self.mode == ViewportMode.AUTO_UNTOUCHED:
+                self._auto_square_fit(view_box, viewport_size, display_rect=display_rect)
             return
 
         if self.mode == ViewportMode.FIT and shape_changed:
             _fit(view_box, display_rect=display_rect)
+        elif self.mode == ViewportMode.AUTO_UNTOUCHED and shape_changed:
+            self._auto_square_fit(view_box, viewport_size, display_rect=display_rect)
 
     def fit(self, view_box):
         self.mode = ViewportMode.FIT
@@ -125,6 +132,23 @@ class ViewportController:
         display_rect = _display_rect(tuple(int(v) for v in image_shape[:2]), display_rect or self.last_display_rect)
         if self.mode == ViewportMode.FIT:
             _fit(view_box, display_rect=display_rect)
+        elif self.mode == ViewportMode.AUTO_UNTOUCHED:
+            self._auto_square_fit(view_box, viewport_size, display_rect=display_rect)
+
+    def is_near_auto(self, view_range=None, *, tolerance_fraction: float = 0.02) -> bool:
+        target = self.last_auto_view_range
+        if target is None:
+            return self.mode == ViewportMode.AUTO_UNTOUCHED
+        try:
+            current = target if view_range is None else _normalize_view_range(view_range)
+        except Exception:
+            return False
+        return view_ranges_near(current, target, tolerance_fraction=tolerance_fraction)
+
+    def _auto_square_fit(self, view_box, viewport_size, *, display_rect=None):
+        view_range = square_pixel_fit_view_range(display_rect, viewport_size)
+        view_box.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+        self.last_auto_view_range = view_range
 
 
 def _intent_from_policy(policy):
@@ -143,6 +167,55 @@ def _fit(view_box, *, display_rect=None):
         return
     x0, y0, x1, y1 = display_rect
     view_box.setRange(xRange=(float(x0), float(x1)), yRange=(float(y0), float(y1)), padding=0)
+
+
+def square_pixel_fit_view_range(display_rect, viewport_size) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return a square-pixel view range that contains ``display_rect``."""
+
+    x0, y0, x1, y1 = _display_rect((1, 1), display_rect)
+    width = max(1e-9, abs(float(x1) - float(x0)))
+    height = max(1e-9, abs(float(y1) - float(y0)))
+    viewport_width = max(1.0, float(viewport_size.width()))
+    viewport_height = max(1.0, float(viewport_size.height()))
+    viewport_aspect = viewport_width / viewport_height
+    content_aspect = width / height
+    fitted_width = width
+    fitted_height = height
+    if viewport_aspect > content_aspect:
+        fitted_width = height * viewport_aspect
+    elif viewport_aspect < content_aspect:
+        fitted_height = width / viewport_aspect
+    cx = (float(x0) + float(x1)) * 0.5
+    cy = (float(y0) + float(y1)) * 0.5
+    return (
+        (cx - fitted_width * 0.5, cx + fitted_width * 0.5),
+        (cy - fitted_height * 0.5, cy + fitted_height * 0.5),
+    )
+
+
+def view_ranges_near(first, second, *, tolerance_fraction: float = 0.02) -> bool:
+    first = _normalize_view_range(first)
+    second = _normalize_view_range(second)
+    tolerance_fraction = max(0.0, float(tolerance_fraction))
+    for axis in (0, 1):
+        span = max(
+            abs(float(first[axis][1]) - float(first[axis][0])),
+            abs(float(second[axis][1]) - float(second[axis][0])),
+            1.0,
+        )
+        tolerance = span * tolerance_fraction
+        if abs(float(first[axis][0]) - float(second[axis][0])) > tolerance:
+            return False
+        if abs(float(first[axis][1]) - float(second[axis][1])) > tolerance:
+            return False
+    return True
+
+
+def _normalize_view_range(view_range) -> tuple[tuple[float, float], tuple[float, float]]:
+    return (
+        (float(view_range[0][0]), float(view_range[0][1])),
+        (float(view_range[1][0]), float(view_range[1][1])),
+    )
 
 
 def constrain_view_range(

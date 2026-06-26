@@ -10,6 +10,8 @@ from arrayscope.display.viewport import (
     ViewportPolicy,
     coerce_viewport_policy,
     constrain_view_range,
+    square_pixel_fit_view_range,
+    view_ranges_near,
 )
 
 
@@ -139,6 +141,53 @@ def test_fit_lock_tracks_origin_only_display_rect_changes():
 
     assert controller.mode == ViewportMode.FIT
     assert view.viewRange() == [[0.0, 10.0], [100.0, 108.0]]
+
+
+def test_auto_untouched_resize_refits_square_pixels_without_stretching():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(
+        view,
+        (10, 10),
+        _size(100, 100),
+        policy=ViewportPolicy.PRESERVE,
+        display_rect=(0.0, 0.0, 10.0, 10.0),
+    )
+
+    controller.resize(view, (10, 10), _size(200, 100), display_rect=(0.0, 0.0, 10.0, 10.0))
+
+    assert controller.mode == ViewportMode.AUTO_UNTOUCHED
+    x_range, y_range = view.viewRange()
+    assert x_range == pytest.approx([-5.0, 15.0])
+    assert y_range == pytest.approx([0.0, 10.0])
+
+
+def test_user_range_change_near_auto_does_not_demote_auto_mode():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(view, (10, 10), _size(100, 100), policy=ViewportPolicy.PRESERVE)
+
+    controller.note_user_range_changed(((0.05, 10.05), (0.0, 10.0)))
+
+    assert controller.mode == ViewportMode.AUTO_UNTOUCHED
+
+
+def test_user_range_change_far_from_auto_demotes_auto_mode():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(view, (10, 10), _size(100, 100), policy=ViewportPolicy.PRESERVE)
+
+    controller.note_user_range_changed(((3.0, 13.0), (0.0, 10.0)))
+
+    assert controller.mode == ViewportMode.USER
+
+
+def test_square_pixel_fit_view_range_preserves_content_aspect_inside_wide_viewport():
+    view_range = square_pixel_fit_view_range((0.0, 0.0, 10.0, 10.0), _size(200, 100))
+
+    assert view_range[0] == pytest.approx((-5.0, 15.0))
+    assert view_range[1] == pytest.approx((0.0, 10.0))
+    assert view_ranges_near(view_range, ((-5.01, 15.01), (0.0, 10.0)), tolerance_fraction=0.02)
 
 
 def test_legacy_auto_range_is_coerced_identically_for_every_backend():

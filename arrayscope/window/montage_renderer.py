@@ -32,11 +32,10 @@ from arrayscope.display.montage import (
     make_montage_plan,
     make_montage_viewport_canvas,
     montage_rect_for_viewport,
-    optimal_montage_columns,
 )
 from arrayscope.display.slice_engine import DisplayImage, make_image_from_slab, make_shader_image_from_slab
 from arrayscope.display.shader_mapping import apply_scale as apply_shader_scale, extract_component
-from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.display.viewport import ViewportPolicy, view_ranges_near
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.operations.evaluator import EvaluationResult, _document_key, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked, stage_materialization_allowed_chunk_axes
@@ -67,10 +66,13 @@ from arrayscope.window.montage_payload_cache import (
 from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
+    effective_montage_columns,
     montage_session_key,
     montage_viewport_retarget_policy,
     montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
     prioritize_montage_tiles,
+    remap_montage_view_range,
+    square_montage_fit_view_range,
 )
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, fallback_level_source, normalize_bounds
@@ -118,9 +120,18 @@ class MontageRenderMixin:
         viewport_size = self.img_view.graphicsView.viewport().size()
         viewport_shape = (max(1, viewport_size.height()), max(1, viewport_size.width()))
         tile_shape = self._montage_tile_shape(view_state)
-        columns = view_state.montage_columns
-        if columns is None and all_indices:
-            columns = optimal_montage_columns(len(all_indices), tile_shape, viewport_shape)
+        current_range = (
+            self._current_montage_global_view_range()
+            if getattr(self.img_view, "image", None) is not None
+            else None
+        )
+        columns = self._effective_montage_columns(
+            view_state,
+            all_indices=all_indices,
+            tile_shape=tile_shape,
+            viewport_shape=viewport_shape,
+            view_range=current_range,
+        )
         plan = make_montage_plan(
             view_state,
             axis=axis,
@@ -128,11 +139,6 @@ class MontageRenderMixin:
             tile_shape=tile_shape,
             columns=columns,
             viewport_shape=viewport_shape,
-        )
-        current_range = (
-            self._current_montage_global_view_range()
-            if getattr(self.img_view, "image", None) is not None
-            else None
         )
         priority_focus = _montage_priority_focus(self, current_range)
         capabilities = image_view_backend_capabilities(self.img_view)
@@ -147,6 +153,36 @@ class MontageRenderMixin:
             persistent_tile_residency=bool(capabilities.persistent_tile_residency),
             priority_focus=priority_focus,
         )
+
+    def _effective_montage_columns(self, view_state, *, all_indices, tile_shape, viewport_shape, view_range) -> int | None:
+        if not all_indices:
+            return None
+        viewport_controller = getattr(getattr(self, "img_view", None), "viewport_controller", None)
+        requested_columns = getattr(view_state, "montage_columns", None)
+        near_auto = bool(
+            viewport_controller is not None
+            and view_range is not None
+            and viewport_controller.is_near_auto(view_range)
+        )
+        if requested_columns is not None and not bool(getattr(self, "_montage_live_layout_reflow", False)):
+            near_auto = False
+        return effective_montage_columns(
+            len(all_indices),
+            tile_shape,
+            viewport_shape,
+            requested_columns=requested_columns,
+            near_auto=near_auto,
+            fit_locked=bool(viewport_controller is not None and viewport_controller.is_fit_locked()),
+        )
+
+    def _on_image_viewport_resized(self) -> None:
+        if getattr(self, "_closing", False):
+            return
+        if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
+            return
+        self._montage_live_layout_reflow = True
+        self._montage_viewport_update_pending = False
+        self._schedule_montage_viewport_update(delay_ms=0)
 
     def update_montage_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         for attribute in (
@@ -493,10 +529,12 @@ class MontageRenderMixin:
         )
         if session.key != expected_key:
             return False
+        viewport_plan = self._retargeted_montage_viewport_plan(session, viewport_plan)
 
         additions, presentation_changed = session.retarget_viewport(
             view_range=viewport_plan.view_range,
             viewport_shape=viewport_plan.viewport_shape,
+            plan=viewport_plan.plan,
             coverage_margin_tiles=retarget_policy.coverage_margin_tiles,
             near_margin_tiles=retarget_policy.near_margin_tiles,
             priority_focus=viewport_plan.priority_focus,
@@ -1379,6 +1417,53 @@ class MontageRenderMixin:
         )
         return True
 
+    def _retargeted_montage_viewport_plan(self, session, viewport_plan: MontageViewportPlan) -> MontageViewportPlan:
+        previous_plan = getattr(session, "plan", None)
+        next_plan = viewport_plan.plan
+        if previous_plan is None or next_plan is None:
+            return viewport_plan
+        layout_changed = getattr(previous_plan, "geometry", None) != getattr(next_plan, "geometry", None)
+        viewport_shape_changed = tuple(getattr(session, "viewport_shape", ())) != tuple(viewport_plan.viewport_shape)
+        if not layout_changed and not viewport_shape_changed:
+            return viewport_plan
+        current_range = viewport_plan.view_range
+        if current_range is None:
+            return viewport_plan
+
+        viewport_controller = getattr(self.img_view, "viewport_controller", None)
+        previous_full_range = _plan_full_view_range(previous_plan)
+        auto_like = bool(
+            viewport_controller is not None
+            and (
+                viewport_controller.is_fit_locked()
+                or viewport_controller.is_near_auto(current_range)
+            )
+        ) or _view_range_contains_near(current_range, previous_full_range)
+        if auto_like:
+            if viewport_controller is not None and viewport_controller.is_fit_locked():
+                next_range = _plan_full_view_range(next_plan)
+            else:
+                next_range = square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)
+                if viewport_controller is not None:
+                    viewport_controller.last_auto_view_range = next_range
+        else:
+            focus = _montage_priority_focus(self, current_range)
+            next_range = remap_montage_view_range(
+                previous_plan,
+                next_plan,
+                current_range,
+                getattr(session, "viewport_shape", viewport_plan.viewport_shape),
+                viewport_plan.viewport_shape,
+                focus=focus,
+            )
+            if next_range is None:
+                return viewport_plan
+
+        if view_ranges_near(current_range, next_range, tolerance_fraction=1e-9):
+            return replace(viewport_plan, view_range=next_range, priority_focus=_montage_priority_focus(self, next_range))
+        self._set_montage_view_range(next_range)
+        return replace(viewport_plan, view_range=next_range, priority_focus=_montage_priority_focus(self, next_range))
+
     def _evaluate_montage_tile_snapshot(self, session, tile, token=None):
         start = perf_counter()
         context = self._evaluation_context(ComputeLane.MONTAGE_TILE, token)
@@ -1996,6 +2081,7 @@ class MontageRenderMixin:
                 and not getattr(tile_delta, "force_refresh", False)
                 and not getattr(tile_delta, "upserts", None)
                 and not getattr(tile_delta, "removals", None)
+                and not bool(getattr(session, "presentation_geometry_changed", False))
                 and not (session.has_pending_level_update() and session.has_stale_level_presentations())
             ):
                 session.final_commit_pending = False
@@ -2256,7 +2342,8 @@ class MontageRenderMixin:
         previous_frame = getattr(self, "_committed_display_frame", None)
         if previous_frame is None or not isinstance(getattr(previous_frame, "value_source", None), TiledValueSource):
             return False
-        if not display_geometry_coordinates_equal(getattr(previous_frame, "geometry", None), geometry):
+        previous_geometry = getattr(previous_frame, "geometry", None)
+        if not _safe_tiled_payload_geometry_retarget(previous_geometry, geometry):
             return False
         context = self._render_request_context(
             document_key=_document_key(session.document),
@@ -2310,13 +2397,18 @@ class MontageRenderMixin:
                 frame = replace(
                     previous_frame,
                     key=context.frame_key,
+                    geometry=geometry,
                     levels=decision.levels,
                     histogram_range=decision.histogram_range,
                     value_source=TiledValueSource(payloads),
+                    scene=None,
                 )
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(session.user_levels_override)
                 self._note_display_level_source(decision)
+                show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
+                if callable(show_pending_montage_revert):
+                    show_pending_montage_revert()
                 refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
                 if callable(refresh_hover):
                     refresh_hover()
@@ -2414,6 +2506,12 @@ class MontageRenderMixin:
         tile_count = len(tuple(montage.indices))
         full_range = _montage_full_view_range(montage)
         signature = _montage_autofit_signature(montage, full_range)
+        revert_previous_signature = getattr(self, "_last_montage_revert_signature", None)
+        self._last_montage_revert_signature = signature
+        scope_grew_for_revert = bool(
+            revert_previous_signature is not None
+            and _montage_autofit_scope_grew(revert_previous_signature, signature)
+        )
         previous_signature = getattr(self, "_last_montage_autofit_signature", None)
         self._last_montage_autofit_signature = signature
         if previous_signature is not None and not _montage_autofit_scope_grew(previous_signature, signature):
@@ -2424,9 +2522,34 @@ class MontageRenderMixin:
         view = self.img_view.getView()
         before_range = _copy_view_range(view.viewRange())
         visible_count = _visible_montage_tile_count(montage, before_range)
+        can_auto_adjust = _should_auto_fit_montage_view(
+            before_range,
+            full_range,
+            viewport_controller=viewport_controller,
+            visible_count=visible_count,
+            tile_count=tile_count,
+        )
+        if (
+            can_auto_adjust
+            and scope_grew_for_revert
+            and tile_count > 0
+            and visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION
+            and not _view_range_contains_near(before_range, full_range)
+            and viewport_controller is not None
+        ):
+            previous_mode = viewport_controller.mode
+
+            self._pending_montage_view_revert = (
+                before_range,
+                previous_mode,
+                "Adjusted montage view.",
+            )
+            return False
+        if not can_auto_adjust:
+            return False
         if tile_count <= 0 or visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION:
             return False
-        if _view_range_contains(before_range, full_range):
+        if _view_range_contains_near(before_range, full_range):
             return False
         previous_mode = None if viewport_controller is None else viewport_controller.mode
         self._set_montage_view_range(full_range)
@@ -2443,6 +2566,32 @@ class MontageRenderMixin:
             timeout=5000,
         )
         return True
+
+    def _show_pending_montage_view_revert(self) -> None:
+        pending = getattr(self, "_pending_montage_view_revert", None)
+        if pending is None:
+            return
+        self._pending_montage_view_revert = None
+        before_range, previous_mode, message = pending
+        try:
+            current_range = _copy_view_range(self.img_view.getView().viewRange())
+        except Exception:
+            return
+        if view_ranges_near(current_range, before_range, tolerance_fraction=0.005):
+            return
+        viewport_controller = getattr(self.img_view, "viewport_controller", None)
+
+        def undo():
+            self._set_montage_view_range(before_range)
+            if viewport_controller is not None and previous_mode is not None:
+                viewport_controller.mode = previous_mode
+
+        show_revert_action(
+            self,
+            message,
+            undo,
+            timeout=5000,
+        )
 
     def _set_montage_view_range(self, view_range) -> None:
         view = self.img_view.getView()
@@ -2848,6 +2997,11 @@ def _montage_full_view_range(montage):
     return ((0.0, float(max(1, width))), (0.0, float(max(1, height))))
 
 
+def _plan_full_view_range(plan):
+    height, width = tuple(int(value) for value in plan.display_shape[:2])
+    return ((0.0, float(max(1, width))), (0.0, float(max(1, height))))
+
+
 def _visible_montage_tile_count(montage, view_range) -> int:
     x0, x1 = sorted((float(view_range[0][0]), float(view_range[0][1])))
     y0, y1 = sorted((float(view_range[1][0]), float(view_range[1][1])))
@@ -2874,6 +3028,34 @@ def _view_range_contains(view_range, target_range) -> bool:
     tx0, tx1 = sorted((float(target_range[0][0]), float(target_range[0][1])))
     ty0, ty1 = sorted((float(target_range[1][0]), float(target_range[1][1])))
     return x0 <= tx0 and x1 >= tx1 and y0 <= ty0 and y1 >= ty1
+
+
+def _view_range_contains_near(view_range, target_range, *, tolerance_fraction: float = 0.02) -> bool:
+    x0, x1 = sorted((float(view_range[0][0]), float(view_range[0][1])))
+    y0, y1 = sorted((float(view_range[1][0]), float(view_range[1][1])))
+    tx0, tx1 = sorted((float(target_range[0][0]), float(target_range[0][1])))
+    ty0, ty1 = sorted((float(target_range[1][0]), float(target_range[1][1])))
+    tolerance_fraction = max(0.0, float(tolerance_fraction))
+    x_tolerance = max(abs(tx1 - tx0), 1.0) * tolerance_fraction
+    y_tolerance = max(abs(ty1 - ty0), 1.0) * tolerance_fraction
+    return x0 <= tx0 + x_tolerance and x1 >= tx1 - x_tolerance and y0 <= ty0 + y_tolerance and y1 >= ty1 - y_tolerance
+
+
+def _should_auto_fit_montage_view(
+    view_range,
+    full_range,
+    *,
+    viewport_controller,
+    visible_count: int,
+    tile_count: int,
+) -> bool:
+    if int(tile_count) <= 0:
+        return False
+    if int(visible_count) <= 0:
+        return True
+    if _view_range_contains_near(view_range, full_range):
+        return True
+    return bool(viewport_controller is not None and viewport_controller.is_near_auto(view_range))
 
 
 def _montage_autofit_signature(montage, full_range) -> tuple[int, float, float, int, int]:
@@ -3209,6 +3391,25 @@ def _montage_work_token(session, reason: str) -> tuple[object, ...]:
     if reason == "priority_retarget":
         return (*base, int(getattr(session, "viewport_revision", 0) or 0))
     return base
+
+
+def _safe_tiled_payload_geometry_retarget(previous_geometry, geometry) -> bool:
+    if display_geometry_coordinates_equal(previous_geometry, geometry):
+        return True
+    if previous_geometry is None or geometry is None:
+        return False
+    previous_montage = getattr(previous_geometry, "montage", None)
+    montage = getattr(geometry, "montage", None)
+    if previous_montage is None or montage is None:
+        return False
+    return (
+        previous_geometry.view_state == geometry.view_state
+        and tuple(previous_montage.indices) == tuple(montage.indices)
+        and tuple(previous_montage.tile_shape) == tuple(montage.tile_shape)
+        and int(previous_montage.gap) == int(montage.gap)
+        and int(previous_geometry.montage_origin_x) == int(geometry.montage_origin_x)
+        and int(previous_geometry.montage_origin_y) == int(geometry.montage_origin_y)
+    )
 
 
 def _latency_feedback(window):

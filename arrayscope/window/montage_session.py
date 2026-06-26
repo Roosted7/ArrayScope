@@ -158,6 +158,8 @@ class MontageRenderSession:
     priority_focus: tuple[float, float] | None = None
     priority_retargeted_tiles: int = 0
     priority_fairness_pops: int = 0
+    presentation_geometry_changed: bool = False
+    _layout_geometry_changed_pending: bool = False
     lod_policy_decision: LodPolicyDecision = field(
         default_factory=lambda: native_lod_policy(None, (1, 1), (1, 1))
     )
@@ -210,6 +212,7 @@ class MontageRenderSession:
         *,
         view_range,
         viewport_shape: tuple[int, int],
+        plan=None,
         coverage_margin_tiles: int = 1,
         near_margin_tiles: int = 2,
         priority_focus: tuple[float, float] | None = None,
@@ -224,8 +227,15 @@ class MontageRenderSession:
 
         self.view_range = view_range
         self.viewport_shape = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
+        layout_changed = False
+        if plan is not None:
+            layout_changed = getattr(plan, "geometry", None) != getattr(self.plan, "geometry", None)
+            self.plan = plan
+            if layout_changed:
+                self._layout_geometry_changed_pending = True
         self.priority_focus = priority_focus
         self._selected_lod_factor()
+        plan_tiles = tuple(getattr(self.plan, "tiles", ()) or ())
         active = _viewport_tiles(
             self.plan,
             view_range=view_range,
@@ -252,9 +262,13 @@ class MontageRenderSession:
         additions = tuple(tile for tile in coverage if int(tile.montage_index) not in known)
         active_numbers = tuple(int(tile.montage_index) for tile in active)
         near_numbers = tuple(int(tile.montage_index) for tile in near)
+        planned_numbers = tuple(int(tile.montage_index) for tile in plan_tiles)
+        previous_visible_numbers = tuple(int(tile.montage_index) for tile in self.visible_tiles)
         presentation_changed = (
-            active_numbers != tuple(int(tile.montage_index) for tile in self.visible_tiles)
+            layout_changed
+            or active_numbers != previous_visible_numbers
             or near_numbers != self._last_near_tiles
+            or planned_numbers != self._last_planned_tiles
         )
         self.visible_tiles = active
         self.visible_tile_numbers = frozenset(active_numbers)
@@ -723,6 +737,14 @@ class MontageRenderSession:
         target_revision = base_revision + (1 if upserts or removals else 0)
         if upserts or removals:
             self.payload_revision += 1
+        presentation_geometry_changed = bool(
+            getattr(self, "_layout_geometry_changed_pending", False)
+            or active != self._last_active_tiles
+            or planned != self._last_planned_tiles
+            or near != self._last_near_tiles
+        )
+        self.presentation_geometry_changed = presentation_geometry_changed
+        self._layout_geometry_changed_pending = False
         if active != self._last_active_tiles or planned != self._last_planned_tiles:
             self.visibility_revision += 1
         if near != self._last_near_tiles:

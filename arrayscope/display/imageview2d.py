@@ -2133,7 +2133,7 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def _on_view_range_changed(self, *_args):
         if not self._viewport_applying:
-            self.viewport_controller.note_user_range_changed()
+            self.viewport_controller.note_user_range_changed(self.view.viewRange())
             self._enforce_viewport_constraints()
         self._sync_profile_marker_visibility()
 
@@ -2146,6 +2146,7 @@ class ImageViewShell(QtWidgets.QWidget):
                     self.viewport_controller.resize(self.view, self.image.shape[:2], event.size(), display_rect=self._current_image_viewport_rect())
                 finally:
                     self._viewport_applying = False
+                self._notify_viewport_content_resized()
         if (
             obj is self.graphicsView.viewport()
             and event.type() == QtCore.QEvent.Type.Wheel
@@ -2167,6 +2168,12 @@ class ImageViewShell(QtWidgets.QWidget):
         ):
             self._show_fit_mode_interaction_reminder()
         return super().eventFilter(obj, event)
+
+    def _notify_viewport_content_resized(self) -> None:
+        parent = self.window()
+        handler = getattr(parent, "_on_image_viewport_resized", None)
+        if callable(handler):
+            handler()
 
     def event(self, event):
         if event.type() in (

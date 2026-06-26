@@ -1068,7 +1068,7 @@ def test_montage_session_key_excludes_transient_viewport_range():
     assert montage_session_key("doc", state, first, None) == montage_session_key("doc", state, second, None)
 
 
-def test_montage_session_key_changes_with_population_or_layout():
+def test_montage_session_key_changes_with_population_but_not_layout_reflow():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
 
@@ -1081,4 +1081,26 @@ def test_montage_session_key_changes_with_population_or_layout():
 
     key = montage_session_key("doc", state, base, None)
     assert key != montage_session_key("doc", state, changed_population, None)
-    assert key != montage_session_key("doc", state, changed_layout, None)
+    assert key == montage_session_key("doc", state, changed_layout, None)
+
+
+def test_direct_tiled_payload_retarget_allows_only_safe_layout_reflow():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.window.montage_renderer import _safe_tiled_payload_geometry_retarget
+
+    state = ViewState.from_shape((4, 4, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
+    plan3 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=3)
+    plan2 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=2)
+    previous = DisplayGeometry(view_state=state, display_shape=plan3.display_shape, montage=plan3.geometry)
+    reflow = DisplayGeometry(view_state=state, display_shape=plan2.display_shape, montage=plan2.geometry)
+    changed_indices = make_montage_plan(state, axis=2, indices=tuple(range(5)), tile_shape=(4, 4), columns=3)
+    incompatible = DisplayGeometry(
+        view_state=state,
+        display_shape=changed_indices.display_shape,
+        montage=changed_indices.geometry,
+    )
+
+    assert _safe_tiled_payload_geometry_retarget(previous, reflow)
+    assert not _safe_tiled_payload_geometry_retarget(previous, incompatible)
