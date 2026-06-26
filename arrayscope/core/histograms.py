@@ -50,6 +50,8 @@ def comparison_histograms(named_value_sets, spec: HistogramSpec | None = None):
 
 def _finite_values(values):
     values = np.asarray(values).ravel()
+    if np.iscomplexobj(values):
+        values = np.abs(values)
     return values[np.isfinite(values)].astype(float, copy=False)
 
 

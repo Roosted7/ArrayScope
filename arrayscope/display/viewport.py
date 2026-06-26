@@ -132,8 +132,10 @@ class ViewportController:
         display_rect = _display_rect(tuple(int(v) for v in image_shape[:2]), display_rect or self.last_display_rect)
         if self.mode == ViewportMode.FIT:
             _fit(view_box, display_rect=display_rect)
-        elif self.mode == ViewportMode.AUTO_UNTOUCHED:
+        elif self.mode == ViewportMode.AUTO_UNTOUCHED and self._current_view_is_near_auto(view_box):
             self._auto_square_fit(view_box, viewport_size, display_rect=display_rect)
+        elif self.mode == ViewportMode.AUTO_UNTOUCHED:
+            self.mode = ViewportMode.USER
 
     def is_near_auto(self, view_range=None, *, tolerance_fraction: float = 0.02) -> bool:
         target = self.last_auto_view_range
@@ -149,6 +151,14 @@ class ViewportController:
         view_range = square_pixel_fit_view_range(display_rect, viewport_size)
         view_box.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
         self.last_auto_view_range = view_range
+
+    def _current_view_is_near_auto(self, view_box) -> bool:
+        if self.last_auto_view_range is None:
+            return True
+        try:
+            return self.is_near_auto(view_box.viewRange())
+        except Exception:
+            return False
 
 
 def _intent_from_policy(policy):
