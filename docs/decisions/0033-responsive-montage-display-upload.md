@@ -47,8 +47,8 @@ canvas. This mode is internal and does not change the public viewer API.
 The Performance menu exposes the montage display backend as Auto, Tile layer, or Canvas fallback.
 Auto keeps PyQtGraph small/scalar montages on canvas, selects tile-layer mode for large RGB/complex
 montages and previously slow upload paths, and records the chosen backend and reason in diagnostics.
-Backends that declare both direct tiled payload support and a tiled-montage preference, such as
-VisPy, use their direct tiled-delta path immediately in Auto to avoid canvas composition/upload during
+Backends that declare typed tiled payload support and a tiled-montage preference, such as
+VisPy, use their typed tiled-delta path immediately in Auto to avoid canvas composition/upload during
 progressive montage updates. Canvas fallback remains available for developer/user escape hatches, but
 large RGB/complex canvas fallback is diagnosed as potentially slow.
 

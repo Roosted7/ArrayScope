@@ -288,9 +288,10 @@ Progress notes:
 - The `ImageSurface` contract covers raster/tiled presentation, camera application, overlay
   coordinate mapping, diagnostics, context-loss reset, teardown, interaction-state visual sync, and
   declared shared interaction-event ownership.
-- The current VisPy surface keeps the VisPy canvas passive and mouse-transparent while the shared Qt
-  pointer driver owns ROI/profile capture and drag lifecycle for both built-in surfaces, so two active
-  event systems no longer compete.
+- The current VisPy surface keeps the VisPy canvas mouse-transparent to the stacked Qt event layer
+  while the shared Qt pointer driver owns ROI/profile capture and drag lifecycle for both built-in
+  surfaces. Background pan/zoom uses backend-native VisPy event handling with shared
+  `display.view_navigation` range math, so plain navigation avoids PyQtGraph scene drag.
 - Surface lifecycle and feature-parity tests now target the contract and cover backend reset/teardown
   behavior for the built-in surfaces.
 
@@ -319,7 +320,8 @@ Progress notes:
 - `DisplayInteractionController` now owns hover, pointer capture, drag update, cancellation, and cursor
   intent for the built-in PyQtGraph and VisPy surfaces.
 - PyQtGraph ROI/profile graphics items are passive overlay views; VisPy mirrors shared interaction
-  state for hover/capture emphasis rather than running a parallel cursor/hit-test policy.
+  state for hover/capture emphasis, does not register duplicate PyQtGraph ROI/profile scene items,
+  and uses native background viewport navigation for non-overlay pan/zoom.
 - ROI hit candidates are indexed by display-space cells before exact semantic hit testing, so ordinary
   pointer motion does not scan every ROI or allocate full ROI snapshots.
 - Hit testing uses unclamped display coordinates while active drags clamp committed image coordinates,

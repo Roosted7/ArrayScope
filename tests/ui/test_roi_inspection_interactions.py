@@ -120,6 +120,64 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         win.close()
 
 
+def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from dataclasses import replace
+
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
+    from arrayscope.display.slice_engine import DisplayImage
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.operations.evaluator import EvaluationResult
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.arange(2 * 2 * 4, dtype=np.float32).reshape(2, 2, 4)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    calls = []
+    monkeypatch.setattr(
+        win.montage_tile_evaluation_controller,
+        "start_latest",
+        lambda _fn, **kwargs: calls.append(kwargs) or len(calls),
+    )
+    try:
+        _process_events(qtbot, count=20)
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
+        first_state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
+        first_plan = make_montage_plan(first_state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
+        for tile in first_plan.tiles:
+            value = 10.0 + float(tile.source_index)
+            image = np.full((2, 2), value, dtype=np.float32)
+            win.operation_evaluator.store_montage_tile_result(
+                tile,
+                montage_axis=2,
+                colormap_lut=None,
+                result=EvaluationResult(DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes)),
+            )
+
+        win._set_view_state(first_state)
+        win.update_montage_view()
+        qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=1000)
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        win.img_view.createRoi("rectangle", rect=(0, 0, 2, 2))
+        _process_events(qtbot, count=20)
+        assert "mean=10" in win.img_view._roi_info_panel.text()
+        truthful_text = win.img_view._roi_info_panel.text()
+
+        calls.clear()
+        second_state = win.view_state.with_axis_range(2, indices=(2, 3), text="2:4")
+        win._set_view_state(second_state)
+        win.update_montage_view()
+        win._refresh_inspection_dock()
+        _process_events(qtbot, count=20)
+
+        assert calls
+        assert not win._montage_session.display_committed
+        assert win.img_view._roi_info_panel.text() == truthful_text
+        assert "mean=0" not in win.img_view._roi_info_panel.text()
+    finally:
+        win.close()
+
+
 def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
     _clear_arrayscope_settings()
     pytest.importorskip("vispy")

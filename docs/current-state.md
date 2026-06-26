@@ -48,7 +48,7 @@ budgets, latency feedback, and a resource governor. These are worth preserving.
 ### Recent performance work improved important hot paths
 
 Active-plus-latest scheduling preserves useful visible progress. Stage-plan/candidate caching, direct
-tile deltas, stable texture identity, retained residency, dynamic tile priority, and separation of
+typed tile deltas, stable texture identity, retained residency, dynamic tile priority, and separation of
 cold upload from warm visibility/rebind are sensible optimizations. VisPy level changes can remain
 uniform-only, while PyQtGraph can reuse the same priority/admission queue for CPU redraws.
 Large normal single-plane presentations can now use the typed tiled backend path rather than being
@@ -78,7 +78,8 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
   beside backend-specific physical work counters.
 - Normal, internally tiled large-plane, one-tile montage, and multi-tile montage presentations now
   share `FramePlanner`, `DisplayTiledPresentation`, tile layout, and committed tiled value-source
-  semantics.
+  semantics. Tile-layer commits are typed tiled commits only; the old public/direct widget tile-layer
+  API and raster tile-layer commit mode have been removed.
 - Backend scene conversion uses cached frame-plan region signatures and current tile-delta active/
   planned/near sets, avoiding stale viewport-retarget semantics and repeated full region rebuilding
   when the plan is unchanged.
@@ -141,8 +142,10 @@ surface, resource policy, extracted control-plane models, or backend mechanics. 
 synchronous LOD route and stop adding cross-cutting behavior to the session and renderer. The next
 architecture step is hardware-backed evidence and residency policy: the surface contract exists,
 VisPy no longer inherits the PyQtGraph concrete view, backend reset/teardown is explicit, and shared
-pointer capture/drag lifecycle owns ROI/profile interaction for both built-in surfaces. Non-native
-LOD waits for the ADR 0041 async materialization and compatible-residency gates.
+pointer capture/drag lifecycle owns ROI/profile interaction for both built-in surfaces. Plain VisPy
+pan/zoom uses backend-native event handling with shared `display.view_navigation` range math, while
+ROI/profile hits still use the shared semantic interaction controller. Non-native LOD waits for the
+ADR 0041 async materialization and compatible-residency gates.
 
 The ordered acceptance gates are in the [roadmap](roadmap.md). Full evidence and recommendations are
 in [the v30 rendering-consistency audit](reviews/v30-rendering-consistency-audit.md).

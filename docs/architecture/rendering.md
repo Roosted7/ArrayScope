@@ -97,7 +97,7 @@ Production residency currently favors native-resolution tiles. Arbitrary CPU-red
 Shared code asks for capabilities such as:
 
 - raster presentation;
-- direct tiled payload presentation;
+- typed tiled presentation via `DisplayTiledPresentation`/`TilePresentationDelta`;
 - persistent residency;
 - shader windowing for scalar/complex data;
 - native pointer/viewport interaction;
@@ -111,6 +111,7 @@ Concrete backend code may own:
 - upload/window preparation specific to the library;
 - shader sources/uniforms;
 - camera synchronization and scene redraw mechanics;
+- backend-native background viewport navigation mechanics that apply shared range math;
 - resource/context-loss handling.
 
 It may not own:
@@ -120,6 +121,7 @@ It may not own:
 - whether levels are user-locked;
 - cache/document identity;
 - the meaning of a viewport request;
+- ROI/profile hit priority or drag lifecycle;
 - montage reflow or ROI source-local remapping semantics.
 
 ## Current backends
@@ -127,15 +129,22 @@ It may not own:
 ### PyQtGraph
 
 The default path is mature and provides the complete feature baseline. Its tiled implementation avoids rebuilding a full montage canvas, but large item counts and per-item updates can become GUI/scene-graph bottlenecks. Warm item visibility/geometry changes should not be reported as cold CPU windowing/upload.
-It accepts typed tiled presentations for internally tiled single planes as well as montages.
+It accepts typed tiled presentations for internally tiled single planes as well as montages. The
+old direct raster tile-layer API has been removed; tile-layer commits enter through
+`present_tiled` with committed tile state and revisioned tile deltas.
 
 ### VisPy
 
 VisPy supports shader mapping and persistent tiled residency with atlas-backed drawing. It can avoid
 repeated CPU windowing and reduce many-item overhead. `VisPySurface` now reaches presentation commits
 through the shared `ImageSurface` contract rather than inheriting the PyQtGraph concrete surface.
-The VisPy canvas remains passive and mouse-transparent; the shared pointer interaction controller
-owns drag/capture semantics while the VisPy surface mirrors hover and capture visuals.
+VisPy does not expose a direct tile-layer presentation API; all tiled updates use the typed
+`DisplayTiledPresentation` path so histogram identity, payload revisions, residency acknowledgement,
+and committed value semantics stay on one control plane.
+The VisPy canvas remains mouse-transparent for the stacked Qt event layer. ROI/profile hover and drag
+use the shared pointer interaction controller, while background pan/zoom uses
+`display.view_navigation_driver` plus `display.view_navigation` range math to update the canonical
+`ViewBox` range and camera without PyQtGraph scene drag.
 VisPy is the preferred backend for sustained large tiled rendering, pending small-view latency and
 platform validation. Its active visible commit should be a coherent GPU presentation transaction:
 admitted payloads are acknowledged only after texture data, atlas/page geometry, visibility, and draw

@@ -40,14 +40,11 @@ class DisplayCommitter:
         return self._frame_for(presentation, key, scene)
 
     def commit_tile_layer(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
+        if not isinstance(presentation, DisplayTiledPresentation):
+            raise TypeError("tile-layer commits require a tiled presentation")
         self._validate_presentation(presentation)
         scene = display_scene_for_presentation(presentation)
-        if isinstance(presentation, DisplayTiledPresentation):
-            self.commit_tiled_delta(presentation)
-        else:
-            self.last_tile_commit_report = None
-            self.last_tile_committed_state = None
-            self.surface.present_raster(presentation, mode=RasterCommitMode.TILE_LAYER)
+        self.commit_tiled_delta(presentation)
         self.surface.set_profile_bounds(scene.bounds)
         return self._frame_for(presentation, key, scene, tile_state=self.last_tile_committed_state)
 

@@ -2159,13 +2159,6 @@ class MontageRenderMixin:
                 dirty_tiles = tuple(int(tile) for tile in dirty_tiles if int(tile) in set(tile_delta.upserts))
             active_payloads = tile_state.active_payloads(tile_delta)
             first_display_commit = not bool(session.display_committed)
-            if first_display_commit and not active_payloads:
-                session.final_commit_pending = False
-                session.flush_pending = False
-                self._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-                if session.pending_tiles:
-                    self._schedule_montage_tiles(session)
-                return
             requested_levels = _session_requested_levels(session)
             explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
             if (
@@ -2288,7 +2281,7 @@ class MontageRenderMixin:
                 rendered_geometry,
                 montage_tile_states=session.ensure_tile_states(),
             )
-            self._sync_committed_montage_geometry(rendered_geometry)
+            self._sync_committed_montage_geometry(rendered_geometry, semantic_commit=bool(semantic_commit))
             overlay_start = perf_counter()
             rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
             self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
@@ -2579,21 +2572,22 @@ class MontageRenderMixin:
         self._schedule_montage_refined_level_stats(session)
         return True
 
-    def _sync_committed_montage_geometry(self, geometry) -> None:
+    def _sync_committed_montage_geometry(self, geometry, *, semantic_commit: bool = True) -> None:
         self.display_geometry = geometry
         frame = getattr(self, "_committed_display_frame", None)
         if (
-            frame is not None
+            bool(semantic_commit)
+            and frame is not None
             and frame.geometry != geometry
-            and not (
-                isinstance(getattr(frame, "value_source", None), TiledValueSource)
-                and display_geometry_coordinates_equal(frame.geometry, geometry)
-            )
         ):
             self._set_committed_display_frame(replace(frame, geometry=geometry, scene=None))
         refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
         if callable(refresh_hover):
             refresh_hover()
+        if bool(semantic_commit):
+            schedule_refresh = getattr(self, "_schedule_refresh_inspection_dock", None)
+            if callable(schedule_refresh):
+                schedule_refresh("montage-semantic-commit")
 
     def _notify_file_session_montage_committed(self) -> None:
         restore = getattr(self, "_schedule_pending_file_session_viewport_restore", None)

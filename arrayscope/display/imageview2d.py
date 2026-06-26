@@ -579,42 +579,6 @@ class ImageViewShell(QtWidgets.QWidget):
         self._montage_display_mode = "canvas"
         self.imageItem.setVisible(True)
 
-    def setMontageTileLayerPresentation(
-        self,
-        img: np.ndarray,
-        *,
-        histogramData: np.ndarray | None,
-        histogramPlotData: np.ndarray | None,
-        geometry,
-        levels: tuple[float, float],
-        histogramRange: tuple[float, float],
-        viewport_policy=ViewportPolicy.PRESERVE,
-        rgb_already_windowed: bool = False,
-        montage_dirty_tiles: tuple[int, ...] | None = None,
-        montage_tile_source_ids: dict[int, object] | None = None,
-        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
-        tile_delta=None,
-        frame_plan=None,
-    ) -> None:
-        if geometry is None or getattr(geometry, "montage", None) is None:
-            raise ValueError("tile-layer presentation requires montage geometry")
-        self._cancel_active_capture_for_frame_replacement()
-        self._apply_tile_layer_presentation(
-            img,
-            histogramData=histogramData,
-            histogramPlotData=histogramPlotData,
-            geometry=geometry,
-            levels=levels,
-            histogramRange=histogramRange,
-            viewport_policy=viewport_policy,
-            rgb_already_windowed=rgb_already_windowed,
-            montage_dirty_tiles=montage_dirty_tiles,
-            montage_tile_source_ids=montage_tile_source_ids,
-            montage_tile_payloads=montage_tile_payloads,
-            tile_delta=tile_delta,
-            frame_plan=frame_plan,
-        )
-
     def _apply_tile_layer_presentation(
         self,
         img: np.ndarray,
@@ -732,9 +696,11 @@ class ImageViewShell(QtWidgets.QWidget):
         """
 
         del shader_mapping  # PyQtGraph receives already materialized display pixels.
-        tile_payloads = tile_state.active_payloads(tile_delta)
-        dirty_tiles = None if tile_delta.force_refresh else tuple(tile_delta.upserts)
-        placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
+        placeholder, tile_payloads, dirty_tiles, tile_source_ids = self._prepare_tiled_montage_commit(
+            geometry,
+            tile_state=tile_state,
+            tile_delta=tile_delta,
+        )
         stats = self._apply_tile_layer_presentation(
             placeholder,
             histogramData=None,
@@ -745,12 +711,19 @@ class ImageViewShell(QtWidgets.QWidget):
             viewport_policy=viewport_policy,
             rgb_already_windowed=rgb_already_windowed,
             montage_dirty_tiles=dirty_tiles,
-            montage_tile_source_ids={key: payload.source_id for key, payload in tile_payloads.items()},
+            montage_tile_source_ids=tile_source_ids,
             montage_tile_payloads=tile_payloads,
             tile_delta=tile_delta,
             frame_plan=frame_plan,
         )
         return _tile_commit_report(tile_payloads, tile_delta, stats)
+
+    def _prepare_tiled_montage_commit(self, geometry, *, tile_state: "TilePresentationState", tile_delta: "TilePresentationDelta"):
+        tile_payloads = tile_state.active_payloads(tile_delta)
+        dirty_tiles = None if tile_delta.force_refresh else tuple(tile_delta.upserts)
+        placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
+        tile_source_ids = {key: payload.source_id for key, payload in tile_payloads.items()}
+        return placeholder, tile_payloads, dirty_tiles, tile_source_ids
 
     def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None, frame_plan=None) -> TileLayerUpdateStats:
         if self._montage_tile_layer is None:
@@ -1071,21 +1044,6 @@ class ImageViewShell(QtWidgets.QWidget):
                 texture_kind=presentation.texture_kind,
                 semantic_data=presentation.semantic_data,
                 lod=presentation.lod,
-            )
-            return
-        if mode is RasterCommitMode.TILE_LAYER:
-            self.setMontageTileLayerPresentation(
-                presentation.data,
-                histogramData=presentation.histogram_data,
-                histogramPlotData=presentation.histogram_plot_data,
-                geometry=presentation.geometry,
-                levels=presentation.levels,
-                histogramRange=presentation.histogram_range,
-                viewport_policy=presentation.viewport_policy,
-                rgb_already_windowed=presentation.rgb_already_windowed,
-                montage_dirty_tiles=presentation.montage_dirty_tiles,
-                montage_tile_source_ids=presentation.montage_tile_source_ids,
-                montage_tile_payloads=None,
             )
             return
         raise ValueError(f"unsupported raster commit mode: {mode}")
@@ -1927,12 +1885,13 @@ class ImageViewShell(QtWidgets.QWidget):
         return self._add_roi_selection(selection)
 
     def _add_roi_selection(self, selection: RoiSelection) -> RoiSelection:
-        item = item_for_roi(selection)
-        make_item_passive(item)
+        item = item_for_roi(selection) if self.draws_qgraphics_roi_items else None
+        if item is not None:
+            make_item_passive(item)
         roi_id = str(selection.id)
         self._roi_items[roi_id] = (item, selection)
         self._roi_hit_index.upsert(selection)
-        if self.draws_qgraphics_roi_items:
+        if item is not None:
             self._layer_owner.add_roi_item(roi_id, item)
         self._sync_roi_item_style(roi_id)
         self.roiCreated.emit(selection)
@@ -1971,7 +1930,8 @@ class ImageViewShell(QtWidgets.QWidget):
         if state.hover is not None and state.hover.kind == "roi" and state.hover.object_id == roi_id:
             self.sync_interaction_state(self.interaction_controller.clear_hover())
         item, _selection = item_selection
-        self._layer_owner.remove_roi_item(roi_id)
+        if item is not None:
+            self._layer_owner.remove_roi_item(roi_id)
         self.roiDeleted.emit(str(roi_id))
         return True
 
@@ -2013,7 +1973,7 @@ class ImageViewShell(QtWidgets.QWidget):
         )
         self._roi_items[str(roi_id)] = (item, updated)
         self._roi_hit_index.upsert(updated)
-        if sync_item:
+        if sync_item and item is not None:
             self._sync_roi_item_to_geometry(item, geometry)
             self._sync_roi_item_style(roi_id)
         if changed and emit:
@@ -2229,7 +2189,11 @@ class ImageViewShell(QtWidgets.QWidget):
             return True
         if obj is self.graphicsView.viewport() and self._handle_roi_drawing_event(event):
             return True
+        if obj is self.graphicsView.viewport() and self._handle_active_view_navigation_event(event):
+            return True
         if obj is self.graphicsView.viewport() and self._handle_pointer_interaction_event(event):
+            return True
+        if obj is self.graphicsView.viewport() and self._handle_view_navigation_event(event):
             return True
         if (
             obj is self.graphicsView.viewport()
@@ -2338,6 +2302,21 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def _handle_pointer_interaction_event(self, event) -> bool:
         return self._pointer_interaction.handle_event(event)
+
+    def _handle_active_view_navigation_event(self, event) -> bool:
+        driver = getattr(self, "_view_navigation", None)
+        if driver is None or not bool(driver.is_active()):
+            return False
+        return bool(driver.handle_event(event))
+
+    def _handle_view_navigation_event(self, event) -> bool:
+        driver = getattr(self, "_view_navigation", None)
+        if driver is None:
+            return False
+        return bool(driver.handle_event(event))
+
+    def _interaction_target_at(self, point: tuple[float, float] | None):
+        return self._pointer_interaction.target_at(point)
 
     def _begin_pointer_capture(self, target: InteractionTarget, point: tuple[float, float]) -> bool:
         if target.kind == "roi" and target.object_id is not None:
@@ -2469,9 +2448,12 @@ class ImageViewShell(QtWidgets.QWidget):
     def _event_display_point(self, event):
         if self.image is None:
             return None
-        scene_pos = self.graphicsView.mapToScene(event.pos())
+        scene_pos = self.graphicsView.mapToScene(self._event_position(event).toPoint())
         view_point = self.view.mapSceneToView(scene_pos)
         return (float(view_point.x()), float(view_point.y()))
+
+    def _event_position(self, event) -> QtCore.QPointF:
+        return _qt_event_position(event)
 
     def resizeEvent(self, event):
         """On resize, if in 'fit' mode keep the image fully visible."""
@@ -2505,6 +2487,13 @@ def _previous_viewport_size_from_resize_event(current_viewport_size, event, *, f
     except Exception:
         pass
     return fallback
+
+
+def _qt_event_position(event) -> QtCore.QPointF:
+    position = getattr(event, "position", None)
+    if callable(position):
+        return QtCore.QPointF(position())
+    return QtCore.QPointF(event.pos())
 
 
 def _world_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, float, float]:

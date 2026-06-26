@@ -230,7 +230,7 @@ def test_image_view_shell_exposes_surface_contract():
         "def teardown_surface",
     ):
         assert method in backend_text
-    assert "setMontageTileLayerPresentation" in text
+    assert "setMontageTileLayerPresentation" not in text
     assert "def present_tiled" in text
     assert "MontageTileLayer" in text
     assert "TileLayerItemState" in layer_text

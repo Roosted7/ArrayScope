@@ -641,6 +641,52 @@ def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
     assert win._committed_display_frame.scene.geometry == loaded
 
 
+def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(qt_app):
+    from dataclasses import replace
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayFrameKey
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class Window(QtCore.QObject, MontageRenderMixin):
+        def _set_committed_display_frame(self, frame):
+            self._committed_display_frame = frame
+
+    first_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
+    second_state = first_state.with_axis_range(2, indices=(2, 3), text="2:4")
+    committed = DisplayGeometry(
+        view_state=first_state,
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+    )
+    loading = DisplayGeometry(
+        view_state=second_state,
+        display_shape=(2, 5),
+        montage=MontageGeometry(indices=(2, 3), tile_shape=(2, 2), columns=2, rows=1, gap=1),
+        montage_tile_states=(MontageTileState.LOADING, MontageTileState.LOADING),
+    )
+    frame = CommittedDisplayFrame(
+        data=np.zeros((2, 5), dtype=np.float32),
+        histogram_data=None,
+        geometry=committed,
+        levels=(0.0, 1.0),
+        histogram_range=(0.0, 1.0),
+        key=DisplayFrameKey(("doc",), ("view",), 1),
+    )
+    win = Window()
+    win.display_geometry = committed
+    win._committed_display_frame = frame
+
+    win._sync_committed_montage_geometry(loading, semantic_commit=False)
+
+    assert win.display_geometry == loading
+    assert win._committed_display_frame is frame
+    assert win._committed_display_frame.geometry == committed
+
+
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
     from arrayscope.window.montage_viewport import montage_viewport_retarget_policy
     from arrayscope.window.montage_renderer import _persistent_direct_tile_layer_backend

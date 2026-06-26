@@ -140,6 +140,8 @@ class InspectionWorkflowMixin:
             return
         if not self._inspection_panel_is_visible():
             self._inspection_stale = True
+            if self._roi_uses_montage_demand(selections) and self._montage_roi_values_pending():
+                return
             stats_by_roi = self._hidden_roi_statistics(selections)
             self._update_roi_info_overlay(stats_by_roi)
             return
@@ -171,7 +173,10 @@ class InspectionWorkflowMixin:
             if not any(selection.enabled for selection in selections):
                 self._apply_empty_inspection_state_if_needed(selections)
                 return
-            image = self._roi_source_image()
+            if self._roi_uses_montage_demand(selections) and self._montage_roi_values_pending():
+                self._inspection_stale = True
+                return
+            image = self._committed_raster_roi_source_image()
             layers = self._compatible_compare_layers(image) if image is not None else ()
             key = self._roi_inspection_key(image, selections, layers)
             if key == getattr(self, "_roi_inspection_request_key", None) and (
@@ -179,6 +184,8 @@ class InspectionWorkflowMixin:
             ):
                 return
             self._roi_inspection_request_key = key
+            priority = self._roi_refresh_priority(selections)
+            self._roi_inspection_priority = priority
             work_size = 0 if image is None else int(np.size(image)) * max(1, sum(1 for selection in selections if selection.enabled))
             if work_size <= 250_000 and not self._roi_uses_montage_demand(selections):
                 self._apply_roi_inspection_snapshot_if_current(key, self._compute_roi_inspection_snapshot(key, image, selections, layers))
@@ -187,7 +194,7 @@ class InspectionWorkflowMixin:
             self.roi_evaluation_controller.start_latest(
                 lambda key=key, image=image, selections=selections, layers=layers: self._compute_roi_inspection_snapshot(key, image, selections, layers),
                 key=key,
-                priority=EvalPriority.SELECTED_ROI,
+                priority=priority,
                 replace_group="roi-inspection",
                 frame_target=FrameTarget(
                     semantic_key=key,
@@ -311,11 +318,43 @@ class InspectionWorkflowMixin:
         geometry = getattr(self, "display_geometry", None)
         return bool(geometry is not None and getattr(geometry, "montage", None) is not None)
 
+    def _roi_refresh_priority(self, selections) -> EvalPriority:
+        reason = str(getattr(self, "_roi_refresh_reason", "") or "")
+        if self._roi_uses_montage_demand(selections) and reason != "refresh":
+            return EvalPriority.PREFETCH
+        return EvalPriority.SELECTED_ROI
+
+    def _montage_roi_values_pending(self) -> bool:
+        session = getattr(self, "_montage_session", None)
+        if session is None:
+            return False
+        return bool(
+            not getattr(session, "display_committed", False)
+            or getattr(session, "pending_tiles", None)
+            or getattr(session, "loading_tiles", None)
+            or getattr(session, "active_tile_requests", None)
+            or getattr(session, "pending_completed_tiles", None)
+            or getattr(session, "dirty_payloads", None)
+            or getattr(session, "pending_payload_upserts", None)
+            or getattr(session, "pending_removals", None)
+        )
+
     def _roi_uses_tiled_demand(self, selections) -> bool:
         return bool(selections and self._committed_tiled_frame() is not None)
 
-    def _committed_tiled_frame(self):
+    def _current_committed_display_frame(self):
         frame = getattr(self, "_committed_display_frame", None)
+        if frame is None:
+            return None
+        is_current = getattr(self, "_is_committed_display_frame_current", None)
+        if callable(is_current) and not is_current(frame):
+            return None
+        if getattr(frame, "geometry", None) != getattr(self, "display_geometry", None):
+            return None
+        return frame
+
+    def _committed_tiled_frame(self):
+        frame = self._current_committed_display_frame()
         if frame is None or not getattr(frame, "is_tiled", False):
             return None
         return frame
@@ -346,7 +385,10 @@ class InspectionWorkflowMixin:
                     tile_local_region=region,
                     purpose="roi",
                 )
-                result = provider.request_tile_region(request, priority=EvalPriority.SELECTED_ROI)
+                result = provider.request_tile_region(
+                    request,
+                    priority=getattr(self, "_roi_inspection_priority", EvalPriority.PREFETCH),
+                )
                 source = result.histogram_data if result.histogram_data is not None else result.image
                 y_slice, x_slice = region
                 offset = (tile.x0 + int(x_slice.start or 0), tile.y0 + int(y_slice.start or 0))
@@ -371,7 +413,7 @@ class InspectionWorkflowMixin:
         return TileDataProvider(
             operation_evaluator=self.operation_evaluator,
             document=self.document,
-            committed_frame=getattr(self, "_committed_display_frame", None),
+            committed_frame=self._current_committed_display_frame(),
             montage_plan=getattr(self, "_current_montage_plan", None),
             colormap_lut=self._roi_colormap_lut(),
             evaluation_context=evaluation_context,
@@ -422,11 +464,19 @@ class InspectionWorkflowMixin:
                 layers.append(layer)
         return tuple(layers)
 
-    def _roi_source_image(self):
+    def _committed_raster_roi_source_image(self):
         if not hasattr(self, "img_view"):
             return None
         if self._committed_tiled_frame() is not None:
             return None
+        geometry = getattr(self, "display_geometry", None)
+        if getattr(geometry, "montage", None) is not None:
+            try:
+                display_mode = str(self.img_view.montageDisplayMode())
+            except Exception:
+                display_mode = ""
+            if display_mode in {"tile_layer", "vispy_tile_layer"}:
+                return None
         source = getattr(self.img_view, "histogramSource", None)
         if source is None:
             source = getattr(self.img_view, "image", None)
@@ -500,7 +550,7 @@ class InspectionWorkflowMixin:
         tiled = self._committed_tiled_roi_values(selections, collect_histograms=False)
         if tiled is not None:
             return tiled[0]
-        image = self._roi_source_image()
+        image = self._committed_raster_roi_source_image()
         stats_by_roi = OrderedDict()
         if image is not None:
             for selection in selections:

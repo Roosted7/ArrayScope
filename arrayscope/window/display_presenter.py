@@ -158,8 +158,8 @@ class DisplayPresentationMixin:
             capabilities = image_view_backend_capabilities(self.img_view)
             use_tile_layer = (
                 isinstance(decision.display_presentation, DisplayTiledPresentation)
-                or backend_decision.backend == "tile_layer"
-            ) and capabilities.direct_montage_tile_payloads
+                and capabilities.direct_montage_tile_payloads
+            )
             if use_tile_layer:
                 frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
                 actual_backend = "tile_layer"
@@ -295,8 +295,8 @@ class DisplayPresentationMixin:
             capabilities = image_view_backend_capabilities(self.img_view)
             use_tile_layer = (
                 isinstance(decision.display_presentation, DisplayTiledPresentation)
-                or backend_decision.backend == "tile_layer"
-            ) and capabilities.direct_montage_tile_payloads
+                and capabilities.direct_montage_tile_payloads
+            )
             if use_tile_layer:
                 frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
                 actual_backend = "tile_layer"

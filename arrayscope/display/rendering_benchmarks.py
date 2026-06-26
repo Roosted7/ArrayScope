@@ -257,20 +257,15 @@ def _benchmark_normal_large_tiled_initial(view, *, measure_presented: bool) -> R
 
 
 def _benchmark_one_tile_montage_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(128, 128), count=1, columns=1)
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(128, 128), count=1, columns=1)
     measurement = _measure_action(
         view,
-        lambda: view.setMontageTileLayerPresentation(
-            placeholder,
-            histogramData=None,
-            histogramPlotData=None,
+        lambda: _present_benchmark_tiled(
+            view,
             geometry=geometry,
+            payloads=payloads,
             levels=(0.0, 1.0),
             histogramRange=(0.0, 1.0),
-            rgb_already_windowed=False,
-            montage_dirty_tiles=None,
-            montage_tile_source_ids=sources,
-            montage_tile_payloads=payloads,
         ),
         measure_presented=measure_presented,
     )
@@ -278,20 +273,15 @@ def _benchmark_one_tile_montage_initial(view, *, measure_presented: bool) -> Ren
 
 
 def _benchmark_multi_tile_montage_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=16, columns=4)
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=16, columns=4)
     measurement = _measure_action(
         view,
-        lambda: view.setMontageTileLayerPresentation(
-            placeholder,
-            histogramData=None,
-            histogramPlotData=None,
+        lambda: _present_benchmark_tiled(
+            view,
             geometry=geometry,
+            payloads=payloads,
             levels=(0.0, 1.0),
             histogramRange=(0.0, 1.0),
-            rgb_already_windowed=False,
-            montage_dirty_tiles=None,
-            montage_tile_source_ids=sources,
-            montage_tile_payloads=payloads,
         ),
         measure_presented=measure_presented,
     )
@@ -310,30 +300,21 @@ def _benchmark_large_histogram_plot_refresh(view, *, measure_presented: bool) ->
 
 
 def _benchmark_complex_tile_level_preview(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(96, 96), count=2, columns=2)
-    view.setMontageTileLayerPresentation(
-        placeholder,
-        histogramData=None,
-        histogramPlotData=None,
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(96, 96), count=2, columns=2)
+    _present_benchmark_tiled(
+        view,
         geometry=geometry,
+        payloads=payloads,
         levels=(0.0, 1.0),
         histogramRange=(0.0, 1.0),
-        rgb_already_windowed=False,
-        montage_dirty_tiles=None,
-        montage_tile_source_ids=sources,
-        montage_tile_payloads=payloads,
     )
-    view.setMontageTileLayerPresentation(
-        placeholder,
-        histogramData=None,
-        histogramPlotData=None,
+    _present_benchmark_tiled(
+        view,
         geometry=geometry,
+        payloads=payloads,
         levels=(0.0, 1.0),
         histogramRange=(0.0, 1.0),
-        rgb_already_windowed=False,
-        montage_dirty_tiles=(),
-        montage_tile_source_ids=sources,
-        montage_tile_payloads=payloads,
+        dirty_tiles=(),
     )
     measurement = _measure_action(
         view,
@@ -344,18 +325,13 @@ def _benchmark_complex_tile_level_preview(view, *, measure_presented: bool) -> R
 
 
 def _benchmark_large_tile_level_preview(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=96, columns=12)
-    view.setMontageTileLayerPresentation(
-        placeholder,
-        histogramData=None,
-        histogramPlotData=None,
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=96, columns=12)
+    _present_benchmark_tiled(
+        view,
         geometry=geometry,
+        payloads=payloads,
         levels=(0.0, 1.0),
         histogramRange=(0.0, 1.0),
-        rgb_already_windowed=False,
-        montage_dirty_tiles=None,
-        montage_tile_source_ids=sources,
-        montage_tile_payloads=payloads,
     )
     measurement = _measure_action(
         view,
@@ -366,32 +342,23 @@ def _benchmark_large_tile_level_preview(view, *, measure_presented: bool) -> Ren
 
 
 def _benchmark_tile_level_uniform_update(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=24, columns=6)
-    view.setMontageTileLayerPresentation(
-        placeholder,
-        histogramData=None,
-        histogramPlotData=None,
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=24, columns=6)
+    _present_benchmark_tiled(
+        view,
         geometry=geometry,
+        payloads=payloads,
         levels=(0.0, 1.0),
         histogramRange=(0.0, 1.0),
-        rgb_already_windowed=False,
-        montage_dirty_tiles=None,
-        montage_tile_source_ids=sources,
-        montage_tile_payloads=payloads,
     )
     measurement = _measure_action(
         view,
-        lambda: view.setMontageTileLayerPresentation(
-            placeholder,
-            histogramData=None,
-            histogramPlotData=None,
+        lambda: _present_benchmark_tiled(
+            view,
             geometry=geometry,
+            payloads=payloads,
             levels=(0.2, 0.9),
             histogramRange=(0.0, 1.0),
-            rgb_already_windowed=False,
-            montage_dirty_tiles=(),
-            montage_tile_source_ids=sources,
-            montage_tile_payloads=payloads,
+            dirty_tiles=(),
         ),
         measure_presented=measure_presented,
     )
@@ -399,32 +366,23 @@ def _benchmark_tile_level_uniform_update(view, *, measure_presented: bool) -> Re
 
 
 def _benchmark_clean_tile_flush(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(96, 96), count=2, columns=2)
-    view.setMontageTileLayerPresentation(
-        placeholder,
-        histogramData=None,
-        histogramPlotData=None,
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(96, 96), count=2, columns=2)
+    _present_benchmark_tiled(
+        view,
         geometry=geometry,
+        payloads=payloads,
         levels=(0.0, 1.0),
         histogramRange=(0.0, 1.0),
-        rgb_already_windowed=False,
-        montage_dirty_tiles=None,
-        montage_tile_source_ids=sources,
-        montage_tile_payloads=payloads,
     )
     measurement = _measure_action(
         view,
-        lambda: view.setMontageTileLayerPresentation(
-            placeholder,
-            histogramData=None,
-            histogramPlotData=None,
+        lambda: _present_benchmark_tiled(
+            view,
             geometry=geometry,
+            payloads=payloads,
             levels=(0.0, 1.0),
             histogramRange=(0.0, 1.0),
-            rgb_already_windowed=False,
-            montage_dirty_tiles=(),
-            montage_tile_source_ids=sources,
-            montage_tile_payloads=payloads,
+            dirty_tiles=(),
         ),
         measure_presented=measure_presented,
     )
@@ -432,20 +390,15 @@ def _benchmark_clean_tile_flush(view, *, measure_presented: bool) -> RenderingBe
 
 
 def _benchmark_large_complex_tiled_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=128, columns=16)
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=128, columns=16)
     measurement = _measure_action(
         view,
-        lambda: view.setMontageTileLayerPresentation(
-            placeholder,
-            histogramData=None,
-            histogramPlotData=None,
+        lambda: _present_benchmark_tiled(
+            view,
             geometry=geometry,
+            payloads=payloads,
             levels=(0.0, 1.0),
             histogramRange=(0.0, 1.0),
-            rgb_already_windowed=False,
-            montage_dirty_tiles=None,
-            montage_tile_source_ids=sources,
-            montage_tile_payloads=payloads,
         ),
         measure_presented=measure_presented,
     )
@@ -453,38 +406,27 @@ def _benchmark_large_complex_tiled_initial(view, *, measure_presented: bool) -> 
 
 
 def _benchmark_one_dirty_tile_commit(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=64, columns=8)
-    view.setMontageTileLayerPresentation(
-        placeholder,
-        histogramData=None,
-        histogramPlotData=None,
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=64, columns=8)
+    _present_benchmark_tiled(
+        view,
         geometry=geometry,
+        payloads=payloads,
         levels=(0.0, 1.0),
         histogramRange=(0.0, 1.0),
-        rgb_already_windowed=False,
-        montage_dirty_tiles=None,
-        montage_tile_source_ids=sources,
-        montage_tile_payloads=payloads,
     )
     dirty_payloads = dict(payloads)
     image = np.array(payloads[3].image, copy=True)
     image[..., 0] = 64
     dirty_payloads[3] = DisplayTilePayload(3, payloads[3].source_index, image, payloads[3].histogram_data, ("montage_tile", 3, "dirty"))
-    dirty_sources = dict(sources)
-    dirty_sources[3] = dirty_payloads[3].source_id
     measurement = _measure_action(
         view,
-        lambda: view.setMontageTileLayerPresentation(
-            placeholder,
-            histogramData=None,
-            histogramPlotData=None,
+        lambda: _present_benchmark_tiled(
+            view,
             geometry=geometry,
+            payloads=dirty_payloads,
             levels=(0.0, 1.0),
             histogramRange=(0.0, 1.0),
-            rgb_already_windowed=False,
-            montage_dirty_tiles=(3,),
-            montage_tile_source_ids=dirty_sources,
-            montage_tile_payloads=dirty_payloads,
+            dirty_tiles=(3,),
         ),
         measure_presented=measure_presented,
     )
@@ -492,32 +434,23 @@ def _benchmark_one_dirty_tile_commit(view, *, measure_presented: bool) -> Render
 
 
 def _benchmark_pan_zoom_no_upload(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=64, columns=8)
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=64, columns=8)
     view.resize(900, 700)
     view.show()
-    view.setMontageTileLayerPresentation(
-        placeholder,
-        histogramData=None,
-        histogramPlotData=None,
+    _present_benchmark_tiled(
+        view,
         geometry=geometry,
+        payloads=payloads,
         levels=(0.0, 1.0),
         histogramRange=(0.0, 1.0),
-        rgb_already_windowed=False,
-        montage_dirty_tiles=None,
-        montage_tile_source_ids=sources,
-        montage_tile_payloads=payloads,
     )
-    view.setMontageTileLayerPresentation(
-        placeholder,
-        histogramData=None,
-        histogramPlotData=None,
+    _present_benchmark_tiled(
+        view,
         geometry=geometry,
+        payloads=payloads,
         levels=(0.0, 1.0),
         histogramRange=(0.0, 1.0),
-        rgb_already_windowed=False,
-        montage_dirty_tiles=(),
-        montage_tile_source_ids=sources,
-        montage_tile_payloads=payloads,
+        dirty_tiles=(),
     )
     def pan_zoom():
         view.getView().setRange(xRange=(0.0, 256.0), yRange=(0.0, 256.0), padding=0)
@@ -668,6 +601,58 @@ def _benchmark_warm_residency_queue_scaling(view, *, measure_presented: bool) ->
         measurement,
         timing=_sum_gpu_stats(stats, mode="warm_residency_queue_scaling"),
         commit_count=len(stats),
+    )
+
+
+def _present_benchmark_tiled(
+    view,
+    *,
+    geometry,
+    payloads: dict[int, DisplayTilePayload],
+    levels: tuple[float, float],
+    histogramRange: tuple[float, float],
+    dirty_tiles: tuple[int, ...] | None = None,
+    histogramPlotData=None,
+    rgb_already_windowed: bool = False,
+    tile_residency_budget_bytes: int = 512 * 1024 * 1024,
+):
+    payloads = {int(tile): payload for tile, payload in dict(payloads).items()}
+    if dirty_tiles is None:
+        upserts = payloads
+        revision = 1
+        force_refresh = True
+    elif dirty_tiles == ():
+        upserts = {}
+        revision = 2
+        force_refresh = False
+    else:
+        dirty = tuple(int(tile) for tile in dirty_tiles)
+        upserts = {tile: payloads[tile] for tile in dirty if tile in payloads}
+        revision = 2
+        force_refresh = False
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=revision,
+        visibility_revision=revision,
+        level_revision=revision,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=upserts,
+        active_tiles=tuple(payloads),
+        planned_tiles=tuple(payloads),
+        near_tiles=tuple(payloads),
+        near_tile_source_ids={tile: payload.source_id for tile, payload in payloads.items()},
+        force_refresh=force_refresh,
+    )
+    return view.setTiledMontagePresentation(
+        geometry=geometry,
+        tile_state=TilePresentationState(payloads),
+        tile_delta=delta,
+        histogramPlotData=histogramPlotData,
+        levels=levels,
+        histogramRange=histogramRange,
+        rgb_already_windowed=rgb_already_windowed,
+        tile_residency_budget_bytes=tile_residency_budget_bytes,
     )
 
 

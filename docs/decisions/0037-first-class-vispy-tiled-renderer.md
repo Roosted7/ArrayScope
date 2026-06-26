@@ -16,14 +16,14 @@ The first VisPy montage path avoided full-canvas uploads but created one VisPy i
 Profiling showed that this was slower than PyQtGraph for large montages: object churn, camera sync,
 histogram/viewport bookkeeping, and per-visual management dominated the texture upload savings.
 
-The old path also carried direct tile data as generic objects through a placeholder canvas commit.
+The old path also carried tile data as generic objects through a placeholder canvas commit.
 That made hover/status, ROI/profile region reads, and display ownership depend on special cases.
 
 ## Decision
 
-Make direct typed tile payloads the tiled presentation contract. VisPy is the primary target for
+Make typed tile payloads the tiled presentation contract. VisPy is the primary target for
 sustained tiled rendering: normal image tiles, large-plane tiles, and montage tiles should reach VisPy
-through the direct tiled-delta path rather than a composed placeholder canvas.
+through the revisioned tiled-delta path rather than a composed placeholder canvas.
 
 `DisplayTilePayload` carries tile number, source index, image, optional histogram/intensity data, and
 a stable source identity. Committed frames own a `FrameValueSource`: canvas frames use
@@ -55,7 +55,9 @@ VisPy tiled montage rendering uses `arrayscope.display.backends.vispy.tiles`:
   visible residency, and admitted visible commit fan-in;
 - PyQtGraph remains the interaction, histogram, ROI, profile, HUD, and context-menu owner.
 
-PyQtGraph tile-layer fallback continues to exist, but it consumes the same typed payload contract.
+PyQtGraph tile-layer fallback continues to exist, but it consumes the same typed payload contract
+behind `present_tiled`; the public direct tile-layer widget API and raster tile-layer commit mode have
+been removed.
 
 ## Consequences
 
@@ -87,13 +89,13 @@ not synchronously push camera state for every range-change signal.
 
 - Typed tile payload and tiled value-source tests.
 - Tile-region provider reads committed tiled payloads before evaluating.
-- VisPy direct tiled payloads use one batched GPU layer rather than per-tile image visuals.
-- Direct tiled deltas are used for normal-image one-tile/small-tile cases, large-plane internal
+- VisPy typed tiled payloads use one batched GPU layer rather than per-tile image visuals.
+- Revisioned tiled deltas are used for normal-image one-tile/small-tile cases, large-plane internal
   tiling, and montage tiling.
 - Admitted visible deltas acknowledge only after texture, geometry, visibility, and draw invalidation
   are consistent.
-- Clean direct tiled commits update zero textures.
-- Dirty direct tiled commits update only dirty payload counters.
+- Clean typed tiled commits update zero textures.
+- Dirty typed tiled commits update only dirty payload counters.
 - Level/window/LUT-only commits update uniforms without changing texture residency identity.
 - Raw complex tiled payloads allocate complex atlas storage and render phase color, not grayscale.
 - Native-only LOD diagnostics report desired and applied factors separately, and payloads preserve

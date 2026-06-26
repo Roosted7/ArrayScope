@@ -78,7 +78,7 @@ def test_montage_roi_gap_source_is_nan(qtbot):
         _process_events(qtbot, count=40)
 
         gap_x = win._current_montage_geometry.tile_width
-        source = win._roi_source_image()
+        source = win._committed_raster_roi_source_image()
 
         assert np.isnan(source[:, gap_x]).all()
     finally:
@@ -218,9 +218,8 @@ def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
         win.close()
 
 
-def test_montage_tile_count_increase_auto_fits_when_many_tiles_are_outside_view(qtbot):
+def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qtbot):
     _clear_arrayscope_settings()
-    from pyqtgraph.Qt import QtWidgets
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((2, 3, 20), dtype=np.float32)
@@ -235,27 +234,14 @@ def test_montage_tile_count_increase_auto_fits_when_many_tiles_are_outside_view(
         _process_events(qtbot, count=50)
         win.img_view.getView().setRange(xRange=(0, 2), yRange=(0, 3), padding=0)
         before = win.img_view.getView().viewRange()
-        status_height = win.statusBar().height()
 
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
         win.render(reason="test-montage-more-tiles")
         _process_events(qtbot, count=80)
 
         view_range = win.img_view.getView().viewRange()
-        assert view_range[0][0] <= 0
-        assert view_range[0][1] >= 19
-        assert view_range[1][0] <= 0
-        assert view_range[1][1] >= 11
-
-        action = win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel")
-        assert action is not None
-        assert win.statusBar().height() == status_height
-        action.linkActivated.emit("action")
-        _process_events(qtbot, count=10)
-
-        restored = win.img_view.getView().viewRange()
-        assert restored[0] == pytest.approx(before[0], abs=0.03)
-        assert restored[1] == pytest.approx(before[1], abs=0.03)
+        assert view_range[0] == pytest.approx(before[0], abs=0.03)
+        assert view_range[1] == pytest.approx(before[1], abs=0.03)
     finally:
         win.close()
 
@@ -432,6 +418,56 @@ def test_montage_commits_cached_tiles_immediately_with_loading_placeholders(qtbo
         assert canvas.tile_states[1] == MontageTileState.LOADING
         np.testing.assert_array_equal(canvas.data[0:2, 0:2], np.full((2, 2), 10, dtype=np.float32))
         assert getattr(win.img_view, "_montage_tile_overlay_items", []) == []
+    finally:
+        win.close()
+
+
+def test_tile_layer_range_scroll_commits_loading_presentation_before_tiles_are_ready(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import MontageDisplayBackendChoice
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 2 * 4, dtype=np.float32).reshape(2, 2, 4))
+    qtbot.addWidget(win)
+    calls = []
+    monkeypatch.setattr(
+        win.montage_tile_evaluation_controller,
+        "start_latest",
+        lambda _fn, **kwargs: calls.append(kwargs) or len(calls),
+    )
+    try:
+        _process_events(qtbot)
+        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
+        first_state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
+        first_plan = make_montage_plan(first_state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
+        for tile in first_plan.tiles:
+            win.operation_evaluator.store_montage_tile_result(
+                tile,
+                montage_axis=2,
+                colormap_lut=None,
+                result=_tile_result(tile, int(tile.source_index) + 10),
+            )
+
+        win._set_view_state(first_state)
+        win.update_montage_view()
+        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=1000)
+        first_timing = win.img_view.lastImageUploadTiming()
+        assert first_timing.tile_layer_visible_items == 2
+        assert bool(win._montage_session.display_committed)
+
+        calls.clear()
+        second_state = win.view_state.with_axis_range(2, indices=(2, 3), text="2:4")
+        win._set_view_state(second_state)
+        win.update_montage_view()
+
+        timing = win.img_view.lastImageUploadTiming()
+        assert calls
+        assert win.img_view.montageDisplayMode() == "tile_layer"
+        assert timing.tile_layer_visible_items == 0
+        assert timing.tile_layer_active_pages == 0
+        assert not any(state.item.isVisible() for state in win.img_view._montage_tile_layer.states.values())
+        assert not win._montage_session.display_committed
     finally:
         win.close()
 

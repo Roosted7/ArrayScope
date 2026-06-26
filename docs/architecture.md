@@ -77,6 +77,8 @@ meaning, and backend adapters own concrete textures/items/visuals only.
 
 - `ui.dimension_strip` and controls translate dimension intent into state changes.
 - `display.interaction` and `overlay_hit_test` own backend-independent hover/target/cursor semantics where migrated.
+- `display.view_navigation` owns backend-independent background pan/zoom range math; backends may
+  provide native event paths that apply it to the canonical viewport range.
 - `display.viewport` owns fit/preserve/reset/1:1 policy and recoverability constraints.
 - Managed panels are coordinated by `window.layout_controller`; widgets do not become state authorities because they happen to be visible.
 
@@ -148,7 +150,10 @@ state/document change
 The last valid frame remains visible during slow or refused work. Small images may commit as a raster
 frame; large single planes can commit as typed tiled regions through the same backend surface used by
 montages. Evaluation scheduling still has separate normal/montage orchestration, but committed
-presentation semantics no longer depend on pretending that a large plane is a montage.
+presentation semantics no longer depend on pretending that a large plane is a montage. Tile-layer
+presentation is not a raster commit mode: both PyQtGraph and VisPy receive typed
+`DisplayTiledPresentation` commits through `present_tiled`, and the obsolete direct tile-layer widget
+API is intentionally absent.
 
 ### Montage (current)
 
@@ -224,6 +229,7 @@ capture and drag-lifecycle migration.
 | Montage viewport reflow and source-local ROI remapping | `window.montage_viewport` |
 | Texture/atlas/visual mechanics | `display.backends.*` |
 | Hover/drag/cursor policy | `display.interaction`, hit testing |
+| Background pan/zoom range math | `display.view_navigation` |
 | Widget controls/layout | `ui.*`, focused `window.*` controller |
 | Admission/budget policy | `core.memory_policy`, compute/resource policy |
 | Historical rationale | `docs/decisions/` |
@@ -233,9 +239,10 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 ## Known architectural debt
 
 - `VisPyImageView2D` now inherits the shared `ImageViewShell` rather than the PyQtGraph concrete
-  `ImageView2D`. The VisPy canvas is passive and mouse-transparent; the shared pointer interaction
-  controller owns ROI/profile hit priority, capture, drag lifecycle, cancellation, and cursor intent
-  for both built-in surfaces.
+  `ImageView2D`. The VisPy canvas is mouse-transparent to the stacked Qt event layer; the shared
+  pointer interaction controller owns ROI/profile hit priority, capture, drag lifecycle,
+  cancellation, and cursor intent, while VisPy background pan/zoom uses backend-native events with
+  shared `display.view_navigation` range math.
 - Normal and montage evaluation scheduling remain separate, even though frame planning and committed
   tiled presentation semantics are now unified.
 - `MontageRenderSession` is still large, but level convergence, tile admission, and stage fan-in now delegate to Qt-free control-plane models.

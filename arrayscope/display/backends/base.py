@@ -18,7 +18,6 @@ class RasterCommitMode(Enum):
 
     FULL = "full"
     FAST = "fast"
-    TILE_LAYER = "tile_layer"
 
 
 @runtime_checkable

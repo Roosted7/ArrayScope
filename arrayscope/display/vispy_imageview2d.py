@@ -32,6 +32,7 @@ from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHis
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import DisplayInteractionState
 from arrayscope.display.overlay_hit_test import roi_handle_points
+from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
 from arrayscope.display.backends.vispy.raster import (
     GpuMappedImageVisual,
     _coerce_texture_kind,
@@ -175,6 +176,7 @@ class VisPyImageView2D(ImageViewShell):
 
     def __init__(self, parent=None, view=None, imageItem=None):
         super().__init__(parent=parent, view=view, imageItem=imageItem)
+        self._view_navigation = QtViewNavigationDriver(self)
         self.imageItem.setVisible(False)
         self.histogramImageItem.setVisible(False)
         self._vispy_bounds_item = QtWidgets.QGraphicsRectItem(QtCore.QRectF(0.0, 0.0, 1.0, 1.0))
@@ -182,7 +184,7 @@ class VisPyImageView2D(ImageViewShell):
         self._vispy_bounds_item.setBrush(QtGui.QBrush(QtCore.Qt.BrushStyle.NoBrush))
         self._vispy_bounds_item.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         self._layer_owner.add_bounds_item(self._vispy_bounds_item)
-        self.view.sigRangeChanged.connect(lambda *_args: self._request_vispy_camera_sync())
+        self.view.sigRangeChanged.connect(lambda *_args: self._request_vispy_camera_sync(immediate=True))
         state_signal = getattr(self.view, "sigStateChanged", None)
         if state_signal is not None:
             state_signal.connect(lambda *_args: self._request_vispy_camera_sync())
@@ -192,6 +194,13 @@ class VisPyImageView2D(ImageViewShell):
         self.teardown_surface()
         super().closeEvent(event)
 
+    def _cancel_vispy_speculative_work(self) -> None:
+        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
+        if warm_timer is not None:
+            warm_timer.stop()
+        self._vispy_pending_warm_tile_payloads = {}
+        self._vispy_pending_warm_tile_context = {}
+
     def _on_vispy_draw(self, *_args) -> None:
         self._vispy_draw_count = int(getattr(self, "_vispy_draw_count", 0) or 0) + 1
         self._vispy_canvas_update_pending = False
@@ -200,7 +209,7 @@ class VisPyImageView2D(ImageViewShell):
         )
         pending_clear = getattr(self, "_vispy_pending_overlay_clear_request_count", None)
         if pending_clear is not None and self._vispy_tile_presentation_draw_count >= int(pending_clear):
-            self._hide_vispy_montage_tile_overlays_now()
+            self._hide_vispy_montage_tile_overlays_now(request_update=False)
 
     def vispyPresentationDiagnostics(self) -> dict[str, object]:
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
@@ -245,11 +254,7 @@ class VisPyImageView2D(ImageViewShell):
         return False
 
     def reset_surface(self, reason: str) -> None:
-        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
-        if warm_timer is not None:
-            warm_timer.stop()
-        self._vispy_pending_warm_tile_payloads = {}
-        self._vispy_pending_warm_tile_context = {}
+        self._cancel_vispy_speculative_work()
         super().reset_surface(reason)
         self._vispy_main_data_id = None
         self._vispy_main_color_source_id = None
@@ -262,11 +267,7 @@ class VisPyImageView2D(ImageViewShell):
     def teardown_surface(self) -> None:
         if getattr(self, "_surface_teardown_done", False):
             return
-        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
-        if warm_timer is not None:
-            warm_timer.stop()
-        self._vispy_pending_warm_tile_payloads = {}
-        self._vispy_pending_warm_tile_context = {}
+        self._cancel_vispy_speculative_work()
         canvas = getattr(self, "_vispy_canvas", None)
         if canvas is not None:
             try:
@@ -487,47 +488,6 @@ class VisPyImageView2D(ImageViewShell):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
-    def setMontageTileLayerPresentation(
-        self,
-        img: np.ndarray,
-        *,
-        histogramData: np.ndarray | None,
-        histogramPlotData: np.ndarray | None,
-        geometry,
-        levels: tuple[float, float],
-        histogramRange: tuple[float, float],
-        viewport_policy=ViewportPolicy.PRESERVE,
-        rgb_already_windowed: bool = False,
-        montage_dirty_tiles: tuple[int, ...] | None = None,
-        montage_tile_source_ids: dict[int, object] | None = None,
-        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
-        shader_mapping=None,
-        tile_delta: "TilePresentationDelta | None" = None,
-        tile_residency_budget_bytes: int = 0,
-        frame_plan=None,
-    ) -> None:
-        if geometry is None or (getattr(geometry, "montage", None) is None and frame_plan is None):
-            raise ValueError("tile-layer presentation requires montage geometry")
-        if montage_tile_payloads is None:
-            raise ValueError("VisPy montage presentation requires direct tile payloads; canvas fallback was removed")
-        self._apply_vispy_tile_layer_presentation(
-            img,
-            histogramData=histogramData,
-            histogramPlotData=histogramPlotData,
-            geometry=geometry,
-            levels=levels,
-            histogramRange=histogramRange,
-            viewport_policy=viewport_policy,
-            rgb_already_windowed=rgb_already_windowed,
-            montage_dirty_tiles=montage_dirty_tiles,
-            montage_tile_source_ids=montage_tile_source_ids,
-            montage_tile_payloads=montage_tile_payloads,
-            shader_mapping=shader_mapping,
-            tile_delta=tile_delta,
-            tile_residency_budget_bytes=tile_residency_budget_bytes,
-            frame_plan=frame_plan,
-        )
-
     def _apply_vispy_tile_layer_presentation(
         self,
         img: np.ndarray,
@@ -566,7 +526,7 @@ class VisPyImageView2D(ImageViewShell):
                 rgb_already_windowed=rgb_already_windowed,
                 frame_plan=frame_plan,
             )
-            histogram_key = _tiled_histogram_key(histogramData, histogramPlotData, histogramRange)
+            histogram_key = _tiled_histogram_key(histogramRange, tile_delta=tile_delta)
             viewport_key = (
                 structure_key,
                 str(getattr(viewport_policy, "value", viewport_policy)),
@@ -724,14 +684,16 @@ class VisPyImageView2D(ImageViewShell):
         tile_residency_budget_bytes: int = 0,
         frame_plan=None,
     ) -> None:
-        tile_payloads = tile_state.active_payloads(tile_delta)
+        placeholder, tile_payloads, dirty_tiles, tile_source_ids = self._prepare_tiled_montage_commit(
+            geometry,
+            tile_state=tile_state,
+            tile_delta=tile_delta,
+        )
         warm_payloads = {
             int(tile): payload
             for tile, payload in tile_state.near_payloads(tile_delta).items()
             if int(tile) not in tile_payloads
         }
-        dirty_tiles = None if tile_delta.force_refresh else tuple(tile_delta.upserts)
-        placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
         stats = self._apply_vispy_tile_layer_presentation(
             placeholder,
             histogramData=None,
@@ -742,7 +704,7 @@ class VisPyImageView2D(ImageViewShell):
             viewport_policy=viewport_policy,
             rgb_already_windowed=rgb_already_windowed,
             montage_dirty_tiles=dirty_tiles,
-            montage_tile_source_ids={key: payload.source_id for key, payload in tile_payloads.items()},
+            montage_tile_source_ids=tile_source_ids,
             montage_tile_payloads=tile_payloads,
             shader_mapping=shader_mapping,
             tile_delta=tile_delta,
@@ -1332,17 +1294,33 @@ class VisPyImageView2D(ImageViewShell):
         lines.visible = bool(len(line_points))
         self._request_vispy_canvas_update()
 
-    def _hide_vispy_montage_tile_overlays_now(self) -> None:
+    def _hide_vispy_montage_tile_overlays_now(self, *, request_update: bool = True) -> None:
         super().clearMontageTileOverlays()
         self._vispy_overlay_key = ()
         self._vispy_overlay_count = 0
         self._vispy_pending_overlay_clear_request_count = None
-        for visual in getattr(self, "_vispy_overlay_visuals", ()):
-            _set_visual_visible(visual, False)
-        try:
+        self._set_vispy_overlay_visuals_visible(False, suppress_canvas_update=not request_update)
+        if request_update:
             self._request_vispy_canvas_update()
-        except Exception:
-            pass
+
+    def _set_vispy_overlay_visuals_visible(self, visible: bool, *, suppress_canvas_update: bool = False) -> None:
+        visuals = tuple(getattr(self, "_vispy_overlay_visuals", ()))
+        if not suppress_canvas_update:
+            for visual in visuals:
+                _set_visual_visible(visual, visible)
+            return
+        canvas = getattr(self, "_vispy_canvas", None)
+        canvas_update = getattr(canvas, "update", None)
+        if canvas is None or not callable(canvas_update):
+            for visual in visuals:
+                _set_visual_visible(visual, visible)
+            return
+        try:
+            canvas.update = lambda *args, **kwargs: None
+            for visual in visuals:
+                _set_visual_visible(visual, visible)
+        finally:
+            canvas.update = canvas_update
 
     def _vispy_tile_presentation_draw_pending(self) -> bool:
         return int(getattr(self, "_vispy_tile_presentation_draw_count", 0) or 0) < int(
@@ -1683,7 +1661,7 @@ class VisPyImageView2D(ImageViewShell):
         except Exception:
             pass
 
-    def _request_vispy_camera_sync(self) -> None:
+    def _request_vispy_camera_sync(self, *, immediate: bool = False) -> None:
         # A camera gesture has priority over speculative residency uploads.
         # The next settled tiled presentation will enqueue the relevant near
         # ring again, so discarding stale warm work is both safe and cheaper.
@@ -1692,6 +1670,10 @@ class VisPyImageView2D(ImageViewShell):
             warm_timer.stop()
         self._vispy_pending_warm_tile_payloads = {}
         self._vispy_pending_warm_tile_context = {}
+        if immediate:
+            self._vispy_camera_sync_pending = False
+            self._sync_vispy_camera_to_view()
+            return
         if getattr(self, "_vispy_camera_sync_pending", False):
             return
         self._vispy_camera_sync_pending = True
@@ -1785,19 +1767,14 @@ def _tiled_structure_key(geometry, *, rgb_already_windowed, frame_plan=None):
     )
 
 
-def _tiled_histogram_key(histogram_data, histogram_plot_data, histogram_range):
+def _tiled_histogram_key(histogram_range, *, tile_delta):
+    if tile_delta is None:
+        raise ValueError("VisPy tiled histogram identity requires a TilePresentationDelta")
     return (
-        _array_identity_key(histogram_data),
-        _array_identity_key(histogram_plot_data),
+        "revision",
+        int(getattr(tile_delta, "histogram_revision")),
         (float(histogram_range[0]), float(histogram_range[1])),
     )
-
-
-def _array_identity_key(data):
-    if data is None:
-        return None
-    array = np.asarray(data)
-    return (tuple(int(value) for value in array.shape), str(array.dtype), array.tobytes())
 
 
 def _set_visual_visible(visual, visible: bool) -> None:

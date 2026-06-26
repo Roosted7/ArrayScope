@@ -61,11 +61,19 @@ The shared interaction controller owns:
 - cursor intent;
 - handle selection.
 
-Backends draw that state. Qt pointer events are normalized by the shared pointer driver; PyQtGraph
-items and VisPy visuals mirror semantic ROI/profile state rather than owning drag behavior.
+Backends draw that state. Qt pointer events for semantic overlays are normalized by the shared pointer
+driver; PyQtGraph items and VisPy visuals mirror ROI/profile state rather than owning drag behavior.
 Pointer hover first queries an indexed display-space ROI candidate set and then applies exact
 backend-independent hit testing. Hit testing uses real display coordinates; only active drag updates
 are clamped to the committed image bounds.
+
+Background viewport navigation is separate from overlay drag semantics. `display.view_navigation`
+owns backend-neutral pan/zoom range math, and `display.view_navigation_driver` translates backend
+events into that model for surfaces that provide native navigation. That shared math consumes the
+canonical `ViewBox` range and inversion/orientation state so flipped X/Y axes behave like the
+PyQtGraph baseline. VisPy uses that path so plain pan/zoom updates the canonical range and camera
+immediately without routing through PyQtGraph scene drag machinery. ROI/profile hits still take
+priority and use the shared semantic interaction controller.
 
 ## ROI and profiles
 
@@ -109,14 +117,17 @@ A command palette is useful when it calls the same semantic command handlers as 
 - Do not let hover flood computation or reprioritize a full queue per mouse event.
 - Do not scan every ROI or rebuild overlay snapshots on every mouse move; maintain bounded candidate
   structures and perform exact geometry checks only on nearby candidates.
+- Do not route backend-native background pan/zoom through a second scene graph when the backend can
+  update the canonical viewport range directly.
 - Coalesce high-frequency intent before expensive planning, but do not use debounce to starve exact progress indefinitely.
 - Keep keyboard, menu, and direct-control routes behaviorally consistent.
 - Any new visible mode must define how it composes with existing image/line/montage, ROI, channel, and viewport state.
 
 ## Current UI debt
 
-- `ImageView2D` remains large and owns shell plus PyQtGraph mechanics.
-- `VisPyImageView2D` inherits it and bridges two input/camera systems.
+- `ImageViewShell` remains large and still contains shared shell, PyQtGraph mechanics, and backend hooks.
+- VisPy still uses a transparent Qt/PyQtGraph event layer for shared overlay events, but background
+  viewport navigation now bypasses PyQtGraph scene drag.
 - Some callbacks still combine state transition, scheduling, rendering, and status updates.
 - Recent slicing grammar is powerful but needs clearer inline preview/error feedback.
 - Tile hover priority is sampled when a plan is built; active queue retargeting needs a coalesced design.

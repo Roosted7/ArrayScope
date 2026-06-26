@@ -387,6 +387,13 @@ class MontageTileLayer:
             tile_source_ids=tile_source_ids,
             rgb_already_windowed=bool(rgb_already_windowed),
         )
+        level_update_tiles = tuple(
+            int(tile)
+            for tile in requested_active
+            if int(tile) in self._states and tuple(self._states[int(tile)].levels) != levels
+        )
+        if level_update_tiles:
+            tile_order = tuple(dict.fromkeys(tuple(tile_order) + tuple(sorted(level_update_tiles))))
         # Match the VisPy atlas path's ordering: resolve active payloads to
         # resident identities, bind tile placement to resident storage, then
         # decide whether any data upload is needed.  For PyQtGraph the
@@ -441,7 +448,7 @@ class MontageTileLayer:
                 continue
 
             if not isinstance(payload, DisplayTilePayload):
-                raise TypeError("direct tile-layer payloads must be DisplayTilePayload instances")
+                raise TypeError("typed tile-layer payloads must be DisplayTilePayload instances")
             tile_img = payload.image
             if tile_img is None:
                 self._hide_tile(tile_number)
