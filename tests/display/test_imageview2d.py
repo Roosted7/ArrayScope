@@ -2383,6 +2383,28 @@ def test_roi_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
 
 
 @pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_set_roi_selections_preserves_id_counter_for_next_roi(qt_app, backend):
+    from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
+
+    view = _view_class(backend)()
+    view.setImage(np.zeros((20, 20), dtype=float))
+    view.setRoiSelections(
+        (
+            RoiSelection(
+                "roi-3",
+                "ROI 3",
+                RoiGeometry(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0)),
+            ),
+        )
+    )
+
+    next_roi = view.createRoi(RoiKind.RECTANGLE, rect=(1.0, 1.0, 2.0, 2.0))
+
+    assert next_roi.id == "roi-4"
+    view.close()
+
+
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
 def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     from pyqtgraph.Qt import QtCore
 

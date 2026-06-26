@@ -762,8 +762,9 @@ class VisPyImageView2D(ImageViewShell):
         tile_delta,
         tile_residency_budget_bytes: int,
     ) -> None:
-        payloads = {int(key): value for key, value in dict(payloads or {}).items()}
         if not payloads:
+            return
+        if getattr(self, "_vispy_pending_warm_tile_payloads", None):
             return
         self._vispy_pending_warm_tile_payloads = payloads
         self._vispy_pending_warm_tile_context = {
@@ -1011,6 +1012,11 @@ class VisPyImageView2D(ImageViewShell):
         super().clearRois()
         for roi_id in tuple(getattr(self, "_vispy_roi_visuals", {})):
             self._remove_vispy_roi(roi_id)
+
+    def setRoiSelections(self, selections, *, selected_id=None) -> None:
+        super().setRoiSelections(selections, selected_id=selected_id)
+        for current_id, (_item, selection) in self._roi_items.items():
+            self._upsert_vispy_roi(current_id, selection.geometry, selection.color)
 
     def highlightRoi(self, roi_id):
         result = super().highlightRoi(roi_id)

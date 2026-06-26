@@ -52,6 +52,51 @@ def test_channel_auto_manual_coercion_matrix(qtbot):
         win.close()
 
 
+def test_automatic_colormap_remains_automatic_across_display_restore(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.core.view_recipe import DisplaySettings
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.ones((6, 7), dtype=np.complex64))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        assert win.current_colormap == "PAL-relaxed"
+        assert not win._colormap_user_selected
+        assert win._current_display_settings().colormap is None
+
+        win._apply_display_settings(
+            DisplaySettings(
+                channel="abs",
+                scale="linear",
+                aspect_mode="square_pixels",
+                window_mode="relative",
+                colormap="gray",
+            )
+        )
+        assert win.current_colormap == "gray"
+        assert not win._colormap_user_selected
+
+        win._on_channel_clicked("complex")
+
+        assert win.current_colormap == "PAL-relaxed"
+        assert not win._colormap_user_selected
+
+        win._apply_display_settings(
+            DisplaySettings(
+                channel="complex",
+                scale="linear",
+                aspect_mode="square_pixels",
+                window_mode="relative",
+                colormap="PAL-relaxed",
+            )
+        )
+        assert win.current_colormap == "PAL-relaxed"
+        assert not win._colormap_user_selected
+    finally:
+        win.close()
+
+
 def test_reload_button_uses_standard_tool_button_chrome(qtbot, tmp_path):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets

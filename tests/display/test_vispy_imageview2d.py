@@ -1882,6 +1882,55 @@ def test_vispy_first_class_tiled_warms_loaded_near_sources_after_visible_commit(
         view.close()
 
 
+def test_vispy_warm_residency_schedule_is_constant_time_when_busy(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    class NoIterationDict(dict):
+        def items(self):
+            raise AssertionError("busy warm scheduling should not inspect payloads")
+
+        def values(self):
+            raise AssertionError("busy warm scheduling should not inspect payloads")
+
+        def __iter__(self):
+            raise AssertionError("busy warm scheduling should not inspect payloads")
+
+    existing = {0: object()}
+    view = VisPyImageView2D()
+    try:
+        view._vispy_pending_warm_tile_payloads = existing
+        view._schedule_vispy_warm_tile_residency(
+            NoIterationDict({1: object()}),
+            geometry=_montage_geometry(),
+            rgb_already_windowed=False,
+            tile_delta=None,
+            tile_residency_budget_bytes=0,
+        )
+
+        assert view._vispy_pending_warm_tile_payloads is existing
+    finally:
+        view.close()
+
+
+def test_vispy_warm_residency_schedule_keeps_caller_payload_mapping(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    payloads = {1: object(), 2: object()}
+    view = VisPyImageView2D()
+    try:
+        view._schedule_vispy_warm_tile_residency(
+            payloads,
+            geometry=_montage_geometry(),
+            rgb_already_windowed=False,
+            tile_delta=None,
+            tile_residency_budget_bytes=0,
+        )
+
+        assert view._vispy_pending_warm_tile_payloads is payloads
+    finally:
+        view.close()
+
+
 def test_vispy_direct_tiled_histogram_only_commit_refreshes_histogram(qt_app, monkeypatch):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
     from arrayscope.display.model.frame import DisplayTilePayload

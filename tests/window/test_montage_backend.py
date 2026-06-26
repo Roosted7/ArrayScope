@@ -96,6 +96,19 @@ def test_canvas_capability_controls_manual_fallback_without_backend_name_checks(
     assert "future-gpu-backend" in decision.reason
 
 
+def test_first_vispy_display_batch_limit_uses_governed_upsert_limit(monkeypatch):
+    import arrayscope.window.montage_renderer as montage_renderer
+
+    session = SimpleNamespace(visible_tiles=tuple(range(100)))
+    monkeypatch.setattr(
+        montage_renderer,
+        "_persistent_tile_upsert_limits",
+        lambda _window, _session, *, first_display_commit: {"max_upserts": 3},
+    )
+
+    assert montage_renderer._first_vispy_display_batch_limit(object(), session) == 3
+
+
 def test_auto_policy_uses_capability_instead_of_backend_name():
     data = np.zeros((1500, 1500), dtype=np.float32)
     capabilities = ImageViewBackendCapabilities(

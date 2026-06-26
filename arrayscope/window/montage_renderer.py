@@ -1424,10 +1424,15 @@ class MontageRenderMixin:
             return viewport_plan
         layout_changed = getattr(previous_plan, "geometry", None) != getattr(next_plan, "geometry", None)
         viewport_shape_changed = tuple(getattr(session, "viewport_shape", ())) != tuple(viewport_plan.viewport_shape)
+        skip_remap = bool(getattr(self, "_skip_next_montage_viewport_remap", False))
+        if skip_remap:
+            self._skip_next_montage_viewport_remap = False
         if not layout_changed and not viewport_shape_changed:
             return viewport_plan
         current_range = viewport_plan.view_range
         if current_range is None:
+            return viewport_plan
+        if skip_remap:
             return viewport_plan
 
         viewport_controller = getattr(self.img_view, "viewport_controller", None)
@@ -1676,7 +1681,7 @@ class MontageRenderMixin:
             _persistent_direct_tile_layer_backend(self, session)
             and not getattr(session, "display_committed", False)
         )
-        first_batch_limit = 6
+        first_batch_limit = _first_vispy_display_batch_limit(self, session) if first_vispy_display else 0
         expected_indices = self._montage_level_expected_indices(session)
         while session.pending_completed_tiles:
             tile, result = session.pending_completed_tiles.popleft()
@@ -1684,7 +1689,7 @@ class MontageRenderMixin:
             processed_tiles.append(tile)
             processed += 1
             budget.record_item(byte_count=byte_count)
-            if first_vispy_display and processed >= first_batch_limit:
+            if first_batch_limit and processed >= first_batch_limit:
                 break
             if budget.should_yield():
                 break
@@ -2007,6 +2012,7 @@ class MontageRenderMixin:
             else:
                 feedback.observe("montage_commit", self._last_montage_canvas_commit_ms)
         session.note_committed()
+        self._notify_file_session_montage_committed()
         self._finish_montage_session_if_complete(session)
         schedule_near_viewport_montage_prefetch(self, session)
         self._retry_live_profile_after_montage_tile()
@@ -2315,6 +2321,7 @@ class MontageRenderMixin:
             or (session.has_pending_level_update() and session.has_stale_level_presentations())
         )
         session.note_committed()
+        self._notify_file_session_montage_committed()
         if upload_backlog:
             self._schedule_montage_ready_display_commit(session)
         self._finish_montage_session_if_complete(session)
@@ -2406,6 +2413,9 @@ class MontageRenderMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(session.user_levels_override)
                 self._note_display_level_source(decision)
+                apply_restored_viewport = getattr(self, "_apply_pending_file_session_viewport", None)
+                if callable(apply_restored_viewport):
+                    apply_restored_viewport()
                 show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
                 if callable(show_pending_montage_revert):
                     show_pending_montage_revert()
@@ -2498,6 +2508,11 @@ class MontageRenderMixin:
         if callable(refresh_hover):
             refresh_hover()
 
+    def _notify_file_session_montage_committed(self) -> None:
+        restore = getattr(self, "_schedule_pending_file_session_viewport_restore", None)
+        if callable(restore):
+            restore()
+
     def _maybe_auto_fit_montage_tiles(self, geometry) -> bool:
         montage = getattr(geometry, "montage", geometry)
         if montage is None or not getattr(montage, "indices", ()):
@@ -2537,13 +2552,13 @@ class MontageRenderMixin:
             and not _view_range_contains_near(before_range, full_range)
             and viewport_controller is not None
         ):
-            previous_mode = viewport_controller.mode
-
-            self._pending_montage_view_revert = (
-                before_range,
-                previous_mode,
-                "Adjusted montage view.",
-            )
+            if not bool(getattr(self, "_suppress_montage_autofit_revert_message", False)):
+                previous_mode = viewport_controller.mode
+                self._pending_montage_view_revert = (
+                    before_range,
+                    previous_mode,
+                    "Adjusted montage view.",
+                )
             return False
         if not can_auto_adjust:
             return False
@@ -2559,12 +2574,13 @@ class MontageRenderMixin:
             if viewport_controller is not None and previous_mode is not None:
                 viewport_controller.mode = previous_mode
 
-        show_revert_action(
-            self,
-            "Fitted montage to show all tiles.",
-            undo,
-            timeout=5000,
-        )
+        if not bool(getattr(self, "_suppress_montage_autofit_revert_message", False)):
+            show_revert_action(
+                self,
+                "Fitted montage to show all tiles.",
+                undo,
+                timeout=5000,
+            )
         return True
 
     def _show_pending_montage_view_revert(self) -> None:
@@ -3335,6 +3351,11 @@ def _persistent_tile_upsert_limits(window, session, *, first_display_commit: boo
         "max_upsert_bytes": max(1024, int(byte_cap)),
     }
     return limits
+
+
+def _first_vispy_display_batch_limit(window, session) -> int:
+    limits = _persistent_tile_upsert_limits(window, session, first_display_commit=True)
+    return max(1, int(limits.get("max_upserts", 1)))
 
 
 def _tile_layer_upsert_limits(window, session, *, first_display_commit: bool) -> dict[str, int]:

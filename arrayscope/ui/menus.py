@@ -531,6 +531,9 @@ class WindowMenuMixin:
         self.layout_manager.resize_default_docks()
 
     def closeEvent(self, event):
+        save_file_session = getattr(self, "_save_file_view_session_on_close", None)
+        if callable(save_file_session):
+            save_file_session()
         self.layout_manager.save_window_settings()
         self._save_app_settings()
         self._closing = True

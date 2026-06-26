@@ -22,6 +22,7 @@ from arrayscope.ui.menus import WindowMenuMixin
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
 from arrayscope.window.evaluation_controller import EvaluationController
+from arrayscope.window.file_view_session import FileViewSessionMixin
 from arrayscope.window.file_reload import FileReloadMixin
 from arrayscope.window.inspection import InspectionWorkflowMixin
 from arrayscope.window.interaction_mode import InteractionMode
@@ -37,6 +38,7 @@ class ArrayScopeWindow(
     DisplayControlBuildMixin,
     StateSyncMixin,
     OperationActionsMixin,
+    FileViewSessionMixin,
     InspectionWorkflowMixin,
     DimensionControlMixin,
     RenderMixin,
@@ -142,6 +144,7 @@ class ArrayScopeWindow(
                 
         self._build_window_ui(data, filepath)
         self._apply_channel_colormap()
+        restored_file_view_session = self._restore_file_view_session_if_available()
         
         if complex_dim is not None: # user requested combining as complex
             if complex_dim < 0 or complex_dim >= data.ndim:
@@ -154,8 +157,33 @@ class ArrayScopeWindow(
                 self.combineAsComplex(complex_dim) # valid
         
         # Initialize dimension controls based on the authoritative view state.
-        self.render(reason="initial", force_autolevel=True)
-        self.show()
+        if restored_file_view_session:
+            self.show()
+            apply_restored_viewport_size = getattr(self, "_apply_pending_file_session_viewport_size", None)
+            if callable(apply_restored_viewport_size):
+                apply_restored_viewport_size()
+            self.render(
+                reason="file-view-session-restore",
+                force_autolevel=self._pending_display_levels_for_render() is None,
+            )
+        else:
+            self.render(reason="initial", force_autolevel=True)
+            self.show()
+        if restored_file_view_session:
+            def finish_restored_file_session_viewport():
+                apply_restored_viewport_size = getattr(self, "_apply_pending_file_session_viewport_size", None)
+                if callable(apply_restored_viewport_size):
+                    resized = bool(apply_restored_viewport_size())
+                    if resized and getattr(getattr(self, "view_state", None), "montage_axis", None) is not None:
+                        self.render(
+                            reason="file-view-session-restore-viewport-size",
+                            force_autolevel=self._pending_display_levels_for_render() is None,
+                        )
+                apply_restored_viewport = getattr(self, "_apply_pending_file_session_viewport", None)
+                if callable(apply_restored_viewport):
+                    apply_restored_viewport()
+
+            Qt.QtCore.QTimer.singleShot(0, finish_restored_file_session_viewport)
         Qt.QtCore.QTimer.singleShot(0, lambda: setattr(self, "_progressive_preserve_enabled", True))
 
         # Set up file watcher if a filepath was provided (QFileSystemWatcher uses

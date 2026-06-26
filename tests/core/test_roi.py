@@ -5,6 +5,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).parents[2]
@@ -71,6 +72,22 @@ def test_roi_statistics_for_all_roi_kinds():
         assert stats.minimum is not None
         assert stats.maximum is not None
         assert stats.rss is not None
+
+
+def test_roi_statistics_uses_complex_magnitude_without_warning():
+    import warnings
+
+    accumulator = roi.RoiStatsAccumulator()
+    values = np.array([3 + 4j, 5 + 12j], dtype=np.complex64)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", np.exceptions.ComplexWarning)
+        accumulator.add_values(values)
+
+    stats = accumulator.result()
+    assert stats.minimum == pytest.approx(5.0)
+    assert stats.maximum == pytest.approx(13.0)
+    assert stats.mean == pytest.approx(9.0)
 
 
 def test_roi_stats_accumulator_matches_exact_small_statistics():

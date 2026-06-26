@@ -87,6 +87,8 @@ class RoiStatsAccumulator:
         finite = flat[np.isfinite(flat)]
         if finite.size == 0:
             return
+        if np.iscomplexobj(finite):
+            finite = np.abs(finite)
         finite = finite.astype(float, copy=False)
         self.finite_count += int(finite.size)
         chunk_min = float(np.min(finite))

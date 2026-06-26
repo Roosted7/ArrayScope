@@ -6,6 +6,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.core.view_recipe import DisplaySettings, ViewRecipe, load_view_recipe as load_view_recipe_file, save_view_recipe as save_view_recipe_file
+from arrayscope.display.colormap_policy import default_colormap_name
 from arrayscope.core.memory_budget import DEFAULT_VISIBLE_RENDER_BUDGET_BYTES, format_bytes
 from arrayscope.io.numpy_save import save_derived_array
 from arrayscope.operations import fft_backend
@@ -586,7 +587,7 @@ class OperationActionsMixin:
             aspect_mode=getattr(self.img_view, "displayMode", "square_pixels"),
             window_mode=self._current_window_mode(),
             levels=levels,
-            colormap=getattr(self, "current_colormap", None),
+            colormap=getattr(self, "current_colormap", None) if bool(getattr(self, "_colormap_user_selected", False)) else None,
             profile_visible=hasattr(self, "profile_dock") and self.profile_dock.isVisible(),
             live_profile=self.widgets["buttons"]["display"]["live_profile"].isChecked(),
         )
@@ -599,11 +600,12 @@ class OperationActionsMixin:
         self.widgets["buttons"]["display"]["window_relative"].setChecked(settings.window_mode != "absolute")
         self.widgets["buttons"]["display"]["window_absolute"].setChecked(settings.window_mode == "absolute")
         self.widgets["buttons"]["display"]["live_profile"].setChecked(settings.live_profile)
-        if settings.colormap is None:
+        saved_colormap = None if settings.colormap is None else str(settings.colormap)
+        if saved_colormap is None or saved_colormap == default_colormap_name(settings.channel):
             self._colormap_user_selected = False
             self._apply_channel_colormap()
         else:
-            self._set_display_colormap(settings.colormap, user_selected=True, request_render=False)
+            self._set_display_colormap(saved_colormap, user_selected=True, request_render=False)
         queued_levels = self._queue_display_levels(settings.levels)
         if queued_levels is not None:
             # _set_document and channel coercion intentionally request automatic

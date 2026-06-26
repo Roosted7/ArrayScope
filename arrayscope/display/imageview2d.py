@@ -1875,14 +1875,35 @@ class ImageViewShell(QtWidgets.QWidget):
             geometry=geometry,
             color=color,
         )
+        return self._add_roi_selection(selection)
+
+    def _add_roi_selection(self, selection: RoiSelection) -> RoiSelection:
         item = item_for_roi(selection)
         make_item_passive(item)
+        roi_id = str(selection.id)
         self._roi_items[roi_id] = (item, selection)
         self._roi_hit_index.upsert(selection)
         self._layer_owner.add_roi_item(roi_id, item)
         self._sync_roi_item_style(roi_id)
         self.roiCreated.emit(selection)
         return selection
+
+    def setRoiSelections(self, selections, *, selected_id=None) -> None:
+        self.clearRois()
+        max_counter = 0
+        for selection in tuple(selections or ()):
+            if not isinstance(selection, RoiSelection):
+                continue
+            self._add_roi_selection(selection)
+            if str(selection.id).startswith("roi-"):
+                try:
+                    max_counter = max(max_counter, int(str(selection.id).split("-", 1)[1]))
+                except Exception:
+                    pass
+        # _roi_counter stores the last assigned roi-N suffix; createRoi adds one.
+        self._roi_counter = max(self._roi_counter, max_counter)
+        if selected_id is not None:
+            self.highlightRoi(str(selected_id))
 
     def removeRoi(self, roi_id):
         roi_id = str(roi_id)
