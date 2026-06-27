@@ -148,9 +148,13 @@ class EvaluationController(Qt.QtCore.QObject):
         self._pending_queue_events = deque()
         self._drain_continuation_pending = False
         self._queue = SimpleQueue()
-        self._poll_timer = Qt.QtCore.QTimer(self)
-        self._poll_timer.setInterval(1)
-        self._poll_timer.timeout.connect(self._drain_queue)
+        # Fallback timer, not the primary drain path. Worker notifications emit
+        # `queueEventReady`; this single-shot safety net handles Qt bindings
+        # that occasionally miss a cross-thread signal while work is active.
+        self._drain_fallback_timer = Qt.QtCore.QTimer(self)
+        self._drain_fallback_timer.setSingleShot(True)
+        self._drain_fallback_timer.setInterval(10)
+        self._drain_fallback_timer.timeout.connect(self._drain_queue)
         try:
             self.queueEventReady.connect(self._drain_queue, Qt.QtCore.Qt.ConnectionType.QueuedConnection)
         except Exception:
@@ -175,7 +179,7 @@ class EvaluationController(Qt.QtCore.QObject):
             self._note_prefetch_work_dropped(key)
         self._prefetch_keys.clear()
         if not self._runnables:
-            self._poll_timer.stop()
+            self._drain_fallback_timer.stop()
         return self.generation
 
     def clear_group(self, replace_group: str):
@@ -194,7 +198,7 @@ class EvaluationController(Qt.QtCore.QObject):
                     self._discard_generation(generation, stale=True)
             self._refresh_frame_progress(group)
         if not self._runnables:
-            self._poll_timer.stop()
+            self._drain_fallback_timer.stop()
 
     def advance_group(self, replace_group: str) -> int:
         replace_group = str(replace_group)
@@ -300,6 +304,8 @@ class EvaluationController(Qt.QtCore.QObject):
         self._handlers[generation] = (on_done, on_error, on_stale, None)
         self._index_request(request)
         if on_slow is not None:
+            # User-visible timeout. `_emit_slow` rechecks generation and
+            # supersession before surfacing delayed-work feedback.
             Qt.QtCore.QTimer.singleShot(int(slow_ms), lambda generation=generation: self._emit_slow(generation, on_slow))
 
         runnable = _EvaluationRunnable(
@@ -370,6 +376,8 @@ class EvaluationController(Qt.QtCore.QObject):
         self._handlers[generation] = (on_done, on_error, on_stale, on_reuse_stale)
         self._index_request(request)
         if on_slow is not None:
+            # User-visible timeout. `_emit_slow` rechecks generation and
+            # supersession before surfacing delayed-work feedback.
             Qt.QtCore.QTimer.singleShot(int(slow_ms), lambda generation=generation: self._emit_slow(generation, on_slow))
 
         runnable = _EvaluationRunnable(
@@ -517,9 +525,11 @@ class EvaluationController(Qt.QtCore.QObject):
             callback()
 
     def _ensure_polling(self):
-        if not self._poll_timer.isActive():
-            self._poll_timer.start()
+        # Queued signal drain: worker completions and bounded continuations
+        # emit `queueEventReady`. The fallback timer is a low-frequency
+        # single-shot safety net, not semantic ordering.
         self._notify_queue_event()
+        self._schedule_drain_fallback()
 
     def _notify_queue_event(self) -> None:
         if self._shutting_down:
@@ -596,14 +606,23 @@ class EvaluationController(Qt.QtCore.QObject):
             while not self._queue.empty():
                 self._pending_queue_events.append(self._queue.get())
             self._schedule_drain_continuation()
-        if not self._runnables and self._queue.empty() and not self._pending_queue_events:
-            self._poll_timer.stop()
+            self._schedule_drain_fallback()
+        if self._runnables or self._handlers:
+            self._schedule_drain_fallback()
+        elif self._queue.empty() and not self._pending_queue_events:
+            self._drain_fallback_timer.stop()
 
     def _schedule_drain_continuation(self) -> None:
         if self._drain_continuation_pending:
             return
         self._drain_continuation_pending = True
         self._notify_queue_event()
+
+    def _schedule_drain_fallback(self) -> None:
+        if self._shutting_down:
+            return
+        if not self._drain_fallback_timer.isActive():
+            self._drain_fallback_timer.start()
 
     def _finish(self, generation, value):
         request = self._requests.get(generation)

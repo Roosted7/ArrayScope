@@ -192,6 +192,8 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
         self.setLayout(layout)
 
+        # User-visible refresh timer. It runs only while the diagnostics dialog
+        # is visible and is stopped on hide/close.
         self._timer = Qt.QtCore.QTimer(self)
         self._timer.setInterval(int(interval_ms))
         self._timer.timeout.connect(self.refresh)

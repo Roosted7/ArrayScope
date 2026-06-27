@@ -25,6 +25,23 @@ def test_evaluation_controller_ignores_stale_results(qt_app):
     assert stale == ["old"]
 
 
+def test_evaluation_controller_drains_without_poll_timer(qt_app):
+    from pyqtgraph.Qt import QtTest
+
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    controller = EvaluationController()
+    done = []
+
+    controller.start(lambda: "done", on_done=done.append)
+
+    QtTest.QTest.qWait(80)
+    qt_app.processEvents()
+
+    assert done == ["done"]
+    assert not hasattr(controller, "_poll_timer")
+
+
 def test_evaluation_controller_dedupes_and_limits_prefetch(qt_app):
     from arrayscope.window.evaluation_controller import EvaluationController
 

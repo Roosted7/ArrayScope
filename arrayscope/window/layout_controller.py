@@ -53,6 +53,8 @@ class WindowLayoutManager:
             self.set_managed_dock_visible(win.profile_dock, True, reason="restore-one-dimensional", preserve_canvas=False)
         if not defer_progressive_docks:
             self.sync_progressive_docks(preserve_canvas=False)
+            # Qt event-turn barrier. Dock sizes are applied after Qt has
+            # accepted restored visibility/state.
             Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
 
     def save_window_settings(self):
@@ -101,6 +103,8 @@ class WindowLayoutManager:
         else:
             self.set_managed_dock_visible(win.operation_dock, False, reason="reset-operations", preserve_canvas=False)
         self._add_dock_to_panel_area(win.profile_dock)
+        # Qt event-turn barrier. Default dock resize depends on the redocked
+        # widgets being present in the main window layout.
         Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
 
     def set_operation_dock_visible_from_user(self, visible):
@@ -150,12 +154,16 @@ class WindowLayoutManager:
             self.schedule_view_geometry_refresh()
 
     def schedule_view_geometry_refresh(self):
+        # Qt event-turn barrier. View geometry is sampled after pending dock
+        # visibility changes settle.
         Qt.QtCore.QTimer.singleShot(0, self.refresh_view_geometry)
 
     def set_dock_visible_later(self, dock, visible, *, preserve_canvas=True):
         self._state_for(dock).auto_visible = bool(visible)
         generation = int(self._dock_visibility_generations.get(dock, 0)) + 1
         self._dock_visibility_generations[dock] = generation
+        # Qt event-turn barrier guarded by a per-dock generation so superseded
+        # visibility requests cannot apply later.
         Qt.QtCore.QTimer.singleShot(
             0,
             lambda dock=dock, visible=visible, preserve_canvas=preserve_canvas, generation=generation: self.apply_queued_dock_visibility(
@@ -246,6 +254,8 @@ class WindowLayoutManager:
         restore_viewport_shape = getattr(win, "_restore_file_session_viewport_shape_after_show", None)
         locked_restore_range = getattr(win, "_file_session_restore_locked_view_range", lambda: None)
         if callable(restore_viewport_shape) and callable(locked_restore_range) and locked_restore_range() is not None:
+            # Qt event-turn barrier. A restored file viewport shape follows the
+            # dock visibility transition that changed the central viewport.
             Qt.QtCore.QTimer.singleShot(0, restore_viewport_shape)
 
     def _window_alive(self) -> bool:

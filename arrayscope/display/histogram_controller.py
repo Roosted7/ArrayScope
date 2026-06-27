@@ -37,6 +37,8 @@ class HistogramLevelPreviewController(QtCore.QObject):
         self.interval_ms = int(interval_ms)
         self.pending_levels = None
         self.last_applied_levels = None
+        # Bounded preview coalescer. Manual level drags can fire faster than
+        # the backend can redraw; final release still flushes immediately.
         self.timer = QtCore.QTimer(owner)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.flush_preview)
@@ -103,6 +105,8 @@ class HistogramDisplayController(QtCore.QObject):
         self.owner = owner
         self.min_bin_screen_px = max(1, int(min_bin_screen_px))
         self._refresh_pending = False
+        # Qt event-turn barrier. PyQtGraph emits multiple range/image signals
+        # during one interaction; this collapses them to one latest refresh.
         self._refresh_timer = QtCore.QTimer(owner)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.timeout.connect(self._refresh_from_timer)
@@ -116,6 +120,8 @@ class HistogramDisplayController(QtCore.QObject):
         self._manual_popup: HistogramLevelEditPopup | None = None
         self._manual_start_levels: tuple[float, float] | None = None
         self._pending_span_edit_scene_pos: QtCore.QPointF | None = None
+        # User-input timeout matching Qt's double-click interval. It prevents
+        # a single-click edit from stealing a double-click auto-window gesture.
         self._pending_span_edit_timer = QtCore.QTimer(owner)
         self._pending_span_edit_timer.setSingleShot(True)
         self._pending_span_edit_timer.timeout.connect(self._flush_pending_span_edit)

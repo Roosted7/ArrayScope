@@ -491,6 +491,10 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             self._profile_dock_user_visible = False
         if not visible and self.widgets['buttons']['display']['live_profile'].isChecked():
             self.widgets['buttons']['display']['live_profile'].setChecked(False)
+        if visible:
+            retry_profile = getattr(self, "_retry_loading_montage_profile", None)
+            if callable(retry_profile):
+                retry_profile()
 
     def _on_inspection_dock_visibility_changed(self, visible):
         if getattr(self, "_closing", False):
@@ -909,13 +913,18 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._coerce_channel_for_current_dtype()
         control_start = perf_counter()
-        self._sync_controls_from_view_state()
-        if hasattr(self, "tab_widget"):
-            self.tab_widget.setVisible(self.data.ndim >= 2)
-        self._update_channel_controls()
-        self.update_dimension_controls()
-        self.update_complex_indicators()
-        self.update_shift_indicators()
+        if self._interactive_slice_controls_are_current(reason=reason, defer_side_panels=defer_side_panels):
+            if hasattr(self, "tab_widget"):
+                self.tab_widget.setVisible(self.data.ndim >= 2)
+        else:
+            self._sync_controls_from_view_state()
+            if hasattr(self, "tab_widget"):
+                self.tab_widget.setVisible(self.data.ndim >= 2)
+            self._update_channel_controls()
+            self.update_dimension_controls()
+            self.update_complex_indicators()
+            self.update_shift_indicators()
+            self._interactive_slice_controls_synced_state = None
         self._last_control_sync_ms = (perf_counter() - control_start) * 1000.0
         self.update_image_view(force_autolevel=force_autolevel, defer_side_panels=defer_side_panels)
         if defer_side_panels:
@@ -927,3 +936,11 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             self._sync_progressive_docks()
             self._deferred_side_panel_refresh_pending = False
         self._last_render_sync_ms = (perf_counter() - render_start) * 1000.0
+
+    def _interactive_slice_controls_are_current(self, *, reason: str, defer_side_panels: bool) -> bool:
+        if not bool(defer_side_panels):
+            return False
+        if str(reason) != "slice":
+            return False
+        synced_state = getattr(self, "_interactive_slice_controls_synced_state", None)
+        return synced_state == self.view_state

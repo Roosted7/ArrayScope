@@ -61,7 +61,7 @@ def test_nearby_slice_prefetch_skips_when_setting_disabled(qtbot):
         win.close()
 
 
-def test_prefetch_waits_for_idle_timer(qtbot):
+def test_prefetch_dispatch_is_queued_but_not_timer_admitted(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import AppSettingsState
     from arrayscope.window import ArrayScopeWindow
@@ -73,9 +73,8 @@ def test_prefetch_waits_for_idle_timer(qtbot):
         win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
         win._active_slice_axis = 2
         win._schedule_prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
-        _process_events(qtbot, count=5)
-        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled == 0
-        _process_events(qtbot, count=30)
+        assert not hasattr(win, "_prefetch_idle_timer")
+        _process_events(qtbot, count=10)
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > 0
     finally:
         win.close()

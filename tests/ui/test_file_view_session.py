@@ -126,6 +126,88 @@ def test_restored_roi_session_schedules_semantic_stats_refresh(qt_app, tmp_path)
     assert refresh_reasons == ["file-session-restore"]
 
 
+def test_restored_file_session_viewport_releases_camera_lock_after_apply(qt_app, tmp_path):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.view_session import ViewportSession
+    from arrayscope.display.viewport import ViewportMode
+
+    path = tmp_path / "scan.npy"
+    data = np.zeros((4, 5), dtype=np.float32)
+    np.save(path, data)
+    window = _FakeFileSessionWindow(path, data, QtCore.QSettings())
+    calls = []
+
+    class View:
+        def setRange(self, *, xRange, yRange, padding=0):
+            calls.append((tuple(xRange), tuple(yRange), padding))
+
+    controller = SimpleNamespace(mode=ViewportMode.USER, last_display_rect=(0.0, 0.0, 5.0, 4.0), fit=lambda _view: calls.append("fit"))
+    window.img_view = SimpleNamespace(
+        getView=lambda: View(),
+        viewport_controller=controller,
+        _viewport_applying=False,
+    )
+    window.view_state = SimpleNamespace(montage_axis=None)
+    window._committed_display_frame = SimpleNamespace(geometry=SimpleNamespace(display_shape=(4, 5)))
+    window._is_committed_display_frame_current = lambda _frame: True
+    window._suppress_montage_autofit_revert_message = True
+    window._schedule_file_session_viewport_retarget = lambda: None
+    window._file_session_restore = _restore_transaction(
+        viewport=ViewportSession(
+            mode="user",
+            view_range=((1.0, 3.0), (1.0, 3.0)),
+            viewport_shape=(200, 300),
+        )
+    )
+    window._file_session_restore.message_enabled = False
+
+    window._apply_file_session_viewport_when_ready()
+    window._apply_file_session_viewport_when_ready()
+
+    assert calls == [((1.0, 3.0), (1.0, 3.0), 0)]
+    assert window._file_session_restore.applied
+    assert not window._file_session_restore.camera_locked
+
+
+def test_restored_file_session_viewport_rejects_invalid_range(qt_app, tmp_path):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.view_session import ViewportSession
+    from arrayscope.display.viewport import ViewportMode
+
+    path = tmp_path / "scan.npy"
+    data = np.zeros((4, 5), dtype=np.float32)
+    np.save(path, data)
+    window = _FakeFileSessionWindow(path, data, QtCore.QSettings())
+    calls = []
+    view = SimpleNamespace(setRange=lambda **_kwargs: calls.append("range"))
+    controller = SimpleNamespace(mode=ViewportMode.USER, last_display_rect=(0.0, 0.0, 5.0, 4.0), fit=lambda _view: calls.append("fit"))
+    window.img_view = SimpleNamespace(
+        getView=lambda: view,
+        viewport_controller=controller,
+        _viewport_applying=False,
+    )
+    window.view_state = SimpleNamespace(montage_axis=None)
+    window._committed_display_frame = SimpleNamespace(geometry=SimpleNamespace(display_shape=(4, 5)))
+    window._is_committed_display_frame_current = lambda _frame: True
+    window._suppress_montage_autofit_revert_message = True
+    window._file_session_restore = _restore_transaction(
+        viewport=ViewportSession(
+            mode="user",
+            view_range=((1.0, 1.0), (0.0, 4.0)),
+            viewport_shape=(200, 300),
+        )
+    )
+    window._file_session_restore.message_enabled = False
+
+    window._apply_file_session_viewport_when_ready()
+
+    assert calls == ["fit"]
+    assert window._file_session_restore.applied
+    assert not window._file_session_restore.camera_locked
+
+
 def test_restored_file_session_uses_restore_render_path(qtbot, monkeypatch):
     from arrayscope.window.main import ArrayScopeWindow
 
@@ -492,14 +574,15 @@ def test_tiled_single_scene_range_change_schedules_tiled_viewport_update(qt_app,
         _release_file_session_restore_camera_lock=lambda: None,
         _note_viewport_interaction=lambda _reason: None,
         _update_display_group_title=lambda: None,
-        _committed_display_frame=SimpleNamespace(
-            scene=DisplayScene(
-                geometry=object(),
-                layout=DisplayLayout.SINGLE,
-                regions=(),
-                bounds=(0.0, 0.0, 1.0, 1.0),
-            )
-        ),
+            _committed_display_frame=SimpleNamespace(
+                scene=DisplayScene(
+                    geometry=object(),
+                    layout=DisplayLayout.SINGLE,
+                    regions=(),
+                    bounds=(0.0, 0.0, 1.0, 1.0),
+                ),
+                value_source=SimpleNamespace(payloads={}),
+            ),
         _schedule_tiled_viewport_update=lambda: scheduled.append("tiled"),
         view_state=SimpleNamespace(montage_axis=None),
     )

@@ -23,6 +23,7 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.setMovable(False)
         self.setIconSize(Qt.QtCore.QSize(16, 16))
         self.setStyleSheet(TOOL_BUTTON_STYLE)
+        self._channel_options_state: tuple[tuple[str, bool], ...] | None = None
 
         self.channel_combo = QtWidgets.QComboBox()
         for label, value in (("Complex", "complex"), ("Real", "real"), ("Abs", "abs"), ("Imag", "imag"), ("Phase", "angle")):
@@ -72,6 +73,13 @@ class DisplayToolbar(QtWidgets.QToolBar):
             configure_tool_button(button)
 
     def set_channel_options(self, enabled_channels):
+        state = tuple(
+            (str(self.channel_combo.itemData(index)), bool(enabled_channels.get(self.channel_combo.itemData(index), False)))
+            for index in range(self.channel_combo.count())
+        )
+        if self._channel_options_state == state:
+            return
+        self._channel_options_state = state
         for index in range(self.channel_combo.count()):
             value = self.channel_combo.itemData(index)
             item = self.channel_combo.model().item(index)

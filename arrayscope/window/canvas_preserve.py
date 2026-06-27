@@ -133,6 +133,9 @@ class CanvasPreserveController:
         transition()
         self.layout_manager._activate_main_window_layout()
         self.layout_manager._restore_visible_dock_extents(dock_extents)
+        # Qt event-turn barrier guarded by `generation`. The correction needs
+        # the post-transition viewport size; remove when Qt exposes a reliable
+        # dock-layout-complete signal.
         Qt.QtCore.QTimer.singleShot(
             0,
             lambda: self._correct_canvas_size(
@@ -256,6 +259,8 @@ class CanvasPreserveController:
             self._record("resize", f"gen={generation} window={new_width}x{new_height}")
             self.layout_manager._restore_visible_dock_extents(dock_extents)
         next_attempts = attempts if attempts == 1 and self.constraints_active and not strong_used else attempts - 1
+        # Qt layout retry guarded by `generation` and bounded attempt count.
+        # This handles compositor-delayed resize application.
         Qt.QtCore.QTimer.singleShot(
             _CANVAS_PRESERVE_RETRY_MS,
             lambda: self._correct_canvas_size(
@@ -300,6 +305,8 @@ class CanvasPreserveController:
         if handle is not None:
             handle.resize(current_size)
             handle.requestUpdate()
+        # Wayland commit nudge guarded by `generation`; remove when the strong
+        # preserve path no longer needs compositor acknowledgement nudges.
         Qt.QtCore.QTimer.singleShot(
             _CANVAS_STRONG_PRESERVE_NUDGE_MS,
             lambda: self._nudge_window_resize_commit(generation, target_size=current_size),
@@ -323,6 +330,7 @@ class CanvasPreserveController:
         if handle is not None:
             handle.resize(nudge_size)
             handle.requestUpdate()
+        # Wayland commit nudge completion guarded by `generation`.
         Qt.QtCore.QTimer.singleShot(
             _CANVAS_STRONG_PRESERVE_NUDGE_MS,
             lambda: self._finish_window_resize_commit_nudge(generation, target_size=target_size),
@@ -380,6 +388,8 @@ class CanvasPreserveController:
     def _schedule_strong_preserve_release(self, generation: int) -> None:
         if self._strong_preserve_constraints is None:
             return
+        # User/layout timeout guarded by `generation`. It releases temporary
+        # size constraints after the compositor has had time to apply them.
         Qt.QtCore.QTimer.singleShot(
             _CANVAS_STRONG_PRESERVE_HOLD_MS,
             lambda: self._release_strong_preserve_constraints(generation),

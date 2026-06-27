@@ -9,30 +9,34 @@ from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import stage_document_key
-from arrayscope.operations.render_plan import MAX_IDLE_PREFETCH_SLICES, PREFETCH_IDLE_DELAY_MS
+from arrayscope.operations.render_plan import MAX_IDLE_PREFETCH_SLICES
 from arrayscope.operations.slabs import plan_slab, request_for_image
 
 
 class RenderPrefetchMixin:
-    def _ensure_prefetch_idle_timer(self):
-        timer = getattr(self, "_prefetch_idle_timer", None)
-        if timer is None:
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.setInterval(PREFETCH_IDLE_DELAY_MS)
-            timer.timeout.connect(self._run_pending_prefetch)
-            self._prefetch_idle_timer = timer
-        return timer
-
     def _schedule_prefetch_nearby_slices(self, view_state, colormap_lut):
         if not getattr(self.app_settings, "prefetch_nearby_slices", False):
             self.operation_evaluator.note_prefetch_skipped()
             return
         self._pending_prefetch_request = (view_state, colormap_lut)
-        timer = self._ensure_prefetch_idle_timer()
-        timer.start(PREFETCH_IDLE_DELAY_MS)
+        revision = int(getattr(self, "_prefetch_dispatch_revision", 0) or 0) + 1
+        self._prefetch_dispatch_revision = revision
+        if bool(getattr(self, "_prefetch_dispatch_queued", False)):
+            return
+        self._prefetch_dispatch_queued = True
+        # Qt event-turn barrier. The queued callback collapses rapid slice
+        # changes to the latest request; WorkGraph/resource gates below decide
+        # whether speculation is actually allowed.
+        Qt.QtCore.QTimer.singleShot(0, lambda revision=revision: self._run_pending_prefetch(revision))
 
-    def _run_pending_prefetch(self):
+    def _run_pending_prefetch(self, revision: int | None = None):
+        self._prefetch_dispatch_queued = False
+        if revision is not None and int(revision) != int(getattr(self, "_prefetch_dispatch_revision", 0) or 0):
+            if getattr(self, "_pending_prefetch_request", None) is not None:
+                self._prefetch_dispatch_queued = True
+                latest = int(getattr(self, "_prefetch_dispatch_revision", 0) or 0)
+                Qt.QtCore.QTimer.singleShot(0, lambda revision=latest: self._run_pending_prefetch(revision))
+            return
         request = getattr(self, "_pending_prefetch_request", None)
         self._pending_prefetch_request = None
         if request is None:

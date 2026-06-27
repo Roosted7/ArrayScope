@@ -109,52 +109,73 @@ class DimensionChip(QtWidgets.QFrame):
         self.setLayout(layout)
         self.setMinimumWidth(220)
         self.setMaximumWidth(238)
+        self._button_icon_state: dict[QtWidgets.QAbstractButton, tuple[str, str | None]] = {}
 
     def update_state(self, shape, view_state, profile_axes=()):
         size = int(shape[self.axis])
         self._axis_size = size
-        self.axis_label.setText(f"{self.axis} [{size}]")
+        _set_text_if_changed(self.axis_label, f"{self.axis} [{size}]")
         image_axes = view_state.image_axes or ()
         is_y = len(image_axes) > 0 and image_axes[0] == self.axis
         is_x = len(image_axes) > 1 and image_axes[1] == self.axis
         is_p = self.axis in tuple(profile_axes or ())
         is_m = getattr(view_state, "montage_axis", None) == self.axis
-        self.y_button.setChecked(is_y)
-        self.x_button.setChecked(is_x)
-        self.p_button.setChecked(is_p)
-        set_button_icon(self.y_button, "arrow_downward" if is_y and view_state.axis_flipped[self.axis] else "arrow_upward")
-        set_button_icon(self.x_button, "arrow_forward" if is_x and view_state.axis_flipped[self.axis] else "arrow_back")
+        _set_checked_if_changed(self.y_button, is_y)
+        _set_checked_if_changed(self.x_button, is_x)
+        _set_checked_if_changed(self.p_button, is_p)
         tiled_tooltip = "Use this range as an image-axis crop"
-        self.y_button.setToolTip(tiled_tooltip if is_m else ("Flip Y direction" if is_y else f"Use dim {self.axis} as image Y axis"))
-        self.x_button.setToolTip(tiled_tooltip if is_m else ("Flip X direction" if is_x else f"Use dim {self.axis} as image X axis"))
-        self.p_button.setToolTip(f"Toggle dim {self.axis} as profile axis")
+        y_tooltip = tiled_tooltip if is_m else ("Flip Y direction" if is_y else f"Use dim {self.axis} as image Y axis")
+        x_tooltip = tiled_tooltip if is_m else ("Flip X direction" if is_x else f"Use dim {self.axis} as image X axis")
+        self._set_button_icon_if_changed(
+            self.y_button,
+            "arrow_downward" if is_y and view_state.axis_flipped[self.axis] else "arrow_upward",
+            tooltip=y_tooltip,
+        )
+        self._set_button_icon_if_changed(
+            self.x_button,
+            "arrow_forward" if is_x and view_state.axis_flipped[self.axis] else "arrow_back",
+            tooltip=x_tooltip,
+        )
+        _set_tooltip_if_changed(self.p_button, f"Toggle dim {self.axis} as profile axis")
         is_display_axis = self.axis in image_axes or is_m
         is_singleton = size == 1
         can_use_as_image = not is_singleton and view_state.image_axes is not None
-        self.y_button.setEnabled(can_use_as_image)
-        self.x_button.setEnabled(can_use_as_image)
-        self.p_button.setEnabled(not is_singleton)
+        _set_enabled_if_changed(self.y_button, can_use_as_image)
+        _set_enabled_if_changed(self.x_button, can_use_as_image)
+        _set_enabled_if_changed(self.p_button, not is_singleton)
         self.slice_edit.blockSignals(True)
         try:
             axis_text = None
             if getattr(view_state, "axis_range_text", None):
                 axis_text = view_state.axis_range_text[self.axis]
             if axis_text is not None:
-                self.slice_edit.setText(str(axis_text))
+                self._set_slice_text_if_changed(str(axis_text))
             elif is_m and getattr(view_state, "montage_text", None):
-                self.slice_edit.setText(str(view_state.montage_text))
+                self._set_slice_text_if_changed(str(view_state.montage_text))
             elif self.axis in image_axes:
-                self.slice_edit.setText(":")
+                self._set_slice_text_if_changed(":")
             else:
-                self.slice_edit.setText(str(view_state.slice_indices[self.axis]))
-            self.slice_edit.setEnabled(not is_singleton)
-            self.slice_edit.setVisible(True)
-            self.slice_edit.setToolTip(
+                self._set_slice_text_if_changed(str(view_state.slice_indices[self.axis]))
+            _set_enabled_if_changed(self.slice_edit, not is_singleton)
+            _set_visible_if_changed(self.slice_edit, True)
+            _set_tooltip_if_changed(
+                self.slice_edit,
                 "Slice index or range. Python default: 0:100:2. "
-                "MATLAB fallback: 0:2:100. Lists: 0 5 8. Repair: 0-100 -> 0:100."
+                "MATLAB fallback: 0:2:100. Lists: 0 5 8. Repair: 0-100 -> 0:100.",
             )
         finally:
             self.slice_edit.blockSignals(False)
+
+    def _set_button_icon_if_changed(self, button, name: str, *, tooltip: str | None = None) -> None:
+        key = (str(name), tooltip)
+        if self._button_icon_state.get(button) == key:
+            return
+        set_button_icon(button, name, tooltip=tooltip)
+        self._button_icon_state[button] = key
+
+    def _set_slice_text_if_changed(self, text: str) -> None:
+        if self.slice_edit.text() != text:
+            self.slice_edit.setText(text)
 
     def _slice_edit_finished(self):
         text = self.slice_edit.text().strip()
@@ -251,6 +272,8 @@ class DimensionStrip(QtWidgets.QWidget):
         if self._relayout_pending:
             return
         self._relayout_pending = True
+        # Qt event-turn barrier. Resize events can arrive before the final
+        # contents rect is stable; `_relayout_pending` guards the latest pass.
         QtCore.QTimer.singleShot(0, self._run_scheduled_relayout)
 
     def _run_scheduled_relayout(self):
@@ -295,3 +318,31 @@ class DimensionStrip(QtWidgets.QWidget):
 
 def _shift_slice_text(text, delta, axis_size):
     return shift_slice_selection_text(text, delta, axis_size)
+
+
+def _set_text_if_changed(widget, text: str) -> None:
+    if widget.text() != text:
+        widget.setText(text)
+
+
+def _set_checked_if_changed(button, checked: bool) -> None:
+    checked = bool(checked)
+    if button.isChecked() != checked:
+        button.setChecked(checked)
+
+
+def _set_enabled_if_changed(widget, enabled: bool) -> None:
+    enabled = bool(enabled)
+    if widget.isEnabled() != enabled:
+        widget.setEnabled(enabled)
+
+
+def _set_visible_if_changed(widget, visible: bool) -> None:
+    visible = bool(visible)
+    if widget.isVisible() != visible:
+        widget.setVisible(visible)
+
+
+def _set_tooltip_if_changed(widget, tooltip: str) -> None:
+    if widget.toolTip() != tooltip:
+        widget.setToolTip(tooltip)

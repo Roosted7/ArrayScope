@@ -33,6 +33,8 @@ def show_status_action(window, message, action_text, on_action, timeout=5000):
     widget.show()
     widget.raise_()
 
+    # User-visible timeout. The widget owns the timer, and clicking or replacing
+    # the status action clears it explicitly.
     timer = Qt.QtCore.QTimer(widget)
     timer.setSingleShot(True)
 

@@ -191,7 +191,11 @@ class ArrayScopeWindow(
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
 
+            # Qt event-turn barrier. The callback rechecks restore readiness
+            # after the first show/layout pass.
             Qt.QtCore.QTimer.singleShot(0, finish_restored_file_session_viewport)
+        # Qt event-turn barrier. Progressive dock preservation starts after
+        # startup layout has settled.
         Qt.QtCore.QTimer.singleShot(0, lambda: setattr(self, "_progressive_preserve_enabled", True))
 
         # Set up file watcher if a filepath was provided (QFileSystemWatcher uses
@@ -236,6 +240,8 @@ class ArrayScopeWindow(
     def _ensure_resource_governor_timer(self):
         timer = getattr(self, "_resource_governor_timer", None)
         if timer is None:
+            # Feedback sampling timer. It only adjusts policy from observed
+            # scheduler/resource state; it does not order rendering semantics.
             timer = Qt.QtCore.QTimer(self)
             timer.timeout.connect(self._on_resource_governor_timer)
             self._resource_governor_timer = timer
@@ -368,6 +374,8 @@ class ArrayScopeWindow(
         self._viewport_interaction_active = True
         timer = getattr(self, "_viewport_interaction_quiet_timer", None)
         if timer is None:
+            # User-interaction quiet detector. It only releases deferred
+            # viewport work after resize/range activity settles.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._on_viewport_interaction_quiet)

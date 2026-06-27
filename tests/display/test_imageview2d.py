@@ -557,6 +557,44 @@ def test_repeated_fast_updates_do_not_rebind_same_histogram_item(qt_app, monkeyp
 
 
 
+def test_tiled_single_tile_histogram_comes_from_payload_after_montage(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload
+
+    view = ImageView2D()
+    try:
+        _present_tiled(
+            view,
+            np.zeros((2, 5), dtype=np.float32),
+            histogramData=None,
+            histogramPlotData=np.arange(4, dtype=np.float32),
+            geometry=_single_tile_geometry(np.zeros((2, 5), dtype=np.float32)),
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+        )
+
+        single_hist = np.full((2, 2), 42.0, dtype=np.float32)
+        payloads = {
+            0: DisplayTilePayload(0, 0, np.zeros((2, 2), dtype=np.float32), single_hist, ("single", 0)),
+        }
+        _present_tiled(
+            view,
+            np.zeros((2, 2), dtype=np.float32),
+            histogramData=None,
+            histogramPlotData=None,
+            geometry=_single_tile_geometry(np.zeros((2, 2), dtype=np.float32)),
+            montage_tile_payloads=payloads,
+            levels=(40.0, 45.0),
+            histogramRange=(40.0, 45.0),
+        )
+
+        assert view.histogramSource is None
+        np.testing.assert_array_equal(view.histogramPlotSource, single_hist)
+        np.testing.assert_array_equal(view.histogramImageItem.image, single_hist)
+    finally:
+        view.close()
+
+
 def test_typed_tiled_single_plane_uses_real_pyqtgraph_items(qt_app):
     from arrayscope.core.scheduler import FrameTarget
     from arrayscope.core.view_state import ViewState

@@ -1123,6 +1123,94 @@ def test_montage_commit_token_ignores_viewport_only_revision_changes():
     assert _montage_work_token(session, "priority_retarget") != priority_token
 
 
+def test_montage_viewport_update_token_tracks_viewport_revision():
+    from arrayscope.window.montage_renderer import _montage_work_token
+
+    session = SimpleNamespace(
+        session_id=1,
+        key="session",
+        render_generation=2,
+        payload_revision=3,
+        level_revision=4,
+        viewport_revision=5,
+    )
+    viewport_token = _montage_work_token(session, "viewport_update")
+
+    session.viewport_revision += 1
+
+    assert _montage_work_token(session, "viewport_update") != viewport_token
+
+
+def test_stale_montage_viewport_update_token_does_not_run():
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class _Window(MontageRenderMixin):
+        def __init__(self):
+            self.view_state = SimpleNamespace(montage_axis=2)
+            self._montage_session = SimpleNamespace(
+                session_id=1,
+                key="session",
+                render_generation=2,
+                payload_revision=3,
+                level_revision=4,
+                viewport_revision=6,
+            )
+            self._montage_viewport_update_token = (
+                "session",
+                "session",
+                2,
+                5,
+            )
+            self.called = False
+
+        def _try_update_montage_viewport_only(self):
+            self.called = True
+            return True
+
+    win = _Window()
+
+    win._run_montage_viewport_update()
+
+    assert win.called is False
+
+
+def test_loading_montage_profile_retry_waits_for_visibility_without_timer():
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class _LiveProfile:
+        def isChecked(self):
+            return True
+
+    class _ProfileDock:
+        visible = False
+
+        def isVisible(self):
+            return bool(self.visible)
+
+    class _Window(MontageRenderMixin):
+        def __init__(self):
+            self.view_state = SimpleNamespace(montage_axis=2)
+            self.widgets = {"buttons": {"display": {"live_profile": _LiveProfile()}}}
+            self.profile_dock = _ProfileDock()
+            self.updated = []
+
+        def _update_live_profile_from_pending_pos(self):
+            self.updated.append(self._pending_profile_point)
+
+    win = _Window()
+
+    win._schedule_loading_montage_profile_retry(1.0, 2.0)
+
+    assert not hasattr(win, "_montage_profile_retry_timer")
+    assert win.updated == []
+    assert win._pending_montage_profile_retry == (1.0, 2.0)
+
+    win.profile_dock.visible = True
+    win._retry_loading_montage_profile()
+
+    assert win.updated == [(1.0, 2.0)]
+
+
 def test_native_tiled_payloads_publish_semantic_histogram_for_partial_commit():
     from arrayscope.core.window_levels import LevelSourceRank
     from arrayscope.display.model.frame import DisplayTilePayload

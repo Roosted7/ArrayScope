@@ -28,6 +28,7 @@ from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
 from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.imageview2d import _tile_commit_report
+from arrayscope.display.imageview2d import _histogram_data_from_tile_payloads
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import DisplayInteractionState
@@ -148,6 +149,14 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_main_source_shader_mapping = None
         self._last_vispy_main_shader_mapping = None
         self._last_vispy_main_texture_kind = None
+        self._pending_vispy_histogram_update = None
+        self._vispy_histogram_update_pending = False
+        # Lower-priority metadata continuation. Pixel commits are synchronous;
+        # PyQtGraph histogram/LUT painting is latest-only secondary work and is
+        # admitted only when no interactive render is pending.
+        self._vispy_histogram_timer = QtCore.QTimer(self)
+        self._vispy_histogram_timer.setSingleShot(True)
+        self._vispy_histogram_timer.timeout.connect(self._flush_pending_vispy_histogram_update)
         self._vispy_display_shape: tuple[int, int] = (1, 1)
         self._vispy_camera_sync_pending = False
         self._vispy_camera_key = None
@@ -210,6 +219,7 @@ class VisPyImageView2D(ImageViewShell):
         pending_clear = getattr(self, "_vispy_pending_overlay_clear_request_count", None)
         if pending_clear is not None and self._vispy_tile_presentation_draw_count >= int(pending_clear):
             self._hide_vispy_montage_tile_overlays_now(request_update=False)
+        self._mark_presentation_drawn()
 
     def vispyPresentationDiagnostics(self) -> dict[str, object]:
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
@@ -246,6 +256,13 @@ class VisPyImageView2D(ImageViewShell):
         diagnostics.update(self.vispyPresentationDiagnostics())
         diagnostics["interaction_event_owner"] = self.interaction_event_owner()
         return diagnostics
+
+    def presentationDrawPending(self) -> bool:
+        return bool(
+            super().presentationDrawPending()
+            or getattr(self, "_vispy_canvas_update_pending", False)
+            or self._vispy_tile_presentation_draw_pending()
+        )
 
     def interaction_event_owner(self) -> str:
         return "shared-controller"
@@ -411,11 +428,16 @@ class VisPyImageView2D(ImageViewShell):
                 semantic_data=semantic_data,
                 lod=lod,
             )
-            self._update_histogram_for_vispy(histogramData, histogramPlotData, display_levels)
-            self._sync_display_levels(display_levels[0], display_levels[1], update_image=False, emit_user=False)
+            self._set_vispy_display_levels(display_levels)
+            self._request_histogram_for_vispy(
+                histogramData,
+                histogramPlotData,
+                display_levels,
+                histogramRange=(self.getHistogramDataBounds() or display_levels) if autoHistogramRange else None,
+            )
             if autoHistogramRange:
                 bounds = self.getHistogramDataBounds() or display_levels
-                self.histogram.setHistogramRange(float(bounds[0]), float(bounds[1]))
+                self.setHistogramDataBounds(bounds)
             self._update_profile_line_bounds()
             self._updateAspectRatio()
             self._sync_vispy_bounds(tuple(img.shape[:2]), image_origin=image_origin)
@@ -472,10 +494,15 @@ class VisPyImageView2D(ImageViewShell):
                 semantic_data=semantic_data,
                 lod=lod,
             )
-            self._update_histogram_for_vispy(histogramData, histogramPlotData, display_levels)
-            self._sync_display_levels(display_levels[0], display_levels[1], update_image=False, emit_user=False)
+            self._set_vispy_display_levels(display_levels)
+            self._request_histogram_for_vispy(
+                histogramData,
+                histogramPlotData,
+                display_levels,
+                histogramRange=histogramRange,
+            )
             if histogramRange is not None:
-                self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+                self.setHistogramDataBounds(histogramRange)
             self._update_profile_line_bounds()
             self._sync_vispy_bounds(tuple(img.shape[:2]), image_origin=image_origin)
             self._refresh_viewport_content_rect(
@@ -526,7 +553,12 @@ class VisPyImageView2D(ImageViewShell):
                 rgb_already_windowed=rgb_already_windowed,
                 frame_plan=frame_plan,
             )
-            histogram_key = _tiled_histogram_key(histogramRange, tile_delta=tile_delta)
+            histogram_key = _tiled_histogram_key(
+                histogramRange,
+                histogramPlotData=histogramPlotData,
+                source_key=source_key,
+                tile_delta=tile_delta,
+            )
             viewport_key = (
                 structure_key,
                 str(getattr(viewport_policy, "value", viewport_policy)),
@@ -635,13 +667,28 @@ class VisPyImageView2D(ImageViewShell):
             self._request_vispy_tile_layer_redraw()
 
             # Histogram, levels, geometry, and viewport are separate concerns.
-            # A level-only change must not look like a full structural commit.
-            histogram_changed = histogram_key != previous_histogram_key or not data_unchanged
+            # Cached visible-tile switches must not repaint the PyQtGraph
+            # histogram/axes unless the histogram stream itself changed.  This
+            # keeps VisPy pixel commits from inheriting PyQtGraph LUT repaint
+            # cost on every scroll step.
+            histogram_changed = histogram_key != previous_histogram_key
             if histogram_changed and not loading_only:
-                self._update_histogram_for_vispy(histogramData, histogramPlotData, level_key)
-                self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+                self._request_histogram_for_vispy(
+                    histogramData,
+                    histogramPlotData,
+                    level_key,
+                    histogramRange=histogramRange,
+                )
             if levels_changed and not loading_only:
-                self._sync_display_levels(level_key[0], level_key[1], update_image=False, emit_user=False)
+                self._set_vispy_display_levels(level_key)
+                if not histogram_changed:
+                    self._request_histogram_for_vispy(
+                        self.histogramSource,
+                        self.histogramPlotSource,
+                        level_key,
+                        histogramRange=None,
+                        defer=True,
+                    )
 
             montage_shape = None
             if structure_changed:
@@ -694,10 +741,11 @@ class VisPyImageView2D(ImageViewShell):
             for tile, payload in tile_state.near_payloads(tile_delta).items()
             if int(tile) not in tile_payloads
         }
+        histogram_data = _histogram_data_from_tile_payloads(tile_payloads)
         stats = self._apply_vispy_tile_layer_presentation(
             placeholder,
             histogramData=None,
-            histogramPlotData=histogramPlotData,
+            histogramPlotData=histogramPlotData if histogramPlotData is not None else histogram_data,
             geometry=geometry,
             levels=levels,
             histogramRange=histogramRange,
@@ -743,6 +791,8 @@ class VisPyImageView2D(ImageViewShell):
         }
         timer = self._vispy_warm_tile_timer
         if timer is None:
+            # Bounded speculative continuation. Visible commits finish before
+            # warm residency starts, and camera sync cancels stale warm work.
             timer = QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._process_vispy_warm_tile_residency)
@@ -1457,6 +1507,94 @@ class VisPyImageView2D(ImageViewShell):
         self._bind_histogram_item(self.histogramImageItem)
         self._set_image_item_data(self.histogramImageItem, plot_data, self._histogram_levels_for_display(levels), role="histogram")
 
+    def _set_vispy_display_levels(self, levels) -> None:
+        low, high = (float(levels[0]), float(levels[1]))
+        self._displayLevels = (low, high)
+        if self._histogram_preview_controller is not None and self._applying_presentation:
+            self._histogram_preview_controller.cancel()
+
+    def _request_histogram_for_vispy(
+        self,
+        histogramData,
+        histogramPlotData,
+        levels,
+        *,
+        histogramRange=None,
+        refresh_curve: bool = True,
+        defer: bool = False,
+    ) -> None:
+        if not bool(defer) and getattr(self.histogramImageItem, "image", None) is None and not self._vispy_input_interactive():
+            if refresh_curve:
+                self._update_histogram_for_vispy(histogramData, histogramPlotData, levels)
+            self._sync_vispy_histogram_widget_bounds(levels, histogramRange=histogramRange)
+            return
+        self._pending_vispy_histogram_update = (
+            histogramData,
+            histogramPlotData,
+            tuple(float(value) for value in levels),
+            None if histogramRange is None else tuple(float(value) for value in histogramRange),
+            bool(refresh_curve),
+        )
+        if self._vispy_histogram_update_pending:
+            return
+        self._vispy_histogram_update_pending = True
+        self._schedule_pending_vispy_histogram_update()
+
+    def _schedule_pending_vispy_histogram_update(self) -> None:
+        timer = getattr(self, "_vispy_histogram_timer", None)
+        if timer is None or timer.isActive():
+            return
+        timer.start(0 if self._vispy_histogram_can_flush_now() else self._vispy_histogram_retry_interval_ms())
+
+    def _flush_pending_vispy_histogram_update(self) -> None:
+        pending = self._pending_vispy_histogram_update
+        if pending is None:
+            self._vispy_histogram_update_pending = False
+            return
+        if not self._vispy_histogram_can_flush_now():
+            self._schedule_pending_vispy_histogram_update()
+            return
+        self._vispy_histogram_update_pending = False
+        self._pending_vispy_histogram_update = None
+        histogramData, histogramPlotData, levels, histogramRange, refresh_curve = pending
+        if refresh_curve:
+            self._update_histogram_for_vispy(histogramData, histogramPlotData, levels)
+        self._sync_vispy_histogram_widget_bounds(levels, histogramRange=histogramRange)
+
+    def _sync_vispy_histogram_widget_bounds(self, levels, *, histogramRange=None) -> None:
+        applying = self._applying_presentation
+        self._applying_presentation = True
+        try:
+            self.histogram.setLevels(float(levels[0]), float(levels[1]))
+            if histogramRange is not None:
+                self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+        finally:
+            self._applying_presentation = applying
+
+    def _vispy_histogram_can_flush_now(self) -> bool:
+        if self._vispy_input_interactive():
+            return False
+        window = self.window()
+        coordinator = getattr(window, "render_coordinator", None)
+        return not bool(coordinator is not None and getattr(coordinator, "has_pending_render", False))
+
+    def _vispy_histogram_retry_interval_ms(self) -> int:
+        window = self.window()
+        decision_provider = getattr(window, "_ui_work_decision", None)
+        if callable(decision_provider):
+            decision = decision_provider("histogram_refresh", interactive=True)
+            if decision is not None:
+                return max(8, int(getattr(decision, "interval_ms", 16) or 16))
+        return 16
+
+    def _vispy_input_interactive(self) -> bool:
+        window = self.window()
+        coordinator = getattr(window, "render_coordinator", None)
+        return bool(
+            getattr(coordinator, "interactive_active", False)
+            or getattr(window, "_viewport_interaction_active", False)
+        )
+
     def _update_vispy_tile_layer(
         self,
         img,
@@ -1682,6 +1820,8 @@ class VisPyImageView2D(ImageViewShell):
             self._vispy_camera_sync_pending = False
             self._sync_vispy_camera_to_view()
 
+        # Qt event-turn barrier. Multiple range changes collapse to one camera
+        # sync; remove if VisPy exposes a direct safe same-turn camera update.
         QtCore.QTimer.singleShot(0, apply_sync)
 
     def _on_vispy_mouse_move(self, event) -> None:
@@ -1767,12 +1907,18 @@ def _tiled_structure_key(geometry, *, rgb_already_windowed, frame_plan=None):
     )
 
 
-def _tiled_histogram_key(histogram_range, *, tile_delta):
+def _tiled_histogram_key(histogram_range, *, histogramPlotData, source_key, tile_delta):
     if tile_delta is None:
         raise ValueError("VisPy tiled histogram identity requires a TilePresentationDelta")
+    source = None if histogramPlotData is None else np.asarray(histogramPlotData)
     return (
         "revision",
         int(getattr(tile_delta, "histogram_revision")),
+        id(histogramPlotData),
+        source_key,
+        None if source is None else tuple(int(value) for value in source.shape),
+        None if source is None else str(source.dtype),
+        None if source is None else tuple(int(value) for value in source.strides),
         (float(histogram_range[0]), float(histogram_range[1])),
     )
 

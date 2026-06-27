@@ -113,6 +113,9 @@ class DisplayControlBuildMixin:
         self.window_button_group.addButton(self.widgets['buttons']['display']['window_absolute'])
         self._pending_profile_pos = None
         self._pending_profile_point = None
+        # Bounded profile preview coalescer. Mouse motion stores the latest
+        # point; final profile work is guarded by request ids and scheduler
+        # supersession in `window.render`.
         self._profile_timer = Qt.QtCore.QTimer(self)
         self._profile_timer.setSingleShot(True)
         self._profile_timer.setInterval(40)

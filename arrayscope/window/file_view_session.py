@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 import pyqtgraph.Qt as Qt
@@ -17,7 +18,7 @@ from arrayscope.core.view_session import (
     save_session_file,
     settings_key_for_metadata,
 )
-from arrayscope.display.viewport import ViewportMode
+from arrayscope.display.viewport import ViewportMode, constrain_view_range
 from arrayscope.ui.toasts import show_revert_action, show_status_action, show_status_message
 
 
@@ -215,6 +216,8 @@ class FileViewSessionMixin:
         if bool(getattr(self, "_file_session_viewport_shape_restore_pending", False)):
             return
         self._file_session_viewport_shape_restore_pending = True
+        # Qt event-turn barrier. File-session viewport sizing must wait until
+        # the first show/layout pass; attempts and closing checks bound retries.
         Qt.QtCore.QTimer.singleShot(
             0,
             lambda shape=tuple(viewport_shape): self._restore_file_session_viewport_shape_step(
@@ -239,6 +242,8 @@ class FileViewSessionMixin:
         if attempts <= 1 or self._file_session_viewport_shape_matches(viewport_shape):
             self._file_session_viewport_shape_restore_pending = False
             return
+        # Qt layout retry. Bounded by FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS and
+        # removable when dockless viewport restore has a reliable post-layout signal.
         Qt.QtCore.QTimer.singleShot(
             FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS,
             lambda shape=tuple(viewport_shape), attempts=int(attempts) - 1: self._restore_file_session_viewport_shape_step(
@@ -307,8 +312,9 @@ class FileViewSessionMixin:
         if not self._file_session_viewport_restore_ready():
             return
         view = getattr(getattr(self, "img_view", None), "getView", lambda: None)()
-        if view is None or viewport.view_range is None:
+        if view is None:
             return
+        view_range = self._validated_file_session_view_range(viewport.view_range)
         controller = getattr(self.img_view, "viewport_controller", None)
         if controller is not None:
             try:
@@ -320,12 +326,22 @@ class FileViewSessionMixin:
                 and controller.mode == ViewportMode.AUTO_UNTOUCHED
             ):
                 controller.mode = ViewportMode.USER
-            elif controller.mode == ViewportMode.AUTO_UNTOUCHED:
-                controller.last_auto_view_range = viewport.view_range
+            elif controller.mode == ViewportMode.AUTO_UNTOUCHED and view_range is not None:
+                controller.last_auto_view_range = view_range
+        if view_range is None:
+            if controller is not None:
+                controller.fit(view)
+            restore.camera_locked = False
+            restore.applied = True
+            self._suppress_montage_autofit_revert_message = False
+            sync_viewport = getattr(self.img_view, "_sync_vispy_camera_to_view", None)
+            if callable(sync_viewport):
+                sync_viewport()
+            return
         previous_applying = bool(getattr(self.img_view, "_viewport_applying", False))
         self.img_view._viewport_applying = True
         try:
-            view.setRange(xRange=viewport.view_range[0], yRange=viewport.view_range[1], padding=0)
+            view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
         finally:
             self.img_view._viewport_applying = previous_applying
         sync_viewport = getattr(self.img_view, "_sync_vispy_camera_to_view", None)
@@ -336,6 +352,7 @@ class FileViewSessionMixin:
         self._schedule_file_session_viewport_retarget()
         first_apply = not restore.applied
         restore.applied = True
+        restore.camera_locked = False
         self._suppress_montage_autofit_revert_message = False
         if first_apply and restore.message_enabled:
             show_revert_action(
@@ -344,6 +361,37 @@ class FileViewSessionMixin:
                 self._revert_file_view_session_restore,
                 timeout=7000,
             )
+
+    def _validated_file_session_view_range(self, view_range):
+        normalized = _normalize_saved_view_range(view_range)
+        if normalized is None:
+            return None
+        content_rect = self._file_session_current_content_rect()
+        if content_rect is None:
+            return normalized
+        constrained = constrain_view_range(normalized, content_rect)
+        return constrained if _view_range_overlaps_content(constrained, content_rect) else None
+
+    def _file_session_current_content_rect(self):
+        controller = getattr(getattr(self, "img_view", None), "viewport_controller", None)
+        content_rect = getattr(controller, "last_display_rect", None)
+        if content_rect is not None:
+            try:
+                x0, y0, x1, y1 = (float(value) for value in content_rect)
+                if _finite_values(x0, y0, x1, y1) and abs(x1 - x0) > 0.0 and abs(y1 - y0) > 0.0:
+                    return (x0, y0, x1, y1)
+            except Exception:
+                pass
+        frame = getattr(self, "_committed_display_frame", None)
+        geometry = getattr(frame, "geometry", None)
+        display_shape = getattr(geometry, "display_shape", None)
+        try:
+            height, width = (int(value) for value in display_shape[:2])
+        except Exception:
+            return None
+        if height < 1 or width < 1:
+            return None
+        return (0.0, 0.0, float(width), float(height))
 
     def _current_image_viewport_shape(self) -> tuple[int, int] | None:
         try:
@@ -370,6 +418,8 @@ class FileViewSessionMixin:
         restore = self._file_session_restore_transaction()
         if restore is None or restore.viewport is None or restore.applied:
             return
+        # Qt event-turn barrier. The callback rechecks committed frame/session
+        # readiness before applying the saved view range.
         Qt.QtCore.QTimer.singleShot(0, self._apply_file_session_viewport_when_ready)
 
     def _schedule_file_session_viewport_retarget(self) -> None:
@@ -383,6 +433,8 @@ class FileViewSessionMixin:
             scheduler(delay_ms=0)
 
         try:
+            # Qt event-turn barrier. Retargeting follows the restored view range
+            # after the ViewBox has accepted it.
             Qt.QtCore.QTimer.singleShot(0, schedule_once)
         except Exception:
             scheduler(delay_ms=0)
@@ -454,3 +506,36 @@ def _file_view_session_config_dir() -> Path:
     if not location:
         location = Qt.QtCore.QDir.homePath()
     return Path(location)
+
+
+def _normalize_saved_view_range(view_range):
+    try:
+        normalized = (
+            (float(view_range[0][0]), float(view_range[0][1])),
+            (float(view_range[1][0]), float(view_range[1][1])),
+        )
+    except Exception:
+        return None
+    values = (normalized[0][0], normalized[0][1], normalized[1][0], normalized[1][1])
+    if not _finite_values(*values):
+        return None
+    if normalized[0][0] == normalized[0][1] or normalized[1][0] == normalized[1][1]:
+        return None
+    return normalized
+
+
+def _view_range_overlaps_content(view_range, content_rect) -> bool:
+    try:
+        x_range, y_range = view_range
+        x0, y0, x1, y1 = (float(value) for value in content_rect)
+    except Exception:
+        return False
+    vx0, vx1 = sorted((float(x_range[0]), float(x_range[1])))
+    vy0, vy1 = sorted((float(y_range[0]), float(y_range[1])))
+    cx0, cx1 = sorted((x0, x1))
+    cy0, cy1 = sorted((y0, y1))
+    return max(vx0, cx0) < min(vx1, cx1) and max(vy0, cy0) < min(vy1, cy1)
+
+
+def _finite_values(*values) -> bool:
+    return all(math.isfinite(float(value)) for value in values)

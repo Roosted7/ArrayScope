@@ -76,6 +76,8 @@ class ArrayScopeGraphicsView(pg.GraphicsView):
             event.accept()
             return
         super().paintEvent(event)
+        if owner is not None:
+            owner._mark_presentation_drawn()
 
     def resizeEvent(self, event):
         owner = getattr(self, "_arrayscope_owner", None)
@@ -130,6 +132,7 @@ class ImageViewShell(QtWidgets.QWidget):
     # Emitted only for explicit user edits of the histogram/LUT levels.
     userLevelsChanged = QtCore.Signal()
     autoWindowRequested = QtCore.Signal()
+    presentationDrawn = QtCore.Signal()
 
     """
     Simplified widget for displaying 2D image data.
@@ -177,6 +180,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._histogram_display_controller = None
         self._upload_timing = None
         self._last_upload_timing = ImageUploadTiming()
+        self._presentation_draw_pending = False
         self._gui_callback_observer = None
         self._gui_callback_budget_provider = None
         self._background_task_submitter = None
@@ -384,6 +388,13 @@ class ImageViewShell(QtWidgets.QWidget):
         timing = self._upload_timing
         if timing is None:
             return
+        visible_changed = bool(
+            int(timing["visible_bytes"]) > 0
+            or int(timing["tile_layer_texture_uploads"]) > 0
+            or int(timing["tile_layer_vertex_uploads"]) > 0
+            or int(timing["tile_layer_level_updates"]) > 0
+            or str(timing["mode"]) in {"full", "fast", "tile_layer", "vispy_full", "vispy_fast", "vispy_tile_layer"}
+        )
         self._last_upload_timing = ImageUploadTiming(
             total_ms=(perf_counter() - float(timing["start"])) * 1000.0,
             visible_upload_ms=float(timing["visible_upload_ms"]),
@@ -440,10 +451,24 @@ class ImageViewShell(QtWidgets.QWidget):
             tile_layer_shader_uniform_updates=int(timing["tile_layer_shader_uniform_updates"]),
             cpu_complex_prep_ms=float(timing["cpu_complex_prep_ms"]),
         )
+        if visible_changed:
+            self._mark_presentation_draw_pending()
         self._upload_timing = None
 
     def lastImageUploadTiming(self) -> ImageUploadTiming:
         return self._last_upload_timing
+
+    def _mark_presentation_draw_pending(self) -> None:
+        self._presentation_draw_pending = True
+
+    def _mark_presentation_drawn(self) -> None:
+        if not bool(getattr(self, "_presentation_draw_pending", False)):
+            return
+        self._presentation_draw_pending = False
+        self.presentationDrawn.emit()
+
+    def presentationDrawPending(self) -> bool:
+        return bool(getattr(self, "_presentation_draw_pending", False))
 
     def setGuiCallbackObserver(self, observer) -> None:
         self._gui_callback_observer = observer if callable(observer) else None
@@ -714,6 +739,9 @@ class ImageViewShell(QtWidgets.QWidget):
             tile_state=tile_state,
             tile_delta=tile_delta,
         )
+        histogramData = _histogram_data_from_tile_payloads(tile_payloads)
+        if histogramPlotData is None:
+            histogramPlotData = histogramData
         stats = self._apply_tile_layer_presentation(
             placeholder,
             histogramData=None,
@@ -2525,6 +2553,22 @@ def _is_tiled_loading_only_commit(
         and histogramData is None
         and histogramPlotData is None
     )
+
+
+def _histogram_data_from_tile_payloads(payloads) -> np.ndarray | None:
+    parts = []
+    for payload in dict(payloads or {}).values():
+        source = getattr(payload, "semantic_histogram_data", None)
+        if source is None:
+            source = getattr(payload, "histogram_data", None)
+        if source is None:
+            continue
+        parts.append(np.asarray(source))
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return np.concatenate([np.ravel(part) for part in parts])
 
 
 def _point_inside_view_range(view_range, x: float, y: float) -> bool:

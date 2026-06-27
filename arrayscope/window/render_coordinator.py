@@ -39,14 +39,22 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self.coalesced = 0
         self.deferred_side_panel_refreshes = 0
         self.immediate_cache_flushes = 0
+        self.presentation_backpressure_skips = 0
+        self._connected_presentation_view = None
 
+        # Qt event-turn barrier / bounded coalescer. This coalesces bursts of
+        # non-cached interactive work without making cache hits wait.
         self._render_timer = Qt.QtCore.QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._flush_timer)
 
+        # User-interaction quiet detector. It only gates side-panel refreshes;
+        # render semantics are guarded by the latest pending request and the
+        # render-generation checks in the window.
         self._quiet_timer = Qt.QtCore.QTimer(self)
         self._quiet_timer.setSingleShot(True)
         self._quiet_timer.timeout.connect(self._quiet_timer_elapsed)
+        self._connect_presentation_draw_signal()
 
     @property
     def interactive_active(self) -> bool:
@@ -59,6 +67,7 @@ class RenderCoordinator(Qt.QtCore.QObject):
     def request(self, *, reason: str, force_autolevel: bool = False, interactive: bool = False) -> None:
         if getattr(self._window, "_closing", False):
             return
+        self._connect_presentation_draw_signal()
         self.requested += 1
         if self._pending_request is not None:
             self.coalesced += 1
@@ -70,6 +79,12 @@ class RenderCoordinator(Qt.QtCore.QObject):
         if interactive:
             self._interactive_active = True
             cache_hit = self._interactive_cache_hit()
+            if self._presentation_draw_pending():
+                self.presentation_backpressure_skips += 1
+                if not cache_hit:
+                    self._window._cancel_render_dependent_work_for_interactive_change()
+                self._quiet_timer.start(self._quiet_interval_ms)
+                return
             if not cache_hit:
                 self._window._cancel_render_dependent_work_for_interactive_change()
             self._quiet_timer.start(self._quiet_interval_ms)
@@ -100,7 +115,43 @@ class RenderCoordinator(Qt.QtCore.QObject):
         except Exception:
             return False
 
+    def _visible_work_busy(self) -> bool:
+        visible = getattr(self._window, "visible_evaluation_controller", None)
+        return bool(visible is not None and visible.is_busy())
+
+    def _connect_presentation_draw_signal(self) -> None:
+        view = getattr(self._window, "img_view", None)
+        if view is None or view is self._connected_presentation_view:
+            return
+        signal = getattr(view, "presentationDrawn", None)
+        if signal is None:
+            return
+        try:
+            signal.connect(self._on_presentation_drawn)
+        except (TypeError, RuntimeError):
+            return
+        self._connected_presentation_view = view
+
+    def _presentation_draw_pending(self) -> bool:
+        view = getattr(self._window, "img_view", None)
+        predicate = getattr(view, "presentationDrawPending", None)
+        if callable(predicate):
+            try:
+                return bool(predicate())
+            except Exception:
+                return False
+        return False
+
+    def _on_presentation_drawn(self) -> None:
+        if self._pending_request is None or self._render_timer.isActive():
+            return
+        if self._presentation_draw_pending():
+            return
+        self.immediate_cache_flushes += 1
+        self._render_timer.start(0)
+
     def _flush_timer(self) -> None:
+        self._connect_presentation_draw_signal()
         request = self._pending_request
         self._pending_request = None
         if request is None or getattr(self._window, "_closing", False):
@@ -116,8 +167,14 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self._interactive_active = False
         if getattr(self._window, "_closing", False):
             return
-        visible = getattr(self._window, "visible_evaluation_controller", None)
-        if self.has_pending_render or (visible is not None and visible.is_busy()):
+        if self.has_pending_render:
+            if self._presentation_draw_pending():
+                self._quiet_timer.start(self._busy_retry_ms)
+                return
+            self.immediate_cache_flushes += 1
+            self._render_timer.start(0)
+            return
+        if self._visible_work_busy():
             self._quiet_timer.start(self._busy_retry_ms)
             return
         if getattr(self._window, "_deferred_side_panel_refresh_pending", False):

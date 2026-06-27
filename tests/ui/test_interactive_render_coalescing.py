@@ -182,6 +182,143 @@ def test_cached_interactive_render_uses_zero_delay_without_cancelling_work(qtbot
         win.close()
 
 
+def test_cached_interactive_render_skips_intermediate_requests_until_draw_completes(qtbot):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.window.render_coordinator import RenderCoordinator
+
+    class DummyImageView(QtCore.QObject):
+        presentationDrawn = QtCore.Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.pending = True
+
+        def presentationDrawPending(self):
+            return self.pending
+
+    class DummyWindow(QtCore.QObject):
+        def __init__(self):
+            super().__init__()
+            self.img_view = DummyImageView()
+            self.rendered = []
+            self.render_coordinator = RenderCoordinator(self)
+
+        def _interactive_render_cache_hit(self):
+            return True
+
+        def _cancel_render_dependent_work_for_interactive_change(self):
+            raise AssertionError("cached presentation backpressure must not cancel visible work")
+
+        def render(self, **kwargs):
+            self.rendered.append(kwargs)
+
+    win = DummyWindow()
+    win.render_coordinator.request(reason="slice-1", interactive=True)
+    win.render_coordinator.request(reason="slice-2", interactive=True)
+    win.render_coordinator.request(reason="slice-3", interactive=True)
+    _process_events(qtbot, count=3)
+
+    assert win.rendered == []
+    assert win.render_coordinator.presentation_backpressure_skips == 3
+
+    win.img_view.pending = False
+    win.img_view.presentationDrawn.emit()
+    qtbot.waitUntil(lambda: bool(win.rendered), timeout=250)
+
+    assert [call["reason"] for call in win.rendered] == ["slice-3"]
+
+
+def test_uncached_interactive_render_also_waits_for_draw_slot(qtbot):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.window.render_coordinator import RenderCoordinator
+
+    class DummyImageView(QtCore.QObject):
+        presentationDrawn = QtCore.Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.pending = True
+
+        def presentationDrawPending(self):
+            return self.pending
+
+    class DummyWindow(QtCore.QObject):
+        def __init__(self):
+            super().__init__()
+            self.img_view = DummyImageView()
+            self.cancelled = 0
+            self.rendered = []
+            self.render_coordinator = RenderCoordinator(self)
+
+        def _interactive_render_cache_hit(self):
+            return False
+
+        def _cancel_render_dependent_work_for_interactive_change(self):
+            self.cancelled += 1
+
+        def render(self, **kwargs):
+            self.rendered.append(kwargs)
+
+    win = DummyWindow()
+    win.render_coordinator.request(reason="slice-1", interactive=True)
+    win.render_coordinator.request(reason="slice-2", interactive=True)
+    _process_events(qtbot, count=3)
+
+    assert win.rendered == []
+    assert win.cancelled == 2
+    assert win.render_coordinator.presentation_backpressure_skips == 2
+
+    win.img_view.pending = False
+    win.img_view.presentationDrawn.emit()
+    qtbot.waitUntil(lambda: bool(win.rendered), timeout=250)
+
+    assert [call["reason"] for call in win.rendered] == ["slice-2"]
+
+
+def test_quiet_timer_flushes_pending_render_if_draw_signal_was_missed(qtbot):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.window.render_coordinator import RenderCoordinator
+
+    class DummyImageView(QtCore.QObject):
+        presentationDrawn = QtCore.Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.pending = True
+
+        def presentationDrawPending(self):
+            return self.pending
+
+    class DummyWindow(QtCore.QObject):
+        def __init__(self):
+            super().__init__()
+            self.img_view = DummyImageView()
+            self.rendered = []
+            self.render_coordinator = RenderCoordinator(self, quiet_interval_ms=1, busy_retry_ms=1)
+
+        def _interactive_render_cache_hit(self):
+            return True
+
+        def _cancel_render_dependent_work_for_interactive_change(self):
+            raise AssertionError("cache hit should not cancel visible work")
+
+        def render(self, **kwargs):
+            self.rendered.append(kwargs)
+
+    win = DummyWindow()
+    win.render_coordinator.request(reason="slice-latest", interactive=True)
+    _process_events(qtbot, count=2)
+
+    assert win.rendered == []
+    win.img_view.pending = False
+    qtbot.waitUntil(lambda: bool(win.rendered), timeout=250)
+
+    assert [call["reason"] for call in win.rendered] == ["slice-latest"]
+
+
 def test_cached_normal_image_render_skips_memory_policy_resample(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

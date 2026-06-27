@@ -426,10 +426,16 @@ class DisplayPresentationMixin:
             if callable(scheduler):
                 scheduler(delay_ms=delay_ms)
             return
+        revision = int(getattr(self, "_normal_tiled_viewport_update_revision", 0) or 0) + 1
+        self._normal_tiled_viewport_update_revision = revision
+        self._normal_tiled_viewport_update_scheduled_revision = revision
         timer = getattr(self, "_normal_tiled_viewport_update_timer", None)
         if timer is None:
             from pyqtgraph.Qt import QtCore
 
+            # Qt event-turn barrier. The revision guard below makes this a
+            # coalesced viewport retarget, not an ordering source for frame
+            # semantics; remove when viewport retargeting is a WorkGraph item.
             timer = QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._run_normal_tiled_viewport_update)
@@ -437,6 +443,10 @@ class DisplayPresentationMixin:
         timer.start(0 if delay_ms is None else max(0, int(delay_ms)))
 
     def _run_normal_tiled_viewport_update(self) -> None:
+        if int(getattr(self, "_normal_tiled_viewport_update_scheduled_revision", 0) or 0) != int(
+            getattr(self, "_normal_tiled_viewport_update_revision", 0) or 0
+        ):
+            return
         frame = getattr(self, "_committed_display_frame", None)
         scene = getattr(frame, "scene", None)
         if frame is None or scene is None:

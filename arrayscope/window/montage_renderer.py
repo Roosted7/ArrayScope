@@ -917,6 +917,9 @@ class MontageRenderMixin:
             return
         timer = getattr(self, "_montage_level_stats_timer", None)
         if timer is None:
+            # Bounded continuation. Cached level stats are secondary UI work
+            # and each slice is budgeted by `_process_montage_cached_level_stats`;
+            # remove when histogram refinement is fully WorkGraph-owned.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._process_montage_cached_level_stats)
@@ -1309,6 +1312,9 @@ class MontageRenderMixin:
         self._montage_attached_stage_token = _montage_work_token(session, "stage_wait")
         timer = getattr(self, "_montage_attached_stage_timer", None)
         if timer is None:
+            # Bounded continuation guarded by `_montage_attached_stage_token`.
+            # It releases stage waiters in GUI-budgeted batches instead of
+            # draining a completed stage in one callback.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._process_montage_attached_stage_waits)
@@ -1687,6 +1693,9 @@ class MontageRenderMixin:
     def _ensure_montage_session_slow_timer(self):
         timer = getattr(self, "_montage_session_slow_timer", None)
         if timer is None:
+            # User-visible timeout. The session key check in the callback
+            # prevents stale overlays; remove only if progress UI becomes tied
+            # to explicit scheduler deadline events.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._on_montage_session_slow_timer)
@@ -1788,6 +1797,9 @@ class MontageRenderMixin:
                 self._montage_tile_result_flush_queued = False
         timer = getattr(self, "_montage_tile_result_timer", None)
         if timer is None:
+            # Bounded continuation guarded by `_montage_tile_result_token`.
+            # Ready worker bursts are fan-in work, not a license to mutate the
+            # whole scene in one GUI callback.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._flush_montage_tile_results)
@@ -1974,6 +1986,9 @@ class MontageRenderMixin:
     def _start_montage_commit_timer(self, interval_ms: int) -> None:
         timer = getattr(self, "_montage_commit_timer", None)
         if timer is None:
+            # Bounded continuation guarded by `_montage_commit_token`.
+            # Commit spacing comes from feedback/resource policy; remove when
+            # backend commits are scheduled directly as WorkGraph callbacks.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._flush_montage_presentation_commit)
@@ -2444,6 +2459,8 @@ class MontageRenderMixin:
         if _persistent_tile_layer_fast_drain_enabled(self, session) and self._queue_montage_presentation_commit_flush():
             return
         try:
+            # Qt event-turn barrier guarded by `_montage_commit_token`; the
+            # fallback timer exists only for bindings that reject singleShot.
             Qt.QtCore.QTimer.singleShot(0, self._flush_montage_presentation_commit)
         except Exception:
             self._start_montage_commit_timer(1)
@@ -2876,15 +2893,9 @@ class MontageRenderMixin:
             )
 
     def _schedule_loading_montage_profile_retry(self, x, y) -> None:
-        timer = getattr(self, "_montage_profile_retry_timer", None)
-        if timer is None:
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._retry_loading_montage_profile)
-            self._montage_profile_retry_timer = timer
         self._pending_montage_profile_retry = (float(x), float(y))
-        if not timer.isActive():
-            timer.start(80)
+        if self.profile_dock.isVisible():
+            self._retry_loading_montage_profile()
 
     def _retry_loading_montage_profile(self) -> None:
         point = getattr(self, "_pending_montage_profile_retry", None)
@@ -2894,7 +2905,7 @@ class MontageRenderMixin:
         if not self.widgets['buttons']['display']['live_profile'].isChecked():
             return
         if not self.profile_dock.isVisible():
-            self._schedule_loading_montage_profile_retry(float(point[0]), float(point[1]))
+            self._pending_montage_profile_retry = (float(point[0]), float(point[1]))
             return
         self._pending_profile_point = (float(point[0]), float(point[1]))
         self._pending_profile_pos = None
@@ -2904,8 +2915,13 @@ class MontageRenderMixin:
         if getattr(self, "_montage_viewport_update_running", False):
             self._montage_viewport_update_pending = True
             return
+        session = getattr(self, "_montage_session", None)
+        self._montage_viewport_update_token = None if session is None else _montage_work_token(session, "viewport_update")
         timer = getattr(self, "_montage_viewport_update_timer", None)
         if timer is None:
+            # Bounded continuation. The callback only retargets the current
+            # montage session/viewport token; it does not establish semantic
+            # order between sessions or payload revisions.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._run_montage_viewport_update)
@@ -2926,6 +2942,9 @@ class MontageRenderMixin:
         self._montage_priority_retarget_token = _montage_work_token(session, "priority_retarget")
         timer = getattr(self, "_montage_priority_retarget_timer", None)
         if timer is None:
+            # Bounded continuation guarded by `_montage_priority_retarget_token`.
+            # Hover retargeting updates queue metadata in batches; remove when
+            # tile priority updates are admitted as scheduler work items.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._run_montage_priority_retarget)
@@ -2970,6 +2989,10 @@ class MontageRenderMixin:
         if getattr(self, "_closing", False):
             return
         if self.view_state.montage_axis is None:
+            return
+        session = getattr(self, "_montage_session", None)
+        token = getattr(self, "_montage_viewport_update_token", None)
+        if token is not None and (session is None or token != _montage_work_token(session, "viewport_update")):
             return
         if getattr(self, "_montage_viewport_update_running", False):
             self._montage_viewport_update_pending = True
@@ -3432,6 +3455,8 @@ def _montage_work_token(session, reason: str) -> tuple[object, ...]:
             int(getattr(session, "level_revision", 0) or 0),
         )
     if reason == "priority_retarget":
+        return (*base, int(getattr(session, "viewport_revision", 0) or 0))
+    if reason == "viewport_update":
         return (*base, int(getattr(session, "viewport_revision", 0) or 0))
     return base
 

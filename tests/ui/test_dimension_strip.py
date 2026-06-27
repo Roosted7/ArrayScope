@@ -27,6 +27,32 @@ def test_image_axes_show_full_range_colon(qt_app):
     strip.close()
 
 
+def test_dimension_chip_update_state_skips_unchanged_icon_work(qt_app, monkeypatch):
+    from arrayscope.core.view_state import ViewState
+    import arrayscope.ui.dimension_strip as dimension_strip
+
+    calls = []
+    original = dimension_strip.set_button_icon
+
+    def record_icon(button, name, **kwargs):
+        calls.append((button, name, kwargs.get("tooltip")))
+        return original(button, name, **kwargs)
+
+    monkeypatch.setattr(dimension_strip, "set_button_icon", record_icon)
+    strip = dimension_strip.DimensionStrip(3)
+    state = ViewState.from_shape((4, 5, 6))
+    try:
+        strip.update_state((4, 5, 6), state, profile_axes=(2,))
+        first_count = len(calls)
+
+        strip.update_state((4, 5, 6), state, profile_axes=(2,))
+
+        assert first_count > 0
+        assert len(calls) == first_count
+    finally:
+        strip.close()
+
+
 def test_dimension_strip_wraps_to_allocated_width(qt_app):
     from arrayscope.ui.dimension_strip import DimensionStrip
 

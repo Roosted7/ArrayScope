@@ -41,42 +41,37 @@ class DimensionControlMixin:
         self.apply_axis_flips()
         
     def update_flip_icons(self):
+        state = getattr(self, "_flip_icon_state", None)
+        if state is None:
+            state = {}
+            self._flip_icon_state = state
         image_axes = self._image_axes()
         for i, flip_label in enumerate(self.widgets['labels']['flip']):
             if i in image_axes:
                 # In line plot mode, only show horizontal flip icon for the plot dimension
                 if self.is_line_plot_mode():
                     if i == self.view_state.line_axis:
-                        flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeHorCursor))
-                        flip_label.setToolTip("Flip X axis")
                         if self._axis_flipped(i):
-                            set_label_icon(flip_label, "arrow_back")
+                            _set_flip_label_state(flip_label, state, "arrow_back", "Flip X axis", Qt.QtCore.Qt.CursorShape.SizeHorCursor)
                         else:
-                            set_label_icon(flip_label, "arrow_forward")
+                            _set_flip_label_state(flip_label, state, "arrow_forward", "Flip X axis", Qt.QtCore.Qt.CursorShape.SizeHorCursor)
                     else:
-                        clear_label_icon(flip_label)  # Hide flip icons for non-plot dimensions
-                        flip_label.setToolTip('')
+                        _set_flip_label_state(flip_label, state, None, "", Qt.QtCore.Qt.CursorShape.ArrowCursor)
                 # In image view mode, show vertical flip for primary, horizontal for secondary
                 elif self.view_state.image_axes is not None and i == self.view_state.image_axes[0]:
-                    flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeVerCursor))
-                    flip_label.setToolTip("Flip Y")
                     if self._axis_flipped(i):
-                        set_label_icon(flip_label, "arrow_downward")
+                        _set_flip_label_state(flip_label, state, "arrow_downward", "Flip Y", Qt.QtCore.Qt.CursorShape.SizeVerCursor)
                     else:
-                        set_label_icon(flip_label, "arrow_upward")
+                        _set_flip_label_state(flip_label, state, "arrow_upward", "Flip Y", Qt.QtCore.Qt.CursorShape.SizeVerCursor)
                 elif self.view_state.image_axes is not None and i == self.view_state.image_axes[1]:
-                    flip_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.SizeHorCursor))
-                    flip_label.setToolTip("Flip X")
                     if self._axis_flipped(i):
-                        set_label_icon(flip_label, "arrow_back")
+                        _set_flip_label_state(flip_label, state, "arrow_back", "Flip X", Qt.QtCore.Qt.CursorShape.SizeHorCursor)
                     else:
-                        set_label_icon(flip_label, "arrow_forward")
+                        _set_flip_label_state(flip_label, state, "arrow_forward", "Flip X", Qt.QtCore.Qt.CursorShape.SizeHorCursor)
                 else:
-                    clear_label_icon(flip_label)  # Clear for dimensions not in primary/secondary
-                    flip_label.setToolTip('')
+                    _set_flip_label_state(flip_label, state, None, "", Qt.QtCore.Qt.CursorShape.ArrowCursor)
             else:
-                clear_label_icon(flip_label)  # Clear for unselected dimensions
-                flip_label.setToolTip('')
+                _set_flip_label_state(flip_label, state, None, "", Qt.QtCore.Qt.CursorShape.ArrowCursor)
     
     def apply_axis_flips(self):
         if self.is_line_plot_mode():
@@ -479,3 +474,16 @@ def _same_view_except_axis_flips(previous, current) -> bool:
         and tuple(getattr(previous, "axis_range_text", ())) == tuple(getattr(current, "axis_range_text", ()))
         and tuple(getattr(previous, "axis_flipped", ())) != tuple(getattr(current, "axis_flipped", ()))
     )
+
+
+def _set_flip_label_state(label, state, icon_name, tooltip: str, cursor_shape) -> None:
+    key = (None if icon_name is None else str(icon_name), str(tooltip or ""), cursor_shape)
+    if state.get(label) == key:
+        return
+    if icon_name is None:
+        clear_label_icon(label)
+    else:
+        set_label_icon(label, icon_name)
+    label.setToolTip(str(tooltip or ""))
+    label.setCursor(QtGui.QCursor(cursor_shape))
+    state[label] = key

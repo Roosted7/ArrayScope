@@ -63,6 +63,7 @@ class StateSyncMixin:
                 spinbox.blockSignals(False)
         if hasattr(self, "dimension_strip"):
             self.dimension_strip.update_axis_state(axis, self.data.shape, self.view_state, self.profile_axes)
+        self._interactive_slice_controls_synced_state = self.view_state
 
     def _apply_slice_state(self, axis: int, state, *, reason: str, interactive: bool, immediate_axis_only: bool) -> None:
         axis = int(axis)
@@ -75,6 +76,7 @@ class StateSyncMixin:
             self.update_dimension_controls()
             self.update_complex_indicators()
             self.update_shift_indicators()
+            self._interactive_slice_controls_synced_state = None
         self.request_render(reason=reason, interactive=interactive)
 
     def _on_slice_index_changed(self, axis, value):
