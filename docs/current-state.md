@@ -51,8 +51,7 @@ Active-plus-latest scheduling preserves useful visible progress. Stage-plan/cand
 typed tile deltas, stable texture identity, retained residency, dynamic tile priority, and separation of
 cold upload from warm visibility/rebind are sensible optimizations. VisPy level changes can remain
 uniform-only, while PyQtGraph can reuse the same priority/admission queue for CPU redraws.
-Large normal single-plane presentations can now use the typed tiled backend path rather than being
-forced through a composed raster surface.
+Large normal single-plane presentations use the same typed tiled backend path as every other image.
 
 ### Tests increasingly protect lifecycle contracts
 
@@ -78,8 +77,8 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
   beside backend-specific physical work counters.
 - Normal, internally tiled large-plane, one-tile montage, and multi-tile montage presentations now
   share `FramePlanner`, `DisplayTiledPresentation`, tile layout, and committed tiled value-source
-  semantics. Tile-layer commits are typed tiled commits only; the old public/direct widget tile-layer
-  API and raster tile-layer commit mode have been removed.
+  semantics. Tile-layer commits are typed tiled commits only; old public/direct widget tile-layer
+  APIs have been removed.
 - Backend scene conversion uses cached frame-plan region signatures and current tile-delta active/
   planned/near sets, avoiding stale viewport-retarget semantics and repeated full region rebuilding
   when the plan is unchanged.

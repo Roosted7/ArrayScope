@@ -16,7 +16,7 @@ These documents should answer most product and planning questions.
 
 - [Architecture overview](architecture.md): ownership, identities, data flow, and non-negotiable invariants.
 - [State and operations](architecture/state-and-operations.md): `ViewState`, document revisions, operation planning, stages, and caches.
-- [Rendering](architecture/rendering.md): semantic presentations, frames, geometry, raster/tiled storage, and backends.
+- [Rendering](architecture/rendering.md): semantic tiled presentations, frames, geometry, residency, and backends.
 - [Scheduling and memory](architecture/scheduling-and-memory.md): visible work, montage sessions, budgets, feedback, and cancellation.
 - [Interaction and UI](architecture/interaction-and-ui.md): widget/state boundaries, viewport behavior, ROI/profile interaction, and panels.
 

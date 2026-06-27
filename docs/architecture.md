@@ -52,7 +52,7 @@ meaning, and backend adapters own concrete textures/items/visuals only.
 
 - Operation classes declare shape/dtype behavior, blocking/chunkable axes, region expansion, memory/cost characteristics, and optimization eligibility.
 - `operations.optimizer`, `regions`, and `planner` turn enabled steps and a request into a Qt-free execution plan.
-- `OperationEvaluator` owns display/profile/tile caches plus reusable stage cache/materialization. Workers evaluate immutable snapshots and return results.
+- `OperationEvaluator` owns a unified display cache, profile/scalar cache, and reusable stage cache/materialization. Workers evaluate immutable snapshots and return results.
 - `operations.slabs`, `chunked`, and `chunked_stage` execute bounded requests without moving operation semantics into UI callbacks.
 
 ### Presentation
@@ -146,18 +146,16 @@ state/document change
   -> cache lookup + render cost decision
   -> synchronous / chunked / background evaluation
   -> DisplayImage + semantic geometry/levels
-  -> FramePlanner chooses raster or typed tiled storage
+  -> FramePlanner chooses typed tiled regions
   -> presentation planning and commit
   -> committed frame
 ```
 
-The last valid frame remains visible during slow or refused work. Small images may commit as a raster
-frame; large single planes can commit as typed tiled regions through the same backend surface used by
-montages. Evaluation scheduling still has separate normal/montage orchestration, but committed
-presentation semantics no longer depend on pretending that a large plane is a montage. Tile-layer
-presentation is not a raster commit mode: both PyQtGraph and VisPy receive typed
-`DisplayTiledPresentation` commits through `present_tiled`, and the obsolete direct tile-layer widget
-API is intentionally absent.
+The last valid frame remains visible during slow or refused work. Small images become one tiled region;
+large single planes and montages become multiple tiled regions through the same backend surface.
+Evaluation scheduling still has separate normal/montage orchestration, but committed presentation
+semantics are always `DisplayTiledPresentation` commits through `present_tiled`; obsolete direct
+tile-layer widget APIs are intentionally absent.
 
 ### Montage (current)
 

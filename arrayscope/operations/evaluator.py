@@ -33,8 +33,7 @@ from arrayscope.display.montage import RenderedTilePayload
 from arrayscope.display.slice_engine import make_image, make_image_from_slab, make_shader_image_from_slab, make_line, make_line_from_slab, make_scalar_from_slab
 
 
-DEFAULT_IMAGE_CACHE_BYTES = 256 * 1024 * 1024
-DEFAULT_TILE_CACHE_BYTES = 512 * 1024 * 1024
+DEFAULT_DISPLAY_CACHE_BYTES = 512 * 1024 * 1024
 DEFAULT_PROFILE_CACHE_BYTES = 64 * 1024 * 1024
 DEFAULT_STAGE_CACHE_BYTES = 512 * 1024 * 1024
 DEFAULT_STAGE_CACHE_ENTRIES = 64
@@ -59,8 +58,6 @@ class OperationEvaluator:
     document: ArrayDocument
     _derived_key: tuple | None = None
     _derived_data: object | None = None
-    _image_key: tuple | None = None
-    _image_result: object | None = None
     _line_key: tuple | None = None
     _line_result: object | None = None
     derived_evaluations: int = 0
@@ -83,10 +80,9 @@ class OperationEvaluator:
     last_region_plan: object | None = None
 
     def __post_init__(self):
-        self._image_cache = BoundedArrayCache(DEFAULT_IMAGE_CACHE_BYTES, 96)
-        self._tile_cache = BoundedArrayCache(DEFAULT_TILE_CACHE_BYTES, 512)
+        self._display_cache = BoundedArrayCache(DEFAULT_DISPLAY_CACHE_BYTES, 512)
         self._profile_cache = BoundedArrayCache(DEFAULT_PROFILE_CACHE_BYTES, 256)
-        self._region_cache = BoundedArrayCache(DEFAULT_TILE_CACHE_BYTES, 512)
+        self._region_cache = BoundedArrayCache(DEFAULT_DISPLAY_CACHE_BYTES, 512)
         self._stage_cache = StageCache(max_bytes=DEFAULT_STAGE_CACHE_BYTES, max_entries=DEFAULT_STAGE_CACHE_ENTRIES)
         self._stage_materializer = StageMaterializationManager(self._stage_cache)
 
@@ -104,14 +100,10 @@ class OperationEvaluator:
     def clear_cache(self):
         self._derived_key = None
         self._derived_data = None
-        self._image_key = None
-        self._image_result = None
         self._line_key = None
         self._line_result = None
-        if hasattr(self, "_image_cache"):
-            self._image_cache.clear()
-        if hasattr(self, "_tile_cache"):
-            self._tile_cache.clear()
+        if hasattr(self, "_display_cache"):
+            self._display_cache.clear()
         if hasattr(self, "_profile_cache"):
             self._profile_cache.clear()
         if hasattr(self, "_region_cache"):
@@ -142,11 +134,11 @@ class OperationEvaluator:
 
     def image(self, view_state, colormap_lut=None):
         request = request_for_image(view_state)
-        key = self.image_key(view_state, colormap_lut=colormap_lut)
-        cached = self._image_cache.get(key)
+        key = self.display_tile_key(view_state, colormap_lut=colormap_lut)
+        cached = self._display_cache.get(key)
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
-            self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.CACHED, "Using cached image view")
+            self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.CACHED, "Using cached display tile")
             return cached
 
         self.last_status = cache_status_computing("Evaluating image slab")
@@ -158,7 +150,7 @@ class OperationEvaluator:
                 stage_cache=self._stage_cache,
                 stage_document_key=stage_document_key(self.document),
             )
-            return self.store_image_result(view_state, colormap_lut, result)
+            return self.store_display_tile_result(view_state, colormap_lut, result)
         except Exception as exc:
             self.last_status = cache_status_error(exc)
             raise
@@ -211,10 +203,10 @@ class OperationEvaluator:
     def export_frame(self, view_state, frame_axis, frame_index, colormap_lut=None):
         request = request_for_export_frame(view_state, frame_axis, frame_index)
         key = self.export_frame_key(view_state, frame_axis, frame_index, colormap_lut=colormap_lut)
-        cached = self._image_cache.get(key)
+        cached = self._display_cache.get(key)
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
-            self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.CACHED, "Using cached export frame")
+            self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.CACHED, "Using cached export tile")
             return cached
 
         self.last_status = cache_status_computing("Evaluating export frame")
@@ -233,9 +225,28 @@ class OperationEvaluator:
             self.last_status = cache_status_error(exc)
             raise
 
-    def image_key(self, view_state, *, colormap_lut=None, document=None, shader_display: bool = False):
+    def display_tile_key(
+        self,
+        view_state,
+        *,
+        montage_axis=None,
+        source_index=None,
+        tile_number: int | None = 0,
+        colormap_lut=None,
+        document=None,
+        shader_display: bool = False,
+    ):
         document = self.document if document is None else document
-        return ("image", _document_key(document), _request_key(request_for_image(view_state)), _lut_key(colormap_lut), bool(shader_display))
+        return (
+            "display_tile",
+            _document_key(document),
+            None if montage_axis is None else int(montage_axis),
+            None if source_index is None else int(source_index),
+            None if tile_number is None else int(tile_number),
+            _request_key(request_for_image(view_state)),
+            _lut_key(colormap_lut),
+            bool(shader_display),
+        )
 
     def line_key(self, view_state, *, document=None):
         document = self.document if document is None else document
@@ -247,34 +258,33 @@ class OperationEvaluator:
 
     def export_frame_key(self, view_state, frame_axis, frame_index, *, colormap_lut=None, document=None):
         document = self.document if document is None else document
-        return ("export_frame", _document_key(document), _request_key(request_for_export_frame(view_state, frame_axis, frame_index)), _lut_key(colormap_lut))
+        return ("export_tile", _document_key(document), _request_key(request_for_export_frame(view_state, frame_axis, frame_index)), _lut_key(colormap_lut))
 
     def montage_tile_key(self, tile_state, *, montage_axis, source_index, colormap_lut=None, document=None, shader_display: bool = False):
-        document = self.document if document is None else document
-        return (
-            "montage_tile",
-            _document_key(document),
-            int(montage_axis),
-            int(source_index),
-            _request_key(request_for_image(tile_state)),
-            _lut_key(colormap_lut),
-            bool(shader_display),
+        return self.display_tile_key(
+            tile_state,
+            montage_axis=montage_axis,
+            source_index=source_index,
+            tile_number=source_index,
+            colormap_lut=colormap_lut,
+            document=document,
+            shader_display=shader_display,
         )
 
-    def cached_image(self, view_state, colormap_lut=None, *, shader_display: bool = False):
-        cached = self._image_cache.get(self.image_key(view_state, colormap_lut=colormap_lut, shader_display=shader_display))
+    def cached_display_tile(self, view_state, colormap_lut=None, *, shader_display: bool = False):
+        cached = self._display_cache.get(self.display_tile_key(view_state, colormap_lut=colormap_lut, shader_display=shader_display))
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
-            self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.CACHED, "Using cached image view")
+            self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.CACHED, "Using cached display tile")
         return cached
 
     def cached_montage_tile(self, tile_state, *, montage_axis, source_index, colormap_lut=None, shader_display: bool = False):
-        cached = self._tile_cache.get(
+        cached = self._display_cache.get(
             self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut, shader_display=shader_display)
         )
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
-            self.last_diagnostics = self._tile_cache.diagnostics(CacheStatus.CACHED, "Using cached montage tile")
+            self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.CACHED, "Using cached display tile")
         return cached
 
     def cached_line(self, view_state):
@@ -315,7 +325,7 @@ class OperationEvaluator:
         return self._region_cache.get(self.tile_region_key(request))
 
     def cached_montage_tile_silent(self, tile_state, *, montage_axis, source_index, colormap_lut=None, shader_display: bool = False):
-        return self._tile_cache.get(
+        return self._display_cache.get(
             self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut, shader_display=shader_display)
         )
 
@@ -338,17 +348,16 @@ class OperationEvaluator:
             evaluation_context=evaluation_context,
         )
 
-    def store_image_result(self, view_state, colormap_lut, result: EvaluationResult, *, shader_display: bool = False):
-        key = self.image_key(view_state, colormap_lut=colormap_lut, shader_display=shader_display)
-        self._image_cache.last_eval_ms = result.eval_ms
-        self._image_result = result.value
+    def store_display_tile_result(self, view_state, colormap_lut, result: EvaluationResult, *, shader_display: bool = False):
+        key = self.display_tile_key(view_state, colormap_lut=colormap_lut, shader_display=shader_display)
+        self._display_cache.last_eval_ms = result.eval_ms
         self.last_region_plan = result.region_plan
-        self._image_cache.put(key, result.value)
+        self._display_cache.put(key, result.value)
         self.image_evaluations += 1
         if result.mode == "chunked" or result.chunk_count > 1:
             self.note_chunked_evaluation()
-        self.last_status = cache_status_ready("Image view cached")
-        self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.READY, _request_message("Image view cached", result))
+        self.last_status = cache_status_ready("Display tile cached")
+        self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.READY, _request_message("Display tile cached", result))
         return result.value
 
     def store_line_result(self, view_state, result: EvaluationResult):
@@ -374,12 +383,12 @@ class OperationEvaluator:
 
     def store_export_frame_result(self, view_state, frame_axis, frame_index, colormap_lut, result: EvaluationResult):
         key = self.export_frame_key(view_state, frame_axis, frame_index, colormap_lut=colormap_lut)
-        self._image_cache.last_eval_ms = result.eval_ms
+        self._display_cache.last_eval_ms = result.eval_ms
         self.last_region_plan = result.region_plan
-        self._image_cache.put(key, result.value)
+        self._display_cache.put(key, result.value)
         self.image_evaluations += 1
-        self.last_status = cache_status_ready("Export frame cached")
-        self.last_diagnostics = self._image_cache.diagnostics(CacheStatus.READY, _request_message("Export frame cached", result))
+        self.last_status = cache_status_ready("Export tile cached")
+        self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.READY, _request_message("Export tile cached", result))
         return result.value
 
     def store_montage_tile_result(self, tile, *, montage_axis, colormap_lut, result: EvaluationResult, shader_display: bool = False):
@@ -397,20 +406,20 @@ class OperationEvaluator:
             level_data=getattr(result.value, "level_data", None),
             level_stats=getattr(result.value, "level_stats", None),
         )
-        self._tile_cache.last_eval_ms = result.eval_ms
+        self._display_cache.last_eval_ms = result.eval_ms
         self.last_region_plan = result.region_plan
-        self._tile_cache.put(key, value)
+        self._display_cache.put(key, value)
         self.image_evaluations += 1
-        self.last_status = cache_status_ready("Montage tile cached")
-        self.last_diagnostics = self._tile_cache.diagnostics(CacheStatus.READY, _request_message("Montage tile cached", result))
+        self.last_status = cache_status_ready("Display tile cached")
+        self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.READY, _request_message("Display tile cached", result))
         return value.bind(tile)
 
-    def prefetch_image_snapshot(self, document, view_state, colormap_lut=None, *, evaluation_context=None):
-        key = self.image_key(view_state, colormap_lut=colormap_lut, document=document)
-        if self._image_cache.get(key) is not None:
+    def prefetch_display_tile_snapshot(self, document, view_state, colormap_lut=None, *, evaluation_context=None):
+        key = self.display_tile_key(view_state, colormap_lut=colormap_lut, document=document)
+        if self._display_cache.get(key) is not None:
             self.prefetch_skipped += 1
             return None
-        if self._image_cache.bytes_used > int(self._image_cache.max_bytes * 0.8):
+        if self._display_cache.bytes_used > int(self._display_cache.max_bytes * 0.8):
             self.prefetch_skipped += 1
             return None
         return evaluate_image_snapshot(
@@ -422,13 +431,13 @@ class OperationEvaluator:
             evaluation_context=evaluation_context,
         )
 
-    def store_prefetch_image_result(self, document, view_state, colormap_lut, result):
+    def store_prefetch_display_tile_result(self, document, view_state, colormap_lut, result):
         if result is None:
             return False
         if _document_key(document) != _document_key(self.document):
             self.prefetch_stale += 1
             return False
-        self.store_image_result(view_state, colormap_lut, result)
+        self.store_display_tile_result(view_state, colormap_lut, result)
         self.prefetch_stored += 1
         return True
 
@@ -489,20 +498,16 @@ class OperationEvaluator:
     def cache_diagnostics(self):
         if self.last_diagnostics is not None:
             return self.last_diagnostics
-        return self._image_cache.diagnostics(self.last_status.status, self.last_status.message)
+        return self._display_cache.diagnostics(self.last_status.status, self.last_status.message)
 
     def apply_memory_policy(self, policy) -> None:
-        self._image_cache.resize(max_bytes=int(policy.image_cache_budget_bytes))
-        self._tile_cache.resize(max_bytes=int(policy.tile_cache_budget_bytes))
-        self._region_cache.resize(max_bytes=int(policy.tile_cache_budget_bytes))
+        self._display_cache.resize(max_bytes=int(policy.display_cache_budget_bytes))
+        self._region_cache.resize(max_bytes=int(policy.display_cache_budget_bytes))
         self._profile_cache.resize(max_bytes=int(policy.profile_cache_budget_bytes))
         self._stage_cache.resize(max_bytes=int(policy.stage_cache_budget_bytes))
 
-    def image_cache_diagnostics(self):
-        return self._image_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())
-
-    def tile_cache_diagnostics(self):
-        return self._tile_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())
+    def display_cache_diagnostics(self):
+        return self._display_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())
 
     def profile_cache_diagnostics(self):
         return self._profile_cache.diagnostics(self.last_status.status, self.last_status.message, **self._prefetch_diagnostics())

@@ -9,7 +9,7 @@ import numpy as np
 
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.lod import LodInfo
-from arrayscope.display.scene import DisplayScene, DisplayStorage, display_scene_for_geometry
+from arrayscope.display.scene import DisplayScene, display_scene_for_geometry
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 
 
@@ -288,46 +288,6 @@ class FrameValueSource:
 
 
 @dataclass(frozen=True)
-class CanvasValueSource(FrameValueSource):
-    data: np.ndarray
-    histogram_data: np.ndarray | None
-    geometry: DisplayGeometry
-
-    def value_at(self, mapping):
-        source = self.histogram_data if self.histogram_data is not None else self.data
-        if source is None:
-            return None
-        data = np.asarray(source)
-        if tuple(data.shape[:2]) != tuple(self.geometry.display_shape):
-            return None
-        y_i = int(getattr(mapping, "canvas_y", -1))
-        x_i = int(getattr(mapping, "canvas_x", -1))
-        if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
-            return None
-        return array_value_at(data, y_i, x_i)
-
-    def tile_region(self, tile, region: tuple[slice, slice]):
-        geometry = self.geometry
-        if tile is None or getattr(geometry, "montage", None) is None:
-            return None
-        y_slice, x_slice = region
-        x0 = int(0 if x_slice.start is None else x_slice.start)
-        x1 = int(tile.width if x_slice.stop is None else x_slice.stop)
-        y0 = int(0 if y_slice.start is None else y_slice.start)
-        y1 = int(tile.height if y_slice.stop is None else y_slice.stop)
-        canvas_x0 = int(tile.x0 + x0 - geometry.montage_origin_x)
-        canvas_y0 = int(tile.y0 + y0 - geometry.montage_origin_y)
-        canvas_x1 = int(tile.x0 + x1 - geometry.montage_origin_x)
-        canvas_y1 = int(tile.y0 + y1 - geometry.montage_origin_y)
-        data = np.asarray(self.data)
-        if canvas_x0 < 0 or canvas_y0 < 0 or canvas_x1 > data.shape[1] or canvas_y1 > data.shape[0]:
-            return None
-        hist = None if self.histogram_data is None else np.asarray(self.histogram_data)
-        hist_region = None if hist is None else hist[canvas_y0:canvas_y1, canvas_x0:canvas_x1]
-        return data[canvas_y0:canvas_y1, canvas_x0:canvas_x1, ...], hist_region, "committed_canvas"
-
-
-@dataclass(frozen=True)
 class TiledValueSource(FrameValueSource):
     payloads: dict[int, DisplayTilePayload] = field(default_factory=dict)
 
@@ -412,26 +372,14 @@ class CommittedDisplayFrame:
 
     def __post_init__(self) -> None:
         if self.value_source is None:
-            if self.data is None:
-                raise ValueError("a committed raster frame requires display data")
-            object.__setattr__(
-                self,
-                "value_source",
-                CanvasValueSource(
-                    data=self.data,
-                    histogram_data=self.histogram_data,
-                    geometry=self.geometry,
-                ),
-            )
-        elif self.data is None and not isinstance(self.value_source, TiledValueSource) and not hasattr(self.value_source, "payloads"):
-            raise ValueError("data-less committed frames require a tiled value source")
+            raise ValueError("committed display frames require a tiled value source")
+        if not isinstance(self.value_source, TiledValueSource):
+            raise ValueError("committed display frames require a tiled value source")
         if self.scene is None:
-            storage = DisplayStorage.TILED if isinstance(self.value_source, TiledValueSource) else DisplayStorage.RASTER
-            payloads = self.value_source.payloads if isinstance(self.value_source, TiledValueSource) else {}
             object.__setattr__(
                 self,
                 "scene",
-                display_scene_for_geometry(self.geometry, storage=storage, payloads=payloads),
+                display_scene_for_geometry(self.geometry, payloads=self.value_source.payloads),
             )
         elif self.scene.geometry != self.geometry:
             raise ValueError("committed display frame scene geometry must match frame geometry")

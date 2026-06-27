@@ -72,9 +72,6 @@ class ImageUploadTiming:
 class MontageRuntimeDiagnostics:
     active: bool
     session_id: int | None = None
-    canvas_rect: tuple[int, int, int, int] | None = None
-    canvas_shape: tuple[int, int] | None = None
-    canvas_bytes: int | None = None
     loaded_tiles: int = 0
     loading_tiles: int = 0
     pending_tiles: int = 0
@@ -90,8 +87,8 @@ class MontageRuntimeDiagnostics:
     tile_presentation_draw_pending: bool = False
     tile_visual_visible_pages: int = 0
     overlays_above_tiles: bool = False
-    display_mode: str = "canvas"
-    backend_chosen: str = "canvas"
+    display_mode: str = "none"
+    backend_chosen: str = "none"
     backend_reason: str = ""
     backend_warning: str = ""
     show_loading_overlays: bool = False
@@ -160,8 +157,8 @@ class MontageTimingDiagnostics:
     last_session_setup_ms: float | None = None
     last_initial_commit_ms: float | None = None
     last_tile_eval_ms: float | None = None
-    last_tile_cache_lookup_ms: float | None = None
-    last_tile_cache_hit: bool | None = None
+    last_display_cache_lookup_ms: float | None = None
+    last_display_cache_hit: bool | None = None
     last_stage_cache_lookup_ms: float | None = None
     last_stage_cache_hit: bool | None = None
     last_stage_attach_wait_ms: float | None = None
@@ -174,14 +171,12 @@ class MontageTimingDiagnostics:
     last_tile_layer_upload_ms: float | None = None
     last_tile_layer_rgb_window_ms: float | None = None
     last_level_sync_ms: float | None = None
-    last_canvas_compose_ms: float | None = None
-    last_canvas_patch_ms: float | None = None
-    last_canvas_commit_ms: float | None = None
+    last_tile_commit_ms: float | None = None
     last_set_image_ms: float | None = None
     last_overlay_update_ms: float | None = None
     cached_tiles_last_session: int = 0
     missing_tiles_last_session: int = 0
-    patched_tiles_last_flush: int = 0
+    committed_tile_upserts_last_flush: int = 0
     upload_visible_bytes: int = 0
     upload_histogram_bytes: int = 0
     upload_fast_same_object: bool = False
@@ -247,8 +242,7 @@ class CanvasPreserveRuntimeDiagnostics:
 @dataclass(frozen=True)
 class WindowRuntimeDiagnostics:
     memory_policy: MemoryPolicy
-    image_cache: CacheDiagnosticsSnapshot
-    tile_cache: CacheDiagnosticsSnapshot
+    display_cache: CacheDiagnosticsSnapshot
     profile_cache: CacheDiagnosticsSnapshot
     stage_cache: object
     schedulers: tuple[object, ...]
@@ -302,8 +296,7 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
         "Schedulers": "\n".join(_scheduler_lines(snapshot.schedulers)),
         "Caches": "\n".join(
             (
-                _cache_line("Image", snapshot.image_cache),
-                _cache_line("Montage tiles", snapshot.tile_cache),
+                _cache_line("Display tiles", snapshot.display_cache),
                 _cache_line("Profiles/scalars", snapshot.profile_cache),
                 _stage_cache_line("Stage cache", snapshot.stage_cache),
                 _stage_materialization_line("Stage materialization", snapshot.stage_materialization),
@@ -359,8 +352,7 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"  tiles visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
             f"presented={snapshot.montage.presented_tiles} "
             f"pending={snapshot.montage.pending_tiles} "
-            f"overlays={snapshot.montage.overlay_count}\n"
-            f"  canvas={_bytes_or_na(snapshot.montage.canvas_bytes)}"
+            f"overlays={snapshot.montage.overlay_count}"
         ),
         (
             "Tile layer:\n"
@@ -589,9 +581,6 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
     return (
         f"Active: {snapshot.montage.active}",
         f"Session: {snapshot.montage.session_id if snapshot.montage.session_id is not None else 'n/a'}",
-        f"Canvas rect: {snapshot.montage.canvas_rect if snapshot.montage.canvas_rect is not None else 'n/a'}",
-        f"Canvas shape: {snapshot.montage.canvas_shape if snapshot.montage.canvas_shape is not None else 'n/a'}",
-        f"Canvas bytes: {_bytes_or_na(snapshot.montage.canvas_bytes)}",
         (
             "Tiles: "
             f"visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
@@ -647,8 +636,8 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         f"Timing session setup: {_ms_text(snapshot.montage_timing.last_session_setup_ms)}",
         f"Timing initial commit: {_ms_text(snapshot.montage_timing.last_initial_commit_ms)}",
         f"Timing tile eval: {_ms_text(snapshot.montage_timing.last_tile_eval_ms)}",
-        f"Timing tile cache lookup: {_ms_text(snapshot.montage_timing.last_tile_cache_lookup_ms)}",
-        f"Tile cache hit: {_bool_text(snapshot.montage_timing.last_tile_cache_hit)}",
+        f"Timing display cache lookup: {_ms_text(snapshot.montage_timing.last_display_cache_lookup_ms)}",
+        f"Display cache hit: {_bool_text(snapshot.montage_timing.last_display_cache_hit)}",
         f"Timing stage cache lookup: {_ms_text(snapshot.montage_timing.last_stage_cache_lookup_ms)}",
         f"Stage cache hit: {_bool_text(snapshot.montage_timing.last_stage_cache_hit)}",
         f"Timing attached stage wait: {_ms_text(snapshot.montage_timing.last_stage_attach_wait_ms)}",
@@ -661,13 +650,11 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         f"Timing tile layer upload: {_ms_text(snapshot.montage_timing.last_tile_layer_upload_ms)}",
         f"Timing tile layer RGB window: {_ms_text(snapshot.montage_timing.last_tile_layer_rgb_window_ms)}",
         f"Timing level sync: {_ms_text(snapshot.montage_timing.last_level_sync_ms)}",
-        f"Timing canvas compose: {_ms_text(snapshot.montage_timing.last_canvas_compose_ms)}",
-        f"Timing canvas patch: {_ms_text(snapshot.montage_timing.last_canvas_patch_ms)}",
-        f"Timing canvas commit: {_ms_text(snapshot.montage_timing.last_canvas_commit_ms)}",
+        f"Timing tile commit: {_ms_text(snapshot.montage_timing.last_tile_commit_ms)}",
         f"Timing montage set image: {_ms_text(snapshot.montage_timing.last_set_image_ms)}",
         f"Timing overlay update: {_ms_text(snapshot.montage_timing.last_overlay_update_ms)}",
-        f"Tile cache last session: cached={snapshot.montage_timing.cached_tiles_last_session} missing={snapshot.montage_timing.missing_tiles_last_session}",
-        f"Patched tiles last flush: {snapshot.montage_timing.patched_tiles_last_flush}",
+        f"Display cache last session: cached={snapshot.montage_timing.cached_tiles_last_session} missing={snapshot.montage_timing.missing_tiles_last_session}",
+        f"Committed tile upserts last flush: {snapshot.montage_timing.committed_tile_upserts_last_flush}",
         (
             "Tile layer items: "
             f"visible={snapshot.montage_timing.tile_layer_visible_items} "

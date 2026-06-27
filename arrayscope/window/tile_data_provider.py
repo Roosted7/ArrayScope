@@ -26,7 +26,7 @@ class TileDataProvider:
         self.evaluation_context = evaluation_context
 
     def request_tile_region(self, request: TileRegionRequest, *, priority=None, cancellation_token=None) -> TileRegionResult:
-        del priority
+        self.last_request_priority = priority
         _check_cancelled(cancellation_token)
         cached = _call_cache(self.operation_evaluator, "cached_tile_region_silent", "cached_tile_region", request)
         if cached is not None:
@@ -34,7 +34,7 @@ class TileDataProvider:
 
         tile = self._tile_for_request(request)
         region = self._normalized_region(request, tile)
-        visible = self._from_committed_canvas(request, tile, region)
+        visible = self._from_committed_tiled_payload(request, tile, region)
         if visible is not None:
             _store_region(self.operation_evaluator, request, (visible.image, visible.histogram_data))
             return visible
@@ -51,7 +51,7 @@ class TileDataProvider:
                 colormap_lut=self.colormap_lut,
             )
             if payload is not None:
-                result = _slice_payload(request, payload.image, payload.histogram_data, region, "tile_cache")
+                result = _slice_payload(request, payload.image, payload.histogram_data, region, "display_cache")
                 _store_region(self.operation_evaluator, request, (result.image, result.histogram_data))
                 return result
 
@@ -88,7 +88,7 @@ class TileDataProvider:
             return (slice(0, int(shape[y_axis])), slice(0, int(shape[x_axis])))
         return (slice(None), slice(None))
 
-    def _from_committed_canvas(self, request: TileRegionRequest, tile, region: tuple[slice, slice]) -> TileRegionResult | None:
+    def _from_committed_tiled_payload(self, request: TileRegionRequest, tile, region: tuple[slice, slice]) -> TileRegionResult | None:
         frame = self.committed_frame
         if frame is None or tile is None:
             return None

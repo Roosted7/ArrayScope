@@ -14,7 +14,7 @@ that unchecks Fit and restores square-pixel interaction.
 Outside Fit mode, pan and zoom stay bounded enough that the current image or montage remains recoverable:
 zoom-out is capped so content occupies at least 5% of each viewport axis, and panning must leave at
 least 5% per-axis overlap. Montage constraints use full montage world bounds, not the currently
-materialized viewport canvas.
+materialized tile subset.
 
 ## Consequences
 

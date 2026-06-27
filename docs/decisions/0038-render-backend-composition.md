@@ -72,12 +72,12 @@ arrayscope/display/
     base.py               # protocol and capabilities
     pyqtgraph/
       surface.py
-      raster.py
+      surface.py
       tiles.py
       overlays.py
     vispy/
       surface.py
-      raster.py
+      gpu_mapped_visual.py
       atlas.py
       shaders.py
       overlays.py

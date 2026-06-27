@@ -1,4 +1,4 @@
-"""Unified semantic frame planning for raster and tiled image presentation."""
+"""Unified semantic frame planning for tiled image presentation."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from typing import Iterable
 
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
-from arrayscope.display.geometry import DisplayGeometry
-from arrayscope.display.montage import make_montage_plan
-from arrayscope.display.scene import DisplayLayout, DisplayStorage
+from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+from arrayscope.display.montage import MontageTileState, make_montage_plan
+from arrayscope.display.scene import DisplayLayout
 
 
 DEFAULT_INTERNAL_TILE_SHAPE = (1024, 1024)
@@ -46,7 +46,6 @@ class FramePlan:
     target: FrameTarget
     geometry: DisplayGeometry
     layout: DisplayLayout
-    storage: DisplayStorage
     tile_shape: tuple[int, int]
     regions: tuple[FrameRegion, ...]
     semantic_key: object
@@ -93,11 +92,8 @@ class FramePlanner:
         self,
         *,
         internal_tile_shape: tuple[int, int] = DEFAULT_INTERNAL_TILE_SHAPE,
-        max_raster_pixels: int | None = None,
     ) -> None:
         self.internal_tile_shape = _shape2(internal_tile_shape)
-        default_pixels = self.internal_tile_shape[0] * self.internal_tile_shape[1]
-        self.max_raster_pixels = int(max_raster_pixels or default_pixels)
 
     def plan(
         self,
@@ -116,7 +112,6 @@ class FramePlanner:
                 target=target,
                 view_state=view_state,
                 display_shape=display_shape,
-                backend_capabilities=backend_capabilities,
                 viewport_shape=viewport_shape,
                 view_range=view_range,
             )
@@ -124,7 +119,6 @@ class FramePlanner:
             target=target,
             view_state=view_state,
             display_shape=display_shape,
-            backend_capabilities=backend_capabilities,
             view_range=view_range,
             memory_policy=memory_policy,
         )
@@ -135,32 +129,36 @@ class FramePlanner:
         target: FrameTarget,
         view_state,
         display_shape: tuple[int, int],
-        backend_capabilities: ImageViewBackendCapabilities,
         view_range,
         memory_policy,
     ) -> FramePlan:
-        tile_shape = self._single_tile_shape(display_shape, memory_policy=memory_policy)
-        force_tiled = _pixel_count(display_shape) > self.max_raster_pixels
-        can_tile = bool(getattr(backend_capabilities, "direct_montage_tile_payloads", False))
-        storage = DisplayStorage.TILED if force_tiled and can_tile else DisplayStorage.RASTER
-        geometry = DisplayGeometry(view_state=view_state, display_shape=display_shape)
-        regions = (
-            self._single_region(view_state=view_state, display_shape=display_shape)
-            if storage is DisplayStorage.RASTER
-            else tuple(self._single_tile_regions(view_state, display_shape, tile_shape, view_range))
+        tile_shape = self._single_tile_shape(display_shape)
+        regions = tuple(self._single_tile_regions(view_state, display_shape, tile_shape, view_range))
+        columns = max(1, ceil(display_shape[1] / tile_shape[1]))
+        rows = max(1, ceil(display_shape[0] / tile_shape[0]))
+        geometry = DisplayGeometry(
+            view_state=view_state,
+            display_shape=display_shape,
+            montage=MontageGeometry(
+                indices=tuple(int(region.region_id) for region in regions),
+                tile_shape=tile_shape,
+                columns=columns,
+                rows=rows,
+                gap=0,
+            ),
+            montage_tile_states=tuple(MontageTileState.LOADED for _region in regions),
         )
         materialization_key = (
             target.semantic_key,
             "single",
             display_shape,
-            tile_shape if storage is DisplayStorage.TILED else display_shape,
+            tile_shape,
         )
         return FramePlan(
             target=target,
             geometry=geometry,
             layout=DisplayLayout.SINGLE,
-            storage=storage,
-            tile_shape=display_shape if storage is DisplayStorage.RASTER else tile_shape,
+            tile_shape=tile_shape,
             regions=regions,
             semantic_key=target.semantic_key,
             materialization_key=materialization_key,
@@ -172,7 +170,6 @@ class FramePlanner:
         target: FrameTarget,
         view_state,
         display_shape: tuple[int, int],
-        backend_capabilities: ImageViewBackendCapabilities,
         viewport_shape: tuple[int, int] | None,
         view_range,
     ) -> FramePlan:
@@ -228,41 +225,20 @@ class FramePlanner:
             )
             for tile in montage_plan.tiles
         )
-        storage = (
-            DisplayStorage.TILED
-            if getattr(backend_capabilities, "direct_montage_tile_payloads", False)
-            else DisplayStorage.RASTER
-        )
         return FramePlan(
             target=target,
             geometry=geometry,
             layout=DisplayLayout.MONTAGE,
-            storage=storage,
             tile_shape=tile_shape,
             regions=regions,
             semantic_key=target.semantic_key,
             materialization_key=(target.semantic_key, "montage", axis, indices, tile_shape),
         )
 
-    def _single_tile_shape(self, display_shape: tuple[int, int], *, memory_policy) -> tuple[int, int]:
-        del memory_policy
+    def _single_tile_shape(self, display_shape: tuple[int, int]) -> tuple[int, int]:
         return (
             min(int(display_shape[0]), int(self.internal_tile_shape[0])),
             min(int(display_shape[1]), int(self.internal_tile_shape[1])),
-        )
-
-    @staticmethod
-    def _single_region(*, view_state, display_shape: tuple[int, int]) -> tuple[FrameRegion, ...]:
-        height, width = display_shape
-        return (
-            FrameRegion(
-                region_id=0,
-                source_index=None,
-                bounds=(0.0, 0.0, float(width - 1), float(height - 1)),
-                data_slices=(slice(0, height), slice(0, width)),
-                view_state=view_state,
-                materialization_key=("single", 0, display_shape),
-            ),
         )
 
     @staticmethod

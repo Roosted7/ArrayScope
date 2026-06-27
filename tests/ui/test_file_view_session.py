@@ -479,6 +479,41 @@ def test_programmatic_range_change_does_not_release_restored_camera_lock(qt_app,
     assert released == []
 
 
+def test_tiled_single_scene_range_change_schedules_tiled_viewport_update(qt_app, monkeypatch):
+    from pyqtgraph.Qt import QtCore
+
+    import arrayscope.window.viewport_bridge as viewport_bridge
+    from arrayscope.display.scene import DisplayScene, DisplayLayout
+    from arrayscope.window.viewport_bridge import ViewportBridge
+
+    scheduled = []
+    owner = SimpleNamespace(
+        img_view=SimpleNamespace(_viewport_applying=False),
+        _release_file_session_restore_camera_lock=lambda: None,
+        _note_viewport_interaction=lambda _reason: None,
+        _update_display_group_title=lambda: None,
+        _committed_display_frame=SimpleNamespace(
+            scene=DisplayScene(
+                geometry=object(),
+                layout=DisplayLayout.SINGLE,
+                regions=(),
+                bounds=(0.0, 0.0, 1.0, 1.0),
+            )
+        ),
+        _schedule_tiled_viewport_update=lambda: scheduled.append("tiled"),
+        view_state=SimpleNamespace(montage_axis=None),
+    )
+    monkeypatch.setattr(
+        viewport_bridge.Qt.QtWidgets.QApplication,
+        "mouseButtons",
+        lambda: QtCore.Qt.MouseButton.NoButton,
+    )
+
+    ViewportBridge(owner).on_view_range_changed()
+
+    assert scheduled == ["tiled"]
+
+
 def test_restored_viewport_waits_until_frame_committed(qt_app, monkeypatch):
     import arrayscope.window.file_view_session as file_view_session
     from arrayscope.core.view_session import ViewportSession

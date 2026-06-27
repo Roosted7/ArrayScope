@@ -2,8 +2,8 @@
 
 ## Problem
 
-Progressive montage rendering still had multiple level decision paths. Full image commits, first
-montage commits, progressive tile patches, histogram widget state, and partial viewport canvases could
+Progressive montage rendering still had multiple level decision paths. Initial
+commits, progressive tile patches, histogram widget state, and partial visible tile coverage could
 all influence the levels that were displayed. In operation-backed montage views this made the
 histogram range, shown levels, and actual image item levels diverge. Panning could appear to fix the
 view because it re-entered rendering through a different cached-tile path.

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from time import perf_counter
 import weakref
 
@@ -110,6 +112,7 @@ class HistogramDisplayController(QtCore.QObject):
         self._active_request_signature = None
         self._running_request_signature = None
         self._pending_request: HistogramPlotRequest | None = None
+        self._result_cache = OrderedDict()
         self._manual_popup: HistogramLevelEditPopup | None = None
         self._manual_start_levels: tuple[float, float] | None = None
         self._pending_span_edit_scene_pos: QtCore.QPointF | None = None
@@ -173,6 +176,7 @@ class HistogramDisplayController(QtCore.QObject):
         self._active_request_signature = None
         self._running_request_signature = None
         self._pending_request = None
+        self._result_cache.clear()
         self.close_popup()
 
     def refresh_histogram_plot(self, *, auto_level: bool = False) -> bool:
@@ -211,6 +215,10 @@ class HistogramDisplayController(QtCore.QObject):
         self._closed = False
         signature = _request_signature(request)
         self._active_request_signature = signature
+        cached = self._cached_histogram_result(request)
+        if cached is not None:
+            self._histogram_ready.emit(cached)
+            return
         if self._active_request_signature == signature:
             running_signature = self._running_request_signature
             if running_signature == signature:
@@ -237,7 +245,7 @@ class HistogramDisplayController(QtCore.QObject):
             started = submit(
                 lambda request=request: compute_histogram_plot(request),
                 on_done=self._histogram_ready.emit,
-                key=("histogram_plot", request.source_identity),
+                key=("histogram_plot", signature),
             )
             if getattr(started, "scheduled", False):
                 self._active_future = None
@@ -273,9 +281,27 @@ class HistogramDisplayController(QtCore.QObject):
 
     def _handle_histogram_ready(self, result) -> None:
         try:
+            self._remember_histogram_result(result)
             self._apply_histogram_result(result, auto_level=False)
         finally:
             self._finish_histogram_job(result)
+
+    def _remember_histogram_result(self, result) -> None:
+        if not isinstance(result, HistogramPlotResult) or not result.has_data:
+            return
+        signature = _result_signature(result)
+        self._result_cache[signature] = result
+        self._result_cache.move_to_end(signature)
+        while len(self._result_cache) > 32:
+            self._result_cache.popitem(last=False)
+
+    def _cached_histogram_result(self, request: HistogramPlotRequest) -> HistogramPlotResult | None:
+        signature = _request_signature(request)
+        result = self._result_cache.get(signature)
+        if result is None:
+            return None
+        self._result_cache.move_to_end(signature)
+        return replace(result, generation=int(request.generation))
 
     def _finish_histogram_job(self, result) -> None:
         if not isinstance(result, HistogramPlotResult):

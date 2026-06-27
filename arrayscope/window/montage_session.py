@@ -13,10 +13,8 @@ from arrayscope.display.montage import (
     MontagePlan,
     MontageTile,
     MontageTileState,
-    MontageViewportCanvas,
     RenderedTile,
     montage_rect_for_viewport,
-    patch_rendered_tile_into_canvas,
 )
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta, TilePresentationState
@@ -106,12 +104,7 @@ class MontageRenderSession:
     active_tile_requests: set[int] = field(default_factory=set)
     presented_tiles: set[int] = field(default_factory=set)
     stage_fan_in: StageFanInState = field(default_factory=StageFanInState)
-    canvas: MontageViewportCanvas | None = None
-    canvas_data: np.ndarray | None = None
-    canvas_histogram_data: np.ndarray | None = None
-    canvas_rect: tuple[int, int, int, int] | None = None
     tile_states: list[MontageTileState] = field(default_factory=list)
-    dirty_rects: list[tuple[int, int, int, int]] = field(default_factory=list)
     dirty_tiles: list[int] = field(default_factory=list)
     flush_pending: bool = False
     last_commit_monotonic: float = 0.0
@@ -444,11 +437,9 @@ class MontageRenderSession:
         semantic = exact_image if semantic is None else np.asarray(semantic)
         lod = self._planned_lod_info(rendered, factor=lod_factor)
         texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
-        del texture_histogram
         source_id = self._payload_source_id(
             base_source_id,
             texture_kind=texture_kind,
-            mapping=mapping,
             lod=lod,
             texture_data=texture_data,
         )
@@ -471,7 +462,7 @@ class MontageRenderSession:
             texture_data=texture_data,
             texture_kind=texture_kind,
             semantic_data=semantic,
-            semantic_histogram_data=exact_histogram,
+            semantic_histogram_data=exact_histogram if texture_histogram is None else texture_histogram,
             source_shape=tuple(int(value) for value in exact_image.shape[:2]),
             lod=lod,
             shader_mapping=mapping,
@@ -505,7 +496,6 @@ class MontageRenderSession:
                 source_id = self._payload_source_id(
                     base_source_id,
                     texture_kind=getattr(rendered, "texture_kind", None),
-                    mapping=getattr(rendered, "shader_mapping", None),
                     lod=lod,
                     texture_data=texture_data,
                 )
@@ -537,18 +527,12 @@ class MontageRenderSession:
             self.presented_tiles.update(int(tile) for tile in seeded_state)
             self.invalidate_tile_states()
 
-    def _payload_source_id(self, base_source_id, *, texture_kind, mapping, lod: LodInfo, texture_data) -> tuple[object, ...]:
-        del mapping
+    def _payload_source_id(self, base_source_id, *, texture_kind, lod: LodInfo, texture_data) -> tuple[object, ...]:
         prefix = tuple(base_source_id) if isinstance(base_source_id, tuple) else (base_source_id,)
         return (
             *prefix,
             "texture_kind",
             None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
-            # Shader uniforms do not change texture content.  Keeping this
-            # compatibility marker avoids invalidating existing source-key
-            # parsing while preventing level/LUT changes from re-uploading.
-            "shader",
-            None,
             "lod",
             int(lod.factor),
             int(lod.level),
@@ -568,7 +552,8 @@ class MontageRenderSession:
         return int(self.lod_policy_decision.applied_factor)
 
     def _planned_lod_info(self, rendered: RenderedTile, *, factor: int) -> LodInfo:
-        del factor
+        if int(factor) < 1:
+            raise ValueError("LOD factor must be positive")
         texture_kind = getattr(rendered, "texture_kind", None)
         if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
             texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
@@ -580,7 +565,8 @@ class MontageRenderSession:
         return LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
 
     def _texture_for_rendered_tile(self, rendered: RenderedTile, *, factor: int | None = None) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
-        del factor
+        if factor is not None and int(factor) < 1:
+            raise ValueError("LOD factor must be positive")
         texture_kind = getattr(rendered, "texture_kind", None)
         if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
             texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
@@ -676,10 +662,12 @@ class MontageRenderSession:
             upserts[int(tile_number)] = payload
 
         resident_retarget_tiles = _resident_retarget_upsert_tiles(upserts, previous_payloads)
+        resident_retarget_tiles.difference_update(int(tile) for tile in stale_level_tiles)
         resident_retarget_tiles.update(
             int(tile)
             for tile, payload in upserts.items()
             if int(tile) in self.pending_payload_upserts
+            and int(tile) not in stale_level_tiles
             and previous_payloads.get(int(tile)) is payload
         )
         resident_retarget_upserts = {
@@ -780,17 +768,12 @@ class MontageRenderSession:
     def acknowledge_tile_presentation(
         self,
         delta: TilePresentationDelta,
-        report: TileCommitReport | None,
+        report: TileCommitReport,
         *,
         levels: tuple[float, float] | None = None,
     ) -> TilePresentationState:
-        if report is None:
-            report = TileCommitReport(
-                presented_tiles=self.tile_presentation_state.apply_delta(delta).active_payloads(delta),
-                committed_upserts=delta.upserts,
-                removed_tiles=delta.removals,
-            )
-        report = report if isinstance(report, TileCommitReport) else TileCommitReport()
+        if not isinstance(report, TileCommitReport):
+            raise TypeError("tile presentation acknowledgement requires a TileCommitReport")
         level_delta_stale = bool(
             self.has_pending_level_update()
             and dict(delta.upserts)
@@ -883,8 +866,6 @@ class MontageRenderSession:
         self.tile_states = states
         self._tile_states_cached_revision = int(self.tile_state_revision)
         self._tile_states_cached_tuple = tuple(self.tile_states)
-        if self.canvas is not None:
-            object.__setattr__(self.canvas, "tile_states", self._tile_states_cached_tuple)
         return self._tile_states_cached_tuple
 
     def is_complete(self) -> bool:
@@ -916,26 +897,6 @@ class MontageRenderSession:
             and self.level_generation.tile_revisions.get(int(tile)) == int(self.level_revision)
         )
 
-    def initialize_canvas(self, canvas: MontageViewportCanvas) -> None:
-        self.canvas = canvas
-        self.canvas_data = canvas.data
-        self.canvas_histogram_data = canvas.histogram_data
-        self.canvas_rect = tuple(int(value) for value in canvas.canvas_rect)
-        self.tile_states = list(canvas.tile_states)
-        self.invalidate_tile_states()
-        self.dirty_rects.clear()
-        self.dirty_tiles.clear()
-
-    def has_canvas(self) -> bool:
-        return self.canvas is not None
-
-    def current_canvas(self) -> MontageViewportCanvas:
-        if self.canvas is None:
-            raise RuntimeError("montage session has no canvas")
-        if self.tile_states:
-            object.__setattr__(self.canvas, "tile_states", tuple(self.tile_states))
-        return self.canvas
-
     def mark_tile_state(self, tile: MontageTile, state: MontageTileState) -> None:
         index = int(tile.montage_index)
         if not self.tile_states:
@@ -946,31 +907,14 @@ class MontageRenderSession:
                 return
             self.tile_states[index] = state
             self.invalidate_tile_states()
-            if self.canvas is not None:
-                object.__setattr__(self.canvas, "tile_states", tuple(self.tile_states))
 
     def invalidate_tile_states(self) -> None:
         self.tile_state_revision += 1
         self._tile_states_cached_revision = -1
         self._tile_states_cached_tuple = ()
 
-    def patch_rendered_tile(self, rendered: RenderedTile) -> bool:
-        if self.canvas is None:
-            return False
-        dirty = patch_rendered_tile_into_canvas(rendered, self.canvas)
-        index = int(rendered.tile.montage_index)
-        self.rendered_tiles[index] = rendered
-        self.mark_presented((index,))
-        if dirty is None:
-            return False
-        self.dirty_rects.append(tuple(int(value) for value in dirty))
-        self.dirty_tiles.append(int(rendered.tile.montage_index))
-        return True
-
     def consume_dirty_rects(self) -> tuple[tuple[int, int, int, int], ...]:
-        rects = tuple(self.dirty_rects)
-        self.dirty_rects.clear()
-        return rects
+        return ()
 
     def consume_dirty_tiles(self) -> tuple[int, ...]:
         tiles = tuple(dict.fromkeys(int(tile) for tile in self.dirty_tiles))

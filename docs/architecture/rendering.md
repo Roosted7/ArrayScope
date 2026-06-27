@@ -33,7 +33,7 @@ Hover and ROI/profile mapping use this frame, not whatever `ViewState` happens t
 `display.geometry` maps among:
 
 - backend world/ViewBox coordinates;
-- canvas-local coordinates;
+- committed-display coordinates;
 - montage tile-local coordinates;
 - array indices and profile states.
 
@@ -52,9 +52,9 @@ A progressive tile can be shown before a high-detail plot is complete, but autom
 ## Unified Tiled Surface
 
 ArrayScope presents normal images, large planes, and montages through one semantic tiled image
-surface. A small/stable image may collapse to one raster commit or one backend texture/item; a large
-single plane may use internal tiles; a montage uses multiple semantic tile regions. Those are
-optimizations and layouts inside one presentation model, not separate semantic renderers.
+surface. A small/stable image is one tile; a large single plane may use internal tiles; a montage uses
+multiple semantic tile regions. Those are layouts inside one presentation model, not separate semantic
+renderers.
 
 A tiled presentation is a set of semantic regions and payloads. PyQtGraph uses persistent per-tile
 image items; VisPy uses atlas/texture-backed visuals. Tile identity is based on materialized data and
@@ -96,7 +96,6 @@ Production residency currently favors native-resolution tiles. Arbitrary CPU-red
 
 Shared code asks for capabilities such as:
 
-- raster presentation;
 - typed tiled presentation via `DisplayTiledPresentation`/`TilePresentationDelta`;
 - persistent residency;
 - shader windowing for scalar/complex data;
@@ -128,9 +127,9 @@ It may not own:
 
 ### PyQtGraph
 
-The default path is mature and provides the complete feature baseline. Its tiled implementation avoids rebuilding a full montage canvas, but large item counts and per-item updates can become GUI/scene-graph bottlenecks. Warm item visibility/geometry changes should not be reported as cold CPU windowing/upload.
+The default path is mature and provides the complete feature baseline. Its tiled implementation avoids rebuilding a composed montage image, but large item counts and per-item updates can become GUI/scene-graph bottlenecks. Warm item visibility/geometry changes should not be reported as cold CPU windowing/upload.
 It accepts typed tiled presentations for internally tiled single planes as well as montages. The
-old direct raster tile-layer API has been removed; tile-layer commits enter through
+old direct tile-layer widget API has been removed; tile-layer commits enter through
 `present_tiled` with committed tile state and revisioned tile deltas.
 
 ### VisPy
@@ -176,7 +175,7 @@ Widget close stops warm-tile work, cancels queued histogram refresh, and closes 
 
 `ImageViewShell` is the shared widget contract for controls, histogram, HUD, viewport intent,
 interaction state, and display timing. PyQtGraph and VisPy expose concrete `ImageSurface`
-implementations with declared capabilities; `DisplayCommitter` commits semantic raster/tiled
-presentations directly to that surface contract. The contract also covers camera application, overlay
+implementations with declared capabilities; `DisplayCommitter` commits semantic tiled presentations
+directly to that surface contract. The contract also covers camera application, overlay
 coordinate mapping, diagnostics, context-loss reset, teardown, interaction-state visual sync, and
 declared shared interaction-event ownership.

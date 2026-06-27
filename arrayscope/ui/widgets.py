@@ -65,8 +65,7 @@ class RangeSlider(QtWidgets.QWidget):
         self.valuesChanged.emit(self._lower_value, self._upper_value)
         self.update()
 
-    def paintEvent(self, event):
-        del event
+    def paintEvent(self, _event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
 

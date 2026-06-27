@@ -4,7 +4,7 @@ from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.frame_planner import FramePlanner
-from arrayscope.display.scene import DisplayLayout, DisplayStorage
+from arrayscope.display.scene import DisplayLayout
 
 
 def _target(semantic="sem", viewport=None):
@@ -16,10 +16,10 @@ def _target(semantic="sem", viewport=None):
     )
 
 
-def test_small_normal_image_plans_one_raster_region():
+def test_small_normal_image_plans_one_tile_region():
     state = ViewState.from_shape((32, 48)).with_image_axes(0, 1)
 
-    plan = FramePlanner(internal_tile_shape=(16, 16), max_raster_pixels=4096).plan(
+    plan = FramePlanner(internal_tile_shape=(64, 64)).plan(
         target=_target(),
         view_state=state,
         display_shape=(32, 48),
@@ -27,7 +27,7 @@ def test_small_normal_image_plans_one_raster_region():
     )
 
     assert plan.layout is DisplayLayout.SINGLE
-    assert plan.storage is DisplayStorage.RASTER
+    assert plan.tile_shape == (32, 48)
     assert plan.active_region_ids == (0,)
     assert plan.regions[0].bounds == (0.0, 0.0, 47.0, 31.0)
     assert plan.regions[0].data_slices == (slice(0, 32), slice(0, 48))
@@ -36,7 +36,7 @@ def test_small_normal_image_plans_one_raster_region():
 def test_huge_single_plane_plans_internal_tiles():
     state = ViewState.from_shape((40, 60)).with_image_axes(0, 1)
 
-    plan = FramePlanner(internal_tile_shape=(16, 16), max_raster_pixels=128).plan(
+    plan = FramePlanner(internal_tile_shape=(16, 16)).plan(
         target=_target(),
         view_state=state,
         display_shape=(40, 60),
@@ -44,7 +44,6 @@ def test_huge_single_plane_plans_internal_tiles():
     )
 
     assert plan.layout is DisplayLayout.SINGLE
-    assert plan.storage is DisplayStorage.TILED
     assert plan.tile_shape == (16, 16)
     assert len(plan.regions) == 12
     assert plan.regions[0].bounds == (0.0, 0.0, 15.0, 15.0)
@@ -55,7 +54,7 @@ def test_huge_single_plane_plans_internal_tiles():
 def test_one_tile_montage_matches_single_region_geometry():
     normal = ViewState.from_shape((12, 14, 1)).with_image_axes(0, 1)
     montage = normal.with_montage_axis(2, columns=1, indices=(0,))
-    planner = FramePlanner(internal_tile_shape=(16, 16), max_raster_pixels=4096)
+    planner = FramePlanner(internal_tile_shape=(16, 16))
 
     normal_plan = planner.plan(
         target=_target("same-semantic"),
@@ -89,7 +88,6 @@ def test_multi_tile_montage_marks_active_and_near_regions_from_viewport():
     )
 
     assert plan.layout is DisplayLayout.MONTAGE
-    assert plan.storage is DisplayStorage.TILED
     assert plan.planned_region_ids == tuple(range(6))
     assert plan.active_region_ids == (1,)
     assert set(plan.near_region_ids).issuperset({0, 1, 2, 4})
@@ -98,7 +96,7 @@ def test_multi_tile_montage_marks_active_and_near_regions_from_viewport():
 
 def test_camera_only_retarget_changes_active_regions_not_materialization_key():
     state = ViewState.from_shape((40, 60)).with_image_axes(0, 1)
-    planner = FramePlanner(internal_tile_shape=(16, 16), max_raster_pixels=128)
+    planner = FramePlanner(internal_tile_shape=(16, 16))
 
     left = planner.plan(
         target=_target("semantic", viewport="left"),

@@ -3,6 +3,8 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
+from arrayscope.core.scheduler import EvalPriority, FrameTarget, WorkStart
+from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.display.image_view_factory import create_image_view
 from arrayscope.ui.docks.inspection import InspectionDock
 from arrayscope.ui.docks.operations import OperationStackDock
@@ -384,17 +386,40 @@ class DisplayControlBuildMixin:
         self.layouts['topDown'].addWidget(self.tab_widget)
 
     def _submit_histogram_background_task(self, fn, *, on_done, key):
-        controller = getattr(self, "prefetch_evaluation_controller", None)
+        controller = getattr(self, "histogram_evaluation_controller", None)
         if controller is None:
             return None
         decision = self._ui_work_decision("histogram_refresh", interactive=False)
-        memory_budget = getattr(decision, "byte_cap", 0) if decision is not None else self._prefetch_budget_bytes()
-        return controller.start_prefetch(
-            fn,
-            on_done=on_done,
-            key=key,
-            memory_budget_bytes=max(1, int(memory_budget or 0)),
+        byte_cap = int(getattr(decision, "byte_cap", 0) or 0) if decision is not None else 0
+        frame_target = FrameTarget(
+            semantic_key=key,
+            viewport_key=("histogram", key),
+            presentation_key=("histogram-plot",),
+            quality="exact-visible",
         )
+        generation = controller.start_active_plus_latest(
+            fn,
+            key=key,
+            priority=EvalPriority.HISTOGRAM,
+            replace_group="histogram-plot",
+            frame_target=frame_target,
+            supersession_key="histogram-plot",
+            supersession_value=key,
+            work_item=WorkItem(
+                key=("histogram_plot", key),
+                lane=WorkLane.HISTOGRAM_REFINEMENT,
+                frame_target=frame_target,
+                supersession_key="histogram-plot",
+                supersession_value=key,
+                estimated_bytes=max(1, byte_cap),
+                expected_value=2.0,
+                reusable_output=True,
+            ),
+            on_done=on_done,
+            on_reuse_stale=on_done,
+            slow_ms=0,
+        )
+        return WorkStart(bool(generation), "scheduled" if generation else "admission")
 
     def _build_header_bar(self, filepath):
         self._reload_btn = QtWidgets.QToolButton()

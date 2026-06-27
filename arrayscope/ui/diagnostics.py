@@ -52,8 +52,7 @@ class _CompactSegmentBar(QtWidgets.QWidget):
         self.setVisible(bool(self._segments))
         self.update()
 
-    def paintEvent(self, event):
-        del event
+    def paintEvent(self, _event):
         painter = QtGui.QPainter(self)
         rect = self.rect().adjusted(0, 0, -1, -1)
         painter.setPen(QtGui.QPen(self.palette().mid().color(), 1))
@@ -98,8 +97,7 @@ class _ElidedOverviewLabel(QtWidgets.QLabel):
     def sizeHint(self):
         return Qt.QtCore.QSize(80, 18)
 
-    def paintEvent(self, event):
-        del event
+    def paintEvent(self, _event):
         painter = QtGui.QPainter(self)
         painter.setPen(self.palette().text().color())
         metrics = painter.fontMetrics()
@@ -148,7 +146,6 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             "render": _CompactUsageBar("Render"),
             "stage": _CompactUsageBar("Stage"),
             "tile": _CompactUsageBar("Tiles"),
-            "canvas": _CompactUsageBar("Canvas"),
         }
         for bar in self._compact_bars.values():
             bar_layout.addWidget(bar, 1)
@@ -330,19 +327,12 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             detail=f"{_short_bytes(snapshot.stage_cache.bytes_used)} / {_short_bytes(snapshot.stage_cache.max_bytes)}",
         )
         bars["tile"].set_usage(
-            used=snapshot.tile_cache.bytes_used,
-            total=snapshot.tile_cache.max_bytes,
-            detail=f"{_short_bytes(snapshot.tile_cache.bytes_used)} / {_short_bytes(snapshot.tile_cache.max_bytes)}",
-        )
-        canvas_used = 0 if snapshot.montage.canvas_bytes is None else int(snapshot.montage.canvas_bytes)
-        bars["canvas"].set_usage(
-            used=canvas_used,
-            total=policy.montage_canvas_budget_bytes,
-            detail="n/a" if snapshot.montage.canvas_bytes is None else f"{_short_bytes(canvas_used)} / {_short_bytes(policy.montage_canvas_budget_bytes)}",
+            used=snapshot.display_cache.bytes_used,
+            total=snapshot.display_cache.max_bytes,
+            detail=f"{_short_bytes(snapshot.display_cache.bytes_used)} / {_short_bytes(snapshot.display_cache.max_bytes)}",
         )
         bars["stage"].setVisible(bool(snapshot.stage_cache.bytes_used or snapshot.stage_cache.entries))
-        bars["tile"].setVisible(bool(snapshot.tile_cache.bytes_used or snapshot.montage.active))
-        bars["canvas"].setVisible(bool(snapshot.montage.active or canvas_used))
+        bars["tile"].setVisible(bool(snapshot.display_cache.bytes_used or snapshot.montage.active))
 
     def _update_segment_bars(self, snapshot) -> None:
         work_segments = []
@@ -380,17 +370,16 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             _timing_segments(
                 (
                     ("tile", snapshot.montage_timing.last_tile_eval_ms, "#c2410c"),
-                    ("cache", snapshot.montage_timing.last_tile_cache_lookup_ms, "#2563eb"),
+                    ("cache", snapshot.montage_timing.last_display_cache_lookup_ms, "#2563eb"),
                     ("stage", snapshot.montage_timing.last_stage_cache_lookup_ms, "#0f766e"),
                     ("wait", snapshot.montage_timing.last_stage_attach_wait_ms, "#0d9488"),
                     ("levels", snapshot.montage_timing.last_level_stats_ms, "#a16207"),
                     ("upload", snapshot.montage_timing.last_visible_upload_ms, "#15803d"),
                     ("hist", snapshot.montage_timing.last_histogram_upload_ms, "#65a30d"),
                     ("rgb", snapshot.montage_timing.last_rgb_window_ms, "#db2777"),
-                    ("compose", snapshot.montage_timing.last_canvas_compose_ms, "#7c3aed"),
-                    ("patch", snapshot.montage_timing.last_canvas_patch_ms, "#9333ea"),
+                    ("tile upload", snapshot.montage_timing.last_tile_layer_upload_ms, "#7c3aed"),
                     ("set", snapshot.montage_timing.last_set_image_ms, "#15803d"),
-                    ("commit", snapshot.montage_timing.last_canvas_commit_ms, "#15803d"),
+                    ("commit", snapshot.montage_timing.last_tile_commit_ms, "#15803d"),
                     ("overlay", snapshot.montage_timing.last_overlay_update_ms, "#0891b2"),
                 )
             ),
@@ -398,17 +387,16 @@ class DiagnosticsDialog(QtWidgets.QDialog):
                 "total",
                 (
                     snapshot.montage_timing.last_tile_eval_ms,
-                    snapshot.montage_timing.last_tile_cache_lookup_ms,
+                    snapshot.montage_timing.last_display_cache_lookup_ms,
                     snapshot.montage_timing.last_stage_cache_lookup_ms,
                     snapshot.montage_timing.last_stage_attach_wait_ms,
                     snapshot.montage_timing.last_level_stats_ms,
                     snapshot.montage_timing.last_visible_upload_ms,
                     snapshot.montage_timing.last_histogram_upload_ms,
                     snapshot.montage_timing.last_rgb_window_ms,
-                    snapshot.montage_timing.last_canvas_compose_ms,
-                    snapshot.montage_timing.last_canvas_patch_ms,
+                    snapshot.montage_timing.last_tile_layer_upload_ms,
                     snapshot.montage_timing.last_set_image_ms,
-                    snapshot.montage_timing.last_canvas_commit_ms,
+                    snapshot.montage_timing.last_tile_commit_ms,
                     snapshot.montage_timing.last_overlay_update_ms,
                 ),
             ),
@@ -513,8 +501,7 @@ def _overview_bottleneck(snapshot) -> str:
 def _interesting_cache_parts(snapshot) -> list[str]:
     parts = []
     for label, cache in (
-        ("image", snapshot.image_cache),
-        ("tiles", snapshot.tile_cache),
+        ("display", snapshot.display_cache),
         ("stage", snapshot.stage_cache),
     ):
         used = int(getattr(cache, "bytes_used", 0) or 0)

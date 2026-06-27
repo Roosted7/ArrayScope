@@ -3,7 +3,7 @@
 ## Problem
 
 ArrayScope had too many static and hidden memory limits. The render memory setting covered only part
-of runtime behavior, montage tiles shared the normal image cache, cache budgets were not visible, and
+of runtime behavior, display payloads shared implicit cache space, cache budgets were not visible, and
 developer debugging required reading internal state or print output.
 
 ## Decision
@@ -11,7 +11,7 @@ developer debugging required reading internal state or print output.
 Use one psutil-backed `MemoryPolicy` to derive runtime budgets from a memory profile, sampled system
 memory, input size, and the existing per-render hard cap. The profiles are conservative, balanced,
 aggressive, and custom. Keep `render_memory_budget_mb` as the per-render hard cap for visible image
-and montage tile/canvas allocations.
+and tile residency allocations.
 
 Split evaluator caches into image, montage tile, and profile/scalar caches, each with a policy budget.
 Expose the current policy and runtime state through Developer -> Diagnostics. Diagnostics is a plain

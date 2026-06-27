@@ -291,7 +291,7 @@ class WindowMenuMixin:
                     (
                         f"Memory profile: {policy.profile.value.title()}, "
                         f"visible budget {format_bytes(policy.visible_render_budget_bytes)}, "
-                        f"tile cache {format_bytes(policy.tile_cache_budget_bytes)}"
+                        f"display cache {format_bytes(policy.display_cache_budget_bytes)}"
                     ),
                     timeout=3000,
                 )
@@ -518,6 +518,7 @@ class WindowMenuMixin:
         for controller_name in (
             "evaluation_controller",
             "visible_evaluation_controller",
+            "histogram_evaluation_controller",
             "pixel_evaluation_controller",
             "profile_evaluation_controller",
             "roi_evaluation_controller",

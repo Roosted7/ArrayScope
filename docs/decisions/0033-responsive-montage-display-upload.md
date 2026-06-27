@@ -54,12 +54,12 @@ Tile-layer presentation is stateful and dirty-aware. Presentation models carry o
 numbers: `None` means the tile state is unknown and visible loaded items should refresh, `()` means a
 known-clean flush, and non-empty tuples identify the loaded items whose pixels changed. `ImageView2D`
 delegates the per-item state to `arrayscope.display.backends.pyqtgraph.tiles`, which tracks item source
-identity, histogram identity, local canvas rect, levels, RGB-windowing policy, and cached display data.
+identity, histogram identity, local tile rect, levels, RGB-windowing policy, and cached display data.
 Known-clean commits skip tile image uploads and, when histogram source/range/levels are unchanged,
 skip histogram image upload as well.
 
-Tile item source identity comes from the rendered tile cache payload, not from the transient montage
-viewport canvas. Rebuilding a canvas from already-cached rendered tiles therefore does not by itself
+Tile item source identity comes from the committed display payload, not from transient visible coverage.
+Replanning already-committed tiles therefore does not by itself
 force tile item uploads or RGB re-windowing; items refresh only when the tile source, visible crop,
 levels, RGB policy, or dirty-tile set requires it.
 
@@ -77,12 +77,12 @@ of tiles; duplicating uint8 display tiles would trade CPU latency for another la
 source. Level changes remain real work, but unchanged-level hot-cache commits are expected to reuse
 the single cached display variant and upload nothing.
 
-Tile-layer float32 RGB source bases are bounded separately from the rendered-tile cache and montage
-canvas. They are useful for immediate RGB/complex level changes, but retaining one base for every
+Tile-layer float32 RGB source bases are bounded separately from committed display residency.
+They are useful for immediate RGB/complex level changes, but retaining one base for every
 visible tile in a large montage can duplicate hundreds of MiB. ArrayScope therefore prunes older
 per-tile source bases while keeping the displayed `ImageItem` data intact; unchanged-level clean
 commits still upload nothing, and later presentation commits can re-window pruned tiles from the
-current committed canvas when levels change.
+current committed payload when levels change.
 
 Histogram/window-level interaction uses a preview/final split. Preview updates are throttled on the
 Qt thread; tile-layer mode re-windows only visible tile items and skips full-canvas RGB re-windowing,

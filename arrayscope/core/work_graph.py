@@ -234,7 +234,7 @@ class WorkGraph:
         self._lane_counters(item.lane).dropped += 1
 
     def reschedule(self, key: object, *, reason: str = "budget") -> None:
-        del reason
+        self.last_reschedule_reason = str(reason)
         item = self._active.pop(key, None)
         was_active = item is not None
         if item is None:

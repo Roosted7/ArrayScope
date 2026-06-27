@@ -414,15 +414,11 @@ def montage_session_key(document_key, view_state, viewport_plan: MontageViewport
 def montage_viewport_retarget_policy(capabilities, display_mode: str) -> MontageViewportRetargetPolicy:
     """Return viewport-retarget behaviour for the current presentation surface.
 
-    Direct tiled backends can retarget the current montage session when only
-    camera/view coverage changes.  Persistent residency backends additionally
-    keep near-viewport warm coverage; PyQtGraph's direct tile layer does not,
-    but it still must not restart the semantic render session for fit/pan.
+    Montage retargeting updates the tiled presentation when only camera/view
+    coverage changes. Persistent residency backends additionally keep
+    near-viewport warm coverage.
     """
 
-    mode = str(display_mode or "")
-    if "tile_layer" not in mode or not bool(getattr(capabilities, "direct_montage_tile_payloads", False)):
-        return MontageViewportRetargetPolicy(enabled=False)
     if bool(getattr(capabilities, "persistent_tile_residency", False)):
         return MontageViewportRetargetPolicy(
             enabled=True,

@@ -18,8 +18,12 @@ class ViewportBridge:
         if callable(note_interaction):
             note_interaction("range")
         self.owner._update_display_group_title()
-        if self.owner.view_state.montage_axis is not None and not getattr(self.owner, "_montage_presentation_commit_active", False):
-            self.owner._schedule_montage_viewport_update()
+        if not getattr(self.owner, "_montage_presentation_commit_active", False) and _owner_has_tiled_scene(self.owner):
+            scheduler = getattr(self.owner, "_schedule_tiled_viewport_update", None)
+            if callable(scheduler):
+                scheduler()
+            elif self.owner.view_state.montage_axis is not None:
+                self.owner._schedule_montage_viewport_update()
 
 
 def _range_change_has_pointer_gesture() -> bool:
@@ -27,3 +31,10 @@ def _range_change_has_pointer_gesture() -> bool:
         return bool(Qt.QtWidgets.QApplication.mouseButtons())
     except Exception:
         return False
+
+
+def _owner_has_tiled_scene(owner) -> bool:
+    frame = getattr(owner, "_committed_display_frame", None)
+    scene = getattr(frame, "scene", None)
+    value_source = getattr(frame, "value_source", None)
+    return scene is not None and value_source is not None and hasattr(value_source, "payloads")

@@ -29,7 +29,6 @@ def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=N
     LUTs likewise change colours rather than scalar values.
     """
 
-    del all_indices, colormap_lut
     axis = view_state.montage_axis
     selected_indices = None if view_state.montage_indices is None else tuple(int(index) for index in view_state.montage_indices)
     scope_state = view_state.with_montage_axis(axis, columns=None, indices=selected_indices, text=None)
@@ -38,6 +37,8 @@ def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=N
         document_key,
         scope_state,
         None if axis is None else int(axis),
+        None if all_indices is None else tuple(int(index) for index in all_indices),
+        None if colormap_lut is None else _lut_identity(colormap_lut),
     )
 
 
@@ -149,7 +150,6 @@ class MontageLevelTracker:
         return bool(stats.refined) if refined else True
 
     def best_source(self, key: object, *, explicit_auto: bool = False) -> LevelSource | None:
-        del explicit_auto
         stats = self.stats_for(key)
         if stats is None:
             return None
@@ -411,3 +411,8 @@ def _merge_incremental_samples(existing: np.ndarray, addition: np.ndarray, limit
         return existing[existing_indices].astype(np.float32, copy=False)
     addition_indices = np.linspace(0, addition.size - 1, keep_addition, dtype=np.int64)
     return np.concatenate((existing[existing_indices], addition[addition_indices])).astype(np.float32, copy=False)
+
+
+def _lut_identity(colormap_lut) -> tuple[object, ...]:
+    array = np.asarray(colormap_lut)
+    return (tuple(int(value) for value in array.shape), str(array.dtype), array.tobytes())

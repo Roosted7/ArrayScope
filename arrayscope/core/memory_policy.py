@@ -41,10 +41,8 @@ class MemoryPolicy:
     user_render_cap_bytes: int
 
     visible_render_budget_bytes: int
-    montage_canvas_budget_bytes: int
     single_tile_budget_bytes: int
-    image_cache_budget_bytes: int
-    tile_cache_budget_bytes: int
+    display_cache_budget_bytes: int
     profile_cache_budget_bytes: int
     stage_cache_budget_bytes: int
     prefetch_budget_bytes: int
@@ -114,8 +112,7 @@ def compute_memory_policy(
 
     if profile == MemoryProfileChoice.CONSERVATIVE:
         visible = _clamp(min(available * 0.05, total * 0.02), 128 * MiB, min(render_cap, 1 * GiB))
-        image_cache = _clamp(min(available * 0.05, max(128 * MiB, visible)), 128 * MiB, 1 * GiB)
-        tile_cache = _clamp(min(available * 0.08, max(256 * MiB, input_nbytes or visible)), 256 * MiB, 2 * GiB)
+        display_cache = _clamp(min(available * 0.08, max(256 * MiB, input_nbytes or visible)), 256 * MiB, 2 * GiB)
         profile_cache = _clamp(min(available * 0.02, 128 * MiB), 32 * MiB, 256 * MiB)
         stage_cache = _clamp(min(available * 0.15, max(input_nbytes or 0, 256 * MiB)), 256 * MiB, 4 * GiB)
         prefetch = min(128 * MiB, stage_cache * 0.05, max(1, visible // 2))
@@ -123,8 +120,7 @@ def compute_memory_policy(
         fft_prefetch_peak = min(16 * MiB, operation_prefetch_peak)
     elif profile == MemoryProfileChoice.AGGRESSIVE:
         visible = _clamp(min(available * 0.18, total * 0.08), 256 * MiB, min(render_cap, 4 * GiB))
-        image_cache = _clamp(min(available * 0.15, max(512 * MiB, 2 * visible)), 512 * MiB, 4 * GiB)
-        tile_cache = _clamp(min(available * 0.25, max(2 * visible, 2 * (input_nbytes or 0))), 512 * MiB, 8 * GiB)
+        display_cache = _clamp(min(available * 0.25, max(2 * visible, 2 * (input_nbytes or 0))), 512 * MiB, 8 * GiB)
         profile_cache = _clamp(min(available * 0.05, 512 * MiB), 128 * MiB, 1 * GiB)
         stage_cache = _clamp(min(available * 0.45, max(3 * (input_nbytes or 0), 1 * GiB)), 512 * MiB, 16 * GiB)
         prefetch = min(512 * MiB, stage_cache * 0.15, visible)
@@ -132,8 +128,7 @@ def compute_memory_policy(
         fft_prefetch_peak = min(64 * MiB, operation_prefetch_peak)
     elif profile == MemoryProfileChoice.CUSTOM:
         visible = render_cap
-        image_cache = _clamp(min(available * 0.10, max(256 * MiB, render_cap)), 128 * MiB, 2 * GiB)
-        tile_cache = _clamp(min(available * 0.15, max(render_cap, input_nbytes or 0)), 256 * MiB, 4 * GiB)
+        display_cache = _clamp(min(available * 0.15, max(render_cap, input_nbytes or 0)), 256 * MiB, 4 * GiB)
         profile_cache = _clamp(min(available * 0.03, 256 * MiB), 64 * MiB, 512 * MiB)
         stage_cache = _clamp(min(available * 0.30, max(2 * (input_nbytes or 0), 512 * MiB)), 256 * MiB, 8 * GiB)
         prefetch = min(256 * MiB, stage_cache * 0.10, max(1, render_cap // 2))
@@ -141,8 +136,7 @@ def compute_memory_policy(
         fft_prefetch_peak = min(32 * MiB, operation_prefetch_peak)
     else:
         visible = _clamp(min(available * 0.10, total * 0.04), 128 * MiB, min(render_cap, 2 * GiB))
-        image_cache = _clamp(min(available * 0.10, max(256 * MiB, visible)), 256 * MiB, 2 * GiB)
-        tile_cache = _clamp(min(available * 0.15, max(visible, input_nbytes or 0)), 256 * MiB, 4 * GiB)
+        display_cache = _clamp(min(available * 0.15, max(visible, input_nbytes or 0)), 256 * MiB, 4 * GiB)
         profile_cache = _clamp(min(available * 0.03, 256 * MiB), 64 * MiB, 512 * MiB)
         stage_cache = _clamp(min(available * 0.30, max(2 * (input_nbytes or 0), 512 * MiB)), 256 * MiB, 8 * GiB)
         prefetch = min(256 * MiB, stage_cache * 0.10, visible)
@@ -158,10 +152,8 @@ def compute_memory_policy(
         input_nbytes=input_nbytes,
         user_render_cap_bytes=render_cap,
         visible_render_budget_bytes=visible,
-        montage_canvas_budget_bytes=visible,
         single_tile_budget_bytes=visible,
-        image_cache_budget_bytes=int(image_cache),
-        tile_cache_budget_bytes=int(tile_cache),
+        display_cache_budget_bytes=int(display_cache),
         profile_cache_budget_bytes=int(profile_cache),
         stage_cache_budget_bytes=int(stage_cache),
         prefetch_budget_bytes=int(prefetch),
@@ -190,7 +182,6 @@ def apply_policy_hysteresis(
     if active_render:
         for name in (
             "visible_render_budget_bytes",
-            "montage_canvas_budget_bytes",
             "single_tile_budget_bytes",
         ):
             updates[name] = max(getattr(previous, name), getattr(current, name))
@@ -199,8 +190,7 @@ def apply_policy_hysteresis(
     change_fraction = abs(int(current.system_available_bytes) - old_available) / float(old_available)
     if change_fraction < 0.20:
         for name in (
-            "image_cache_budget_bytes",
-            "tile_cache_budget_bytes",
+            "display_cache_budget_bytes",
             "profile_cache_budget_bytes",
             "stage_cache_budget_bytes",
             "prefetch_budget_bytes",
@@ -223,10 +213,8 @@ def format_memory_policy(policy: MemoryPolicy) -> str:
         f"Input: {'n/a' if policy.input_nbytes is None else format_bytes(policy.input_nbytes)}",
         f"Render cap: {format_bytes(policy.user_render_cap_bytes)}",
         f"Visible render budget: {format_bytes(policy.visible_render_budget_bytes)}",
-        f"Montage canvas budget: {format_bytes(policy.montage_canvas_budget_bytes)}",
         f"Single tile budget: {format_bytes(policy.single_tile_budget_bytes)}",
-        f"Image cache budget: {format_bytes(policy.image_cache_budget_bytes)}",
-        f"Tile cache budget: {format_bytes(policy.tile_cache_budget_bytes)}",
+        f"Display cache budget: {format_bytes(policy.display_cache_budget_bytes)}",
         f"Profile cache budget: {format_bytes(policy.profile_cache_budget_bytes)}",
         f"Stage cache budget: {format_bytes(policy.stage_cache_budget_bytes)}",
         f"Prefetch budget: {format_bytes(policy.prefetch_budget_bytes)}",

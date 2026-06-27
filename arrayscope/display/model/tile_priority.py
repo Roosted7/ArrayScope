@@ -163,7 +163,7 @@ class MontageTilePriorityQueue:
         return int(processed)
 
     def pop(self, position=None):
-        del position
+        self.last_pop_position = position
         if not self._tiles:
             return None
         fair = self._fair_tile()

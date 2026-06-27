@@ -33,7 +33,7 @@ from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import DisplayInteractionState
 from arrayscope.display.overlay_hit_test import roi_handle_points
 from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
-from arrayscope.display.backends.vispy.raster import (
+from arrayscope.display.backends.vispy.gpu_mapped_visual import (
     GpuMappedImageVisual,
     _coerce_texture_kind,
     _contiguous_display,
@@ -300,7 +300,7 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_tiled_shader_mapping = None
         self._last_vispy_tiled_histogram_key = None
         self._last_vispy_tiled_viewport_key = None
-        self._montage_display_mode = "canvas"
+        self._montage_display_mode = "idle"
         self.imageItem.setVisible(False)
         _set_visual_visible(getattr(self, "_vispy_image", None), False)
         _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
@@ -669,7 +669,7 @@ class VisPyImageView2D(ImageViewShell):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
-    def setTiledMontagePresentation(
+    def setTiledPresentation(
         self,
         *,
         geometry,
@@ -843,7 +843,7 @@ class VisPyImageView2D(ImageViewShell):
         lod=None,
     ):
         start = perf_counter()
-        del lod
+        self._last_vispy_main_lod = lod
         texture_kind = _coerce_texture_kind(texture_kind)
         if texture_kind in {TexturePlaneKind.COMPLEX_RG32F, TexturePlaneKind.SCALAR_R32F} and semantic_data is not None:
             source_shader_mapping = shader_mapping

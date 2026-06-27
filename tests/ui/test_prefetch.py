@@ -34,9 +34,9 @@ def test_nearby_slice_prefetch_uses_prefetch_state_keys(qtbot):
         win._schedule_prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
         _process_events(qtbot, count=40)
 
-        assert win.operation_evaluator.image_cache_diagnostics().prefetch_scheduled > 0
-        assert win.operation_evaluator.image_cache_diagnostics().prefetch_stored > 0
-        assert win.operation_evaluator.cached_image(win.view_state.with_slice(2, 1)) is not None
+        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > 0
+        assert win.operation_evaluator.display_cache_diagnostics().prefetch_stored > 0
+        assert win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 1)) is not None
     finally:
         win.close()
 
@@ -50,10 +50,10 @@ def test_nearby_slice_prefetch_skips_when_setting_disabled(qtbot):
     try:
         _process_events(qtbot)
         win._active_slice_axis = 2
-        before = win.operation_evaluator.image_cache_diagnostics()
+        before = win.operation_evaluator.display_cache_diagnostics()
         win._prefetch_nearby_slices(win.view_state.with_slice(2, 1), None)
         _process_events(qtbot, count=20)
-        after = win.operation_evaluator.image_cache_diagnostics()
+        after = win.operation_evaluator.display_cache_diagnostics()
 
         assert after.prefetch_scheduled == before.prefetch_scheduled
         assert after.prefetch_skipped > before.prefetch_skipped
@@ -74,9 +74,9 @@ def test_prefetch_waits_for_idle_timer(qtbot):
         win._active_slice_axis = 2
         win._schedule_prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
         _process_events(qtbot, count=5)
-        assert win.operation_evaluator.image_cache_diagnostics().prefetch_scheduled == 0
+        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled == 0
         _process_events(qtbot, count=30)
-        assert win.operation_evaluator.image_cache_diagnostics().prefetch_scheduled > 0
+        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > 0
     finally:
         win.close()
 
@@ -96,7 +96,7 @@ def test_prefetch_limits_to_two_neighbors(qtbot):
         win._prefetch_nearby_slices(win.view_state.with_slice(2, 4), None)
         _process_events(qtbot, count=40)
 
-        assert win.operation_evaluator.image_cache_diagnostics().prefetch_scheduled <= 2
+        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled <= 2
     finally:
         win.close()
 
@@ -154,7 +154,7 @@ def test_cost_aware_prefetch_allows_cheap_operation_backed_stack(qtbot):
         win._active_slice_axis = 2
         win._prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
         _process_events(qtbot, count=40)
-        after = win.operation_evaluator.image_cache_diagnostics()
+        after = win.operation_evaluator.display_cache_diagnostics()
 
         assert after.prefetch_scheduled > 0
         assert after.prefetch_stored > 0
@@ -175,11 +175,11 @@ def test_cost_aware_prefetch_blocks_expensive_fft_stack(qtbot):
         win.request_operation("centered_fft", 2)
         _process_events(qtbot, count=20)
         win._active_slice_axis = 2
-        before = win.operation_evaluator.image_cache_diagnostics()
+        before = win.operation_evaluator.display_cache_diagnostics()
         before_blocked = win.prefetch_evaluation_controller.diagnostics().prefetch_cost_blocked
         win._prefetch_nearby_slices(win.view_state.with_slice(2, 1), None)
         _process_events(qtbot, count=20)
-        after = win.operation_evaluator.image_cache_diagnostics()
+        after = win.operation_evaluator.display_cache_diagnostics()
 
         assert after.prefetch_scheduled == before.prefetch_scheduled
         assert win.prefetch_evaluation_controller.diagnostics().prefetch_cost_blocked > before_blocked

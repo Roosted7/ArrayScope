@@ -57,11 +57,13 @@ class NumpyFFTBackend:
     name: str = "numpy"
 
     def centered_fft(self, data, axis: int, *, workers: int = 1):
-        del workers
+        if int(workers) < 1:
+            raise ValueError("workers must be at least 1")
         return np.fft.ifftshift(np.fft.ifft(np.fft.fftshift(data, axes=axis), axis=axis, norm="ortho"), axes=axis)
 
     def centered_ifft(self, data, axis: int, *, workers: int = 1):
-        del workers
+        if int(workers) < 1:
+            raise ValueError("workers must be at least 1")
         return np.fft.ifftshift(np.fft.fft(np.fft.fftshift(data, axes=axis), axis=axis, norm="ortho"), axes=axis)
 
 

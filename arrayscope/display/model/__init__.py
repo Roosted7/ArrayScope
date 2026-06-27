@@ -5,14 +5,12 @@ from arrayscope.display.model.commit import (
     CommitPlan,
     DisplayPayload,
     DisplayPresentation,
-    DisplayRasterPresentation,
     DisplayTiledPresentation,
     PresentationDecision,
     PresentationInput,
     RenderRequestContext,
 )
 from arrayscope.display.model.frame import (
-    CanvasValueSource,
     CommittedDisplayFrame,
     DisplayFrameKey,
     DisplayTilePayload,
@@ -38,14 +36,12 @@ from arrayscope.display.model.tile_priority import (
 )
 
 __all__ = [
-    "CanvasValueSource",
     "CommitKind",
     "CommitPlan",
     "CommittedDisplayFrame",
     "DisplayFrameKey",
     "DisplayPayload",
     "DisplayPresentation",
-    "DisplayRasterPresentation",
     "DisplayTilePayload",
     "DisplayTiledPresentation",
     "FrameValueSource",

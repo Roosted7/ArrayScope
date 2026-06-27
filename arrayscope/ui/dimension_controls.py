@@ -8,7 +8,6 @@ from pyqtgraph.Qt import QtGui
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.slice_selection import center_index
 from arrayscope.display.geometry import DisplayGeometry
-from arrayscope.display.model.frame import CanvasValueSource
 from arrayscope.ui.icons import clear_label_icon, set_label_icon
 from arrayscope.ui.shortcuts import colormap_name_for_key
 from arrayscope.ui.toasts import show_status_message
@@ -110,14 +109,7 @@ class DimensionControlMixin:
             montage_origin_y=geometry.montage_origin_y,
             montage_tile_states=geometry.montage_tile_states,
         )
-        value_source = frame.value_source
-        if isinstance(value_source, CanvasValueSource):
-            value_source = CanvasValueSource(
-                data=value_source.data,
-                histogram_data=value_source.histogram_data,
-                geometry=updated_geometry,
-            )
-        self._committed_display_frame = replace(frame, geometry=updated_geometry, value_source=value_source, scene=None)
+        self._committed_display_frame = replace(frame, geometry=updated_geometry, scene=None)
 
     def update_complex_indicators(self):
         """Initialize or update indicators for dimensions that can be combined as complex."""

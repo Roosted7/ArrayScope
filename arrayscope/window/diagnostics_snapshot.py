@@ -32,6 +32,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         "visible_evaluation_controller",
         "montage_tile_evaluation_controller",
         "stage_evaluation_controller",
+        "histogram_evaluation_controller",
         "pixel_evaluation_controller",
         "profile_evaluation_controller",
         "roi_evaluation_controller",
@@ -42,30 +43,13 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             schedulers.append(controller.diagnostics())
 
     session = getattr(window, "_montage_session", None)
-    canvas = getattr(window, "_current_montage_canvas", None)
     overlay_count = _montage_overlay_count(window)
     presentation = _presentation_diagnostics(window)
-    canvas_bytes = None
-    if canvas is not None:
-        canvas_bytes = int(getattr(canvas.data, "nbytes", 0))
-        histogram = getattr(canvas, "histogram_data", None)
-        if histogram is not None:
-            canvas_bytes += int(getattr(histogram, "nbytes", 0))
     lod_decision = None if session is None else getattr(session, "lod_policy_decision", None)
     lod_demand = None if lod_decision is None else getattr(lod_decision, "demand", None)
     montage = MontageRuntimeDiagnostics(
         active=session is not None,
         session_id=None if session is None else int(session.session_id),
-        canvas_rect=None
-        if canvas is None
-        else (
-            int(canvas.origin_x),
-            int(canvas.origin_y),
-            int(canvas.origin_x + canvas.display_shape[1]),
-            int(canvas.origin_y + canvas.display_shape[0]),
-        ),
-        canvas_shape=None if canvas is None else tuple(int(size) for size in canvas.display_shape),
-        canvas_bytes=canvas_bytes,
         loaded_tiles=0 if session is None else len(session.rendered_tiles),
         loading_tiles=0 if session is None else len(session.loading_tiles),
         pending_tiles=0 if session is None else len(session.pending_tiles),
@@ -81,8 +65,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_presentation_draw_pending=bool(presentation.get("tile_presentation_draw_pending", False)),
         tile_visual_visible_pages=int(presentation.get("tile_visual_visible_pages", 0) or 0),
         overlays_above_tiles=bool(presentation.get("overlays_above_tiles", False)),
-        display_mode=str(getattr(window.img_view, "montageDisplayMode", lambda: "canvas")()),
-        backend_chosen=str(getattr(window, "_last_montage_backend_actual", getattr(getattr(window, "_last_montage_backend_choice", None), "backend", "canvas"))),
+        display_mode=str(getattr(window.img_view, "montageDisplayMode", lambda: "none")()),
+        backend_chosen=str(getattr(window, "_last_montage_backend_actual", getattr(getattr(window, "_last_montage_backend_choice", None), "backend", "none"))),
         backend_reason=str(getattr(getattr(window, "_last_montage_backend_choice", None), "reason", "")),
         backend_warning=str(getattr(window, "_last_montage_backend_warning", "") or ""),
         show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
@@ -151,6 +135,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         ComputeLane.VISIBLE,
         ComputeLane.MONTAGE_TILE,
         ComputeLane.STAGE,
+        ComputeLane.HISTOGRAM,
         ComputeLane.PREFETCH,
         ComputeLane.PROFILE,
         ComputeLane.ROI,
@@ -172,8 +157,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
 
     return WindowRuntimeDiagnostics(
         memory_policy=policy,
-        image_cache=window.operation_evaluator.image_cache_diagnostics(),
-        tile_cache=window.operation_evaluator.tile_cache_diagnostics(),
+        display_cache=window.operation_evaluator.display_cache_diagnostics(),
         profile_cache=window.operation_evaluator.profile_cache_diagnostics(),
         stage_cache=stage_cache_diagnostics,
         stage_materialization=stage_materialization_diagnostics,
@@ -230,8 +214,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             last_session_setup_ms=getattr(window, "_last_montage_session_setup_ms", None),
             last_initial_commit_ms=getattr(window, "_last_montage_initial_commit_ms", None),
             last_tile_eval_ms=getattr(window, "_last_montage_tile_eval_ms", None),
-            last_tile_cache_lookup_ms=getattr(window, "_last_montage_tile_cache_lookup_ms", None),
-            last_tile_cache_hit=getattr(window, "_last_montage_tile_cache_hit", None),
+            last_display_cache_lookup_ms=getattr(window, "_last_montage_display_cache_lookup_ms", None),
+            last_display_cache_hit=getattr(window, "_last_montage_display_cache_hit", None),
             last_stage_cache_lookup_ms=getattr(stage_cache_diagnostics, "last_lookup_ms", None),
             last_stage_cache_hit=getattr(stage_cache_diagnostics, "last_lookup_hit", None),
             last_stage_attach_wait_ms=getattr(window, "_last_montage_stage_attach_wait_ms", None),
@@ -244,14 +228,12 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             last_tile_layer_upload_ms=None if upload_timing is None else upload_timing.tile_layer_upload_ms,
             last_tile_layer_rgb_window_ms=None if upload_timing is None else upload_timing.tile_layer_rgb_window_ms,
             last_level_sync_ms=None if upload_timing is None else upload_timing.level_sync_ms,
-            last_canvas_compose_ms=getattr(window, "_last_montage_canvas_compose_ms", None),
-            last_canvas_patch_ms=getattr(window, "_last_montage_canvas_patch_ms", None),
-            last_canvas_commit_ms=getattr(window, "_last_montage_canvas_commit_ms", None),
+            last_tile_commit_ms=getattr(window, "_last_montage_tile_commit_ms", None),
             last_set_image_ms=getattr(window, "_last_set_image_ms", None),
             last_overlay_update_ms=getattr(window, "_last_montage_overlay_update_ms", None),
             cached_tiles_last_session=int(getattr(window, "_montage_cached_tiles_last_session", 0) or 0),
             missing_tiles_last_session=int(getattr(window, "_montage_missing_tiles_last_session", 0) or 0),
-            patched_tiles_last_flush=int(getattr(window, "_montage_patched_tiles_last_flush", 0) or 0),
+            committed_tile_upserts_last_flush=int(getattr(window, "_montage_committed_tile_upserts_last_flush", 0) or 0),
             upload_visible_bytes=0 if upload_timing is None else int(upload_timing.visible_bytes),
             upload_histogram_bytes=0 if upload_timing is None else int(upload_timing.histogram_bytes),
             upload_fast_same_object=False if upload_timing is None else bool(upload_timing.fast_same_object),

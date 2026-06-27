@@ -42,12 +42,10 @@ class CastDType:
     def output_shape(self, shape):
         return tuple(int(size) for size in shape)
 
-    def output_dtype(self, input_dtype):
-        del input_dtype
+    def output_dtype(self, _input_dtype):
         return np.dtype(self.dtype)
 
-    def capabilities(self, input_shape, input_dtype=None) -> OperationCapabilities:
-        del input_dtype
+    def capabilities(self, input_shape, _input_dtype=None) -> OperationCapabilities:
         ndim = len(tuple(input_shape))
         return OperationCapabilities(
             kind=OperationKind.ELEMENTWISE,
@@ -56,12 +54,10 @@ class CastDType:
             can_fuse=True,
         )
 
-    def required_input_region(self, input_shape, output_region: RegionSpec) -> RegionSpec:
-        del input_shape
+    def required_input_region(self, _input_shape, output_region: RegionSpec) -> RegionSpec:
         return output_region
 
     def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
-        del input_region, output_region
         return self.apply(data)
 
 

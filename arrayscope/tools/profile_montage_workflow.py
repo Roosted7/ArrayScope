@@ -481,7 +481,7 @@ def _wait_for_montage_complete(
             session is not None
             and bool(getattr(session, "display_committed", False))
             and session.is_complete()
-            and mode in {"tile_layer", "vispy_tile_layer", "canvas"}
+            and mode in {"tile_layer", "vispy_tile_layer"}
         )
         if logical_complete and first_logical_complete_ms is None:
             first_logical_complete_ms = (perf_counter() - start) * 1000.0
@@ -653,7 +653,7 @@ def _phase_record(
         "presentation_active_presented_tile_count": int(level_state["active_presented_tile_count"]),
         "last_render_sync_ms": _optional_float(snapshot.render_timing.last_render_sync_ms),
         "last_display_commit_ms": _optional_float(snapshot.render_timing.last_display_commit_ms),
-        "last_canvas_commit_ms": _optional_float(timing.last_canvas_commit_ms),
+        "last_tile_commit_ms": _optional_float(timing.last_tile_commit_ms),
         "last_histogram_recompute_ms": _optional_float(timing.last_histogram_recompute_ms),
         "last_level_sync_ms": _optional_float(timing.last_level_sync_ms),
         "last_tile_layer_upload_ms": _optional_float(timing.last_tile_layer_upload_ms),
@@ -773,7 +773,7 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
     )
     active_presented = active.intersection(presented)
     fully_visible = bool(
-        str(mode) in {"tile_layer", "vispy_tile_layer", "canvas"}
+        str(mode) in {"tile_layer", "vispy_tile_layer"}
         and getattr(session, "display_committed", False)
         and not has_backlog
         and expected.issubset(active)

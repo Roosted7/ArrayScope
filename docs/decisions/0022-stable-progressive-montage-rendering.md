@@ -2,8 +2,8 @@
 
 ## Problem
 
-Interactive montage previously derived the viewport canvas from the loaded tile rectangle. If only a
-subset of visible tiles was loaded, the canvas could shrink or move around those tiles, making hover,
+Interactive montage previously derived visible bounds from the loaded tile rectangle. If only a
+subset of visible tiles was loaded, the presented region could shrink or move around those tiles, making hover,
 profile, panning, and tile edges unstable.
 
 Missing tiles were also represented only by placeholder data/NaN-like behavior, so the UI could not
@@ -13,8 +13,8 @@ Stale montage callbacks could also clear overlays that belonged to a newer rende
 
 ## Decision
 
-Montage viewport canvases are now based on the requested viewport rect clipped to full montage bounds,
-never on loaded tile bounds. `MontageViewportCanvas` carries per-tile states: loaded, loading, skipped,
+Montage tile planning is now based on the requested viewport rect clipped to full montage bounds,
+never on loaded tile bounds. `DisplayGeometry` carries per-tile states: loaded, loading, skipped,
 and unloaded. Normal visible tiles are scheduled and loaded progressively; skipped is reserved for a
 hard per-tile memory-budget refusal and shows a detailed warning. `DisplayGeometry` uses those states
 to resolve only loaded tiles to array/profile mappings and to report loading/skipped/gap status for

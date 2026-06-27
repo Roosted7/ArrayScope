@@ -311,7 +311,7 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot,
         win.close()
 
 
-def test_relative_window_levels_match_for_cached_and_uncached_images(qtbot, monkeypatch):
+def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.display.slice_engine import DisplayImage
     from arrayscope.operations.evaluator import EvaluationResult
@@ -342,7 +342,7 @@ def test_relative_window_levels_match_for_cached_and_uncached_images(qtbot, monk
 
         slice2_state = win.view_state.with_slice(2, 2)
         slice2 = data[:, :, 2]
-        win.operation_evaluator.store_image_result(slice2_state, None, EvaluationResult(DisplayImage(slice2), 0.0, slice2.shape, int(slice2.nbytes)))
+        win.operation_evaluator.store_display_tile_result(slice2_state, None, EvaluationResult(DisplayImage(slice2), 0.0, slice2.shape, int(slice2.nbytes)))
         win._on_slice_index_changed(2, 2)
         win.render_coordinator.flush_now()
         _process_events(qtbot, count=20)

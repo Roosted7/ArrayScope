@@ -151,186 +151,7 @@ class MontageTileLayer:
                 tile_delta=tile_delta,
                 frame_plan=frame_plan,
             )
-        montage = geometry.montage
-        tile_h = int(montage.tile_height)
-        tile_w = int(montage.tile_width)
-        stride_x = tile_w + int(montage.gap)
-        stride_y = tile_h + int(montage.gap)
-        # Legacy raster-backed montage updates do not receive a typed
-        # ``tile_payloads`` map.  The active set still comes from the semantic
-        # delta when present; dereferencing ``tile_payloads`` here made direct
-        # legacy delta calls crash before they reached the typed presentation
-        # migration path.
-        active = {
-            int(tile)
-            for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())
-        } if tile_delta is not None else set()
-        states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
-        dirty_set = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
-        image = np.asarray(img)
-        hist = None if histogram_data is None else np.asarray(histogram_data)
-        levels = (float(levels[0]), float(levels[1]))
-        visible_items = 0
-        items_created = 0
-        items_updated = 0
-        items_skipped = 0
-        rgb_window_tiles = 0
-        image_replacements = 0
-        existing_items_shown = 0
-        relocated_tiles = 0
-        level_updates = 0
-        updated_tiles: list[int] = []
-
-        for tile_number, source_index in enumerate(tuple(montage.indices)):
-            state = states[tile_number] if tile_number < len(states) else "unloaded"
-            state_value = str(getattr(state, "value", state))
-            if state_value != "loaded":
-                self._hide_tile(tile_number)
-                continue
-
-            row = tile_number // int(montage.columns)
-            col = tile_number % int(montage.columns)
-            global_x = col * stride_x
-            global_y = row * stride_y
-            local_x = global_x - int(geometry.montage_origin_x)
-            local_y = global_y - int(geometry.montage_origin_y)
-            source_x0 = max(0, -local_x)
-            source_y0 = max(0, -local_y)
-            dest_x0 = max(0, local_x)
-            dest_y0 = max(0, local_y)
-            width = min(tile_w - source_x0, int(image.shape[1]) - dest_x0)
-            height = min(tile_h - source_y0, int(image.shape[0]) - dest_y0)
-            if width <= 0 or height <= 0:
-                self._hide_tile(tile_number)
-                continue
-
-            item_state = self._states.get(tile_number)
-            existing_item = item_state is not None
-            if item_state is None:
-                item = ImageItem(axisOrder="row-major")
-                self.layer_owner.add_tile_item(tile_number, item)
-                item_state = TileLayerItemState(
-                    tile_number=int(tile_number),
-                    source_index=int(source_index),
-                    item=item,
-                    local_rect=(-1, -1, -1, -1),
-                    world_rect=(-1, -1, -1, -1),
-                    source_array_id=0,
-                    histogram_array_id=None,
-                    levels=levels,
-                    rgb_already_windowed=bool(rgb_already_windowed),
-                    visible=False,
-                )
-                self._states[int(tile_number)] = item_state
-                items_created += 1
-
-            item_state.item.setVisible(True)
-            world_x = global_x + source_x0
-            world_y = global_y + source_y0
-            item_state.item.setPos(float(world_x), float(world_y))
-            visible_items += 1
-            active.add(int(tile_number))
-
-            local_rect = (int(dest_x0), int(dest_y0), int(width), int(height))
-            world_rect = (int(world_x), int(world_y), int(width), int(height))
-            source_id = (
-                tile_source_ids.get(int(tile_number), id(img))
-                if tile_source_ids is not None
-                else id(img)
-            )
-            hist_id = (
-                ("tile-source", source_id)
-                if tile_source_ids is not None
-                else (None if histogram_data is None else id(histogram_data))
-            )
-            geometry_changed = (
-                tuple(item_state.local_rect) != local_rect
-                or tuple(getattr(item_state, "world_rect", (-1, -1, -1, -1))) != world_rect
-            )
-            source_changed = (
-                item_state.source_array_id != source_id
-                or item_state.histogram_array_id != hist_id
-                or tuple(item_state.local_rect) != local_rect
-                or int(item_state.source_index) != int(source_index)
-                or bool(item_state.rgb_already_windowed) != bool(rgb_already_windowed)
-            )
-            dirty = dirty_set is None or int(tile_number) in dirty_set
-            levels_changed = tuple(item_state.levels) != levels
-            tile_view = image[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...]
-            is_rgb_tile = self._is_rgb_image(tile_view)
-            missing_display = getattr(item_state.item, "image", None) is None and is_rgb_tile
-            needs_source_rewindow = (
-                levels_changed
-                and is_rgb_tile
-                and not bool(rgb_already_windowed)
-                and hist is not None
-                and (item_state.rgb_base is None or item_state.hist_source is None)
-            )
-            should_upload = bool(source_changed or dirty or not item_state.visible or missing_display or needs_source_rewindow)
-
-            if should_upload:
-                tile_data = tile_view
-                tile_hist = None if hist is None else hist[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width]
-                updated, windowed = self._set_tile_data(
-                    item_state,
-                    tile_data,
-                    tile_hist,
-                    levels,
-                    source_index=int(source_index),
-                    source_array_id=source_id,
-                    histogram_array_id=hist_id,
-                    local_rect=local_rect,
-                    rgb_already_windowed=bool(rgb_already_windowed),
-                )
-                item_state.world_rect = world_rect
-                items_updated += int(updated)
-                if updated:
-                    updated_tiles.append(int(tile_number))
-                rgb_window_tiles += int(windowed)
-                image_replacements += int(updated and not items_created)
-            elif levels_changed:
-                updated, windowed = self._update_tile_levels(item_state, levels)
-                item_state.world_rect = world_rect
-                level_updates += int(existing_item)
-                items_updated += int(updated)
-                if updated:
-                    updated_tiles.append(int(tile_number))
-                rgb_window_tiles += int(windowed)
-                if not updated:
-                    items_skipped += 1
-            else:
-                items_skipped += 1
-                item_state.levels = levels
-                item_state.visible = True
-                item_state.world_rect = world_rect
-                existing_items_shown += 1
-                relocated_tiles += int(geometry_changed)
-
-        for tile_number in tuple(self._states):
-            if int(tile_number) not in active:
-                self._hide_tile(tile_number)
-        self._prune_rgb_source_cache()
-
-        return TileLayerUpdateStats(
-            visible_items=int(visible_items),
-            presented_tiles=tuple(sorted(active)),
-            committed_upserts=(
-                None
-                if tile_delta is None
-                else tuple(sorted(int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {})))
-            ),
-            updated_tiles=tuple(int(tile) for tile in updated_tiles),
-            items_created=int(items_created),
-            items_updated=int(items_updated),
-            items_skipped=int(items_skipped),
-            rgb_window_tiles=int(rgb_window_tiles),
-            image_replacements=int(image_replacements),
-            existing_items_shown=int(existing_items_shown),
-            relocated_tiles=int(relocated_tiles),
-            level_updates=int(level_updates),
-            level_update_processed_items=int(level_updates),
-        )
-
+        raise ValueError("PyQtGraph tiled presentation requires typed tile payloads")
 
     def _update_direct_payload_presentation(
         self,
@@ -391,9 +212,14 @@ class MontageTileLayer:
             tile_source_ids=tile_source_ids,
             rgb_already_windowed=bool(rgb_already_windowed),
         )
+        level_update_pending_items = sum(
+            1
+            for tile in requested_active
+            if int(tile) in self._states and tuple(self._states[int(tile)].levels) != levels
+        )
         level_update_tiles = tuple(
             int(tile)
-            for tile in requested_active
+            for tile in requested_upserts
             if int(tile) in self._states and tuple(self._states[int(tile)].levels) != levels
         )
         if level_update_tiles:
@@ -650,7 +476,7 @@ class MontageTileLayer:
             level_updates=int(level_updates),
             level_update_processed_items=int(level_updates),
             upload_ms=(perf_counter() - update_start) * 1000.0,
-            level_update_pending_items=max(0, len(requested_upserts - committed_upserts)),
+            level_update_pending_items=max(0, int(level_update_pending_items) - int(level_updates)),
         )
 
     def update_levels(

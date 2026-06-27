@@ -68,10 +68,8 @@ def diagnostics_start_record(
             "memory_profile": policy.profile.value,
             "memory_budgets": {
                 "visible_render_bytes": int(policy.visible_render_budget_bytes),
-                "montage_canvas_bytes": int(policy.montage_canvas_budget_bytes),
                 "single_tile_bytes": int(policy.single_tile_budget_bytes),
-                "image_cache_bytes": int(policy.image_cache_budget_bytes),
-                "tile_cache_bytes": int(policy.tile_cache_budget_bytes),
+                "display_cache_bytes": int(policy.display_cache_budget_bytes),
                 "profile_cache_bytes": int(policy.profile_cache_budget_bytes),
                 "stage_cache_bytes": int(policy.stage_cache_budget_bytes),
                 "prefetch_bytes": int(policy.prefetch_budget_bytes),

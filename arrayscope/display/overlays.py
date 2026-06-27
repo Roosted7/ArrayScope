@@ -48,7 +48,8 @@ class MontageTileOverlayItem(QtWidgets.QGraphicsItem):
         return QtCore.QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0))
 
     def paint(self, painter, option, widget=None):
-        del option, widget
+        self._last_paint_option = option
+        self._last_paint_widget = widget
         for overlay in self._overlays:
             rect = QtCore.QRectF(float(overlay.x), float(overlay.y), float(overlay.width), float(overlay.height))
             if str(overlay.state) == "skipped":

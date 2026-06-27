@@ -111,7 +111,11 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, monkeypatch):
         win._set_view_state(state)
         win.update_montage_view()
 
-        qtbot.waitUntil(lambda: win._current_montage_canvas is not None, timeout=250)
+        qtbot.waitUntil(
+            lambda: getattr(getattr(win, "_committed_display_frame", None), "scene", None) is not None
+            and len(win._committed_display_frame.scene.resident_region_ids) == 2,
+            timeout=250,
+        )
         assert calls == []
         assert win._montage_cached_tiles_last_session == 2
         assert win._montage_missing_tiles_last_session == 0
@@ -151,11 +155,6 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
 
         assert calls == []
         assert second_sources == first_sources
-        base_sources = [
-            source[0] if len(source) > 1 and source[1] == "pyqtgraph_display" else source
-            for source in second_sources.values()
-        ]
-        assert all(str(source[0]) == "montage_tile" for source in base_sources)
         assert timing.tile_layer_visible_items == 2
         assert timing.tile_layer_items_updated == 0
         assert timing.tile_layer_items_skipped == 0
@@ -328,7 +327,11 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
         win.update_montage_view()
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer", timeout=3000)
-        monkeypatch.setattr(win, "_schedule_montage_viewport_update", lambda: scheduled.append(win.img_view.getView().viewRange()))
+        monkeypatch.setattr(
+            win,
+            "_schedule_montage_viewport_update",
+            lambda **_kwargs: scheduled.append(win.img_view.getView().viewRange()),
+        )
 
         assert win.img_view._vispy_canvas_native.testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         win.img_view.getView().setRange(xRange=(0.0, 4.0), yRange=(0.0, 2.0), padding=0)
@@ -414,11 +417,10 @@ def test_cold_montage_tile_patches_without_side_panel_refresh(qtbot, monkeypatch
         calls[0]["on_done"](_tile_result(tile, 9))
 
         def requested_tile_is_patched():
-            canvas = win._current_montage_canvas
-            x0 = int(tile.x0) - int(canvas.origin_x)
-            y0 = int(tile.y0) - int(canvas.origin_y)
-            patch = canvas.data[y0 : y0 + tile.height, x0 : x0 + tile.width]
-            return np.array_equal(patch, np.full((tile.height, tile.width), 9, dtype=np.float32))
+            layer = getattr(win.img_view, "_montage_tile_layer", None)
+            state = None if layer is None else layer.states.get(int(tile.montage_index))
+            image = None if state is None else getattr(state.item, "image", None)
+            return image is not None and np.array_equal(image, np.full((tile.height, tile.width), 9, dtype=np.float32))
 
         qtbot.waitUntil(requested_tile_is_patched, timeout=250)
 

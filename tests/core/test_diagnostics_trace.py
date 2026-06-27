@@ -18,7 +18,7 @@ def _write_trace(path):
             "recorded_at": "2026-06-20T10:00:00+00:00",
             "diagnostics": {
                 "render_timing": {"last_render_sync_ms": 2.0},
-                "montage_timing": {"last_canvas_commit_ms": 1.0},
+                "montage_timing": {"last_tile_commit_ms": 1.0},
                 "montage": {"session_id": 1, "loaded_tiles": 1, "pending_tiles": 3},
             },
         },
@@ -28,7 +28,7 @@ def _write_trace(path):
             "recorded_at": "2026-06-20T10:00:00.500000+00:00",
             "diagnostics": {
                 "render_timing": {"last_render_sync_ms": 2.0},
-                "montage_timing": {"last_canvas_commit_ms": 1.0},
+                "montage_timing": {"last_tile_commit_ms": 1.0},
                 "montage": {"session_id": 1, "loaded_tiles": 2, "pending_tiles": 2},
             },
         },
@@ -38,7 +38,7 @@ def _write_trace(path):
             "recorded_at": "2026-06-20T10:00:03+00:00",
             "diagnostics": {
                 "render_timing": {"last_render_sync_ms": 2100.0},
-                "montage_timing": {"last_canvas_commit_ms": 4.0},
+                "montage_timing": {"last_tile_commit_ms": 4.0},
                 "montage": {"session_id": 2, "loaded_tiles": 4, "pending_tiles": 0},
             },
         },
@@ -68,7 +68,7 @@ def test_trace_summary_markdown_marks_unattributed_stall(tmp_path):
     _write_trace(path)
     records = [json.loads(line) for line in path.read_text().splitlines()]
     records[-1]["diagnostics"]["render_timing"]["last_render_sync_ms"] = 2.0
-    records[-1]["diagnostics"]["montage_timing"]["last_canvas_commit_ms"] = 1.0
+    records[-1]["diagnostics"]["montage_timing"]["last_tile_commit_ms"] = 1.0
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
     text = format_trace_summary_markdown(summarize_diagnostics_trace(path))

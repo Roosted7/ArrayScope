@@ -83,11 +83,11 @@ def select_lod_demand(
 ) -> LodDemand:
     """Return desired display quality without promising materialization."""
 
-    del tile_shape
+    tile_height, tile_width = (max(1, int(value)) for value in tile_shape)
     native = LodDemand(
         desired_level=0,
         desired_factor=1,
-        desired_factor_xy=(1, 1),
+        desired_factor_xy=(min(1, tile_width), min(1, tile_height)),
         acceptable_levels=(0,),
         source_texels_per_pixel_xy=(0.0, 0.0),
         reason=LOD_REASON_INVALID_VIEW,

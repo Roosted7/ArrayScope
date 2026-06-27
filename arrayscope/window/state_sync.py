@@ -49,7 +49,6 @@ class StateSyncMixin:
                 channel=self.view_state.channel.value,
                 scale=self.view_state.scale.value,
                 window_mode="absolute" if self.widgets['buttons']['display']['window_absolute'].isChecked() else "relative",
-                live_profile=self.widgets['buttons']['display']['live_profile'].isChecked(),
             )
 
     def _sync_slice_controls_immediately(self, axis: int) -> None:

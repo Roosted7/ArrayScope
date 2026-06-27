@@ -30,13 +30,13 @@ Compare heap-with-version, bucketed distance rings, and ordered visible/near que
 
 Prototype a pure Qt-free model before wiring workers. Simulate input rates, cost estimates, cancellation delays, cache reuse, and deadline misses to choose completion-versus-restart policy.
 
-### Storage-neutral region presentation
+### Region presentation
 
-Represent a raster as one region and a huge plane/montage as several regions, independent of montage-axis semantics. Validate that geometry, levels, values, dirty state, and backend commits use the same model.
+Represent a small image as one tile and a huge plane/montage as several regions, independent of montage-axis semantics. Validate that geometry, levels, values, dirty state, and backend commits use the same model.
 
 ### Surface composition seam
 
-Extract one narrow capability at a time from `ImageView2D`: teardown, camera, raster commit, tiled commit, overlays, pointer mapping. Avoid creating a giant new abstract base class that merely mirrors both current widgets.
+Extract one narrow capability at a time from `ImageView2D`: teardown, camera, tiled commit, overlays, pointer mapping. Avoid creating a giant new abstract base class that merely mirrors both current widgets.
 
 ### Off-thread histogram refinement
 

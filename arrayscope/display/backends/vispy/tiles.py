@@ -927,8 +927,7 @@ class TextureAtlasPool:
             raise AtlasCapacityError(
                 f"atlas has {self.capacity} slots but {len(active_keys)} active tiles require residency"
             )
-        priority, _last, victim, page_index, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
-        del priority
+        _priority, _last, victim, page_index, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
         self._discard_tile_mappings_for_resident_key(victim)
         self.resident_slots.pop(victim, None)
         self.source_ids.pop(victim, None)
@@ -1537,7 +1536,7 @@ class GpuWindowedTileVisual(Visual):
         return True
 
     def _bounds(self, axis, view):
-        del view
+        self._last_bounds_view = view
         if axis == 0:
             return self._bounds_xy[0], self._bounds_xy[1]
         if axis == 1:

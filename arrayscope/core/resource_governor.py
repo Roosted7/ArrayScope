@@ -248,7 +248,7 @@ class ResourceGovernor:
             if interactive or busy_state.visible_busy or busy_state.montage_busy or pressure.ui_pressure != ResourcePressure.NORMAL:
                 desired = 1
                 reasons.append("prefetch kept narrow while user-visible work is active")
-        elif lane in {ComputeLane.VISIBLE, ComputeLane.STAGE, ComputeLane.PROFILE, ComputeLane.ROI, ComputeLane.PIXEL}:
+        elif lane in {ComputeLane.VISIBLE, ComputeLane.STAGE, ComputeLane.HISTOGRAM, ComputeLane.PROFILE, ComputeLane.ROI, ComputeLane.PIXEL}:
             desired = min(desired, max_workers)
         if pressure.cpu_headroom < 0.15 and lane not in {ComputeLane.VISIBLE, ComputeLane.STAGE}:
             desired = min(desired, max(1, self._lane_targets.get(lane, max_workers) - 1))

@@ -99,6 +99,7 @@ class ArrayScopeWindow(
             max_callback_dispatch_per_drain=8,
         )
         self.stage_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.stage_workers, name="stage")
+        self.histogram_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.histogram_workers, name="histogram")
         self.pixel_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.pixel_workers, name="pixel")
         self.profile_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.profile_workers, name="profile")
         self.roi_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.roi_workers, name="roi")
@@ -225,6 +226,7 @@ class ArrayScopeWindow(
             ComputeLane.VISIBLE: getattr(self, "visible_evaluation_controller", None),
             ComputeLane.MONTAGE_TILE: getattr(self, "montage_tile_evaluation_controller", None),
             ComputeLane.STAGE: getattr(self, "stage_evaluation_controller", None),
+            ComputeLane.HISTOGRAM: getattr(self, "histogram_evaluation_controller", None),
             ComputeLane.PREFETCH: getattr(self, "prefetch_evaluation_controller", None),
             ComputeLane.PROFILE: getattr(self, "profile_evaluation_controller", None),
             ComputeLane.ROI: getattr(self, "roi_evaluation_controller", None),
@@ -297,6 +299,7 @@ class ArrayScopeWindow(
             ("visible_callback", getattr(self, "visible_evaluation_controller", None)),
             ("montage_tile_result", getattr(self, "montage_tile_evaluation_controller", None)),
             ("stage_callback", getattr(self, "stage_evaluation_controller", None)),
+            ("histogram_refresh", getattr(self, "histogram_evaluation_controller", None)),
             ("prefetch_callback", getattr(self, "prefetch_evaluation_controller", None)),
             ("profile_update", getattr(self, "profile_evaluation_controller", None)),
             ("roi_refresh", getattr(self, "roi_evaluation_controller", None)),
@@ -392,6 +395,7 @@ class ArrayScopeWindow(
             "visible_evaluation_controller",
             "montage_tile_evaluation_controller",
             "stage_evaluation_controller",
+            "histogram_evaluation_controller",
             "pixel_evaluation_controller",
             "profile_evaluation_controller",
             "roi_evaluation_controller",

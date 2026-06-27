@@ -15,8 +15,6 @@ class ImageViewBackendCapabilities:
     """Capabilities that affect display planning and commit policy."""
 
     name: str
-    direct_montage_tile_payloads: bool = False
-    prefers_tiled_montages: bool = False
     persistent_tile_residency: bool = False
     shader_windowing: bool = False
     native_pointer_interaction: bool = True
@@ -24,8 +22,6 @@ class ImageViewBackendCapabilities:
 
 PYQTGRAPH_CAPABILITIES = ImageViewBackendCapabilities(
     name="pyqtgraph",
-    direct_montage_tile_payloads=True,
-    prefers_tiled_montages=False,
     persistent_tile_residency=False,
     shader_windowing=False,
     native_pointer_interaction=True,
@@ -33,8 +29,6 @@ PYQTGRAPH_CAPABILITIES = ImageViewBackendCapabilities(
 
 VISPY_CAPABILITIES = ImageViewBackendCapabilities(
     name="vispy",
-    direct_montage_tile_payloads=True,
-    prefers_tiled_montages=True,
     persistent_tile_residency=True,
     shader_windowing=True,
     # The current backend intentionally uses the shared PyQtGraph interaction
@@ -59,8 +53,6 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
     if capabilities is not None and hasattr(capabilities, "name"):
         return ImageViewBackendCapabilities(
             name=str(getattr(capabilities, "name", "pyqtgraph") or "pyqtgraph"),
-            direct_montage_tile_payloads=bool(getattr(capabilities, "direct_montage_tile_payloads", False)),
-            prefers_tiled_montages=bool(getattr(capabilities, "prefers_tiled_montages", False)),
             persistent_tile_residency=bool(getattr(capabilities, "persistent_tile_residency", False)),
             shader_windowing=bool(getattr(capabilities, "shader_windowing", False)),
             native_pointer_interaction=bool(getattr(capabilities, "native_pointer_interaction", True)),

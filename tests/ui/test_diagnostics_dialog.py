@@ -109,7 +109,7 @@ def test_diagnostics_refresh_updates_cache_text(qtbot):
         after = dialog.text_edit.toPlainText()
 
         assert before != after
-        assert "Image:" in after
+        assert "Display tiles:" in after
         assert "entries=1" in after
     finally:
         win.close()
@@ -287,7 +287,7 @@ def test_diagnostics_jsonl_logging_writes_start_and_snapshots(qtbot, tmp_path, m
         records = _read_jsonl(written_path)
         assert [record["event"] for record in records] == ["start", "snapshot", "snapshot"]
         assert records[-1]["sequence"] == 2
-        assert records[-1]["diagnostics"]["image_cache"]["entries"] == 1
+        assert records[-1]["diagnostics"]["display_cache"]["entries"] == 1
 
         dialog.log_button.click()
         assert dialog.log_button.text() == "Log..."

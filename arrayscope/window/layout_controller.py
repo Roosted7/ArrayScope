@@ -276,7 +276,7 @@ class WindowLayoutManager:
             try:
                 action.setChecked(bool(visible))
             finally:
-                del blocker
+                blocker.unblock()
 
         action.triggered.connect(on_triggered)
         dock.visibilityChanged.connect(sync_checked)

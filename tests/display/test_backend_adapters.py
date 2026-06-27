@@ -7,10 +7,10 @@ import pytest
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES
-from arrayscope.display.backends import RasterCommitMode, surface_for_view
+from arrayscope.display.backends import surface_for_view
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
-from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+from arrayscope.display.model.commit import DisplayTiledPresentation
+from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta, TilePresentationState
 from arrayscope.display.shader_mapping import ShaderMapping
 from arrayscope.display.viewport import ViewportPolicy
 
@@ -21,14 +21,13 @@ class _FakeSurface:
         self.widget = object()
         self.calls = []
 
-    def current_raster_shape(self):
-        return (2, 3)
-
-    def present_raster(self, presentation, *, mode):
-        self.calls.append(("raster", RasterCommitMode(mode), presentation))
-
     def present_tiled(self, presentation):
         self.calls.append(("tiled", None, presentation))
+        return TileCommitReport(
+            presented_tiles=frozenset(presentation.tile_state.active_payloads(presentation.tile_delta)),
+            committed_upserts=frozenset(presentation.tile_delta.upserts),
+            removed_tiles=frozenset(presentation.tile_delta.removals),
+        )
 
     def set_profile_bounds(self, bounds):
         self.calls.append(("bounds", tuple(bounds), None))
@@ -62,7 +61,7 @@ class _FakeSurface:
         self.calls.append(("teardown", None, None))
 
 
-def _raster_presentation(*, montage=False):
+def _geometry(*, montage=False):
     state = ViewState.from_shape((2, 3, 1)).with_image_axes(0, 1)
     geometry = DisplayGeometry(state, (2, 3))
     if montage:
@@ -73,21 +72,12 @@ def _raster_presentation(*, montage=False):
             montage=MontageGeometry(indices=(0,), tile_shape=(2, 3), columns=1, rows=1, gap=0),
             montage_tile_states=("loaded",),
         )
-    data = np.arange(6, dtype=np.float32).reshape(2, 3)
-    return DisplayRasterPresentation(
-        data=data,
-        histogram_data=data,
-        histogram_plot_data=None,
-        geometry=geometry,
-        levels=(0.0, 5.0),
-        histogram_range=(0.0, 5.0),
-        viewport_policy=ViewportPolicy.PRESERVE,
-    )
+    return geometry
 
 
 def _tiled_presentation():
-    raster = _raster_presentation(montage=True)
-    data = raster.data
+    geometry = _geometry(montage=True)
+    data = np.arange(6, dtype=np.float32).reshape(2, 3)
     payload = DisplayTilePayload(
         tile_number=0,
         source_index=0,
@@ -109,10 +99,10 @@ def _tiled_presentation():
         near_tiles=(0,),
     )
     return DisplayTiledPresentation(
-        geometry=raster.geometry,
-        levels=raster.levels,
-        histogram_range=raster.histogram_range,
-        viewport_policy=raster.viewport_policy,
+        geometry=geometry,
+        levels=(0.0, 5.0),
+        histogram_range=(0.0, 5.0),
+        viewport_policy=ViewportPolicy.PRESERVE,
         tile_state=state,
         base_tile_state=TilePresentationState(),
         tile_delta=delta,
@@ -140,20 +130,16 @@ def test_surface_resolver_explains_nonconforming_surface():
         surface_for_view(view)
 
 
-def test_surface_contract_commits_shared_raster_and_tiled_semantics():
+def test_surface_contract_commits_tiled_semantics():
     surface = _FakeSurface()
-    raster = _raster_presentation(montage=True)
     tiled = _tiled_presentation()
 
-    surface.present_raster(raster, mode=RasterCommitMode.FULL)
-    surface.present_raster(raster, mode=RasterCommitMode.FAST)
-    surface.present_tiled(tiled)
+    report = surface.present_tiled(tiled)
     surface.set_profile_bounds((0.0, 0.0, 2.0, 1.0))
 
-    assert [call[0] for call in surface.calls] == ["raster", "raster", "tiled", "bounds"]
-    assert surface.calls[0][1] is RasterCommitMode.FULL
-    assert surface.calls[1][1] is RasterCommitMode.FAST
-    assert surface.calls[2][2].tile_state == tiled.tile_state
+    assert [call[0] for call in surface.calls] == ["tiled", "bounds"]
+    assert surface.calls[0][2].tile_state == tiled.tile_state
+    assert report.committed_upserts == frozenset({0})
 
 
 def test_pyqtgraph_surface_exposes_lifecycle_contract(qt_app):
@@ -166,11 +152,6 @@ def test_pyqtgraph_surface_exposes_lifecycle_contract(qt_app):
         assert surface.widget is view
         assert surface.capabilities.name == "pyqtgraph"
         assert surface.interaction_event_owner() == "shared-controller"
-        view.image = np.zeros((4, 5, 3), dtype=np.uint8)
-        assert surface.current_raster_shape() == (4, 5)
-        view.image = np.zeros((4,), dtype=np.float32)
-        assert surface.current_raster_shape() is None
-        view.image = None
         surface.apply_camera((2, 3), ViewportPolicy.PRESERVE)
         assert surface.current_viewport_rect() is None
         diagnostics = surface.presentation_diagnostics()

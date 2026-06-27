@@ -190,7 +190,7 @@ def test_cached_normal_image_render_skips_memory_policy_resample(qtbot, monkeypa
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=4)
-        assert win.operation_evaluator.cached_image(
+        assert win.operation_evaluator.cached_display_tile(
             win.view_state,
             colormap_lut=None,
             shader_display=bool(win.img_view.rendering_capabilities.shader_windowing),

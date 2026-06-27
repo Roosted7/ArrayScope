@@ -30,8 +30,8 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
     if not session.document.enabled_operations:
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_no_stage", "raw montage tiles rely on visible-level commit ordering"),))
-    if window.operation_evaluator._tile_cache.bytes_used > int(window.operation_evaluator._tile_cache.max_bytes * 0.8):
-        return _record(window, (MontagePrefetchDecision(None, None, "blocked_budget", "tile cache is near capacity"),))
+    if window.operation_evaluator._display_cache.bytes_used > int(window.operation_evaluator._display_cache.max_bytes * 0.8):
+        return _record(window, (MontagePrefetchDecision(None, None, "blocked_budget", "display cache is near capacity"),))
     governor = getattr(window, "resource_governor", None)
     if governor is not None:
         decision = governor.decide_montage_prefetch(stage_ready_or_in_flight=True, visible_busy=False)
@@ -126,7 +126,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             )
             window.operation_evaluator.prefetch_stored += 1
 
-        started = window.prefetch_evaluation_controller.start_prefetch(evaluate, on_done=done, key=("montage_tile_prefetch", tile_key), memory_budget_bytes=window._memory_policy().tile_cache_budget_bytes)
+        started = window.prefetch_evaluation_controller.start_prefetch(evaluate, on_done=done, key=("montage_tile_prefetch", tile_key), memory_budget_bytes=window._memory_policy().display_cache_budget_bytes)
         if started.scheduled:
             scheduled += 1
             window.operation_evaluator.note_prefetch_scheduled()

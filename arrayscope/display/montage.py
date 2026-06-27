@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from collections.abc import Sequence
 from enum import Enum
 
 import numpy as np
 
-from arrayscope.core.memory_budget import estimate_viewport_canvas_bytes, format_bytes
 from arrayscope.display.geometry import MontageGeometry
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
-from arrayscope.display.slice_engine import DisplayImage
 
 
 @dataclass(frozen=True)
@@ -22,12 +20,6 @@ class MontageLayout:
     columns: int
     rows: int
     gap: int = 1
-
-
-@dataclass(frozen=True)
-class RenderedMontage:
-    image: DisplayImage
-    geometry: MontageGeometry
 
 
 @dataclass(frozen=True)
@@ -270,109 +262,6 @@ class RenderedTile:
         )
 
 
-@dataclass(frozen=True)
-class MontageViewportCanvas:
-    data: np.ndarray
-    histogram_data: np.ndarray | None
-    origin_x: int
-    origin_y: int
-    full_plan: MontagePlan
-    tile_states: tuple[MontageTileState, ...] = ()
-    canvas_rect: tuple[int, int, int, int] = (0, 0, 1, 1)
-
-    @property
-    def display_shape(self) -> tuple[int, int]:
-        return self.data.shape[:2]
-
-
-def make_montage(images, *, histogram_images=None, columns=None, gap=1, indices=None):
-    images = tuple(np.asarray(image) for image in images)
-    if not images:
-        geometry = MontageGeometry(indices=(), tile_shape=(1, 1), columns=1, rows=0, gap=max(0, int(gap)))
-        return RenderedMontage(DisplayImage(np.zeros((1, 1), dtype=float)), geometry)
-    first = images[0]
-    if first.ndim not in (2, 3):
-        raise ValueError(f"montage images must be 2D scalar or RGB, got shape {first.shape}")
-    count = len(images)
-    indices = tuple(range(count)) if indices is None else tuple(int(index) for index in indices)
-    if len(indices) != count:
-        raise ValueError("indices length must match image count")
-    columns = int(columns or np.ceil(np.sqrt(count)))
-    columns = max(1, min(columns, count))
-    rows = int(np.ceil(count / columns))
-    height, width = first.shape[:2]
-    gap = max(0, int(gap))
-    fill_shape = (rows * height + gap * (rows - 1), columns * width + gap * (columns - 1)) + first.shape[2:]
-    montage = np.zeros(fill_shape, dtype=first.dtype)
-    hist_montage = None
-    if histogram_images is not None:
-        histogram_images = tuple(np.asarray(image) for image in histogram_images)
-        hist_montage = np.full(fill_shape[:2], np.nan, dtype=float)
-    for index, image in enumerate(images):
-        row = index // columns
-        column = index % columns
-        y0 = row * (height + gap)
-        x0 = column * (width + gap)
-        montage[y0 : y0 + height, x0 : x0 + width, ...] = image
-        if hist_montage is not None and index < len(histogram_images):
-            hist_montage[y0 : y0 + height, x0 : x0 + width] = histogram_images[index]
-    geometry = MontageGeometry(indices=indices, tile_shape=(height, width), columns=columns, rows=rows, gap=gap)
-    return RenderedMontage(DisplayImage(data=montage, histogram_data=hist_montage), geometry)
-
-
-def make_montage_viewport_canvas(
-    plan: MontagePlan,
-    rendered_tiles: Sequence[RenderedTile],
-    *,
-    view_range=None,
-    viewport_shape: tuple[int, int] | None = None,
-    budget_bytes: int,
-    dtype=None,
-    rgb: bool = False,
-    include_histogram: bool = True,
-    loading_tiles: Sequence[MontageTile] = (),
-    skipped_tiles: Sequence[MontageTile] = (),
-) -> MontageViewportCanvas:
-    rendered_tiles = tuple(rendered_tiles)
-    tile_by_index = {int(rendered.tile.montage_index): rendered for rendered in rendered_tiles}
-    rect = montage_rect_for_viewport(plan, view_range=view_range, viewport_shape=viewport_shape)
-    x0, y0, x1, y1 = rect
-    width = max(1, int(x1) - int(x0))
-    height = max(1, int(y1) - int(y0))
-    rendered_images = tuple(np.asarray(rendered.image) for rendered in rendered_tiles)
-    sample = rendered_images[0] if rendered_images else None
-    if dtype is None:
-        dtype = sample.dtype if sample is not None else float
-    data_dtype = np.dtype(dtype)
-    is_rgb = bool(rgb or any(image.ndim == 3 for image in rendered_images))
-    trailing_shape = _rgb_trailing_shape(rendered_images) if is_rgb else ()
-    canvas_shape = (height, width) + tuple(trailing_shape)
-    estimated = estimate_viewport_canvas_bytes((height, width), dtype, rgb=is_rgb, histogram=include_histogram)
-    if estimated > int(budget_bytes):
-        raise MemoryError(
-            f"Montage viewport canvas would allocate {format_bytes(estimated)} "
-            f"over budget {format_bytes(int(budget_bytes))}."
-        )
-    if is_rgb:
-        data = np.full(canvas_shape, 42, dtype=np.uint8)
-    else:
-        # Keep visual placeholders finite. Tile state, not display pixel value,
-        # distinguishes loading/skipped/unloaded regions; histogram_data remains
-        # NaN so ROI/statistics ignore non-loaded regions.
-        data = np.zeros(canvas_shape, dtype=data_dtype)
-    histogram_data = np.full((height, width), np.nan, dtype=np.float32) if include_histogram else None
-    canvas_rect = (int(x0), int(y0), int(x0) + width, int(y0) + height)
-    tile_states = _tile_states_for_plan(
-        plan,
-        loaded_indices=tile_by_index.keys(),
-        loading_tiles=loading_tiles,
-        skipped_tiles=skipped_tiles,
-    )
-    for rendered in sorted(tile_by_index.values(), key=lambda item: item.tile.montage_index):
-        _copy_rendered_tile_into_canvas(rendered, data, histogram_data, canvas_rect)
-    return MontageViewportCanvas(data, histogram_data, int(x0), int(y0), plan, tile_states, canvas_rect)
-
-
 def montage_rect_for_viewport(plan: MontagePlan, *, view_range=None, viewport_shape=None) -> tuple[int, int, int, int]:
     full_height, full_width = plan.display_shape
     if full_height <= 0 or full_width <= 0:
@@ -427,55 +316,6 @@ def tile_status_at_global_point(
     )
 
 
-def copy_rendered_tile_into_canvas(rendered: RenderedTile, canvas: MontageViewportCanvas) -> MontageViewportCanvas:
-    data = np.array(canvas.data, copy=True)
-    histogram_data = None if canvas.histogram_data is None else np.array(canvas.histogram_data, copy=True)
-    _copy_rendered_tile_into_canvas(rendered, data, histogram_data, canvas.canvas_rect)
-    states = list(canvas.tile_states or _tile_states_for_plan(canvas.full_plan))
-    if int(rendered.tile.montage_index) < len(states):
-        states[int(rendered.tile.montage_index)] = MontageTileState.LOADED
-    return replace(canvas, data=data, histogram_data=histogram_data, tile_states=tuple(states))
-
-
-def patch_rendered_tile_into_canvas(rendered: RenderedTile, canvas: MontageViewportCanvas) -> tuple[int, int, int, int] | None:
-    """Patch one rendered tile into an existing viewport canvas.
-
-    Returns the dirty rect in canvas-local coordinates, or None when the tile
-    does not intersect the current viewport canvas.
-    """
-    dirty = _copy_rendered_tile_into_canvas(rendered, canvas.data, canvas.histogram_data, canvas.canvas_rect)
-    if dirty is None:
-        return None
-    states = list(canvas.tile_states or _tile_states_for_plan(canvas.full_plan))
-    if int(rendered.tile.montage_index) < len(states):
-        states[int(rendered.tile.montage_index)] = MontageTileState.LOADED
-        object.__setattr__(canvas, "tile_states", tuple(states))
-    return dirty
-
-
-def _tile_states_for_plan(
-    plan: MontagePlan,
-    *,
-    loaded_indices=(),
-    loading_tiles: Sequence[MontageTile] = (),
-    skipped_tiles: Sequence[MontageTile] = (),
-) -> tuple[MontageTileState, ...]:
-    states = [MontageTileState.UNLOADED for _tile in plan.tiles]
-    for tile in skipped_tiles:
-        index = int(tile.montage_index)
-        if 0 <= index < len(states):
-            states[index] = MontageTileState.SKIPPED
-    for tile in loading_tiles:
-        index = int(tile.montage_index)
-        if 0 <= index < len(states) and states[index] != MontageTileState.SKIPPED:
-            states[index] = MontageTileState.LOADING
-    for index in loaded_indices:
-        index = int(index)
-        if 0 <= index < len(states):
-            states[index] = MontageTileState.LOADED
-    return tuple(states)
-
-
 def _rect_for_view_range(view_range, plan: MontagePlan, viewport_shape) -> tuple[int, int, int, int]:
     x_range, y_range = view_range
     x0, x1 = sorted((float(x_range[0]), float(x_range[1])))
@@ -505,60 +345,6 @@ def _intersect_rect(a, b) -> tuple[int, int, int, int] | None:
     if x1 <= x0 or y1 <= y0:
         return None
     return x0, y0, x1, y1
-
-
-def _copy_rendered_tile_into_canvas(rendered: RenderedTile, data, histogram_data, canvas_rect) -> tuple[int, int, int, int] | None:
-    tile = rendered.tile
-    tile_rect = (int(tile.x0), int(tile.y0), int(tile.x0 + tile.width), int(tile.y0 + tile.height))
-    clipped = _intersect_rect(tile_rect, canvas_rect)
-    if clipped is None:
-        return None
-    x0, y0, x1, y1 = clipped
-    source_x0 = x0 - tile_rect[0]
-    source_y0 = y0 - tile_rect[1]
-    dest_x0 = x0 - canvas_rect[0]
-    dest_y0 = y0 - canvas_rect[1]
-    height = y1 - y0
-    width = x1 - x0
-    source_image = np.asarray(rendered.image)[
-        source_y0 : source_y0 + height,
-        source_x0 : source_x0 + width,
-        ...,
-    ]
-    source_image = _coerce_rendered_image_for_canvas(source_image, data)
-    if source_image is None:
-        return None
-    data[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width, ...] = source_image
-    if histogram_data is None:
-        return dest_x0, dest_y0, dest_x0 + width, dest_y0 + height
-    source = rendered.histogram_data
-    if source is None:
-        source = rendered.image
-        if np.asarray(source).ndim == 3:
-            return dest_x0, dest_y0, dest_x0 + width, dest_y0 + height
-    histogram_data[dest_y0 : dest_y0 + height, dest_x0 : dest_x0 + width] = np.asarray(source)[
-        source_y0 : source_y0 + height,
-        source_x0 : source_x0 + width,
-    ]
-    return dest_x0, dest_y0, dest_x0 + width, dest_y0 + height
-
-
-def _rgb_trailing_shape(images: Sequence[np.ndarray]) -> tuple[int, ...]:
-    for image in images:
-        if np.asarray(image).ndim == 3:
-            return tuple(int(value) for value in np.asarray(image).shape[2:])
-    return (3,)
-
-
-def _coerce_rendered_image_for_canvas(source, data) -> np.ndarray | None:
-    source = np.asarray(source)
-    if source.ndim == data.ndim:
-        return source
-    if source.ndim == 2 and data.ndim == 3:
-        return np.broadcast_to(source[..., np.newaxis], source.shape + tuple(data.shape[2:]))
-    if source.ndim == 3 and data.ndim == 2:
-        return None
-    return None
 
 
 def optimal_montage_columns(count, tile_shape, viewport_shape, gap=1):

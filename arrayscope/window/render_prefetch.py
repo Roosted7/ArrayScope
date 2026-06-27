@@ -57,7 +57,7 @@ class RenderPrefetchMixin:
             self.operation_evaluator.note_prefetch_skipped()
             return
         policy = self._memory_policy()
-        if self.operation_evaluator._image_cache.bytes_used > int(self.operation_evaluator._image_cache.max_bytes * policy.cache_prefetch_skip_fraction):
+        if self.operation_evaluator._display_cache.bytes_used > int(self.operation_evaluator._display_cache.max_bytes * policy.cache_prefetch_skip_fraction):
             self.operation_evaluator.note_prefetch_skipped()
             return
         if self._estimated_image_display_bytes(view_state) > policy.prefetch_budget_bytes:
@@ -85,19 +85,19 @@ class RenderPrefetchMixin:
             index = current + delta
             if 0 <= index < size:
                 prefetch_state = view_state.with_slice(axis, index)
-                prefetch_key = self.operation_evaluator.image_key(
+                prefetch_key = self.operation_evaluator.display_tile_key(
                     prefetch_state,
                     colormap_lut=colormap_lut,
                     document=document,
                 )
                 started = self.prefetch_evaluation_controller.start_prefetch(
-                    lambda prefetch_state=prefetch_state, document=document: self.operation_evaluator.prefetch_image_snapshot(
+                    lambda prefetch_state=prefetch_state, document=document: self.operation_evaluator.prefetch_display_tile_snapshot(
                         document,
                         prefetch_state,
                         colormap_lut=colormap_lut,
                         evaluation_context=self._evaluation_context(ComputeLane.PREFETCH, None),
                     ),
-                    on_done=lambda result, prefetch_state=prefetch_state, document=document, prefetch_key=prefetch_key: self._store_prefetch_image_if_current(
+                    on_done=lambda result, prefetch_state=prefetch_state, document=document, prefetch_key=prefetch_key: self._store_prefetch_display_tile_if_current(
                         document,
                         prefetch_key,
                         prefetch_state,
@@ -107,7 +107,7 @@ class RenderPrefetchMixin:
                     key=prefetch_key,
                     memory_budget_bytes=policy.prefetch_budget_bytes,
                     work_item=WorkItem(
-                        key=("prefetch_image", prefetch_key),
+                        key=("prefetch_display_tile", prefetch_key),
                         lane=WorkLane.SPECULATIVE_RESIDENCY,
                         frame_target=FrameTarget(
                             semantic_key=prefetch_key,
@@ -238,12 +238,12 @@ class RenderPrefetchMixin:
             return False
         return self.operation_evaluator.store_prefetch_line_result(document, profile_state, result)
 
-    def _store_prefetch_image_if_current(self, document, request_key, view_state, colormap_lut, result):
-        current_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut)
+    def _store_prefetch_display_tile_if_current(self, document, request_key, view_state, colormap_lut, result):
+        current_key = self.operation_evaluator.display_tile_key(view_state, colormap_lut=colormap_lut)
         if request_key != current_key:
             self.operation_evaluator.note_prefetch_stale()
             return False
-        return self.operation_evaluator.store_prefetch_image_result(document, view_state, colormap_lut, result)
+        return self.operation_evaluator.store_prefetch_display_tile_result(document, view_state, colormap_lut, result)
 
     def _note_prefetch_start(self, started):
         if started.scheduled:

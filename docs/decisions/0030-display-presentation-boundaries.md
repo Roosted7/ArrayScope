@@ -19,13 +19,13 @@ Introduce explicit display presentation boundaries:
 - `arrayscope.display.model.frame.CommittedDisplayFrame` records the committed
   value source for hover/status.
 - `arrayscope.window.montage_levels.MontageLevelTracker` tracks semantic montage
-  histogram coverage independently from viewport canvas pixels.
+  histogram coverage independently from transient visible tile residency.
 - `ImageView2D` exposes presentation APIs that keep LUT levels separate from
   semantic histogram/data bounds.
 
 Viewport changes may schedule new visible tile work, but they do not own
-semantic window/level state. Partial visible montage canvas histograms are not
-automatic window/level sources.
+semantic window/level state. Partial visible tile histograms are not automatic
+window/level sources.
 
 ## Consequences
 
@@ -40,4 +40,3 @@ direct display mutation back into `render.py`.
 Tests cover explicit ImageView presentation state, panning without new tile data,
 degenerate previous levels, committed hover coordinates, and architecture guards
 that route display commits through `DisplayCommitter`.
-

@@ -17,6 +17,7 @@ from arrayscope.core.memory_policy import MiB, MemoryPolicy
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.frame_planner import FramePlanner
+from arrayscope.display.region_source import EagerDisplayRegionSource
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.ui.toasts import show_status_message
@@ -32,7 +33,6 @@ from arrayscope.display.model.frame import (
 from arrayscope.window.montage_backend import MontageBackendDecision, backend_warning_for_actual_commit
 from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation, normalize_bounds
 from arrayscope.display.model.commit import CommitKind, DisplayPayload, DisplayTiledPresentation, PresentationInput, RenderRequestContext
-from arrayscope.display.scene import DisplayStorage
 from arrayscope.window.viewport_bridge import ViewportBridge
 
 
@@ -118,7 +118,7 @@ class DisplayPresentationMixin:
                 geometry=geometry,
                 display_shape=display_image.data.shape[:2],
             )
-            if tile_state is None and _should_commit_normal_as_tiled(frame_plan):
+            if tile_state is None:
                 tile_state, base_tile_state, tile_delta = _tile_presentation_for_display_image(
                     display_image,
                     frame_plan=frame_plan,
@@ -128,7 +128,7 @@ class DisplayPresentationMixin:
                 PresentationInput(
                     payload=DisplayPayload(
                         image=display_image,
-                        geometry=geometry,
+                        geometry=frame_plan.geometry,
                         viewport_policy=viewport_policy,
                         frame_plan=frame_plan,
                         rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
@@ -154,28 +154,16 @@ class DisplayPresentationMixin:
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
 
             set_image_start = perf_counter()
-            backend_decision = self._montage_backend_decision_for_display(geometry, display_image.data)
-            capabilities = image_view_backend_capabilities(self.img_view)
-            use_tile_layer = (
-                isinstance(decision.display_presentation, DisplayTiledPresentation)
-                and capabilities.direct_montage_tile_payloads
-            )
-            if use_tile_layer:
-                frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
-                actual_backend = "tile_layer"
-            else:
-                frame = self._display_committer().commit_full(decision.display_presentation, context.frame_key)
-                actual_backend = "canvas"
+            backend_decision = self._montage_backend_decision_for_display(decision.display_presentation.geometry, display_image.data)
+            frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
+            actual_backend = "tile_layer"
             self._record_montage_backend_commit(backend_decision, actual_backend)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
-            self.display_geometry = geometry
-            report = getattr(self._display_committer(), "last_tile_commit_report", None) if use_tile_layer else None
+            self.display_geometry = frame.geometry
+            report = getattr(self._display_committer(), "last_tile_commit_report", None)
             semantic_frame_commit = bool(
                 semantic_commit
-                and (
-                    not use_tile_layer
-                    or bool(getattr(report, "presented_tiles", ()))
-                )
+                and bool(getattr(report, "presented_tiles", ()))
             )
             if semantic_frame_commit:
                 self._set_committed_display_frame(frame)
@@ -251,7 +239,7 @@ class DisplayPresentationMixin:
                 geometry=geometry,
                 display_shape=display_image.data.shape[:2],
             )
-            if tile_state is None and _should_commit_normal_as_tiled(frame_plan):
+            if tile_state is None:
                 tile_state, base_tile_state, tile_delta = _tile_presentation_for_display_image(
                     display_image,
                     frame_plan=frame_plan,
@@ -261,7 +249,7 @@ class DisplayPresentationMixin:
                 PresentationInput(
                     payload=DisplayPayload(
                         image=display_image,
-                        geometry=geometry,
+                        geometry=frame_plan.geometry,
                         viewport_policy=viewport_policy,
                         frame_plan=frame_plan,
                         rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
@@ -286,36 +274,16 @@ class DisplayPresentationMixin:
             )
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
             set_image_start = perf_counter()
-            can_fast = (
-                decision.allow_fast_commit
-                and viewport_policy == ViewportPolicy.PRESERVE
-                and self._display_committer().surface.current_raster_shape() == tuple(display_image.data.shape[:2])
-            )
-            backend_decision = self._montage_backend_decision_for_display(geometry, display_image.data)
-            capabilities = image_view_backend_capabilities(self.img_view)
-            use_tile_layer = (
-                isinstance(decision.display_presentation, DisplayTiledPresentation)
-                and capabilities.direct_montage_tile_payloads
-            )
-            if use_tile_layer:
-                frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
-                actual_backend = "tile_layer"
-            elif can_fast:
-                frame = self._display_committer().commit_fast(decision.display_presentation, context.frame_key)
-                actual_backend = "canvas"
-            else:
-                frame = self._display_committer().commit_full(decision.display_presentation, context.frame_key)
-                actual_backend = "canvas"
+            backend_decision = self._montage_backend_decision_for_display(decision.display_presentation.geometry, display_image.data)
+            frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
+            actual_backend = "tile_layer"
             self._record_montage_backend_commit(backend_decision, actual_backend)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
-            self.display_geometry = geometry
-            report = getattr(self._display_committer(), "last_tile_commit_report", None) if use_tile_layer else None
+            self.display_geometry = frame.geometry
+            report = getattr(self._display_committer(), "last_tile_commit_report", None)
             semantic_frame_commit = bool(
                 semantic_commit
-                and (
-                    not use_tile_layer
-                    or bool(getattr(report, "presented_tiles", ()))
-                )
+                and bool(getattr(report, "presented_tiles", ()))
             )
             if semantic_frame_commit:
                 self._set_committed_display_frame(frame)
@@ -348,7 +316,7 @@ class DisplayPresentationMixin:
     def _montage_backend_decision_for_display(self, geometry, data) -> MontageBackendDecision:
         policy = getattr(self, "_montage_backend_policy", None)
         if policy is None or getattr(geometry, "montage", None) is None:
-            return MontageBackendDecision("canvas", "not a montage display")
+            return MontageBackendDecision("none", "not a montage display")
         return policy(geometry, data)
 
     def _record_montage_backend_commit(self, decision: MontageBackendDecision, actual_backend: str) -> None:
@@ -452,6 +420,85 @@ class DisplayPresentationMixin:
             self._viewport_bridge_instance = bridge
         return bridge
 
+    def _schedule_tiled_viewport_update(self, *, delay_ms: int | None = None) -> None:
+        if getattr(self.view_state, "montage_axis", None) is not None:
+            scheduler = getattr(self, "_schedule_montage_viewport_update", None)
+            if callable(scheduler):
+                scheduler(delay_ms=delay_ms)
+            return
+        timer = getattr(self, "_normal_tiled_viewport_update_timer", None)
+        if timer is None:
+            from pyqtgraph.Qt import QtCore
+
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._run_normal_tiled_viewport_update)
+            self._normal_tiled_viewport_update_timer = timer
+        timer.start(0 if delay_ms is None else max(0, int(delay_ms)))
+
+    def _run_normal_tiled_viewport_update(self) -> None:
+        frame = getattr(self, "_committed_display_frame", None)
+        scene = getattr(frame, "scene", None)
+        if frame is None or scene is None:
+            return
+        if getattr(getattr(scene, "layout", None), "value", getattr(scene, "layout", None)) != "single":
+            return
+        value_source = getattr(frame, "value_source", None)
+        if not isinstance(value_source, TiledValueSource):
+            return
+        view_range = _current_view_range(self)
+        context = self._render_request_context(
+            document_key=frame.key.document_key,
+            request_key=frame.key.request_key,
+            render_generation=frame.key.render_generation,
+            semantic_key=frame.key.semantic_key,
+        )
+        frame_plan = self._frame_planner().plan(
+            target=FrameTarget(
+                semantic_key=context.semantic_key or context.request_key,
+                viewport_key=view_range,
+                presentation_key=None,
+                quality="exact-visible",
+            ),
+            view_state=frame.geometry.view_state,
+            display_shape=frame.geometry.display_shape,
+            backend_capabilities=image_view_backend_capabilities(self.img_view),
+            view_range=view_range,
+            memory_policy=self._memory_policy(),
+        )
+        payloads = dict(value_source.payloads)
+        revision = max(0, int(getattr(getattr(scene, "tile_state", None), "revision", 0) or 0))
+        state = TilePresentationState(payloads, revision=revision)
+        delta = TilePresentationDelta(
+            structure_revision=1,
+            payload_revision=1,
+            visibility_revision=1,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=1,
+            base_revision=revision,
+            target_revision=revision,
+            upserts={},
+            active_tiles=frame_plan.active_region_ids,
+            planned_tiles=frame_plan.planned_region_ids,
+            near_tiles=frame_plan.near_region_ids,
+        )
+        presentation = DisplayTiledPresentation(
+            geometry=frame_plan.geometry,
+            levels=frame.levels,
+            histogram_range=frame.histogram_range,
+            viewport_policy=ViewportPolicy.PRESERVE,
+            tile_state=state,
+            base_tile_state=state,
+            tile_delta=delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes(self._memory_policy()),
+            frame_plan=frame_plan,
+        )
+        committed = self._display_committer().commit_tile_layer(presentation, frame.key)
+        self.display_geometry = committed.geometry
+        self._set_committed_display_frame(committed)
+        self.apply_axis_flips()
+
     def _display_frame_key(self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None) -> DisplayFrameKey:
         if document_key is None:
             document_key = _document_key(self.document)
@@ -467,8 +514,13 @@ class DisplayPresentationMixin:
         )
 
     def _set_committed_display_frame(self, frame: CommittedDisplayFrame) -> None:
+        if not getattr(frame, "is_tiled", False):
+            raise RuntimeError("Committed display frames must be tiled.")
         self._committed_display_request_key = frame.key.request_key
         self._committed_display_frame = frame
+        refresh_hidden_roi_overlay = getattr(self, "_refresh_hidden_roi_overlay_from_committed_frame", None)
+        if callable(refresh_hidden_roi_overlay):
+            refresh_hidden_roi_overlay()
 
     def _queue_display_levels(self, levels) -> tuple[float, float] | None:
         """Queue exact levels for the next successful semantic presentation.
@@ -597,7 +649,7 @@ class DisplayPresentationMixin:
         session = getattr(self, "_montage_session", None)
         if session is None or not bool(getattr(session, "display_committed", False)):
             return False
-        if str(getattr(self.img_view, "montageDisplayMode", lambda: "canvas")()) not in {"tile_layer", "vispy_tile_layer"}:
+        if str(getattr(self.img_view, "montageDisplayMode", lambda: "none")()) not in {"tile_layer", "vispy_tile_layer"}:
             return False
 
         histogram_range = normalize_bounds(getattr(self.img_view, "getHistogramDataBounds", lambda: None)()) or levels
@@ -634,12 +686,8 @@ class DisplayPresentationMixin:
         session.force_auto = False
         needs_level_work = bool(session.begin_level_presentation_update(levels))
 
-        capabilities = image_view_backend_capabilities(self.img_view)
-        if capabilities.shader_windowing:
+        if image_view_backend_capabilities(self.img_view).shader_windowing:
             session.acknowledge_uniform_level_presentation(levels)
-            needs_level_work = False
-        elif not capabilities.direct_montage_tile_payloads:
-            session.set_level_update_pending(False)
             needs_level_work = False
 
         frame = getattr(self, "_committed_display_frame", None)
@@ -665,55 +713,29 @@ def tile_residency_budget_bytes(policy: MemoryPolicy) -> int:
     return int(
         min(
             int(getattr(policy, "visible_render_budget_bytes", 0) or 0),
-            max(64 * MiB, int(getattr(policy, "tile_cache_budget_bytes", 0) or 0) // 2),
+            max(64 * MiB, int(getattr(policy, "display_cache_budget_bytes", 0) or 0) // 2),
             int(getattr(policy, "user_render_cap_bytes", 0) or 0),
         )
     )
 
 
-def _should_commit_normal_as_tiled(frame_plan) -> bool:
-    if frame_plan is None:
-        return False
-    layout = getattr(frame_plan, "layout", None)
-    layout_value = getattr(layout, "value", layout)
-    storage = getattr(frame_plan, "storage", None)
-    storage_value = getattr(storage, "value", storage)
-    return layout_value == "single" and storage_value == DisplayStorage.TILED.value
+def _current_view_range(window):
+    try:
+        view_range = window.img_view.getView().viewRange()
+        return (
+            (float(view_range[0][0]), float(view_range[0][1])),
+            (float(view_range[1][0]), float(view_range[1][1])),
+        )
+    except Exception:
+        return None
 
 
 def _tile_presentation_for_display_image(display_image, *, frame_plan, source_key):
-    data = np.asarray(display_image.data)
-    hist = None if display_image.histogram_data is None else np.asarray(display_image.histogram_data)
-    semantic = None if getattr(display_image, "semantic_data", None) is None else np.asarray(display_image.semantic_data)
-    texture = None if getattr(display_image, "texture_data", None) is None else np.asarray(display_image.texture_data)
+    source = EagerDisplayRegionSource(display_image, source_key=source_key)
     payloads: dict[int, DisplayTilePayload] = {}
     for region in tuple(getattr(frame_plan, "regions", ()) or ()):
         tile_number = int(region.region_id)
-        y_slice, x_slice = region.data_slices
-        tile_data = data[y_slice, x_slice, ...]
-        tile_hist = None if hist is None else hist[y_slice, x_slice]
-        tile_semantic = None if semantic is None else semantic[y_slice, x_slice, ...]
-        tile_texture = None if texture is None else texture[y_slice, x_slice, ...]
-        payloads[tile_number] = DisplayTilePayload(
-            tile_number=tile_number,
-            source_index=tile_number,
-            image=tile_data,
-            histogram_data=tile_hist,
-            source_id=(
-                source_key,
-                getattr(region, "materialization_key", None),
-                tuple(int(value) for value in tile_data.shape),
-                str(tile_data.dtype),
-                id(tile_data.base if getattr(tile_data, "base", None) is not None else tile_data),
-            ),
-            texture_data=tile_texture,
-            texture_kind=getattr(display_image, "texture_kind", None),
-            semantic_data=tile_semantic,
-            semantic_histogram_data=tile_hist,
-            source_shape=tile_data.shape[:2],
-            lod=getattr(display_image, "lod", None),
-            shader_mapping=getattr(display_image, "shader_mapping", None),
-        )
+        payloads[tile_number] = source.read_region(region, quality="exact-visible")
     state = TilePresentationState(payloads, revision=1)
     delta = TilePresentationDelta(
         structure_revision=1,

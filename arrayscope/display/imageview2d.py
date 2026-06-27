@@ -24,7 +24,6 @@ from arrayscope.core.roi import (
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget, GuiCallbackObservation
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
-from arrayscope.display.backends import RasterCommitMode
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.histogram_controller import HistogramDisplayController, HistogramLevelPreviewController
 from arrayscope.display.image_upload import ensure_imageitem_array, rgb_display_for_levels
@@ -117,12 +116,12 @@ class ArrayScopeGraphicsView(pg.GraphicsView):
             owner._sync_profile_marker_visibility()
             owner._sync_backend_camera_to_view()
         finally:
-            del blocker
+            blocker.unblock()
 
 
 class ImageViewShell(QtWidgets.QWidget):
-    # Backends that implement the typed tile-payload method can bypass CPU
-    # montage canvas composition.  Renderer orchestration checks this
+    # Backends that implement the typed tile-payload method can present montage
+    # tiles directly.  Renderer orchestration checks this
     # capability rather than branching on a backend name.
     rendering_capabilities = PYQTGRAPH_CAPABILITIES
     draws_qgraphics_roi_items = True
@@ -182,7 +181,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._gui_callback_budget_provider = None
         self._background_task_submitter = None
         self._level_presentation_change_handler = None
-        self._montage_display_mode = "canvas"
+        self._montage_display_mode = "none"
         self._montage_tile_layer = None
         self._montage_tile_layer_histogram_key = None
         self._profile_vline = None
@@ -590,7 +589,7 @@ class ImageViewShell(QtWidgets.QWidget):
         if self._montage_tile_layer is not None:
             self._montage_tile_layer.clear()
         self._montage_tile_layer_histogram_key = None
-        self._montage_display_mode = "canvas"
+        self._montage_display_mode = "none"
         self.imageItem.setVisible(True)
 
     def _apply_tile_layer_presentation(
@@ -686,7 +685,7 @@ class ImageViewShell(QtWidgets.QWidget):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
-    def setTiledMontagePresentation(
+    def setTiledPresentation(
         self,
         *,
         geometry,
@@ -709,7 +708,7 @@ class ImageViewShell(QtWidgets.QWidget):
         state and delta, not placeholder pixels.
         """
 
-        del shader_mapping  # PyQtGraph receives already materialized display pixels.
+        self._last_tiled_shader_mapping = shader_mapping
         placeholder, tile_payloads, dirty_tiles, tile_source_ids = self._prepare_tiled_montage_commit(
             geometry,
             tile_state=tile_state,
@@ -742,6 +741,8 @@ class ImageViewShell(QtWidgets.QWidget):
     def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None, frame_plan=None) -> TileLayerUpdateStats:
         if self._montage_tile_layer is None:
             return TileLayerUpdateStats()
+        if montage_tile_payloads is None or tile_delta is None:
+            raise ValueError("typed tile payloads and a TilePresentationDelta are required for tiled presentation commits")
         return self._montage_tile_layer.update_presentation(
             img,
             histogram_data=histogramData,
@@ -824,13 +825,7 @@ class ImageViewShell(QtWidgets.QWidget):
         )
 
     def _update_montage_tile_levels(self, levels) -> TileLayerUpdateStats:
-        if self._montage_tile_layer is not None:
-            return self._montage_tile_layer.update_levels(
-                levels,
-                image=self.image,
-                histogram_data=self.histogramSource,
-            )
-        return TileLayerUpdateStats()
+        raise RuntimeError("PyQtGraph tiled level changes must use governed tiled presentation commits")
         
     def setImage(self, img, autoRange=None, autoLevels=True, levels=None,
                  pos=None, scale=None, transform=None, autoHistogramRange=True,
@@ -860,9 +855,12 @@ class ImageViewShell(QtWidgets.QWidget):
         autoHistogramRange : bool
             Whether to auto-scale the histogram range
         """
-        del shader_mapping, texture_kind, semantic_data, lod
         if not isinstance(img, np.ndarray):
             raise TypeError("Image must be a numpy array")
+        self._last_shader_mapping = shader_mapping
+        self._last_texture_kind = texture_kind
+        self._last_semantic_data_shape = None if semantic_data is None else tuple(np.shape(semantic_data))
+        self._last_lod = lod
         viewport_policy = coerce_viewport_policy(viewport_policy, autoRange)
             
         is_rgb = self._is_rgb_image(img)
@@ -939,75 +937,6 @@ class ImageViewShell(QtWidgets.QWidget):
         finally:
             self._finish_upload_timing()
 
-    def setImagePresentation(
-        self,
-        img: np.ndarray,
-        *,
-        histogramData: np.ndarray | None,
-        histogramPlotData: np.ndarray | None = None,
-        levels: tuple[float, float],
-        histogramRange: tuple[float, float],
-        viewport_policy=ViewportPolicy.PRESERVE,
-        rgb_already_windowed: bool = False,
-        image_origin: tuple[float, float] = (0.0, 0.0),
-        geometry=None,
-        shader_mapping=None,
-        texture_kind=None,
-        semantic_data: np.ndarray | None = None,
-        lod=None,
-    ) -> None:
-        """Set fully decided image pixels, levels, and histogram range."""
-        self.setImage(
-            img,
-            autoLevels=False,
-            levels=levels,
-            histogramData=histogramData,
-            histogramPlotData=histogramPlotData,
-            autoHistogramRange=False,
-            viewport_policy=viewport_policy,
-            rgb_already_windowed=rgb_already_windowed,
-            image_origin=image_origin,
-            viewport_content_rect=_viewport_rect_for_geometry(geometry, img.shape[:2], image_origin),
-            shader_mapping=shader_mapping,
-            texture_kind=texture_kind,
-            semantic_data=semantic_data,
-            lod=lod,
-        )
-        self.setHistogramDataBounds(histogramRange)
-        self.setHistogramRange(histogramRange[0], histogramRange[1])
-
-    def updateImagePresentationFast(
-        self,
-        img: np.ndarray,
-        *,
-        histogramData: np.ndarray | None,
-        histogramPlotData: np.ndarray | None = None,
-        levels: tuple[float, float],
-        histogramRange: tuple[float, float],
-        rgb_already_windowed: bool = False,
-        image_origin: tuple[float, float] = (0.0, 0.0),
-        geometry=None,
-        shader_mapping=None,
-        texture_kind=None,
-        semantic_data: np.ndarray | None = None,
-        lod=None,
-    ) -> None:
-        """Fast same-shape update with explicit presentation state."""
-        self.updateImageDataFast(
-            img,
-            histogramData=histogramData,
-            histogramPlotData=histogramPlotData,
-            levels=levels,
-            histogramRange=histogramRange,
-            rgb_already_windowed=rgb_already_windowed,
-            image_origin=image_origin,
-            viewport_content_rect=_viewport_rect_for_geometry(geometry, img.shape[:2], image_origin),
-            shader_mapping=shader_mapping,
-            texture_kind=texture_kind,
-            semantic_data=semantic_data,
-            lod=lod,
-        )
-
     @property
     def widget(self):
         return self
@@ -1016,54 +945,8 @@ class ImageViewShell(QtWidgets.QWidget):
     def capabilities(self):
         return self.rendering_capabilities
 
-    def current_raster_shape(self) -> tuple[int, int] | None:
-        image = getattr(self, "image", None)
-        if image is None:
-            return None
-        shape = tuple(np.shape(image))
-        if len(shape) < 2:
-            return None
-        return (int(shape[0]), int(shape[1]))
-
-    def present_raster(self, presentation, *, mode: RasterCommitMode) -> None:
-        mode = RasterCommitMode(mode)
-        if mode is RasterCommitMode.FULL:
-            self.setImagePresentation(
-                presentation.data,
-                histogramData=presentation.histogram_data,
-                histogramPlotData=presentation.histogram_plot_data,
-                levels=presentation.levels,
-                histogramRange=presentation.histogram_range,
-                viewport_policy=presentation.viewport_policy,
-                rgb_already_windowed=presentation.rgb_already_windowed,
-                image_origin=_image_origin(presentation.geometry),
-                geometry=presentation.geometry,
-                shader_mapping=presentation.shader_mapping,
-                texture_kind=presentation.texture_kind,
-                semantic_data=presentation.semantic_data,
-                lod=presentation.lod,
-            )
-            return
-        if mode is RasterCommitMode.FAST:
-            self.updateImagePresentationFast(
-                presentation.data,
-                histogramData=presentation.histogram_data,
-                histogramPlotData=presentation.histogram_plot_data,
-                levels=presentation.levels,
-                histogramRange=presentation.histogram_range,
-                rgb_already_windowed=presentation.rgb_already_windowed,
-                image_origin=_image_origin(presentation.geometry),
-                geometry=presentation.geometry,
-                shader_mapping=presentation.shader_mapping,
-                texture_kind=presentation.texture_kind,
-                semantic_data=presentation.semantic_data,
-                lod=presentation.lod,
-            )
-            return
-        raise ValueError(f"unsupported raster commit mode: {mode}")
-
     def present_tiled(self, presentation):
-        return self.setTiledMontagePresentation(
+        return self.setTiledPresentation(
             geometry=presentation.geometry,
             tile_state=presentation.tile_state,
             tile_delta=presentation.tile_delta,
@@ -1162,9 +1045,12 @@ class ImageViewShell(QtWidgets.QWidget):
         lod=None,
     ) -> None:
         """Replace same-shape pixel data without recomputing levels or viewport."""
-        del shader_mapping, texture_kind, semantic_data, lod
         if not isinstance(img, np.ndarray):
             raise TypeError("Image must be a numpy array")
+        self._last_shader_mapping = shader_mapping
+        self._last_texture_kind = texture_kind
+        self._last_semantic_data_shape = None if semantic_data is None else tuple(np.shape(semantic_data))
+        self._last_lod = lod
         if self.image is None:
             raise RuntimeError("fast image update requires an existing image")
         if tuple(img.shape[:2]) != tuple(self.image.shape[:2]):
@@ -1375,8 +1261,6 @@ class ImageViewShell(QtWidgets.QWidget):
                 handler = getattr(self, "_level_presentation_change_handler", None)
                 if callable(handler) and bool(handler(levels, final=bool(final))):
                     return
-                stats = self._update_montage_tile_levels(levels)
-                self._record_tile_layer_stats(stats)
                 return
             if self._rgbBaseImage is None or self.histogramSource is None:
                 if self.imageItem is not None and self.imageDisp is not None and not self._is_rgb_image(self.image):
@@ -1398,8 +1282,8 @@ class ImageViewShell(QtWidgets.QWidget):
 
         PyQtGraph may still have deferred CPU tile redraws for this generation;
         the presentation handler is therefore allowed to force-drain the
-        existing job.  Raster previews and settled tiled generations require no
-        second image conversion merely because the mouse button was released.
+        existing job. Settled tiled generations require no second image
+        conversion merely because the mouse button was released.
         """
 
         if self._montage_display_mode not in {"tile_layer", "vispy_tile_layer"}:
@@ -1675,8 +1559,8 @@ class ImageViewShell(QtWidgets.QWidget):
         data = np.asarray(source)
         if self.image is None or tuple(data.shape[:2]) != tuple(self.image.shape[:2]):
             return None
-        y_i = int(mapping.canvas_y)
-        x_i = int(mapping.canvas_x)
+        y_i = int(mapping.display_y)
+        x_i = int(mapping.display_x)
         if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
             return None
         return data[y_i, x_i]
@@ -2276,7 +2160,7 @@ class ImageViewShell(QtWidgets.QWidget):
                 if applied_range is not None:
                     self.view.setRange(xRange=applied_range[0], yRange=applied_range[1], padding=0)
             if blocker is not None:
-                del blocker
+                blocker.unblock()
             self._viewport_applying = False
         if block_range_signals:
             self._remember_accepted_view_range()
@@ -2446,10 +2330,8 @@ class ImageViewShell(QtWidgets.QWidget):
             return True
         return False
 
-    def _set_roi_drawing_preview(self, tool, points) -> None:
+    def _set_roi_drawing_preview(self, _tool, _points) -> None:
         """Backend hook for the transient polyline/freehand drawing path."""
-
-        del tool, points
 
     def _event_image_point(self, event):
         point = self._event_display_point(event)

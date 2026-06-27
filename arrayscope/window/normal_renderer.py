@@ -8,14 +8,10 @@ from __future__ import annotations
 
 from time import perf_counter
 
-import pyqtgraph.Qt as Qt
-
-from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.scheduler import FrameTarget
-from arrayscope.core.view_state import ChannelMode
 from arrayscope.core.work_graph import WorkItem, WorkLane, complete_inline_work as _complete_inline_work
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.backend_contract import image_view_backend_capabilities
@@ -44,7 +40,7 @@ class NormalImageRenderMixin:
             return False
         shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
         colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
-        return evaluator.cached_image(
+        return evaluator.cached_display_tile(
             view_state,
             colormap_lut=colormap_lut,
             shader_display=shader_display,
@@ -72,7 +68,6 @@ class NormalImageRenderMixin:
         self._stop_montage_session_slow_overlay()
         self._current_montage_geometry = None
         self._current_montage_plan = None
-        self._current_montage_canvas = None
         if hasattr(self.img_view, "clearMontageTileOverlays"):
             self.img_view.clearMontageTileOverlays()
             
@@ -84,7 +79,7 @@ class NormalImageRenderMixin:
         document = self.document
         shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
         colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
-        request_key = self.operation_evaluator.image_key(view_state, colormap_lut=colormap_lut, document=document, shader_display=shader_display)
+        request_key = self.operation_evaluator.display_tile_key(view_state, colormap_lut=colormap_lut, document=document, shader_display=shader_display)
         render_generation = self._capture_render_generation()
         frame_target = FrameTarget(
             semantic_key=request_key,
@@ -111,7 +106,7 @@ class NormalImageRenderMixin:
                 estimated_bytes=self._estimated_image_display_bytes(view_state),
             ),
         )
-        cached = self.operation_evaluator.cached_image(view_state, colormap_lut=colormap_lut, shader_display=shader_display)
+        cached = self.operation_evaluator.cached_display_tile(view_state, colormap_lut=colormap_lut, shader_display=shader_display)
         if cached is not None:
             self._last_render_was_degraded = False
             geometry = DisplayGeometry(view_state=view_state, display_shape=cached.data.shape[:2])
@@ -204,7 +199,7 @@ class NormalImageRenderMixin:
             def done_preview(result):
                 if not self._is_current_render_generation(render_generation):
                     return
-                if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut, shader_display=shader_display):
+                if request_key != self.operation_evaluator.display_tile_key(self.view_state, colormap_lut=colormap_lut, shader_display=shader_display):
                     return
                 self.operation_evaluator.note_render_degraded()
                 display_image = result.value
@@ -315,7 +310,7 @@ class NormalImageRenderMixin:
                 self._update_operation_dock()
 
         def current_target_matches() -> bool:
-            if request_key != self.operation_evaluator.image_key(self.view_state, colormap_lut=colormap_lut, shader_display=shader_display):
+            if request_key != self.operation_evaluator.display_tile_key(self.view_state, colormap_lut=colormap_lut, shader_display=shader_display):
                 return False
             if window_mode != self._current_window_mode():
                 return False
@@ -326,7 +321,7 @@ class NormalImageRenderMixin:
         def store_reusable_exact(result):
             if _document_key(document) != _document_key(self.document):
                 return None
-            return self.operation_evaluator.store_image_result(
+            return self.operation_evaluator.store_display_tile_result(
                 view_state,
                 colormap_lut,
                 result,

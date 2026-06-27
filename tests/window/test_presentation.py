@@ -14,6 +14,7 @@ from arrayscope.display.model.frame import (
     DisplayTilePayload,
     TilePresentationDelta,
     TilePresentationState,
+    TiledValueSource,
 )
 from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation
 from arrayscope.display.model.commit import (
@@ -35,11 +36,40 @@ def _context():
 
 def _payload(data, *, histogram_data=None):
     image = DisplayImage(np.asarray(data, dtype=np.float32), histogram_data=None if histogram_data is None else np.asarray(histogram_data, dtype=np.float32))
-    return DisplayPayload(image=image, geometry=_geometry(image.data.shape[:2]), viewport_policy=ViewportPolicy.PRESERVE)
+    frame_plan = FramePlanner().plan(
+        target=FrameTarget(("test", image.data.shape), None, None, "exact-visible"),
+        view_state=ViewState.from_shape(image.data.shape[:2]).with_image_axes(0, 1),
+        display_shape=image.data.shape[:2],
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+    )
+    payloads = _payloads_for_frame_plan(image, frame_plan)
+    tile_state = TilePresentationState(payloads)
+    tile_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=frame_plan.active_region_ids,
+        planned_tiles=frame_plan.planned_region_ids,
+        near_tiles=frame_plan.near_region_ids,
+    )
+    return DisplayPayload(
+        image=image,
+        geometry=frame_plan.geometry,
+        viewport_policy=ViewportPolicy.PRESERVE,
+        frame_plan=frame_plan,
+        tile_state=tile_state,
+        base_tile_state=TilePresentationState(),
+        tile_delta=tile_delta,
+    )
 
 
 def _frame(*, levels=(10.0, 20.0), histogram_range=(0.0, 100.0)):
     data = np.zeros((2, 2), dtype=np.float32)
+    payload = DisplayTilePayload(0, 0, data, data.copy(), ("frame", 0), semantic_data=data, semantic_histogram_data=data.copy(), source_shape=data.shape)
     return CommittedDisplayFrame(
         data=data,
         histogram_data=data.copy(),
@@ -47,7 +77,29 @@ def _frame(*, levels=(10.0, 20.0), histogram_range=(0.0, 100.0)):
         levels=levels,
         histogram_range=histogram_range,
         key=DisplayFrameKey(("doc", 1), ("image", 0), 1, "levels"),
+        value_source=TiledValueSource({0: payload}),
     )
+
+
+def _payloads_for_frame_plan(image: DisplayImage, frame_plan) -> dict[int, DisplayTilePayload]:
+    data = np.asarray(image.data)
+    histogram = None if image.histogram_data is None else np.asarray(image.histogram_data)
+    payloads = {}
+    for region in frame_plan.regions:
+        y_slice, x_slice = region.data_slices
+        tile_data = data[y_slice, x_slice, ...]
+        tile_histogram = None if histogram is None else histogram[y_slice, x_slice]
+        payloads[int(region.region_id)] = DisplayTilePayload(
+            int(region.region_id),
+            int(region.region_id),
+            tile_data,
+            tile_histogram,
+            ("payload", int(region.region_id), tuple(tile_data.shape), str(tile_data.dtype)),
+            semantic_data=tile_data,
+            semantic_histogram_data=tile_histogram,
+            source_shape=tile_data.shape[:2],
+        )
+    return payloads
 
 
 def _input(
@@ -83,17 +135,34 @@ def test_normal_relative_level_reuse_uses_committed_frame():
 
 def test_normal_presentation_preserves_frame_plan_semantics():
     payload = _payload(np.zeros((4, 4), dtype=np.float32))
-    frame_plan = FramePlanner(internal_tile_shape=(2, 2), max_raster_pixels=4).plan(
+    frame_plan = FramePlanner(internal_tile_shape=(2, 2)).plan(
         target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
         view_state=payload.geometry.view_state.with_image_axes(0, 1),
         display_shape=(4, 4),
         backend_capabilities=PYQTGRAPH_CAPABILITIES,
     )
+    payloads = _payloads_for_frame_plan(payload.image, frame_plan)
+    tile_state = TilePresentationState(payloads)
+    tile_delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts=payloads,
+        active_tiles=frame_plan.active_region_ids,
+        planned_tiles=frame_plan.planned_region_ids,
+        near_tiles=frame_plan.near_region_ids,
+    )
     payload = DisplayPayload(
         image=payload.image,
-        geometry=DisplayGeometry(frame_plan.geometry.view_state, (4, 4)),
+        geometry=frame_plan.geometry,
         viewport_policy=payload.viewport_policy,
         frame_plan=frame_plan,
+        tile_state=tile_state,
+        base_tile_state=TilePresentationState(),
+        tile_delta=tile_delta,
     )
 
     decision = decide_presentation(_input(payload))
@@ -282,12 +351,7 @@ def test_explicit_auto_clears_user_lock_and_uses_best_available_source():
 
 
 def test_montage_dirty_tiles_pass_through_presentation():
-    payload = DisplayPayload(
-        image=DisplayImage(np.zeros((2, 2), dtype=np.float32), histogram_data=np.zeros((2, 2), dtype=np.float32)),
-        geometry=_geometry((2, 2)),
-        viewport_policy=ViewportPolicy.PRESERVE,
-        montage_dirty_tiles=(3,),
-    )
+    payload = _payload(np.zeros((2, 2), dtype=np.float32), histogram_data=np.zeros((2, 2), dtype=np.float32))
 
     decision = decide_presentation(
         _input(
@@ -297,7 +361,7 @@ def test_montage_dirty_tiles_pass_through_presentation():
         )
     )
 
-    assert decision.display_presentation.montage_dirty_tiles == (3,)
+    assert tuple(decision.display_presentation.tile_delta.upserts) == (0,)
 
 
 def test_typed_tile_payloads_create_first_class_tiled_presentation():

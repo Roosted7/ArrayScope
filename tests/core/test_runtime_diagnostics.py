@@ -54,8 +54,7 @@ def _snapshot():
     )
     return WindowRuntimeDiagnostics(
         memory_policy=policy,
-        image_cache=_cache(),
-        tile_cache=_cache(),
+        display_cache=_cache(),
         profile_cache=_cache(),
         stage_cache=StageCacheDiagnostics(
             entries=0,
@@ -103,7 +102,7 @@ def _snapshot():
             last_stage_plan_ms=0.75,
             last_session_setup_ms=2.25,
             last_initial_commit_ms=3.5,
-            last_canvas_compose_ms=2.5,
+            last_tile_payload_build_ms=2.5,
             last_visible_upload_ms=10.0,
             last_histogram_upload_ms=5.0,
             last_histogram_recompute_ms=3.0,
@@ -218,7 +217,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Coalescer: pending=False, interactive=False" in text
     assert "Timing render sync: 1.25 ms" in text
     assert "Timing worker queue wait: n/a" in text
-    assert "Timing canvas compose: 2.50 ms" in text
+    assert "Timing tile payload build: 2.50 ms" in text
     assert "Display mode: tile_layer" in text
     assert "Display backend: tile_layer" in text
     assert "Display backend reason: pyqtgraph supports direct tiled montage payloads" in text
@@ -247,7 +246,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Tile layer storage: rebuilds=1 evictions=2 pages=0/0 near=0 warm=0 gpu=8.0 KiB budget=0 B max_texture=n/a cpu_shadow=0 B" in text
     assert "Tile layer submissions: textures=3 bytes=4.0 KiB vertices=1 levels=1" in text
     assert "Upload: visible=1.0 KiB histogram=512 B same object=True" in text
-    assert "Tile cache last session: cached=3 missing=4" in text
+    assert "Display cache last session: cached=3 missing=4" in text
     assert "Workers: visible=1, montage_tile=2" in text
     assert "FFT workers: visible=4, montage_tile=1" in text
     assert "active_preserved=2" in text
@@ -271,8 +270,7 @@ def test_runtime_diagnostics_avoids_long_feedback_worker_lines():
     policy = compute_memory_policy(profile=MemoryProfileChoice.BALANCED, render_cap_mb=512, input_nbytes=1, system=None)
     snapshot = WindowRuntimeDiagnostics(
         memory_policy=policy,
-        image_cache=_cache(),
-        tile_cache=_cache(),
+        display_cache=_cache(),
         profile_cache=_cache(),
         stage_cache=StageCacheDiagnostics(
             entries=0,

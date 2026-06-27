@@ -104,7 +104,10 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         point_context = None if geometry is None else geometry.context_for_view_point(mousePoint.x(), mousePoint.y())
         if point_context is not None:
             mapping = point_context.mapping
-            x_i, y_i = mapping.local_x, mapping.local_y
+            if mapping.montage_axis is None:
+                x_i, y_i = mapping.view_x, mapping.view_y
+            else:
+                x_i, y_i = mapping.local_x, mapping.local_y
             context = point_context.context_text
             value = self._hover_value_from_display(mapping)
             if value is not None:
@@ -200,7 +203,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         self.pixel_evaluation_controller.start_latest(
             evaluate,
             key=request_key,
-            priority=EvalPriority.HOVER_EXACT,
+            priority=EvalPriority.HOVER,
             replace_group="pixel-hover",
             frame_target=frame_target,
             supersession_key="pixel-hover",
@@ -457,8 +460,6 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             self.img_view.hideProfileMarker()
 
     def _on_live_profile_toggled(self, enabled):
-        if hasattr(self, "display_toolbar"):
-            self.display_toolbar.set_current(live_profile=enabled)
         if enabled and hasattr(self, "profile_dock"):
             self.interaction_mode = InteractionMode.LIVE_PROFILE
             self._profile_dock_user_visible = None
@@ -621,7 +622,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             try:
                 self.display_toolbar.fit_action.setChecked(bool(enabled))
             finally:
-                del blocker
+                blocker.unblock()
         self.img_view.setFitLocked(bool(enabled))
         self._sync_controls_from_view_state()
 
@@ -632,7 +633,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             try:
                 self.display_toolbar.fit_action.setChecked(False)
             finally:
-                del blocker
+                blocker.unblock()
         self.img_view.oneToOne()
         self._sync_controls_from_view_state()
 
@@ -874,6 +875,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
 
     def _cancel_render_dependent_work_for_interactive_change(self) -> None:
         for controller_name, groups in (
+            ("histogram_evaluation_controller", ("histogram-plot",)),
             ("profile_evaluation_controller", ("profile-plot", "live-profile")),
             ("roi_evaluation_controller", ("roi-inspection",)),
             ("pixel_evaluation_controller", ("pixel",)),
@@ -888,7 +890,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
             prefetch.cancel_prefetch()
 
     def _run_deferred_side_panel_refresh(self, *, reason: str) -> None:
-        del reason
+        self._last_deferred_side_panel_refresh_reason = str(reason)
         if getattr(self, "_closing", False) or not hasattr(self, "widgets"):
             return
         try:

@@ -1,4 +1,4 @@
-"""VisPy raster image visual and texture preparation helpers."""
+"""VisPy GPU mapped image visual and texture preparation helpers."""
 
 from __future__ import annotations
 
@@ -336,7 +336,7 @@ class GpuMappedImageVisual(Visual):
         return True
 
     def _bounds(self, axis, view):
-        del view
+        self._last_bounds_view = view
         if axis == 0:
             return (0.0, float(self._shape[1]))
         if axis == 1:

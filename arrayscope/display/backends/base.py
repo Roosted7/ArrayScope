@@ -2,22 +2,14 @@
 
 from __future__ import annotations
 
-from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 
 if TYPE_CHECKING:
     from arrayscope.display.interaction import DisplayInteractionState
-    from arrayscope.display.model.commit import DisplayRasterPresentation, DisplayTiledPresentation
+    from arrayscope.display.model.commit import DisplayTiledPresentation
     from arrayscope.display.model.frame import TileCommitReport
-
-
-class RasterCommitMode(Enum):
-    """How an already-decided raster presentation should be applied."""
-
-    FULL = "full"
-    FAST = "fast"
 
 
 @runtime_checkable
@@ -30,11 +22,7 @@ class ImageSurface(Protocol):
     @property
     def widget(self): ...
 
-    def current_raster_shape(self) -> tuple[int, int] | None: ...
-
-    def present_raster(self, presentation: "DisplayRasterPresentation", *, mode: RasterCommitMode) -> None: ...
-
-    def present_tiled(self, presentation: "DisplayTiledPresentation") -> "TileCommitReport | None": ...
+    def present_tiled(self, presentation: "DisplayTiledPresentation") -> "TileCommitReport": ...
 
     def set_profile_bounds(self, bounds: tuple[float, float, float, float]) -> None: ...
 

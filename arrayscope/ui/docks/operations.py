@@ -188,7 +188,7 @@ class OperationStackDock(StandardDockWidget):
         operations,
         output_shape=None,
         cache_status=None,
-        image_cache_status=None,
+        display_cache_status=None,
         profile_cache_status=None,
         derived_estimate=None,
         operation_shapes=None,
@@ -200,7 +200,9 @@ class OperationStackDock(StandardDockWidget):
         self._operation_shapes = tuple(operation_shapes or ())
         self._operation_dtypes = tuple(operation_dtypes or ())
         self._output_shape = output_shape
-        del cache_status, image_cache_status, profile_cache_status
+        self._cache_status = cache_status
+        self._display_cache_status = display_cache_status
+        self._profile_cache_status = profile_cache_status
         self._derived_estimate = derived_estimate
         previous_row = self.operation_list.currentRow()
         self.operation_list.clear()

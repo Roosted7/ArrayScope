@@ -7,7 +7,7 @@ def test_run_foundation_benchmarks_returns_expected_scenarios():
     assert {result.name for result in results} == {
         "raw_slice",
         "fft_slice",
-        "montage_canvas",
+        "montage_tile_payloads",
         "roi_stats",
         "large_rgb_montage_histogram_drag",
         "tile_layer_clean_commit",

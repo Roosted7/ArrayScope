@@ -114,7 +114,7 @@ def test_profile_states_under_montage_include_tile_slice_and_local_xy():
     assert states[1].slice_indices == (1, 1, 2)
 
 
-def test_montage_canvas_origin_maps_world_point_to_global_source_index():
+def test_montage_display_origin_maps_world_point_to_global_source_index():
     state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
     geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
@@ -123,22 +123,22 @@ def test_montage_canvas_origin_maps_world_point_to_global_source_index():
 
     assert mapping.montage_index == 10
     assert mapping.array_index == (1, 1, 10)
-    assert mapping.canvas_x == 1
-    assert mapping.canvas_y == 1
+    assert mapping.display_x == 1
+    assert mapping.display_y == 1
 
 
-def test_montage_canvas_origin_change_does_not_change_world_to_array_mapping():
+def test_montage_display_origin_change_does_not_change_world_to_array_mapping():
     state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
-    first = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=0)
+    first = DisplayGeometry(state, (11, 19), montage=montage, montage_origin_x=0, montage_origin_y=0)
     shifted = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
 
     first_mapping = first.view_point_to_array_index(1, 7)
     shifted_mapping = shifted.view_point_to_array_index(1, 7)
 
     assert first_mapping.array_index == shifted_mapping.array_index == (1, 1, 10)
-    assert first_mapping.canvas_y == 7
-    assert shifted_mapping.canvas_y == 1
+    assert first_mapping.display_y == 7
+    assert shifted_mapping.display_y == 1
 
 
 def test_montage_status_for_loaded_tile_allows_mapping():
@@ -191,7 +191,7 @@ def test_montage_status_for_gap_reports_gap():
     assert geometry.view_point_to_array_index(3, 1) is None
 
 
-def test_montage_canvas_origin_applies_to_tile_status():
+def test_montage_display_origin_applies_to_tile_status():
     state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
     states = tuple(MontageTileState.UNLOADED for _ in range(10)) + (MontageTileState.LOADING,) + tuple(MontageTileState.LOADED for _ in range(9))
@@ -203,7 +203,7 @@ def test_montage_canvas_origin_applies_to_tile_status():
     assert status.source_index == 10
 
 
-def test_montage_canvas_origin_gap_returns_none():
+def test_montage_display_origin_gap_returns_none():
     state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
     geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
@@ -211,7 +211,7 @@ def test_montage_canvas_origin_gap_returns_none():
     assert geometry.view_point_to_array_index(3, 7) is None
 
 
-def test_montage_canvas_origin_profile_state_uses_global_tile_slice():
+def test_montage_display_origin_profile_state_uses_global_tile_slice():
     state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=2).with_montage_axis(2, indices=tuple(range(20)), text=":")
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
     geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
@@ -222,7 +222,7 @@ def test_montage_canvas_origin_profile_state_uses_global_tile_slice():
     assert states[1].slice_indices == (1, 1, 12)
 
 
-def test_montage_canvas_clamp_returns_world_point():
+def test_montage_display_origin_clamp_returns_world_point():
     state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
     geometry = DisplayGeometry(state, (2, 7), montage=montage, montage_origin_x=4, montage_origin_y=6)

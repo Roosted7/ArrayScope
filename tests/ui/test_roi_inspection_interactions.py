@@ -18,38 +18,39 @@ from tests.ui.helpers import (
 def test_hidden_montage_roi_stats_use_semantic_demand_not_presented_payloads(monkeypatch):
     from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
     from arrayscope.core.roi_store import RoiStore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.operations.pipeline import ArrayDocument
     from arrayscope.window.inspection import InspectionWorkflowMixin
-    import arrayscope.window.inspection as inspection
 
-    class FakeTimer:
-        started = 0
+    class FakeRoiController:
+        submissions = []
 
-        def __init__(self, _parent):
-            self.timeout = SimpleNamespace(connect=lambda _callback: None)
-
-        def setSingleShot(self, _value):
-            pass
-
-        def setInterval(self, _value):
-            pass
-
-        def start(self):
-            type(self).started += 1
+        def start_latest(self, fn, **kwargs):
+            self.submissions.append((fn, kwargs))
+            return len(self.submissions)
 
     selection = RoiSelection("roi-1", "ROI 1", RoiGeometry(RoiKind.RECTANGLE, rect=(50.0, 50.0, 4.0, 4.0)))
     win = InspectionWorkflowMixin()
     win.roi_store = RoiStore(selections=(selection,))
+    win.document = ArrayDocument(np.zeros((4, 4, 8), dtype=np.float32))
     win.img_view = SimpleNamespace(roiSelections=lambda: (selection,))
     win.inspection_dock = SimpleNamespace(set_rois=lambda _selections: None, isVisible=lambda: False)
-    win.display_geometry = SimpleNamespace(montage=object())
+    win.view_state = ViewState.from_shape((4, 4, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
     win._montage_roi_values_pending = lambda: False
     win._ui_work_decision = lambda *args, **kwargs: None
     win._hidden_roi_statistics = lambda _selections: (_ for _ in ()).throw(AssertionError("presented payloads are not authoritative"))
-    monkeypatch.setattr(inspection.Qt.QtCore, "QTimer", FakeTimer)
+    win.roi_evaluation_controller = FakeRoiController()
 
     win._schedule_refresh_inspection_dock("file-session-restore")
 
-    assert FakeTimer.started == 1
+    assert len(win.roi_evaluation_controller.submissions) == 1
+    _, kwargs = win.roi_evaluation_controller.submissions[0]
+    assert kwargs["priority"].name == "HIDDEN_ROI"
+
+
+def _render_committed_tiled_frame(win, qtbot, *, reason: str) -> None:
+    win.render(reason=reason)
+    qtbot.waitUntil(lambda: getattr(getattr(win, "_committed_display_frame", None), "is_tiled", False), timeout=3000)
 
 
 def test_roi_statistics_refresh_is_debounced(qtbot, monkeypatch):
@@ -67,6 +68,7 @@ def test_roi_statistics_refresh_is_debounced(qtbot, monkeypatch):
         )
     try:
         _process_events(qtbot, count=20)
+        _render_committed_tiled_frame(win, qtbot, reason="test-roi-inspection")
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
         _process_events(qtbot, count=10)
         calls.clear()
@@ -96,13 +98,88 @@ def test_hidden_inspection_panel_updates_overlay_without_dock_work(qtbot, monkey
     )
     try:
         _process_events(qtbot, count=20)
+        _render_committed_tiled_frame(win, qtbot, reason="test-hidden-roi-overlay")
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
         _process_events(qtbot, count=10)
         calls.clear()
         win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
         _process_events(qtbot, count=20)
 
-        assert calls == []
+        assert len(calls) == 1
+        assert win._roi_inspection_priority.name == "HIDDEN_ROI"
+        assert getattr(win, "_inspection_stale", False)
+        assert win.inspection_dock.roi_model.rowCount() == 0
+        assert win.img_view._roi_info_panel is not None
+        assert "n=36" in win.img_view._roi_info_panel.text()
+        assert "mean=184.5" in win.img_view._roi_info_panel.text()
+    finally:
+        win.close()
+
+
+def test_hidden_single_image_timed_roi_refresh_updates_overlay(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(40 * 40, dtype=float).reshape(40, 40))
+    qtbot.addWidget(win)
+    calls = []
+    original = win._compute_roi_inspection_snapshot
+    monkeypatch.setattr(
+        win,
+        "_compute_roi_inspection_snapshot",
+        lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1],
+    )
+    try:
+        _process_events(qtbot, count=20)
+        _render_committed_tiled_frame(win, qtbot, reason="test-hidden-timed-roi-overlay")
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=10)
+
+        win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
+        win.img_view.setRoiInfoText("")
+        calls.clear()
+        win._refresh_inspection_dock_now()
+
+        qtbot.waitUntil(lambda: win.img_view._roi_info_panel is not None, timeout=3000)
+        assert len(calls) == 1
+        assert win._roi_inspection_priority.name == "HIDDEN_ROI"
+        assert getattr(win, "_inspection_stale", False)
+        assert win.inspection_dock.roi_model.rowCount() == 0
+        assert "n=36" in win.img_view._roi_info_panel.text()
+        assert "mean=184.5" in win.img_view._roi_info_panel.text()
+    finally:
+        win.close()
+
+
+def test_hidden_roi_overlay_refreshes_when_tiled_frame_commits(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(40 * 40, dtype=float).reshape(40, 40))
+    qtbot.addWidget(win)
+    calls = []
+    original = win._compute_roi_inspection_snapshot
+    monkeypatch.setattr(
+        win,
+        "_compute_roi_inspection_snapshot",
+        lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1],
+    )
+    try:
+        _process_events(qtbot, count=20)
+        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=10)
+        win._committed_display_frame = None
+        win._committed_display_request_key = None
+
+        win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
+        win.img_view.setRoiInfoText("")
+        calls.clear()
+
+        _render_committed_tiled_frame(win, qtbot, reason="test-hidden-roi-overlay-after-commit")
+        _process_events(qtbot, count=20)
+
+        assert len(calls) == 1
+        assert win._roi_inspection_priority.name == "HIDDEN_ROI"
         assert getattr(win, "_inspection_stale", False)
         assert win.inspection_dock.roi_model.rowCount() == 0
         assert win.img_view._roi_info_panel is not None
@@ -128,7 +205,7 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1],
     )
     try:
-        win._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4), max_raster_pixels=16)
+        win._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4))
         win.render(reason="test-tiled-roi")
         _process_events(qtbot, count=30)
         assert getattr(win._committed_display_frame, "is_tiled", False)
@@ -139,7 +216,8 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         win.img_view.createRoi("rectangle", rect=(1, 1, 3, 3))
         _process_events(qtbot, count=20)
 
-        assert calls == []
+        assert len(calls) == 1
+        assert win._roi_inspection_priority.name == "HIDDEN_ROI"
         assert getattr(win, "_inspection_stale", False)
         assert win.inspection_dock.roi_model.rowCount() == 0
         assert win.img_view._roi_info_panel is not None
@@ -233,7 +311,7 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
     try:
         if image_view_backend_capabilities(win.img_view).name != "vispy":
             pytest.skip("VisPy backend unavailable in this Qt environment")
-        win._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4), max_raster_pixels=16)
+        win._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4))
         win.render(reason="test-vispy-tiled-roi")
         _process_events(qtbot, count=30)
         assert getattr(win._committed_display_frame, "is_tiled", False)

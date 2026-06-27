@@ -16,6 +16,9 @@ from arrayscope.display.model.frame import DisplayFrameKey, DisplayTilePayload, 
 from arrayscope.display.model.commit import DisplayTiledPresentation
 
 
+_AUTO_REPORT = object()
+
+
 def _presentation():
     state = ViewState.from_shape((2, 2, 1)).with_image_axes(0, 1).with_montage_axis(2, columns=1, indices=(0,))
     geometry = DisplayGeometry(
@@ -70,13 +73,7 @@ class _FakeImageView:
         self.capabilities = PYQTGRAPH_CAPABILITIES
         self.commit = None
         self.bounds = None
-        self.report = None
-
-    def current_raster_shape(self):
-        return None
-
-    def present_raster(self, presentation, *, mode):
-        self.commit = (mode, presentation)
+        self.report = _AUTO_REPORT
 
     def present_tiled(self, presentation):
         self.commit = {
@@ -84,6 +81,12 @@ class _FakeImageView:
             "tile_delta": presentation.tile_delta,
             "geometry": presentation.geometry,
         }
+        if self.report is _AUTO_REPORT:
+            return TileCommitReport(
+                presented_tiles=frozenset(presentation.tile_state.active_payloads(presentation.tile_delta)),
+                committed_upserts=frozenset(presentation.tile_delta.upserts),
+                removed_tiles=frozenset(presentation.tile_delta.removals),
+            )
         return self.report
 
     def set_profile_bounds(self, bounds):
@@ -114,7 +117,7 @@ class _FakeImageView:
         self.teardown_called = True
 
 
-def test_tiled_committer_keeps_fake_raster_out_of_committed_frame():
+def test_tiled_committer_keeps_source_pixels_out_of_committed_frame():
     view = _FakeImageView()
     presentation = _presentation()
 
@@ -159,9 +162,12 @@ def test_tiled_committer_excludes_unpresented_payloads_from_committed_frame():
     assert committer.last_tile_committed_state.payloads == {}
 
 
-def test_full_commit_rejects_tiled_presentation():
-    with pytest.raises(TypeError, match="raster presentation"):
-        DisplayCommitter(_FakeImageView()).commit_full(
+def test_tiled_committer_rejects_missing_backend_acknowledgement():
+    view = _FakeImageView()
+    view.report = None
+
+    with pytest.raises(TypeError, match="TileCommitReport"):
+        DisplayCommitter(view).commit_tile_layer(
             _presentation(),
             DisplayFrameKey(("doc",), ("view",), 1),
         )
@@ -194,10 +200,10 @@ def test_tiled_value_source_reads_exact_semantic_data_not_lod_texture():
     assert kind == "committed_tile_payload"
 
 
-def test_tiled_single_plane_commits_without_montage_geometry():
+def test_single_plane_commits_with_internal_tile_geometry():
     view = _FakeImageView()
     state = ViewState.from_shape((4, 4)).with_image_axes(0, 1)
-    frame_plan = FramePlanner(internal_tile_shape=(2, 2), max_raster_pixels=4).plan(
+    frame_plan = FramePlanner(internal_tile_shape=(2, 2)).plan(
         target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
         view_state=state,
         display_shape=(4, 4),
@@ -248,11 +254,33 @@ def test_tiled_single_plane_commits_without_montage_geometry():
         DisplayFrameKey(("doc",), ("single",), 1),
     )
 
-    assert view.commit["geometry"].montage is None
+    assert view.commit["geometry"].montage == frame_plan.geometry.montage
     assert frame.scene.layout.value == "single"
-    assert frame.scene.storage.value == "tiled"
+    assert frame.scene.resident_region_ids == (0, 1, 2, 3)
     assert frame.value_source.value_at(SimpleNamespace(tile_number=3, local_y=1, local_x=1)) == 15.0
     region, hist, kind = frame.value_source.tile_region(SimpleNamespace(region_id=3), (slice(0, 2), slice(0, 2)))
     np.testing.assert_array_equal(region, image[2:4, 2:4])
     np.testing.assert_array_equal(hist, image[2:4, 2:4])
     assert kind == "committed_tile_payload"
+
+
+def test_eager_region_source_matches_existing_display_image_slices():
+    from arrayscope.display.region_source import EagerDisplayRegionSource
+    from arrayscope.display.slice_engine import DisplayImage
+
+    state = ViewState.from_shape((4, 4)).with_image_axes(0, 1)
+    frame_plan = FramePlanner(internal_tile_shape=(2, 2)).plan(
+        target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
+        view_state=state,
+        display_shape=(4, 4),
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+    )
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+    hist = image + 100.0
+    source = EagerDisplayRegionSource(DisplayImage(image, histogram_data=hist), source_key=("source",))
+
+    payload = source.read_region(frame_plan.regions[3], quality="exact-visible", deadline_ns=123)
+
+    np.testing.assert_array_equal(payload.image, image[2:4, 2:4])
+    np.testing.assert_array_equal(payload.histogram_data, hist[2:4, 2:4])
+    assert payload.tile_number == 3

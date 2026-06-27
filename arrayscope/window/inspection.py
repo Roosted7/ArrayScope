@@ -10,9 +10,9 @@ import numpy as np
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
-from arrayscope.core.compare import CompareDocument, compatible_roi_shape
+from arrayscope.core.compare import CompareDocument
 from arrayscope.core.histograms import HistogramSpec, comparison_histograms
-from arrayscope.core.roi import RoiKind, RoiStatsAccumulator, roi_bounding_rect, roi_statistics, roi_values, roi_values_for_region
+from arrayscope.core.roi import RoiKind, RoiStatsAccumulator, roi_bounding_rect, roi_values_for_region
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.operations.evaluator import _document_key
@@ -37,7 +37,7 @@ class InspectionWorkflowMixin:
         if not hasattr(self, "compare_document"):
             self._init_compare_document(getattr(self, "base_data", data))
         self.compare_document = self.compare_document.with_layer(data, label=label)
-        self._refresh_inspection_dock_now()
+        self._refresh_inspection_dock()
         return self.compare_document.layers[-1]
 
     def _on_inspection_tool_changed(self, tool):
@@ -109,7 +109,7 @@ class InspectionWorkflowMixin:
         self._inspection_dock_user_visible = True
         self.layout_manager.set_managed_dock_visible(self.inspection_dock, True, reason="show-inspection")
         if getattr(self, "_inspection_stale", False):
-            self._refresh_inspection_dock_now()
+            self._refresh_inspection_dock()
 
     def _refresh_inspection_dock(self):
         from time import perf_counter
@@ -143,87 +143,113 @@ class InspectionWorkflowMixin:
             if self._roi_uses_montage_demand(selections):
                 if self._montage_roi_values_pending():
                     return
-            else:
-                stats_by_roi = self._hidden_roi_statistics(selections)
-                self._update_roi_info_overlay(stats_by_roi)
-                return
-        if not hasattr(self, "_roi_refresh_timer"):
-            self._roi_refresh_timer = Qt.QtCore.QTimer(self)
-            self._roi_refresh_timer.setSingleShot(True)
-            self._roi_refresh_timer.setInterval(60)
-            self._roi_refresh_timer.timeout.connect(self._refresh_inspection_dock_now)
-        decision = getattr(self, "_ui_work_decision", lambda *args, **kwargs: None)("roi_refresh", interactive=False)
-        if decision is not None:
-            self._roi_refresh_timer.setInterval(max(1, int(decision.interval_ms)))
         self._roi_refresh_reason = reason
-        self._roi_refresh_timer.start()
+        self._queue_roi_inspection_refresh(selections, panel_visible=self._inspection_panel_is_visible())
+
+    def _queue_roi_inspection_refresh(self, selections, *, panel_visible: bool) -> None:
+        self._pending_roi_inspection_refresh = SimpleNamespace(
+            selections=tuple(selections),
+            panel_visible=bool(panel_visible),
+        )
+        if bool(getattr(self, "_roi_inspection_refresh_queued", False)):
+            return
+        self._roi_inspection_refresh_queued = True
+        try:
+            queued = Qt.QtCore.QMetaObject.invokeMethod(
+                self,
+                "_drain_pending_roi_inspection_refresh",
+                Qt.QtCore.Qt.ConnectionType.QueuedConnection,
+            )
+        except Exception:
+            queued = False
+        if not queued:
+            self._roi_inspection_refresh_queued = False
+            self._drain_pending_roi_inspection_refresh()
+
+    @Qt.QtCore.Slot()
+    def _drain_pending_roi_inspection_refresh(self) -> None:
+        self._roi_inspection_refresh_queued = False
+        pending = getattr(self, "_pending_roi_inspection_refresh", None)
+        self._pending_roi_inspection_refresh = None
+        if pending is None:
+            return
+        self._submit_roi_inspection_refresh(
+            tuple(getattr(pending, "selections", ()) or ()),
+            panel_visible=bool(getattr(pending, "panel_visible", False)),
+        )
 
     def _refresh_inspection_dock_now(self):
+        if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
+            return
+        self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
+        selections = self.roi_store.selections
+        self.inspection_dock.set_rois(selections)
+        if not any(selection.enabled for selection in selections):
+            self._apply_empty_inspection_state_if_needed(selections)
+            return
+        panel_visible = self._inspection_panel_is_visible()
+        self._inspection_stale = not panel_visible
+        if self._roi_uses_montage_demand(selections) and self._montage_roi_values_pending():
+            self._inspection_stale = True
+            return
+        self._queue_roi_inspection_refresh(selections, panel_visible=panel_visible)
+
+    def _submit_roi_inspection_refresh(self, selections, *, panel_visible: bool) -> None:
         from time import perf_counter
 
         start = perf_counter()
         try:
-            if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
+            controller = getattr(self, "roi_evaluation_controller", None)
+            if controller is None:
                 return
-            panel_visible = self._inspection_panel_is_visible()
-            if not panel_visible and not self._roi_uses_montage_demand(getattr(getattr(self, "roi_store", None), "selections", ())):
-                self._inspection_stale = True
-                return
-            self._inspection_stale = not panel_visible
-            self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
-            selections = self.roi_store.selections
-            self.inspection_dock.set_rois(selections)
-            if not any(selection.enabled for selection in selections):
-                self._apply_empty_inspection_state_if_needed(selections)
-                return
-            if self._roi_uses_montage_demand(selections) and self._montage_roi_values_pending():
-                self._inspection_stale = True
-                return
-            image = self._committed_raster_roi_source_image()
-            layers = self._compatible_compare_layers(image) if image is not None else ()
-            key = self._roi_inspection_key(image, selections, layers)
-            if key == getattr(self, "_roi_inspection_request_key", None) and (
-                getattr(self, "_roi_inspection_in_flight", False) or key == getattr(self, "_roi_inspection_applied_key", None)
+            destination = "visible" if panel_visible else "hidden"
+            roi_key = self._roi_inspection_key(selections)
+            request_key = (destination, roi_key)
+            if request_key == getattr(self, "_roi_inspection_request_key", None) and (
+                getattr(self, "_roi_inspection_in_flight", False) or request_key == getattr(self, "_roi_inspection_applied_key", None)
             ):
                 return
-            self._roi_inspection_request_key = key
-            priority = self._roi_refresh_priority(selections)
+            self._roi_inspection_request_key = request_key
+            priority = self._roi_refresh_priority(selections, panel_visible=panel_visible)
             self._roi_inspection_priority = priority
-            work_size = 0 if image is None else int(np.size(image)) * max(1, sum(1 for selection in selections if selection.enabled))
-            if work_size <= 250_000 and not self._roi_uses_montage_demand(selections):
-                self._apply_roi_inspection_snapshot_if_current(key, self._compute_roi_inspection_snapshot(key, image, selections, layers))
-                return
+            work_size = self._roi_inspection_work_size(selections)
+            frame_target = FrameTarget(
+                semantic_key=request_key,
+                viewport_key=("roi", tuple(selection.id for selection in selections if selection.enabled)),
+                presentation_key=("roi-inspection", destination),
+                quality="exact-visible",
+            )
+            decision = getattr(self, "_ui_work_decision", lambda *args, **kwargs: None)("roi_refresh", interactive=False)
+            if decision is not None:
+                controller.set_max_callback_dispatch_per_drain(decision.batch_limit)
+                if hasattr(controller, "set_callback_budget_ms"):
+                    controller.set_callback_budget_ms(decision.budget_ms)
             self._roi_inspection_in_flight = True
-            self.roi_evaluation_controller.start_latest(
-                lambda key=key, image=image, selections=selections, layers=layers: self._compute_roi_inspection_snapshot(key, image, selections, layers),
-                key=key,
+            controller.start_latest(
+                lambda key=roi_key, selections=selections: self._compute_roi_inspection_snapshot(key, selections),
+                key=request_key,
                 priority=priority,
                 replace_group="roi-inspection",
-                frame_target=FrameTarget(
-                    semantic_key=key,
-                    viewport_key=("roi", tuple(selection.id for selection in selections if selection.enabled)),
-                    presentation_key=("roi-inspection",),
-                    quality="exact-visible",
-                ),
+                frame_target=frame_target,
                 supersession_key="roi-inspection",
-                supersession_value=key,
+                supersession_value=request_key,
                 work_item=WorkItem(
-                    key=("roi_inspection", key),
+                    key=("roi_inspection", request_key),
                     lane=WorkLane.PROFILE_ROI_HOVER,
-                    frame_target=FrameTarget(
-                        semantic_key=key,
-                        viewport_key=("roi", tuple(selection.id for selection in selections if selection.enabled)),
-                        presentation_key=("roi-inspection",),
-                        quality="exact-visible",
-                    ),
+                    frame_target=frame_target,
                     supersession_key="roi-inspection",
-                    supersession_value=key,
+                    supersession_value=request_key,
                     estimated_cpu_ms=0.0,
                     estimated_bytes=int(work_size),
                     expected_value=2.0,
                     reusable_output=False,
                 ),
-                on_done=lambda snapshot, key=key: self._apply_roi_inspection_snapshot_if_current(key, snapshot),
+                on_done=(
+                    (lambda snapshot, key=request_key: self._apply_roi_inspection_snapshot_if_current(key, snapshot))
+                    if panel_visible
+                    else (lambda snapshot, key=request_key: self._apply_hidden_roi_overlay_snapshot_if_current(key, snapshot))
+                ),
+                on_stale=lambda: setattr(self, "_inspection_stale", True),
                 on_error=lambda exc: self._finish_roi_inspection_error(),
                 slow_ms=0,
             )
@@ -243,21 +269,21 @@ class InspectionWorkflowMixin:
         self._update_roi_info_overlay(OrderedDict())
         self._roi_inspection_applied_key = key
 
-    def _roi_inspection_key(self, image, selections, layers):
+    def _roi_inspection_key(self, selections):
         if self._roi_uses_montage_demand(selections):
             geometry = getattr(self, "display_geometry", None)
-            image_key = (
+            source_key = (
                 "montage-demand",
                 _document_key(self.document),
                 self.view_state,
                 None if geometry is None else getattr(geometry, "montage", None),
             )
-        elif self._roi_uses_tiled_demand(selections):
+        else:
             frame = self._committed_tiled_frame()
             scene = None if frame is None else getattr(frame, "scene", None)
             value_source = None if frame is None else getattr(frame, "value_source", None)
             payloads = {} if value_source is None else dict(getattr(value_source, "payloads", {}) or {})
-            image_key = (
+            source_key = (
                 "tiled-demand",
                 None if frame is None else getattr(frame, "key", None),
                 tuple(
@@ -269,47 +295,45 @@ class InspectionWorkflowMixin:
                     for key, payload in sorted(payloads.items(), key=lambda item: int(item[0]))
                 ),
             )
-        else:
-            image_key = None if image is None else (id(image), tuple(np.shape(image)), str(getattr(image, "dtype", None)))
         selection_key = tuple((selection.id, selection.enabled, selection.geometry) for selection in selections)
-        layer_key = tuple((layer.label, id(layer.data), tuple(np.shape(layer.data)), str(getattr(layer.data, "dtype", None))) for layer in layers)
-        return image_key, selection_key, layer_key
+        return source_key, selection_key
 
-    def _compute_roi_inspection_snapshot(self, key, image, selections, layers):
+    def _roi_inspection_work_size(self, selections) -> int:
+        total = 0
+        for selection in selections:
+            if not selection.enabled:
+                continue
+            bounds = roi_bounding_rect(selection.geometry)
+            if bounds is None:
+                continue
+            x0, y0, x1, y1 = bounds
+            total += max(1, int(np.ceil(x1) - np.floor(x0))) * max(1, int(np.ceil(y1) - np.floor(y0)))
+        return int(total)
+
+    def _compute_roi_inspection_snapshot(self, key, selections):
         if self._roi_uses_montage_demand(selections):
             return self._compute_montage_roi_inspection_snapshot(key, selections)
-        if self._roi_uses_tiled_demand(selections):
-            return self._compute_tiled_roi_inspection_snapshot(key, selections)
-        stats_by_roi = OrderedDict()
-        hist_inputs = []
-        if image is not None:
-            for selection in selections:
-                if not selection.enabled:
-                    continue
-                values = roi_values(image, selection.geometry)
-                stats = roi_statistics(values)
-                stats_by_roi[selection.id] = (selection, stats)
-                finite = np.asarray(values).ravel()
-                finite = finite[np.isfinite(finite)]
-                if finite.size:
-                    hist_inputs.append((selection.label, finite))
-                for layer in layers:
-                    layer_values = roi_values(layer.data, selection.geometry)
-                    layer_finite = np.asarray(layer_values).ravel()
-                    layer_finite = layer_finite[np.isfinite(layer_finite)]
-                    if layer_finite.size:
-                        hist_inputs.append((f"{selection.label} / {layer.label}", layer_finite))
-        return RoiInspectionSnapshot(key, stats_by_roi, comparison_histograms(hist_inputs, HistogramSpec(bins=96)))
+        return self._compute_tiled_roi_inspection_snapshot(key, selections)
 
     def _apply_roi_inspection_snapshot_if_current(self, key, snapshot):
         if key != getattr(self, "_roi_inspection_request_key", None):
             return False
         self._roi_inspection_in_flight = False
         self._roi_inspection_applied_key = key
+        self._inspection_stale = False
         self.inspection_dock.set_statistics(snapshot.stats_by_roi)
         self.inspection_dock.set_histograms(snapshot.histograms)
         self._update_roi_info_overlay(snapshot.stats_by_roi)
         self._sync_progressive_docks()
+        return True
+
+    def _apply_hidden_roi_overlay_snapshot_if_current(self, key, snapshot):
+        if key != getattr(self, "_roi_inspection_request_key", None):
+            return False
+        self._roi_inspection_in_flight = False
+        self._roi_inspection_applied_key = key
+        self._inspection_stale = True
+        self._update_roi_info_overlay(snapshot.stats_by_roi)
         return True
 
     def _finish_roi_inspection_error(self):
@@ -318,13 +342,14 @@ class InspectionWorkflowMixin:
     def _roi_uses_montage_demand(self, selections) -> bool:
         if not selections:
             return False
-        geometry = getattr(self, "display_geometry", None)
-        return bool(geometry is not None and getattr(geometry, "montage", None) is not None)
+        return getattr(getattr(self, "view_state", None), "montage_axis", None) is not None
 
-    def _roi_refresh_priority(self, selections) -> EvalPriority:
+    def _roi_refresh_priority(self, selections, *, panel_visible: bool) -> EvalPriority:
+        if not panel_visible:
+            return EvalPriority.HIDDEN_ROI
         reason = str(getattr(self, "_roi_refresh_reason", "") or "")
         if self._roi_uses_montage_demand(selections) and reason != "refresh":
-            return EvalPriority.PREFETCH
+            return EvalPriority.VISIBLE_ROI
         return EvalPriority.SELECTED_ROI
 
     def _montage_roi_values_pending(self) -> bool:
@@ -390,7 +415,7 @@ class InspectionWorkflowMixin:
                 )
                 result = provider.request_tile_region(
                     request,
-                    priority=getattr(self, "_roi_inspection_priority", EvalPriority.PREFETCH),
+                    priority=getattr(self, "_roi_inspection_priority", EvalPriority.HIDDEN_ROI),
                 )
                 source = result.histogram_data if result.histogram_data is not None else result.image
                 y_slice, x_slice = region
@@ -456,40 +481,6 @@ class InspectionWorkflowMixin:
             regions.append((tile, region))
         return tuple(regions)
 
-    def _compatible_compare_layers(self, reference_image):
-        if not hasattr(self, "compare_document"):
-            return ()
-        layers = []
-        for layer in self.compare_document.layers[1:]:
-            if not layer.visible:
-                continue
-            if compatible_roi_shape(layer.data, np.shape(reference_image)):
-                layers.append(layer)
-        return tuple(layers)
-
-    def _committed_raster_roi_source_image(self):
-        if not hasattr(self, "img_view"):
-            return None
-        if self._committed_tiled_frame() is not None:
-            return None
-        geometry = getattr(self, "display_geometry", None)
-        if getattr(geometry, "montage", None) is not None:
-            try:
-                display_mode = str(self.img_view.montageDisplayMode())
-            except Exception:
-                display_mode = ""
-            if display_mode in {"tile_layer", "vispy_tile_layer"}:
-                return None
-        source = getattr(self.img_view, "histogramSource", None)
-        if source is None:
-            source = getattr(self.img_view, "image", None)
-        if source is None:
-            return None
-        image = getattr(self.img_view, "image", None)
-        if image is None or tuple(np.shape(source)[:2]) != tuple(np.shape(image)[:2]):
-            return None
-        return np.asarray(source)
-
     def _set_inspection_dock_visible_from_user(self, visible):
         self.layout_manager.set_inspection_dock_visible_from_user(visible)
 
@@ -549,20 +540,28 @@ class InspectionWorkflowMixin:
             lines.append(f"{label}: {kind}{count}{mean}")
         self.img_view.setRoiInfoText("\n".join(lines))
 
+    def _refresh_hidden_roi_overlay_from_committed_frame(self) -> None:
+        if not hasattr(self, "img_view") or not hasattr(self, "inspection_dock"):
+            return
+        if self._inspection_panel_is_visible():
+            return
+        selections_fn = getattr(self.img_view, "roiSelections", None)
+        if not callable(selections_fn):
+            return
+        selections = tuple(selections_fn())
+        if not any(selection.enabled for selection in selections):
+            self._update_roi_info_overlay(OrderedDict())
+            return
+        if self._roi_uses_montage_demand(selections) and self._montage_roi_values_pending():
+            self._inspection_stale = True
+            return
+        self._schedule_refresh_inspection_dock("display-commit")
+
     def _hidden_roi_statistics(self, selections):
         tiled = self._committed_tiled_roi_values(selections, collect_histograms=False)
         if tiled is not None:
             return tiled[0]
-        image = self._committed_raster_roi_source_image()
         stats_by_roi = OrderedDict()
-        if image is not None:
-            for selection in selections:
-                if not selection.enabled:
-                    continue
-                try:
-                    stats_by_roi[selection.id] = (selection, roi_statistics(roi_values(image, selection.geometry)))
-                except Exception:
-                    continue
         return stats_by_roi
 
     def _committed_tiled_roi_values(self, selections, *, collect_histograms: bool):

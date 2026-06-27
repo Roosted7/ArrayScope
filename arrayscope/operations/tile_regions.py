@@ -9,7 +9,7 @@ import numpy as np
 
 
 TileRegionPurpose = Literal["visible", "roi", "profile", "prefetch"]
-TileRegionSource = Literal["committed_canvas", "committed_tile_payload", "tile_cache", "region_cache", "stage_cache", "computed"]
+TileRegionSource = Literal["committed_tile_payload", "display_cache", "region_cache", "stage_cache", "computed"]
 
 
 @dataclass(frozen=True)

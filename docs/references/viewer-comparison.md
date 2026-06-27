@@ -24,7 +24,7 @@ ArrayScope currently optimizes local semantic correctness and large-array orches
 | N-dimensional slices | Yes | Yes | Yes |
 | Complex/MRI conventions | Strong and operation-aware | Strong, mature | Broad display modes |
 | Lazy operation pipeline | Strong differentiator: region plans, stages, optimizer, budgets | Primarily direct data operations | Server render pipeline, no equivalent visible operation document |
-| Montage/large view | Progressive bounded tiled/raster strategies | Traditional figure image arrays | Mosaic and many modes in frontend/server |
+| Montage/large view | Progressive bounded tiled presentation | Traditional figure image arrays | Mosaic and many modes in frontend/server |
 | Compare/multiview | Limited scaffolding; roadmap gap | Linked relatives, not modern compare breadth | Major strength: compare, diff, overlay, multiview, qMRI |
 | ROI/profile/statistics | Strong core, still polishing backend parity | Mature basics | Broad tools and contextual islands |
 | Memory/scheduler diagnostics | Strong differentiator | Minimal by modern standards | Caches/tests, less explicit native GPU/Qt scheduling need |
@@ -37,7 +37,7 @@ ArrayScope currently optimizes local semantic correctness and large-array orches
 ### Explicit scientific and presentation semantics
 
 ArrayScope has first-class `ViewState`, operation steps, axis metadata, region plans, stage identities,
-semantic frame/value sources, and raster/tiled presentation contracts. This makes correctness under
+semantic frame/value sources, and tiled presentation contracts. This makes correctness under
 shape-changing operations, stale async work, complex display, ROI/profile demand, and backend changes
 more tractable than deriving state from GUI objects.
 

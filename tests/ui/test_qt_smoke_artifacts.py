@@ -368,8 +368,8 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
         win.widgets["buttons"]["display"]["live_profile"].setChecked(True)
         win.set_profile_axis(1)
         geometry = win._current_montage_geometry
-        tile_width = geometry["tile_width"]
-        gap = geometry["gap"]
+        tile_width = geometry.tile_width
+        gap = geometry.gap
         second_tile_x = tile_width + gap + 1
         win.img_view.setProfileMarker(second_tile_x, 1, visible=True)
         win._on_profile_marker_moved(second_tile_x, 1)

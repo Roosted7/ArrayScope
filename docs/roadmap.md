@@ -105,7 +105,7 @@ Completion notes:
 - `PresentationGenerationTracker`, `TileAdmissionQueue`, `LevelConvergenceStrategy`, and
   `StageFanInState` are Qt-free and covered by focused state-machine/property tests.
 - `MontageRenderSession` delegates level convergence, tile admission, and stage fan-in to those models
-  while retaining montage identity, materialized tile state, payload cache, and canvas patch state.
+  while retaining montage identity, materialized tile state, and payload cache.
 - Legacy session aliases for extracted generation and fan-in state were removed; call sites now use
   `level_generation` and `stage_fan_in` directly.
 - Montage timers carry explicit session/revision work tokens for commit, result fan-in, stage wait,
@@ -282,10 +282,10 @@ Progress notes:
 
 - `ImageViewShell` is the canonical display shell name and owns the semantic widget state used by the
   window. Built-in views expose an `ImageSurface` contract directly through `surface`.
-- `DisplayCommitter` commits raster and tiled presentations to `ImageSurface` instead of the retired
+- `DisplayCommitter` commits tiled presentations to `ImageSurface` instead of the retired
   built-in method-adapter scaffold.
 - `VisPyImageView2D` now inherits `ImageViewShell`, not the PyQtGraph concrete `ImageView2D` class.
-- The `ImageSurface` contract covers raster/tiled presentation, camera application, overlay
+- The `ImageSurface` contract covers tiled presentation, camera application, overlay
   coordinate mapping, diagnostics, context-loss reset, teardown, interaction-state visual sync, and
   declared shared interaction-event ownership.
 - The current VisPy surface keeps the VisPy canvas mouse-transparent to the stacked Qt event layer

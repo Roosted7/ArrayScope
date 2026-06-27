@@ -9,18 +9,14 @@ from typing import Any
 import numpy as np
 
 from arrayscope.display.geometry import DisplayGeometry
-from arrayscope.display.lod import LodInfo
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.display.model.frame import (
-    CanvasValueSource,
     CommittedDisplayFrame,
     DisplayFrameKey,
-    FrameValueSource,
     TilePresentationDelta,
     TilePresentationState,
-    TiledValueSource,
 )
 
 
@@ -74,25 +70,6 @@ class DisplayPayload:
 
 
 @dataclass(frozen=True)
-class DisplayRasterPresentation:
-    data: np.ndarray
-    histogram_data: np.ndarray | None
-    histogram_plot_data: np.ndarray | None
-    geometry: DisplayGeometry
-    levels: tuple[float, float]
-    histogram_range: tuple[float, float]
-    viewport_policy: ViewportPolicy
-    frame_plan: Any = None
-    rgb_already_windowed: bool = False
-    montage_dirty_tiles: tuple[int, ...] | None = None
-    montage_tile_source_ids: dict[int, object] | None = None
-    shader_mapping: ShaderMapping | None = None
-    texture_kind: TexturePlaneKind | None = None
-    semantic_data: np.ndarray | None = None
-    lod: LodInfo | None = None
-
-
-@dataclass(frozen=True)
 class DisplayTiledPresentation:
     geometry: DisplayGeometry
     levels: tuple[float, float]
@@ -108,7 +85,7 @@ class DisplayTiledPresentation:
     shader_mapping: ShaderMapping | None = None
 
 
-DisplayPresentation = DisplayRasterPresentation | DisplayTiledPresentation
+DisplayPresentation = DisplayTiledPresentation
 
 
 @dataclass(frozen=True)

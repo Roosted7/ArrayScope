@@ -15,8 +15,12 @@ def test_visible_and_stage_use_resolved_auto_fft_workers():
 
     assert policy.fft_workers_visible == 8
     assert policy.fft_workers_stage == 8
+    assert policy.histogram_workers == 1
+    assert policy.fft_workers_histogram == 1
     assert policy.fft_workers_for_lane(ComputeLane.VISIBLE) == 8
     assert policy.fft_workers_for_lane(ComputeLane.STAGE) == 8
+    assert policy.workers_for_lane(ComputeLane.HISTOGRAM) == 1
+    assert policy.fft_workers_for_lane(ComputeLane.HISTOGRAM) == 1
 
 
 def test_small_cpu_policy_keeps_tile_worker_product_conservative():

@@ -77,7 +77,8 @@ class PanelManager:
         return self._panels_by_name[str(name)].location
 
     def show_docked(self, name, *, reason, preserve_canvas=True):
-        del reason, preserve_canvas
+        self._last_transition_reason = str(reason)
+        self._last_transition_preserve_canvas = bool(preserve_canvas)
         panel = self._panels_by_name[str(name)]
         if panel.location == PanelLocation.DETACHED:
             self.redock_panel(panel.name, reason="show-docked", preserve_canvas=False)
@@ -90,7 +91,8 @@ class PanelManager:
         self._sync_view_action(panel)
 
     def hide_panel(self, name, *, reason, preserve_canvas=True):
-        del reason, preserve_canvas
+        self._last_transition_reason = str(reason)
+        self._last_transition_preserve_canvas = bool(preserve_canvas)
         panel = self._panels_by_name[str(name)]
         if panel.dialog is not None:
             self._destroy_dialog_and_take_body(panel)
@@ -101,7 +103,8 @@ class PanelManager:
         self._sync_view_action(panel)
 
     def detach_panel(self, name, *, reason, preserve_canvas=True):
-        del reason, preserve_canvas
+        self._last_transition_reason = str(reason)
+        self._last_transition_preserve_canvas = bool(preserve_canvas)
         panel = self._panels_by_name[str(name)]
         if panel.location == PanelLocation.DETACHED:
             if panel.dialog is not None:
@@ -115,7 +118,8 @@ class PanelManager:
         self._sync_view_action(panel)
 
     def redock_panel(self, name, *, reason, preserve_canvas=True):
-        del reason, preserve_canvas
+        self._last_transition_reason = str(reason)
+        self._last_transition_preserve_canvas = bool(preserve_canvas)
         panel = self._panels_by_name[str(name)]
         self._destroy_dialog_and_take_body(panel)
         self._set_body_in_dock(panel)
@@ -203,7 +207,7 @@ class PanelManager:
         try:
             action.setChecked(panel.location in (PanelLocation.DOCKED, PanelLocation.DETACHED))
         finally:
-            del blocker
+            blocker.unblock()
 
 
 class _DetachedPanelDialog(QtWidgets.QDialog):

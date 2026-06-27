@@ -86,7 +86,7 @@ def test_bounded_cache_counts_rendered_tile_bytes():
     assert small_cache.evictions == 1
 
 
-def test_montage_tile_cache_diagnostics_are_separate_from_image_cache():
+def test_montage_and_single_tiles_share_display_cache_diagnostics():
     data = np.arange(2 * 2 * 2, dtype=np.float32).reshape(2, 2, 2)
     evaluator = OperationEvaluator(ArrayDocument(data))
     state = ViewState.from_shape(data.shape).with_montage_axis(2, columns=2, indices=(0, 1), text=":")
@@ -103,28 +103,26 @@ def test_montage_tile_cache_diagnostics_are_separate_from_image_cache():
         result=EvaluationResult(DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes)),
     )
 
-    assert evaluator.tile_cache_diagnostics().entries == 1
-    assert evaluator.image_cache_diagnostics().entries == 0
+    assert evaluator.display_cache_diagnostics().entries == 1
 
 
-def test_image_cache_key_ignores_axis_flip_display_transform():
+def test_display_tile_key_ignores_axis_flip_display_transform():
     data = np.zeros((2, 3, 4), dtype=np.float32)
     evaluator = OperationEvaluator(ArrayDocument(data))
     state = ViewState.from_shape(data.shape)
     flipped = state.with_axis_flipped(state.image_axes[0], True)
 
-    assert evaluator.image_key(state) == evaluator.image_key(flipped)
+    assert evaluator.display_tile_key(state) == evaluator.display_tile_key(flipped)
 
 
-def test_apply_memory_policy_resizes_image_tile_and_profile_caches():
+def test_apply_memory_policy_resizes_display_and_profile_caches():
     evaluator = OperationEvaluator(ArrayDocument(np.zeros((2, 3), dtype=np.float32)))
     system = SystemMemorySnapshot(total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, process_rss_bytes=0)
     policy = compute_memory_policy(profile=MemoryProfileChoice.CONSERVATIVE, render_cap_mb=512, input_nbytes=1024, system=system)
 
     evaluator.apply_memory_policy(policy)
 
-    assert evaluator.image_cache_diagnostics().max_bytes == policy.image_cache_budget_bytes
-    assert evaluator.tile_cache_diagnostics().max_bytes == policy.tile_cache_budget_bytes
+    assert evaluator.display_cache_diagnostics().max_bytes == policy.display_cache_budget_bytes
     assert evaluator.profile_cache_diagnostics().max_bytes == policy.profile_cache_budget_bytes
     assert evaluator.stage_cache_diagnostics().max_bytes == policy.stage_cache_budget_bytes
 
@@ -186,14 +184,14 @@ def test_prefetch_fills_cache_without_incrementing_visible_evaluation_count():
     evaluator = OperationEvaluator(ArrayDocument(data))
 
     evaluator.image(state)
-    result = evaluator.prefetch_image_snapshot(evaluator.document, prefetch_state)
-    assert evaluator.store_prefetch_image_result(evaluator.document, prefetch_state, None, result) is True
+    result = evaluator.prefetch_display_tile_snapshot(evaluator.document, prefetch_state)
+    assert evaluator.store_prefetch_display_tile_result(evaluator.document, prefetch_state, None, result) is True
     visible_count = evaluator.image_evaluations
     evaluator.image(prefetch_state)
 
     assert evaluator.image_evaluations == visible_count
     assert evaluator.cache_diagnostics().status == CacheStatus.CACHED
-    assert evaluator.image_cache_diagnostics().prefetch_stored == 1
+    assert evaluator.display_cache_diagnostics().prefetch_stored == 1
 
 
 def test_prefetch_store_uses_document_key_not_array_equality():
@@ -201,10 +199,10 @@ def test_prefetch_store_uses_document_key_not_array_equality():
     evaluator = OperationEvaluator(ArrayDocument(data))
     other_document = ArrayDocument(data.copy())
     state = ViewState.from_shape(data.shape)
-    result = evaluator.prefetch_image_snapshot(other_document, state)
+    result = evaluator.prefetch_display_tile_snapshot(other_document, state)
 
-    assert evaluator.store_prefetch_image_result(other_document, state, None, result) is False
-    assert evaluator.image_cache_diagnostics().prefetch_stale == 1
+    assert evaluator.store_prefetch_display_tile_result(other_document, state, None, result) is False
+    assert evaluator.display_cache_diagnostics().prefetch_stale == 1
 
 
 def test_prefetch_diagnostics_track_scheduling_outcomes():
@@ -215,7 +213,7 @@ def test_prefetch_diagnostics_track_scheduling_outcomes():
     evaluator.note_prefetch_limited()
     evaluator.note_prefetch_stale()
 
-    diagnostics = evaluator.image_cache_diagnostics()
+    diagnostics = evaluator.display_cache_diagnostics()
     assert diagnostics.prefetch_scheduled == 1
     assert diagnostics.prefetch_deduped == 1
     assert diagnostics.prefetch_limited == 1
@@ -230,7 +228,7 @@ def test_evaluator_diagnostics_counts_degraded_refused_chunked_cancelled():
     evaluator.note_chunked_evaluation()
     evaluator.note_render_cancelled()
 
-    diagnostics = evaluator.image_cache_diagnostics()
+    diagnostics = evaluator.display_cache_diagnostics()
     assert diagnostics.degraded_evaluations == 1
     assert diagnostics.refused_evaluations == 1
     assert diagnostics.chunked_evaluations == 1

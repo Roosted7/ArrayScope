@@ -9,7 +9,7 @@ ArrayScope uses one internal 2D image coordinate convention:
 - Montage tile shapes are `(height, width)`.
 
 `arrayscope.display.geometry.DisplayGeometry` is the only mapper from display
-world/ViewBox points to canvas-local points, tile-local points, array
+world/ViewBox points to committed-display points, tile-local points, array
 indices/profile states, and context labels. Pixel hover, live profile markers,
 montage tile lookup, ROI demand rendering, and marker clamping use the same
 geometry object that was created with the committed image. Montage assembly
@@ -19,10 +19,10 @@ coordinate in `[x, x+1)` maps to column `x`, and a view coordinate in
 `[y, y+1)` maps to row `y`. Marker drawing can use center positions, but hit
 testing and context labels use cell membership.
 
-For montage, ViewBox coordinates are full montage coordinates. The bounded
-canvas is positioned at `canvas.origin_x/origin_y`, and exact tile-layer items
-are positioned at their full montage tile origins. `DisplayGeometry` exposes
-explicit `view_point_to_canvas_point()`, `view_point_to_tile_point()`,
+For montage, ViewBox coordinates are full montage coordinates. Committed
+display regions and backend tile items are positioned at their full montage
+tile origins. `DisplayGeometry` exposes explicit
+`view_point_to_display_point()`, `view_point_to_tile_point()`,
 `view_point_to_array_index()`, `view_point_to_profile_states()`,
 `clamp_view_point()`, and `context_for_view_point()` methods. Hover/value
 lookups require loaded committed pixels; demand ROI/profile mapping can request
@@ -53,7 +53,7 @@ state for normal non-1:1 viewport modes.
 ROI statistics remain image-tile-space in this phase, but montage ROI geometry
 is world-stable. Normal-image ROI statistics sample the committed scalar image
 or histogram source. Montage ROI statistics use demand tile-region requests:
-visible committed canvas data is reused when available, otherwise cached or
+visible committed tile payloads are reused when available, otherwise cached or
 newly evaluated tile regions are sampled offscreen. Gaps are ignored because no
 tile-region request is produced for them.
 

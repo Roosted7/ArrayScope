@@ -104,12 +104,7 @@ class MontageRenderMixin:
         return choose_montage_backend(
             geometry,
             data,
-            previous_upload_ms=float(getattr(self, "_last_set_image_ms", 0.0) or 0.0),
-            patched_tiles=int(getattr(self, "_montage_patched_tiles_last_flush", 0) or 0),
-            current_mode=str(getattr(self.img_view, "montageDisplayMode", lambda: "canvas")()),
             renderer_backend=image_view_backend_capabilities(self.img_view).name,
-            renderer_capabilities=image_view_backend_capabilities(self.img_view),
-            very_slow_upload_ms=MONTAGE_VERY_SLOW_UPLOAD_MS,
         )
 
     def _montage_viewport_plan(self, view_state, *, view_range=None) -> MontageViewportPlan:
@@ -566,7 +561,7 @@ class MontageRenderMixin:
         last_hit = False
         tile_tuple = tuple(tiles)
         for tile in tile_tuple:
-            tile_cache_start = perf_counter()
+            display_cache_start = perf_counter()
             cached = self.operation_evaluator.cached_montage_tile(
                 tile.view_state,
                 montage_axis=axis,
@@ -574,7 +569,7 @@ class MontageRenderMixin:
                 colormap_lut=colormap_lut,
                 shader_display=shader_display,
             )
-            total_lookup_ms += (perf_counter() - tile_cache_start) * 1000.0
+            total_lookup_ms += (perf_counter() - display_cache_start) * 1000.0
             last_hit = cached is not None
             if cached is None:
                 tile_key = self.operation_evaluator.montage_tile_key(
@@ -596,8 +591,8 @@ class MontageRenderMixin:
                     cached_tiles.append(_rendered_tile_from_previous_payload(tile, previous_payload))
             else:
                 cached_tiles.append(cached.bind(tile) if hasattr(cached, "bind") else cached.payload().bind(tile))
-        self._last_montage_tile_cache_lookup_ms = total_lookup_ms
-        self._last_montage_tile_cache_hit = last_hit if tile_tuple else False
+        self._last_montage_display_cache_lookup_ms = total_lookup_ms
+        self._last_montage_display_cache_hit = last_hit if tile_tuple else False
         return cached_tiles, missing_tiles
 
     def _merge_montage_stage_plan(self, session: MontageRenderSession, stage_plan) -> None:
@@ -700,17 +695,17 @@ class MontageRenderMixin:
         additions_to_process = tuple(additions)
         processed_additions = 0
         for tile in additions_to_process:
-            tile_cached, tile_missing = self._resolve_montage_tiles_from_cache(
+            display_cached, display_missing = self._resolve_montage_tiles_from_cache(
                 (tile,),
                 document=session.document,
                 axis=session.montage_axis,
                 colormap_lut=session.colormap_lut,
                 shader_display=bool(getattr(session, "shader_display", False)),
             )
-            cached_tiles.extend(tile_cached)
-            missing_tiles.extend(tile_missing)
+            cached_tiles.extend(display_cached)
+            missing_tiles.extend(display_missing)
             processed_additions += 1
-            byte_count = sum(_rendered_tile_nbytes(rendered) for rendered in tile_cached)
+            byte_count = sum(_rendered_tile_nbytes(rendered) for rendered in display_cached)
             budget.record_item(byte_count=byte_count)
             if budget.should_yield():
                 break
@@ -1081,7 +1076,7 @@ class MontageRenderMixin:
                 evaluate,
                 on_done=done,
                 key=key,
-                memory_budget_bytes=self._memory_policy().tile_cache_budget_bytes,
+                memory_budget_bytes=self._memory_policy().display_cache_budget_bytes,
             )
             if not getattr(started, "scheduled", False):
                 if str(getattr(started, "reason", "")) == "deduped":
@@ -1821,7 +1816,7 @@ class MontageRenderMixin:
         processed = 0
         processed_tiles = []
         first_vispy_display = bool(
-            _persistent_direct_tile_layer_backend(self, session)
+            _persistent_tile_residency_backend(self, session)
             and not getattr(session, "display_committed", False)
         )
         first_batch_limit = _first_vispy_display_batch_limit(self, session) if first_vispy_display else 0
@@ -1906,12 +1901,7 @@ class MontageRenderMixin:
         self._queue_montage_level_refinement(session, rendered)
         session.mark_loaded(rendered)
         patch_start = perf_counter()
-        if session.has_canvas() and not _persistent_direct_tile_layer_backend(self, session):
-            session.patch_rendered_tile(rendered)
-            self._last_montage_canvas_patch_ms = (perf_counter() - patch_start) * 1000.0
-        else:
-            session.dirty_tiles.append(int(tile.montage_index))
-            self._last_montage_canvas_patch_ms = 0.0
+        session.dirty_tiles.append(int(tile.montage_index))
         return _rendered_tile_nbytes(rendered)
 
     def _resolve_lead_stage_warmup(self, session, tile) -> None:
@@ -1955,7 +1945,7 @@ class MontageRenderMixin:
         self._montage_commit_token = _montage_work_token(session, "commit")
         interval_ms = self._montage_commit_interval_ms(session, force=force)
         elapsed_ms = (monotonic() - float(session.last_commit_monotonic or 0.0)) * 1000.0
-        needs_initial_commit = session.canvas is None and not bool(getattr(session, "display_committed", False))
+        needs_initial_commit = not bool(getattr(session, "display_committed", False))
         needs_final_dirty_commit = bool(
             force
             and not session.pending_tiles
@@ -2024,17 +2014,10 @@ class MontageRenderMixin:
         self._classify_visible_montage_tiles(session)
         direct_presentation = self._direct_montage_tile_layer_presentation(session)
         if direct_presentation is None:
-            capabilities = image_view_backend_capabilities(self.img_view)
-            raise RuntimeError(
-                f"{capabilities.name} does not provide direct montage tile payloads; "
-                "montage presentation cannot be committed"
-            )
+            raise RuntimeError("montage presentation could not be built")
         self._commit_montage_session_tile_layer(session, direct_presentation, commit_start=commit_start)
 
     def _direct_montage_tile_layer_presentation(self, session):
-        capabilities = image_view_backend_capabilities(self.img_view)
-        if not capabilities.direct_montage_tile_payloads:
-            return None
         tile_states = session.ensure_tile_states()
         placeholder = _montage_tile_layer_placeholder(session)
         geometry = DisplayGeometry(
@@ -2054,11 +2037,9 @@ class MontageRenderMixin:
         display_image, rendered_geometry = direct_presentation
         dirty_tiles = session.consume_dirty_tiles()
         tile_source_ids = self._montage_tile_source_ids(session)
-        self._montage_patched_tiles_last_flush = len(dirty_tiles)
-        self._last_montage_canvas_compose_ms = 0.0
+        self._montage_committed_tile_upserts_last_flush = len(dirty_tiles)
         self._current_montage_geometry = session.plan.geometry
         self._current_montage_plan = session.plan
-        self._current_montage_canvas = None
         self._next_viewport_policy = ViewportPolicy.PRESERVE
         self._montage_presentation_commit_active = True
         try:
@@ -2082,7 +2063,7 @@ class MontageRenderMixin:
                 ),
                 **tile_layer_limits,
             )
-            if _persistent_direct_tile_layer_backend(self, session):
+            if _persistent_tile_residency_backend(self, session):
                 dirty_tiles = tuple(int(tile) for tile in dirty_tiles if int(tile) in set(tile_delta.upserts))
             active_payloads = tile_state.active_payloads(tile_delta)
             first_display_commit = not bool(session.display_committed)
@@ -2215,7 +2196,7 @@ class MontageRenderMixin:
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
         finally:
             self._montage_presentation_commit_active = False
-        self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
+        self._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
         report = getattr(self._display_committer(), "last_tile_commit_report", None)
         _complete_inline_work(
             self,
@@ -2225,7 +2206,7 @@ class MontageRenderMixin:
                 frame_target=session.frame_plan.target,
                 supersession_key=("montage-backend-commit", session.key),
                 supersession_value=int(session.session_id),
-                estimated_cpu_ms=float(self._last_montage_canvas_commit_ms),
+                estimated_cpu_ms=float(self._last_montage_tile_commit_ms),
                 estimated_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
             ),
         )
@@ -2239,7 +2220,7 @@ class MontageRenderMixin:
         if feedback is not None:
             cold_ms = 0.0
             if cold_count > 0 and storage_rebuilds <= 0:
-                cold_ms = float(getattr(report, "cold_work_ms", 0.0) or 0.0) or self._last_montage_canvas_commit_ms
+                cold_ms = float(getattr(report, "cold_work_ms", 0.0) or 0.0) or self._last_montage_tile_commit_ms
                 if hasattr(self, "_record_ui_work"):
                     self._record_ui_work(
                         "montage_cold_commit",
@@ -2256,7 +2237,7 @@ class MontageRenderMixin:
                         count=cold_count,
                         byte_count=texture_upload_bytes,
                     )
-            commit_feedback_ms = self._last_montage_canvas_commit_ms
+            commit_feedback_ms = self._last_montage_tile_commit_ms
             commit_feedback_bytes = texture_upload_bytes
             vispy_backend = backend_name.lower() == "vispy"
             vispy_uniform_only = bool(
@@ -2269,7 +2250,7 @@ class MontageRenderMixin:
                 if hasattr(self, "_record_ui_work"):
                     self._record_ui_work(
                         "montage_layout_commit",
-                        self._last_montage_canvas_commit_ms,
+                        self._last_montage_tile_commit_ms,
                         count=processed_count,
                         byte_count=texture_upload_bytes,
                         work_class="presentation_layout",
@@ -2278,7 +2259,7 @@ class MontageRenderMixin:
                 else:
                     feedback.observe(
                         "montage_layout_commit",
-                        self._last_montage_canvas_commit_ms,
+                        self._last_montage_tile_commit_ms,
                         count=processed_count,
                         byte_count=texture_upload_bytes,
                     )
@@ -2288,7 +2269,7 @@ class MontageRenderMixin:
                 if hasattr(self, "_record_ui_work"):
                     self._record_ui_work(
                         "montage_present_total",
-                        self._last_montage_canvas_commit_ms,
+                        self._last_montage_tile_commit_ms,
                         count=processed_count,
                         byte_count=texture_upload_bytes,
                         work_class="presentation_upsert",
@@ -2297,11 +2278,11 @@ class MontageRenderMixin:
                 else:
                     feedback.observe(
                         "montage_present_total",
-                        self._last_montage_canvas_commit_ms,
+                        self._last_montage_tile_commit_ms,
                         count=processed_count,
                         byte_count=texture_upload_bytes,
                     )
-                commit_feedback_ms = max(0.0, self._last_montage_canvas_commit_ms - cold_ms)
+                commit_feedback_ms = max(0.0, self._last_montage_tile_commit_ms - cold_ms)
                 commit_feedback_bytes = 0
                 if vispy_uniform_only:
                     commit_feedback_ms = 0.0
@@ -2351,7 +2332,7 @@ class MontageRenderMixin:
         explicit_auto: bool,
         semantic_commit: bool,
     ) -> bool:
-        if not _persistent_direct_tile_layer_backend(self, session):
+        if not _persistent_tile_residency_backend(self, session):
             return False
         previous_frame = getattr(self, "_committed_display_frame", None)
         if previous_frame is None or not isinstance(getattr(previous_frame, "value_source", None), TiledValueSource):
@@ -2760,7 +2741,7 @@ class MontageRenderMixin:
             _enqueue_session_pending_tile(session, tile)
             session.mark_loading(tile)
 
-    def _update_montage_tile_overlays_for_plan(self, plan, tile_states, canvas_rect) -> None:
+    def _update_montage_tile_overlays_for_plan(self, plan, tile_states, viewport_rect) -> None:
         if not hasattr(self.img_view, "setMontageTileOverlays"):
             return
         session = getattr(self, "_montage_session", None)
@@ -2780,7 +2761,7 @@ class MontageRenderMixin:
             candidate_numbers = tuple(sorted(candidates))
             key = (
                 id(plan),
-                tuple(int(value) for value in canvas_rect),
+                tuple(int(value) for value in viewport_rect),
                 tile_state_revision,
                 show_loading,
                 candidate_numbers,
@@ -2793,7 +2774,7 @@ class MontageRenderMixin:
                     self.img_view.setMontageTileOverlays(())
                 return
         overlays = []
-        canvas_x0, canvas_y0, canvas_x1, canvas_y1 = (int(value) for value in canvas_rect)
+        viewport_x0, viewport_y0, viewport_x1, viewport_y1 = (int(value) for value in viewport_rect)
         if candidate_numbers is None:
             tiles = tuple(plan.tiles)
         else:
@@ -2813,10 +2794,10 @@ class MontageRenderMixin:
             tile_y0 = int(tile.y0)
             tile_x1 = tile_x0 + int(tile.width)
             tile_y1 = tile_y0 + int(tile.height)
-            x = max(tile_x0, canvas_x0)
-            y = max(tile_y0, canvas_y0)
-            x1 = min(tile_x1, canvas_x1)
-            y1 = min(tile_y1, canvas_y1)
+            x = max(tile_x0, viewport_x0)
+            y = max(tile_y0, viewport_y0)
+            x1 = min(tile_x1, viewport_x1)
+            y1 = min(tile_y1, viewport_y1)
             if x1 <= x or y1 <= y:
                 continue
             overlays.append(
@@ -3355,20 +3336,19 @@ def _persistent_tile_layer_fast_drain_enabled(window, session) -> bool:
         return False
     if not bool(getattr(session, "display_committed", False)):
         return False
-    return _persistent_direct_tile_layer_backend(window, session)
+    return _persistent_tile_residency_backend(window, session)
 
 
-def _persistent_direct_tile_layer_backend(window, session) -> bool:
+def _persistent_tile_residency_backend(window, session) -> bool:
     capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
     return bool(
-        capabilities.direct_montage_tile_payloads
-        and capabilities.persistent_tile_residency
+        capabilities.persistent_tile_residency
         and capabilities.shader_windowing
     )
 
 
 def _persistent_tile_upsert_limits(window, session, *, first_display_commit: bool) -> dict[str, int]:
-    if not _persistent_direct_tile_layer_backend(window, session):
+    if not _persistent_tile_residency_backend(window, session):
         return {}
     decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
         "montage_present_total",
@@ -3402,12 +3382,11 @@ def _first_vispy_display_batch_limit(window, session) -> int:
 
 
 def _tile_layer_upsert_limits(window, session, *, first_display_commit: bool) -> dict[str, int]:
-    if _persistent_direct_tile_layer_backend(window, session):
+    if _persistent_tile_residency_backend(window, session):
         return _persistent_tile_upsert_limits(window, session, first_display_commit=first_display_commit)
     capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
     if not (
-        capabilities.direct_montage_tile_payloads
-        and not capabilities.shader_windowing
+        not capabilities.shader_windowing
         and session.has_pending_level_update()
         and session.has_stale_level_presentations()
     ):

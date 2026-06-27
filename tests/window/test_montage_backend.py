@@ -22,12 +22,47 @@ def _geometry():
     return SimpleNamespace(montage=object())
 
 
-def test_auto_small_scalar_montage_uses_tile_layer_when_direct_payloads_available():
+def _committed_tiled_frame(geometry, *, key):
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayTilePayload, TiledValueSource
+
+    shape = tuple(int(value) for value in geometry.display_shape[:2])
+    data = np.zeros(shape, dtype=np.float32)
+    payloads = {}
+    montage = geometry.montage
+    for tile_number, source_index in enumerate(tuple(montage.indices)):
+        state = geometry.montage_tile_states[tile_number]
+        if state is not MontageTileState.LOADED:
+            continue
+        tile_shape = tuple(int(value) for value in montage.tile_shape[:2])
+        tile_data = np.zeros(tile_shape, dtype=np.float32)
+        payloads[int(tile_number)] = DisplayTilePayload(
+            int(tile_number),
+            int(source_index),
+            tile_data,
+            tile_data.copy(),
+            ("frame-tile", int(tile_number), int(source_index)),
+            semantic_data=tile_data,
+            semantic_histogram_data=tile_data.copy(),
+            source_shape=tile_shape,
+        )
+    return CommittedDisplayFrame(
+        data=data,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        histogram_range=(0.0, 1.0),
+        key=key,
+        value_source=TiledValueSource(payloads),
+    )
+
+
+def test_auto_small_scalar_montage_uses_tile_layer():
     decision = choose_montage_backend(_geometry(), np.zeros((64, 64), dtype=np.float32))
 
     assert decision.backend == "tile_layer"
-    assert decision.expected_tile_layer is True
-    assert "direct tiled montage payloads" in decision.reason
+
+    assert "tiled montage presentation" in decision.reason
 
 
 def test_initial_montage_plan_uses_pending_restored_viewport_range():
@@ -52,7 +87,7 @@ def test_initial_montage_plan_uses_pending_restored_viewport_range():
         ),
         graphicsView=SimpleNamespace(viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(400, 200))),
         getView=lambda: SimpleNamespace(viewRange=lambda: ((0.0, 1.0), (0.0, 1.0))),
-        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph", direct_montage_tile_payloads=True),
+        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
     )
     win._pending_file_session_viewport_range = lambda: ((100.0, 120.0), (200.0, 220.0))
     win._pending_file_session_montage_columns = lambda: 3
@@ -84,7 +119,7 @@ def test_initial_montage_plan_ignores_invalid_restored_columns():
         ),
         graphicsView=SimpleNamespace(viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(400, 200))),
         getView=lambda: SimpleNamespace(viewRange=lambda: ((0.0, 1.0), (0.0, 1.0))),
-        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph", direct_montage_tile_payloads=True),
+        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
     )
     win._pending_file_session_viewport_range = lambda: ((100.0, 120.0), (200.0, 220.0))
     win._pending_file_session_montage_columns = lambda: "auto"
@@ -110,11 +145,11 @@ def test_montage_commit_reschedules_restored_roi_stats():
     assert calls == ["viewport", ("roi", "montage-semantic-commit")]
 
 
-def test_auto_large_scalar_montage_uses_tile_layer_when_direct_payloads_available():
+def test_auto_large_scalar_montage_uses_tile_layer():
     data = np.zeros((1500, 1500), dtype=np.float32)
 
     decision = choose_montage_backend(_geometry(), data)
-    slow = choose_montage_backend(_geometry(), data, previous_upload_ms=150.0, very_slow_upload_ms=100.0)
+    slow = choose_montage_backend(_geometry(), data)
 
     assert decision.backend == "tile_layer"
     assert slow.backend == "tile_layer"
@@ -126,8 +161,8 @@ def test_auto_large_scalar_vispy_montage_uses_tile_layer_to_avoid_full_uploads()
     decision = choose_montage_backend(_geometry(), data, renderer_backend="vispy")
 
     assert decision.backend == "tile_layer"
-    assert decision.expected_tile_layer is True
-    assert "direct tiled montage payloads" in decision.reason
+
+    assert "tiled montage presentation" in decision.reason
 
 
 def test_auto_small_scalar_vispy_montage_uses_tile_layer():
@@ -136,8 +171,8 @@ def test_auto_small_scalar_vispy_montage_uses_tile_layer():
     decision = choose_montage_backend(_geometry(), data, renderer_backend="vispy")
 
     assert decision.backend == "tile_layer"
-    assert decision.expected_tile_layer is True
-    assert "direct tiled montage payloads" in decision.reason
+
+    assert "tiled montage presentation" in decision.reason
 
 
 def test_first_vispy_display_batch_limit_uses_governed_upsert_limit(monkeypatch):
@@ -153,55 +188,38 @@ def test_first_vispy_display_batch_limit_uses_governed_upsert_limit(monkeypatch)
     assert montage_renderer._first_vispy_display_batch_limit(object(), session) == 3
 
 
-def test_auto_policy_uses_capability_instead_of_backend_name():
+def test_auto_policy_uses_renderer_backend_name():
     data = np.zeros((1500, 1500), dtype=np.float32)
-    capabilities = ImageViewBackendCapabilities(
-        name="future-gpu-backend",
-        direct_montage_tile_payloads=True,
-        prefers_tiled_montages=True,
-        persistent_tile_residency=True,
-    )
-
     decision = choose_montage_backend(
         _geometry(),
         data,
-        renderer_backend="pyqtgraph",
-        renderer_capabilities=capabilities,
+        renderer_backend="future-gpu-backend",
     )
 
     assert decision.backend == "tile_layer"
     assert "future-gpu-backend" in decision.reason
 
 
-def test_montage_policy_requires_direct_tile_payloads():
+def test_montage_policy_is_always_tiled():
     data = np.zeros((64, 64), dtype=np.float32)
-    capabilities = ImageViewBackendCapabilities(
-        name="future-gpu-backend",
-        direct_montage_tile_payloads=False,
-        prefers_tiled_montages=True,
-        persistent_tile_residency=True,
-    )
 
     decision = choose_montage_backend(
         _geometry(),
         data,
-        renderer_backend="pyqtgraph",
-        renderer_capabilities=capabilities,
+        renderer_backend="future-gpu-backend",
     )
 
     assert decision.backend == "tile_layer"
-    assert decision.expected_tile_layer is True
-    assert "requires direct tiled payloads" in decision.reason
-    assert "presentation contract" in decision.warning
+    assert "tiled montage presentation" in decision.reason
 
 
 def test_auto_preserves_vispy_tile_layer_mode():
     data = np.zeros((64, 64), dtype=np.float32)
 
-    decision = choose_montage_backend(_geometry(), data, current_mode="vispy_tile_layer")
+    decision = choose_montage_backend(_geometry(), data)
 
     assert decision.backend == "tile_layer"
-    assert "direct tiled montage payloads" in decision.reason
+    assert "tiled montage presentation" in decision.reason
 
 
 def test_interactive_montage_commit_is_timer_coalesced(qt_app, monkeypatch):
@@ -340,7 +358,6 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
                     name="vispy",
-                    direct_montage_tile_payloads=True,
                     persistent_tile_residency=True,
                     shader_windowing=True,
                 ),
@@ -437,7 +454,6 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypa
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
                     name="vispy",
-                    direct_montage_tile_payloads=True,
                     persistent_tile_residency=True,
                     shader_windowing=True,
                 ),
@@ -537,7 +553,6 @@ def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
                     name="pyqtgraph",
-                    direct_montage_tile_payloads=True,
                 ),
                 montageDisplayMode=lambda: "tile_layer",
             )
@@ -597,7 +612,6 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
                     name="pyqtgraph",
-                    direct_montage_tile_payloads=True,
                     persistent_tile_residency=False,
                     shader_windowing=False,
                 ),
@@ -730,7 +744,7 @@ def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayFrameKey
+    from arrayscope.display.model.frame import DisplayFrameKey
     from arrayscope.window.montage_renderer import MontageRenderMixin
 
     class Window(QtCore.QObject, MontageRenderMixin):
@@ -745,14 +759,7 @@ def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
         montage_tile_states=(MontageTileState.LOADING,),
     )
     loaded = replace(loading, montage_tile_states=(MontageTileState.LOADED,))
-    frame = CommittedDisplayFrame(
-        data=np.zeros((2, 2), dtype=np.float32),
-        histogram_data=None,
-        geometry=loading,
-        levels=(0.0, 1.0),
-        histogram_range=(0.0, 1.0),
-        key=DisplayFrameKey(("doc",), ("view",), 1),
-    )
+    frame = _committed_tiled_frame(loading, key=DisplayFrameKey(("doc",), ("view",), 1))
     win = Window()
     win.display_geometry = loading
     win._committed_display_frame = frame
@@ -770,7 +777,7 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayFrameKey
+    from arrayscope.display.model.frame import DisplayFrameKey
     from arrayscope.window.montage_renderer import MontageRenderMixin
 
     class Window(QtCore.QObject, MontageRenderMixin):
@@ -791,14 +798,7 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
         montage=MontageGeometry(indices=(2, 3), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADING, MontageTileState.LOADING),
     )
-    frame = CommittedDisplayFrame(
-        data=np.zeros((2, 5), dtype=np.float32),
-        histogram_data=None,
-        geometry=committed,
-        levels=(0.0, 1.0),
-        histogram_range=(0.0, 1.0),
-        key=DisplayFrameKey(("doc",), ("view",), 1),
-    )
+    frame = _committed_tiled_frame(committed, key=DisplayFrameKey(("doc",), ("view",), 1))
     win = Window()
     win.display_geometry = committed
     win._committed_display_frame = frame
@@ -812,27 +812,23 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
 
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
     from arrayscope.window.montage_viewport import montage_viewport_retarget_policy
-    from arrayscope.window.montage_renderer import _persistent_direct_tile_layer_backend
+    from arrayscope.window.montage_renderer import _persistent_tile_residency_backend
 
     capabilities = ImageViewBackendCapabilities(
         name="vispy",
-        direct_montage_tile_payloads=True,
         persistent_tile_residency=True,
     )
     persistent_nonvispy = ImageViewBackendCapabilities(
         name="future-backend",
-        direct_montage_tile_payloads=True,
         persistent_tile_residency=True,
         shader_windowing=True,
     )
     direct_nonpersistent = ImageViewBackendCapabilities(
         name="pyqtgraph",
-        direct_montage_tile_payloads=True,
         persistent_tile_residency=False,
     )
     persistent_without_shader = ImageViewBackendCapabilities(
         name="resident-cpu-backend",
-        direct_montage_tile_payloads=True,
         persistent_tile_residency=True,
         shader_windowing=False,
     )
@@ -845,7 +841,7 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     fallback = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
-            montageDisplayMode=lambda: "canvas",
+            montageDisplayMode=lambda: "tile_layer",
         )
     )
 
@@ -853,14 +849,14 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     assert _montage_viewport_update_delay_ms(fallback) == 120
     assert montage_viewport_retarget_policy(capabilities, "vispy_tile_layer").coverage_margin_tiles == 1
     assert (
-        _persistent_direct_tile_layer_backend(
+        _persistent_tile_residency_backend(
             SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=persistent_nonvispy)),
             SimpleNamespace(),
         )
         is True
     )
     assert (
-        _persistent_direct_tile_layer_backend(
+        _persistent_tile_residency_backend(
             SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
             SimpleNamespace(),
         )
@@ -868,7 +864,7 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     )
     assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
     assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").coverage_margin_tiles == 0
-    assert montage_viewport_retarget_policy(direct_nonpersistent, "canvas").enabled is False
+    assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
 
 
 def test_recent_payload_cache_is_keyed_by_semantic_source_identity():
@@ -990,7 +986,7 @@ def test_auto_large_rgb_montage_uses_tile_layer():
     decision = choose_montage_backend(_geometry(), data)
 
     assert decision.backend == "tile_layer"
-    assert decision.expected_tile_layer is True
+
 
 
 def test_stage_wait_release_falls_back_to_direct_tile_evaluation():

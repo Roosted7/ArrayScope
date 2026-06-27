@@ -77,7 +77,7 @@ def test_visible_render_uses_cost_decision_refuse_without_clearing_previous_imag
         _process_events(qtbot, count=5)
 
         np.testing.assert_array_equal(win.img_view.image, previous)
-        assert win.operation_evaluator.image_cache_diagnostics().refused_evaluations == 1
+        assert win.operation_evaluator.display_cache_diagnostics().refused_evaluations == 1
     finally:
         win.close()
 
@@ -144,7 +144,7 @@ def test_degraded_preview_commits_with_overlay_and_not_exact_cache(qtbot, monkey
         qtbot.waitUntil(lambda: getattr(win, "_last_render_was_degraded", False), timeout=3000)
 
         assert win.img_view._evaluation_overlay.isVisible()
-        assert win.operation_evaluator.cached_image(win.view_state) is None
+        assert win.operation_evaluator.cached_display_tile(win.view_state) is None
     finally:
         win.close()
 
@@ -200,9 +200,9 @@ def test_chunked_visible_render_commits_exact_result(qtbot, monkeypatch):
         )
 
         win.update_image_view()
-        qtbot.waitUntil(lambda: win.operation_evaluator.cached_image(win.view_state) is not None, timeout=3000)
+        qtbot.waitUntil(lambda: win.operation_evaluator.cached_display_tile(win.view_state) is not None, timeout=3000)
 
-        assert win.operation_evaluator.image_cache_diagnostics().chunked_evaluations >= 1
+        assert win.operation_evaluator.display_cache_diagnostics().chunked_evaluations >= 1
     finally:
         win.close()
 
@@ -238,10 +238,10 @@ def test_prefetch_never_runs_during_montage(qtbot):
         win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
         win._active_slice_axis = 2
         state = win.view_state.with_montage_axis(2, indices=(0, 1, 2), text=":")
-        before = win.operation_evaluator.image_cache_diagnostics()
+        before = win.operation_evaluator.display_cache_diagnostics()
         win._prefetch_nearby_slices(state, None)
         _process_events(qtbot, count=20)
-        after = win.operation_evaluator.image_cache_diagnostics()
+        after = win.operation_evaluator.display_cache_diagnostics()
 
         assert after.prefetch_scheduled == before.prefetch_scheduled
         assert after.prefetch_skipped > before.prefetch_skipped
@@ -260,8 +260,43 @@ def test_compute_policy_configures_stage_and_montage_lanes(qtbot):
         _process_events(qtbot)
         assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.workers_for_lane(ComputeLane.MONTAGE_TILE)
         assert win.stage_evaluation_controller.pool.maxThreadCount() == win.compute_policy.workers_for_lane(ComputeLane.STAGE)
+        assert win.histogram_evaluation_controller.pool.maxThreadCount() == win.compute_policy.workers_for_lane(ComputeLane.HISTOGRAM)
         assert win.compute_policy.fft_workers_for_lane(ComputeLane.MONTAGE_TILE) == 1
         assert win.compute_policy.fft_workers_for_lane(ComputeLane.STAGE) >= 1
+        assert win.compute_policy.fft_workers_for_lane(ComputeLane.HISTOGRAM) == 1
+    finally:
+        win.close()
+
+
+def test_histogram_background_work_uses_histogram_priority_not_prefetch(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.core.scheduler import EvalPriority, WorkStart
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
+    qtbot.addWidget(win)
+    histogram_calls = []
+    prefetch_calls = []
+
+    def start_histogram(fn, **kwargs):
+        histogram_calls.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(win.histogram_evaluation_controller, "start_active_plus_latest", start_histogram)
+    monkeypatch.setattr(
+        win.prefetch_evaluation_controller,
+        "start_prefetch",
+        lambda *args, **kwargs: prefetch_calls.append(kwargs) or WorkStart(False, "wrong-controller"),
+    )
+    try:
+        result = win._submit_histogram_background_task(lambda: "hist", on_done=lambda _value: None, key=("histogram_plot", "source"))
+
+        assert result.scheduled
+        assert histogram_calls
+        assert histogram_calls[-1]["priority"] == EvalPriority.HISTOGRAM
+        assert histogram_calls[-1]["replace_group"] == "histogram-plot"
+        assert callable(histogram_calls[-1]["on_reuse_stale"])
+        assert prefetch_calls == []
     finally:
         win.close()
 

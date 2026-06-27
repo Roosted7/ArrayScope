@@ -112,9 +112,8 @@ Cancellation protects correctness and scarce resources; it is not a substitute f
 `core.memory_policy` derives budgets from configured profile, system total/available memory, process RSS, and hard per-render caps. Separate budgets cover:
 
 - visible render output/peak;
-- montage canvas and individual tiles;
-- display image cache;
-- montage payload cache;
+- visible tile materialization and presentation residency;
+- display cache;
 - profile/scalar cache;
 - reusable stage cache;
 - speculative/prefetch allowance.

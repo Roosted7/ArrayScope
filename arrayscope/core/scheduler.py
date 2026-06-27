@@ -7,11 +7,15 @@ from enum import IntEnum
 
 
 class EvalPriority(IntEnum):
-    VISIBLE_IMAGE = 0
-    LIVE_PROFILE = 10
-    SELECTED_ROI = 20
-    HOVER_EXACT = 30
-    PREFETCH = 40
+    INTERACTIVE = 0
+    VISIBLE_IMAGE = 10
+    HOVER = 20
+    HISTOGRAM = 30
+    LIVE_PROFILE = 40
+    SELECTED_ROI = 50
+    VISIBLE_ROI = 60
+    HIDDEN_ROI = 70
+    PREFETCH = 80
 
 
 @dataclass(frozen=True)
@@ -45,7 +49,7 @@ class EvalRequest:
 
 
 @dataclass(frozen=True)
-class PrefetchStart:
+class WorkStart:
     scheduled: bool
     reason: str = "scheduled"
 

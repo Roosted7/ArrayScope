@@ -9,7 +9,7 @@ from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.app.errors import handle_ui_exception, traceback_text
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget
 from arrayscope.operations.cancellation import EvaluationCancelled
-from arrayscope.core.scheduler import EvalPriority, EvalRequest, FrameProgress, FrameTarget, PrefetchStart, SchedulerDiagnostics
+from arrayscope.core.scheduler import EvalPriority, EvalRequest, FrameProgress, FrameTarget, SchedulerDiagnostics, WorkStart
 from arrayscope.core.work_graph import WorkItem
 
 prefer_pyside6()
@@ -218,7 +218,7 @@ class EvaluationController(Qt.QtCore.QObject):
         on_stale=None,
         on_slow=None,
         slow_ms=100,
-        priority=EvalPriority.HOVER_EXACT,
+        priority=EvalPriority.HOVER,
         key=None,
         replace_group="default",
         frame_target: FrameTarget | None = None,
@@ -398,23 +398,23 @@ class EvaluationController(Qt.QtCore.QObject):
         work_item: WorkItem | None = None,
     ):
         if self._shutting_down:
-            return PrefetchStart(False, "closed")
+            return WorkStart(False, "closed")
         if blocked_reason:
             self._note_prefetch_blocked(blocked_reason)
-            return PrefetchStart(False, blocked_reason)
+            return WorkStart(False, blocked_reason)
         if idle_elapsed is False:
             self._note_prefetch_blocked("idle")
-            return PrefetchStart(False, "idle")
+            return WorkStart(False, "idle")
         if memory_budget_bytes is not None and int(memory_budget_bytes) <= 0:
             self._note_prefetch_blocked("cost")
-            return PrefetchStart(False, "cost")
+            return WorkStart(False, "cost")
         key = ("prefetch", id(fn), len(self._runnables)) if key is None else key
         if key in self._prefetch_keys:
             self._prefetch_deduped_count += 1
-            return PrefetchStart(False, "deduped")
+            return WorkStart(False, "deduped")
         if len(self._prefetch_keys) >= self._max_prefetch:
             self._prefetch_limited_count += 1
-            return PrefetchStart(False, "limited")
+            return WorkStart(False, "limited")
         graph = self._work_graph()
         if graph is not None and work_item is not None:
             visible_backlog = bool(getattr(graph, "visible_backlog", 0))
@@ -425,7 +425,7 @@ class EvaluationController(Qt.QtCore.QObject):
             )
             if not decision.admitted:
                 self._note_prefetch_blocked(decision.reason)
-                return PrefetchStart(False, decision.reason)
+                return WorkStart(False, decision.reason)
         self._prefetch_keys.add(key)
         if work_item is not None:
             self._prefetch_work_items[key] = work_item
@@ -436,7 +436,7 @@ class EvaluationController(Qt.QtCore.QObject):
             self._handlers[key] = (on_done, None, None, None)
         self.pool.start(runnable)
         self._ensure_polling()
-        return PrefetchStart(True)
+        return WorkStart(True)
 
     def cancel_prefetch(self) -> None:
         for key in tuple(self._prefetch_keys):

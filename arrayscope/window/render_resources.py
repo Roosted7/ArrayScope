@@ -25,9 +25,6 @@ class RenderResourceMixin:
     def _visible_render_budget_bytes(self) -> int:
         return int(self._memory_policy().visible_render_budget_bytes)
 
-    def _montage_canvas_budget_bytes(self) -> int:
-        return int(self._memory_policy().montage_canvas_budget_bytes)
-
     def _single_montage_tile_budget_bytes(self) -> int:
         return int(self._memory_policy().single_tile_budget_bytes)
 

@@ -96,8 +96,6 @@ class OperationActionsMixin:
     def _enable_live_profile_for_axis(self, dim):
         self.set_profile_axes_exactly((dim,))
         self.widgets["buttons"]["display"]["live_profile"].setChecked(True)
-        if hasattr(self, "display_toolbar"):
-            self.display_toolbar.set_current(live_profile=True)
 
     def _set_live_profile_for_axis_from_menu(self, dim, enabled):
         if enabled:
@@ -488,7 +486,6 @@ class OperationActionsMixin:
         return None
 
     def _confirm_expensive_full_array(self, action, shape, dtype):
-        del shape, dtype
         enabled_operations = tuple(self.document.enabled_operations)
         cost = estimate_pipeline_cost(
             self.base_data.shape,
@@ -517,7 +514,8 @@ class OperationActionsMixin:
             worker_text = f" FFT workers: {workers_choice.value}."
         message = (
             f"{action} will evaluate the full derived array "
-            f"(output {format_bytes(output_bytes)}, estimated peak {format_bytes(peak_bytes)}{expensive_text})."
+            f"(shape {tuple(int(size) for size in shape)}, dtype {np.dtype(dtype)}, "
+            f"output {format_bytes(output_bytes)}, estimated peak {format_bytes(peak_bytes)}{expensive_text})."
             f"{worker_text} Continue?"
         )
         result = QtWidgets.QMessageBox.warning(

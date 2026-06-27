@@ -11,7 +11,7 @@ run exact, preview, or refuse.
 
 Visible image rendering now goes through a pure render decision model. The decision can use cache, run an
 exact async render, run exact evaluation in cooperative chunks, show a marked degraded preview, or refuse
-while keeping the previous image visible. Degraded previews are not written to the exact image cache.
+while keeping the previous image visible. Degraded previews are not written to the exact display cache.
 
 Chunked visible evaluation splits work across independent output/display axes, including operation-backed
 pipelines with reductions or transforms when a non-blocking image axis is available. It checks

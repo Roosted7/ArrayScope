@@ -77,7 +77,7 @@ Costs and tradeoffs:
 
 ## Alternatives considered
 
-### Keep all normal images raster-only
+### Keep normal images as one untiled object
 
 This avoids normal-image viewport retargeting, but it fails the performance target for very large planes
 and out-of-core sources. It also preserves a semantic split between one-tile montage and one large normal
@@ -86,8 +86,8 @@ image.
 ### Make every image an atlas tile immediately
 
 This simplifies one backend path, but it is not optimal for small images and creates unnecessary atlas,
-quad, and residency overhead. Raster and tiled storage should remain interchangeable physical strategies
-behind one semantic presentation model.
+quad, and residency overhead. The semantic model stays tiled while each backend can choose a compact
+physical representation for one-tile scenes.
 
 ### Build committed scenes from requested deltas
 

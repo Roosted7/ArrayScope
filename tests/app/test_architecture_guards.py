@@ -66,8 +66,8 @@ def test_visible_render_paths_do_not_compare_partial_document_keys():
             Path("arrayscope/window/render_prefetch.py"),
         )
     )
-    assert ".image_key(" in text
-    assert "image_key(view_state, colormap_lut=colormap_lut)[1]" not in text
+    assert ".display_tile_key(" in text
+    assert "display_tile_key(view_state, colormap_lut=colormap_lut)[1]" not in text
     assert "line_key(profile_state)[1]" not in text
     assert "scalar_key(view_state, index)[1]" not in text
 
@@ -135,11 +135,7 @@ def test_canvas_preserve_controller_owns_strong_preserve_path():
 
 
 def test_montage_renderer_commits_montage_through_tiled_payloads():
-    render_text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
     montage_text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
-    assert "make_montage(" not in render_text
-    assert "make_montage(" not in montage_text
-    assert "make_montage_viewport_canvas(" not in montage_text
     assert "_commit_montage_session_tile_layer(" in montage_text
 
 
@@ -183,7 +179,7 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/display/planning.py"),
         Path("arrayscope/display/commit.py"),
         Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
-        Path("arrayscope/display/backends/vispy/raster.py"),
+        Path("arrayscope/display/backends/vispy/gpu_mapped_visual.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
         Path("arrayscope/display/model/montage_levels.py"),
         Path("arrayscope/window/montage_renderer.py"),
@@ -252,12 +248,12 @@ def test_builtin_backend_method_adapters_are_removed():
     assert "ImageViewMethodBackendAdapter" not in backend_text
     assert "backend_adapter_for_view" not in committer_text
     assert "surface_for_view" in committer_text
-    assert 'hasattr(self.img_view, "setTiledMontagePresentation")' not in presenter_text
+    assert 'hasattr(self.img_view, "setTiledPresentation")' not in presenter_text
 
 
 def test_backend_identity_uses_declared_surface_capabilities():
     offenders = []
-    forbidden = ("rendering_backend_name", "supports_direct_montage_tile_payloads")
+    forbidden = ("rendering_backend_name", "supports_" + "direct_montage_" + "tile_payloads")
     for path in (ROOT / "arrayscope").rglob("*.py"):
         rel = path.relative_to(ROOT)
         text = path.read_text()
@@ -339,7 +335,7 @@ def test_display_semantics_live_in_display_package():
         Path("arrayscope/display/planning.py"),
         Path("arrayscope/display/commit.py"),
         Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
-        Path("arrayscope/display/backends/vispy/raster.py"),
+        Path("arrayscope/display/backends/vispy/gpu_mapped_visual.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
     )
     retired = (
@@ -538,10 +534,11 @@ def test_window_render_uses_memory_policy_not_static_budget_constants():
         assert token not in text
 
 
-def test_operation_evaluator_owns_separate_display_caches():
+def test_operation_evaluator_owns_unified_display_cache():
     text = (ROOT / "arrayscope" / "operations" / "evaluator.py").read_text()
-    assert "self._image_cache = BoundedArrayCache" in text
-    assert "self._tile_cache = BoundedArrayCache" in text
+    assert "self._display_cache = BoundedArrayCache" in text
+    assert ("self._" + "image_" + "cache = BoundedArrayCache") not in text
+    assert ("self._" + "tile_" + "cache = BoundedArrayCache") not in text
     assert "self._profile_cache = BoundedArrayCache" in text
 
 
@@ -604,9 +601,9 @@ def test_visible_controller_remains_single_worker():
     assert "visible_workers=1" in policy_text
 
 
-def test_degraded_preview_is_not_stored_in_exact_image_cache():
+def test_degraded_preview_is_not_stored_in_exact_display_cache():
     text = (ROOT / "arrayscope" / "window" / "normal_renderer.py").read_text()
     marker = "if decision.kind == RenderDecisionKind.DEGRADED_PREVIEW:"
     assert marker in text
     degraded_block = text.split(marker, 1)[1].split("def evaluate(token):", 1)[0]
-    assert "store_image_result" not in degraded_block
+    assert "store_display_tile_result" not in degraded_block

@@ -32,8 +32,8 @@ arrays. It is intentionally not full Phase 5 session or synchronized-window supp
 debounces ROI statistics/histogram refreshes and moves large ROI computations to the window's ROI
 evaluation controller. ROI rows update immediately, but statistics and histograms commit only when
 the debounced ROI/image request key is still current. Montage ROI statistics use demand tile-region
-requests rather than sampling only the current visible canvas. The demand path checks committed canvas
-coverage, rendered tile cache, region cache, stage-cache reuse through the evaluator, and exact tile
+requests rather than sampling only current visible tile coverage. The demand path checks committed tile
+coverage, display payload cache, region cache, stage-cache reuse through the evaluator, and exact tile
 evaluation without mutating the visible montage session. Rectangle ROIs request intersected
 subregions; line, polyline, and freehand/polygon ROIs stream per-tile values through the same Qt-free
 ROI helpers. The dock keeps previous results visible and shows a local updating indicator while demand

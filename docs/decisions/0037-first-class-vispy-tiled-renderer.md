@@ -26,8 +26,7 @@ sustained tiled rendering: normal image tiles, large-plane tiles, and montage ti
 through the revisioned tiled-delta path rather than a composed placeholder canvas.
 
 `DisplayTilePayload` carries tile number, source index, image, optional histogram/intensity data, and
-a stable source identity. Committed frames own a `FrameValueSource`: canvas frames use
-`CanvasValueSource`, and tiled frames use `TiledValueSource`. Hover/status and demand tile-region
+a stable source identity. Committed frames own a `TiledValueSource`; hover/status and demand tile-region
 reads go through the committed value source, never through placeholder pixels.
 
 VisPy tiled montage rendering uses `arrayscope.display.backends.vispy.tiles`:
@@ -55,9 +54,8 @@ VisPy tiled montage rendering uses `arrayscope.display.backends.vispy.tiles`:
   visible residency, and admitted visible commit fan-in;
 - PyQtGraph remains the interaction, histogram, ROI, profile, HUD, and context-menu owner.
 
-PyQtGraph tile-layer fallback continues to exist, but it consumes the same typed payload contract
-behind `present_tiled`; the public direct tile-layer widget API and raster tile-layer commit mode have
-been removed.
+PyQtGraph consumes the same typed payload contract behind `present_tiled`; the public direct tile-layer
+widget API has been removed.
 
 ## Consequences
 

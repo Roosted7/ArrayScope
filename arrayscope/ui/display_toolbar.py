@@ -84,7 +84,7 @@ class DisplayToolbar(QtWidgets.QToolBar):
             return
         self.channelChanged.emit(self.channel_combo.currentData())
 
-    def set_current(self, *, channel=None, scale=None, aspect=None, window_mode=None, live_profile=None):
+    def set_current(self, *, channel=None, scale=None, aspect=None, window_mode=None):
         for combo, value in (
             (self.channel_combo, channel),
             (self.scale_combo, scale),
@@ -102,5 +102,4 @@ class DisplayToolbar(QtWidgets.QToolBar):
             try:
                 self.fit_action.setChecked(aspect == "fit")
             finally:
-                del blocker
-        del live_profile
+                blocker.unblock()

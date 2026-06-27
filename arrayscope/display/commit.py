@@ -6,10 +6,10 @@ from dataclasses import replace
 
 import numpy as np
 
-from arrayscope.display.backends import RasterCommitMode, surface_for_view
+from arrayscope.display.backends import surface_for_view
 from arrayscope.display.scene import DisplayScene, display_scene_for_presentation
-from arrayscope.display.model.frame import CanvasValueSource, CommittedDisplayFrame, DisplayFrameKey, TileCommitReport, TiledValueSource
-from arrayscope.display.model.commit import DisplayPresentation, DisplayRasterPresentation, DisplayTiledPresentation
+from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayFrameKey, TileCommitReport, TiledValueSource
+from arrayscope.display.model.commit import DisplayTiledPresentation
 
 
 class DisplayCommitter:
@@ -19,31 +19,7 @@ class DisplayCommitter:
         self.last_tile_commit_report: TileCommitReport | None = None
         self.last_tile_committed_state = None
 
-    def commit_full(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
-        self.last_tile_commit_report = None
-        self.last_tile_committed_state = None
-        presentation = self._require_raster(presentation, "full")
-        self._validate_presentation(presentation)
-        scene = display_scene_for_presentation(presentation)
-        self.surface.present_raster(presentation, mode=RasterCommitMode.FULL)
-        self.surface.set_profile_bounds(scene.bounds)
-        return self._frame_for(presentation, key, scene)
-
-    def commit_fast(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
-        self.last_tile_commit_report = None
-        self.last_tile_committed_state = None
-        presentation = self._require_raster(presentation, "fast")
-        self._validate_presentation(presentation)
-        if self.surface.current_raster_shape() != tuple(presentation.geometry.display_shape):
-            raise ValueError("fast display commit requires an existing image with the same display shape")
-        scene = display_scene_for_presentation(presentation)
-        self.surface.present_raster(presentation, mode=RasterCommitMode.FAST)
-        self.surface.set_profile_bounds(scene.bounds)
-        return self._frame_for(presentation, key, scene)
-
-    def commit_tile_layer(self, presentation: DisplayPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
-        if not isinstance(presentation, DisplayTiledPresentation):
-            raise TypeError("tile-layer commits require a tiled presentation")
+    def commit_tile_layer(self, presentation: DisplayTiledPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
         self._validate_presentation(presentation)
         self.commit_tiled_delta(presentation)
         committed_state = self.last_tile_committed_state or presentation.base_tile_state
@@ -63,11 +39,7 @@ class DisplayCommitter:
         self._validate_presentation(presentation)
         report = self.surface.present_tiled(presentation)
         if not isinstance(report, TileCommitReport):
-            report = TileCommitReport(
-                presented_tiles=presentation.tile_state.active_payloads(presentation.tile_delta),
-                committed_upserts=presentation.tile_delta.upserts,
-                removed_tiles=presentation.tile_delta.removals,
-            )
+            raise TypeError("tiled presentation commits require a TileCommitReport acknowledgement")
         tile_state = presentation.base_tile_state.acknowledge_delta(presentation.tile_delta, report)
         self.last_tile_commit_report = report
         self.last_tile_committed_state = tile_state
@@ -75,25 +47,16 @@ class DisplayCommitter:
 
     def _frame_for(
         self,
-        presentation: DisplayPresentation,
+        presentation: DisplayTiledPresentation,
         key: DisplayFrameKey,
         scene: DisplayScene,
         *,
         tile_state=None,
     ) -> CommittedDisplayFrame:
-        if isinstance(presentation, DisplayTiledPresentation):
-            data = None
-            histogram_data = None
-            committed_state = tile_state or presentation.tile_state
-            value_source = TiledValueSource(committed_state.payloads)
-        else:
-            data = presentation.data
-            histogram_data = presentation.histogram_data
-            value_source = CanvasValueSource(
-                data=presentation.data,
-                histogram_data=presentation.histogram_data,
-                geometry=presentation.geometry,
-            )
+        data = None
+        histogram_data = None
+        committed_state = tile_state or presentation.tile_state
+        value_source = TiledValueSource(committed_state.payloads)
         return CommittedDisplayFrame(
             data=data,
             histogram_data=histogram_data,
@@ -105,31 +68,17 @@ class DisplayCommitter:
             scene=scene,
         )
 
-    def _validate_presentation(self, presentation: DisplayPresentation) -> None:
-        if isinstance(presentation, DisplayTiledPresentation):
-            for tile_number, payload in dict(presentation.tile_state.payloads).items():
-                if int(tile_number) != int(payload.tile_number):
-                    raise ValueError("tile payload key must match tile_number")
-            for tile_number, payload in dict(presentation.tile_delta.upserts).items():
-                if int(tile_number) != int(payload.tile_number):
-                    raise ValueError("tile delta upsert key must match tile_number")
-            if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
-                raise ValueError("histogram plot data must not be empty")
-        else:
-            shape = tuple(np.shape(presentation.data)[:2])
-            if shape != tuple(presentation.geometry.display_shape):
-                raise ValueError(f"display data shape {shape} does not match geometry {presentation.geometry.display_shape}")
-            if presentation.histogram_data is not None and tuple(np.shape(presentation.histogram_data)[:2]) != shape:
-                raise ValueError("histogram data shape does not match display data shape")
-            if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
-                raise ValueError("histogram plot data must not be empty")
+    def _validate_presentation(self, presentation: DisplayTiledPresentation) -> None:
+        for tile_number, payload in dict(presentation.tile_state.payloads).items():
+            if int(tile_number) != int(payload.tile_number):
+                raise ValueError("tile payload key must match tile_number")
+        for tile_number, payload in dict(presentation.tile_delta.upserts).items():
+            if int(tile_number) != int(payload.tile_number):
+                raise ValueError("tile delta upsert key must match tile_number")
+        if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
+            raise ValueError("histogram plot data must not be empty")
         self._validate_bounds("levels", presentation.levels)
         self._validate_bounds("histogram range", presentation.histogram_range)
-
-    def _require_raster(self, presentation: DisplayPresentation, commit_kind: str) -> DisplayRasterPresentation:
-        if not isinstance(presentation, DisplayRasterPresentation):
-            raise TypeError(f"{commit_kind} display commit requires a raster presentation")
-        return presentation
 
     def _validate_bounds(self, label: str, bounds) -> None:
         try:

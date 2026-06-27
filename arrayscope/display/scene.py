@@ -1,14 +1,8 @@
-"""Backend-neutral display scene and region model.
-
-A normal image is a one-region scene. A montage is a multi-region scene.
-Whether those regions are stored as one raster, individual PyQtGraph items, or
-GPU atlas pages is a backend strategy and must not change coordinate, profile,
-or inspection semantics.
-"""
+"""Backend-neutral tiled display scene and region model."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 from typing import Mapping
@@ -19,11 +13,6 @@ from arrayscope.display.geometry import DisplayGeometry
 class DisplayLayout(Enum):
     SINGLE = "single"
     MONTAGE = "montage"
-
-
-class DisplayStorage(Enum):
-    RASTER = "raster"
-    TILED = "tiled"
 
 
 @dataclass(frozen=True)
@@ -54,32 +43,41 @@ class DisplayScene:
 
     geometry: DisplayGeometry
     layout: DisplayLayout
-    storage: DisplayStorage
     regions: tuple[DisplayRegion, ...]
     bounds: tuple[float, float, float, float]
+    _region_by_id: dict[int, DisplayRegion] = field(init=False, repr=False, compare=False)
+    _active_region_ids: tuple[int, ...] = field(init=False, repr=False)
+    _planned_region_ids: tuple[int, ...] = field(init=False, repr=False)
+    _near_region_ids: tuple[int, ...] = field(init=False, repr=False)
+    _resident_region_ids: tuple[int, ...] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        regions = tuple(self.regions)
+        object.__setattr__(self, "regions", regions)
+        object.__setattr__(self, "_region_by_id", {int(region.region_id): region for region in regions})
+        object.__setattr__(self, "_active_region_ids", tuple(region.region_id for region in regions if region.active))
+        object.__setattr__(self, "_planned_region_ids", tuple(region.region_id for region in regions if region.planned))
+        object.__setattr__(self, "_near_region_ids", tuple(region.region_id for region in regions if region.near))
+        object.__setattr__(self, "_resident_region_ids", tuple(region.region_id for region in regions if region.resident))
 
     @property
     def active_region_ids(self) -> tuple[int, ...]:
-        return tuple(region.region_id for region in self.regions if region.active)
+        return self._active_region_ids
 
     @property
     def planned_region_ids(self) -> tuple[int, ...]:
-        return tuple(region.region_id for region in self.regions if region.planned)
+        return self._planned_region_ids
 
     @property
     def near_region_ids(self) -> tuple[int, ...]:
-        return tuple(region.region_id for region in self.regions if region.near)
+        return self._near_region_ids
 
     @property
     def resident_region_ids(self) -> tuple[int, ...]:
-        return tuple(region.region_id for region in self.regions if region.resident)
+        return self._resident_region_ids
 
     def region(self, region_id: int) -> DisplayRegion | None:
-        region_id = int(region_id)
-        for region in self.regions:
-            if region.region_id == region_id:
-                return region
-        return None
+        return self._region_by_id.get(int(region_id))
 
 
 def display_scene_for_presentation(presentation) -> DisplayScene:
@@ -87,11 +85,11 @@ def display_scene_for_presentation(presentation) -> DisplayScene:
 
     tile_state = getattr(presentation, "tile_state", None)
     tile_delta = getattr(presentation, "tile_delta", None)
-    storage = DisplayStorage.TILED if tile_state is not None and tile_delta is not None else DisplayStorage.RASTER
+    if tile_state is None or tile_delta is None:
+        raise TypeError("display scenes require tiled presentation state")
     payloads = getattr(tile_state, "payloads", {}) if tile_state is not None else {}
     return display_scene_for_geometry(
         presentation.geometry,
-        storage=storage,
         payloads=payloads,
         tile_delta=tile_delta,
         frame_plan=getattr(presentation, "frame_plan", None),
@@ -101,21 +99,15 @@ def display_scene_for_presentation(presentation) -> DisplayScene:
 def display_scene_for_geometry(
     geometry: DisplayGeometry,
     *,
-    storage: DisplayStorage | str = DisplayStorage.RASTER,
     payloads: Mapping[int, object] | None = None,
     tile_delta=None,
     frame_plan=None,
 ) -> DisplayScene:
     """Build scene state without depending on a concrete presentation class."""
 
-    storage = storage if isinstance(storage, DisplayStorage) else DisplayStorage(str(storage))
-    if frame_plan is not None and (
-        storage is DisplayStorage.TILED
-        or getattr(getattr(frame_plan, "layout", None), "value", getattr(frame_plan, "layout", None)) == DisplayLayout.SINGLE.value
-    ):
+    if frame_plan is not None:
         return _scene_for_frame_plan(
             geometry,
-            storage=storage,
             payloads=payloads,
             tile_delta=tile_delta,
             frame_plan=frame_plan,
@@ -127,13 +119,12 @@ def display_scene_for_geometry(
         return DisplayScene(
             geometry=geometry,
             layout=DisplayLayout.SINGLE,
-            storage=storage,
             regions=(
                 DisplayRegion(
                     region_id=0,
                     source_index=None,
                     bounds=bounds,
-                    resident=True,
+                    resident=0 in {int(key) for key in dict(payloads or {})},
                 ),
             ),
             bounds=bounds,
@@ -151,7 +142,6 @@ def display_scene_for_geometry(
     payload_keys = _unique_int_tuple(dict(payloads or {}))
     return _montage_scene_cached(
         geometry,
-        storage,
         payload_keys,
         tuple(geometry.montage_tile_states or ()),
         active,
@@ -163,7 +153,6 @@ def display_scene_for_geometry(
 @lru_cache(maxsize=128)
 def _montage_scene_cached(
     geometry: DisplayGeometry,
-    storage: DisplayStorage,
     payload_keys: tuple[int, ...],
     states: tuple[object, ...],
     active: tuple[int, ...],
@@ -201,7 +190,7 @@ def _montage_scene_cached(
                 active=tile_number in active_set,
                 planned=tile_number in planned_set,
                 near=tile_number in near_set,
-                resident=tile_number in payload_key_set or (storage is DisplayStorage.RASTER and status == "loaded"),
+                resident=tile_number in payload_key_set,
             )
         )
 
@@ -210,7 +199,6 @@ def _montage_scene_cached(
     return DisplayScene(
         geometry=geometry,
         layout=DisplayLayout.MONTAGE,
-        storage=storage,
         regions=tuple(regions),
         bounds=_shape_bounds(full_height, full_width),
     )
@@ -219,7 +207,6 @@ def _montage_scene_cached(
 def _scene_for_frame_plan(
     geometry: DisplayGeometry,
     *,
-    storage: DisplayStorage,
     payloads: Mapping[int, object] | None,
     tile_delta,
     frame_plan,
@@ -240,16 +227,14 @@ def _scene_for_frame_plan(
         planned,
         near,
         tuple(sorted(payload_key_set)),
-        storage,
     )
     if not regions:
-        return display_scene_for_geometry(geometry, storage=storage, payloads=payloads, frame_plan=None)
+        return display_scene_for_geometry(geometry, payloads=payloads, frame_plan=None)
     layout = getattr(frame_plan, "layout", None)
     layout = layout if isinstance(layout, DisplayLayout) else DisplayLayout(str(getattr(layout, "value", layout or "single")))
     return DisplayScene(
         geometry=geometry,
         layout=layout,
-        storage=storage,
         regions=regions,
         bounds=_shape_bounds(*geometry.display_shape),
     )
@@ -257,15 +242,13 @@ def _scene_for_frame_plan(
 
 @lru_cache(maxsize=256)
 def _frame_plan_regions_cached(
-    frame_plan_id: int,
+    _frame_plan_id: int,
     frame_regions: tuple[tuple[int, int | None, tuple[float, float, float, float]], ...],
     active: tuple[int, ...],
     planned: tuple[int, ...],
     near: tuple[int, ...],
     resident: tuple[int, ...],
-    storage: DisplayStorage,
 ) -> tuple[DisplayRegion, ...]:
-    del frame_plan_id
     active_ids = set(int(value) for value in active)
     planned_ids = set(int(value) for value in planned)
     near_ids = set(int(value) for value in near)
@@ -279,7 +262,7 @@ def _frame_plan_regions_cached(
             active=int(region_id) in active_ids,
             planned=int(region_id) in planned_ids,
             near=int(region_id) in near_ids,
-            resident=int(region_id) in resident_ids or storage is DisplayStorage.RASTER,
+            resident=int(region_id) in resident_ids,
         )
         for region_id, source_index, bounds in frame_regions
     )
@@ -302,7 +285,6 @@ __all__ = [
     "DisplayLayout",
     "DisplayRegion",
     "DisplayScene",
-    "DisplayStorage",
     "display_scene_for_geometry",
     "display_scene_for_presentation",
 ]

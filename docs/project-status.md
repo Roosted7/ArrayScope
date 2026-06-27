@@ -13,7 +13,7 @@
 - Backend-independent display frames, geometry, value sources, level sources, and tile payloads.
 - Progressive montage with retained last-valid pixels, stale-result guards, viewport/hover priority,
   and persistent backend items/residency.
-- Production PyQtGraph fallback plus an experimental VisPy raster/tiled path with shader-based levels.
+- Production PyQtGraph plus experimental VisPy tiled surfaces with shader-based levels.
 - Profiles, hover, ROI statistics/histograms, and demand evaluation outside the visible viewport.
 - Deterministic rendering counters, callback observations, diagnostics snapshots, JSONL traces, and a
   substantial pure/Qt test suite.

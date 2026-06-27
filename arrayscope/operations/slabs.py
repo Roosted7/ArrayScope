@@ -107,8 +107,7 @@ def evaluate_slab(document: ArrayDocument, request: SlabRequest, *, stage_cache=
     )
 
 
-def evaluate_slab_from_plan(document: ArrayDocument, request: SlabRequest, plan: SlabPlan, *, stage_cache=None, document_key=None, cancellation_token=None, evaluation_context=None):
-    del request
+def evaluate_slab_from_plan(document: ArrayDocument, _request: SlabRequest, plan: SlabPlan, *, stage_cache=None, document_key=None, cancellation_token=None, evaluation_context=None):
     region_plan = plan.region_plan
     _check_cancelled(cancellation_token)
     if stage_cache is not None and region_plan.cache_candidates:
@@ -183,8 +182,7 @@ def materialize_stage_candidate(document: ArrayDocument, region_plan, candidate:
     return value
 
 
-def evaluate_slab_from_stage(document: ArrayDocument, request: SlabRequest, plan: SlabPlan, stage_value: StageValue, candidate: StageCacheCandidate, *, cancellation_token=None, evaluation_context=None):
-    del request
+def evaluate_slab_from_stage(document: ArrayDocument, _request: SlabRequest, plan: SlabPlan, stage_value: StageValue, candidate: StageCacheCandidate, *, cancellation_token=None, evaluation_context=None):
     region_plan = plan.region_plan
     data = stage_value.data
     current_region = stage_value.region

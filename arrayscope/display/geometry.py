@@ -40,26 +40,12 @@ class MontageGeometry:
     def tile_width(self) -> int:
         return self.tile_shape[1]
 
-    def __getitem__(self, key):
-        # Compatibility for older smoke tests and callers while render.py is
-        # migrated away from dict-shaped montage geometry.
-        aliases = {
-            "indices": self.indices,
-            "tile_height": self.tile_height,
-            "tile_width": self.tile_width,
-            "columns": self.columns,
-            "rows": self.rows,
-            "gap": self.gap,
-        }
-        return aliases[key]
-
-
 @dataclass(frozen=True)
 class ViewPointMapping:
     view_x: int
     view_y: int
-    canvas_x: int
-    canvas_y: int
+    display_x: int
+    display_y: int
     local_x: int
     local_y: int
     array_index: tuple[int, ...]
@@ -106,14 +92,14 @@ class DisplayGeometry:
         object.__setattr__(self, "montage_origin_y", int(self.montage_origin_y))
         object.__setattr__(self, "montage_tile_states", tuple(self.montage_tile_states or ()))
 
-    def view_point_to_canvas_point(self, x: float, y: float) -> tuple[int, int] | None:
+    def view_point_to_display_point(self, x: float, y: float) -> tuple[int, int] | None:
         view_x = int(math.floor(float(x)))
         view_y = int(math.floor(float(y)))
-        canvas_x = view_x - (self.montage_origin_x if self.montage is not None else 0)
-        canvas_y = view_y - (self.montage_origin_y if self.montage is not None else 0)
-        if canvas_x < 0 or canvas_y < 0 or canvas_x >= self.display_shape[1] or canvas_y >= self.display_shape[0]:
+        display_x = view_x - (self.montage_origin_x if self.montage is not None else 0)
+        display_y = view_y - (self.montage_origin_y if self.montage is not None else 0)
+        if display_x < 0 or display_y < 0 or display_x >= self.display_shape[1] or display_y >= self.display_shape[0]:
             return None
-        return canvas_x, canvas_y
+        return display_x, display_y
 
     def view_point_to_tile_point(self, x: float, y: float, *, require_loaded: bool = True) -> MontagePointStatus | None:
         if self.montage is None:
@@ -163,12 +149,16 @@ class DisplayGeometry:
             return None
         view_x = int(math.floor(float(x)))
         view_y = int(math.floor(float(y)))
-        canvas_x = view_x - (self.montage_origin_x if self.montage is not None else 0)
-        canvas_y = view_y - (self.montage_origin_y if self.montage is not None else 0)
+        display_x = view_x - (self.montage_origin_x if self.montage is not None else 0)
+        display_y = view_y - (self.montage_origin_y if self.montage is not None else 0)
+        if display_x < 0 or display_y < 0 or display_x >= self.display_shape[1] or display_y >= self.display_shape[0]:
+            return None
         local_x = view_x
         local_y = view_y
         tile_number = None
         montage_index = None
+        axis_x = local_x
+        axis_y = local_y
         view_state = self.view_state
 
         if self.montage is not None:
@@ -180,10 +170,14 @@ class DisplayGeometry:
             local_x = status.local_x
             local_y = status.local_y
             if view_state.montage_axis is None:
-                return None
-            view_state = view_state.with_slice(view_state.montage_axis, montage_index)
+                axis_x = display_x
+                axis_y = display_y
+            else:
+                axis_x = local_x
+                axis_y = local_y
+                view_state = view_state.with_slice(view_state.montage_axis, montage_index)
 
-        axis_index = self._local_point_to_axis_indices(view_state, local_x, local_y)
+        axis_index = self._local_point_to_axis_indices(view_state, axis_x, axis_y)
         if axis_index is None:
             return None
         primary_value, secondary_value = axis_index
@@ -194,8 +188,8 @@ class DisplayGeometry:
         return ViewPointMapping(
             view_x=view_x,
             view_y=view_y,
-            canvas_x=canvas_x,
-            canvas_y=canvas_y,
+            display_x=display_x,
+            display_y=display_y,
             local_x=local_x,
             local_y=local_y,
             array_index=tuple(index),

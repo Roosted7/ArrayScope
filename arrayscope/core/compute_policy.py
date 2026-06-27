@@ -15,6 +15,7 @@ class ComputeLane(Enum):
     VISIBLE = "visible"
     STAGE = "stage"
     MONTAGE_TILE = "montage_tile"
+    HISTOGRAM = "histogram"
     PREFETCH = "prefetch"
     PROFILE = "profile"
     ROI = "roi"
@@ -26,6 +27,7 @@ class ComputePolicy:
     visible_workers: int
     montage_tile_workers: int
     stage_workers: int
+    histogram_workers: int
     prefetch_workers: int
     profile_workers: int
     roi_workers: int
@@ -33,6 +35,7 @@ class ComputePolicy:
     fft_workers_visible: int
     fft_workers_stage: int
     fft_workers_tile: int
+    fft_workers_histogram: int
     fft_workers_prefetch: int
     fft_workers_profile: int
     fft_workers_roi: int
@@ -43,6 +46,7 @@ class ComputePolicy:
             ComputeLane.VISIBLE: self.visible_workers,
             ComputeLane.STAGE: self.stage_workers,
             ComputeLane.MONTAGE_TILE: self.montage_tile_workers,
+            ComputeLane.HISTOGRAM: self.histogram_workers,
             ComputeLane.PREFETCH: self.prefetch_workers,
             ComputeLane.PROFILE: self.profile_workers,
             ComputeLane.ROI: self.roi_workers,
@@ -54,6 +58,7 @@ class ComputePolicy:
             ComputeLane.VISIBLE: self.fft_workers_visible,
             ComputeLane.STAGE: self.fft_workers_stage,
             ComputeLane.MONTAGE_TILE: self.fft_workers_tile,
+            ComputeLane.HISTOGRAM: self.fft_workers_histogram,
             ComputeLane.PREFETCH: self.fft_workers_prefetch,
             ComputeLane.PROFILE: self.fft_workers_profile,
             ComputeLane.ROI: self.fft_workers_roi,
@@ -95,6 +100,7 @@ def compute_policy_from_settings(settings, *, cpu_count: int | None = None) -> C
         visible_workers=1,
         montage_tile_workers=max(1, tile_workers),
         stage_workers=1,
+        histogram_workers=1,
         prefetch_workers=1,
         profile_workers=1,
         roi_workers=1,
@@ -102,6 +108,7 @@ def compute_policy_from_settings(settings, *, cpu_count: int | None = None) -> C
         fft_workers_visible=visible_fft,
         fft_workers_stage=stage_fft,
         fft_workers_tile=tile_fft,
+        fft_workers_histogram=1,
         fft_workers_prefetch=1,
         fft_workers_profile=1,
         fft_workers_roi=1,
