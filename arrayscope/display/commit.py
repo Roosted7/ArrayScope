@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from arrayscope.display.backends import RasterCommitMode, surface_for_view
@@ -43,10 +45,12 @@ class DisplayCommitter:
         if not isinstance(presentation, DisplayTiledPresentation):
             raise TypeError("tile-layer commits require a tiled presentation")
         self._validate_presentation(presentation)
-        scene = display_scene_for_presentation(presentation)
         self.commit_tiled_delta(presentation)
+        committed_state = self.last_tile_committed_state or presentation.base_tile_state
+        committed_presentation = replace(presentation, tile_state=committed_state)
+        scene = display_scene_for_presentation(committed_presentation)
         self.surface.set_profile_bounds(scene.bounds)
-        return self._frame_for(presentation, key, scene, tile_state=self.last_tile_committed_state)
+        return self._frame_for(committed_presentation, key, scene, tile_state=committed_state)
 
     def commit_tiled_delta(self, presentation: DisplayTiledPresentation) -> TileCommitReport:
         """Present a tiled delta and return the backend acknowledgement.
