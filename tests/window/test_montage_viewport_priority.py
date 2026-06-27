@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -123,7 +125,7 @@ def test_effective_montage_columns_reflows_explicit_in_stretch_fit():
     assert columns != 2
 
 
-def test_montage_viewport_intent_promotes_near_auto_to_auto_owned():
+def test_montage_viewport_intent_observes_without_promoting():
     from arrayscope.window.montage_viewport import montage_viewport_intent
 
     class Controller:
@@ -143,9 +145,9 @@ def test_montage_viewport_intent_promotes_near_auto_to_auto_owned():
     controller = Controller()
     intent = montage_viewport_intent(controller, ((100.0, 120.0), (100.0, 120.0)))
 
-    assert intent.auto_active
-    assert intent.auto_like
-    assert controller.promoted
+    assert not intent.auto_active
+    assert not intent.auto_like
+    assert not controller.promoted
 
 
 def test_remap_montage_view_range_keeps_tile_anchor_and_manual_zoom_scale():
@@ -167,7 +169,7 @@ def test_remap_montage_view_range_keeps_tile_anchor_and_manual_zoom_scale():
     )
 
     assert remapped is not None
-    assert remapped[0][1] - remapped[0][0] == 40.0
+    assert remapped[0][1] - remapped[0][0] == 20.0
     assert remapped[1][1] - remapped[1][0] == 20.0
     next_tile = next_plan.tiles[4]
     remapped_center = (
@@ -177,7 +179,7 @@ def test_remap_montage_view_range_keeps_tile_anchor_and_manual_zoom_scale():
     assert remapped_center == (next_tile.x0 + 4.0, next_tile.y0 + 6.0)
 
 
-def test_remap_montage_view_range_preserves_manual_spans_without_layout_change():
+def test_remap_montage_view_range_preserves_screen_zoom_without_layout_change():
     from arrayscope.window.montage_viewport import remap_montage_view_range
 
     plan = _plan_with_columns(3)
@@ -193,10 +195,10 @@ def test_remap_montage_view_range_preserves_manual_spans_without_layout_change()
     )
 
     assert remapped is not None
-    assert remapped == ((5.0, 25.0), (0.0, 10.0))
+    assert remapped == ((10.0, 20.0), (0.0, 10.0))
 
 
-def test_remap_montage_view_range_preserves_spans_when_width_shrinks():
+def test_remap_montage_view_range_shrink_shows_less_content_at_same_zoom():
     from arrayscope.window.montage_viewport import remap_montage_view_range
 
     plan = _plan_with_columns(3)
@@ -211,11 +213,11 @@ def test_remap_montage_view_range_preserves_spans_when_width_shrinks():
     )
 
     assert remapped is not None
-    assert remapped[0][1] - remapped[0][0] == 20.0
+    assert remapped[0][1] - remapped[0][0] == 10.0
     assert remapped[1][1] - remapped[1][0] == 40.0
 
 
-def test_remap_montage_view_range_preserves_spans_when_width_grows():
+def test_remap_montage_view_range_growth_shows_more_content_at_same_zoom():
     from arrayscope.window.montage_viewport import remap_montage_view_range
 
     plan = _plan_with_columns(3)
@@ -230,11 +232,35 @@ def test_remap_montage_view_range_preserves_spans_when_width_grows():
     )
 
     assert remapped is not None
-    assert remapped[0][1] - remapped[0][0] == 20.0
+    assert remapped[0][1] - remapped[0][0] == 40.0
     assert remapped[1][1] - remapped[1][0] == 40.0
 
 
-def test_remap_montage_view_range_does_not_drift_when_focus_is_outside_tiles():
+def test_repeated_manual_resize_preserves_units_per_viewport_pixel():
+    from arrayscope.window.montage_viewport import remap_montage_view_range
+
+    plan = _plan_with_columns(3)
+    view_range = ((5.0, 25.0), (-10.0, 30.0))
+    viewport_shape = (100, 100)
+    initial_x_units = (view_range[0][1] - view_range[0][0]) / viewport_shape[1]
+    initial_y_units = (view_range[1][1] - view_range[1][0]) / viewport_shape[0]
+
+    for next_shape in ((100, 90), (100, 80), (120, 80), (120, 140)):
+        view_range = remap_montage_view_range(
+            plan,
+            plan,
+            view_range,
+            viewport_shape,
+            next_shape,
+            focus=((view_range[0][0] + view_range[0][1]) * 0.5, (view_range[1][0] + view_range[1][1]) * 0.5),
+        )
+        viewport_shape = next_shape
+        assert view_range is not None
+        assert (view_range[0][1] - view_range[0][0]) / viewport_shape[1] == pytest.approx(initial_x_units)
+        assert (view_range[1][1] - view_range[1][0]) / viewport_shape[0] == pytest.approx(initial_y_units)
+
+
+def test_remap_montage_view_range_anchors_to_nearest_tile_when_focus_is_outside_tiles():
     from arrayscope.window.montage_viewport import remap_montage_view_range
 
     two_columns = _plan_with_columns(2)
@@ -254,7 +280,7 @@ def test_remap_montage_view_range_does_not_drift_when_focus_is_outside_tiles():
             (600, 900),
             focus=focus,
         )
-        assert next_range is None
+        assert next_range is not None
         next_range = remap_montage_view_range(
             three_columns,
             two_columns,
@@ -263,7 +289,7 @@ def test_remap_montage_view_range_does_not_drift_when_focus_is_outside_tiles():
             (600, 800),
             focus=focus,
         )
-        assert next_range is None
+        assert next_range is not None
 
 
 def test_remap_montage_view_range_does_not_follow_scrolled_source_window():
@@ -288,7 +314,7 @@ def test_remap_montage_view_range_does_not_follow_scrolled_source_window():
     assert remapped is None
 
 
-def test_retarget_montage_viewport_plan_preserves_manual_resize_range():
+def test_retarget_montage_viewport_plan_preserves_manual_screen_zoom_on_resize():
     from arrayscope.window.montage_viewport import MontageViewportPlan, retarget_montage_viewport_plan
 
     plan = _plan_with_columns(3)
@@ -312,8 +338,8 @@ def test_retarget_montage_viewport_plan_preserves_manual_resize_range():
         focus=(15.0, 10.0),
     )
 
-    assert reflow.viewport_plan.view_range == current_range
-    assert reflow.view_range_to_apply is None
+    assert reflow.viewport_plan.view_range == ((10.0, 20.0), (-10.0, 30.0))
+    assert reflow.view_range_to_apply == ((10.0, 20.0), (-10.0, 30.0))
     assert reflow.last_auto_view_range is None
 
 
@@ -345,7 +371,7 @@ def test_retarget_montage_viewport_plan_preserves_manual_layout_zoom():
     )
 
     view_range = reflow.viewport_plan.view_range
-    assert view_range[0][1] - view_range[0][0] == 120.0
+    assert view_range[0][1] - view_range[0][0] == 60.0
     assert view_range[1][1] - view_range[1][0] == 80.0
     assert reflow.last_auto_view_range is None
 
@@ -678,7 +704,7 @@ def test_montage_autofit_allows_empty_auto_like_view():
     from arrayscope.window.montage_renderer import _should_auto_fit_montage_view
 
     class AutoController:
-        def promote_near_auto(self, _view_range):
+        def is_auto_active(self):
             return True
 
     assert _should_auto_fit_montage_view(
@@ -772,16 +798,11 @@ def test_retarget_layout_reflow_refits_when_near_previous_auto_range():
     class AutoController:
         def __init__(self):
             self.last_auto_view_range = None
-            self.promoted = False
 
         def is_fit_locked(self):
             return False
 
         def is_auto_active(self):
-            return self.promoted
-
-        def promote_near_auto(self, _view_range):
-            self.promoted = True
             return True
 
     previous = _plan_with_columns(2)
@@ -821,16 +842,11 @@ def test_retarget_layout_reflow_refits_only_when_near_next_auto_range():
     class AutoController:
         def __init__(self):
             self.last_auto_view_range = None
-            self.promoted = False
 
         def is_fit_locked(self):
             return False
 
         def is_auto_active(self):
-            return self.promoted
-
-        def promote_near_auto(self, _view_range):
-            self.promoted = True
             return True
 
     previous = _plan_with_columns(2)

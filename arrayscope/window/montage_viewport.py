@@ -97,13 +97,8 @@ def montage_viewport_intent(viewport_controller, view_range) -> MontageViewportI
     if viewport_controller is None:
         return MontageViewportIntent(auto_active=True)
     fit_locked = bool(viewport_controller.is_fit_locked())
-    promote = getattr(viewport_controller, "promote_near_auto", None)
-    if callable(promote) and view_range is not None:
-        auto_active = bool(promote(view_range))
-    else:
-        auto_active = False
     auto_active_fn = getattr(viewport_controller, "is_auto_active", None)
-    auto_active = bool(auto_active or (auto_active_fn() if callable(auto_active_fn) else False))
+    auto_active = bool(auto_active_fn() if callable(auto_active_fn) else False)
     return MontageViewportIntent(
         fit_locked=fit_locked,
         auto_active=auto_active,
@@ -292,16 +287,16 @@ def remap_montage_view_range(
     previous_plan,
     next_plan,
     view_range,
-    _previous_viewport_shape,
-    _next_viewport_shape,
+    previous_viewport_shape,
+    next_viewport_shape,
     *,
     focus: tuple[float, float] | None = None,
 ) -> tuple[tuple[float, float], tuple[float, float]] | None:
     """Transfer a manual view through a montage layout change.
 
-    The same source-local point remains at the same screen fraction while the
-    current world spans are preserved.  The caller may already have applied
-    viewport resize mechanics; montage layout remap must not add another zoom.
+    The same source-local point remains at the same screen fraction.  World
+    spans scale with viewport size so the screen zoom, measured as world units
+    per viewport pixel, stays constant while resize shows more or less content.
     """
 
     try:
@@ -315,25 +310,31 @@ def remap_montage_view_range(
     span_y = abs(y1 - y0)
     if span_x <= MIN_VIEW_SPAN or span_y <= MIN_VIEW_SPAN:
         return None
-    if getattr(previous_plan, "geometry", None) == getattr(next_plan, "geometry", None):
-        return view_range
+    next_span_x, next_span_y = _resize_preserving_screen_zoom_spans(
+        span_x,
+        span_y,
+        previous_viewport_shape,
+        next_viewport_shape,
+    )
 
     focus_x, focus_y = _focus_or_center(view_range, focus)
-    anchor = _tile_local_anchor(previous_plan, view_range, (focus_x, focus_y), allow_nearest=False)
-    if anchor is None:
-        return None
-    source_index, local_x, local_y = anchor
-    next_tile = _tile_for_source(next_plan, source_index)
-    if next_tile is None:
-        return None
-
-    next_focus_x = float(next_tile.x0) + min(max(0.0, local_x), float(next_tile.width))
-    next_focus_y = float(next_tile.y0) + min(max(0.0, local_y), float(next_tile.height))
+    if getattr(previous_plan, "geometry", None) == getattr(next_plan, "geometry", None):
+        next_focus_x, next_focus_y = focus_x, focus_y
+    else:
+        anchor = _tile_local_anchor(previous_plan, view_range, (focus_x, focus_y), allow_nearest=True)
+        if anchor is None:
+            return None
+        source_index, local_x, local_y = anchor
+        next_tile = _tile_for_source(next_plan, source_index)
+        if next_tile is None:
+            return None
+        next_focus_x = float(next_tile.x0) + min(max(0.0, local_x), float(next_tile.width))
+        next_focus_y = float(next_tile.y0) + min(max(0.0, local_y), float(next_tile.height))
     fraction_x = min(1.0, max(0.0, (focus_x - min(x0, x1)) / span_x))
     fraction_y = min(1.0, max(0.0, (focus_y - min(y0, y1)) / span_y))
     return (
-        (next_focus_x - fraction_x * span_x, next_focus_x + (1.0 - fraction_x) * span_x),
-        (next_focus_y - fraction_y * span_y, next_focus_y + (1.0 - fraction_y) * span_y),
+        (next_focus_x - fraction_x * next_span_x, next_focus_x + (1.0 - fraction_x) * next_span_x),
+        (next_focus_y - fraction_y * next_span_y, next_focus_y + (1.0 - fraction_y) * next_span_y),
     )
 
 
@@ -441,6 +442,23 @@ def _normalized_view_range(view_range) -> tuple[tuple[float, float], tuple[float
 
 def _normalized_viewport_shape(viewport_shape) -> tuple[int, int]:
     return (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
+
+
+def _resize_preserving_screen_zoom_spans(
+    span_x: float,
+    span_y: float,
+    previous_viewport_shape,
+    next_viewport_shape,
+) -> tuple[float, float]:
+    try:
+        previous_height, previous_width = _normalized_viewport_shape(previous_viewport_shape)
+        next_height, next_width = _normalized_viewport_shape(next_viewport_shape)
+    except Exception:
+        return (float(span_x), float(span_y))
+    return (
+        max(MIN_VIEW_SPAN, float(span_x) * float(next_width) / float(previous_width)),
+        max(MIN_VIEW_SPAN, float(span_y) * float(next_height) / float(previous_height)),
+    )
 
 
 def _focus_or_center(view_range, focus) -> tuple[float, float]:

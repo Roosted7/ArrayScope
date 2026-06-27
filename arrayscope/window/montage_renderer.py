@@ -112,7 +112,7 @@ class MontageRenderMixin:
             very_slow_upload_ms=MONTAGE_VERY_SLOW_UPLOAD_MS,
         )
 
-    def _montage_viewport_plan(self, view_state) -> MontageViewportPlan:
+    def _montage_viewport_plan(self, view_state, *, view_range=None) -> MontageViewportPlan:
         axis = view_state.montage_axis
         if axis is None:
             raise ValueError("montage viewport planning requires an active montage axis")
@@ -120,10 +120,21 @@ class MontageRenderMixin:
         viewport_size = self.img_view.graphicsView.viewport().size()
         viewport_shape = (max(1, viewport_size.height()), max(1, viewport_size.width()))
         tile_shape = self._montage_tile_shape(view_state)
-        current_range = (
-            self._current_montage_global_view_range()
-            if getattr(self.img_view, "image", None) is not None
-            else None
+        pending_restore_range = None
+        pending_restore_columns = None
+        if view_range is None:
+            pending_restore = getattr(self, "_pending_file_session_viewport_range", None)
+            pending_restore_range = pending_restore() if callable(pending_restore) else None
+            pending_columns = getattr(self, "_pending_file_session_montage_columns", None)
+            pending_restore_columns = pending_columns() if callable(pending_columns) else None
+        current_range = view_range if view_range is not None else (
+            pending_restore_range
+            if pending_restore_range is not None
+            else (
+                self._current_montage_global_view_range()
+                if getattr(self.img_view, "image", None) is not None
+                else None
+            )
         )
         columns = self._effective_montage_columns(
             view_state,
@@ -131,6 +142,7 @@ class MontageRenderMixin:
             tile_shape=tile_shape,
             viewport_shape=viewport_shape,
             view_range=current_range,
+            restored_columns=pending_restore_columns,
         )
         plan = make_montage_plan(
             view_state,
@@ -154,11 +166,25 @@ class MontageRenderMixin:
             priority_focus=priority_focus,
         )
 
-    def _effective_montage_columns(self, view_state, *, all_indices, tile_shape, viewport_shape, view_range) -> int | None:
+    def _effective_montage_columns(
+        self,
+        view_state,
+        *,
+        all_indices,
+        tile_shape,
+        viewport_shape,
+        view_range,
+        restored_columns=None,
+    ) -> int | None:
         if not all_indices:
             return None
         viewport_controller = getattr(getattr(self, "img_view", None), "viewport_controller", None)
         requested_columns = getattr(view_state, "montage_columns", None)
+        if requested_columns is None and restored_columns is not None:
+            try:
+                requested_columns = max(1, int(restored_columns))
+            except (TypeError, ValueError):
+                requested_columns = None
         intent = montage_viewport_intent(viewport_controller, view_range)
         return effective_montage_columns(
             len(all_indices),
@@ -169,19 +195,46 @@ class MontageRenderMixin:
             auto_active=intent.auto_active,
         )
 
-    def _on_image_viewport_resized(self) -> None:
+    def _on_image_viewport_resized(self, *, previous_viewport_size=None, base_view_range=None, resize_focus=None) -> None:
         if getattr(self, "_closing", False):
             return
         if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
             return
+        locked_restore_range = getattr(self, "_file_session_restore_locked_view_range", lambda: None)()
+        if locked_restore_range is not None and not _viewport_gesture_active():
+            restore_viewport_shape = getattr(self, "_restore_file_session_viewport_shape_after_show", None)
+            if callable(restore_viewport_shape):
+                restore_viewport_shape()
+            self._set_montage_view_range(locked_restore_range)
+            self._schedule_montage_viewport_update(delay_ms=0)
+            return
+        if locked_restore_range is not None:
+            release_restore_camera = getattr(self, "_release_file_session_restore_camera_lock", None)
+            if callable(release_restore_camera):
+                release_restore_camera()
         self._montage_live_layout_reflow = True
         self._montage_viewport_update_pending = False
-        viewport_plan = self._retarget_montage_resize_camera()
+        viewport_plan = self._retarget_montage_resize_camera(
+            previous_viewport_size=_montage_viewport_shape_from_qt_size_tuple(previous_viewport_size),
+            base_view_range=base_view_range,
+            resize_focus=resize_focus,
+        )
         if viewport_plan is not None:
             self._retarget_montage_resize_payloads(viewport_plan)
         self._schedule_montage_viewport_update(delay_ms=0)
 
-    def _retarget_montage_resize_camera(self) -> MontageViewportPlan | None:
+    def _current_montage_resize_focus(self, view_range) -> tuple[float, float] | None:
+        if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
+            return None
+        return _montage_priority_focus(self, view_range)
+
+    def _retarget_montage_resize_camera(
+        self,
+        *,
+        previous_viewport_size=None,
+        base_view_range=None,
+        resize_focus=None,
+    ) -> MontageViewportPlan | None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session.session_id, session.key):
             return None
@@ -189,7 +242,7 @@ class MontageRenderMixin:
         if view_state.montage_axis is None:
             return None
         capabilities = image_view_backend_capabilities(self.img_view)
-        viewport_plan = self._montage_viewport_plan(view_state)
+        viewport_plan = self._montage_viewport_plan(view_state, view_range=base_view_range)
         colormap_lut = self._evaluation_colormap_lut(
             view_state,
             shader_display=bool(capabilities.shader_windowing),
@@ -203,7 +256,12 @@ class MontageRenderMixin:
         if session.key != expected_key:
             return None
         previous_plan = getattr(session, "plan", None)
-        viewport_plan = self._retargeted_montage_viewport_plan(session, viewport_plan)
+        viewport_plan = self._retargeted_montage_viewport_plan(
+            session,
+            viewport_plan,
+            previous_viewport_shape=previous_viewport_size,
+            focus=resize_focus,
+        )
         self._remap_montage_rois_for_layout_reflow(previous_plan, viewport_plan.plan)
         return viewport_plan
 
@@ -221,7 +279,7 @@ class MontageRenderMixin:
         view_state = self.view_state
         if view_state.montage_axis is None:
             return False
-        session.retarget_viewport(
+        _additions, presentation_changed = session.retarget_viewport(
             view_range=viewport_plan.view_range,
             viewport_shape=viewport_plan.viewport_shape,
             plan=viewport_plan.plan,
@@ -248,7 +306,15 @@ class MontageRenderMixin:
             view_range=viewport_plan.view_range,
             memory_policy=self._memory_policy() if hasattr(self, "_memory_policy") else None,
         )
+        if presentation_changed:
+            self._commit_montage_resize_presentation_retarget(session)
         return True
+
+    def _commit_montage_resize_presentation_retarget(self, session) -> None:
+        if bool(getattr(self, "_montage_presentation_commit_active", False)):
+            self._schedule_montage_presentation_commit(session, force=True)
+            return
+        self._commit_montage_session_presentation(session, force=True)
 
     def update_montage_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         for attribute in (
@@ -1471,7 +1537,14 @@ class MontageRenderMixin:
         )
         return True
 
-    def _retargeted_montage_viewport_plan(self, session, viewport_plan: MontageViewportPlan) -> MontageViewportPlan:
+    def _retargeted_montage_viewport_plan(
+        self,
+        session,
+        viewport_plan: MontageViewportPlan,
+        *,
+        previous_viewport_shape=None,
+        focus=None,
+    ) -> MontageViewportPlan:
         skip_remap = bool(getattr(self, "_skip_next_montage_viewport_remap", False))
         if skip_remap:
             self._skip_next_montage_viewport_remap = False
@@ -1479,11 +1552,11 @@ class MontageRenderMixin:
         viewport_controller = getattr(self.img_view, "viewport_controller", None)
         current_range = viewport_plan.view_range
         intent = montage_viewport_intent(viewport_controller, current_range)
-        focus = None if current_range is None else _montage_priority_focus(self, current_range)
+        focus = focus if focus is not None else (None if current_range is None else _montage_priority_focus(self, current_range))
         reflow = retarget_montage_viewport_plan(
             getattr(session, "plan", None),
             viewport_plan,
-            getattr(session, "viewport_shape", viewport_plan.viewport_shape),
+            previous_viewport_shape or getattr(session, "viewport_shape", viewport_plan.viewport_shape),
             fit_locked=intent.fit_locked,
             auto_active=intent.auto_active,
             skip_remap=skip_remap,
@@ -1494,9 +1567,10 @@ class MontageRenderMixin:
         if reflow.view_range_to_apply is not None:
             self._set_montage_view_range(reflow.view_range_to_apply)
         view_range = reflow.viewport_plan.view_range
+        priority_focus = focus if focus is not None else (None if view_range is None else _montage_priority_focus(self, view_range))
         return replace(
             reflow.viewport_plan,
-            priority_focus=None if view_range is None else _montage_priority_focus(self, view_range),
+            priority_focus=priority_focus,
         )
 
     def _remap_montage_rois_for_layout_reflow(self, previous_plan, next_plan) -> None:
@@ -2446,9 +2520,17 @@ class MontageRenderMixin:
         restore = getattr(self, "_schedule_file_session_viewport_when_ready", None)
         if callable(restore):
             restore()
+        if not bool(getattr(self, "_file_session_roi_refresh_pending", False)):
+            return
+        schedule_roi_refresh = getattr(self, "_schedule_file_session_roi_refresh", None)
+        if callable(schedule_roi_refresh):
+            schedule_roi_refresh("montage-semantic-commit")
 
     def _maybe_auto_fit_montage_tiles(self, plan_or_geometry) -> bool:
         if bool(getattr(self, "_montage_live_layout_reflow", False)):
+            return False
+        pending_restore = getattr(self, "_pending_file_session_viewport_range", None)
+        if callable(pending_restore) and pending_restore() is not None:
             return False
         plan = plan_or_geometry if hasattr(plan_or_geometry, "geometry") else None
         geometry = getattr(plan_or_geometry, "geometry", plan_or_geometry)
@@ -2951,6 +3033,16 @@ def _copy_view_range(view_range):
     )
 
 
+def _montage_viewport_shape_from_qt_size_tuple(size):
+    if size is None:
+        return None
+    try:
+        width, height = size
+        return (max(1, int(round(float(height)))), max(1, int(round(float(width)))))
+    except Exception:
+        return None
+
+
 def _montage_full_view_range(montage):
     height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(montage.gap)
     width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(montage.gap)
@@ -3018,9 +3110,6 @@ def _should_auto_fit_montage_view(
 def _viewport_controller_auto_active_for_range(viewport_controller, view_range) -> bool:
     if viewport_controller is None:
         return False
-    promote = getattr(viewport_controller, "promote_near_auto", None)
-    if callable(promote):
-        return bool(promote(view_range))
     active = getattr(viewport_controller, "is_auto_active", None)
     if callable(active) and bool(active()):
         return True

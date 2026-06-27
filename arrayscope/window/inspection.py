@@ -140,11 +140,13 @@ class InspectionWorkflowMixin:
             return
         if not self._inspection_panel_is_visible():
             self._inspection_stale = True
-            if self._roi_uses_montage_demand(selections) and self._montage_roi_values_pending():
+            if self._roi_uses_montage_demand(selections):
+                if self._montage_roi_values_pending():
+                    return
+            else:
+                stats_by_roi = self._hidden_roi_statistics(selections)
+                self._update_roi_info_overlay(stats_by_roi)
                 return
-            stats_by_roi = self._hidden_roi_statistics(selections)
-            self._update_roi_info_overlay(stats_by_roi)
-            return
         if not hasattr(self, "_roi_refresh_timer"):
             self._roi_refresh_timer = Qt.QtCore.QTimer(self)
             self._roi_refresh_timer.setSingleShot(True)
@@ -163,10 +165,11 @@ class InspectionWorkflowMixin:
         try:
             if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
                 return
-            if not self._inspection_panel_is_visible():
+            panel_visible = self._inspection_panel_is_visible()
+            if not panel_visible and not self._roi_uses_montage_demand(getattr(getattr(self, "roi_store", None), "selections", ())):
                 self._inspection_stale = True
                 return
-            self._inspection_stale = False
+            self._inspection_stale = not panel_visible
             self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections())
             selections = self.roi_store.selections
             self.inspection_dock.set_rois(selections)

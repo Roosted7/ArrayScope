@@ -62,7 +62,8 @@ class ViewportController:
 
     def note_user_range_changed(self, view_range=None):
         if self.mode not in (ViewportMode.FIT, ViewportMode.ONE_TO_ONE):
-            if view_range is not None and self.mode == ViewportMode.AUTO_UNTOUCHED and self.is_near_auto(view_range):
+            if view_range is not None and self.is_near_auto(view_range):
+                self.mode = ViewportMode.AUTO_UNTOUCHED
                 return
             self.mode = ViewportMode.USER
 
@@ -87,6 +88,9 @@ class ViewportController:
 
         rect_changed_only = previous_shape == image_shape and previous_rect != display_rect
         shape_changed = previous_shape is None or previous_shape != image_shape
+        if previous_shape is None and intent == ViewportIntent.PRESERVE and self.mode == ViewportMode.USER:
+            return
+
         if intent == ViewportIntent.RESET_FOR_NEW_SHAPE or previous_shape is None:
             if self.mode == ViewportMode.USER and previous_shape is not None:
                 _preserve_center_for_shape(view_box, image_shape, display_rect=display_rect)
@@ -169,17 +173,9 @@ class ViewportController:
         if self.mode == ViewportMode.FIT:
             _fit(view_box, display_rect=display_rect)
             return _normalize_view_range(view_box.viewRange())
-        elif self.mode == ViewportMode.AUTO_UNTOUCHED and self._current_view_is_near_auto(view_box, base_view_range=base_view_range):
+        elif self.mode == ViewportMode.AUTO_UNTOUCHED:
             self._auto_square_fit(view_box, viewport_size, display_rect=display_rect)
             return _normalize_view_range(view_box.viewRange())
-        elif self.mode == ViewportMode.AUTO_UNTOUCHED:
-            self.mode = ViewportMode.USER
-            return _preserve_screen_zoom_for_resize(
-                view_box,
-                previous_viewport_size,
-                self.last_viewport_size,
-                base_view_range=base_view_range,
-            )
         elif self.mode == ViewportMode.USER:
             return _preserve_screen_zoom_for_resize(
                 view_box,

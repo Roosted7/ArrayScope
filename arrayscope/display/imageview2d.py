@@ -84,20 +84,28 @@ class ArrayScopeGraphicsView(pg.GraphicsView):
             super().resizeEvent(event)
             return
         base_view_range = owner.view.viewRange()
+        resize_focus = None
+        focus_fn = getattr(owner.window(), "_current_montage_resize_focus", None)
+        if callable(focus_fn):
+            resize_focus = focus_fn(base_view_range)
         blocker = QtCore.QSignalBlocker(owner.view)
         try:
             super().resizeEvent(event)
-            if owner._viewport_resize_owned_by_parent():
-                owner._notify_viewport_content_resized()
-                owner._remember_accepted_view_range()
-                owner._sync_profile_marker_visibility()
-                owner._sync_backend_camera_to_view()
-                return
             previous_viewport_size = _previous_viewport_size_from_resize_event(
                 owner.graphicsView.viewport().size(),
                 event,
                 fallback=owner.viewport_controller.last_viewport_size,
             )
+            if owner._viewport_resize_owned_by_parent():
+                owner._notify_viewport_content_resized(
+                    previous_viewport_size=previous_viewport_size,
+                    base_view_range=base_view_range,
+                    resize_focus=resize_focus,
+                )
+                owner._remember_accepted_view_range()
+                owner._sync_profile_marker_visibility()
+                owner._sync_backend_camera_to_view()
+                return
             owner._apply_viewport_resize(
                 previous_viewport_size=previous_viewport_size,
                 base_view_range=base_view_range,
@@ -2215,11 +2223,14 @@ class ImageViewShell(QtWidgets.QWidget):
             self._show_fit_mode_interaction_reminder()
         return super().eventFilter(obj, event)
 
-    def _notify_viewport_content_resized(self) -> None:
+    def _notify_viewport_content_resized(self, **kwargs) -> None:
         parent = self.window()
         handler = getattr(parent, "_on_image_viewport_resized", None)
         if callable(handler):
-            handler()
+            try:
+                handler(**kwargs)
+            except TypeError:
+                handler()
 
     def _viewport_resize_owned_by_parent(self) -> bool:
         parent = self.window()

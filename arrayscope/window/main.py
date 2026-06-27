@@ -162,8 +162,10 @@ class ArrayScopeWindow(
         
         # Initialize dimension controls based on the authoritative view state.
         initial_window_size = self._file_session_restore_initial_window_size() if restored_file_view_session else None
+        initial_viewport_shape = self._file_session_restore_initial_viewport_shape() if restored_file_view_session else None
         self._restore_window_settings(
             initial_window_size=initial_window_size,
+            initial_viewport_shape=initial_viewport_shape,
             defer_progressive_docks=bool(restored_file_view_session),
         )
         if restored_file_view_session:
@@ -181,6 +183,8 @@ class ArrayScopeWindow(
             self.render(reason="initial", force_autolevel=True)
             self.show()
         if restored_file_view_session:
+            self._restore_file_session_viewport_shape_after_show()
+
             def finish_restored_file_session_viewport():
                 apply_restored_viewport = getattr(self, "_apply_file_session_viewport_when_ready", None)
                 if callable(apply_restored_viewport):

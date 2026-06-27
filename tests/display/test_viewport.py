@@ -46,6 +46,18 @@ def test_viewport_controller_fits_first_image():
     assert view.viewRange() == [[0.0, 10.0], [0.0, 8.0]]
 
 
+def test_viewport_controller_preserves_user_camera_on_first_preserve_commit():
+    controller = ViewportController(mode=ViewportMode.USER)
+    view = FakeViewBox()
+    view.setRange(xRange=(5.0, 20.0), yRange=(-3.0, 12.0), padding=0)
+
+    controller.apply_after_image(view, (8, 10), _size(100, 80), policy=ViewportPolicy.PRESERVE)
+
+    assert controller.mode == ViewportMode.USER
+    assert view.fit_count == 0
+    assert view.viewRange() == [[5.0, 20.0], [-3.0, 12.0]]
+
+
 def test_image_view_reports_montage_resize_as_parent_owned(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtWidgets
@@ -282,7 +294,7 @@ def test_user_range_change_far_from_auto_demotes_auto_mode():
     assert controller.mode == ViewportMode.USER
 
 
-def test_resize_with_stale_auto_mode_preserves_far_from_auto_view():
+def test_auto_resize_refits_even_if_current_range_is_far_from_previous_auto():
     controller = ViewportController()
     view = FakeViewBox()
     controller.apply_after_image(view, (10, 10), _size(100, 100), policy=ViewportPolicy.PRESERVE)
@@ -290,8 +302,8 @@ def test_resize_with_stale_auto_mode_preserves_far_from_auto_view():
 
     controller.resize(view, (10, 10), _size(200, 100), display_rect=(0.0, 0.0, 10.0, 10.0))
 
-    assert controller.mode == ViewportMode.USER
-    assert view.viewRange() == [[90.0, 130.0], [200.0, 220.0]]
+    assert controller.mode == ViewportMode.AUTO_UNTOUCHED
+    assert view.viewRange() == [[-5.0, 15.0], [0.0, 10.0]]
 
 
 def test_user_resize_shrink_shows_less_content_at_same_screen_zoom():

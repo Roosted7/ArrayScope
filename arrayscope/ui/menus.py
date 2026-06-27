@@ -473,9 +473,16 @@ class WindowMenuMixin:
         else:
             show_status_message(self, f"Verified {len(result)} icons")
 
-    def _restore_window_settings(self, *, initial_window_size=None, defer_progressive_docks: bool = False):
+    def _restore_window_settings(
+        self,
+        *,
+        initial_window_size=None,
+        initial_viewport_shape=None,
+        defer_progressive_docks: bool = False,
+    ):
         self.layout_manager.restore_window_settings(
             initial_window_size=initial_window_size,
+            initial_viewport_shape=initial_viewport_shape,
             defer_progressive_docks=defer_progressive_docks,
         )
 

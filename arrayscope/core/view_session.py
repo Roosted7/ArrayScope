@@ -29,6 +29,7 @@ class ViewportSession:
     mode: str
     view_range: tuple[tuple[float, float], tuple[float, float]] | None
     viewport_shape: tuple[int, int] | None = None
+    montage_columns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,7 @@ def viewport_to_mapping(viewport: ViewportSession) -> dict[str, object]:
         "mode": str(viewport.mode),
         "view_range": None if viewport.view_range is None else [list(axis) for axis in viewport.view_range],
         "viewport_shape": None if viewport.viewport_shape is None else [int(value) for value in viewport.viewport_shape],
+        "montage_columns": None if viewport.montage_columns is None else int(viewport.montage_columns),
     }
 
 
@@ -186,7 +188,14 @@ def viewport_from_mapping(mapping) -> ViewportSession:
             raise ValueError("viewport.viewport_shape must be [height, width]")
         normalized_shape = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
     mode = str(mapping.get("mode", ViewportMode.AUTO_UNTOUCHED.value))
-    return ViewportSession(mode=mode, view_range=normalized, viewport_shape=normalized_shape)
+    montage_columns = mapping.get("montage_columns")
+    normalized_columns = None if montage_columns is None else max(1, int(montage_columns))
+    return ViewportSession(
+        mode=mode,
+        view_range=normalized,
+        viewport_shape=normalized_shape,
+        montage_columns=normalized_columns,
+    )
 
 
 def window_size_from_mapping(value) -> tuple[int, int] | None:

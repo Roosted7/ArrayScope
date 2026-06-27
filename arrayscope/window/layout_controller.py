@@ -27,7 +27,13 @@ class WindowLayoutManager:
         self._dock_visibility_generations = {}
         self.canvas_preserver = CanvasPreserveController(self)
 
-    def restore_window_settings(self, *, initial_window_size=None, defer_progressive_docks: bool = False):
+    def restore_window_settings(
+        self,
+        *,
+        initial_window_size=None,
+        initial_viewport_shape=None,
+        defer_progressive_docks: bool = False,
+    ):
         win = self.window
         geometry = win._settings.value("geometry")
         if geometry is not None:
@@ -37,10 +43,12 @@ class WindowLayoutManager:
             win.restoreState(state)
         self._hide_managed_docks_after_state_restore()
         self._reset_session_dock_visibility_preferences()
-        if initial_window_size is None:
-            self._restore_saved_base_window_size()
-        else:
+        if initial_window_size is not None:
             self.resize_to_dockless_window_size(initial_window_size)
+        elif initial_viewport_shape is not None:
+            self.resize_to_dockless_viewport_shape(initial_viewport_shape)
+        else:
+            self._restore_saved_base_window_size()
         if not win.profile_dock.isVisible() and win.data.ndim == 1:
             self.set_managed_dock_visible(win.profile_dock, True, reason="restore-one-dimensional", preserve_canvas=False)
         if not defer_progressive_docks:
@@ -235,6 +243,10 @@ class WindowLayoutManager:
             transition_name="show-docked" if visible else "hide-docked",
         )
         self.schedule_view_geometry_refresh()
+        restore_viewport_shape = getattr(win, "_restore_file_session_viewport_shape_after_show", None)
+        locked_restore_range = getattr(win, "_file_session_restore_locked_view_range", lambda: None)
+        if callable(restore_viewport_shape) and callable(locked_restore_range) and locked_restore_range() is not None:
+            Qt.QtCore.QTimer.singleShot(0, restore_viewport_shape)
 
     def _window_alive(self) -> bool:
         win = self.window
@@ -428,19 +440,80 @@ class WindowLayoutManager:
         win = self.window
         if win.isMaximized() or win.isFullScreen():
             return False
+        self.canvas_preserver.cancel()
         try:
             target_width = max(1, int(size[0]))
             target_height = max(1, int(size[1]))
         except Exception:
             return False
+        width_delta, height_delta = self._visible_docked_panel_deltas()
         minimum = win.minimumSize()
-        new_width = max(int(minimum.width()), int(target_width))
-        new_height = max(int(minimum.height()), int(target_height))
+        new_width = max(int(minimum.width()), int(target_width) + int(width_delta))
+        new_height = max(int(minimum.height()), int(target_height) + int(height_delta))
         if new_width == win.width() and new_height == win.height():
             return False
         win.resize(new_width, new_height)
         self.refresh_view_geometry()
         return True
+
+    def _visible_docked_panel_deltas(self) -> tuple[int, int]:
+        width_delta = 0
+        height_delta = 0
+        separator = self._dock_separator_extent()
+        for dock in self._managed_docks():
+            if dock is None or not dock.isVisible():
+                continue
+            panel_manager = getattr(self.window, "panel_manager", None)
+            panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+            if panel is not None and panel.location != PanelLocation.DOCKED:
+                continue
+            area = self._dock_area_for_transition(dock)
+            if self._is_horizontal_dock_area(area):
+                width_delta += max(0, int(dock.width())) + separator
+            else:
+                height_delta += max(0, int(dock.height())) + separator
+        return width_delta, height_delta
+
+    def resize_to_dockless_viewport_shape(self, viewport_shape) -> bool:
+        win = self.window
+        if win.isMaximized() or win.isFullScreen():
+            return False
+        self.canvas_preserver.cancel()
+        try:
+            target_height = max(1, int(viewport_shape[0]))
+            target_width = max(1, int(viewport_shape[1]))
+            viewport = win.img_view.graphicsView.viewport()
+            current = viewport.size()
+        except Exception:
+            return False
+        dx = target_width - max(1, int(current.width()))
+        dy = target_height - max(1, int(current.height()))
+        if abs(dx) <= 1 and abs(dy) <= 1:
+            return False
+        minimum = win.minimumSize()
+        new_width = max(int(minimum.width()), int(win.width()) + int(dx))
+        new_height = max(int(minimum.height()), int(win.height()) + int(dy))
+        if new_width == win.width() and new_height == win.height():
+            return False
+        win.resize(new_width, new_height)
+        self.refresh_view_geometry()
+        return True
+
+    def dockless_window_size_for_viewport_shape(self, viewport_shape):
+        try:
+            target_height = max(1, int(viewport_shape[0]))
+            target_width = max(1, int(viewport_shape[1]))
+            viewport = self.window.img_view.graphicsView.viewport()
+            current = viewport.size()
+        except Exception:
+            return None
+        base = self._window_size_excluding_docked_panels()
+        if base is None or not base.isValid() or base.isEmpty():
+            base = Qt.QtCore.QSize(self.window.size())
+        return Qt.QtCore.QSize(
+            max(1, int(base.width()) + target_width - max(1, int(current.width()))),
+            max(1, int(base.height()) + target_height - max(1, int(current.height()))),
+        )
 
     def _dockless_minimum_window_size(self):
         minimum = Qt.QtCore.QSize(320, 240)

@@ -1,4 +1,5 @@
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,6 +13,43 @@ from tests.ui.helpers import (
     view_action as _view_action,
     wait_for_panel_preserve as _wait_for_panel_preserve,
 )
+
+
+def test_hidden_montage_roi_stats_use_semantic_demand_not_presented_payloads(monkeypatch):
+    from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
+    from arrayscope.core.roi_store import RoiStore
+    from arrayscope.window.inspection import InspectionWorkflowMixin
+    import arrayscope.window.inspection as inspection
+
+    class FakeTimer:
+        started = 0
+
+        def __init__(self, _parent):
+            self.timeout = SimpleNamespace(connect=lambda _callback: None)
+
+        def setSingleShot(self, _value):
+            pass
+
+        def setInterval(self, _value):
+            pass
+
+        def start(self):
+            type(self).started += 1
+
+    selection = RoiSelection("roi-1", "ROI 1", RoiGeometry(RoiKind.RECTANGLE, rect=(50.0, 50.0, 4.0, 4.0)))
+    win = InspectionWorkflowMixin()
+    win.roi_store = RoiStore(selections=(selection,))
+    win.img_view = SimpleNamespace(roiSelections=lambda: (selection,))
+    win.inspection_dock = SimpleNamespace(set_rois=lambda _selections: None, isVisible=lambda: False)
+    win.display_geometry = SimpleNamespace(montage=object())
+    win._montage_roi_values_pending = lambda: False
+    win._ui_work_decision = lambda *args, **kwargs: None
+    win._hidden_roi_statistics = lambda _selections: (_ for _ in ()).throw(AssertionError("presented payloads are not authoritative"))
+    monkeypatch.setattr(inspection.Qt.QtCore, "QTimer", FakeTimer)
+
+    win._schedule_refresh_inspection_dock("file-session-restore")
+
+    assert FakeTimer.started == 1
 
 
 def test_roi_statistics_refresh_is_debounced(qtbot, monkeypatch):
@@ -292,7 +330,7 @@ def test_render_refreshes_inspection_once_on_image_commit(qtbot, monkeypatch):
         win.close()
 
 
-def test_montage_viewport_updates_do_not_recompute_same_roi_stats(qtbot, monkeypatch):
+def test_montage_viewport_updates_recompute_roi_stats_only_when_layout_changes(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -320,7 +358,8 @@ def test_montage_viewport_updates_do_not_recompute_same_roi_stats(qtbot, monkeyp
         win.update_montage_view()
         _process_events(qtbot, count=40)
 
-        assert len(calls) == 1
+        assert len(calls) == 2
+        assert calls[0][0][3].columns != calls[1][0][3].columns
     finally:
         win.close()
 

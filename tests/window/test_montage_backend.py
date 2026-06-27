@@ -30,6 +30,86 @@ def test_auto_small_scalar_montage_uses_tile_layer_when_direct_payloads_availabl
     assert "direct tiled montage payloads" in decision.reason
 
 
+def test_initial_montage_plan_uses_pending_restored_viewport_range():
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.viewport import ViewportMode
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class Window(MontageRenderMixin):
+        pass
+
+    win = Window()
+    state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, columns=None, indices=tuple(range(8)), text=":")
+    win.img_view = SimpleNamespace(
+        image=None,
+        viewport_controller=SimpleNamespace(
+            mode=ViewportMode.USER,
+            is_fit_locked=lambda: False,
+            promote_near_auto=lambda _view_range: False,
+            is_auto_active=lambda: False,
+        ),
+        graphicsView=SimpleNamespace(viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(400, 200))),
+        getView=lambda: SimpleNamespace(viewRange=lambda: ((0.0, 1.0), (0.0, 1.0))),
+        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph", direct_montage_tile_payloads=True),
+    )
+    win._pending_file_session_viewport_range = lambda: ((100.0, 120.0), (200.0, 220.0))
+    win._pending_file_session_montage_columns = lambda: 3
+
+    viewport_plan = MontageRenderMixin._montage_viewport_plan(win, state)
+
+    assert viewport_plan.view_range == ((100.0, 120.0), (200.0, 220.0))
+    assert viewport_plan.plan.columns == 3
+
+
+def test_initial_montage_plan_ignores_invalid_restored_columns():
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.viewport import ViewportMode
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    class Window(MontageRenderMixin):
+        pass
+
+    win = Window()
+    state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, columns=None, indices=tuple(range(8)), text=":")
+    win.img_view = SimpleNamespace(
+        image=None,
+        viewport_controller=SimpleNamespace(
+            mode=ViewportMode.USER,
+            is_fit_locked=lambda: False,
+            is_auto_active=lambda: False,
+        ),
+        graphicsView=SimpleNamespace(viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(400, 200))),
+        getView=lambda: SimpleNamespace(viewRange=lambda: ((0.0, 1.0), (0.0, 1.0))),
+        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph", direct_montage_tile_payloads=True),
+    )
+    win._pending_file_session_viewport_range = lambda: ((100.0, 120.0), (200.0, 220.0))
+    win._pending_file_session_montage_columns = lambda: "auto"
+
+    viewport_plan = MontageRenderMixin._montage_viewport_plan(win, state)
+
+    assert viewport_plan.view_range == ((100.0, 120.0), (200.0, 220.0))
+    assert viewport_plan.plan.columns is not None
+
+
+def test_montage_commit_reschedules_restored_roi_stats():
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+
+    calls = []
+    win = SimpleNamespace(
+        _file_session_roi_refresh_pending=True,
+        _schedule_file_session_viewport_when_ready=lambda: calls.append("viewport"),
+        _schedule_file_session_roi_refresh=lambda reason: calls.append(("roi", reason)),
+    )
+
+    MontageRenderMixin._notify_file_session_montage_committed(win)
+
+    assert calls == ["viewport", ("roi", "montage-semantic-commit")]
+
+
 def test_auto_large_scalar_montage_uses_tile_layer_when_direct_payloads_available():
     data = np.zeros((1500, 1500), dtype=np.float32)
 
@@ -267,7 +347,7 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
                 montageDisplayMode=lambda: "vispy_tile_layer",
             )
 
-        def _montage_viewport_plan(self, view_state):
+        def _montage_viewport_plan(self, view_state, *, view_range=None):
             return self._viewport_plan
 
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
@@ -364,7 +444,7 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypa
                 montageDisplayMode=lambda: "vispy_tile_layer",
             )
 
-        def _montage_viewport_plan(self, view_state):
+        def _montage_viewport_plan(self, view_state, *, view_range=None):
             return self._viewport_plan
 
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
@@ -422,6 +502,81 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypa
     assert win.tile_schedules == 1
 
 
+def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.backend_contract import ImageViewBackendCapabilities
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.operations.pipeline import ArrayDocument
+    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.montage_viewport import MontageViewportPlan
+
+    class Planner:
+        def plan(self, **_kwargs):
+            return object()
+
+    class Session:
+        session_id = 1
+        key = ("session",)
+        window_mode = "relative"
+        user_levels_override = None
+        force_auto = False
+
+        def __init__(self):
+            self.retargeted = False
+
+        def retarget_viewport(self, **_kwargs):
+            self.retargeted = True
+            return (), True
+
+    class Window(QtCore.QObject, MontageRenderMixin):
+        def __init__(self):
+            super().__init__()
+            self.view_state = ViewState.from_shape((4, 4, 4)).with_montage_axis(2, indices=tuple(range(4)), text=":")
+            self.document = ArrayDocument(np.zeros((4, 4, 4), dtype=np.float32))
+            self.img_view = SimpleNamespace(
+                rendering_capabilities=ImageViewBackendCapabilities(
+                    name="pyqtgraph",
+                    direct_montage_tile_payloads=True,
+                ),
+                montageDisplayMode=lambda: "tile_layer",
+            )
+            self._montage_session = Session()
+            self.commits = 0
+
+        def _is_current_montage_session(self, session_id, key):
+            return session_id == 1 and key == ("session",)
+
+        def _montage_frame_planner(self):
+            return Planner()
+
+        def _commit_montage_session_presentation(self, session, *, force=False):
+            assert session is self._montage_session
+            assert force is True
+            self.commits += 1
+
+        def _schedule_montage_presentation_commit(self, session, *, force=False):
+            raise AssertionError("resize geometry should commit immediately when no commit is active")
+
+    state = ViewState.from_shape((4, 4, 4)).with_montage_axis(2, indices=tuple(range(4)), text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(4, 4), columns=2)
+    viewport_plan = MontageViewportPlan(
+        axis=2,
+        all_indices=tuple(range(4)),
+        viewport_shape=(40, 80),
+        tile_shape=(4, 4),
+        plan=plan,
+        view_range=((0.0, 9.0), (0.0, 9.0)),
+        shader_display=False,
+        persistent_tile_residency=False,
+    )
+    win = Window()
+
+    assert win._retarget_montage_resize_payloads(viewport_plan) is True
+    assert win._montage_session.retargeted is True
+    assert win.commits == 1
+
+
 def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
@@ -449,7 +604,7 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
                 montageDisplayMode=lambda: "tile_layer",
             )
 
-        def _montage_viewport_plan(self, view_state):
+        def _montage_viewport_plan(self, view_state, *, view_range=None):
             return self._viewport_plan
 
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
@@ -524,7 +679,7 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
             self.scheduled = []
             self.img_view = SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
 
-        def _montage_viewport_plan(self, view_state):
+        def _montage_viewport_plan(self, view_state, *, view_range=None):
             return self._viewport_plan
 
         def _is_current_montage_session(self, session_id, key):
