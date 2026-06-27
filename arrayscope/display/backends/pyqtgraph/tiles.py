@@ -156,10 +156,14 @@ class MontageTileLayer:
         tile_w = int(montage.tile_width)
         stride_x = tile_w + int(montage.gap)
         stride_y = tile_h + int(montage.gap)
+        # Legacy raster-backed montage updates do not receive a typed
+        # ``tile_payloads`` map.  The active set still comes from the semantic
+        # delta when present; dereferencing ``tile_payloads`` here made direct
+        # legacy delta calls crash before they reached the typed presentation
+        # migration path.
         active = {
             int(tile)
             for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())
-            if int(tile) in tile_payloads
         } if tile_delta is not None else set()
         states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
         dirty_set = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}

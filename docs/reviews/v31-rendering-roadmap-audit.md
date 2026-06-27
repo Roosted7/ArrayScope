@@ -230,45 +230,39 @@ def take_free_slot(self, owner: object) -> int | None:
 Expected outcome: cold atlas fill cost is bounded by the number of newly assigned tiles, not multiplied
 by the number of slots already occupied in the page. Eviction behavior is unchanged.
 
+### 3. Legacy PyQtGraph tiled delta calls no longer dereference missing payload maps
+
+The legacy raster-backed PyQtGraph montage path accepts `tile_payloads=None`, but the active-set setup
+was still testing membership in that missing map when a `tile_delta` was supplied. Direct legacy delta
+callers could therefore raise `TypeError` before reaching the newer typed presentation path.
+
+The fix makes the legacy active set come directly from `tile_delta.active_tiles` when present. The branch
+should still be deleted once all callers use `DisplayTiledPresentation`, but it no longer has a fragile
+`None` dereference.
+
 ## Bugs and risks not fixed here
 
-### 1. Legacy PyQtGraph tiled branch has a likely direct-call bug
-
-The legacy `MontageTileLayer.update_presentation()` branch accepts `tile_payloads=None`, but a delta path
-inside that branch still appears to test membership in `tile_payloads`. If a direct caller uses that legacy
-entrypoint with a delta and no payload map, it can raise a `TypeError`. The typed tiled presentation path
-appears to avoid this, so this is probably dormant, but it should either be deleted or guarded.
-
-Recommended small fix:
-
-```python
-payload_keys = set(tile_payloads or {})
-active = {int(tile) for tile in tile_delta.active_tiles if int(tile) in payload_keys}
-```
-
-Better fix: remove the legacy public branch once all callers use `DisplayTiledPresentation`.
-
-### 2. First-frame large normal image can still be too eager
+### 1. First-frame large normal image can still be too eager
 
 A tiled single-plane frame should not require full display-frame materialization before the first visible
 tiles can appear. Today the architecture supports the target shape, but region-first source reads are not
 the dominant contract yet.
 
-### 3. Scene cache keys include object identity
+### 2. Scene cache keys include object identity
 
 `_frame_plan_regions_cached()` receives `id(frame_plan)` as a cache argument. That is safe enough for
 short-lived cache invalidation, but it reduces reuse across equivalent plans. This is not urgent, because
 the region signature is also present and scene construction is not the main hot path, but the cache should
 not grow around plan object churn if frame plans become frequent during normal tiled panning.
 
-### 4. Backend capability flags need to encode failure modes
+### 3. Backend capability flags need to encode failure modes
 
 `direct_montage_tile_payloads` is currently used as a capability gate for tiled storage. Hardware and
 runtime failure modes are more nuanced: max texture size, supported internal formats, allocation success,
 context loss, and shader support may change the viable strategy after startup. X5 should turn capability
 flags into measured, invalidatable backend evidence.
 
-### 5. Restore and viewport code are better, but still sensitive
+### 4. Restore and viewport code are better, but still sensitive
 
 The recent restore work is valuable, but restored camera locks, fit policy, ROI remapping, and pointer
 capture now intersect with tiled surfaces. Add manual traces specifically for: restore huge single-plane
