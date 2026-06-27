@@ -164,7 +164,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
         assert timing.tile_layer_upload_ms == 0.0
         assert timing.visible_bytes == 0
 
-        win._commit_montage_session_canvas(win._montage_session, force=True)
+        win._commit_montage_session_presentation(win._montage_session, force=True)
         timing = win.img_view.lastImageUploadTiming()
 
         assert calls == []
@@ -218,7 +218,7 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         win._montage_session.last_commit_monotonic = 0.0
 
         win.img_view.setLevels(0.5, 4.0)
-        win._flush_montage_canvas_commit()
+        win._flush_montage_presentation_commit()
         timing = win.img_view.lastImageUploadTiming()
 
         assert timing.tile_layer_items_updated == 1
@@ -242,7 +242,7 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
 
         win._montage_session.last_commit_monotonic = 0.0
         win.img_view.setLevels(*initial_levels)
-        win._flush_montage_canvas_commit()
+        win._flush_montage_presentation_commit()
         timing = win.img_view.lastImageUploadTiming()
 
         assert timing.tile_layer_items_updated == 1
@@ -290,7 +290,7 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
         win._montage_session.last_commit_monotonic = 0.0
 
         win.img_view.setLevels(0.5, 4.0)
-        win._flush_montage_canvas_commit()
+        win._flush_montage_presentation_commit()
         timing = win.img_view.lastImageUploadTiming()
 
         assert timing.tile_layer_level_updates == 1
@@ -305,9 +305,9 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
 
         win._montage_session.last_commit_monotonic = monotonic()
         before_stale = snapshot.stale_count
-        win._schedule_montage_canvas_commit(win._montage_session, force=False)
+        win._schedule_montage_presentation_commit(win._montage_session, force=False)
         win._montage_session.viewport_revision += 1
-        win._flush_montage_canvas_commit()
+        win._flush_montage_presentation_commit()
 
         snapshot = win._montage_session.level_presentation_snapshot()
         assert snapshot.stale_count < before_stale

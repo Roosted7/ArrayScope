@@ -46,6 +46,36 @@ def test_viewport_controller_fits_first_image():
     assert view.viewRange() == [[0.0, 10.0], [0.0, 8.0]]
 
 
+def test_image_view_reports_montage_resize_as_parent_owned(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtWidgets
+
+    parent = QtWidgets.QMainWindow()
+    view = ImageView2D()
+    parent.setCentralWidget(view)
+    parent.view_state = SimpleNamespace(montage_axis=2)
+    parent._on_image_viewport_resized = lambda: None
+    try:
+        assert view._viewport_resize_owned_by_parent()
+    finally:
+        parent.close()
+
+
+def test_image_view_keeps_non_montage_resize_locally_owned(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtWidgets
+
+    parent = QtWidgets.QMainWindow()
+    view = ImageView2D()
+    parent.setCentralWidget(view)
+    parent.view_state = SimpleNamespace(montage_axis=None)
+    parent._on_image_viewport_resized = lambda: None
+    try:
+        assert not view._viewport_resize_owned_by_parent()
+    finally:
+        parent.close()
+
+
 def test_viewport_controller_one_to_one_uses_viewport_pixels():
     controller = ViewportController()
     view = FakeViewBox()
@@ -141,6 +171,56 @@ def test_fit_lock_tracks_origin_only_display_rect_changes():
 
     assert controller.mode == ViewportMode.FIT
     assert view.viewRange() == [[0.0, 10.0], [100.0, 108.0]]
+
+
+def test_disabling_fit_at_fit_range_returns_to_square_pixel_auto():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(
+        view,
+        (10, 20),
+        _size(100, 100),
+        policy=ViewportPolicy.PRESERVE,
+        display_rect=(0.0, 0.0, 20.0, 10.0),
+    )
+    controller.set_fit_locked(view, True)
+
+    controller.set_fit_locked(
+        view,
+        False,
+        image_shape=(10, 20),
+        viewport_size=_size(100, 100),
+        display_rect=(0.0, 0.0, 20.0, 10.0),
+    )
+
+    assert controller.mode == ViewportMode.AUTO_UNTOUCHED
+    assert view.viewRange() == [[0.0, 20.0], [-5.0, 15.0]]
+    assert controller.last_auto_view_range == ((0.0, 20.0), (-5.0, 15.0))
+
+
+def test_disabling_fit_returns_to_auto_even_after_aspect_side_effect():
+    controller = ViewportController()
+    view = FakeViewBox()
+    controller.apply_after_image(
+        view,
+        (10, 20),
+        _size(100, 100),
+        policy=ViewportPolicy.PRESERVE,
+        display_rect=(0.0, 0.0, 20.0, 10.0),
+    )
+    controller.set_fit_locked(view, True)
+    view.setRange(xRange=(0.0, 20.0), yRange=(-5.0, 15.0), padding=0)
+
+    controller.set_fit_locked(
+        view,
+        False,
+        image_shape=(10, 20),
+        viewport_size=_size(100, 100),
+        display_rect=(0.0, 0.0, 20.0, 10.0),
+    )
+
+    assert controller.mode == ViewportMode.AUTO_UNTOUCHED
+    assert view.viewRange() == [[0.0, 20.0], [-5.0, 15.0]]
 
 
 def test_auto_untouched_resize_refits_square_pixels_without_stretching():

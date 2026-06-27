@@ -23,20 +23,21 @@ def _geometry():
     return SimpleNamespace(montage=object())
 
 
-def test_auto_small_scalar_montage_uses_canvas():
+def test_auto_small_scalar_montage_uses_tile_layer_when_direct_payloads_available():
     decision = choose_montage_backend(_geometry(), np.zeros((64, 64), dtype=np.float32))
 
-    assert decision.backend == "canvas"
-    assert "small montage" in decision.reason
+    assert decision.backend == "tile_layer"
+    assert decision.expected_tile_layer is True
+    assert "direct tiled montage payloads" in decision.reason
 
 
-def test_auto_large_scalar_montage_stays_canvas_until_upload_is_slow():
+def test_auto_large_scalar_montage_uses_tile_layer_when_direct_payloads_available():
     data = np.zeros((1500, 1500), dtype=np.float32)
 
     decision = choose_montage_backend(_geometry(), data)
     slow = choose_montage_backend(_geometry(), data, previous_upload_ms=150.0, very_slow_upload_ms=100.0)
 
-    assert decision.backend == "canvas"
+    assert decision.backend == "tile_layer"
     assert slow.backend == "tile_layer"
 
 
@@ -47,7 +48,7 @@ def test_auto_large_scalar_vispy_montage_uses_tile_layer_to_avoid_full_uploads()
 
     assert decision.backend == "tile_layer"
     assert decision.expected_tile_layer is True
-    assert "prefers tiled montages" in decision.reason
+    assert "direct tiled montage payloads" in decision.reason
 
 
 def test_auto_small_scalar_vispy_montage_uses_tile_layer():
@@ -57,30 +58,30 @@ def test_auto_small_scalar_vispy_montage_uses_tile_layer():
 
     assert decision.backend == "tile_layer"
     assert decision.expected_tile_layer is True
-    assert "canvas composition" in decision.reason
+    assert "direct tiled montage payloads" in decision.reason
 
 
-def test_vispy_cannot_be_forced_through_montage_canvas():
+def test_direct_tiled_backend_cannot_be_forced_through_montage_canvas():
     data = np.zeros((64, 64), dtype=np.float32)
 
     decision = choose_montage_backend(
         _geometry(),
         data,
         setting=MontageDisplayBackendChoice.CANVAS,
-        renderer_backend="vispy",
+        renderer_backend="pyqtgraph",
     )
 
     assert decision.backend == "tile_layer"
     assert decision.expected_tile_layer is True
-    assert "does not support montage canvas" in decision.reason
-    assert "unavailable" in decision.warning
+    assert "canvas fallback is not used" in decision.reason
+    assert "direct tiled presentation" in decision.warning
 
 
-def test_canvas_capability_controls_manual_fallback_without_backend_name_checks():
+def test_canvas_capability_controls_manual_fallback_only_without_direct_payloads():
     data = np.zeros((64, 64), dtype=np.float32)
     capabilities = ImageViewBackendCapabilities(
         name="future-gpu-backend",
-        direct_montage_tile_payloads=True,
+        direct_montage_tile_payloads=False,
         prefers_tiled_montages=True,
         supports_montage_canvas=False,
     )
@@ -129,7 +130,7 @@ def test_auto_policy_uses_capability_instead_of_backend_name():
     assert "future-gpu-backend" in decision.reason
 
 
-def test_auto_prefers_tiled_capability_without_direct_payloads_stays_canvas_until_large():
+def test_auto_without_direct_payloads_stays_canvas_until_large():
     data = np.zeros((64, 64), dtype=np.float32)
     capabilities = ImageViewBackendCapabilities(
         name="future-gpu-backend",
@@ -154,7 +155,7 @@ def test_auto_preserves_vispy_tile_layer_mode():
     decision = choose_montage_backend(_geometry(), data, current_mode="vispy_tile_layer")
 
     assert decision.backend == "tile_layer"
-    assert "preserving" in decision.reason
+    assert "direct tiled montage payloads" in decision.reason
 
 
 def test_interactive_montage_commit_is_timer_coalesced(qt_app, monkeypatch):
@@ -170,7 +171,7 @@ def test_interactive_montage_commit_is_timer_coalesced(qt_app, monkeypatch):
             self.view_state = ViewState.from_shape((2, 2, 1)).with_montage_axis(2, indices=(0,), text=":")
             self._commits = 0
 
-        def _commit_montage_session_canvas(self, session, *, force=False):
+        def _commit_montage_session_presentation(self, session, *, force=False):
             self._commits += 1
 
     win = Window()
@@ -202,7 +203,7 @@ def test_interactive_montage_commit_is_timer_coalesced(qt_app, monkeypatch):
     win._montage_session = session
     win._viewport_interaction_active = True
 
-    win._schedule_montage_canvas_commit(session, force=True)
+    win._schedule_montage_presentation_commit(session, force=True)
 
     assert win._commits == 0
     assert session.final_commit_pending is True
@@ -311,7 +312,7 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
             self.resolved_batches.append(tuple(int(tile.montage_index) for tile in batch))
             return (), batch
 
-        def _schedule_montage_canvas_commit(self, session, *, force=False):
+        def _schedule_montage_presentation_commit(self, session, *, force=False):
             self.commits += 1
 
         def _schedule_montage_tiles(self, session):
@@ -406,7 +407,7 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app):
         def _schedule_montage_tiles(self, session):
             self.tile_schedules += 1
 
-        def _schedule_montage_canvas_commit(self, session, *, force=False):
+        def _schedule_montage_presentation_commit(self, session, *, force=False):
             pass
 
     document = ArrayDocument(np.zeros((2, 2, 4), dtype=np.float32))
@@ -490,7 +491,7 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
         def _schedule_montage_tiles(self, session):
             self.tile_schedules += 1
 
-        def _schedule_montage_canvas_commit(self, session, *, force=False):
+        def _schedule_montage_presentation_commit(self, session, *, force=False):
             self.commits += 1
 
     document = ArrayDocument(np.zeros((2, 2, 4), dtype=np.float32))
@@ -875,8 +876,9 @@ def test_forced_canvas_warns_for_large_rgb_montage():
 
     decision = choose_montage_backend(_geometry(), data, setting=MontageDisplayBackendChoice.CANVAS)
 
-    assert decision.backend == "canvas"
-    assert "manual" in decision.warning
+    assert decision.backend == "tile_layer"
+    assert decision.expected_tile_layer is True
+    assert "direct tiled presentation" in decision.warning
 
 
 def test_forced_tile_layer_wins():
@@ -972,7 +974,7 @@ def test_ready_display_commit_refreshes_stale_commit_token_at_source(qt_app):
         def _is_current_montage_session(self, session_id, key):
             return True
 
-        def _flush_montage_canvas_commit(self):
+        def _flush_montage_presentation_commit(self):
             return None
 
     session = SimpleNamespace(

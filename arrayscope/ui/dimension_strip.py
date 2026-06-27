@@ -13,6 +13,9 @@ from arrayscope.core.slice_selection import (
 from arrayscope.ui.icons import set_button_icon
 
 
+_QT_WIDGET_MAX_SIZE = 16_777_215
+
+
 class _SliceSelectionValidator(QtGui.QValidator):
     def validate(self, text, pos):
         state = self.State.Acceptable if selection_text_is_allowed(text) else self.State.Invalid
@@ -259,10 +262,10 @@ class DimensionStrip(QtWidgets.QWidget):
         if not visible:
             visible = self.chips
         parent = self.parentWidget()
-        available_width = max(1, parent.width() if parent is not None else self.width())
+        parent_width = 0 if parent is None else parent.contentsRect().width()
+        available_width = max(1, parent_width or self.contentsRect().width() or self.width())
         chip_width = 242
         columns = max(1, available_width // chip_width)
-        columns = max(3, columns)
         return min(max(1, len(visible)), columns)
 
     def _relayout(self, columns=None):
@@ -275,8 +278,8 @@ class DimensionStrip(QtWidgets.QWidget):
         if columns == self._columns and self.layout().count() == len(self.chips):
             return
         self._columns = columns
-        self.setMaximumWidth(columns * 242)
-        self.setMinimumWidth(min(max(1, len(visible)), 3) * 220)
+        self.setMaximumWidth(max(220, columns * 242))
+        self.setMinimumWidth(min(max(1, columns), len(visible)) * 220)
         layout = self.layout()
         for chip in self.chips:
             layout.removeWidget(chip)
@@ -286,6 +289,8 @@ class DimensionStrip(QtWidgets.QWidget):
             layout.addWidget(chip, row, col, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         for col in range(columns):
             layout.setColumnStretch(col, 0)
+        layout.invalidate()
+        self.updateGeometry()
 
 
 def _shift_slice_text(text, delta, axis_size):

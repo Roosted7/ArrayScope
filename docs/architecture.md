@@ -81,6 +81,10 @@ meaning, and backend adapters own concrete textures/items/visuals only.
   provide native event paths that apply it to the canonical viewport range.
 - `display.viewport` owns fit/preserve/reset/1:1 policy and recoverability constraints.
 - Managed panels are coordinated by `window.layout_controller`; widgets do not become state authorities because they happen to be visible.
+- File-session restore is a transaction. Layout consumes only the saved dockless window size before
+  first show; viewport range is applied only after the first committed scene/plan; panel visibility
+  is restored as intent for the managed-panel controller. See
+  [ADR 0043](decisions/0043-file-session-restore-boundaries.md).
 
 ## Authoritative identities
 

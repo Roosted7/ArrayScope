@@ -3111,41 +3111,160 @@ def test_adaptive_histogram_auto_level_refresh_updates_display_levels(qt_app):
         view.close()
 
 
-def test_histogram_double_click_requests_auto_window(qt_app):
+def test_histogram_native_double_click_between_limits_requests_auto_window(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
-    from pyqtgraph.Qt import QtCore
+    from pyqtgraph.Qt import QtCore, QtTest
 
-    class _DoubleClick:
-        def __init__(self, scene_pos):
-            self._scene_pos = scene_pos
+    view = ImageView2D()
+    try:
+        view.resize(420, 280)
+        view.show()
+        qt_app.processEvents()
+        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        qt_app.processEvents()
+        calls = []
+        view.autoWindowRequested.connect(lambda: calls.append(True))
+        scene_pos = view.histogram.item.vb.mapViewToScene(QtCore.QPointF(0.0, 5.0))
+        graphics_view = view.histogram.item.vb.scene().views()[0]
+        viewport_pos = graphics_view.mapFromScene(scene_pos)
+
+        QtTest.QTest.mouseDClick(graphics_view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=viewport_pos)
+        qt_app.processEvents()
+
+        assert calls == [True]
+    finally:
+        view.close()
+
+
+def test_histogram_release_pair_between_limits_requests_auto_window(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtCore, QtTest
+
+    view = ImageView2D()
+
+    class _ReleaseEvent:
+        def __init__(self, global_pos):
+            self._global_pos = QtCore.QPointF(global_pos)
             self.accepted = False
+
+        def type(self):
+            return QtCore.QEvent.Type.MouseButtonRelease
 
         def button(self):
             return QtCore.Qt.MouseButton.LeftButton
 
-        def double(self):
-            return True
-
-        def isAccepted(self):
-            return self.accepted
-
-        def scenePos(self):
-            return self._scene_pos
+        def globalPosition(self):
+            return self._global_pos
 
         def accept(self):
             self.accepted = True
 
+        def isAccepted(self):
+            return self.accepted
+
+    try:
+        view.resize(420, 280)
+        view.show()
+        qt_app.processEvents()
+        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        qt_app.processEvents()
+        calls = []
+        view.autoWindowRequested.connect(lambda: calls.append(True))
+
+        first = _ReleaseEvent(QtCore.QPointF(100.0, 200.0))
+        assert not view._histogram_display_controller._handle_native_histogram_double_click(
+            view.histogram, first
+        )
+        assert calls == []
+
+        QtTest.QTest.qWait(30)
+        second = _ReleaseEvent(QtCore.QPointF(100.0, 200.0))
+        assert view._histogram_display_controller._handle_native_histogram_double_click(
+            view.histogram, second
+        )
+        qt_app.processEvents()
+
+        assert second.accepted
+        assert calls == [True]
+    finally:
+        view.close()
+
+
+def test_histogram_span_edit_waits_for_double_click_window(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtCore, QtTest, QtWidgets
+
     view = ImageView2D()
     try:
         view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        controller = view._histogram_display_controller
+        scene_pos = view.histogram.item.vb.mapViewToScene(QtCore.QPointF(0.0, 5.0))
+
+        controller._schedule_span_edit(scene_pos)
+
+        assert controller.active_popup() is None
+
+        controller.request_auto_window()
+        QtTest.QTest.qWait(QtWidgets.QApplication.doubleClickInterval() + 20)
+
+        assert controller.active_popup() is None
+    finally:
+        view.close()
+
+
+def test_histogram_native_double_click_in_lut_area_requests_auto_window(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtCore, QtTest
+
+    view = ImageView2D()
+    try:
+        view.resize(420, 280)
+        view.show()
+        qt_app.processEvents()
+        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        qt_app.processEvents()
         calls = []
         view.autoWindowRequested.connect(lambda: calls.append(True))
-        scene_pos = view.histogram.item.vb.mapViewToScene(QtCore.QPointF(0.0, 12.0))
-        event = _DoubleClick(scene_pos)
+        graphics_view = view.histogram.item.vb.scene().views()[0]
+        pos = graphics_view.viewport().rect().center()
 
-        view._histogram_display_controller._on_scene_mouse_clicked(event)
+        QtTest.QTest.mouseDClick(graphics_view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=pos)
+        qt_app.processEvents()
 
-        assert event.accepted
+        assert calls == [True]
+    finally:
+        view.close()
+
+
+def test_histogram_viewport_double_click_filter_requests_auto_window(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    view = ImageView2D()
+    try:
+        view.resize(420, 280)
+        view.show()
+        qt_app.processEvents()
+        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        qt_app.processEvents()
+        calls = []
+        view.autoWindowRequested.connect(lambda: calls.append(True))
+        viewport = view.histogram.viewport()
+        pos = QtCore.QPointF(viewport.rect().center())
+        event = QtGui.QMouseEvent(
+            QtCore.QEvent.Type.MouseButtonDblClick,
+            pos,
+            pos,
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+
+        handled = qt_app.sendEvent(viewport, event)
+        qt_app.processEvents()
+
+        assert handled
+        assert event.isAccepted()
         assert calls == [True]
     finally:
         view.close()

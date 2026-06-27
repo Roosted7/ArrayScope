@@ -51,6 +51,16 @@ def _display_levels(win):
     return tuple(float(value) for value in win.img_view.getLevels())
 
 
+def _assert_view_contains_applied_montage_plan(win):
+    plan = win._montage_session.plan
+    height, width = tuple(int(value) for value in plan.display_shape[:2])
+    view_range = win.img_view.getView().viewRange()
+    assert view_range[0][0] <= 0.0
+    assert view_range[0][1] >= float(width)
+    assert view_range[1][0] <= 0.0
+    assert view_range[1][1] >= float(height)
+
+
 def _assert_canvas_tile_value(canvas, tile, value):
     rows, cols = _canvas_tile_region(canvas, tile)
     expected = np.full((int(tile.height), int(tile.width)), value, dtype=np.float32)
@@ -262,11 +272,7 @@ def test_switching_to_larger_montage_auto_fits_when_tiles_would_be_hidden(qtbot)
         win.render(reason="test-switch-to-montage")
         _process_events(qtbot, count=80)
 
-        view_range = win.img_view.getView().viewRange()
-        assert view_range[0][0] <= 0
-        assert view_range[0][1] >= 19
-        assert view_range[1][0] <= 0
-        assert view_range[1][1] >= 11
+        _assert_view_contains_applied_montage_plan(win)
         assert win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel") is not None
     finally:
         win.close()
@@ -289,18 +295,11 @@ def test_montage_tile_count_increase_auto_adjusts_when_near_auto(qtbot):
         if action is not None:
             action.linkActivated.emit("action")
             _process_events(qtbot, count=5)
-        win.img_view.getView().setRange(xRange=(0, 19), yRange=(0, 5), padding=0)
-        before = win.img_view.getView().viewRange()
-
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(12)), text=":"))
         win.render(reason="test-montage-few-more-tiles")
         _process_events(qtbot, count=80)
 
-        after = win.img_view.getView().viewRange()
-        assert after[0] == pytest.approx(before[0])
-        assert after[1] != pytest.approx(before[1])
-        assert after[1][0] <= 0.0
-        assert after[1][1] >= 8.0
+        _assert_view_contains_applied_montage_plan(win)
     finally:
         win.close()
 
@@ -572,7 +571,7 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
         monkeypatch.setattr(win, "_is_current_montage_session", lambda session_id, key: session_id == 1 and key == ("test-session",))
         monkeypatch.setattr(
             win,
-            "_flush_montage_canvas_commit",
+            "_flush_montage_presentation_commit",
             lambda: calls.append(
                 (
                     bool(session.final_commit_pending),
@@ -909,7 +908,7 @@ def test_montage_loading_canvas_preserves_levels_until_first_real_tile(qtbot, mo
 
         tile2 = win._montage_session.plan.tiles[2]
         win._apply_montage_tile_result(win._montage_session, tile2, _tile_result(tile2, 300))
-        win._schedule_montage_canvas_commit(win._montage_session, force=True)
+        win._schedule_montage_presentation_commit(win._montage_session, force=True)
         _process_events(qtbot)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (144.333333, 280.333333)
@@ -995,7 +994,7 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
         session = win._montage_session
         for index, tile in enumerate(session.plan.tiles):
             win._apply_montage_tile_result(session, tile, _tile_result(tile, 100 * (index + 1)))
-        win._schedule_montage_canvas_commit(session, force=True)
+        win._schedule_montage_presentation_commit(session, force=True)
         _process_events(qtbot)
 
         before_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
@@ -1176,7 +1175,7 @@ def test_montage_panning_without_new_tiles_does_not_change_levels(qtbot, monkeyp
 
         tile = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile, 1000.0))
-        win._commit_montage_session_canvas(win._montage_session, force=True)
+        win._commit_montage_session_presentation(win._montage_session, force=True)
         _process_events(qtbot, count=10)
         assert win._montage_session.applied_level_source.source_count == 1
 

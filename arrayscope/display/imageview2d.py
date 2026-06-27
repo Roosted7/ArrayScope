@@ -87,6 +87,12 @@ class ArrayScopeGraphicsView(pg.GraphicsView):
         blocker = QtCore.QSignalBlocker(owner.view)
         try:
             super().resizeEvent(event)
+            if owner._viewport_resize_owned_by_parent():
+                owner._notify_viewport_content_resized()
+                owner._remember_accepted_view_range()
+                owner._sync_profile_marker_visibility()
+                owner._sync_backend_camera_to_view()
+                return
             previous_viewport_size = _previous_viewport_size_from_resize_event(
                 owner.graphicsView.viewport().size(),
                 event,
@@ -1710,7 +1716,13 @@ class ImageViewShell(QtWidgets.QWidget):
         if self.image is not None:
             self._viewport_applying = True
             try:
-                self.viewport_controller.set_fit_locked(self.view, bool(enabled))
+                self.viewport_controller.set_fit_locked(
+                    self.view,
+                    bool(enabled),
+                    image_shape=self.image.shape[:2],
+                    viewport_size=self.graphicsView.viewport().size(),
+                    display_rect=self._current_image_viewport_rect(),
+                )
             finally:
                 self._viewport_applying = False
 
@@ -2208,6 +2220,12 @@ class ImageViewShell(QtWidgets.QWidget):
         handler = getattr(parent, "_on_image_viewport_resized", None)
         if callable(handler):
             handler()
+
+    def _viewport_resize_owned_by_parent(self) -> bool:
+        parent = self.window()
+        handler = getattr(parent, "_on_image_viewport_resized", None)
+        view_state = getattr(parent, "view_state", None)
+        return bool(callable(handler) and getattr(view_state, "montage_axis", None) is not None)
 
     def _sync_backend_camera_to_view(self) -> None:
         sync_camera = getattr(self, "_sync_vispy_camera_to_view", None)

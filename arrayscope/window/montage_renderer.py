@@ -35,7 +35,7 @@ from arrayscope.display.montage import (
 )
 from arrayscope.display.slice_engine import DisplayImage, make_image_from_slab, make_shader_image_from_slab
 from arrayscope.display.shader_mapping import apply_scale as apply_shader_scale, extract_component
-from arrayscope.display.viewport import ViewportPolicy, view_ranges_near
+from arrayscope.display.viewport import ViewportMode, ViewportPolicy, view_ranges_near
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.operations.evaluator import EvaluationResult, _document_key, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked, stage_materialization_allowed_chunk_axes
@@ -68,11 +68,13 @@ from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     effective_montage_columns,
     montage_session_key,
+    montage_viewport_intent,
     montage_viewport_retarget_policy,
     montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
     prioritize_montage_tiles,
     remap_montage_roi_selections,
     retarget_montage_viewport_plan,
+    square_montage_fit_view_range,
 )
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, fallback_level_source, normalize_bounds
@@ -159,20 +161,14 @@ class MontageRenderMixin:
             return None
         viewport_controller = getattr(getattr(self, "img_view", None), "viewport_controller", None)
         requested_columns = getattr(view_state, "montage_columns", None)
-        near_auto = bool(
-            viewport_controller is not None
-            and view_range is not None
-            and viewport_controller.is_near_auto(view_range)
-        )
-        if requested_columns is not None and not bool(getattr(self, "_montage_live_layout_reflow", False)):
-            near_auto = False
+        intent = montage_viewport_intent(viewport_controller, view_range)
         return effective_montage_columns(
             len(all_indices),
             tile_shape,
             viewport_shape,
             requested_columns=requested_columns,
-            near_auto=near_auto,
-            fit_locked=bool(viewport_controller is not None and viewport_controller.is_fit_locked()),
+            fit_locked=intent.fit_locked,
+            auto_active=intent.auto_active,
         )
 
     def _on_image_viewport_resized(self) -> None:
@@ -182,10 +178,38 @@ class MontageRenderMixin:
             return
         self._montage_live_layout_reflow = True
         self._montage_viewport_update_pending = False
-        self._retarget_montage_resize_camera_only()
+        viewport_plan = self._retarget_montage_resize_camera()
+        if viewport_plan is not None:
+            self._retarget_montage_resize_payloads(viewport_plan)
         self._schedule_montage_viewport_update(delay_ms=0)
 
-    def _retarget_montage_resize_camera_only(self) -> bool:
+    def _retarget_montage_resize_camera(self) -> MontageViewportPlan | None:
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+            return None
+        view_state = self.view_state
+        if view_state.montage_axis is None:
+            return None
+        capabilities = image_view_backend_capabilities(self.img_view)
+        viewport_plan = self._montage_viewport_plan(view_state)
+        colormap_lut = self._evaluation_colormap_lut(
+            view_state,
+            shader_display=bool(capabilities.shader_windowing),
+        )
+        expected_key = montage_session_key(
+            _document_key(self.document),
+            view_state,
+            viewport_plan,
+            colormap_lut,
+        )
+        if session.key != expected_key:
+            return None
+        previous_plan = getattr(session, "plan", None)
+        viewport_plan = self._retargeted_montage_viewport_plan(session, viewport_plan)
+        self._remap_montage_rois_for_layout_reflow(previous_plan, viewport_plan.plan)
+        return viewport_plan
+
+    def _retarget_montage_resize_payloads(self, viewport_plan: MontageViewportPlan) -> bool:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session.session_id, session.key):
             return False
@@ -199,22 +223,6 @@ class MontageRenderMixin:
         view_state = self.view_state
         if view_state.montage_axis is None:
             return False
-        viewport_plan = self._montage_viewport_plan(view_state)
-        colormap_lut = self._evaluation_colormap_lut(
-            view_state,
-            shader_display=bool(capabilities.shader_windowing),
-        )
-        expected_key = montage_session_key(
-            _document_key(self.document),
-            view_state,
-            viewport_plan,
-            colormap_lut,
-        )
-        if session.key != expected_key:
-            return False
-        previous_plan = getattr(session, "plan", None)
-        viewport_plan = self._retargeted_montage_viewport_plan(session, viewport_plan)
-        self._remap_montage_rois_for_layout_reflow(previous_plan, viewport_plan.plan)
         session.retarget_viewport(
             view_range=viewport_plan.view_range,
             viewport_shape=viewport_plan.viewport_shape,
@@ -281,7 +289,7 @@ class MontageRenderMixin:
         viewport_shape = viewport_plan.viewport_shape
         tile_shape = viewport_plan.tile_shape
         plan = viewport_plan.plan
-        if self._maybe_auto_fit_montage_tiles(plan.geometry):
+        if self._maybe_auto_fit_montage_tiles(plan):
             viewport_plan = self._montage_viewport_plan(view_state)
             viewport_shape = viewport_plan.viewport_shape
             tile_shape = viewport_plan.tile_shape
@@ -434,6 +442,9 @@ class MontageRenderMixin:
         )
         session.shader_display = bool(shader_display)
         self._montage_session = session
+        apply_restored_viewport = getattr(self, "_apply_file_session_viewport_when_ready", None)
+        if callable(apply_restored_viewport):
+            apply_restored_viewport()
         _complete_inline_work(
             self,
             WorkItem(
@@ -455,7 +466,7 @@ class MontageRenderMixin:
         self._last_montage_session_setup_ms = (perf_counter() - session_setup_start) * 1000.0
         initial_commit_start = perf_counter()
         try:
-            self._commit_montage_session_canvas(session, force=True)
+            self._commit_montage_session_presentation(session, force=True)
         except MemoryError as exc:
             show_status_message(self, str(exc), timeout=6000)
             return
@@ -626,7 +637,7 @@ class MontageRenderMixin:
         self._prune_stale_montage_tile_work(session)
         if not additions:
             if presentation_changed:
-                self._schedule_montage_canvas_commit(session, force=False)
+                self._schedule_montage_presentation_commit(session, force=False)
             if session.pending_tiles and not _viewport_interaction_active(self):
                 self._schedule_montage_tiles(session)
                 return True
@@ -675,7 +686,7 @@ class MontageRenderMixin:
         self._montage_cached_tiles_last_session = len(cached_tiles)
         self._montage_missing_tiles_last_session = len(missing_tiles)
         if presentation_changed or cached_tiles:
-            self._schedule_montage_canvas_commit(session, force=False)
+            self._schedule_montage_presentation_commit(session, force=False)
         if cached_tiles:
             self._schedule_montage_cached_level_stats(session)
         if not missing_tiles:
@@ -988,7 +999,7 @@ class MontageRenderMixin:
             and not getattr(session, "pending_removals", ())
             and getattr(session, "user_levels_override", None) is None
         ):
-            self._schedule_montage_canvas_commit(session, force=False)
+            self._schedule_montage_presentation_commit(session, force=False)
         self._schedule_montage_cached_level_stats(session)
 
     def _schedule_montage_refined_level_stats(self, session) -> None:
@@ -1056,7 +1067,7 @@ class MontageRenderMixin:
                 and getattr(session, "user_levels_override", None) is None
                 and self._should_publish_montage_level_metadata(session, summary)
             ):
-                self._schedule_montage_canvas_commit(session, force=False)
+                self._schedule_montage_presentation_commit(session, force=False)
         self._schedule_montage_refined_level_stats(session)
 
     def _plan_montage_stages(self, document, missing_tiles):
@@ -1382,7 +1393,7 @@ class MontageRenderMixin:
         for tile in waiting:
             session.mark_skipped(tile)
         show_status_message(self, f"Montage stage update failed: {exc}", timeout=4000)
-        self._schedule_montage_canvas_commit(session, force=True)
+        self._schedule_montage_presentation_commit(session, force=True)
         self._schedule_montage_tiles(session)
 
     def _warn_montage_tiles_skipped(self, *, skipped_count: int, tile_bytes: int, budget_bytes: int, tile_shape) -> None:
@@ -1423,7 +1434,7 @@ class MontageRenderMixin:
                 return False
             if session.stage_fan_in.active_requests or session.stage_fan_in.waiting_tiles:
                 return False
-            self._schedule_montage_canvas_commit(session, force=True)
+            self._schedule_montage_presentation_commit(session, force=True)
             if session.pending_tiles:
                 return self._schedule_next_montage_tile(session)
             if self._finish_montage_session_if_complete(session):
@@ -1491,19 +1502,14 @@ class MontageRenderMixin:
 
         viewport_controller = getattr(self.img_view, "viewport_controller", None)
         current_range = viewport_plan.view_range
-        fit_locked = bool(viewport_controller is not None and viewport_controller.is_fit_locked())
-        near_auto = bool(
-            viewport_controller is not None
-            and current_range is not None
-            and viewport_controller.is_near_auto(current_range)
-        )
+        intent = montage_viewport_intent(viewport_controller, current_range)
         focus = None if current_range is None else _montage_priority_focus(self, current_range)
         reflow = retarget_montage_viewport_plan(
             getattr(session, "plan", None),
             viewport_plan,
             getattr(session, "viewport_shape", viewport_plan.viewport_shape),
-            fit_locked=fit_locked,
-            near_auto=near_auto,
+            fit_locked=intent.fit_locked,
+            auto_active=intent.auto_active,
             skip_remap=skip_remap,
             focus=focus,
         )
@@ -1667,7 +1673,7 @@ class MontageRenderMixin:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
         session.show_loading_overlays = True
-        self._schedule_montage_canvas_commit(session, force=True)
+        self._schedule_montage_presentation_commit(session, force=True)
         self.img_view.setImageStale(True)
         self.img_view.setEvaluationOverlay(True, "Updating montage...")
         self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
@@ -1799,7 +1805,7 @@ class MontageRenderMixin:
             self._record_gui_budget(budget)
             first_visible_committed = False
             if first_vispy_display and (getattr(session, "dirty_tiles", None) or getattr(session, "dirty_payloads", None)):
-                self._commit_montage_session_canvas(session, force=False)
+                self._commit_montage_session_presentation(session, force=False)
                 first_visible_committed = bool(getattr(session, "display_committed", False))
             for tile in processed_tiles:
                 self._resolve_lead_stage_warmup(session, tile)
@@ -1811,7 +1817,7 @@ class MontageRenderMixin:
             if first_visible_committed:
                 pass
             elif force:
-                self._schedule_montage_canvas_commit(session, force=True)
+                self._schedule_montage_presentation_commit(session, force=True)
             else:
                 self._schedule_montage_ready_display_commit(session)
         if session.pending_completed_tiles:
@@ -1890,10 +1896,10 @@ class MontageRenderMixin:
             self.operation_evaluator.stage_materializer.cancel(key)
         session.mark_skipped(tile)
         show_status_message(self, f"Montage tile update failed: {exc}", timeout=4000)
-        self._schedule_montage_canvas_commit(session, force=True)
+        self._schedule_montage_presentation_commit(session, force=True)
         self._schedule_montage_tiles(session)
 
-    def _schedule_montage_canvas_commit(self, session, *, force=False) -> None:
+    def _schedule_montage_presentation_commit(self, session, *, force=False) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
         self._montage_commit_token = _montage_work_token(session, "commit")
@@ -1918,7 +1924,7 @@ class MontageRenderMixin:
             self._start_montage_commit_timer(max(1, int(interval_ms)))
             return
         if needs_initial_commit or needs_final_dirty_commit or force and not session.flush_pending or elapsed_ms >= interval_ms:
-            self._commit_montage_session_canvas(session, force=force)
+            self._commit_montage_session_presentation(session, force=force)
             return
         session.final_commit_pending = True
         session.flush_pending = True
@@ -1930,7 +1936,7 @@ class MontageRenderMixin:
         if timer is None:
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
-            timer.timeout.connect(self._flush_montage_canvas_commit)
+            timer.timeout.connect(self._flush_montage_presentation_commit)
             self._montage_commit_timer = timer
         if not timer.isActive():
             timer.start(max(1, int(interval_ms)))
@@ -1945,15 +1951,15 @@ class MontageRenderMixin:
         return interval
 
     @Qt.QtCore.Slot()
-    def _flush_montage_canvas_commit(self):
-        self._montage_canvas_commit_flush_queued = False
+    def _flush_montage_presentation_commit(self):
+        self._montage_presentation_commit_flush_queued = False
         session = getattr(self, "_montage_session", None)
         if session is None or not session.final_commit_pending:
             return
         token = getattr(self, "_montage_commit_token", None)
         if token is not None and token != _montage_work_token(session, "commit"):
             return
-        self._commit_montage_session_canvas(session, force=False)
+        self._commit_montage_session_presentation(session, force=False)
         if (
             getattr(session, "show_loading_overlays", False)
             and (session.pending_tiles or session.loading_tiles or session.active_tile_requests or session.stage_fan_in.attached_requests)
@@ -1961,7 +1967,7 @@ class MontageRenderMixin:
             self.img_view.setImageStale(True)
             self.img_view.setEvaluationOverlay(True, "Updating montage...")
 
-    def _commit_montage_session_canvas(self, session, *, force=False) -> None:
+    def _commit_montage_session_presentation(self, session, *, force=False) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
         commit_start = perf_counter()
@@ -2009,7 +2015,7 @@ class MontageRenderMixin:
         self._current_montage_plan = session.plan
         self._current_montage_canvas = canvas
         self._next_viewport_policy = ViewportPolicy.PRESERVE
-        self._montage_canvas_commit_active = True
+        self._montage_presentation_commit_active = True
         try:
             display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
             level_stats = self._montage_level_stats_for_session(session)
@@ -2078,7 +2084,7 @@ class MontageRenderMixin:
             self._update_montage_tile_overlays(canvas)
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
         finally:
-            self._montage_canvas_commit_active = False
+            self._montage_presentation_commit_active = False
         self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
         _complete_inline_work(
             self,
@@ -2133,7 +2139,7 @@ class MontageRenderMixin:
         self._current_montage_plan = session.plan
         self._current_montage_canvas = None
         self._next_viewport_policy = ViewportPolicy.PRESERVE
-        self._montage_canvas_commit_active = True
+        self._montage_presentation_commit_active = True
         try:
             payload_start = perf_counter()
             previous_payloads = _previous_tiled_payloads(getattr(self, "_committed_display_frame", None))
@@ -2287,7 +2293,7 @@ class MontageRenderMixin:
             self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
         finally:
-            self._montage_canvas_commit_active = False
+            self._montage_presentation_commit_active = False
         self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
         report = getattr(self._display_committer(), "last_tile_commit_report", None)
         _complete_inline_work(
@@ -2493,7 +2499,7 @@ class MontageRenderMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(session.user_levels_override)
                 self._note_display_level_source(decision)
-                apply_restored_viewport = getattr(self, "_apply_pending_file_session_viewport", None)
+                apply_restored_viewport = getattr(self, "_apply_file_session_viewport_when_ready", None)
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
                 show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
@@ -2527,34 +2533,34 @@ class MontageRenderMixin:
             if _persistent_tile_layer_fast_drain_enabled(self, session):
                 session.final_commit_pending = True
                 session.flush_pending = True
-                if self._queue_montage_canvas_commit_flush():
+                if self._queue_montage_presentation_commit_flush():
                     return
-            self._schedule_montage_canvas_commit(session, force=False)
+            self._schedule_montage_presentation_commit(session, force=False)
             return
         session.final_commit_pending = True
         session.flush_pending = True
-        if _persistent_tile_layer_fast_drain_enabled(self, session) and self._queue_montage_canvas_commit_flush():
+        if _persistent_tile_layer_fast_drain_enabled(self, session) and self._queue_montage_presentation_commit_flush():
             return
         try:
-            Qt.QtCore.QTimer.singleShot(0, self._flush_montage_canvas_commit)
+            Qt.QtCore.QTimer.singleShot(0, self._flush_montage_presentation_commit)
         except Exception:
             self._start_montage_commit_timer(1)
 
-    def _queue_montage_canvas_commit_flush(self) -> bool:
-        if bool(getattr(self, "_montage_canvas_commit_flush_queued", False)):
+    def _queue_montage_presentation_commit_flush(self) -> bool:
+        if bool(getattr(self, "_montage_presentation_commit_flush_queued", False)):
             return True
-        self._montage_canvas_commit_flush_queued = True
+        self._montage_presentation_commit_flush_queued = True
         try:
             queued = Qt.QtCore.QMetaObject.invokeMethod(
                 self,
-                "_flush_montage_canvas_commit",
+                "_flush_montage_presentation_commit",
                 Qt.QtCore.Qt.ConnectionType.QueuedConnection,
             )
         except Exception:
             queued = False
         if queued:
             return True
-        self._montage_canvas_commit_flush_queued = False
+        self._montage_presentation_commit_flush_queued = False
         return False
 
     def _finish_montage_session_if_complete(self, session) -> bool:
@@ -2590,19 +2596,29 @@ class MontageRenderMixin:
                 schedule_refresh("montage-semantic-commit")
 
     def _notify_file_session_montage_committed(self) -> None:
-        restore = getattr(self, "_schedule_pending_file_session_viewport_restore", None)
+        restore = getattr(self, "_schedule_file_session_viewport_when_ready", None)
         if callable(restore):
             restore()
 
-    def _maybe_auto_fit_montage_tiles(self, geometry) -> bool:
+    def _maybe_auto_fit_montage_tiles(self, plan_or_geometry) -> bool:
         if bool(getattr(self, "_montage_live_layout_reflow", False)):
             return False
+        plan = plan_or_geometry if hasattr(plan_or_geometry, "geometry") else None
+        geometry = getattr(plan_or_geometry, "geometry", plan_or_geometry)
         montage = getattr(geometry, "montage", geometry)
         if montage is None or not getattr(montage, "indices", ()):
             self._last_montage_autofit_signature = None
             return False
         tile_count = len(tuple(montage.indices))
-        full_range = _montage_full_view_range(montage)
+        fallback_range = _montage_full_view_range(montage)
+        if plan is not None:
+            viewport_size = self.img_view.graphicsView.viewport().size()
+            auto_range = square_montage_fit_view_range(
+                plan,
+                (max(1, viewport_size.height()), max(1, viewport_size.width())),
+            )
+        else:
+            auto_range = fallback_range
         signature = _montage_autofit_signature(montage)
         revert_previous_signature = getattr(self, "_last_montage_revert_signature", None)
         self._last_montage_revert_signature = signature
@@ -2619,10 +2635,11 @@ class MontageRenderMixin:
             return False
         view = self.img_view.getView()
         before_range = _copy_view_range(view.viewRange())
+        auto_like = _viewport_controller_auto_active_for_range(viewport_controller, before_range)
         visible_count = _visible_montage_tile_count(montage, before_range)
         can_auto_adjust = _should_auto_fit_montage_view(
             before_range,
-            full_range,
+            auto_range,
             viewport_controller=viewport_controller,
             visible_count=visible_count,
             tile_count=tile_count,
@@ -2630,9 +2647,10 @@ class MontageRenderMixin:
         if (
             can_auto_adjust
             and scope_grew_for_revert
+            and not auto_like
             and tile_count > 0
             and visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION
-            and not _view_range_contains_near(before_range, full_range)
+            and not _view_range_contains_near(before_range, fallback_range)
             and viewport_controller is not None
         ):
             if not bool(getattr(self, "_suppress_montage_autofit_revert_message", False)):
@@ -2645,12 +2663,15 @@ class MontageRenderMixin:
             return False
         if not can_auto_adjust:
             return False
-        if tile_count <= 0 or visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION:
+        if not auto_like and (tile_count <= 0 or visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION):
             return False
-        if _view_range_contains_near(before_range, full_range):
+        if _view_range_contains_near(before_range, fallback_range):
             return False
         previous_mode = None if viewport_controller is None else viewport_controller.mode
-        self._set_montage_view_range(full_range)
+        self._set_montage_view_range(auto_range)
+        if viewport_controller is not None:
+            viewport_controller.mode = ViewportMode.AUTO_UNTOUCHED
+            viewport_controller.last_auto_view_range = auto_range
 
         def undo():
             self._set_montage_view_range(before_range)
@@ -3145,12 +3166,25 @@ def _should_auto_fit_montage_view(
 ) -> bool:
     if int(tile_count) <= 0:
         return False
-    controller_near_auto = bool(viewport_controller is not None and viewport_controller.is_near_auto(view_range))
+    if _viewport_controller_auto_active_for_range(viewport_controller, view_range):
+        return True
     if int(visible_count) <= 0:
-        return bool(viewport_controller is None or controller_near_auto)
+        return bool(viewport_controller is None)
     if view_ranges_near(view_range, full_range):
         return True
-    return controller_near_auto
+    return False
+
+
+def _viewport_controller_auto_active_for_range(viewport_controller, view_range) -> bool:
+    if viewport_controller is None:
+        return False
+    promote = getattr(viewport_controller, "promote_near_auto", None)
+    if callable(promote):
+        return bool(promote(view_range))
+    active = getattr(viewport_controller, "is_auto_active", None)
+    if callable(active) and bool(active()):
+        return True
+    return False
 
 
 def _montage_autofit_signature(montage) -> tuple[tuple[int, ...], int, int, int]:

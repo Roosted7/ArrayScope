@@ -34,6 +34,7 @@ Status terminology:
 | [0015](0015-coordinate-geometry-and-viewport.md) | Geometry/viewport | Implemented contract. |
 | [0017](0017-managed-panels-and-wayland.md) | Managed panels/Wayland | Implemented with platform regression needs. |
 | [0018](0018-viewport-fit-toggle.md) | Fit/1:1 behavior | Implemented and recently refined. |
+| [0043](0043-file-session-restore-boundaries.md) | File-session restore boundaries | Implemented. |
 
 ## Evaluation, planning, cache, and resource policy
 

@@ -614,7 +614,8 @@ class OperationActionsMixin:
             self._force_autolevel = False
         if settings.profile_visible:
             self._profile_dock_user_visible = True
-            self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="view-recipe")
+            if not bool(getattr(self, "_suspend_progressive_dock_sync", False)):
+                self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="view-recipe")
 
 
 def _operation_icon_name(operation_id):

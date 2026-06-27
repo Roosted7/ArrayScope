@@ -79,6 +79,37 @@ class MontageViewportReflow:
     last_auto_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None
 
 
+@dataclass(frozen=True)
+class MontageViewportIntent:
+    """Canonical auto/manual facts consumed by montage viewport planning."""
+
+    fit_locked: bool = False
+    auto_active: bool = False
+
+    @property
+    def auto_like(self) -> bool:
+        return bool(self.fit_locked or self.auto_active)
+
+
+def montage_viewport_intent(viewport_controller, view_range) -> MontageViewportIntent:
+    """Return semantic viewport intent without coupling callers to controller internals."""
+
+    if viewport_controller is None:
+        return MontageViewportIntent(auto_active=True)
+    fit_locked = bool(viewport_controller.is_fit_locked())
+    promote = getattr(viewport_controller, "promote_near_auto", None)
+    if callable(promote) and view_range is not None:
+        auto_active = bool(promote(view_range))
+    else:
+        auto_active = False
+    auto_active_fn = getattr(viewport_controller, "is_auto_active", None)
+    auto_active = bool(auto_active or (auto_active_fn() if callable(auto_active_fn) else False))
+    return MontageViewportIntent(
+        fit_locked=fit_locked,
+        auto_active=auto_active,
+    )
+
+
 def prioritize_montage_tiles(tiles, *, view_range, focus=None):
     """Return tiles ordered from normalized viewport-focus distance outward."""
 
@@ -128,14 +159,15 @@ def effective_montage_columns(
     viewport_shape: tuple[int, int],
     *,
     requested_columns: int | None,
-    near_auto: bool,
     fit_locked: bool = False,
+    auto_active: bool = False,
 ) -> int | None:
     """Choose applied montage columns without rewriting semantic view state.
 
-    Explicit Fit keeps the user's requested column count.  Otherwise, automatic
-    layout is used when no column preference exists or when the current view is
-    still near the automatic pose; manual pan/zoom keeps the requested columns.
+    Automatic layout is used when no column preference exists, when Fit owns
+    the camera, when the viewport is explicitly auto-owned, or when the current
+    view is still near the automatic pose.  Manual pan/zoom keeps requested
+    columns.
     """
 
     count = max(0, int(count))
@@ -146,9 +178,7 @@ def effective_montage_columns(
     automatic = optimal_montage_columns(count, tile_shape, viewport_shape)
     if requested_columns is None:
         return automatic
-    if bool(fit_locked):
-        return max(1, min(int(requested_columns), count))
-    if bool(near_auto):
+    if bool(fit_locked) or bool(auto_active):
         return automatic
     return max(1, min(int(requested_columns), count))
 
@@ -189,7 +219,7 @@ def retarget_montage_viewport_plan(
     previous_viewport_shape,
     *,
     fit_locked: bool = False,
-    near_auto: bool = False,
+    auto_active: bool = False,
     skip_remap: bool = False,
     focus: tuple[float, float] | None = None,
 ) -> MontageViewportReflow:
@@ -214,22 +244,10 @@ def retarget_montage_viewport_plan(
     last_auto_view_range = None
     if bool(fit_locked):
         next_range = plan_full_view_range(next_plan)
-    elif bool(near_auto):
+    elif bool(auto_active):
         auto_range = square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)
-        if view_ranges_near(current_range, auto_range):
-            next_range = auto_range
-            last_auto_view_range = next_range
-        else:
-            next_range = _manual_montage_reflow_range(
-                previous_plan,
-                next_plan,
-                current_range,
-                previous_viewport_shape,
-                viewport_plan.viewport_shape,
-                focus=focus,
-            )
-            if next_range is None:
-                return MontageViewportReflow(viewport_plan)
+        next_range = auto_range
+        last_auto_view_range = next_range
     else:
         next_range = _manual_montage_reflow_range(
             previous_plan,

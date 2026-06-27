@@ -112,7 +112,14 @@ class HistogramDisplayController(QtCore.QObject):
         self._pending_request: HistogramPlotRequest | None = None
         self._manual_popup: HistogramLevelEditPopup | None = None
         self._manual_start_levels: tuple[float, float] | None = None
+        self._pending_span_edit_scene_pos: QtCore.QPointF | None = None
+        self._pending_span_edit_timer = QtCore.QTimer(owner)
+        self._pending_span_edit_timer.setSingleShot(True)
+        self._pending_span_edit_timer.timeout.connect(self._flush_pending_span_edit)
         self._manual_region_mouse_click_event = None
+        self._filtered_histogram_widgets = []
+        self._last_histogram_release: tuple[float, QtCore.QPointF] | None = None
+        self._last_histogram_auto_reset: tuple[float, QtCore.QPointF] | None = None
         self._manual_region_installed = False
         self._histogram_ready.connect(self._handle_histogram_ready)
 
@@ -120,13 +127,27 @@ class HistogramDisplayController(QtCore.QObject):
         item = self._histogram_item()
         if item is None:
             return
+        widget = getattr(self.owner, "histogram", None)
+        self._install_histogram_event_filter(getattr(widget, "viewport", lambda: None)())
         vb = getattr(item, "vb", None)
         if vb is not None:
             vb.sigRangeChanged.connect(lambda *_args: self.schedule_refresh())
             scene = vb.scene()
-            if scene is not None and hasattr(scene, "sigMouseClicked"):
-                scene.sigMouseClicked.connect(self._on_scene_mouse_clicked)
+            if scene is not None:
+                for view in tuple(scene.views() or ()):
+                    self._install_histogram_event_filter(getattr(view, "viewport", lambda: None)())
         self._install_manual_clicks()
+
+    def eventFilter(self, obj, event):
+        if obj in self._filtered_histogram_widgets and self._handle_native_histogram_double_click(obj, event):
+            return True
+        return super().eventFilter(obj, event)
+
+    def _install_histogram_event_filter(self, widget) -> None:
+        if widget is None or widget in self._filtered_histogram_widgets:
+            return
+        widget.installEventFilter(self)
+        self._filtered_histogram_widgets.append(widget)
 
     def schedule_refresh(self) -> None:
         if self._refresh_pending:
@@ -148,6 +169,7 @@ class HistogramDisplayController(QtCore.QObject):
         self._refresh_pending = False
         if self._refresh_timer.isActive():
             self._refresh_timer.stop()
+        self._cancel_pending_span_edit()
         self._active_request_signature = None
         self._running_request_signature = None
         self._pending_request = None
@@ -376,6 +398,7 @@ class HistogramDisplayController(QtCore.QObject):
             self._manual_popup.close()
 
     def cancel_manual_edit(self) -> None:
+        self._cancel_pending_span_edit()
         popup = self._manual_popup
         if popup is not None:
             popup.reject()
@@ -397,49 +420,123 @@ class HistogramDisplayController(QtCore.QObject):
         def mouse_click_event(event, _region=region):
             if (
                 event.button() == QtCore.Qt.MouseButton.LeftButton
-                and event.double()
-                and not self._line_click_in_progress(event)
-            ):
-                event.accept()
-                self.request_auto_window()
-                return
-            if (
-                event.button() == QtCore.Qt.MouseButton.LeftButton
                 and not event.double()
                 and not self._line_click_in_progress(event)
             ):
                 event.accept()
-                self.begin_span_edit(event.scenePos())
+                self._schedule_span_edit(event.scenePos())
                 return
             self._manual_region_mouse_click_event(event)
 
         region.mouseClickEvent = mouse_click_event
         self._manual_region_installed = True
 
-    def _on_scene_mouse_clicked(self, event) -> None:
-        if event.button() != QtCore.Qt.MouseButton.LeftButton or not event.double():
-            return
-        if event.isAccepted():
-            return
-        item = self._histogram_item()
-        vb = None if item is None else getattr(item, "vb", None)
-        if vb is None:
-            return
-        try:
-            if not vb.sceneBoundingRect().contains(event.scenePos()):
-                return
-        except Exception:
-            return
-        if self._line_click_in_progress(event):
-            return
+    def _handle_native_histogram_double_click(self, viewport, event) -> bool:
+        event_type = event.type()
+        if event_type not in {
+            QtCore.QEvent.Type.MouseButtonPress,
+            QtCore.QEvent.Type.MouseButtonRelease,
+            QtCore.QEvent.Type.MouseButtonDblClick,
+        }:
+            return False
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            return False
+        if event_type == QtCore.QEvent.Type.MouseButtonRelease:
+            if not self._histogram_release_completes_double_click(event):
+                return False
+            event.accept()
+            self._request_auto_window_from_histogram_event(event)
+            return True
+        if event_type != QtCore.QEvent.Type.MouseButtonDblClick:
+            return False
+        self._last_histogram_release = None
+        if self._histogram_event_was_recently_handled(event):
+            return False
         event.accept()
+        self._request_auto_window_from_histogram_event(event)
+        return True
+
+    def _histogram_release_completes_double_click(self, event) -> bool:
+        position = self._histogram_global_position(event)
+        if position is None:
+            self._last_histogram_release = None
+            return False
+        now = perf_counter()
+        if self._histogram_position_was_recently_handled(now, position):
+            self._last_histogram_release = None
+            return False
+        previous = self._last_histogram_release
+        self._last_histogram_release = (now, position)
+        if previous is None:
+            return False
+        previous_time, previous_position = previous
+        interval_s = max(1, QtWidgets.QApplication.doubleClickInterval()) / 1000.0
+        if now - previous_time > interval_s:
+            return False
+        max_distance = max(1, QtWidgets.QApplication.startDragDistance())
+        delta = position - previous_position
+        if delta.x() * delta.x() + delta.y() * delta.y() > max_distance * max_distance:
+            return False
+        self._last_histogram_release = None
+        return True
+
+    def _histogram_event_was_recently_handled(self, event) -> bool:
+        position = self._histogram_global_position(event)
+        if position is None:
+            return False
+        return self._histogram_position_was_recently_handled(perf_counter(), position)
+
+    def _histogram_position_was_recently_handled(self, now: float, position: QtCore.QPointF) -> bool:
+        previous = self._last_histogram_auto_reset
+        if previous is None:
+            return False
+        previous_time, previous_position = previous
+        if now - previous_time > 0.25:
+            return False
+        return self._histogram_positions_match(position, previous_position)
+
+    def _request_auto_window_from_histogram_event(self, event) -> None:
+        position = self._histogram_global_position(event)
+        if position is not None:
+            self._last_histogram_auto_reset = (perf_counter(), position)
         self.request_auto_window()
+
+    @staticmethod
+    def _histogram_positions_match(first: QtCore.QPointF, second: QtCore.QPointF) -> bool:
+        delta = first - second
+        return delta.x() * delta.x() + delta.y() * delta.y() <= 1.0
+
+    @staticmethod
+    def _histogram_global_position(event) -> QtCore.QPointF | None:
+        try:
+            if hasattr(event, "globalPosition"):
+                return QtCore.QPointF(event.globalPosition())
+            if hasattr(event, "globalPos"):
+                return QtCore.QPointF(event.globalPos())
+        except Exception:
+            return None
+        return None
 
     def request_auto_window(self) -> None:
         self.cancel_manual_edit()
         signal = getattr(self.owner, "autoWindowRequested", None)
         if signal is not None:
             signal.emit()
+
+    def _schedule_span_edit(self, scene_pos) -> None:
+        self._pending_span_edit_scene_pos = QtCore.QPointF(scene_pos)
+        self._pending_span_edit_timer.start(max(1, QtWidgets.QApplication.doubleClickInterval()))
+
+    def _flush_pending_span_edit(self) -> None:
+        scene_pos = self._pending_span_edit_scene_pos
+        self._pending_span_edit_scene_pos = None
+        if scene_pos is not None:
+            self.begin_span_edit(scene_pos)
+
+    def _cancel_pending_span_edit(self) -> None:
+        if self._pending_span_edit_timer.isActive():
+            self._pending_span_edit_timer.stop()
+        self._pending_span_edit_scene_pos = None
 
     def _on_limit_line_clicked(self, index: int, event) -> None:
         if event.button() != QtCore.Qt.MouseButton.LeftButton or event.double():

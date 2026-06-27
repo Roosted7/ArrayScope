@@ -50,7 +50,7 @@ def choose_montage_backend(
     direct_tile_payloads = (
         bool(renderer_capabilities.direct_montage_tile_payloads)
         if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
-        else renderer_backend == "vispy"
+        else renderer_backend in {"pyqtgraph", "vispy"}
     )
     supports_montage_canvas = (
         bool(renderer_capabilities.supports_montage_canvas)
@@ -68,6 +68,13 @@ def choose_montage_backend(
         return MontageBackendDecision("tile_layer", "user forced tile layer", expected_tile_layer=True)
 
     if setting == MontageDisplayBackendChoice.CANVAS:
+        if direct_tile_payloads:
+            return MontageBackendDecision(
+                "tile_layer",
+                f"{renderer_name} supports direct tiled montage payloads; canvas fallback is not used for live montages",
+                warning="canvas fallback was requested but direct tiled presentation is the live montage path",
+                expected_tile_layer=True,
+            )
         if not supports_montage_canvas:
             return MontageBackendDecision(
                 "tile_layer",
@@ -80,10 +87,10 @@ def choose_montage_backend(
             warning = "canvas fallback is manual and may be slow for large RGB/complex montage"
         return MontageBackendDecision("canvas", "user forced canvas fallback", warning=warning, expected_tile_layer=False)
 
-    if prefers_tiled_montages and direct_tile_payloads:
+    if direct_tile_payloads:
         return MontageBackendDecision(
             "tile_layer",
-            f"{renderer_name} prefers tiled montages; avoid canvas composition",
+            f"{renderer_name} supports direct tiled montage payloads; using live tiled presentation",
             expected_tile_layer=True,
         )
     if large_rgb:

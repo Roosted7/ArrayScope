@@ -27,6 +27,22 @@ def test_image_axes_show_full_range_colon(qt_app):
     strip.close()
 
 
+def test_dimension_strip_wraps_to_allocated_width(qt_app):
+    from arrayscope.ui.dimension_strip import DimensionStrip
+
+    strip = DimensionStrip(6)
+    strip.resize(520, 120)
+    strip.show()
+    qt_app.processEvents()
+    strip._relayout()
+
+    assert strip._columns == 2
+    assert strip.maximumWidth() <= 484
+    assert max(strip.chip(axis).geometry().right() for axis in range(6)) <= strip.contentsRect().right()
+    assert strip.chip(2).geometry().top() > strip.chip(0).geometry().top()
+    strip.close()
+
+
 def test_slice_selection_validator_rejects_unsupported_characters(qt_app):
     from PySide6 import QtGui
 

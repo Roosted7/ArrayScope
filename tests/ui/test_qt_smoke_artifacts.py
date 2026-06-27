@@ -241,8 +241,8 @@ def test_dimension_strip_wraps_for_many_dimensions(qt_app):
         win.resize(560, 520)
         win.show()
         _process_events(qt_app)
-        assert win.dimension_strip._columns == 3
-        _grab_widget(win.dimension_strip, "arrayscope_dimension_strip_6d_narrow.png", min_width=560, min_height=55)
+        assert win.dimension_strip._columns <= 2
+        _grab_widget(win.dimension_strip, "arrayscope_dimension_strip_6d_narrow.png", min_width=220, min_height=80)
 
         win.resize(1180, 620)
         _process_events(qt_app)

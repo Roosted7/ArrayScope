@@ -512,8 +512,11 @@ class WindowMenuMixin:
         else:
             show_status_message(self, f"Verified {len(result)} icons")
 
-    def _restore_window_settings(self):
-        self.layout_manager.restore_window_settings()
+    def _restore_window_settings(self, *, initial_window_size=None, defer_progressive_docks: bool = False):
+        self.layout_manager.restore_window_settings(
+            initial_window_size=initial_window_size,
+            defer_progressive_docks=defer_progressive_docks,
+        )
 
     def reset_layout(self):
         self.layout_manager.reset_layout()

@@ -120,6 +120,7 @@ class ArrayScopeWindow(
         self._operation_dock_user_visible = None
         self._profile_dock_user_visible = None
         self._inspection_dock_user_visible = None
+        self._suspend_progressive_dock_sync = True
         self._progressive_preserve_enabled = False
         self._last_operation_axis = None
         self._focused_dimension_axis = None
@@ -144,7 +145,10 @@ class ArrayScopeWindow(
                 
         self._build_window_ui(data, filepath)
         self._apply_channel_colormap()
-        restored_file_view_session = self._restore_file_view_session_if_available()
+        try:
+            restored_file_view_session = self._restore_file_view_session_if_available()
+        finally:
+            self._suspend_progressive_dock_sync = False
         
         if complex_dim is not None: # user requested combining as complex
             if complex_dim < 0 or complex_dim >= data.ndim:
@@ -157,29 +161,28 @@ class ArrayScopeWindow(
                 self.combineAsComplex(complex_dim) # valid
         
         # Initialize dimension controls based on the authoritative view state.
+        initial_window_size = self._file_session_restore_initial_window_size() if restored_file_view_session else None
+        self._restore_window_settings(
+            initial_window_size=initial_window_size,
+            defer_progressive_docks=bool(restored_file_view_session),
+        )
         if restored_file_view_session:
-            self.show()
-            apply_restored_viewport_size = getattr(self, "_apply_pending_file_session_viewport_size", None)
-            if callable(apply_restored_viewport_size):
-                apply_restored_viewport_size()
+            self._apply_file_session_layout_intent()
+        if restored_file_view_session:
             self.render(
                 reason="file-view-session-restore",
                 force_autolevel=self._pending_display_levels_for_render() is None,
+                defer_side_panels=True,
             )
+            self.show()
+            self._progressive_preserve_enabled = True
+            self._run_deferred_side_panel_refresh(reason="file-view-session-restore")
         else:
             self.render(reason="initial", force_autolevel=True)
             self.show()
         if restored_file_view_session:
             def finish_restored_file_session_viewport():
-                apply_restored_viewport_size = getattr(self, "_apply_pending_file_session_viewport_size", None)
-                if callable(apply_restored_viewport_size):
-                    resized = bool(apply_restored_viewport_size())
-                    if resized and getattr(getattr(self, "view_state", None), "montage_axis", None) is not None:
-                        self.render(
-                            reason="file-view-session-restore-viewport-size",
-                            force_autolevel=self._pending_display_levels_for_render() is None,
-                        )
-                apply_restored_viewport = getattr(self, "_apply_pending_file_session_viewport", None)
+                apply_restored_viewport = getattr(self, "_apply_file_session_viewport_when_ready", None)
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
 

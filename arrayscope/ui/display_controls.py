@@ -238,7 +238,7 @@ class DisplayControlBuildMixin:
         self._setup_export_context_menus()
         self._save_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Save, self)
         self._save_shortcut.activated.connect(self._save_current_numpy_file)
-        self.dimension_strip = DimensionStrip(data.ndim, self)
+        self.dimension_strip = DimensionStrip(data.ndim)
         self.dimension_strip.roleChanged.connect(self.set_dimension_role)
         self.dimension_strip.sliceChanged.connect(self._on_slice_index_changed)
         self.dimension_strip.sliceTextChanged.connect(self._on_slice_text_changed)
@@ -246,7 +246,7 @@ class DisplayControlBuildMixin:
         self.dimension_strip.focusedAxisChanged.connect(lambda axis: setattr(self, "_focused_dimension_axis", int(axis)))
         for container in self.dim_containers:
             container.hide()
-        self.layouts['dims'].addWidget(self.dimension_strip, 1)
+        self.layouts['dims'].addWidget(self.dimension_strip, 0, Qt.QtCore.Qt.AlignmentFlag.AlignHCenter)
 
     def _build_display_controls_panel(self):
         # Create a single compact control panel with all radio buttons
@@ -488,7 +488,6 @@ class DisplayControlBuildMixin:
         self.operation_dock.visibilityChanged.connect(self._on_operation_dock_visibility_changed)
         self._update_operation_dock()
         self._setup_menus()
-        self._restore_window_settings()
         
         # Initialize complex indicators for size-2 real dimensions
         self.update_complex_indicators()

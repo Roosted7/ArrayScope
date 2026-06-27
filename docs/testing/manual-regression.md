@@ -41,6 +41,41 @@ Use this checklist for release candidates and rendering/UI changes. Historical p
   should follow the same source-local data. Scroll the tiled dimension to a different source set; ROI
   world positions should remain stable and sample the new content under them.
 
+## When automated interaction tests disagree with the real app
+
+Qt, PyQtGraph, and platform plugins can transform input before ArrayScope sees
+it. When a `QTest` or controller-level test passes but real interaction still
+fails, troubleshoot from the real event stream before adding another special
+case:
+
+1. Launch the real file and backend that reproduces the issue, on the real
+   display/session type. Prefer a bundled or copied fixture path so the run can
+   be repeated, for example:
+
+   ```bash
+   PATH=~/miniconda3/bin:$PATH direnv exec . python -m arrayscope data/example.nii
+   ```
+
+2. Add a temporary, narrowly scoped trace at the ownership boundary that should
+   receive the intent. For histogram interactions that boundary is the
+   histogram controller, not the renderer. Log event type, target widget,
+   button, local/global position, accepted state, and the semantic signal or
+   slot reached.
+3. Ask the tester to perform the exact real gesture while the process remains
+   attached to the terminal. Compare center/edge/inside/outside regions when
+   the bug is spatial.
+4. Turn the observed event sequence into the regression test. Do not only test
+   the ideal Qt event if the real app emits press/release pairs, swallowed
+   double-clicks, propagated events, or accepted events from a child item.
+5. Remove the trace before committing unless it is part of a documented
+   diagnostics feature.
+
+The histogram double-click repair is the model case: real PyQtGraph interaction
+showed that a click inside the active level region opened span editing before
+the second click could become auto-window. The fix moved that single-click edit
+behind Qt's double-click interval, and the regression test covers the observed
+release-pair behavior rather than only `QTest.mouseDClick`.
+
 ## Responsiveness stress
 
 Use a large plane, many montage tiles, complex shader mode, and at least one expensive operation.

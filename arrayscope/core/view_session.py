@@ -36,6 +36,7 @@ class FileViewSession:
     metadata: dict[str, object]
     recipe: ViewRecipe
     viewport: ViewportSession | None = None
+    window_size: tuple[int, int] | None = None
     rois: tuple[RoiSelection, ...] = ()
     selected_roi_id: str | None = None
     version: int = VIEW_SESSION_VERSION
@@ -124,6 +125,7 @@ def session_to_mapping(session: FileViewSession) -> dict[str, object]:
         "metadata": dict(session.metadata),
         "recipe": recipe_to_mapping(session.recipe),
         "viewport": None if session.viewport is None else viewport_to_mapping(session.viewport),
+        "window_size": None if session.window_size is None else [int(value) for value in session.window_size],
         "rois": [roi_to_mapping(roi) for roi in session.rois],
         "selected_roi_id": session.selected_roi_id,
     }
@@ -139,6 +141,7 @@ def session_from_mapping(mapping, base_shape) -> FileViewSession:
         metadata=dict(mapping.get("metadata", {})),
         recipe=recipe_from_mapping(mapping.get("recipe", {}), base_shape),
         viewport=None if viewport is None else viewport_from_mapping(viewport),
+        window_size=window_size_from_mapping(mapping.get("window_size")),
         rois=tuple(roi_from_mapping(item) for item in tuple(mapping.get("rois", ()) or ())),
         selected_roi_id=mapping.get("selected_roi_id"),
     )
@@ -184,6 +187,14 @@ def viewport_from_mapping(mapping) -> ViewportSession:
         normalized_shape = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
     mode = str(mapping.get("mode", ViewportMode.AUTO_UNTOUCHED.value))
     return ViewportSession(mode=mode, view_range=normalized, viewport_shape=normalized_shape)
+
+
+def window_size_from_mapping(value) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("window_size must be [width, height]")
+    return (max(1, int(value[0])), max(1, int(value[1])))
 
 
 def roi_to_mapping(selection: RoiSelection) -> dict[str, object]:

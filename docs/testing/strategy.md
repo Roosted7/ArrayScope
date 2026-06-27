@@ -104,7 +104,7 @@ claim rests on a valid timing artifact.
 
 ## Manual and real-hardware tests
 
-[Manual regression](manual-regression.md) covers interaction feel, rendering artifacts, Wayland/panel behavior, HiDPI, GPU limits, and lifecycle/context loss. Record OS, session type, Qt/PySide/PyQtGraph/VisPy versions, GPU/driver, data shape/dtype, backend, and settings.
+[Manual regression](manual-regression.md) covers interaction feel, rendering artifacts, Wayland/panel behavior, HiDPI, GPU limits, and lifecycle/context loss. Record OS, session type, Qt/PySide/PyQtGraph/VisPy versions, GPU/driver, data shape/dtype, backend, and settings. When pytest-qt interaction tests disagree with the real app, capture the real widget event stream at the ownership boundary and convert that observed sequence into the regression test.
 
 Headless `offscreen` runs cannot validate:
 

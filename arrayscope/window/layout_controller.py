@@ -24,9 +24,10 @@ class WindowLayoutManager:
     def __init__(self, window):
         self.window = window
         self._dock_states = {}
+        self._dock_visibility_generations = {}
         self.canvas_preserver = CanvasPreserveController(self)
 
-    def restore_window_settings(self):
+    def restore_window_settings(self, *, initial_window_size=None, defer_progressive_docks: bool = False):
         win = self.window
         geometry = win._settings.value("geometry")
         if geometry is not None:
@@ -36,17 +37,27 @@ class WindowLayoutManager:
             win.restoreState(state)
         self._hide_managed_docks_after_state_restore()
         self._reset_session_dock_visibility_preferences()
-        self._restore_saved_base_window_size()
+        if initial_window_size is None:
+            self._restore_saved_base_window_size()
+        else:
+            self.resize_to_dockless_window_size(initial_window_size)
         if not win.profile_dock.isVisible() and win.data.ndim == 1:
             self.set_managed_dock_visible(win.profile_dock, True, reason="restore-one-dimensional", preserve_canvas=False)
-        self.sync_progressive_docks(preserve_canvas=False)
-        Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
+        if not defer_progressive_docks:
+            self.sync_progressive_docks(preserve_canvas=False)
+            Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
 
     def save_window_settings(self):
         win = self.window
         win._settings.setValue("geometry", win.saveGeometry())
         win._settings.setValue("window_state", win.saveState())
         win._settings.setValue("window_base_size", self._window_size_excluding_docked_panels())
+
+    def window_size_for_file_session(self) -> tuple[int, int] | None:
+        size = self._window_size_excluding_docked_panels()
+        if size is None or not size.isValid() or size.isEmpty():
+            return None
+        return (int(size.width()), int(size.height()))
 
     def _reset_session_dock_visibility_preferences(self):
         win = self.window
@@ -104,6 +115,8 @@ class WindowLayoutManager:
 
     def sync_progressive_docks(self, *, preserve_canvas=True):
         win = self.window
+        if bool(getattr(win, "_suspend_progressive_dock_sync", False)):
+            return
         preserve_canvas = bool(preserve_canvas) and bool(getattr(win, "_progressive_preserve_enabled", True))
         changed = False
         if hasattr(win, "operation_dock"):
@@ -133,18 +146,23 @@ class WindowLayoutManager:
 
     def set_dock_visible_later(self, dock, visible, *, preserve_canvas=True):
         self._state_for(dock).auto_visible = bool(visible)
+        generation = int(self._dock_visibility_generations.get(dock, 0)) + 1
+        self._dock_visibility_generations[dock] = generation
         Qt.QtCore.QTimer.singleShot(
             0,
-            lambda dock=dock, visible=visible, preserve_canvas=preserve_canvas: self.apply_queued_dock_visibility(
+            lambda dock=dock, visible=visible, preserve_canvas=preserve_canvas, generation=generation: self.apply_queued_dock_visibility(
                 dock,
                 visible,
                 preserve_canvas=preserve_canvas,
+                generation=generation,
             ),
         )
 
-    def apply_queued_dock_visibility(self, dock, visible, *, preserve_canvas=True):
+    def apply_queued_dock_visibility(self, dock, visible, *, preserve_canvas=True, generation: int | None = None):
         win = self.window
         if not self._window_alive():
+            return
+        if generation is not None and int(self._dock_visibility_generations.get(dock, 0)) != int(generation):
             return
         if not visible:
             if dock is getattr(win, "operation_dock", None) and win.document.steps:
@@ -167,6 +185,7 @@ class WindowLayoutManager:
         win = self.window
         if not self._window_alive():
             return
+        self._dock_visibility_generations[dock] = int(self._dock_visibility_generations.get(dock, 0)) + 1
         panel_manager = getattr(win, "panel_manager", None)
         panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
         if panel is not None and panel.location == PanelLocation.DETACHED:
@@ -404,6 +423,24 @@ class WindowLayoutManager:
         )
         if target != win.size():
             win.resize(target)
+
+    def resize_to_dockless_window_size(self, size) -> bool:
+        win = self.window
+        if win.isMaximized() or win.isFullScreen():
+            return False
+        try:
+            target_width = max(1, int(size[0]))
+            target_height = max(1, int(size[1]))
+        except Exception:
+            return False
+        minimum = win.minimumSize()
+        new_width = max(int(minimum.width()), int(target_width))
+        new_height = max(int(minimum.height()), int(target_height))
+        if new_width == win.width() and new_height == win.height():
+            return False
+        win.resize(new_width, new_height)
+        self.refresh_view_geometry()
+        return True
 
     def _dockless_minimum_window_size(self):
         minimum = Qt.QtCore.QSize(320, 240)

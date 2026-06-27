@@ -465,6 +465,47 @@ def test_operations_dock_does_not_auto_reopen_after_user_close(qtbot):
         win.close()
 
 
+def test_stale_queued_dock_visibility_does_not_override_newer_layout_decision(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+
+        win.layout_manager.set_dock_visible_later(win.inspection_dock, True, preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock,
+            False,
+            reason="newer-test-decision",
+            preserve_canvas=False,
+        )
+        _process_events(qtbot, count=10)
+
+        assert not win.inspection_dock.isVisible()
+    finally:
+        win.close()
+
+
+def test_queued_dock_visibility_is_latest_only_per_dock(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+
+        win.layout_manager.set_dock_visible_later(win.inspection_dock, True, preserve_canvas=False)
+        win.layout_manager.set_dock_visible_later(win.inspection_dock, False, preserve_canvas=False)
+        _process_events(qtbot, count=10)
+
+        assert not win.inspection_dock.isVisible()
+    finally:
+        win.close()
+
+
 def test_restored_window_size_excludes_visible_docked_panels(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

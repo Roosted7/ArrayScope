@@ -115,14 +115,31 @@ class ViewportController:
         self.mode = ViewportMode.FIT
         _fit(view_box, display_rect=self.last_display_rect)
 
-    def set_fit_locked(self, view_box, enabled: bool):
+    def set_fit_locked(self, view_box, enabled: bool, *, image_shape=None, viewport_size=None, display_rect=None):
         if enabled:
             self.fit(view_box)
         elif self.mode == ViewportMode.FIT:
-            self.mode = ViewportMode.USER
+            if viewport_size is None:
+                self.mode = ViewportMode.USER
+                return
+            shape = (1, 1) if image_shape is None else tuple(int(value) for value in image_shape[:2])
+            rect = _display_rect(shape, display_rect or self.last_display_rect)
+            self.mode = ViewportMode.AUTO_UNTOUCHED
+            self._auto_square_fit(view_box, viewport_size, display_rect=rect)
 
     def is_fit_locked(self) -> bool:
         return self.mode == ViewportMode.FIT
+
+    def is_auto_active(self) -> bool:
+        return self.mode == ViewportMode.AUTO_UNTOUCHED
+
+    def promote_near_auto(self, view_range=None) -> bool:
+        if self.mode == ViewportMode.FIT:
+            return False
+        if self.is_near_auto(view_range):
+            self.mode = ViewportMode.AUTO_UNTOUCHED
+            return True
+        return self.is_auto_active()
 
     def one_to_one(self, view_box, image_shape, viewport_size, display_rect=None):
         _set_one_to_one(view_box, image_shape, viewport_size, display_rect=_display_rect(image_shape, display_rect))
@@ -172,7 +189,7 @@ class ViewportController:
             )
         return None
 
-    def is_near_auto(self, view_range=None, *, tolerance_fraction: float = 0.02) -> bool:
+    def is_near_auto(self, view_range=None, *, tolerance_fraction: float = 0.04) -> bool:
         target = self.last_auto_view_range
         if target is None:
             return self.mode == ViewportMode.AUTO_UNTOUCHED
@@ -210,8 +227,13 @@ def _fit(view_box, *, display_rect=None):
     if display_rect is None:
         view_box.autoRange(padding=0)
         return
-    x0, y0, x1, y1 = display_rect
-    view_box.setRange(xRange=(float(x0), float(x1)), yRange=(float(y0), float(y1)), padding=0)
+    view_range = _display_rect_view_range(display_rect)
+    view_box.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+
+
+def _display_rect_view_range(display_rect) -> tuple[tuple[float, float], tuple[float, float]]:
+    x0, y0, x1, y1 = _display_rect((1, 1), display_rect)
+    return ((float(x0), float(x1)), (float(y0), float(y1)))
 
 
 def square_pixel_fit_view_range(display_rect, viewport_size) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -238,7 +260,7 @@ def square_pixel_fit_view_range(display_rect, viewport_size) -> tuple[tuple[floa
     )
 
 
-def view_ranges_near(first, second, *, tolerance_fraction: float = 0.02) -> bool:
+def view_ranges_near(first, second, *, tolerance_fraction: float = 0.04) -> bool:
     first = _normalize_view_range(first)
     second = _normalize_view_range(second)
     tolerance_fraction = max(0.0, float(tolerance_fraction))
