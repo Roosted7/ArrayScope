@@ -332,28 +332,52 @@ Progress notes:
 
 ### X5. Hardware evidence and residency policy
 
-**Goal:** base GPU and multi-resolution decisions on real device behavior.
+**Status:** Next. This is now the evidence and residency gate for tiled surfaces, not a general
+performance bucket.
+
+**Goal:** base GPU, backend-default, viewport-residency, and multi-resolution decisions on real device
+behavior.
 
 Work:
 
 - Record queried texture/format limits and proven allocation outcomes.
 - Separate estimated GPU residency from CPU caches and track eviction/reupload.
+- Treat committed tiled-scene residency as backend-acknowledged state only; requested upserts are not
+  resident until accepted by the backend.
+- Add conformance coverage for partially accepted, deferred, rejected, evicted, and context-lost tiled
+  commits so `DisplayScene.resident_region_ids` follows acknowledged payloads.
+- Change viewport retarget scheduling from montage-mode based to tiled-scene based before enabling
+  visible-only active regions for internally tiled normal images.
+- Introduce region-first display materialization so huge single-plane tiling can read and prepare visible
+  regions without requiring a full display image first.
+- Benchmark huge normal-plane first frame, pan into cold tiles, pan across warm/resident tiles, level-only
+  changes, backend reset/context loss, and allocation fallback on both PyQtGraph and VisPy paths.
 - Build Linux X11/Wayland, Windows, and macOS reference traces on integrated and discrete GPUs.
 - Decide whether/where VisPy becomes default from measured latency, stability, memory, and parity—not
   theoretical throughput.
-- Implement asynchronous/source-provided LOD materialization only after N6/N7 gates.
+- Implement asynchronous/source-provided LOD materialization only after the acknowledged-residency,
+  viewport-retarget, and region-first materialization contracts are proven.
 - Use separate compatible LOD pages/arrays or virtual textures; retain adjacent levels during
   transitions when budget allows.
 
 Exit gate:
 
-- published benchmark matrix includes request-to-frame, event-loop, RSS, residency, upload counters,
-  and LOD transition traces;
+- published benchmark matrix includes request-to-first-visible-tile, request-to-settled-frame,
+  event-loop gap, RSS, residency, upload counters, accepted/rejected tile counts, and LOD transition
+  traces;
 - no fixed assumed max texture size drives policy;
+- committed scene residency always reflects backend acknowledgement, including partial acceptance and
+  context-loss recovery;
+- internally tiled normal images can pan/zoom through viewport-scoped active and near regions without
+  blanking, full-frame rematerialization, or montage-specific assumptions;
+- region-first materialization works for eager array-backed sources and has a clear extension point for
+  memory-mapped/chunked sources;
 - context loss and allocation failure recover without semantic corruption;
 - repeated zoom threshold crossings do not rebuild/re-upload the full active set;
 - exact inspection values remain independent of display LOD;
 - backend-default and LOD-enable decisions have documented evidence.
+
+See [ADR 0044](decisions/0044-viewport-scoped-tiled-residency.md).
 
 ## Later — product capabilities that fit the mission
 

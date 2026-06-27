@@ -71,6 +71,7 @@ Status terminology:
 | [0040](0040-backend-aware-presentation-convergence.md) | Backend-aware presentation convergence | Implemented for tiled presentation. |
 | [0041](0041-lod-selection-materialization-and-residency.md) | LOD selection/materialization/residency | Accepted design; production remains native-only. |
 | [0042](0042-montage-viewport-reflow-and-roi-ownership.md) | Montage viewport reflow and ROI ownership | Implemented for tiled montage. |
+| [0044](0044-viewport-scoped-tiled-residency.md) | Viewport-scoped tiled residency | Accepted; acknowledgement repair implemented, normal-image retarget remains roadmap work. |
 
 ## Adding or changing a decision
 
