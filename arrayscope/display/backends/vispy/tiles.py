@@ -136,6 +136,19 @@ class TextureAtlasPage:
                 wrapping="clamp_to_edge",
             )
         self.slot_owners: list[object | None] = [None] * self.capacity
+        # Allocate slots from an explicit stack instead of scanning the whole
+        # owner list for every cold tile.  Large atlas pages may contain
+        # hundreds or thousands of slots, and visible commits can allocate many
+        # tiles in one UI callback.
+        self._free_slots: list[int] = list(range(self.capacity - 1, -1, -1))
+
+    def take_free_slot(self, owner: object) -> int | None:
+        while self._free_slots:
+            slot = int(self._free_slots.pop())
+            if self.slot_owners[slot] is None:
+                self.slot_owners[slot] = owner
+                return slot
+        return None
 
     @property
     def estimated_gpu_bytes(self) -> int:
@@ -899,11 +912,9 @@ class TextureAtlasPool:
             return int(current[0]), int(current[1]), False
 
         for page_index, page in enumerate(self.pages):
-            try:
-                slot = page.slot_owners.index(None)
-            except ValueError:
+            slot = page.take_free_slot(resident_key)
+            if slot is None:
                 continue
-            page.slot_owners[int(slot)] = resident_key
             self.resident_slots[resident_key] = (int(page_index), int(slot))
             return int(page_index), int(slot), True
 
