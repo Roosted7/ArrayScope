@@ -1,6 +1,6 @@
 # Current state
 
-**Snapshot:** ArrayScope v32 deadline-work-graph branch, reviewed on 2026-06-26. The v30
+**Snapshot:** ArrayScope v30 (and updated!) deadline-work-graph branch, reviewed on 2026-06-26. The v30
 rendering-consistency repairs are preserved. X1 unified frame planning/tiled surface work and X2
 deadline work admission are now implemented on top.
 
@@ -29,7 +29,7 @@ commit, retained warmup, and speculative work publish explicit admission and lif
 | VisPy backend | Experimental | Persistent textures/shader levels are promising; real-hardware evidence remains a gap. |
 | LOD | Explicit native-only production policy | Demand selection records desired/applied factor, per-axis texels, policy, and reason; applied factor remains 1 until async compatible residency exists. |
 | Diagnostics/benchmarks | Good internal base, recently corrected | Completion, level-work, work-graph, and large-normal tiled-surface counters now reflect committed backend work and rejected optional admission. |
-| Documentation/ADRs | Updated for v32 findings | X1, X2, X3, and X4 shared pointer capture are implemented; X5 hardware evidence remains. |
+| Documentation/ADRs | Updated for post v30 findings | X1, X2, X3, and X4 shared pointer capture are implemented; X5 hardware evidence remains. |
 
 ## What is working well
 
