@@ -34,10 +34,10 @@ def coerce_viewport_policy(
     policy: ViewportPolicy | ViewportIntent | str,
     auto_range: bool | None = None,
 ) -> ViewportPolicy | ViewportIntent:
-    """Normalize legacy ``autoRange`` and semantic viewport requests once.
+    """Normalize Qt-style ``autoRange`` and semantic viewport requests once.
 
     Rendering backends must not maintain independent translations of the
-    legacy boolean.  ``True`` means a one-time fit request; persistent Fit is
+    boolean.  ``True`` means a one-time fit request; persistent Fit is
     represented explicitly by :class:`ViewportIntent.FIT`/controller state.
     """
 

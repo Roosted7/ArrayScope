@@ -12,6 +12,5 @@ class ViewportBridge:
         if callable(note_interaction):
             note_interaction("range")
         self.owner._update_display_group_title()
-        if self.owner.view_state.montage_axis is not None and not getattr(self.owner, "_montage_canvas_commit_active", False):
+        if self.owner.view_state.montage_axis is not None and not getattr(self.owner, "_montage_presentation_commit_active", False):
             self.owner._schedule_montage_viewport_update()
-

@@ -91,10 +91,8 @@ class MontageRuntimeDiagnostics:
     tile_visual_visible_pages: int = 0
     overlays_above_tiles: bool = False
     display_mode: str = "canvas"
-    backend_setting: str = "auto"
     backend_chosen: str = "canvas"
     backend_reason: str = ""
-    backend_fallback_available: str = "canvas"
     backend_warning: str = ""
     show_loading_overlays: bool = False
     tile_lod_desired_factor: int = 1
@@ -345,7 +343,7 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             "Renderer:\n"
             f"  image={snapshot.image_rendering_backend_actual} "
             f"setting={snapshot.image_rendering_backend_selected} "
-            f"montage={snapshot.montage.backend_chosen} montage_setting={snapshot.montage.backend_setting}"
+            f"montage={snapshot.montage.backend_chosen}"
         ),
         (
             "Render:\n"
@@ -614,7 +612,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         ),
         f"Attached stage waits: {snapshot.montage.attached_stage_requests}",
         f"Display mode: {snapshot.montage.display_mode}",
-        f"Display backend: {snapshot.montage.backend_chosen} (setting={snapshot.montage.backend_setting}, fallback={snapshot.montage.backend_fallback_available})",
+        f"Display backend: {snapshot.montage.backend_chosen}",
         f"Display backend reason: {snapshot.montage.backend_reason or 'n/a'}",
         f"Warning: {snapshot.montage.backend_warning}" if snapshot.montage.backend_warning else "Warning: n/a",
         f"Loading overlays: {snapshot.montage.show_loading_overlays}",

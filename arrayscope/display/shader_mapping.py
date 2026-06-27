@@ -139,8 +139,8 @@ def common_shader_mapping(mappings) -> ShaderMapping | None:
 
     Shader state is frame-level presentation state.  It must never be inferred
     independently for each atlas page because page membership changes as tiles
-    enter and leave residency.  Missing mappings are tolerated for legacy
-    scalar payloads; conflicting explicit mappings are rejected.
+    enter and leave residency.  Missing mappings are tolerated for scalar
+    payloads without shader metadata; conflicting explicit mappings are rejected.
     """
 
     common = None

@@ -568,9 +568,9 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         self._colormap_user_selected = bool(user_selected)
         current_key = key_getter() if callable(key_getter) else None
 
-        # Shader-backed paths update uniforms in setColorMap.  Only the legacy
-        # CPU complex path bakes the LUT into RGB pixels and therefore needs a
-        # new materialization/cache key.
+        # Shader-backed paths update uniforms in setColorMap.  The CPU complex
+        # path bakes the LUT into RGB pixels and therefore needs a new
+        # materialization/cache key.
         if request_render and previous_key != current_key and self._evaluation_colormap_lut() is not None:
             self.render(reason="colormap")
         return self.current_colormap
@@ -847,7 +847,7 @@ class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRende
         self.line_plot.hide_crosshair()
 
     def is_line_plot_mode(self):
-        """The historical line-plot tab is no longer the primary plot surface."""
+        """Line-plot mode is disabled while the 2D viewer owns the primary surface."""
         return False
 
     def request_render(self, *, reason: str, force_autolevel: bool = False, interactive: bool = False) -> None:

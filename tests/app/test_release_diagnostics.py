@@ -5,7 +5,7 @@ def _read_jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_release_diagnostics_writes_trace_and_preserves_backend_setting(qt_app, tmp_path):
+def test_release_diagnostics_writes_trace_and_preserves_image_renderer_choice(qt_app, tmp_path):
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.core.diagnostics_trace import summarize_diagnostics_trace

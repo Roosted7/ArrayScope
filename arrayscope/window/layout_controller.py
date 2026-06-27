@@ -179,7 +179,7 @@ class WindowLayoutManager:
         self.set_managed_dock_visible(dock, bool(visible), reason="progressive", preserve_canvas=preserve_canvas)
 
     def set_dock_visible_preserving_canvas(self, dock, visible):
-        return self.set_managed_dock_visible(dock, visible, reason="legacy")
+        return self.set_managed_dock_visible(dock, visible, reason="preserve-canvas")
 
     def set_managed_dock_visible(self, dock, visible, *, reason, preserve_canvas=True, raise_dock=True):
         win = self.window

@@ -76,9 +76,8 @@ def _snapshot():
         montage=MontageRuntimeDiagnostics(
             active=False,
             display_mode="tile_layer",
-            backend_setting="auto",
             backend_chosen="tile_layer",
-            backend_reason="RGB/complex montage canvas pixels 3000000 > 2000000",
+            backend_reason="pyqtgraph supports direct tiled montage payloads",
             tile_lod_desired_factor=4,
             tile_lod_applied_factor=1,
             tile_lod_desired_factor_xy=(4, 2),
@@ -221,8 +220,8 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Timing worker queue wait: n/a" in text
     assert "Timing canvas compose: 2.50 ms" in text
     assert "Display mode: tile_layer" in text
-    assert "Display backend: tile_layer (setting=auto, fallback=canvas)" in text
-    assert "Display backend reason: RGB/complex montage" in text
+    assert "Display backend: tile_layer" in text
+    assert "Display backend reason: pyqtgraph supports direct tiled montage payloads" in text
     assert "LOD policy: native-only desired=4 desired_xy=(4, 2) applied=1 applied_xy=(1, 1)" in text
     assert "source_texels_per_pixel_xy=(8.00, 3.00)" in text
     assert "LOD policy reason: desired LOD is deferred until asynchronous multi-resolution residency exists" in text

@@ -39,18 +39,16 @@ still update displayed pixels immediately.
 Progressive montage commits are coalesced to the latest state when upload is slow. Final complete
 state is always committed.
 
-For large or previously slow montage displays, `ImageView2D` switches to an internal exact tile-layer
-mode. The full canvas remains the committed value source for hover/status and semantics, but per-tile
-`ImageItem`s paint visible loaded tiles. Updating one tile then uploads that tile rather than the full
-canvas. This mode is internal and does not change the public viewer API.
+Montage displays use the direct tiled-payload presentation path. The committed frame, frame plan, and
+tile payload state own value and coordinate semantics; backend scene objects mirror that state. Updating
+one tile then uploads or relocates that tile rather than rebuilding a full montage surface. This mode is
+internal and does not change the public viewer API.
 
-The Performance menu exposes the montage display backend as Auto, Tile layer, or Canvas fallback.
-Auto keeps PyQtGraph small/scalar montages on canvas, selects tile-layer mode for large RGB/complex
-montages and previously slow upload paths, and records the chosen backend and reason in diagnostics.
-Backends that declare typed tiled payload support and a tiled-montage preference, such as
-VisPy, use their typed tiled-delta path immediately in Auto to avoid canvas composition/upload during
-progressive montage updates. Canvas fallback remains available for developer/user escape hatches, but
-large RGB/complex canvas fallback is diagnosed as potentially slow.
+The Performance menu does not expose a montage presentation selector. PyQtGraph and VisPy both declare
+direct montage tile-payload support, so the shared presentation policy chooses the tiled path for every
+montage and records the chosen backend and reason in diagnostics. A backend that cannot accept direct
+montage tile payloads violates the presentation contract and must add that capability before it can show
+montages.
 
 Tile-layer presentation is stateful and dirty-aware. Presentation models carry optional dirty tile
 numbers: `None` means the tile state is unknown and visible loaded items should refresh, `()` means a
@@ -95,14 +93,13 @@ change finish.
 
 Diagnostics can distinguish slow operation evaluation from slow Qt upload.
 
-Large progressive montage is more responsive because intermediate canvas commits can be coalesced and
-tile-layer mode avoids repeated full-canvas uploads. Hot cached tile-layer flushes with unchanged
-levels and no dirty tiles, including all-cached sessions that rebuild the viewport canvas, are expected
-to report zero tile item updates and zero visible upload bytes.
+Large progressive montage is more responsive because tiled commits avoid repeated full-surface uploads.
+Hot cached tile-layer flushes with unchanged levels and no dirty tiles are expected to report zero tile
+item updates and zero visible upload bytes.
 
-The display implementation is more complex: ImageView2D now owns two montage paint modes, and tests
-must guard that both use the same levels, histogram source, hover/value semantics, and dirty-only
-update behavior.
+The display implementation is backend-specific only at the scene/texture layer. Tests must guard that
+PyQtGraph and VisPy use the same levels, histogram source, hover/value semantics, and dirty-only update
+behavior.
 
 For future work, PyQtGraph and VisPy should share semantic presentation, not necessarily scheduling or
 commit mechanics. PyQtGraph can remain item-oriented; VisPy should commit admitted visible tiles as a

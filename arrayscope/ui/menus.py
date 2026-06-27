@@ -9,13 +9,11 @@ from arrayscope.app.settings_state import (
     FFTWorkersChoice,
     ImageRenderingBackendChoice,
     MemoryProfileChoice,
-    MontageDisplayBackendChoice,
     PanelResizeBehavior,
     settings_from_mapping,
     settings_to_mapping,
 )
 from arrayscope.core.memory_budget import format_bytes
-from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
 from arrayscope.operations import fft_backend
 from arrayscope.operations.registry import operation_entries
@@ -34,7 +32,6 @@ class WindowMenuMixin:
                 "panel_resize_behavior": self._settings.value("panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value),
                 "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
                 "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
-                "montage_display_backend": self._settings.value("montage_display_backend", MontageDisplayBackendChoice.AUTO.value),
                 "image_rendering_backend": self._settings.value("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value),
                 "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
@@ -164,23 +161,6 @@ class WindowMenuMixin:
             workers_menu.addAction(action)
             self._fft_workers_actions[choice] = action
 
-        self._montage_backend_actions = {}
-        self._montage_backend_action_group = QtGui.QActionGroup(self)
-        self._montage_backend_action_group.setExclusive(True)
-        montage_backend_menu = QtWidgets.QMenu("Montage Display Backend", self)
-        performance_menu.addMenu(montage_backend_menu)
-        self._montage_backend_menu = montage_backend_menu
-        for choice, label in (
-            (MontageDisplayBackendChoice.AUTO, "Auto"),
-            (MontageDisplayBackendChoice.TILE_LAYER, "Tile layer"),
-            (MontageDisplayBackendChoice.CANVAS, "Canvas fallback"),
-        ):
-            action = QtGui.QAction(label, self, checkable=True)
-            self._montage_backend_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, choice=choice: self._set_montage_display_backend_choice(choice))
-            montage_backend_menu.addAction(action)
-            self._montage_backend_actions[choice] = action
-
         self._image_rendering_backend_actions = {}
         self._image_rendering_backend_action_group = QtGui.QActionGroup(self)
         self._image_rendering_backend_action_group.setExclusive(True)
@@ -206,7 +186,7 @@ class WindowMenuMixin:
         self._render_budget_menu = budget_menu
         for mb in (128, 256, 512, 1024, 2048, 4096, 8192):
             action = QtGui.QAction(f"{mb} MiB", self, checkable=True)
-            action.setToolTip("Per-render hard cap for visible images and montage canvas/tile allocation.")
+            action.setToolTip("Per-render hard cap for visible images and montage tile allocation.")
             self._render_budget_action_group.addAction(action)
             action.triggered.connect(lambda checked=False, mb=mb: self._set_render_memory_budget_mb(mb))
             budget_menu.addAction(action)
@@ -275,17 +255,6 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(self.app_settings.fft_workers == choice)
             action.blockSignals(False)
-        for choice, action in self._montage_backend_actions.items():
-            action.blockSignals(True)
-            action.setChecked(self.app_settings.montage_display_backend == choice)
-            action.blockSignals(False)
-        canvas_action = self._montage_backend_actions.get(MontageDisplayBackendChoice.CANVAS)
-        if canvas_action is not None:
-            supports_canvas = image_view_backend_capabilities(getattr(self, "img_view", None)).supports_montage_canvas
-            canvas_action.setEnabled(bool(supports_canvas))
-            canvas_action.setToolTip(
-                "" if supports_canvas else "The active renderer supports montage through the tiled path only."
-            )
         for choice, action in getattr(self, "_image_rendering_backend_actions", {}).items():
             action.blockSignals(True)
             action.setChecked(self.app_settings.image_rendering_backend == choice)
@@ -336,10 +305,6 @@ class WindowMenuMixin:
         self.app_settings = self._updated_app_settings(fft_workers=choice)
         self._apply_performance_settings(persist=True)
 
-    def _set_montage_display_backend_choice(self, choice):
-        self.app_settings = self._updated_app_settings(montage_display_backend=choice)
-        self._apply_performance_settings(persist=True)
-
     def _set_image_rendering_backend_choice(self, choice):
         self.app_settings = self._updated_app_settings(image_rendering_backend=choice)
         self._apply_performance_settings(persist=True)
@@ -380,7 +345,6 @@ class WindowMenuMixin:
             "panel_resize_behavior": current.panel_resize_behavior,
             "fft_backend": current.fft_backend,
             "fft_workers": current.fft_workers,
-            "montage_display_backend": current.montage_display_backend,
             "image_rendering_backend": current.image_rendering_backend,
             "memory_profile": current.memory_profile,
             "render_memory_budget_mb": current.render_memory_budget_mb,
@@ -412,7 +376,6 @@ class WindowMenuMixin:
             panel_resize_behavior=current.panel_resize_behavior,
             fft_backend=current.fft_backend,
             fft_workers=current.fft_workers,
-            montage_display_backend=current.montage_display_backend,
             image_rendering_backend=current.image_rendering_backend,
             memory_profile=current.memory_profile,
             render_memory_budget_mb=current.render_memory_budget_mb,
@@ -428,7 +391,6 @@ class WindowMenuMixin:
             panel_resize_behavior=self.app_settings.panel_resize_behavior,
             fft_backend=self.app_settings.fft_backend,
             fft_workers=self.app_settings.fft_workers,
-            montage_display_backend=self.app_settings.montage_display_backend,
             image_rendering_backend=self.app_settings.image_rendering_backend,
             memory_profile=self.app_settings.memory_profile,
             render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
@@ -446,7 +408,6 @@ class WindowMenuMixin:
             panel_resize_behavior=behavior,
             fft_backend=self.app_settings.fft_backend,
             fft_workers=self.app_settings.fft_workers,
-            montage_display_backend=self.app_settings.montage_display_backend,
             image_rendering_backend=self.app_settings.image_rendering_backend,
             memory_profile=self.app_settings.memory_profile,
             render_memory_budget_mb=self.app_settings.render_memory_budget_mb,

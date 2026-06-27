@@ -121,7 +121,6 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, monkeypatch):
 
 def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch):
     clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.window import ArrayScopeWindow
 
@@ -140,7 +139,6 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
             )
         calls = []
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
 
         win._set_view_state(state)
         win.update_montage_view()
@@ -183,8 +181,6 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
     from time import monotonic
 
     from pyqtgraph.Qt import QtCore
-
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.window import ArrayScopeWindow
 
@@ -205,7 +201,6 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
                 result=result,
             )
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: pytest.fail("no tile evaluation expected"))
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
 
         win._set_view_state(state)
         win.update_montage_view()
@@ -258,8 +253,6 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
     clear_arrayscope_settings()
     from types import SimpleNamespace
     from time import monotonic
-
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.window import ArrayScopeWindow
 
@@ -279,7 +272,6 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
                 result=result,
             )
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: pytest.fail("no tile evaluation expected"))
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
 
         win._set_view_state(state)
         win.update_montage_view()
@@ -320,7 +312,7 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
 
     clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice, MontageDisplayBackendChoice
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
     scheduled = []
@@ -332,7 +324,6 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
 
         win = ArrayScopeWindow(np.arange(2 * 2 * 8, dtype=np.float32).reshape(2, 2, 8))
         qtbot.addWidget(win)
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
         process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
         win.update_montage_view()
@@ -356,7 +347,7 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
 
     clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice, MontageDisplayBackendChoice
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
     win = None
@@ -369,7 +360,6 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
         qtbot.addWidget(win)
         win.resize(360, 240)
         win.show()
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
         process_events(qtbot)
         monkeypatch.setattr(
             win.montage_tile_evaluation_controller,

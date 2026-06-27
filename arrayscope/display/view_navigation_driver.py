@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pyqtgraph.Qt import QtCore
 
+from arrayscope.display.interaction import point_inside_rect
 from arrayscope.display.view_navigation import PanGesture, begin_pan, pan_view_range, wheel_zoom_view_range
 
 
@@ -29,6 +30,8 @@ class QtViewNavigationDriver:
         }:
             point = owner._event_overlay_point(event)
             if point is None:
+                return False
+            if not point_inside_rect(point, owner._current_image_viewport_rect()):
                 return False
             target_at = getattr(owner, "_interaction_target_at", None)
             if callable(target_at) and target_at(point) is not None:

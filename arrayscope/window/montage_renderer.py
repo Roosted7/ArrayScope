@@ -2,8 +2,8 @@
 
 The montage path is large enough to have explicit ownership separate from
 hover/profile/preference UI code.  It manages sessions, visible-tile planning,
-stage-first tile scheduling, progressive canvas commits, and montage-specific
-level source tracking.
+stage-first tile scheduling, progressive tiled presentation commits, and
+montage-specific level source tracking.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from arrayscope.display.montage import (
     MontageTileState,
     RenderedTile,
     make_montage_plan,
-    make_montage_viewport_canvas,
     montage_rect_for_viewport,
 )
 from arrayscope.display.slice_engine import DisplayImage, make_image_from_slab, make_shader_image_from_slab
@@ -105,7 +104,6 @@ class MontageRenderMixin:
         return choose_montage_backend(
             geometry,
             data,
-            setting=getattr(getattr(self, "app_settings", None), "montage_display_backend", "auto"),
             previous_upload_ms=float(getattr(self, "_last_set_image_ms", 0.0) or 0.0),
             patched_tiles=int(getattr(self, "_montage_patched_tiles_last_flush", 0) or 0),
             current_mode=str(getattr(self.img_view, "montageDisplayMode", lambda: "canvas")()),
@@ -306,28 +304,6 @@ class MontageRenderMixin:
         )
         shader_display = viewport_plan.shader_display
         output_dtype = np.uint8 if view_state.channel == ChannelMode.COMPLEX and not shader_display else getattr(document.base_data, "dtype", np.dtype(float))
-        canvas_estimate = estimate_display_image_bytes(
-            (max(1, int(canvas_rect[3]) - int(canvas_rect[1])), max(1, int(canvas_rect[2]) - int(canvas_rect[0]))),
-            output_dtype,
-            rgb=view_state.channel == ChannelMode.COMPLEX,
-            histogram=True,
-        )
-        canvas_warning_geometry = DisplayGeometry(
-            view_state=view_state,
-            display_shape=(max(1, int(canvas_rect[3]) - int(canvas_rect[1])), max(1, int(canvas_rect[2]) - int(canvas_rect[0]))),
-            montage=plan.geometry,
-        )
-        if view_state.channel == ChannelMode.COMPLEX and not shader_display:
-            backend_probe = np.zeros((1, 1, 3), dtype=np.uint8)
-        else:
-            backend_probe = np.zeros((1, 1), dtype=np.dtype(output_dtype))
-        backend_decision = self._montage_backend_policy(canvas_warning_geometry, backend_probe)
-        if backend_decision.backend == "canvas" and canvas_estimate > policy.montage_canvas_budget_bytes:
-            show_status_message(
-                self,
-                f"Montage viewport canvas would allocate {format_bytes(canvas_estimate)} over budget {format_bytes(policy.montage_canvas_budget_bytes)}. Zoom in or increase Performance > Render Memory Budget.",
-                timeout=6000,
-            )
         single_estimate = estimate_display_image_bytes(
             tile_shape,
             output_dtype,
@@ -1971,144 +1947,15 @@ class MontageRenderMixin:
         if not self._is_current_montage_session(session.session_id, session.key):
             return
         commit_start = perf_counter()
-        self._classify_canvas_tiles(session)
+        self._classify_visible_montage_tiles(session)
         direct_presentation = self._direct_montage_tile_layer_presentation(session)
-        if direct_presentation is not None:
-            self._commit_montage_session_tile_layer(session, direct_presentation, commit_start=commit_start)
-            return
-        previous_canvas = getattr(self, "_current_montage_canvas", None)
-        previous_global_range = self._current_montage_global_view_range()
-        newly_composed = session.canvas is None
-        if newly_composed:
-            compose_start = perf_counter()
-            canvas = make_montage_viewport_canvas(
-                session.plan,
-                session.rendered_tuple(),
-                view_range=session.view_range,
-                viewport_shape=session.viewport_shape,
-                budget_bytes=self._montage_canvas_budget_bytes(),
-                dtype=session.output_dtype,
-                rgb=session.rgb,
-                include_histogram=True,
-                loading_tiles=session.loading_tile_tuple(),
-                skipped_tiles=session.skipped_tile_tuple(),
+        if direct_presentation is None:
+            capabilities = image_view_backend_capabilities(self.img_view)
+            raise RuntimeError(
+                f"{capabilities.name} does not provide direct montage tile payloads; "
+                "montage presentation cannot be committed"
             )
-            self._last_montage_canvas_compose_ms = (perf_counter() - compose_start) * 1000.0
-            session.initialize_canvas(canvas)
-        else:
-            canvas = session.current_canvas()
-            object.__setattr__(canvas, "tile_states", tuple(session.tile_states))
-            self._last_montage_canvas_compose_ms = 0.0
-        dirty_rects = session.consume_dirty_rects()
-        dirty_tiles = session.consume_dirty_tiles()
-        tile_source_ids = self._montage_tile_source_ids(session)
-        self._montage_patched_tiles_last_flush = len(dirty_rects)
-        rendered_geometry = DisplayGeometry(
-            view_state=session.view_state,
-            display_shape=canvas.data.shape[:2],
-            montage=session.plan.geometry,
-            montage_origin_x=canvas.origin_x,
-            montage_origin_y=canvas.origin_y,
-            montage_tile_states=canvas.tile_states,
-        )
-        self._current_montage_geometry = session.plan.geometry
-        self._current_montage_plan = session.plan
-        self._current_montage_canvas = canvas
-        self._next_viewport_policy = ViewportPolicy.PRESERVE
-        self._montage_presentation_commit_active = True
-        try:
-            display_image = DisplayImage(data=canvas.data, histogram_data=canvas.histogram_data)
-            level_stats = self._montage_level_stats_for_session(session)
-            requested_levels = _session_requested_levels(session)
-            explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
-            semantic_commit = bool(session.rendered_tiles)
-            decision_force_auto = bool(explicit_auto and semantic_commit)
-            first_display_commit = not bool(session.display_committed)
-            publish_metadata = bool(explicit_auto) or self._should_publish_montage_level_metadata(session, level_stats)
-            semantic_source = self._montage_level_source_for_session(session, allow_partial=publish_metadata)
-            histogram_plot_data = (
-                self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
-                if _should_publish_montage_histogram_plot(first_display_commit, explicit_auto, level_stats)
-                else None
-            )
-            if newly_composed or first_display_commit:
-                self._apply_full_display_image(
-                    display_image,
-                    geometry=rendered_geometry,
-                    window_mode=session.window_mode,
-                    previous_frame=getattr(self, "_committed_display_frame", None),
-                    force_auto=decision_force_auto,
-                    defer_side_panels=getattr(session, "defer_side_panels", False),
-                    semantic_source=semantic_source,
-                    applied_level_source=session.applied_level_source,
-                    histogram_plot_data=histogram_plot_data,
-                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if decision_force_auto else CommitKind.FULL_MONTAGE_INITIAL,
-                    document_key=_document_key(session.document),
-                    request_key=session.key,
-                    render_generation=session.render_generation,
-                    montage_level_key=session.level_key,
-                    montage_dirty_tiles=dirty_tiles,
-                    montage_tile_source_ids=tile_source_ids,
-                    frame_plan=session.frame_plan,
-                    user_levels=requested_levels,
-                    semantic_commit=semantic_commit,
-                )
-                session.display_committed = bool(session.rendered_tiles)
-            else:
-                self._apply_progressive_display_image(
-                    display_image,
-                    geometry=rendered_geometry,
-                    window_mode=session.window_mode,
-                    previous_frame=getattr(self, "_committed_display_frame", None),
-                    force_auto=False,
-                    viewport_policy=ViewportPolicy.PRESERVE,
-                    semantic_source=semantic_source,
-                    applied_level_source=session.applied_level_source,
-                    histogram_plot_data=histogram_plot_data,
-                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_MONTAGE_PATCH,
-                    document_key=_document_key(session.document),
-                    request_key=session.key,
-                    render_generation=session.render_generation,
-                    montage_level_key=session.level_key,
-                    montage_dirty_tiles=dirty_tiles,
-                    montage_tile_source_ids=tile_source_ids,
-                    frame_plan=session.frame_plan,
-                    user_levels=requested_levels,
-                    semantic_commit=semantic_commit,
-                )
-            session.mark_presented(session.rendered_tiles.keys())
-            session.display_committed = bool(session.presented_tiles)
-            if session.canvas is not None:
-                object.__setattr__(session.canvas, "tile_states", tuple(session.ensure_tile_states()))
-            overlay_start = perf_counter()
-            self._update_montage_tile_overlays(canvas)
-            self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
-        finally:
-            self._montage_presentation_commit_active = False
-        self._last_montage_canvas_commit_ms = (perf_counter() - commit_start) * 1000.0
-        _complete_inline_work(
-            self,
-            WorkItem(
-                key=("montage_backend_commit", session.key, int(session.session_id), int(session.tile_presentation_state.revision), "canvas"),
-                lane=WorkLane.BACKEND_COMMIT,
-                frame_target=session.frame_plan.target,
-                supersession_key=("montage-backend-commit", session.key),
-                supersession_value=int(session.session_id),
-                estimated_cpu_ms=float(self._last_montage_canvas_commit_ms),
-                estimated_bytes=int(getattr(canvas.data, "nbytes", 0) or 0),
-            ),
-        )
-        feedback = _latency_feedback(self)
-        if feedback is not None:
-            if hasattr(self, "_record_ui_work"):
-                self._record_ui_work("montage_commit", self._last_montage_canvas_commit_ms)
-            else:
-                feedback.observe("montage_commit", self._last_montage_canvas_commit_ms)
-        session.note_committed()
-        self._notify_file_session_montage_committed()
-        self._finish_montage_session_if_complete(session)
-        schedule_near_viewport_montage_prefetch(self, session)
-        self._retry_live_profile_after_montage_tile()
+        self._commit_montage_session_tile_layer(session, direct_presentation, commit_start=commit_start)
 
     def _direct_montage_tile_layer_presentation(self, session):
         capabilities = image_view_backend_capabilities(self.img_view)
@@ -2807,7 +2654,7 @@ class MontageRenderMixin:
         # to stale tiny placeholder ranges.
         session.applied_level_source = source
 
-    def _classify_canvas_tiles(self, session) -> None:
+    def _classify_visible_montage_tiles(self, session) -> None:
         rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
         pending = set(session.pending_tile_numbers())
         newly_pending = []
@@ -2830,13 +2677,6 @@ class MontageRenderMixin:
         ):
             _enqueue_session_pending_tile(session, tile)
             session.mark_loading(tile)
-
-    def _update_montage_tile_overlays(self, canvas) -> None:
-        self._update_montage_tile_overlays_for_plan(
-            canvas.full_plan,
-            canvas.tile_states,
-            canvas.canvas_rect,
-        )
 
     def _update_montage_tile_overlays_for_plan(self, plan, tile_states, canvas_rect) -> None:
         if not hasattr(self.img_view, "setMontageTileOverlays"):

@@ -321,7 +321,7 @@ def test_square_pixel_fit_view_range_preserves_content_aspect_inside_wide_viewpo
     assert view_ranges_near(view_range, ((-5.01, 15.01), (0.0, 10.0)), tolerance_fraction=0.02)
 
 
-def test_legacy_auto_range_is_coerced_identically_for_every_backend():
+def test_qt_auto_range_is_coerced_identically_for_every_backend():
     assert coerce_viewport_policy(ViewportPolicy.PRESERVE, True) is ViewportPolicy.FIT_ONCE
     assert coerce_viewport_policy(ViewportPolicy.FIT_ONCE, False) is ViewportPolicy.PRESERVE
 

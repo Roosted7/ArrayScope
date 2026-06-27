@@ -4,13 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-
-from arrayscope.app.settings_state import MontageDisplayBackendChoice, normalize_montage_display_backend_choice
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
-
-
-LARGE_MONTAGE_CANVAS_PIXELS = 2_000_000
 
 
 @dataclass(frozen=True)
@@ -25,7 +19,6 @@ def choose_montage_backend(
     geometry,
     data,
     *,
-    setting=MontageDisplayBackendChoice.AUTO,
     previous_upload_ms: float = 0.0,
     patched_tiles: int = 0,
     current_mode: str = "canvas",
@@ -36,126 +29,33 @@ def choose_montage_backend(
     if getattr(geometry, "montage", None) is None:
         return MontageBackendDecision("canvas", "not a montage display")
 
-    setting = normalize_montage_display_backend_choice(setting)
-    pixels = max(_canvas_pixels(data), _montage_pixels(geometry))
-    rgb_like = _is_rgb_like(data)
-    large = pixels > LARGE_MONTAGE_CANVAS_PIXELS
-    large_rgb = large and rgb_like
-    renderer_backend = str(getattr(renderer_backend, "value", renderer_backend) or "pyqtgraph").lower()
-    prefers_tiled_montages = (
-        bool(renderer_capabilities.prefers_tiled_montages)
-        if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
-        else renderer_backend == "vispy"
-    )
     direct_tile_payloads = (
         bool(renderer_capabilities.direct_montage_tile_payloads)
         if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
-        else renderer_backend in {"pyqtgraph", "vispy"}
-    )
-    supports_montage_canvas = (
-        bool(renderer_capabilities.supports_montage_canvas)
-        if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
-        else renderer_backend != "vispy"
+        else str(getattr(renderer_backend, "value", renderer_backend) or "pyqtgraph").lower() in {"pyqtgraph", "vispy"}
     )
     renderer_name = (
         str(renderer_capabilities.name)
         if isinstance(renderer_capabilities, ImageViewBackendCapabilities)
         else renderer_backend
     )
-    current_is_tile_layer = str(current_mode) in {"tile_layer", "vispy_tile_layer"}
-
-    if setting == MontageDisplayBackendChoice.TILE_LAYER:
-        return MontageBackendDecision("tile_layer", "user forced tile layer", expected_tile_layer=True)
-
-    if setting == MontageDisplayBackendChoice.CANVAS:
-        if direct_tile_payloads:
-            return MontageBackendDecision(
-                "tile_layer",
-                f"{renderer_name} supports direct tiled montage payloads; canvas fallback is not used for live montages",
-                warning="canvas fallback was requested but direct tiled presentation is the live montage path",
-                expected_tile_layer=True,
-            )
-        if not supports_montage_canvas:
-            return MontageBackendDecision(
-                "tile_layer",
-                f"{renderer_name} does not support montage canvas; using tiled presentation",
-                warning="canvas fallback is unavailable for this rendering backend",
-                expected_tile_layer=True,
-            )
-        warning = None
-        if large_rgb:
-            warning = "canvas fallback is manual and may be slow for large RGB/complex montage"
-        return MontageBackendDecision("canvas", "user forced canvas fallback", warning=warning, expected_tile_layer=False)
-
-    if direct_tile_payloads:
+    if not direct_tile_payloads:
         return MontageBackendDecision(
             "tile_layer",
-            f"{renderer_name} supports direct tiled montage payloads; using live tiled presentation",
+            f"{renderer_name} montage requires direct tiled payloads",
+            warning="renderer capabilities do not provide the montage presentation contract",
             expected_tile_layer=True,
         )
-    if large_rgb:
-        return MontageBackendDecision(
-            "tile_layer",
-            f"RGB/complex montage canvas pixels {pixels} > {LARGE_MONTAGE_CANVAS_PIXELS}",
-            expected_tile_layer=True,
-        )
-    if large and prefers_tiled_montages:
-        return MontageBackendDecision(
-            "tile_layer",
-            f"{renderer_name} prefers tiled montage pixels {pixels} > {LARGE_MONTAGE_CANVAS_PIXELS}; avoid full-surface uploads",
-            expected_tile_layer=True,
-        )
-    if float(previous_upload_ms or 0.0) > float(very_slow_upload_ms):
-        return MontageBackendDecision(
-            "tile_layer",
-            f"previous montage upload {float(previous_upload_ms):.1f} ms > {float(very_slow_upload_ms):.1f} ms",
-            expected_tile_layer=True,
-        )
-    if int(patched_tiles or 0) > 8:
-        return MontageBackendDecision(
-            "tile_layer",
-            f"patched tiles last flush {int(patched_tiles)} > 8",
-            expected_tile_layer=True,
-        )
-    if current_is_tile_layer:
-        return MontageBackendDecision("tile_layer", "preserving active tile-layer backend", expected_tile_layer=True)
-    if large:
-        return MontageBackendDecision("canvas", f"large scalar montage canvas pixels {pixels}; scalar levels are cheap")
-    return MontageBackendDecision("canvas", f"small montage canvas pixels {pixels}")
+    return MontageBackendDecision(
+        "tile_layer",
+        f"{renderer_name} supports direct tiled montage payloads",
+        expected_tile_layer=True,
+    )
 
 
 def backend_warning_for_actual_commit(decision: MontageBackendDecision, actual_backend: str) -> str | None:
     if decision.warning:
         return decision.warning
     if decision.expected_tile_layer and str(actual_backend) != "tile_layer":
-        return "large montage committed through canvas mode; expected tile_layer"
+        return "montage committed outside the tiled presentation path"
     return None
-
-
-def _canvas_pixels(data) -> int:
-    shape = tuple(np.shape(data)[:2])
-    if len(shape) != 2:
-        return 0
-    return int(shape[0]) * int(shape[1])
-
-
-def _montage_pixels(geometry) -> int:
-    montage = getattr(geometry, "montage", None)
-    if montage is None:
-        return 0
-    try:
-        columns = int(montage.columns)
-        rows = int(montage.rows)
-        tile_width = int(montage.tile_width)
-        tile_height = int(montage.tile_height)
-        gap = int(getattr(montage, "gap", 0))
-    except Exception:
-        return 0
-    width = columns * tile_width + max(0, columns - 1) * gap
-    height = rows * tile_height + max(0, rows - 1) * gap
-    return max(0, width) * max(0, height)
-
-
-def _is_rgb_like(data) -> bool:
-    shape = tuple(np.shape(data))
-    return len(shape) == 3 and int(shape[-1]) in (3, 4)

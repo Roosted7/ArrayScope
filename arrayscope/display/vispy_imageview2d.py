@@ -1494,7 +1494,7 @@ class VisPyImageView2D(ImageViewShell):
                 force_mapping=force_mapping,
                 frame_plan=frame_plan,
             )
-        raise ValueError("VisPy montage presentation requires direct tile payloads; canvas fallback was removed")
+        raise ValueError("VisPy montage presentation requires direct tile payloads")
 
     def _update_vispy_direct_tile_layer(
         self,

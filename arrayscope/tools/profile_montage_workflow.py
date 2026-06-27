@@ -56,10 +56,7 @@ def run_profile_montage_workflow(
     import pyqtgraph as pg
     from pyqtgraph.Qt import QtCore
 
-    from arrayscope.app.settings_state import (
-        ImageRenderingBackendChoice,
-        MontageDisplayBackendChoice,
-    )
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.window import ArrayScopeWindow
 
@@ -71,12 +68,10 @@ def run_profile_montage_workflow(
     app = pg.mkQApp()
     settings = QtCore.QSettings()
     previous_image_backend = settings.value("image_rendering_backend", None)
-    previous_montage_backend = settings.value("montage_display_backend", None)
     settings.setValue(
         "image_rendering_backend",
         ImageRenderingBackendChoice.VISPY.value if backend == "vispy" else ImageRenderingBackendChoice.PYQTGRAPH.value,
     )
-    settings.setValue("montage_display_backend", MontageDisplayBackendChoice.TILE_LAYER.value)
     settings.sync()
 
     win = None
@@ -123,7 +118,6 @@ def run_profile_montage_workflow(
             win.app_settings,
             backend=backend,
             image_choice=ImageRenderingBackendChoice,
-            montage_choice=MontageDisplayBackendChoice,
         )
         apply_theme = getattr(win, "_apply_theme_choice", None)
         if callable(apply_theme):
@@ -191,7 +185,6 @@ def run_profile_montage_workflow(
             win.close()
             _process_events(app, QtCore, count=10)
         _restore_setting(settings, "image_rendering_backend", previous_image_backend)
-        _restore_setting(settings, "montage_display_backend", previous_montage_backend)
         settings.sync()
 
 
@@ -908,7 +901,7 @@ def _is_nifti(path: Path) -> bool:
     return name.endswith(".nii") or name.endswith(".nii.gz")
 
 
-def _replace_settings(settings, *, backend: str, image_choice, montage_choice):
+def _replace_settings(settings, *, backend: str, image_choice):
     from dataclasses import replace
 
     from arrayscope.app.theme import ThemeChoice
@@ -917,7 +910,6 @@ def _replace_settings(settings, *, backend: str, image_choice, montage_choice):
         settings,
         theme=ThemeChoice.DARK if backend == "vispy" else ThemeChoice.LIGHT,
         image_rendering_backend=image_choice.VISPY if backend == "vispy" else image_choice.PYQTGRAPH,
-        montage_display_backend=montage_choice.TILE_LAYER,
     )
 
 

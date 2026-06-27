@@ -264,7 +264,7 @@ class DimensionControlMixin:
         self.render(reason="transpose")
 
     def update(self):
-        self.render(reason="legacy-update")
+        self.render(reason="dimension-update")
 
     def update_dimension_controls(self):
         """Update button and spinbox states based on current mode"""

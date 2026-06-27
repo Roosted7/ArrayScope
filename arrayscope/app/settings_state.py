@@ -30,12 +30,6 @@ class FFTWorkersChoice(Enum):
     ALL_MINUS_ONE = "all_minus_one"
 
 
-class MontageDisplayBackendChoice(Enum):
-    AUTO = "auto"
-    TILE_LAYER = "tile_layer"
-    CANVAS = "canvas"
-
-
 class ImageRenderingBackendChoice(Enum):
     PYQTGRAPH = "pyqtgraph"
     VISPY = "vispy"
@@ -48,7 +42,6 @@ class AppSettingsState:
     panel_resize_behavior: PanelResizeBehavior = PanelResizeBehavior.BEST_EFFORT
     fft_backend: FFTBackendChoice = FFTBackendChoice.AUTO
     fft_workers: FFTWorkersChoice = FFTWorkersChoice.AUTO
-    montage_display_backend: MontageDisplayBackendChoice = MontageDisplayBackendChoice.AUTO
     image_rendering_backend: ImageRenderingBackendChoice = ImageRenderingBackendChoice.PYQTGRAPH
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
@@ -62,7 +55,6 @@ def settings_from_mapping(values) -> AppSettingsState:
         panel_resize_behavior=normalize_panel_resize_behavior(values.get("panel_resize_behavior")),
         fft_backend=normalize_fft_backend_choice(values.get("fft_backend")),
         fft_workers=normalize_fft_workers_choice(values.get("fft_workers")),
-        montage_display_backend=normalize_montage_display_backend_choice(values.get("montage_display_backend")),
         image_rendering_backend=normalize_image_rendering_backend_choice(values.get("image_rendering_backend")),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(values.get("render_memory_budget_mb", 512)),
@@ -76,7 +68,6 @@ def settings_to_mapping(settings: AppSettingsState):
         "panel_resize_behavior": settings.panel_resize_behavior.value,
         "fft_backend": settings.fft_backend.value,
         "fft_workers": settings.fft_workers.value,
-        "montage_display_backend": settings.montage_display_backend.value,
         "image_rendering_backend": settings.image_rendering_backend.value,
         "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
@@ -110,17 +101,6 @@ def normalize_fft_workers_choice(value) -> FFTWorkersChoice:
         return FFTWorkersChoice(str(value))
     except Exception:
         return FFTWorkersChoice.AUTO
-
-
-def normalize_montage_display_backend_choice(value) -> MontageDisplayBackendChoice:
-    if isinstance(value, MontageDisplayBackendChoice):
-        return value
-    value = getattr(value, "value", value)
-    try:
-        return MontageDisplayBackendChoice(str(value))
-    except Exception:
-        return MontageDisplayBackendChoice.AUTO
-
 
 
 def normalize_image_rendering_backend_choice(value) -> ImageRenderingBackendChoice:

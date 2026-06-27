@@ -114,7 +114,6 @@ def test_montage_status_does_not_remain_computing(qtbot):
 
 def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((2, 3, 20), dtype=float)
@@ -123,7 +122,6 @@ def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbo
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.CANVAS)
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
         win.render(reason="test-montage")
@@ -154,7 +152,6 @@ def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbo
 
 def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((2, 3, 20), dtype=np.float32)
@@ -163,7 +160,6 @@ def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.CANVAS)
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
         win.render(reason="test-montage")
@@ -193,7 +189,6 @@ def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
 
 def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((2, 3, 20), dtype=np.float32)
@@ -202,7 +197,6 @@ def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.CANVAS)
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
         win.render(reason="test-montage")
@@ -423,7 +417,6 @@ def test_montage_commits_cached_tiles_immediately_with_loading_placeholders(qtbo
 
 def test_tile_layer_range_scroll_commits_loading_presentation_before_tiles_are_ready(qtbot, monkeypatch):
     _clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.window import ArrayScopeWindow
 
@@ -437,7 +430,6 @@ def test_tile_layer_range_scroll_commits_loading_presentation_before_tiles_are_r
     )
     try:
         _process_events(qtbot)
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
         first_state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
         first_plan = make_montage_plan(first_state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
         for tile in first_plan.tiles:
@@ -1414,7 +1406,6 @@ def test_operation_backed_complex_montage_rewindows_rgb_from_histogram_levels(qt
 
 def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogram_levels(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.window import ArrayScopeWindow
 
@@ -1426,7 +1417,6 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         win.operation_coordinator.load_operations((CenteredFFT(axis=0),))
         win._set_document(win.operation_coordinator.document)
         win._coerce_channel_for_current_dtype()
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_montage_view()
 
@@ -1516,14 +1506,12 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_upload_canvas(
 
 def test_large_complex_montage_forced_canvas_records_warning(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
     data = np.ones((840, 840, 3), dtype=np.complex64)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.CANVAS)
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_montage_view()

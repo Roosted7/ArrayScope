@@ -369,6 +369,14 @@ def hit_test_display_overlays(
     return None
 
 
+def point_inside_rect(point: tuple[float, float], rect) -> bool:
+    if rect is None:
+        return False
+    x, y = (float(point[0]), float(point[1]))
+    x0, y0, x1, y1 = (float(value) for value in rect)
+    return min(x0, x1) <= x <= max(x0, x1) and min(y0, y1) <= y <= max(y0, y1)
+
+
 def drag_roi_geometry(
     geometry: RoiGeometry,
     target: InteractionTarget,
@@ -475,4 +483,5 @@ __all__ = [
     "drag_profile_position",
     "drag_roi_geometry",
     "hit_test_display_overlays",
+    "point_inside_rect",
 ]

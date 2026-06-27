@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from arrayscope.core.roi import roi_bounding_rect
 from arrayscope.display.interaction import (
     DisplayInteractionController,
     InteractionTarget,
     PointerPhase,
     hit_test_display_overlays,
+    point_inside_rect,
 )
 
 
@@ -71,6 +73,8 @@ class QtPointerInteractionDriver:
     def target_at(self, point: tuple[float, float] | None) -> InteractionTarget | None:
         if point is None:
             return None
+        content_rect = self._owner._current_image_viewport_rect()
+        point_inside_content = point_inside_rect(point, content_rect)
         state = self._controller.state
         if state.pending_draw_tool is not None or state.phase is PointerPhase.DRAWING:
             return None
@@ -78,7 +82,7 @@ class QtPointerInteractionDriver:
         profile_bounds = self._owner._current_profile_bounds() if profile_position is not None else None
         tolerance = self._hit_tolerance()
         roi_candidates = self._owner.roiHitCandidates(point, tolerance=tolerance)
-        return hit_test_display_overlays(
+        target = hit_test_display_overlays(
             point,
             roi_selections=roi_candidates,
             roi_selections_topmost=True,
@@ -86,6 +90,11 @@ class QtPointerInteractionDriver:
             profile_bounds=profile_bounds,
             tolerance=tolerance,
         )
+        if point_inside_content:
+            return target
+        if target is not None and _target_roi_outside_rect(target, roi_candidates, content_rect):
+            return target
+        return None
 
     def cancel(self, reason: str) -> None:
         state = self._controller.cancel_active(reason)
@@ -113,6 +122,27 @@ class QtPointerInteractionDriver:
         except Exception:
             buttons = QtWidgets.QApplication.mouseButtons()
         return bool(buttons & QtCore.Qt.MouseButton.LeftButton)
+
+def _target_roi_outside_rect(target: InteractionTarget, roi_candidates, rect) -> bool:
+    if target.kind != "roi" or target.object_id is None or rect is None:
+        return False
+    target_id = str(target.object_id)
+    for selection in roi_candidates:
+        if str(getattr(selection, "id", "")) != target_id:
+            continue
+        geometry = getattr(selection, "geometry", None)
+        bounds = None if geometry is None else roi_bounding_rect(geometry)
+        if bounds is None:
+            return False
+        gx0, gy0, gx1, gy1 = (float(value) for value in bounds)
+        rx0, ry0, rx1, ry1 = (float(value) for value in rect)
+        return (
+            gx0 < min(rx0, rx1)
+            or gx1 > max(rx0, rx1)
+            or gy0 < min(ry0, ry1)
+            or gy1 > max(ry0, ry1)
+        )
+    return False
 
 
 __all__ = ["QtPointerInteractionDriver"]

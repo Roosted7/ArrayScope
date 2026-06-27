@@ -42,7 +42,7 @@ class ScipyFFTBackend:
         from scipy import fft
 
         # ArrayScope's names are MRI/k-space oriented: "centered FFT" maps to
-        # an inverse FFT internally, preserving the historical viewer behavior.
+        # an inverse FFT internally, preserving established viewer behavior.
         return fft.ifftshift(fft.ifft(fft.fftshift(data, axes=axis), axis=axis, norm="ortho", workers=int(workers)), axes=axis)
 
     def centered_ifft(self, data, axis: int, *, workers: int = 1):

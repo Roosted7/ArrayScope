@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from arrayscope.app.settings_state import MontageDisplayBackendChoice
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.window.montage_payload_cache import (
@@ -61,42 +60,6 @@ def test_auto_small_scalar_vispy_montage_uses_tile_layer():
     assert "direct tiled montage payloads" in decision.reason
 
 
-def test_direct_tiled_backend_cannot_be_forced_through_montage_canvas():
-    data = np.zeros((64, 64), dtype=np.float32)
-
-    decision = choose_montage_backend(
-        _geometry(),
-        data,
-        setting=MontageDisplayBackendChoice.CANVAS,
-        renderer_backend="pyqtgraph",
-    )
-
-    assert decision.backend == "tile_layer"
-    assert decision.expected_tile_layer is True
-    assert "canvas fallback is not used" in decision.reason
-    assert "direct tiled presentation" in decision.warning
-
-
-def test_canvas_capability_controls_manual_fallback_only_without_direct_payloads():
-    data = np.zeros((64, 64), dtype=np.float32)
-    capabilities = ImageViewBackendCapabilities(
-        name="future-gpu-backend",
-        direct_montage_tile_payloads=False,
-        prefers_tiled_montages=True,
-        supports_montage_canvas=False,
-    )
-
-    decision = choose_montage_backend(
-        _geometry(),
-        data,
-        setting=MontageDisplayBackendChoice.CANVAS,
-        renderer_capabilities=capabilities,
-    )
-
-    assert decision.backend == "tile_layer"
-    assert "future-gpu-backend" in decision.reason
-
-
 def test_first_vispy_display_batch_limit_uses_governed_upsert_limit(monkeypatch):
     import arrayscope.window.montage_renderer as montage_renderer
 
@@ -130,7 +93,7 @@ def test_auto_policy_uses_capability_instead_of_backend_name():
     assert "future-gpu-backend" in decision.reason
 
 
-def test_auto_without_direct_payloads_stays_canvas_until_large():
+def test_montage_policy_requires_direct_tile_payloads():
     data = np.zeros((64, 64), dtype=np.float32)
     capabilities = ImageViewBackendCapabilities(
         name="future-gpu-backend",
@@ -146,7 +109,10 @@ def test_auto_without_direct_payloads_stays_canvas_until_large():
         renderer_capabilities=capabilities,
     )
 
-    assert decision.backend == "canvas"
+    assert decision.backend == "tile_layer"
+    assert decision.expected_tile_layer is True
+    assert "requires direct tiled payloads" in decision.reason
+    assert "presentation contract" in decision.warning
 
 
 def test_auto_preserves_vispy_tile_layer_mode():
@@ -159,7 +125,7 @@ def test_auto_preserves_vispy_tile_layer_mode():
 
 
 def test_interactive_montage_commit_is_timer_coalesced(qt_app, monkeypatch):
-    from pyqtgraph.Qt import QtCore
+    from pyqtgraph.Qt import QtCore, QtWidgets
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.window.montage_renderer import MontageRenderMixin
@@ -372,8 +338,8 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
     assert win._last_montage_viewport_deferred_additions == 7
 
 
-def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app):
-    from pyqtgraph.Qt import QtCore
+def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypatch):
+    from pyqtgraph.Qt import QtCore, QtWidgets
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
@@ -449,6 +415,7 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app):
     win = Window(document, state, viewport_plan)
     win._montage_session = session
     win._viewport_interaction_active = False
+    monkeypatch.setattr(QtWidgets.QApplication, "mouseButtons", lambda: QtCore.Qt.MouseButton.NoButton)
 
     assert win._try_update_montage_viewport_only() is True
 
@@ -869,27 +836,6 @@ def test_auto_large_rgb_montage_uses_tile_layer():
 
     assert decision.backend == "tile_layer"
     assert decision.expected_tile_layer is True
-
-
-def test_forced_canvas_warns_for_large_rgb_montage():
-    data = np.zeros((1500, 1500, 3), dtype=np.uint8)
-
-    decision = choose_montage_backend(_geometry(), data, setting=MontageDisplayBackendChoice.CANVAS)
-
-    assert decision.backend == "tile_layer"
-    assert decision.expected_tile_layer is True
-    assert "direct tiled presentation" in decision.warning
-
-
-def test_forced_tile_layer_wins():
-    decision = choose_montage_backend(
-        _geometry(),
-        np.zeros((16, 16), dtype=np.float32),
-        setting=MontageDisplayBackendChoice.TILE_LAYER,
-    )
-
-    assert decision.backend == "tile_layer"
-    assert decision.reason == "user forced tile layer"
 
 
 def test_stage_wait_release_falls_back_to_direct_tile_evaluation():

@@ -123,8 +123,6 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
 def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from dataclasses import replace
-
-    from arrayscope.app.settings_state import MontageDisplayBackendChoice
     from arrayscope.display.slice_engine import DisplayImage
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import EvaluationResult
@@ -141,7 +139,6 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, m
     )
     try:
         _process_events(qtbot, count=20)
-        win.app_settings = replace(win.app_settings, montage_display_backend=MontageDisplayBackendChoice.TILE_LAYER)
         first_state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
         first_plan = make_montage_plan(first_state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
         for tile in first_plan.tiles:

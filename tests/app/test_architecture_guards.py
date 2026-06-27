@@ -134,12 +134,13 @@ def test_canvas_preserve_controller_owns_strong_preserve_path():
     assert "commit_nudge" in preserve_text
 
 
-def test_montage_renderer_uses_viewport_canvas_not_full_montage():
+def test_montage_renderer_commits_montage_through_tiled_payloads():
     render_text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
     montage_text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
     assert "make_montage(" not in render_text
     assert "make_montage(" not in montage_text
-    assert "make_montage_viewport_canvas(" in montage_text
+    assert "make_montage_viewport_canvas(" not in montage_text
+    assert "_commit_montage_session_tile_layer(" in montage_text
 
 
 def test_render_display_commits_go_through_display_committer():
@@ -341,7 +342,7 @@ def test_display_semantics_live_in_display_package():
         Path("arrayscope/display/backends/vispy/raster.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
     )
-    legacy = (
+    retired = (
         Path("arrayscope/window/display_frame.py"),
         Path("arrayscope/window/render_model.py"),
         Path("arrayscope/window/presentation.py"),
@@ -352,7 +353,7 @@ def test_display_semantics_live_in_display_package():
     )
     for rel in canonical:
         assert (ROOT / rel).exists()
-    for rel in legacy:
+    for rel in retired:
         assert not (ROOT / rel).exists()
 
 

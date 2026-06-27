@@ -97,7 +97,7 @@ def test_profile_suite_can_opt_into_native_py_spy_without_passing_suite_flag_to_
 
 
 def test_profile_workflow_forces_backend_specific_themes():
-    from arrayscope.app.settings_state import AppSettingsState, ImageRenderingBackendChoice, MontageDisplayBackendChoice
+    from arrayscope.app.settings_state import AppSettingsState, ImageRenderingBackendChoice
     from arrayscope.app.theme import ThemeChoice
     from arrayscope.tools.profile_montage_workflow import _replace_settings
 
@@ -105,13 +105,11 @@ def test_profile_workflow_forces_backend_specific_themes():
         AppSettingsState(),
         backend="pyqtgraph",
         image_choice=ImageRenderingBackendChoice,
-        montage_choice=MontageDisplayBackendChoice,
     )
     vispy = _replace_settings(
         AppSettingsState(),
         backend="vispy",
         image_choice=ImageRenderingBackendChoice,
-        montage_choice=MontageDisplayBackendChoice,
     )
 
     assert pyqtgraph.theme == ThemeChoice.LIGHT
