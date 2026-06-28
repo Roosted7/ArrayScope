@@ -68,7 +68,7 @@ meaning, and backend adapters own concrete textures/items/visuals only.
 
 ### Orchestration
 
-- `window.normal_renderer` and `window.montage_renderer` currently coordinate the two visible paths.
+- `window.render` and `window.frame_renderer` currently coordinate the visible image paths.
 - `window.montage_session`, payload cache, viewport planning, tile provider, and extracted control-plane models separate parts of montage lifecycle from the main window.
 - `window.evaluation_controller`, render generation, coalescing, prefetch, and stage warmup coordinate work around Qt.
 - `core.memory_policy`, compute policy, latency feedback, telemetry, and resource governor decide limits/admission inputs.
@@ -248,7 +248,7 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 - Normal and montage evaluation scheduling remain separate, even though frame planning and committed
   tiled presentation semantics are now unified.
 - `MontageRenderSession` is still large, but level convergence, tile admission, and stage fan-in now delegate to Qt-free control-plane models.
-- `montage_renderer.py` remains large, but montage resize/reflow and ROI layout semantics now delegate
+- `frame_renderer.py` remains large, but montage resize/reflow and ROI layout semantics now delegate
   to Qt-free viewport helpers per ADR 0042.
 - Large renderer/backend modules still combine orchestration and mechanics.
 - Histogram binding still reaches into private PyQtGraph state.

@@ -97,13 +97,13 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
 
 ### 1. Renderer/session orchestration remains large
 
-`window/montage_renderer.py` and `window/montage_session.py` are still substantial orchestration
+`window/frame_renderer.py` and `window/montage_session.py` are still substantial orchestration
 modules. N6 removed ownership of level generation, convergence strategy, admission caps, and stage
 fan-in from the session, X1 unified frame planning/presentation semantics, and X2 added work-graph
 admission/counters. ADR 0042 also moved montage resize/reflow and ROI layout semantics out to a
-Qt-free viewport helper. The renderer still coordinates Qt timers, committed frames, overlays, side
-panels, diagnostics, and backend commits. Future X4/X5 work should reuse the extracted models rather
-than growing another scheduler.
+Qt-free viewport helper. The frame renderer still coordinates Qt timers, committed frames, overlays,
+side panels, diagnostics, and backend commits. Future X4/X5 work should reuse the extracted models
+rather than growing another scheduler.
 
 ### 2. Semantic parity is being confused with mechanical uniformity
 

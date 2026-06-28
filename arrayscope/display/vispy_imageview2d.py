@@ -304,10 +304,24 @@ class VisPyImageView2D(ImageViewShell):
         return self.graphicsView.mapTo(parent, local)
 
     def clearMontageTileLayer(self) -> None:
+        self.hide_tiled_presentation("legacy-clear")
+
+    def hide_tiled_presentation(self, reason: str) -> None:
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         if layer is not None:
             layer.clear()
         self.clearMontageTileOverlays()
+        self._montage_display_mode = "idle"
+        self.imageItem.setVisible(False)
+        _set_visual_visible(getattr(self, "_vispy_image", None), False)
+        _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
+
+    def reset_tiled_residency(self, reason: str) -> None:
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        if layer is not None and hasattr(layer, "reset_residency"):
+            layer.reset_residency()
+        else:
+            self.hide_tiled_presentation(reason)
         self._last_vispy_tile_payloads = None
         self._last_vispy_tiled_source_key = None
         self._last_vispy_tiled_structure_key = None
@@ -317,6 +331,7 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_tiled_shader_mapping = None
         self._last_vispy_tiled_histogram_key = None
         self._last_vispy_frame_viewport_key = None
+        self._last_vispy_tiled_reset_reason = str(reason)
         self._montage_display_mode = "idle"
         self.imageItem.setVisible(False)
         _set_visual_visible(getattr(self, "_vispy_image", None), False)
@@ -324,7 +339,7 @@ class VisPyImageView2D(ImageViewShell):
 
     def clear(self):
         super().clear()
-        self.clearMontageTileLayer()
+        self.reset_tiled_residency("view-clear")
         self._vispy_main_data_id = None
         self._vispy_main_color_source_id = None
         self._vispy_main_scalar_source_id = None
@@ -412,7 +427,7 @@ class VisPyImageView2D(ImageViewShell):
         applying = self._applying_presentation
         self._applying_presentation = True
         try:
-            self.clearMontageTileLayer()
+            self.hide_tiled_presentation("normal-image-commit")
             self.image = img
             self.histogramSource = histogramData
             self.histogramPlotSource = histogramPlotData
@@ -476,7 +491,7 @@ class VisPyImageView2D(ImageViewShell):
         applying = self._applying_presentation
         self._applying_presentation = True
         try:
-            self.clearMontageTileLayer()
+            self.hide_tiled_presentation("normal-image-fast-update")
             self.image = img
             self.histogramSource = histogramData
             self.histogramPlotSource = histogramPlotData
@@ -1655,23 +1670,18 @@ class VisPyImageView2D(ImageViewShell):
         if geometry is None or (getattr(geometry, "montage", None) is None and frame_plan is None):
             return TileLayerUpdateStats()
         self._last_vispy_geometry = geometry
+        payloads_by_tile = {int(tile): payload for tile, payload in dict(tile_payloads or {}).items()}
         if tile_delta is not None:
             active_set = {int(tile) for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())}
-            loaded_payloads = {
-                int(tile): payload
-                for tile, payload in dict(tile_payloads or {}).items()
-                if int(tile) in active_set
-            }
         else:
-            active_set = set(dict(tile_payloads or {}))
-            loaded_payloads = {int(tile): payload for tile, payload in dict(tile_payloads or {}).items()}
+            active_set = set(payloads_by_tile)
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         if layer is None:
             return TileLayerUpdateStats()
         previous_presented = getattr(getattr(layer, "last_stats", None), "presented_tiles", None)
         presentation_complete = (
             previous_presented is None
-            or set(int(tile) for tile in tuple(previous_presented or ())) == set(loaded_payloads)
+            or set(int(tile) for tile in tuple(previous_presented or ())) == active_set
         )
         if (
             (force_levels or force_mapping)
@@ -1682,7 +1692,7 @@ class VisPyImageView2D(ImageViewShell):
         else:
             try:
                 stats = layer.update(
-                    payloads=loaded_payloads,
+                    payloads=payloads_by_tile,
                     geometry=geometry,
                     levels=levels,
                     dirty_tiles=dirty_tiles,
@@ -1699,7 +1709,7 @@ class VisPyImageView2D(ImageViewShell):
                     raise
                 previous = getattr(layer, "last_stats", None)
                 stats = GpuMontageLayerStats(
-                    visible_items=len(loaded_payloads),
+                    visible_items=len(active_set),
                     presented_tiles=(),
                     resident_items=int(getattr(previous, "resident_items", 0) or 0),
                     atlas_capacity=int(getattr(previous, "atlas_capacity", 0) or 0),

@@ -89,6 +89,12 @@ class _FakeImageView:
             )
         return self.report
 
+    def hide_tiled_presentation(self, reason):
+        self.hide_tiled_reason = str(reason)
+
+    def reset_tiled_residency(self, reason):
+        self.reset_tiled_reason = str(reason)
+
     def set_profile_bounds(self, bounds):
         self.bounds = bounds
 

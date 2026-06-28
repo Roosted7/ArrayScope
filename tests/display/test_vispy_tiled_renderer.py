@@ -523,7 +523,7 @@ def test_mapping_only_update_is_uniform_across_pages_without_texture_or_vertex_u
     assert all(visual.mappings[-1][1] is second_mapping for visual in layer._visuals_by_page)
 
 
-def test_none_dirty_set_forces_refresh_even_when_sources_match():
+def test_atlas_reuses_matching_source_identity_even_when_dirty_is_unknown():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     values = {0: payload(0, 1.0), 1: payload(1, 2.0)}
     pool.update_payloads(
@@ -542,9 +542,22 @@ def test_none_dirty_set_forces_refresh_even_when_sources_match():
         reserve_count=2,
     )
 
-    assert refreshed.items_updated == 2
-    assert refreshed.items_skipped == 0
-    assert refreshed.texture_uploads == 2
+    assert refreshed.items_updated == 0
+    assert refreshed.items_skipped == 2
+    assert refreshed.texture_uploads == 0
+
+    changed = {0: payload(0, 10.0, source_id=("changed", 0)), 1: values[1]}
+    _uvs, uploaded = pool.update_payloads(
+        changed,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=2,
+    )
+
+    assert uploaded.items_updated == 1
+    assert uploaded.items_skipped == 1
+    assert uploaded.texture_uploads == 1
 
 
 def test_atlas_retains_offscreen_payload_for_later_clean_reuse():

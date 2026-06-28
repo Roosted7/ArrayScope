@@ -29,6 +29,12 @@ class _FakeSurface:
             removed_tiles=frozenset(presentation.tile_delta.removals),
         )
 
+    def hide_tiled_presentation(self, reason):
+        self.calls.append(("hide_tiled", str(reason), None))
+
+    def reset_tiled_residency(self, reason):
+        self.calls.append(("reset_tiled", str(reason), None))
+
     def set_profile_bounds(self, bounds):
         self.calls.append(("bounds", tuple(bounds), None))
 

@@ -5,7 +5,7 @@
 
 ## Context
 
-Montage resize and column reflow exposed an ownership leak. `montage_renderer.py` was deciding too
+Montage resize and column reflow exposed an ownership leak. `frame_renderer.py` was deciding too
 much about viewport meaning while also coordinating sessions, timers, tile work, committed frames,
 and backend commits. That let layout-only changes behave like semantic montage growth: manual views
 could refit, visible zoom could change on resize, and ROI graphics needed ad hoc correction after the
@@ -35,7 +35,7 @@ Montage viewport reflow policy belongs in the Qt-free viewport layer, not in the
 - the pure `MontageViewportReflow` decision returned by `retarget_montage_viewport_plan`;
 - canonical ROI remapping through old/new source layout maps.
 
-`arrayscope.window.montage_renderer` owns:
+`arrayscope.window.frame_renderer` owns:
 
 - reading current UI/controller facts, such as Fit lock and `ViewportController.is_near_auto`;
 - applying a returned view range to the ViewBox;

@@ -7,9 +7,9 @@ from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
-    limited_payload_cache as _limited_payload_cache,
     payload_lod_matches as _payload_lod_matches,
     payload_compatible_with_tile as _payload_compatible_with_tile,
+    RetainedTiledPayloadStore,
 )
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
@@ -867,11 +867,26 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
 
 
-def test_recent_payload_cache_is_keyed_by_semantic_source_identity():
-    payload = SimpleNamespace(source_id=(("montage_tile", "doc", 2), "texture_kind", "complex_rg32f", "shader", None, "lod", 4, 2, 1))
-    other = SimpleNamespace(source_id=("plain", 1))
+def test_retained_payload_store_is_keyed_by_semantic_source_identity():
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.shader_mapping import TexturePlaneKind
 
-    cache = _limited_payload_cache({}, {0: payload, 1: other}, limit=8)
+    texture = np.ones((2, 2), dtype=np.complex64)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        texture,
+        np.ones((2, 2), dtype=np.float32),
+        (("montage_tile", "doc", 2), "texture_kind", "complex_rg32f", "shader", None, "lod", 4, 2, 1),
+        texture_data=texture,
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        semantic_data=texture,
+    )
+    other = DisplayTilePayload(1, 1, np.ones((2, 2), dtype=np.float32), None, ("plain", 1))
+
+    store = RetainedTiledPayloadStore()
+    store.remember_acknowledged({0: payload, 1: other}, limit=8)
+    cache = store.payloads_by_base_source()
 
     assert _base_tile_source_id(payload.source_id) == ("montage_tile", "doc", 2)
     assert cache[("montage_tile", "doc", 2)] is payload
@@ -904,7 +919,6 @@ def test_montage_cache_resolver_accepts_single_display_image_cache_hit():
     win = _Window()
     win.operation_evaluator = _Evaluator()
     win._committed_display_frame = None
-    win._montage_recent_tile_payloads_by_base_source = {}
 
     cached_tiles, missing_tiles = win._resolve_montage_tiles_from_cache(
         (tile,),
@@ -919,6 +933,59 @@ def test_montage_cache_resolver_accepts_single_display_image_cache_hit():
     assert cached_tiles[0].tile is tile
     np.testing.assert_array_equal(cached_tiles[0].image, image)
     np.testing.assert_array_equal(cached_tiles[0].histogram_data, image)
+
+
+def test_montage_cache_resolver_uses_retained_payloads_when_current_frame_is_single():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    image = np.arange(4, dtype=np.float32).reshape(2, 2)
+    histogram = image.copy()
+    tile = SimpleNamespace(
+        view_state=ViewState.from_shape((2, 2, 8)),
+        source_index=7,
+        montage_index=3,
+    )
+    tile_key = ("montage-tile-key", 7)
+    payload = DisplayTilePayload(
+        3,
+        7,
+        image,
+        histogram,
+        tile_key,
+        semantic_data=image,
+        semantic_histogram_data=histogram,
+    )
+
+    class _Evaluator:
+        def cached_montage_tile(self, *_args, **_kwargs):
+            return None
+
+        def montage_tile_key(self, *_args, **_kwargs):
+            return tile_key
+
+    class _Window(FrameRenderMixin):
+        pass
+
+    win = _Window()
+    win.operation_evaluator = _Evaluator()
+    win._committed_display_frame = None
+    win._retained_tiled_payload_store().remember_acknowledged({3: payload})
+
+    cached_tiles, missing_tiles = win._resolve_montage_tiles_from_cache(
+        (tile,),
+        document=object(),
+        axis=2,
+        colormap_lut=None,
+        shader_display=True,
+    )
+
+    assert missing_tiles == []
+    assert len(cached_tiles) == 1
+    assert cached_tiles[0].tile is tile
+    np.testing.assert_array_equal(cached_tiles[0].image, image)
+    np.testing.assert_array_equal(cached_tiles[0].histogram_data, histogram)
 
 
 def test_previous_complex_shader_payload_must_carry_complex_texture():

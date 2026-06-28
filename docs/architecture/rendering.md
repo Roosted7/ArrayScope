@@ -62,6 +62,11 @@ compatible physical representation, not levels/LUT. Level/window/LUT changes are
 updates, preferably shader/uniform updates where the backend supports them, and do not imply new
 source pixels.
 
+VisPy atlas residency is a data-keyed cache, not a mirror of the current viewport. `active_tiles`
+controls which retained tile mappings are visible; source identity, texture kind, LOD, tile shape,
+storage mode, budget eviction, reset/context loss, or teardown are the only valid reasons for texture
+residency to become cold.
+
 Presentation-generation and admission state are Qt-free. `PresentationGenerationTracker` owns the
 latest level target, revision, active coverage, pending work, and acknowledgement state.
 `TileAdmissionQueue` owns priority/aging/item/byte/deadline admission without knowing array semantics.
@@ -140,6 +145,9 @@ through the shared `ImageSurface` contract rather than inheriting the PyQtGraph 
 VisPy does not expose a direct tile-layer presentation API; all tiled updates use the typed
 `DisplayTiledPresentation` path so histogram identity, payload revisions, residency acknowledgement,
 and committed value semantics stay on one control plane.
+Normal-image commits hide/deactivate the tiled presentation but do not reset compatible VisPy atlas
+residency or retained acknowledged tile payloads. Explicit surface reset, context loss, teardown, and
+incompatible physical representation changes are the reset boundaries that destroy residency.
 The VisPy canvas remains mouse-transparent for the stacked Qt event layer. ROI/profile hover and drag
 use the shared pointer interaction controller, while background pan/zoom uses
 `display.view_navigation_driver` plus `display.view_navigation` range math to update the canonical

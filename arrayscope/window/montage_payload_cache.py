@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from dataclasses import dataclass, field
+
 import numpy as np
 
 from arrayscope.core.view_state import ChannelMode
@@ -34,15 +37,54 @@ def previous_tiled_payloads_by_base_source(frame) -> dict[object, object]:
     }
 
 
-def limited_payload_cache(existing, payloads, *, limit: int = 4096) -> dict[object, object]:
-    cache = dict(existing or {})
-    for payload in dict(payloads or {}).values():
-        key = base_tile_source_id(payload.source_id)
-        if key is not None:
-            cache[key] = payload
-    if len(cache) <= int(limit):
-        return cache
-    return dict(tuple(cache.items())[-int(limit) :])
+@dataclass
+class RetainedTiledPayloadStore:
+    """Acknowledged tiled payloads retained outside the current frame.
+
+    The committed frame may temporarily describe a single image or a narrowed
+    tiled view.  This store keeps the broader resident source set available for
+    the next compatible tiled montage session without treating requested-but-not
+    acknowledged deltas as reusable presentation state.
+    """
+
+    limit: int = 4096
+    _payloads_by_base_source: OrderedDict[object, object] = field(default_factory=OrderedDict)
+    last_clear_reason: str = ""
+
+    def remember_acknowledged(self, payloads, *, limit: int | None = None) -> None:
+        max_items = max(1, int(self.limit if limit is None else limit))
+        for payload in dict(payloads or {}).values():
+            key = base_tile_source_id(getattr(payload, "source_id", None))
+            if key is None or not payload_matches_texture_kind(payload):
+                continue
+            self._payloads_by_base_source.pop(key, None)
+            self._payloads_by_base_source[key] = payload
+        while len(self._payloads_by_base_source) > max_items:
+            self._payloads_by_base_source.popitem(last=False)
+
+    def resolve(self, tile_key, lod_factor: int, tile_state, *, shader_display: bool):
+        payload = self._payloads_by_base_source.get(tile_key)
+        if payload is None:
+            return None
+        if not payload_lod_matches(payload, lod_factor):
+            return None
+        if not payload_compatible_with_tile(payload, tile_state, shader_display=shader_display):
+            return None
+        return payload
+
+    def payloads_by_base_source(self, *, lod_factor: int | None = None) -> dict[object, object]:
+        payloads = dict(self._payloads_by_base_source)
+        if lod_factor is None:
+            return payloads
+        return {
+            key: payload
+            for key, payload in payloads.items()
+            if payload_lod_matches(payload, lod_factor)
+        }
+
+    def clear_for_document_or_context_change(self, reason: str) -> None:
+        self._payloads_by_base_source.clear()
+        self.last_clear_reason = str(reason)
 
 
 def payload_lod_matches(payload, factor: int) -> bool:

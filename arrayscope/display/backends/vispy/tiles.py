@@ -389,197 +389,30 @@ class TextureAtlasPool:
         budget_bytes: int | None = None,
         tile_delta=None,
     ) -> tuple[dict[int, tuple[float, float, float, float]], GpuMontageLayerStats]:
-        # The window scheduler decides which ready tiles enter a visible
-        # commit.  Do not queue or slice again here: once a payload reaches the
-        # visible atlas commit, it must become presentable in that commit.
+        # Residency is a data-keyed cache; visibility is a presentation choice.
+        # A viewport commit may hide or reveal tile mappings, but it must not
+        # make resident sources cold again.  Only incompatible atlas storage,
+        # explicit reset/context loss, budget eviction, or a new source identity
+        # can require another texture upload.
         start = perf_counter()
         tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
-        dirty_all = dirty_tiles is None
-        dirty = set() if dirty_all else {int(tile) for tile in dirty_tiles}
-        if (
-            tile_delta is not None
-            and not dirty_all
-            and self.storage_mode is not None
-            and self.tile_shape == (tile_h, tile_w)
-            and self.tile_slots
-        ):
-            explicit_upserts = {int(key): value for key, value in dict(getattr(tile_delta, "upserts", {}) or {}).items()}
-            payload_map = {int(key): value for key, value in dict(payloads or {}).items()}
-            raw_active_tiles = getattr(tile_delta, "active_tiles", None)
-            active_tiles = (
-                tuple(int(tile) for tile in tuple(raw_active_tiles))
-                if raw_active_tiles is not None
-                else tuple(int(tile) for tile in payload_map)
-            )
-            active_set = set(active_tiles)
-            active_payloads = {
-                int(tile_number): payload_map[int(tile_number)]
-                for tile_number in active_set
-                if int(tile_number) in payload_map
-            }
-            delta_removals = set(int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ()))
-            delta_removals.update(int(tile) for tile in tuple(self.tile_slots) if int(tile) not in active_set)
-            delta_upserts = dict(explicit_upserts)
-            for tile_number in sorted(active_set):
-                payload = payload_map.get(int(tile_number))
-                if payload is None:
-                    continue
-                resident_key = _resident_key(payload)
-                if (
-                    int(tile_number) not in self.tile_slots
-                    or self.tile_resident_keys.get(int(tile_number)) != resident_key
-                    or int(tile_number) not in self.tile_uvs
-                    or self.source_ids.get(resident_key) != payload.source_id
-                ):
-                    delta_upserts[int(tile_number)] = payload
-            storage_mode = self.storage_mode
-            delta_items = tuple((int(tile), payload) for tile, payload in delta_upserts.items())
-            if all(
-                _payload_supported_by_storage_mode(payload, storage_mode, rgb_already_windowed=rgb_already_windowed)
-                for _tile, payload in delta_items
-            ):
-                requested_capacity = self.requested_capacity(
-                    active_count=max(1, len(active_tiles)),
-                    reserve_count=max(
-                        len(active_tiles),
-                        int(reserve_count or 0),
-                    ),
-                    storage_mode=storage_mode,
-                    tile_shape=tile_shape,
-                    budget_bytes=budget_bytes,
-                )
-                layout_invalidates_residency = (
-                    self.tile_shape != tile_shape
-                    or self.storage_mode != _normalize_storage_mode(storage_mode)
-                )
-                rebuilt = self.ensure_layout(
-                    tile_shape=tile_shape,
-                    count=requested_capacity,
-                    storage_mode=storage_mode,
-                    budget_bytes=budget_bytes,
-                )
-                active_keys = {_resident_key(payload) for payload in active_payloads.values()}
-                for tile_number in tuple(delta_removals):
-                    old_key = self.tile_resident_keys.get(int(tile_number))
-                    self._clear_tile_mapping(int(tile_number))
-                for tile_number, payload in delta_items:
-                    old_key = self.tile_resident_keys.get(int(tile_number))
-                    resident_key = _resident_key(payload)
-                    active_keys.add(resident_key)
-                self.active_resident_keys = set(active_keys)
-                near = {int(tile) for tile in tuple(near_tiles or ())}
-                near_keys = self._near_resident_keys(near_tile_source_ids)
-                near_keys.update(_resident_key(payload) for tile_number, payload in delta_items if int(tile_number) in near)
-                uploads = 0
-                upload_bytes = 0
-                complex_uploads = 0
-                texture_prepare_ms = 0.0
-                texture_submit_ms = 0.0
-                updated = 0
-                skipped = 0
-                evictions_before = self.eviction_count
-                evicted_near_before = self.evicted_near_count
-
-                for tile_number, payload in delta_items:
-                    resident_key = _resident_key(payload)
-                    page_index, slot, newly_assigned = self._slot_for(resident_key, active_keys=active_keys, near_keys=near_keys)
-                    page = self.pages[int(page_index)]
-                    self._touch(resident_key)
-                    source_changed = self.source_ids.get(resident_key) != payload.source_id
-                    missing_uploaded_source = resident_key not in self.source_ids
-                    should_upload = bool(
-                        layout_invalidates_residency
-                        or newly_assigned
-                        or source_changed
-                        or missing_uploaded_source
-                    )
-                    self._set_tile_mapping(
-                        int(tile_number),
-                        resident_key,
-                        int(page_index),
-                        int(slot),
-                        page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload)),
-                    )
-                    if not should_upload:
-                        skipped += 1
-                        continue
-                    scalar, color, prepare_ms = _prepare_payload_texture_data(
-                        payload,
-                        tile_shape=(tile_h, tile_w),
-                        rgb_already_windowed=rgb_already_windowed,
-                        need_scalar=page.scalar_is_atlas,
-                        need_color=page.color_is_atlas,
-                    )
-                    texture_prepare_ms += prepare_ms
-                    y0, x0 = page.offset_for_slot(slot)
-                    if scalar is not None:
-                        texture_submit_ms += _upload_texture_plane(
-                            page.scalar_texture,
-                            scalar,
-                            offset=(int(y0), int(x0)),
-                            copy=_upload_copy_required(scalar, payload, force=page.complex_is_atlas),
-                        )
-                        uploads += 1
-                        upload_bytes += int(scalar.nbytes)
-                        if page.complex_is_atlas:
-                            complex_uploads += 1
-                    if color is not None:
-                        texture_submit_ms += _upload_texture_plane(
-                            page.color_texture,
-                            color,
-                            offset=(int(y0), int(x0)),
-                            copy=_upload_copy_required(color, payload),
-                        )
-                        uploads += 1
-                        upload_bytes += int(color.nbytes)
-                    self.source_ids[resident_key] = payload.source_id
-                    updated += 1
-
-                presented_tiles = tuple(
-                    int(tile_number)
-                    for tile_number, payload in sorted(active_payloads.items())
-                    if int(tile_number) in self.tile_slots
-                    and self.tile_resident_keys.get(int(tile_number)) == _resident_key(payload)
-                    and self.source_ids.get(_resident_key(payload)) == payload.source_id
-                )
-                elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt or delta_removals else 0.0
-                return self.tile_uvs, GpuMontageLayerStats(
-                    visible_items=len(presented_tiles),
-                    presented_tiles=presented_tiles,
-                    committed_upserts=tuple(
-                        int(tile)
-                        for tile in sorted(delta_upserts)
-                        if int(tile) in presented_tiles
-                    ),
-                    resident_items=self.resident_count,
-                    atlas_capacity=self.capacity,
-                    atlas_rebuilds=int(layout_invalidates_residency),
-                    atlas_evictions=self.eviction_count - evictions_before,
-                    texture_uploads=uploads,
-                    texture_upload_bytes=upload_bytes,
-                    items_updated=updated,
-                    items_skipped=skipped + max(0, len(presented_tiles) - len(delta_items)),
-                    estimated_gpu_bytes=self.estimated_gpu_bytes,
-                    cpu_shadow_bytes=self.cpu_shadow_bytes,
-                    upload_ms=elapsed,
-                    texture_prepare_ms=texture_prepare_ms,
-                    texture_submit_ms=texture_submit_ms,
-                    page_count=len(self.pages),
-                    active_pages=len({self.tile_slots[int(tile)][0] for tile in presented_tiles if int(tile) in self.tile_slots}),
-                    device_max_texture_size=self.max_texture_size,
-                    budget_bytes=self.budget_bytes,
-                    near_resident_items=len(near_keys.intersection(self.source_ids)),
-                    warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
-                    evicted_near_items=self.evicted_near_count - evicted_near_before,
-                    lod_level=_max_payload_lod_level(delta_upserts),
-                    lod_factor=_max_payload_lod_factor(delta_upserts),
-                    source_texels_per_pixel=float(_max_payload_lod_factor(delta_upserts)),
-                    gutter_pixels=_max_payload_gutter(delta_upserts),
-                    mipmap_updates=0,
-                    mipmap_available=False,
-                    complex_texture_uploads=complex_uploads,
-                )
-        raw_payload_items = tuple((int(key), value) for key, value in payloads.items())
+        payload_map = {int(key): value for key, value in dict(payloads or {}).items()}
+        explicit_upserts = {
+            int(key): value
+            for key, value in dict(getattr(tile_delta, "upserts", {}) or {}).items()
+        }
+        raw_active_tiles = None if tile_delta is None else getattr(tile_delta, "active_tiles", None)
+        active_tiles = (
+            tuple(int(tile) for tile in tuple(raw_active_tiles))
+            if raw_active_tiles is not None
+            else tuple(sorted(payload_map))
+        )
+        active_set = set(active_tiles)
+        raw_payload_items = tuple(
+            (int(tile), payload_map[int(tile)])
+            for tile in active_tiles
+            if int(tile) in payload_map
+        )
         storage_mode = (
             _atlas_storage_mode(raw_payload_items, rgb_already_windowed=rgb_already_windowed)
             if raw_payload_items
@@ -592,11 +425,15 @@ class TextureAtlasPool:
         )
         unsupported_items = len(raw_payload_items) - len(payload_items)
         requested_capacity = self.requested_capacity(
-            active_count=len(payload_items),
-            reserve_count=max(len(payload_items), int(reserve_count or 0)),
+            active_count=max(1, len(payload_items)),
+            reserve_count=max(len(active_tiles), int(reserve_count or 0)),
             storage_mode=storage_mode,
             tile_shape=tile_shape,
             budget_bytes=budget_bytes,
+        )
+        layout_invalidates_residency = (
+            self.tile_shape != (tile_h, tile_w)
+            or self.storage_mode != _normalize_storage_mode(storage_mode)
         )
         rebuilt = self.ensure_layout(
             tile_shape=tile_shape,
@@ -607,6 +444,8 @@ class TextureAtlasPool:
         active = {int(tile_number) for tile_number, _payload in payload_items}
         active_keys = {_resident_key(payload) for _tile_number, payload in payload_items}
         self.active_resident_keys = set(active_keys)
+        for tile_number in tuple(getattr(tile_delta, "removals", ()) or ()):
+            self._clear_tile_mapping(int(tile_number))
         near = {int(tile) for tile in tuple(near_tiles or ())}
         near_keys = self._near_resident_keys(near_tile_source_ids)
         near_keys.update(_resident_key(payload) for tile_number, payload in payload_items if int(tile_number) in near)
@@ -634,7 +473,12 @@ class TextureAtlasPool:
             self._touch(resident_key)
             source_changed = self.source_ids.get(resident_key) != payload.source_id
             missing_uploaded_source = resident_key not in self.source_ids
-            should_upload = bool(dirty_all or newly_assigned or source_changed or missing_uploaded_source)
+            should_upload = bool(
+                layout_invalidates_residency
+                or newly_assigned
+                or source_changed
+                or missing_uploaded_source
+            )
             uvs[tile_number] = page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload))
             active_tile_uvs[int(tile_number)] = uvs[tile_number]
             if not should_upload:
@@ -680,29 +524,27 @@ class TextureAtlasPool:
             and self.source_ids.get(_resident_key(payload)) == payload.source_id
         )
         presented_set = set(presented_tiles)
-        self.tile_slots = {
-            int(tile): slot
-            for tile, slot in active_tile_slots.items()
-            if int(tile) in presented_set
-        }
-        self.tile_resident_keys = {
-            int(tile): resident_key
-            for tile, resident_key in active_tile_keys.items()
-            if int(tile) in presented_set
-        }
-        self.resident_tiles = {}
-        for tile, resident_key in self.tile_resident_keys.items():
-            self.resident_tiles.setdefault(resident_key, set()).add(int(tile))
-        self.tile_uvs = {
-            int(tile): uv
-            for tile, uv in active_tile_uvs.items()
-            if int(tile) in presented_set
-        }
+        for tile in active_set:
+            if int(tile) not in presented_set:
+                self._clear_tile_mapping(int(tile))
+        for tile in presented_tiles:
+            self._set_tile_mapping(
+                int(tile),
+                active_tile_keys[int(tile)],
+                active_tile_slots[int(tile)][0],
+                active_tile_slots[int(tile)][1],
+                active_tile_uvs[int(tile)],
+            )
         uvs = self.tile_uvs
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
         return uvs, GpuMontageLayerStats(
             visible_items=len(presented_tiles),
             presented_tiles=presented_tiles,
+            committed_upserts=tuple(
+                int(tile)
+                for tile in sorted(explicit_upserts)
+                if int(tile) in presented_set
+            ),
             resident_items=self.resident_count,
             atlas_capacity=self.capacity,
             atlas_rebuilds=int(rebuilt),
@@ -723,10 +565,10 @@ class TextureAtlasPool:
             near_resident_items=len(near_keys.intersection(self.source_ids)),
             warm_resident_items=max(0, self.resident_count - len(active)),
             evicted_near_items=self.evicted_near_count - evicted_near_before,
-            lod_level=_max_payload_lod_level(payloads),
-            lod_factor=_max_payload_lod_factor(payloads),
-            source_texels_per_pixel=float(_max_payload_lod_factor(payloads)),
-            gutter_pixels=_max_payload_gutter(payloads),
+            lod_level=_max_payload_lod_level(payload_map),
+            lod_factor=_max_payload_lod_factor(payload_map),
+            source_texels_per_pixel=float(_max_payload_lod_factor(payload_map)),
+            gutter_pixels=_max_payload_gutter(payload_map),
             mipmap_updates=0,
             mipmap_available=False,
             complex_texture_uploads=complex_uploads,
@@ -1025,6 +867,17 @@ class GpuMontageLayer:
     @property
     def last_stats(self) -> GpuMontageLayerStats:
         return self._last_stats
+
+    def reset_residency(self) -> None:
+        for visual in self._visuals_by_page:
+            visual.visible = False
+        self._pool = TextureAtlasPool(self._gloo, limits=self._device_limits)
+        self._geometry_keys.clear()
+        self._page_payloads_by_index.clear()
+        self._montage_geometry_key = None
+        self._atlas_serial = -1
+        self._visible_items = 0
+        self._last_stats = GpuMontageLayerStats()
 
     def clear(self) -> None:
         # Hiding a layer must not discard useful GPU residency.  A later

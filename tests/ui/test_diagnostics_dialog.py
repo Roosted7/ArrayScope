@@ -69,6 +69,7 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
         assert dialog._overview_labels["status"].text()
         assert "RSS" in dialog._overview_labels["resources"].text()
         assert "sync" in dialog._overview_labels["render"].text()
+        assert dialog._compact_bars["render"].format().startswith("GPU:")
         assert dialog._overview_labels["montage"].text()
     finally:
         win.close()

@@ -359,6 +359,7 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"  visible={snapshot.montage_timing.tile_layer_visible_items} "
             f"resident={snapshot.montage_timing.tile_layer_resident_items}/"
             f"{snapshot.montage_timing.tile_layer_storage_capacity} "
+            f"({_ratio_percent_text(snapshot.montage_timing.tile_layer_resident_items, snapshot.montage_timing.tile_layer_storage_capacity)}) "
             f"created={snapshot.montage_timing.tile_layer_items_created} "
             f"updated={snapshot.montage_timing.tile_layer_items_updated} "
             f"shown={snapshot.montage_timing.tile_layer_existing_items_shown} "
@@ -368,6 +369,8 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"  rgb={_ms_text(snapshot.montage_timing.last_tile_layer_rgb_window_ms)} "
             f"upload={_ms_text(snapshot.montage_timing.last_tile_layer_upload_ms)} "
             f"gpu={format_bytes(snapshot.montage_timing.tile_layer_estimated_gpu_bytes)} "
+            f"budget={format_bytes(snapshot.montage_timing.tile_layer_budget_bytes)} "
+            f"({_ratio_percent_text(snapshot.montage_timing.tile_layer_estimated_gpu_bytes, snapshot.montage_timing.tile_layer_budget_bytes)}) "
             f"pages={snapshot.montage_timing.tile_layer_active_pages}/"
             f"{snapshot.montage_timing.tile_layer_page_count}"
         ),
@@ -660,6 +663,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"visible={snapshot.montage_timing.tile_layer_visible_items} "
             f"resident={snapshot.montage_timing.tile_layer_resident_items}/"
             f"{snapshot.montage_timing.tile_layer_storage_capacity} "
+            f"({_ratio_percent_text(snapshot.montage_timing.tile_layer_resident_items, snapshot.montage_timing.tile_layer_storage_capacity)}) "
             f"created={snapshot.montage_timing.tile_layer_items_created} "
             f"updated={snapshot.montage_timing.tile_layer_items_updated} "
             f"shown={snapshot.montage_timing.tile_layer_existing_items_shown} "
@@ -677,6 +681,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"warm={snapshot.montage_timing.tile_layer_warm_resident_items} "
             f"gpu={format_bytes(snapshot.montage_timing.tile_layer_estimated_gpu_bytes)} "
             f"budget={format_bytes(snapshot.montage_timing.tile_layer_budget_bytes)} "
+            f"budget_used={_ratio_percent_text(snapshot.montage_timing.tile_layer_estimated_gpu_bytes, snapshot.montage_timing.tile_layer_budget_bytes)} "
             f"max_texture={snapshot.montage_timing.tile_layer_device_max_texture_size or 'n/a'} "
             f"cpu_shadow={format_bytes(snapshot.montage_timing.tile_layer_cpu_shadow_bytes)}"
         ),
@@ -875,6 +880,15 @@ def _bool_text(value: bool | None) -> str:
 
 def _percent_text(value: float | None) -> str:
     return "n/a" if value is None else f"{float(value):.0f}%"
+
+
+def _ratio_percent_text(used: int | float | None, total: int | float | None) -> str:
+    if used is None or total is None:
+        return "n/a"
+    total_float = float(total)
+    if total_float <= 0.0:
+        return "n/a"
+    return f"{(float(used) / total_float * 100.0):.1f}%"
 
 
 def _float_or_na(value: float | None) -> str:

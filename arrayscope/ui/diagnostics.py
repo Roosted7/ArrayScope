@@ -143,7 +143,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         self._compact_bars = {
             "system": _CompactUsageBar("System"),
             "rss": _CompactUsageBar("RSS"),
-            "render": _CompactUsageBar("Render"),
+            "render": _CompactUsageBar("GPU"),
             "stage": _CompactUsageBar("Stage"),
             "tile": _CompactUsageBar("Tiles"),
         }
@@ -299,6 +299,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         )
         self._overview_labels["render"].setText(
             f"{snapshot.render.last_decision_kind or 'n/a'} | "
+            f"GPU {_gpu_overview(snapshot)} | "
             f"sync {_ms_text(snapshot.render_timing.last_render_sync_ms)}, "
             f"eval {_ms_text(snapshot.render_timing.last_evaluation_ms)}, "
             f"commit {_ms_text(snapshot.render_timing.last_display_commit_ms)}"
@@ -316,13 +317,8 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         bars["system"].setFormat(f"System {_percent(system_used, policy.system_total_bytes)}")
         bars["rss"].set_usage(used=policy.process_rss_bytes, total=policy.system_total_bytes)
         bars["rss"].setFormat(f"RSS {_short_bytes(policy.process_rss_bytes)}")
-        render_used = snapshot.render.estimated_display_bytes
-        render_budget = snapshot.render.render_budget_bytes or policy.visible_render_budget_bytes
-        bars["render"].set_usage(
-            used=0 if render_used is None else render_used,
-            total=render_budget,
-            detail="n/a" if render_used is None else f"{_short_bytes(render_used)} / {_short_bytes(render_budget)}",
-        )
+        gpu_used, gpu_total, gpu_detail = _gpu_bar_usage(snapshot)
+        bars["render"].set_usage(used=gpu_used, total=gpu_total, detail=gpu_detail)
         bars["stage"].set_usage(
             used=snapshot.stage_cache.bytes_used,
             total=snapshot.stage_cache.max_bytes,
@@ -483,6 +479,37 @@ def _short_bytes(value: int | None) -> str:
 
 def _percent(used: int, total: int) -> str:
     return f"{(float(used) / max(1.0, float(total)) * 100.0):.0f}%"
+
+
+def _gpu_bar_usage(snapshot) -> tuple[int, int, str]:
+    timing = snapshot.montage_timing
+    gpu_bytes = int(getattr(timing, "tile_layer_estimated_gpu_bytes", 0) or 0)
+    budget_bytes = int(getattr(timing, "tile_layer_budget_bytes", 0) or 0)
+    resident = int(getattr(timing, "tile_layer_resident_items", 0) or 0)
+    capacity = int(getattr(timing, "tile_layer_storage_capacity", 0) or 0)
+    slot_text = "slots n/a" if capacity <= 0 else f"slots {resident}/{capacity} {_percent(resident, capacity)}"
+    if budget_bytes > 0:
+        return (
+            gpu_bytes,
+            budget_bytes,
+            f"{_short_bytes(gpu_bytes)} / {_short_bytes(budget_bytes)} {_percent(gpu_bytes, budget_bytes)} | {slot_text}",
+        )
+    if capacity > 0:
+        return resident, capacity, f"{slot_text} | {_short_bytes(gpu_bytes)}"
+    return 0, 1, "n/a"
+
+
+def _gpu_overview(snapshot) -> str:
+    timing = snapshot.montage_timing
+    gpu_bytes = int(getattr(timing, "tile_layer_estimated_gpu_bytes", 0) or 0)
+    budget_bytes = int(getattr(timing, "tile_layer_budget_bytes", 0) or 0)
+    resident = int(getattr(timing, "tile_layer_resident_items", 0) or 0)
+    capacity = int(getattr(timing, "tile_layer_storage_capacity", 0) or 0)
+    if budget_bytes > 0:
+        return f"{_short_bytes(gpu_bytes)}/{_short_bytes(budget_bytes)} {_percent(gpu_bytes, budget_bytes)}"
+    if capacity > 0:
+        return f"slots {resident}/{capacity} {_percent(resident, capacity)}"
+    return "n/a"
 
 
 def _overview_bottleneck(snapshot) -> str:

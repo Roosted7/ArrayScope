@@ -128,6 +128,7 @@ def _snapshot():
             tile_layer_vertex_uploads=1,
             tile_layer_level_updates=1,
             tile_layer_estimated_gpu_bytes=8192,
+            tile_layer_budget_bytes=16384,
             coalesced_commits=7,
         ),
         fft_backend_choice="auto",
@@ -232,7 +233,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Timing stage plan: 0.75 ms" in text
     assert "Timing session setup: 2.25 ms" in text
     assert "Timing initial commit: 3.50 ms" in text
-    assert "Tile layer:\n  visible=50 resident=80/128 created=0 updated=1 shown=0 moved=0 skipped=49 rgb_tiles=1" in text
+    assert "Tile layer:\n  visible=50 resident=80/128 (62.5%) created=0 updated=1 shown=0 moved=0 skipped=49 rgb_tiles=1" in text
     assert "Timing visible upload: 10.00 ms" in text
     assert "Timing histogram upload: 5.00 ms" in text
     assert "Timing histogram recompute: 3.00 ms" in text
@@ -241,9 +242,9 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Timing tile layer RGB window: 1.50 ms" in text
     assert "Timing level sync: 1.00 ms" in text
     assert "Coalesced montage commits: 7" in text
-    assert "Tile layer items: visible=50 resident=80/128 created=0 updated=1 shown=0 moved=0 skipped=49" in text
+    assert "Tile layer items: visible=50 resident=80/128 (62.5%) created=0 updated=1 shown=0 moved=0 skipped=49" in text
     assert "Tile layer RGB window tiles: 1" in text
-    assert "Tile layer storage: rebuilds=1 evictions=2 pages=0/0 near=0 warm=0 gpu=8.0 KiB budget=0 B max_texture=n/a cpu_shadow=0 B" in text
+    assert "Tile layer storage: rebuilds=1 evictions=2 pages=0/0 near=0 warm=0 gpu=8.0 KiB budget=16.0 KiB budget_used=50.0% max_texture=n/a cpu_shadow=0 B" in text
     assert "Tile layer submissions: textures=3 bytes=4.0 KiB vertices=1 levels=1" in text
     assert "Upload: visible=1.0 KiB histogram=512 B same object=True" in text
     assert "Display cache last session: cached=3 missing=4" in text

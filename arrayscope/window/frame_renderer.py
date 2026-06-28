@@ -54,12 +54,11 @@ from arrayscope.display.model.montage_levels import (
     sample_tile_level_stats,
 )
 from arrayscope.window.montage_payload_cache import (
-    base_tile_source_id as _base_tile_source_id,
-    limited_payload_cache as _limited_payload_cache,
     payload_lod_matches as _payload_lod_matches,
     payload_compatible_with_tile as _payload_compatible_with_tile,
     previous_tiled_payloads as _previous_tiled_payloads,
     previous_tiled_payloads_by_base_source as _previous_tiled_payloads_by_base_source,
+    RetainedTiledPayloadStore,
 )
 from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.montage_viewport import (
@@ -123,6 +122,13 @@ class FrameRenderMixin:
 
     def _montage_tile_layer_policy(self, geometry, data) -> bool:
         return self._montage_backend_policy(geometry, data).backend == "tile_layer"
+
+    def _retained_tiled_payload_store(self) -> RetainedTiledPayloadStore:
+        store = getattr(self, "_montage_retained_tiled_payloads", None)
+        if not isinstance(store, RetainedTiledPayloadStore):
+            store = RetainedTiledPayloadStore()
+            self._montage_retained_tiled_payloads = store
+        return store
 
     def _montage_backend_policy(self, geometry, data):
         return choose_montage_backend(
@@ -557,11 +563,8 @@ class FrameRenderMixin:
         """Resolve only the supplied tiles from semantic CPU caches."""
 
         selected_lod_factor = 1
-        previous_payloads = {
-            key: payload
-            for key, payload in dict(getattr(self, "_montage_recent_tile_payloads_by_base_source", {}) or {}).items()
-            if _payload_lod_matches(payload, selected_lod_factor)
-        }
+        retained_store = self._retained_tiled_payload_store()
+        previous_payloads = retained_store.payloads_by_base_source(lod_factor=selected_lod_factor)
         previous_payloads.update(
             {
                 key: payload
@@ -597,6 +600,13 @@ class FrameRenderMixin:
                     shader_display=shader_display,
                 )
                 previous_payload = previous_payloads.get(tile_key)
+                if previous_payload is None:
+                    previous_payload = retained_store.resolve(
+                        tile_key,
+                        selected_lod_factor,
+                        tile.view_state,
+                        shader_display=shader_display,
+                    )
                 if previous_payload is None or not _payload_compatible_with_tile(
                     previous_payload,
                     tile.view_state,
@@ -2076,7 +2086,22 @@ class FrameRenderMixin:
         self._montage_presentation_commit_active = True
         try:
             payload_start = perf_counter()
-            previous_payloads = _previous_tiled_payloads(getattr(self, "_committed_display_frame", None))
+            selected_lod_factor = int(session._selected_lod_factor())
+            previous_payloads = {
+                int(tile): payload
+                for tile, payload in _previous_tiled_payloads(getattr(self, "_committed_display_frame", None)).items()
+                if _payload_lod_matches(payload, selected_lod_factor)
+            }
+            retained_payloads = self._retained_tiled_payload_store().payloads_by_base_source(
+                lod_factor=selected_lod_factor
+            )
+            if retained_payloads:
+                previous_payloads.update(
+                    {
+                        int(tile): payload
+                        for tile, payload in enumerate(retained_payloads.values())
+                    }
+                )
             if previous_payloads and not getattr(session, "presented_tiles", None):
                 session.seed_display_tile_payloads(previous_payloads, tile_source_ids)
             base_tile_state = session.tile_presentation_state
@@ -2124,10 +2149,6 @@ class FrameRenderMixin:
             rendered_geometry = replace(
                 rendered_geometry,
                 montage_tile_states=session.ensure_tile_states(),
-            )
-            self._montage_recent_tile_payloads_by_base_source = _limited_payload_cache(
-                getattr(self, "_montage_recent_tile_payloads_by_base_source", None),
-                tile_state.payloads,
             )
             self._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
             level_stats = self._montage_level_stats_for_session(session)
@@ -2211,7 +2232,8 @@ class FrameRenderMixin:
                     semantic_commit=semantic_commit,
                 )
             report = getattr(self._display_committer(), "last_tile_commit_report", None)
-            session.acknowledge_tile_presentation(tile_delta, report, levels=normalize_bounds(self.img_view.getLevels()))
+            acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=normalize_bounds(self.img_view.getLevels()))
+            self._retained_tiled_payload_store().remember_acknowledged(acknowledged.payloads)
             if not session.has_stale_level_presentations():
                 session.set_level_update_pending(False)
             presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)

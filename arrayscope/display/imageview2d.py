@@ -611,11 +611,17 @@ class ImageViewShell(QtWidgets.QWidget):
         return str(self._montage_display_mode)
 
     def clearMontageTileLayer(self) -> None:
+        self.reset_tiled_residency("legacy-clear")
+
+    def hide_tiled_presentation(self, reason: str) -> None:
         if self._montage_tile_layer is not None:
             self._montage_tile_layer.clear()
         self._montage_tile_layer_histogram_key = None
         self._montage_display_mode = "none"
         self.imageItem.setVisible(True)
+
+    def reset_tiled_residency(self, reason: str) -> None:
+        self.hide_tiled_presentation(reason)
 
     def _apply_tile_layer_presentation(
         self,
@@ -899,7 +905,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._start_upload_timing("full")
         previous_shape = None if self.image is None else tuple(self.image.shape[:2])
         try:
-            self.clearMontageTileLayer()
+            self.hide_tiled_presentation("normal-image-commit")
             self.image = img
             self.imageDisp = None
             self.histogramSource = histogramData
@@ -1029,7 +1035,7 @@ class ImageViewShell(QtWidgets.QWidget):
     def reset_surface(self, reason: str) -> None:
         self._cancel_interaction("surface-reset")
         self._last_surface_reset_reason = str(reason)
-        self.clearMontageTileLayer()
+        self.reset_tiled_residency(reason)
         self.clearMontageTileOverlays()
         overlay = getattr(self, "_evaluation_overlay", None)
         if overlay is not None:
@@ -1092,7 +1098,7 @@ class ImageViewShell(QtWidgets.QWidget):
         applying = self._applying_presentation
         self._applying_presentation = True
         try:
-            self.clearMontageTileLayer()
+            self.hide_tiled_presentation("normal-image-fast-update")
             self.image = img
             self.histogramSource = histogramData
             self.histogramPlotSource = histogramPlotData

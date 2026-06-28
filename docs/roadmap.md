@@ -72,7 +72,7 @@ Exit gate:
 
 **Goal:** make local rendering fixes local again.
 
-`MontageRenderSession` and `montage_renderer.py` currently combine materialization, stage waits,
+`MontageRenderSession` and `frame_renderer.py` currently combine materialization, stage waits,
 payload admission, level convergence, viewport/residency hints, acknowledgement, timers, and
 committed-frame publication. That concentration is now a correctness risk, not merely a file-size
 preference.

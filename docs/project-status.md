@@ -41,7 +41,7 @@ The v30 review repairs the immediate level/histogram/benchmark issues and record
 ### Rendering control-plane concentration
 
 The main risk is no longer missing abstractions in the evaluation core. It is the concentration of
-many lifecycle state machines in `MontageRenderSession` and `montage_renderer.py`: compute/stage
+many lifecycle state machines in `MontageRenderSession` and `frame_renderer.py`: compute/stage
 queues, payload admission, viewport/residency hints, semantic level coverage, level convergence,
 acknowledgement, committed frames, and timers. The roadmap now places Qt-free state-machine extraction
 before more renderer unification. Montage resize/reflow and source-local ROI remapping have now moved
@@ -78,8 +78,8 @@ the safe default until conformance and platform traces justify a change.
 
 ## Scale and test posture
 
-The largest source files are currently about 3,070 lines (`montage_renderer.py`), 2,230
-(`imageview2d.py`), 2,202 (`vispy_imageview2d.py`), 2,075 (VisPy tiled backend), and 2,028 (profile
-workflow). These sizes are evidence of ownership concentration, not an instruction to split files
-mechanically. Extract generation, admission, stage fan-in, histogram model/adapter, and backend
-mechanics along the boundaries in the roadmap.
+The largest source files are currently `frame_renderer.py`, `imageview2d.py`,
+`vispy_imageview2d.py`, the VisPy tiled backend, and the profile workflow. These sizes are evidence of
+ownership concentration, not an instruction to split files mechanically. Extract generation,
+admission, stage fan-in, histogram model/adapter, and backend mechanics along the boundaries in the
+roadmap.
