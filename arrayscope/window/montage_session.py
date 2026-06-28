@@ -88,7 +88,7 @@ class MontageRenderSession:
     plan: MontagePlan
     view_state: object
     document: object
-    montage_axis: int
+    montage_axis: int | None
     colormap_lut: object | None
     viewport_shape: tuple[int, int]
     view_range: object

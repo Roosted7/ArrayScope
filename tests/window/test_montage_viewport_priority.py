@@ -568,7 +568,7 @@ def test_montage_layout_reflow_updates_roi_mirror_geometry():
     from types import SimpleNamespace
 
     from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
-    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.frame_renderer import FrameRenderMixin
 
     previous = _plan_with_columns(2)
     next_plan = _plan_with_columns(3)
@@ -593,7 +593,7 @@ def test_montage_layout_reflow_updates_roi_mirror_geometry():
     )
     window = SimpleNamespace(img_view=img_view)
 
-    MontageRenderMixin._remap_montage_rois_for_layout_reflow(window, previous, next_plan)
+    FrameRenderMixin._remap_montage_rois_for_layout_reflow(window, previous, next_plan)
 
     assert changed == [("roi-1", selections["roi-1"].geometry, True, True)]
     assert selections["roi-1"].geometry.rect == (next_tile.x0 + 2.0, next_tile.y0 + 3.0, 4.0, 5.0)
@@ -675,7 +675,7 @@ def test_square_montage_fit_view_range_follows_viewport_aspect():
 
 
 def test_montage_autofit_skips_manual_zoom_even_when_reflow_temporarily_empty():
-    from arrayscope.window.montage_renderer import _should_auto_fit_montage_view
+    from arrayscope.window.frame_renderer import _should_auto_fit_montage_view
 
     class ManualController:
         def is_near_auto(self, _view_range):
@@ -701,7 +701,7 @@ def test_montage_autofit_skips_manual_zoom_even_when_reflow_temporarily_empty():
 
 
 def test_montage_autofit_allows_empty_auto_like_view():
-    from arrayscope.window.montage_renderer import _should_auto_fit_montage_view
+    from arrayscope.window.frame_renderer import _should_auto_fit_montage_view
 
     class AutoController:
         def is_auto_active(self):
@@ -717,7 +717,7 @@ def test_montage_autofit_allows_empty_auto_like_view():
 
 
 def test_montage_autofit_rejects_far_zoomed_out_manual_view():
-    from arrayscope.window.montage_renderer import _should_auto_fit_montage_view
+    from arrayscope.window.frame_renderer import _should_auto_fit_montage_view
 
     class ManualController:
         def is_near_auto(self, _view_range):
@@ -733,7 +733,7 @@ def test_montage_autofit_rejects_far_zoomed_out_manual_view():
 
 
 def test_montage_autofit_allows_exact_near_full_manual_alignment():
-    from arrayscope.window.montage_renderer import _should_auto_fit_montage_view
+    from arrayscope.window.frame_renderer import _should_auto_fit_montage_view
 
     class ManualController:
         def is_near_auto(self, _view_range):
@@ -753,7 +753,7 @@ def test_montage_autofit_allows_exact_near_full_manual_alignment():
 def test_retarget_layout_reflow_keeps_far_zoomed_out_manual_range_manual():
     from types import SimpleNamespace
 
-    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.frame_renderer import FrameRenderMixin
     from arrayscope.window.montage_viewport import MontageViewportPlan, square_montage_fit_view_range
 
     class ManualController:
@@ -783,7 +783,7 @@ def test_retarget_layout_reflow_keeps_far_zoomed_out_manual_range_manual():
     )
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
 
-    retargeted = MontageRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+    retargeted = FrameRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
 
     assert retargeted.view_range != square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)
     assert applied != [square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)]
@@ -792,7 +792,7 @@ def test_retarget_layout_reflow_keeps_far_zoomed_out_manual_range_manual():
 def test_retarget_layout_reflow_refits_when_near_previous_auto_range():
     from types import SimpleNamespace
 
-    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.frame_renderer import FrameRenderMixin
     from arrayscope.window.montage_viewport import MontageViewportPlan, square_montage_fit_view_range
 
     class AutoController:
@@ -826,7 +826,7 @@ def test_retarget_layout_reflow_refits_when_near_previous_auto_range():
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
     expected = square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)
 
-    retargeted = MontageRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+    retargeted = FrameRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
 
     assert retargeted.view_range == expected
     assert applied == [expected]
@@ -836,7 +836,7 @@ def test_retarget_layout_reflow_refits_when_near_previous_auto_range():
 def test_retarget_layout_reflow_refits_only_when_near_next_auto_range():
     from types import SimpleNamespace
 
-    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.frame_renderer import FrameRenderMixin
     from arrayscope.window.montage_viewport import MontageViewportPlan, square_montage_fit_view_range
 
     class AutoController:
@@ -870,7 +870,7 @@ def test_retarget_layout_reflow_refits_only_when_near_next_auto_range():
     )
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
 
-    retargeted = MontageRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+    retargeted = FrameRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
 
     assert retargeted.view_range == expected
     assert applied == []
@@ -880,7 +880,7 @@ def test_retarget_layout_reflow_refits_only_when_near_next_auto_range():
 def test_retarget_layout_reflow_refits_when_auto_active_even_if_far_from_next_auto():
     from types import SimpleNamespace
 
-    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.frame_renderer import FrameRenderMixin
     from arrayscope.window.montage_viewport import MontageViewportPlan, square_montage_fit_view_range
 
     class AutoController:
@@ -917,7 +917,7 @@ def test_retarget_layout_reflow_refits_when_auto_active_even_if_far_from_next_au
     )
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
 
-    retargeted = MontageRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+    retargeted = FrameRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
 
     assert retargeted.view_range == expected
     assert applied == [expected]
@@ -925,7 +925,7 @@ def test_retarget_layout_reflow_refits_when_auto_active_even_if_far_from_next_au
 
 
 def test_montage_autofit_allows_auto_active_even_when_visible_fraction_is_high():
-    from arrayscope.window.montage_renderer import _should_auto_fit_montage_view
+    from arrayscope.window.frame_renderer import _should_auto_fit_montage_view
 
     class AutoController:
         def is_auto_active(self):
@@ -946,16 +946,16 @@ def test_montage_autofit_allows_auto_active_even_when_visible_fraction_is_high()
 def test_montage_live_layout_reflow_skips_autofit_helper():
     from types import SimpleNamespace
 
-    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.frame_renderer import FrameRenderMixin
 
     geometry = _plan_with_columns(3).geometry
     window = SimpleNamespace(_montage_live_layout_reflow=True)
 
-    assert not MontageRenderMixin._maybe_auto_fit_montage_tiles(window, geometry)
+    assert not FrameRenderMixin._maybe_auto_fit_montage_tiles(window, geometry)
 
 
 def test_montage_autofit_signature_ignores_layout_only_reflow():
-    from arrayscope.window.montage_renderer import _montage_autofit_scope_grew, _montage_autofit_signature
+    from arrayscope.window.frame_renderer import _montage_autofit_scope_grew, _montage_autofit_signature
 
     previous = _plan_with_columns(2).geometry
     next_geometry = _plan_with_columns(3).geometry

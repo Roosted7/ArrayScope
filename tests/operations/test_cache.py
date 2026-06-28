@@ -115,6 +115,14 @@ def test_display_tile_key_ignores_axis_flip_display_transform():
     assert evaluator.display_tile_key(state) == evaluator.display_tile_key(flipped)
 
 
+def test_montage_tile_key_matches_single_slice_display_key():
+    data = np.zeros((4, 5, 6), dtype=np.float32)
+    evaluator = OperationEvaluator(ArrayDocument(data))
+    state = ViewState.from_shape(data.shape).with_image_axes(0, 1).with_slice(2, 3)
+
+    assert evaluator.montage_tile_key(state, montage_axis=2, source_index=3) == evaluator.display_tile_key(state)
+
+
 def test_apply_memory_policy_resizes_display_and_profile_caches():
     evaluator = OperationEvaluator(ArrayDocument(np.zeros((2, 3), dtype=np.float32)))
     system = SystemMemorySnapshot(total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, process_rss_bytes=0)

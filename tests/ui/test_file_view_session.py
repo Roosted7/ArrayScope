@@ -561,7 +561,7 @@ def test_programmatic_range_change_does_not_release_restored_camera_lock(qt_app,
     assert released == []
 
 
-def test_tiled_single_scene_range_change_schedules_tiled_viewport_update(qt_app, monkeypatch):
+def test_tiled_single_scene_range_change_schedules_frame_viewport_update(qt_app, monkeypatch):
     from pyqtgraph.Qt import QtCore
 
     import arrayscope.window.viewport_bridge as viewport_bridge
@@ -583,7 +583,7 @@ def test_tiled_single_scene_range_change_schedules_tiled_viewport_update(qt_app,
                 ),
                 value_source=SimpleNamespace(payloads={}),
             ),
-        _schedule_tiled_viewport_update=lambda: scheduled.append("tiled"),
+        _schedule_frame_viewport_update=lambda: scheduled.append("frame"),
         view_state=SimpleNamespace(montage_axis=None),
     )
     monkeypatch.setattr(
@@ -594,7 +594,7 @@ def test_tiled_single_scene_range_change_schedules_tiled_viewport_update(qt_app,
 
     ViewportBridge(owner).on_view_range_changed()
 
-    assert scheduled == ["tiled"]
+    assert scheduled == ["frame"]
 
 
 def test_restored_viewport_waits_until_frame_committed(qt_app, monkeypatch):

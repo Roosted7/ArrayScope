@@ -213,7 +213,11 @@ class WindowLevelController:
             if levels is not None:
                 histogram = None if previous_state is None else previous_state.histogram_range
                 if candidate_state is not None:
-                    histogram = union_bounds(histogram, candidate_state.histogram_range)
+                    histogram = (
+                        candidate_state.histogram_range
+                        if _complete_source(candidate_state)
+                        else union_bounds(histogram, candidate_state.histogram_range)
+                    )
                 return WindowLevelState(
                     semantic_key=(candidate_state.semantic_key if candidate_state is not None else (previous_state.semantic_key if previous_state else None)),
                     display_levels=levels,
@@ -281,7 +285,11 @@ class WindowLevelController:
             return candidate_state
 
         if mode == LevelMode.ABSOLUTE and not previous_state.user_locked:
-            histogram = union_bounds(previous_state.histogram_range, candidate_state.histogram_range) or candidate_state.histogram_range
+            histogram = (
+                candidate_state.histogram_range
+                if _complete_source(candidate_state)
+                else union_bounds(previous_state.histogram_range, candidate_state.histogram_range) or candidate_state.histogram_range
+            )
             return replace(
                 previous_state,
                 histogram_range=histogram,
@@ -292,10 +300,23 @@ class WindowLevelController:
             )
 
         if mode == LevelMode.RELATIVE:
-            histogram = union_bounds(previous_state.histogram_range, candidate_state.histogram_range)
+            histogram = (
+                candidate_state.histogram_range
+                if _complete_source(candidate_state)
+                else union_bounds(previous_state.histogram_range, candidate_state.histogram_range)
+            )
             rank = max(previous_state.source_rank, candidate_state.source_rank)
             count = max(previous_state.source_count, candidate_state.source_count)
             expected = max(previous_state.expected_count, candidate_state.expected_count)
+            if _complete_source(candidate_state) and _span(histogram) < _span(previous_state.display_levels):
+                return replace(
+                    previous_state,
+                    source_rank=rank,
+                    source_count=count,
+                    expected_count=expected,
+                    user_locked=False,
+                    mode=mode,
+                )
             if histogram == previous_state.histogram_range and rank == previous_state.source_rank and count == previous_state.source_count:
                 return replace(previous_state, expected_count=expected, user_locked=False, mode=mode)
             mapped = relative_levels(
@@ -314,7 +335,11 @@ class WindowLevelController:
                 mode=mode,
             )
 
-        histogram = union_bounds(previous_state.histogram_range, candidate_state.histogram_range)
+        histogram = (
+            candidate_state.histogram_range
+            if _complete_source(candidate_state)
+            else union_bounds(previous_state.histogram_range, candidate_state.histogram_range)
+        )
         return replace(
             previous_state,
             histogram_range=histogram or previous_state.histogram_range,
@@ -341,3 +366,16 @@ class WindowLevelController:
             return LevelMode(str(mode))
         except ValueError:
             return LevelMode.RELATIVE
+
+
+def _complete_source(state: WindowLevelState) -> bool:
+    if state.source_rank >= LevelSourceRank.MONTAGE_COMPLETE:
+        return True
+    return bool(state.expected_count > 0 and state.source_count >= state.expected_count)
+
+
+def _span(bounds: Levels | None) -> float:
+    normalized = normalize_bounds(bounds)
+    if normalized is None:
+        return 0.0
+    return max(0.0, float(normalized[1]) - float(normalized[0]))

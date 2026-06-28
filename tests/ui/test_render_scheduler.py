@@ -84,7 +84,7 @@ def test_visible_render_uses_cost_decision_refuse_without_clearing_previous_imag
 
 def test_refused_render_formats_fallback_memory_message(qtbot, monkeypatch):
     _clear_arrayscope_settings()
-    import arrayscope.window.normal_renderer as normal_renderer
+    import arrayscope.window.frame_renderer as frame_renderer
     import arrayscope.window.render as render_module
     from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
     from arrayscope.window import ArrayScopeWindow
@@ -102,7 +102,7 @@ def test_refused_render_formats_fallback_memory_message(qtbot, monkeypatch):
             lambda _context: RenderDecision(RenderDecisionKind.REFUSE, "test refuse"),
         )
         monkeypatch.setattr(
-            normal_renderer,
+            frame_renderer,
             "show_status_message",
             lambda _owner, text, **_kwargs: messages.append(text),
         )

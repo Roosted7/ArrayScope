@@ -263,24 +263,35 @@ class OperationEvaluator:
     def montage_tile_key(self, tile_state, *, montage_axis, source_index, colormap_lut=None, document=None, shader_display: bool = False):
         return self.display_tile_key(
             tile_state,
-            montage_axis=montage_axis,
-            source_index=source_index,
-            tile_number=source_index,
             colormap_lut=colormap_lut,
             document=document,
             shader_display=shader_display,
         )
 
-    def cached_display_tile(self, view_state, colormap_lut=None, *, shader_display: bool = False):
-        cached = self._display_cache.get(self.display_tile_key(view_state, colormap_lut=colormap_lut, shader_display=shader_display))
+    def cached_display_tile(self, view_state, colormap_lut=None, *, document=None, shader_display: bool = False):
+        cached = self._display_cache.get(
+            self.display_tile_key(
+                view_state,
+                colormap_lut=colormap_lut,
+                document=document,
+                shader_display=shader_display,
+            )
+        )
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
             self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.CACHED, "Using cached display tile")
         return cached
 
-    def cached_montage_tile(self, tile_state, *, montage_axis, source_index, colormap_lut=None, shader_display: bool = False):
+    def cached_montage_tile(self, tile_state, *, montage_axis, source_index, colormap_lut=None, document=None, shader_display: bool = False):
         cached = self._display_cache.get(
-            self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut, shader_display=shader_display)
+            self.montage_tile_key(
+                tile_state,
+                montage_axis=montage_axis,
+                source_index=source_index,
+                colormap_lut=colormap_lut,
+                document=document,
+                shader_display=shader_display,
+            )
         )
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
@@ -324,9 +335,16 @@ class OperationEvaluator:
     def cached_tile_region_silent(self, request):
         return self._region_cache.get(self.tile_region_key(request))
 
-    def cached_montage_tile_silent(self, tile_state, *, montage_axis, source_index, colormap_lut=None, shader_display: bool = False):
+    def cached_montage_tile_silent(self, tile_state, *, montage_axis, source_index, colormap_lut=None, document=None, shader_display: bool = False):
         return self._display_cache.get(
-            self.montage_tile_key(tile_state, montage_axis=montage_axis, source_index=source_index, colormap_lut=colormap_lut, shader_display=shader_display)
+            self.montage_tile_key(
+                tile_state,
+                montage_axis=montage_axis,
+                source_index=source_index,
+                colormap_lut=colormap_lut,
+                document=document,
+                shader_display=shader_display,
+            )
         )
 
     def store_tile_region_result(self, request, result):
@@ -348,8 +366,13 @@ class OperationEvaluator:
             evaluation_context=evaluation_context,
         )
 
-    def store_display_tile_result(self, view_state, colormap_lut, result: EvaluationResult, *, shader_display: bool = False):
-        key = self.display_tile_key(view_state, colormap_lut=colormap_lut, shader_display=shader_display)
+    def store_display_tile_result(self, view_state, colormap_lut, result: EvaluationResult, *, document=None, shader_display: bool = False):
+        key = self.display_tile_key(
+            view_state,
+            colormap_lut=colormap_lut,
+            document=document,
+            shader_display=shader_display,
+        )
         self._display_cache.last_eval_ms = result.eval_ms
         self.last_region_plan = result.region_plan
         self._display_cache.put(key, result.value)
@@ -391,8 +414,15 @@ class OperationEvaluator:
         self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.READY, _request_message("Export tile cached", result))
         return result.value
 
-    def store_montage_tile_result(self, tile, *, montage_axis, colormap_lut, result: EvaluationResult, shader_display: bool = False):
-        key = self.montage_tile_key(tile.view_state, montage_axis=montage_axis, source_index=tile.source_index, colormap_lut=colormap_lut, shader_display=shader_display)
+    def store_montage_tile_result(self, tile, *, montage_axis, colormap_lut, result: EvaluationResult, document=None, shader_display: bool = False):
+        key = self.montage_tile_key(
+            tile.view_state,
+            montage_axis=montage_axis,
+            source_index=tile.source_index,
+            colormap_lut=colormap_lut,
+            document=document,
+            shader_display=shader_display,
+        )
         value = RenderedTilePayload(
             image=result.value.data,
             histogram_data=result.value.histogram_data,
@@ -414,8 +444,13 @@ class OperationEvaluator:
         self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.READY, _request_message("Display tile cached", result))
         return value.bind(tile)
 
-    def prefetch_display_tile_snapshot(self, document, view_state, colormap_lut=None, *, evaluation_context=None):
-        key = self.display_tile_key(view_state, colormap_lut=colormap_lut, document=document)
+    def prefetch_display_tile_snapshot(self, document, view_state, colormap_lut=None, *, evaluation_context=None, shader_display: bool = False):
+        key = self.display_tile_key(
+            view_state,
+            colormap_lut=colormap_lut,
+            document=document,
+            shader_display=shader_display,
+        )
         if self._display_cache.get(key) is not None:
             self.prefetch_skipped += 1
             return None
@@ -429,15 +464,22 @@ class OperationEvaluator:
             stage_cache=self._stage_cache,
             stage_document_key=stage_document_key(document),
             evaluation_context=evaluation_context,
+            shader_display=shader_display,
         )
 
-    def store_prefetch_display_tile_result(self, document, view_state, colormap_lut, result):
+    def store_prefetch_display_tile_result(self, document, view_state, colormap_lut, result, *, shader_display: bool = False):
         if result is None:
             return False
         if _document_key(document) != _document_key(self.document):
             self.prefetch_stale += 1
             return False
-        self.store_display_tile_result(view_state, colormap_lut, result)
+        self.store_display_tile_result(
+            view_state,
+            colormap_lut,
+            result,
+            document=document,
+            shader_display=shader_display,
+        )
         self.prefetch_stored += 1
         return True
 

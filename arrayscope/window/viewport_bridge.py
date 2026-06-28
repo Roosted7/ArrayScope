@@ -19,7 +19,7 @@ class ViewportBridge:
             note_interaction("range")
         self.owner._update_display_group_title()
         if not getattr(self.owner, "_montage_presentation_commit_active", False) and _owner_has_tiled_scene(self.owner):
-            scheduler = getattr(self.owner, "_schedule_tiled_viewport_update", None)
+            scheduler = getattr(self.owner, "_schedule_frame_viewport_update", None)
             if callable(scheduler):
                 scheduler()
             elif self.owner.view_state.montage_axis is not None:

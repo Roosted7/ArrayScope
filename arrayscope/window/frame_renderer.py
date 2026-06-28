@@ -1,9 +1,8 @@
-"""Progressive montage render orchestration for ArrayScope windows.
+"""Frame render orchestration for ArrayScope windows.
 
-The montage path is large enough to have explicit ownership separate from
-hover/profile/preference UI code.  It manages sessions, visible-tile planning,
-stage-first tile scheduling, progressive tiled presentation commits, and
-montage-specific level source tracking.
+The frame path owns the single visible image surface for every image view.  A
+single slice and a multi-region montage both become one semantic frame with
+region payloads; backends differ only in physical presentation mechanics.
 """
 
 from __future__ import annotations
@@ -86,7 +85,32 @@ MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
 MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
 
 
-class MontageRenderMixin:
+class FrameRenderMixin:
+    def _interactive_frame_cache_hit(self) -> bool:
+        view_state = getattr(self, "view_state", None)
+        if view_state is None or view_state.image_axes is None:
+            return False
+        evaluator = getattr(self, "operation_evaluator", None)
+        if evaluator is None:
+            return False
+        shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
+        colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
+        viewport_plan = self._montage_viewport_plan(view_state)
+        for tile in viewport_plan.candidate_tiles(margin_tiles=0):
+            if (
+                evaluator.cached_montage_tile(
+                    tile.view_state,
+                    montage_axis=viewport_plan.axis,
+                    source_index=tile.source_index,
+                    colormap_lut=colormap_lut,
+                    document=self.document,
+                    shader_display=shader_display,
+                )
+                is None
+            ):
+                return False
+        return True
+
     def _montage_frame_planner(self) -> FramePlanner:
         provider = getattr(self, "_frame_planner", None)
         if provider is not None:
@@ -109,9 +133,7 @@ class MontageRenderMixin:
 
     def _montage_viewport_plan(self, view_state, *, view_range=None) -> MontageViewportPlan:
         axis = view_state.montage_axis
-        if axis is None:
-            raise ValueError("montage viewport planning requires an active montage axis")
-        all_indices = tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
+        all_indices = (0,) if axis is None else tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
         viewport_size = self.img_view.graphicsView.viewport().size()
         viewport_shape = (max(1, viewport_size.height()), max(1, viewport_size.width()))
         tile_shape = self._montage_tile_shape(view_state)
@@ -150,7 +172,7 @@ class MontageRenderMixin:
         priority_focus = _montage_priority_focus(self, current_range)
         capabilities = image_view_backend_capabilities(self.img_view)
         return MontageViewportPlan(
-            axis=int(axis),
+            axis=None if axis is None else int(axis),
             all_indices=all_indices,
             viewport_shape=viewport_shape,
             tile_shape=tile_shape,
@@ -193,8 +215,6 @@ class MontageRenderMixin:
     def _on_image_viewport_resized(self, *, previous_viewport_size=None, base_view_range=None, resize_focus=None) -> None:
         if getattr(self, "_closing", False):
             return
-        if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
-            return
         locked_restore_range = getattr(self, "_file_session_restore_locked_view_range", lambda: None)()
         if locked_restore_range is not None and not _viewport_gesture_active():
             restore_viewport_shape = getattr(self, "_restore_file_session_viewport_shape_after_show", None)
@@ -219,8 +239,6 @@ class MontageRenderMixin:
         self._schedule_montage_viewport_update(delay_ms=0)
 
     def _current_montage_resize_focus(self, view_range) -> tuple[float, float] | None:
-        if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
-            return None
         return _montage_priority_focus(self, view_range)
 
     def _retarget_montage_resize_camera(
@@ -234,8 +252,6 @@ class MontageRenderMixin:
         if session is None or not self._is_current_montage_session(session.session_id, session.key):
             return None
         view_state = self.view_state
-        if view_state.montage_axis is None:
-            return None
         capabilities = image_view_backend_capabilities(self.img_view)
         viewport_plan = self._montage_viewport_plan(view_state, view_range=base_view_range)
         colormap_lut = self._evaluation_colormap_lut(
@@ -272,8 +288,6 @@ class MontageRenderMixin:
         if not montage_viewport_retarget_policy(capabilities, display_mode).enabled:
             return False
         view_state = self.view_state
-        if view_state.montage_axis is None:
-            return False
         _additions, presentation_changed = session.retarget_viewport(
             view_range=viewport_plan.view_range,
             viewport_shape=viewport_plan.viewport_shape,
@@ -311,7 +325,7 @@ class MontageRenderMixin:
             return
         self._commit_montage_session_presentation(session, force=True)
 
-    def update_montage_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
+    def update_image_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         for attribute in (
             "_last_montage_viewport_plan_ms",
             "_last_montage_cache_resolve_ms",
@@ -321,10 +335,12 @@ class MontageRenderMixin:
         ):
             setattr(self, attribute, None)
         axis = self.view_state.montage_axis
-        if axis is None or self.view_state.image_axes is None or axis in self.view_state.image_axes:
+        if self.view_state.image_axes is None or axis in self.view_state.image_axes:
             return
         plan_start = perf_counter()
         policy = self._refresh_memory_policy(active_render=self._montage_render_active())
+        if policy is None:
+            policy = self._memory_policy()
         user_levels = self._pending_display_levels_for_render()
         if force_autolevel and user_levels is not None:
             self._queue_display_levels(None)
@@ -518,7 +534,7 @@ class MontageRenderMixin:
             self._schedule_montage_cached_level_stats(session)
             return
         self.prefetch_evaluation_controller.cancel_prefetch()
-        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
+        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image frame")
         if defer_side_panels:
             self._deferred_side_panel_refresh_pending = True
         else:
@@ -590,7 +606,7 @@ class MontageRenderMixin:
                 else:
                     cached_tiles.append(_rendered_tile_from_previous_payload(tile, previous_payload))
             else:
-                cached_tiles.append(cached.bind(tile) if hasattr(cached, "bind") else cached.payload().bind(tile))
+                cached_tiles.append(_rendered_tile_from_cached_display(tile, cached))
         self._last_montage_display_cache_lookup_ms = total_lookup_ms
         self._last_montage_display_cache_hit = last_hit if tile_tuple else False
         return cached_tiles, missing_tiles
@@ -1491,7 +1507,7 @@ class MontageRenderMixin:
             return self._evaluate_montage_tile_snapshot(session, tile, token)
 
         session_id = int(session.session_id)
-        montage_axis = int(session.montage_axis)
+        montage_axis = session.montage_axis
         document = session.document
         colormap_lut = session.colormap_lut
         shader_display = bool(getattr(session, "shader_display", False))
@@ -1729,14 +1745,14 @@ class MontageRenderMixin:
         session.show_loading_overlays = True
         self._schedule_montage_presentation_commit(session, force=True)
         self.img_view.setImageStale(True)
-        self.img_view.setEvaluationOverlay(True, "Updating montage...")
-        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating montage view")
+        self.img_view.setEvaluationOverlay(True, "Updating image frame...")
+        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image frame")
         if getattr(session, "defer_side_panels", False) or _viewport_interaction_active(self):
             self._deferred_side_panel_refresh_pending = True
         else:
             self._update_operation_dock()
 
-    def _on_montage_tile_done(self, session_id, tile, result, *, document, montage_axis: int, colormap_lut, shader_display: bool) -> None:
+    def _on_montage_tile_done(self, session_id, tile, result, *, document, montage_axis: int | None, colormap_lut, shader_display: bool) -> None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, session.key):
             self._store_reusable_montage_tile_result(
@@ -1761,7 +1777,7 @@ class MontageRenderMixin:
         session.pending_completed_tiles.append((tile, result))
         self._schedule_montage_tile_result_flush(session)
 
-    def _store_reusable_montage_tile_result(self, tile, result, *, document, montage_axis: int, colormap_lut, shader_display: bool):
+    def _store_reusable_montage_tile_result(self, tile, result, *, document, montage_axis: int | None, colormap_lut, shader_display: bool):
         if _document_key(document) != _document_key(self.document):
             return None
         stored = self.operation_evaluator.store_montage_tile_result(
@@ -1769,6 +1785,7 @@ class MontageRenderMixin:
             montage_axis=montage_axis,
             colormap_lut=colormap_lut,
             result=result,
+            document=document,
             shader_display=shader_display,
         )
         controller = getattr(self, "montage_tile_evaluation_controller", None)
@@ -2020,7 +2037,7 @@ class MontageRenderMixin:
             and (session.pending_tiles or session.loading_tiles or session.active_tile_requests or session.stage_fan_in.attached_requests)
         ):
             self.img_view.setImageStale(True)
-            self.img_view.setEvaluationOverlay(True, "Updating montage...")
+            self.img_view.setEvaluationOverlay(True, "Updating image frame...")
 
     def _commit_montage_session_presentation(self, session, *, force=False) -> None:
         if not self._is_current_montage_session(session.session_id, session.key):
@@ -2144,7 +2161,7 @@ class MontageRenderMixin:
                     semantic_source=semantic_source,
                     applied_level_source=session.applied_level_source,
                     histogram_plot_data=histogram_plot_data,
-                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if decision_force_auto else CommitKind.FULL_MONTAGE_INITIAL,
+                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if decision_force_auto else CommitKind.FULL_FRAME_INITIAL,
                     document_key=_document_key(session.document),
                     request_key=session.key,
                     render_generation=session.render_generation,
@@ -2181,7 +2198,7 @@ class MontageRenderMixin:
                     semantic_source=semantic_source,
                     applied_level_source=session.applied_level_source,
                     histogram_plot_data=histogram_plot_data,
-                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_FRAME_PATCH,
                     document_key=_document_key(session.document),
                     request_key=session.key,
                     render_generation=session.render_generation,
@@ -2379,7 +2396,7 @@ class MontageRenderMixin:
                 previous_frame=previous_frame,
                 window_mode=session.window_mode,
                 force_auto=False,
-                commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+                commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_FRAME_PATCH,
                 semantic_source=semantic_source,
                 applied_level_source=applied_level_source,
                 user_levels=_session_requested_levels(session),
@@ -2489,7 +2506,7 @@ class MontageRenderMixin:
             return False
         session.show_loading_overlays = False
         self._stop_montage_session_slow_overlay()
-        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Montage view ready")
+        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Image frame ready")
         self.img_view.setImageStale(False)
         self.img_view.setEvaluationOverlay(False)
         if hasattr(self.img_view, "clearMontageTileOverlays"):
@@ -2833,7 +2850,7 @@ class MontageRenderMixin:
         session = getattr(self, "_montage_session", None)
         if session is None:
             return False
-        return int(session.session_id) == int(session_id) and session.key == key and self.view_state.montage_axis is not None
+        return int(session.session_id) == int(session_id) and session.key == key
 
     def _retry_live_profile_after_montage_tile(self) -> None:
         try:
@@ -2988,8 +3005,6 @@ class MontageRenderMixin:
     def _run_montage_viewport_update(self) -> None:
         if getattr(self, "_closing", False):
             return
-        if self.view_state.montage_axis is None:
-            return
         session = getattr(self, "_montage_session", None)
         token = getattr(self, "_montage_viewport_update_token", None)
         if token is not None and (session is None or token != _montage_work_token(session, "viewport_update")):
@@ -3001,10 +3016,10 @@ class MontageRenderMixin:
         self._montage_viewport_update_pending = False
         try:
             if not self._try_update_montage_viewport_only():
-                self.update_montage_view()
+                self.update_image_view()
         finally:
             self._montage_viewport_update_running = False
-        if getattr(self, "_montage_viewport_update_pending", False) and self.view_state.montage_axis is not None:
+        if getattr(self, "_montage_viewport_update_pending", False):
             self._montage_viewport_update_pending = False
             delay = 0 if getattr(self, "_montage_viewport_continue_immediately", False) else _montage_viewport_chunk_delay_ms(self)
             self._montage_viewport_continue_immediately = False
@@ -3247,6 +3262,29 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         lod=getattr(payload, "lod", None),
         level_data=getattr(payload, "level_data", None),
         level_stats=getattr(payload, "level_stats", None),
+    )
+
+
+def _rendered_tile_from_cached_display(tile, cached) -> RenderedTile:
+    if hasattr(cached, "bind"):
+        return cached.bind(tile)
+    if hasattr(cached, "payload"):
+        return cached.payload().bind(tile)
+    image = np.asarray(cached.data)
+    histogram = None if getattr(cached, "histogram_data", None) is None else np.asarray(cached.histogram_data)
+    return RenderedTile(
+        tile=tile,
+        image=image,
+        histogram_data=histogram,
+        eval_ms=0.0,
+        slab_shape=tuple(image.shape),
+        slab_nbytes=int(image.nbytes),
+        shader_mapping=getattr(cached, "shader_mapping", None),
+        texture_kind=getattr(cached, "texture_kind", None),
+        semantic_data=getattr(cached, "semantic_data", None),
+        lod=getattr(cached, "lod", None),
+        level_data=getattr(cached, "level_data", None),
+        level_stats=getattr(cached, "level_stats", None),
     )
 
 

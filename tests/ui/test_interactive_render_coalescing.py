@@ -95,6 +95,7 @@ def test_interactive_slice_preserves_visible_work_and_cancels_side_work(qtbot, m
     monkeypatch.setattr(win, "render", lambda **_kwargs: None)
     try:
         _process_events(qtbot, count=2)
+        cancelled_prefetch.clear()
         win._on_slice_index_changed(2, 1)
 
         assert not any(name in {"visible", "montage"} for name, _group in cleared)
@@ -163,7 +164,7 @@ def test_cached_interactive_render_uses_zero_delay_without_cancelling_work(qtbot
     qtbot.addWidget(win)
     renders = []
     cancellations = []
-    monkeypatch.setattr(win, "_interactive_render_cache_hit", lambda: True)
+    monkeypatch.setattr(win, "_interactive_frame_cache_hit", lambda: True)
     monkeypatch.setattr(
         win,
         "_cancel_render_dependent_work_for_interactive_change",
@@ -204,7 +205,7 @@ def test_cached_interactive_render_skips_intermediate_requests_until_draw_comple
             self.rendered = []
             self.render_coordinator = RenderCoordinator(self)
 
-        def _interactive_render_cache_hit(self):
+        def _interactive_frame_cache_hit(self):
             return True
 
         def _cancel_render_dependent_work_for_interactive_change(self):
@@ -252,7 +253,7 @@ def test_uncached_interactive_render_also_waits_for_draw_slot(qtbot):
             self.rendered = []
             self.render_coordinator = RenderCoordinator(self)
 
-        def _interactive_render_cache_hit(self):
+        def _interactive_frame_cache_hit(self):
             return False
 
         def _cancel_render_dependent_work_for_interactive_change(self):
@@ -299,7 +300,7 @@ def test_quiet_timer_flushes_pending_render_if_draw_signal_was_missed(qtbot):
             self.rendered = []
             self.render_coordinator = RenderCoordinator(self, quiet_interval_ms=1, busy_retry_ms=1)
 
-        def _interactive_render_cache_hit(self):
+        def _interactive_frame_cache_hit(self):
             return True
 
         def _cancel_render_dependent_work_for_interactive_change(self):
@@ -319,7 +320,7 @@ def test_quiet_timer_flushes_pending_render_if_draw_signal_was_missed(qtbot):
     assert [call["reason"] for call in win.rendered] == ["slice-latest"]
 
 
-def test_cached_normal_image_render_skips_memory_policy_resample(qtbot, monkeypatch):
+def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 

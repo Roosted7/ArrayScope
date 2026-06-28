@@ -142,7 +142,7 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_tiled_source_shader_mapping = None
         self._last_vispy_tiled_shader_mapping = None
         self._last_vispy_tiled_histogram_key = None
-        self._last_vispy_tiled_viewport_key = None
+        self._last_vispy_frame_viewport_key = None
         self._vispy_main_data_id: int | None = None
         self._vispy_main_color_source_id: int | None = None
         self._vispy_main_scalar_source_id: int | None = None
@@ -316,7 +316,7 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_tiled_source_shader_mapping = None
         self._last_vispy_tiled_shader_mapping = None
         self._last_vispy_tiled_histogram_key = None
-        self._last_vispy_tiled_viewport_key = None
+        self._last_vispy_frame_viewport_key = None
         self._montage_display_mode = "idle"
         self.imageItem.setVisible(False)
         _set_visual_visible(getattr(self, "_vispy_image", None), False)
@@ -568,7 +568,7 @@ class VisPyImageView2D(ImageViewShell):
             previous_levels_key = getattr(self, "_last_vispy_tiled_levels_key", None)
             previous_mapping_key = getattr(self, "_last_vispy_tiled_mapping_key", None)
             previous_histogram_key = getattr(self, "_last_vispy_tiled_histogram_key", None)
-            previous_viewport_key = getattr(self, "_last_vispy_tiled_viewport_key", None)
+            previous_viewport_key = getattr(self, "_last_vispy_frame_viewport_key", None)
             structure_changed = structure_key != previous_structure_key
             levels_changed = level_key != previous_levels_key
             mapping_changed = mapping_key != previous_mapping_key
@@ -710,7 +710,7 @@ class VisPyImageView2D(ImageViewShell):
                 self._last_vispy_tiled_source_shader_mapping = source_shader_mapping
                 self._last_vispy_tiled_shader_mapping = shader_mapping
                 self._last_vispy_tiled_histogram_key = histogram_key
-                self._last_vispy_tiled_viewport_key = viewport_key
+                self._last_vispy_frame_viewport_key = viewport_key
             return stats
         finally:
             self._applying_presentation = applying

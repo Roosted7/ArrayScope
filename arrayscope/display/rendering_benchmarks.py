@@ -116,8 +116,8 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
         measure_presented = os.environ.get("ARRAYSCOPE_BENCH_PRESENTED") == "1"
     results = []
     scenarios = (
-        _benchmark_normal_small_initial,
-        _benchmark_normal_large_tiled_initial,
+        _benchmark_tiled_small_initial,
+        _benchmark_tiled_large_initial,
         _benchmark_one_tile_montage_initial,
         _benchmark_multi_tile_montage_initial,
         _benchmark_scalar_level_preview,
@@ -198,17 +198,17 @@ def _benchmark_scalar_level_preview(view, *, measure_presented: bool) -> Renderi
     return _result(view, "scalar_level_preview", measurement)
 
 
-def _benchmark_normal_small_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+def _benchmark_tiled_small_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
     data = np.linspace(0.0, 1.0, 128 * 128, dtype=np.float32).reshape(128, 128)
     measurement = _measure_action(
         view,
         lambda: _present_single_plane_benchmark_tiled(view, data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), histogramPlotData=data),
         measure_presented=measure_presented,
     )
-    return _result(view, "normal_small_initial", measurement)
+    return _result(view, "tiled_small_initial", measurement)
 
 
-def _benchmark_normal_large_tiled_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+def _benchmark_tiled_large_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
     state = ViewState.from_shape((1024, 1024)).with_image_axes(0, 1)
     planner = FramePlanner(internal_tile_shape=(256, 256))
     plan = planner.plan(
@@ -246,7 +246,7 @@ def _benchmark_normal_large_tiled_initial(view, *, measure_presented: bool) -> R
         ),
         measure_presented=measure_presented,
     )
-    return _result(view, "normal_large_tiled_initial", measurement)
+    return _result(view, "tiled_large_initial", measurement)
 
 
 def _benchmark_one_tile_montage_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
@@ -730,7 +730,7 @@ def _single_plane_tile_state(frame_plan) -> TilePresentationState:
             int(region.region_id),
             image,
             histogram,
-            ("normal_tile", frame_plan.semantic_key, int(region.region_id)),
+            ("tiled_region", frame_plan.semantic_key, int(region.region_id)),
             semantic_data=histogram,
             semantic_histogram_data=histogram,
             source_shape=histogram.shape,
@@ -749,7 +749,7 @@ def _single_plane_tile_state_from_array(frame_plan, data: np.ndarray) -> TilePre
             int(region.region_id),
             tile,
             tile,
-            ("normal_tile", frame_plan.semantic_key, int(region.region_id), tuple(tile.shape), str(tile.dtype)),
+            ("tiled_region", frame_plan.semantic_key, int(region.region_id), tuple(tile.shape), str(tile.dtype)),
             semantic_data=tile,
             semantic_histogram_data=tile,
             source_shape=tile.shape[:2],

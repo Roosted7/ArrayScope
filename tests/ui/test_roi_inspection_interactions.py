@@ -268,7 +268,7 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, m
             )
 
         win._set_view_state(first_state)
-        win.update_montage_view()
+        win.update_image_view()
         qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=1000)
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
         win.img_view.createRoi("rectangle", rect=(0, 0, 2, 2))
@@ -279,7 +279,7 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, m
         calls.clear()
         second_state = win.view_state.with_axis_range(2, indices=(2, 3), text="2:4")
         win._set_view_state(second_state)
-        win.update_montage_view()
+        win.update_image_view()
         win._refresh_inspection_dock()
         _process_events(qtbot, count=20)
 
@@ -431,9 +431,9 @@ def test_montage_viewport_updates_recompute_roi_stats_only_when_layout_changes(q
         _process_events(qtbot, count=10)
 
         win.img_view.getView().setRange(xRange=(0, 3), yRange=(3, 6), padding=0)
-        win.update_montage_view()
+        win.update_image_view()
         _process_events(qtbot, count=40)
-        win.update_montage_view()
+        win.update_image_view()
         _process_events(qtbot, count=40)
 
         assert len(calls) == 2
@@ -478,9 +478,9 @@ def test_empty_inspection_dock_does_not_rewrite_table_on_montage_viewport_update
         overlay_updates.clear()
 
         win.img_view.getView().setRange(xRange=(0, 3), yRange=(3, 6), padding=0)
-        win.update_montage_view()
+        win.update_image_view()
         _process_events(qtbot, count=40)
-        win.update_montage_view()
+        win.update_image_view()
         _process_events(qtbot, count=40)
 
         assert table_updates == []

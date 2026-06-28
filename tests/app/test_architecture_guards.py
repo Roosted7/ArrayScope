@@ -62,7 +62,7 @@ def test_visible_render_paths_do_not_compare_partial_document_keys():
         (ROOT / rel).read_text()
         for rel in (
             Path("arrayscope/window/render.py"),
-            Path("arrayscope/window/normal_renderer.py"),
+            Path("arrayscope/window/frame_renderer.py"),
             Path("arrayscope/window/render_prefetch.py"),
         )
     )
@@ -134,9 +134,9 @@ def test_canvas_preserve_controller_owns_strong_preserve_path():
     assert "commit_nudge" in preserve_text
 
 
-def test_montage_renderer_commits_montage_through_tiled_payloads():
-    montage_text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
-    assert "_commit_montage_session_tile_layer(" in montage_text
+def test_frame_renderer_commits_frames_through_region_payloads():
+    frame_text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
+    assert "_commit_montage_session_tile_layer(" in frame_text
 
 
 def test_render_display_commits_go_through_display_committer():
@@ -182,12 +182,13 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/display/backends/vispy/gpu_mapped_visual.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
         Path("arrayscope/display/model/montage_levels.py"),
-        Path("arrayscope/window/montage_renderer.py"),
-        Path("arrayscope/window/normal_renderer.py"),
+        Path("arrayscope/window/frame_renderer.py"),
         Path("arrayscope/window/viewport_bridge.py"),
         Path("arrayscope/window/display_presenter.py"),
     ):
         assert (ROOT / rel).exists()
+    assert not (ROOT / "arrayscope" / "window" / "normal_renderer.py").exists()
+    assert not (ROOT / "arrayscope" / "window" / "montage_renderer.py").exists()
 
 
 def test_display_presenter_uses_unified_frame_planner_for_frame_semantics():
@@ -369,8 +370,8 @@ def test_histogram_imageitem_binding_is_centralized():
     assert "regionChanged()" in adapter
 
 
-def test_montage_renderer_does_not_mutate_image_items_directly():
-    text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
+def test_frame_renderer_does_not_mutate_image_items_directly():
+    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
     forbidden = (".setImage(", ".setMontageTileLayerPresentation(", "ImageItem(")
     for token in forbidden:
         assert token not in text
@@ -564,21 +565,21 @@ def test_montage_state_modules_are_qt_free():
             assert "Qt" not in text
 
 
-def test_update_montage_view_does_not_batch_missing_tiles():
-    text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
+def test_update_image_view_does_not_batch_missing_regions():
+    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
     tree = ast.parse(text)
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "update_montage_view":
+        if isinstance(node, ast.FunctionDef) and node.name == "update_image_view":
             segment = ast.get_source_segment(text, node) or ""
             assert "tuple((tile, evaluate_image_snapshot" not in segment
             assert "for tile in missing_tiles)" not in segment
             assert "_schedule_montage_tiles" in segment
             return
-    raise AssertionError("update_montage_view not found")
+    raise AssertionError("update_image_view not found")
 
 
 def test_stale_montage_callbacks_do_not_clear_current_overlay():
-    text = (ROOT / "arrayscope" / "window" / "montage_renderer.py").read_text()
+    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
     for name in ("_on_montage_tile_done", "_on_montage_tile_error"):
         marker = f"def {name}"
         assert marker in text
@@ -588,10 +589,10 @@ def test_stale_montage_callbacks_do_not_clear_current_overlay():
         assert "setImageStale(False)" not in stale_prefix
 
 
-def test_normal_renderer_uses_render_decision_helper():
-    text = (ROOT / "arrayscope" / "window" / "normal_renderer.py").read_text()
-    assert "choose_visible_render_decision" in text
-    assert "estimate_visible_render_context" in text
+def test_frame_renderer_does_not_use_legacy_normal_render_decision_helper():
+    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
+    assert "choose_visible_render_decision" not in text
+    assert "estimate_visible_render_context" not in text
 
 
 def test_visible_controller_remains_single_worker():
@@ -601,9 +602,7 @@ def test_visible_controller_remains_single_worker():
     assert "visible_workers=1" in policy_text
 
 
-def test_degraded_preview_is_not_stored_in_exact_display_cache():
-    text = (ROOT / "arrayscope" / "window" / "normal_renderer.py").read_text()
-    marker = "if decision.kind == RenderDecisionKind.DEGRADED_PREVIEW:"
-    assert marker in text
-    degraded_block = text.split(marker, 1)[1].split("def evaluate(token):", 1)[0]
-    assert "store_display_tile_result" not in degraded_block
+def test_frame_renderer_has_no_legacy_normal_degraded_preview_branch():
+    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
+    assert "RenderDecisionKind.DEGRADED_PREVIEW" not in text
+    assert "store_display_tile_result" not in text

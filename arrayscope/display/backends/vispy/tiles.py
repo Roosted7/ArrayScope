@@ -492,7 +492,6 @@ class TextureAtlasPool:
                         or newly_assigned
                         or source_changed
                         or missing_uploaded_source
-                        or int(tile_number) in dirty
                     )
                     self._set_tile_mapping(
                         int(tile_number),
@@ -635,7 +634,7 @@ class TextureAtlasPool:
             self._touch(resident_key)
             source_changed = self.source_ids.get(resident_key) != payload.source_id
             missing_uploaded_source = resident_key not in self.source_ids
-            should_upload = bool(dirty_all or newly_assigned or source_changed or missing_uploaded_source or tile_number in dirty)
+            should_upload = bool(dirty_all or newly_assigned or source_changed or missing_uploaded_source)
             uvs[tile_number] = page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload))
             active_tile_uvs[int(tile_number)] = uvs[tile_number]
             if not should_upload:
@@ -2081,10 +2080,25 @@ def _resident_key(payload: DisplayTilePayload) -> object:
     unhashable identities.
     """
 
-    return _source_resident_key(payload.source_id)
+    texture = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
+    lod = getattr(payload, "lod", None)
+    return (
+        _source_resident_key(payload.source_id),
+        "texture_kind",
+        None if payload.texture_kind is None else getattr(payload.texture_kind, "value", payload.texture_kind),
+        "texture_shape",
+        tuple(int(value) for value in texture.shape),
+        "texture_dtype",
+        str(texture.dtype),
+        "lod",
+        None if lod is None else (int(lod.factor), int(lod.level), int(lod.gutter)),
+    )
 
 
 def _source_resident_key(source_id: object) -> object:
+    normalized = _display_tile_texture_source_id(source_id)
+    if normalized is not None:
+        return normalized
     try:
         hash(source_id)
     except Exception:
@@ -2093,6 +2107,34 @@ def _source_resident_key(source_id: object) -> object:
 
 
 def _base_texture_source_id(source_id: object) -> object:
+    normalized = _display_tile_texture_source_id(source_id)
+    if normalized is not None:
+        return normalized
     if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
         return source_id[0]
+    if isinstance(source_id, tuple) and "texture_kind" in source_id:
+        return source_id[: source_id.index("texture_kind")]
     return source_id
+
+
+def _display_tile_texture_source_id(source_id: object) -> object | None:
+    display_key = None
+    if isinstance(source_id, tuple) and len(source_id) >= 8 and source_id[0] == "display_tile":
+        display_key = source_id
+    elif (
+        isinstance(source_id, tuple)
+        and source_id
+        and isinstance(source_id[0], tuple)
+        and len(source_id[0]) >= 8
+        and source_id[0][0] == "display_tile"
+    ):
+        display_key = source_id[0]
+    if display_key is None:
+        return None
+    return (
+        "display_tile_texture",
+        display_key[1],
+        display_key[5],
+        display_key[6],
+        display_key[7],
+    )

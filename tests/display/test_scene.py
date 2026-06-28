@@ -13,7 +13,7 @@ from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationD
 from arrayscope.display.model.commit import DisplayTiledPresentation
 
 
-def test_normal_image_geometry_is_one_tile_scene_without_payloads():
+def test_frame_geometry_is_one_tile_scene_without_payloads():
     geometry = DisplayGeometry(ViewState.from_shape((5, 7)).with_image_axes(0, 1), (5, 7))
 
     scene = display_scene_for_geometry(geometry)

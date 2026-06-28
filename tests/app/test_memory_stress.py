@@ -56,7 +56,7 @@ def test_montage_tile_residency_rss_stays_bounded(qtbot, monkeypatch):
         for row in (1, 3, 5):
             y0 = row * (256 + 1)
             win.img_view.getView().setRange(xRange=(0, 256), yRange=(y0, y0 + 256), padding=0)
-            win.update_montage_view()
+            win.update_image_view()
             process_events(qtbot, count=80)
             rss_samples.append(process.memory_info().rss)
 

@@ -37,10 +37,10 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_result
     results = benchmark_results
 
     assert {result.name for result in results} == {
-        "pyqtgraph_normal_small_initial",
-        "vispy_normal_small_initial",
-        "pyqtgraph_normal_large_tiled_initial",
-        "vispy_normal_large_tiled_initial",
+        "pyqtgraph_frame_small_initial",
+        "vispy_frame_small_initial",
+        "pyqtgraph_frame_large_initial",
+        "vispy_frame_large_initial",
         "pyqtgraph_one_tile_montage_initial",
         "vispy_one_tile_montage_initial",
         "pyqtgraph_multi_tile_montage_initial",
@@ -76,7 +76,7 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_result
         assert result.ui_max_gap_ms is None
         assert result.commit_count >= 1
         assert result.timing.mode
-        if result.scenario == "normal_large_tiled_initial":
+        if result.scenario == "frame_large_initial":
             assert result.timing.mode in {"tile_layer", "vispy_tile_layer"}
             assert result.timing.tile_layer_visible_items == 16
         assert result.lod_policy == "native-only"

@@ -106,7 +106,7 @@ class DisplayPresentationMixin:
             viewport_policy = self._viewport_policy_for_display_shape(display_image.data.shape[:2])
             levels_start = perf_counter()
             if commit_kind is None:
-                commit_kind = CommitKind.FULL_MONTAGE_INITIAL if getattr(geometry, "montage", None) is not None else CommitKind.FULL_NORMAL
+                commit_kind = CommitKind.FULL_FRAME_INITIAL
             context = self._render_request_context(
                 document_key=document_key,
                 request_key=request_key,
@@ -122,7 +122,7 @@ class DisplayPresentationMixin:
                 tile_state, base_tile_state, tile_delta = _tile_presentation_for_display_image(
                     display_image,
                     frame_plan=frame_plan,
-                    source_key=(context.frame_key, "normal-tiled"),
+                    source_key=context.request_key,
                 )
             decision = decide_presentation(
                 PresentationInput(
@@ -211,7 +211,7 @@ class DisplayPresentationMixin:
         semantic_source=None,
         applied_level_source=None,
         histogram_plot_data=None,
-        commit_kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+        commit_kind=CommitKind.PROGRESSIVE_FRAME_PATCH,
         document_key=None,
         request_key=None,
         render_generation=None,
@@ -243,7 +243,7 @@ class DisplayPresentationMixin:
                 tile_state, base_tile_state, tile_delta = _tile_presentation_for_display_image(
                     display_image,
                     frame_plan=frame_plan,
-                    source_key=(context.frame_key, "normal-tiled"),
+                    source_key=context.request_key,
                 )
             decision = decide_presentation(
                 PresentationInput(
@@ -420,16 +420,16 @@ class DisplayPresentationMixin:
             self._viewport_bridge_instance = bridge
         return bridge
 
-    def _schedule_tiled_viewport_update(self, *, delay_ms: int | None = None) -> None:
+    def _schedule_frame_viewport_update(self, *, delay_ms: int | None = None) -> None:
         if getattr(self.view_state, "montage_axis", None) is not None:
             scheduler = getattr(self, "_schedule_montage_viewport_update", None)
             if callable(scheduler):
                 scheduler(delay_ms=delay_ms)
             return
-        revision = int(getattr(self, "_normal_tiled_viewport_update_revision", 0) or 0) + 1
-        self._normal_tiled_viewport_update_revision = revision
-        self._normal_tiled_viewport_update_scheduled_revision = revision
-        timer = getattr(self, "_normal_tiled_viewport_update_timer", None)
+        revision = int(getattr(self, "_frame_viewport_update_revision", 0) or 0) + 1
+        self._frame_viewport_update_revision = revision
+        self._frame_viewport_update_scheduled_revision = revision
+        timer = getattr(self, "_frame_viewport_update_timer", None)
         if timer is None:
             from pyqtgraph.Qt import QtCore
 
@@ -438,13 +438,13 @@ class DisplayPresentationMixin:
             # semantics; remove when viewport retargeting is a WorkGraph item.
             timer = QtCore.QTimer(self)
             timer.setSingleShot(True)
-            timer.timeout.connect(self._run_normal_tiled_viewport_update)
-            self._normal_tiled_viewport_update_timer = timer
+            timer.timeout.connect(self._run_frame_viewport_update)
+            self._frame_viewport_update_timer = timer
         timer.start(0 if delay_ms is None else max(0, int(delay_ms)))
 
-    def _run_normal_tiled_viewport_update(self) -> None:
-        if int(getattr(self, "_normal_tiled_viewport_update_scheduled_revision", 0) or 0) != int(
-            getattr(self, "_normal_tiled_viewport_update_revision", 0) or 0
+    def _run_frame_viewport_update(self) -> None:
+        if int(getattr(self, "_frame_viewport_update_scheduled_revision", 0) or 0) != int(
+            getattr(self, "_frame_viewport_update_revision", 0) or 0
         ):
             return
         frame = getattr(self, "_committed_display_frame", None)
@@ -760,6 +760,5 @@ def _tile_presentation_for_display_image(display_image, *, frame_plan, source_ke
         active_tiles=frame_plan.active_region_ids,
         planned_tiles=frame_plan.planned_region_ids,
         near_tiles=frame_plan.near_region_ids,
-        force_refresh=True,
     )
     return state, TilePresentationState(revision=0), delta

@@ -21,9 +21,8 @@ from arrayscope.display.model.frame import (
 
 
 class CommitKind(Enum):
-    FULL_NORMAL = "full_normal"
-    FULL_MONTAGE_INITIAL = "full_montage_initial"
-    PROGRESSIVE_MONTAGE_PATCH = "progressive_montage_patch"
+    FULL_FRAME_INITIAL = "full_frame_initial"
+    PROGRESSIVE_FRAME_PATCH = "progressive_frame_patch"
     EXPLICIT_AUTO_WINDOW = "explicit_auto_window"
     DEGRADED_PREVIEW = "degraded_preview"
 

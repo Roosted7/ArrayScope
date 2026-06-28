@@ -19,7 +19,7 @@ MIN_VIEW_SPAN = 1e-9
 class MontageViewportPlan:
     """Stable montage layout plus transient viewport scheduling state."""
 
-    axis: int
+    axis: int | None
     all_indices: tuple[int, ...]
     viewport_shape: tuple[int, int]
     tile_shape: tuple[int, int]
@@ -391,18 +391,23 @@ def _remap_montage_roi_geometry_with_layout(previous_layout, next_layout, geomet
 def montage_session_key(document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut) -> tuple[object, ...]:
     """Stable render-session identity, excluding transient viewport coverage."""
 
-    scope_state = view_state.with_montage_axis(
-        viewport_plan.axis,
-        columns=None,
-        indices=None,
-        text=None,
-    )
+    if viewport_plan.axis is None:
+        scope_state = view_state.with_montage_axis(None, columns=None, indices=None, text=None)
+        axis_key = None
+    else:
+        scope_state = view_state.with_montage_axis(
+            viewport_plan.axis,
+            columns=None,
+            indices=None,
+            text=None,
+        )
+        axis_key = int(viewport_plan.axis)
     lut_key = None if colormap_lut is None else np.asarray(colormap_lut).tobytes()
     return (
         "montage_tiles",
         document_key,
         scope_state,
-        int(viewport_plan.axis),
+        axis_key,
         tuple(int(index) for index in viewport_plan.all_indices),
         tuple(int(value) for value in viewport_plan.tile_shape),
         int(viewport_plan.plan.gap),

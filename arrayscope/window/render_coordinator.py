@@ -107,7 +107,7 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self._interactive_active = False
 
     def _interactive_cache_hit(self) -> bool:
-        predicate = getattr(self._window, "_interactive_render_cache_hit", None)
+        predicate = getattr(self._window, "_interactive_frame_cache_hit", None)
         if not callable(predicate):
             return False
         try:

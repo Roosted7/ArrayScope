@@ -185,7 +185,7 @@ def test_atlas_page_uses_free_slot_stack_without_owner_scan(monkeypatch):
     assert page.take_free_slot(("owner", 3)) is None
 
 
-def test_dirty_resident_payload_uploads_even_when_source_id_matches():
+def test_dirty_resident_payload_reuses_uploaded_source_when_source_id_matches():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     payloads = {0: payload(0, 1.0)}
 
@@ -216,8 +216,10 @@ def test_dirty_resident_payload_uploads_even_when_source_id_matches():
         reserve_count=1,
     )
 
-    assert dirty.items_updated == 1
-    assert len(pool.scalar_texture.updates) == clean_texture_updates + 1
+    assert dirty.items_updated == 0
+    assert dirty.items_skipped == 1
+    assert dirty.texture_uploads == 0
+    assert len(pool.scalar_texture.updates) == clean_texture_updates
 
 
 def test_allocated_slot_without_uploaded_source_is_not_treated_clean():

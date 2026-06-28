@@ -808,7 +808,7 @@ def test_montage_render_session_reuses_tile_state_tuple_until_revision_changes()
 
 
 def test_montage_overlay_refresh_caches_empty_and_repeated_state():
-    from arrayscope.window.montage_renderer import MontageRenderMixin
+    from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class ImageView:
         def __init__(self):
@@ -827,7 +827,7 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     owner = SimpleNamespace(img_view=image_view, _montage_session=session)
     rect = (0, 0, 20, 20)
 
-    MontageRenderMixin._update_montage_tile_overlays_for_plan(
+    FrameRenderMixin._update_montage_tile_overlays_for_plan(
         owner,
         session.plan,
         session.ensure_tile_states(),
@@ -836,7 +836,7 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     assert image_view.calls == 0
 
     session.mark_skipped(session.plan.tiles[1])
-    MontageRenderMixin._update_montage_tile_overlays_for_plan(
+    FrameRenderMixin._update_montage_tile_overlays_for_plan(
         owner,
         session.plan,
         session.ensure_tile_states(),
@@ -845,7 +845,7 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     assert image_view.calls == 1
     assert len(image_view.overlays) == 1
 
-    MontageRenderMixin._update_montage_tile_overlays_for_plan(
+    FrameRenderMixin._update_montage_tile_overlays_for_plan(
         owner,
         session.plan,
         session.ensure_tile_states(),

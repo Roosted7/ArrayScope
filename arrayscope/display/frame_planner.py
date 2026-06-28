@@ -86,7 +86,7 @@ class FramePlan:
 
 
 class FramePlanner:
-    """Plan one semantic tiled surface for normal images and montages."""
+    """Plan one semantic tiled surface for image frames."""
 
     def __init__(
         self,

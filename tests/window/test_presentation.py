@@ -107,7 +107,7 @@ def _input(
     *,
     previous_frame=None,
     force_auto=False,
-    kind=CommitKind.FULL_NORMAL,
+    kind=CommitKind.FULL_FRAME_INITIAL,
     semantic_source=None,
     applied_level_source=None,
     window_mode="relative",
@@ -126,14 +126,24 @@ def _input(
     )
 
 
-def test_normal_relative_level_reuse_uses_committed_frame():
-    decision = decide_presentation(_input(_payload([[200, 300], [200, 300]]), previous_frame=_frame(levels=(25, 75), histogram_range=(0, 100))))
+def _frame_level_source(bounds=(200.0, 300.0)):
+    return LevelSource(bounds, bounds, LevelSourceRank.MONTAGE_COMPLETE, source_count=1, expected_count=1, semantic_key="levels")
+
+
+def test_frame_relative_level_reuse_uses_committed_frame():
+    decision = decide_presentation(
+        _input(
+            _payload([[200, 300], [200, 300]]),
+            previous_frame=_frame(levels=(25, 75), histogram_range=(0, 100)),
+            semantic_source=_frame_level_source(),
+        )
+    )
 
     assert decision.levels == (225.0, 275.0)
     assert decision.histogram_range == (200.0, 300.0)
 
 
-def test_normal_presentation_preserves_frame_plan_semantics():
+def test_frame_presentation_preserves_frame_plan_semantics():
     payload = _payload(np.zeros((4, 4), dtype=np.float32))
     frame_plan = FramePlanner(internal_tile_shape=(2, 2)).plan(
         target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
@@ -170,12 +180,13 @@ def test_normal_presentation_preserves_frame_plan_semantics():
     assert decision.display_presentation.frame_plan is frame_plan
 
 
-def test_normal_absolute_level_reuse_uses_committed_frame():
+def test_frame_absolute_level_reuse_uses_committed_frame():
     decision = decide_presentation(
         _input(
             _payload([[200, 300], [200, 300]]),
             previous_frame=_frame(levels=(25, 75), histogram_range=(0, 100)),
             window_mode="absolute",
+            semantic_source=_frame_level_source(),
         )
     )
 
@@ -183,12 +194,13 @@ def test_normal_absolute_level_reuse_uses_committed_frame():
     assert decision.histogram_range == (200.0, 300.0)
 
 
-def test_normal_explicit_restore_levels_are_committed_with_current_histogram_domain():
+def test_frame_explicit_restore_levels_are_committed_with_current_histogram_domain():
     decision = decide_presentation(
         _input(
             _payload([[200, 300], [200, 300]]),
             previous_frame=_frame(levels=(25, 75), histogram_range=(0, 100)),
             user_levels=(210, 240),
+            semantic_source=_frame_level_source(),
         )
     )
 
@@ -203,6 +215,7 @@ def test_explicit_auto_window_wins_over_queued_restore_levels():
             _payload([[200, 300], [200, 300]]),
             force_auto=True,
             user_levels=(210, 240),
+            semantic_source=_frame_level_source(),
         )
     )
 
@@ -225,13 +238,13 @@ def test_explicit_auto_window_accepts_partial_montage_source():
     assert decision.level_source_rank == int(LevelSourceRank.MONTAGE_VISIBLE_SUBSET)
 
 
-def test_progressive_montage_patch_accepts_partial_implicit_source_monotonically():
+def test_progressive_frame_patch_accepts_partial_implicit_source_monotonically():
     source = LevelSource((100.0, 200.0), (100.0, 200.0), LevelSourceRank.MONTAGE_VISIBLE_SUBSET, source_count=1, expected_count=4, semantic_key="levels")
     decision = decide_presentation(
         _input(
             _payload(np.full((2, 2), 1000.0)),
             previous_frame=_frame(levels=(2.0, 8.0), histogram_range=(0.0, 10.0)),
-            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            kind=CommitKind.PROGRESSIVE_FRAME_PATCH,
             semantic_source=source,
         )
     )
@@ -240,13 +253,13 @@ def test_progressive_montage_patch_accepts_partial_implicit_source_monotonically
     assert decision.histogram_range == (0.0, 200.0)
 
 
-def test_progressive_montage_patch_accepts_complete_source():
+def test_progressive_frame_patch_accepts_complete_source():
     source = LevelSource((0.0, 300.0), (0.0, 300.0), LevelSourceRank.MONTAGE_COMPLETE, source_count=4, expected_count=4, semantic_key="levels")
     decision = decide_presentation(
         _input(
             _payload(np.full((2, 2), 1000.0)),
             previous_frame=_frame(levels=(2.0, 8.0), histogram_range=(0.0, 10.0)),
-            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            kind=CommitKind.PROGRESSIVE_FRAME_PATCH,
             semantic_source=source,
         )
     )
@@ -261,7 +274,7 @@ def test_degenerate_complete_source_does_not_shrink_previous_levels():
         _input(
             _payload(np.full((2, 2), np.nan)),
             previous_frame=_frame(levels=(2.0, 8.0), histogram_range=(0.0, 10.0)),
-            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            kind=CommitKind.PROGRESSIVE_FRAME_PATCH,
             semantic_source=source,
         )
     )
@@ -278,7 +291,7 @@ def test_user_locked_montage_levels_are_not_overridden_by_complete_source():
         _input(
             _payload(np.full((2, 2), 1000.0)),
             previous_frame=_frame(levels=(2.0, 8.0), histogram_range=(0.0, 10.0)),
-            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            kind=CommitKind.PROGRESSIVE_FRAME_PATCH,
             semantic_source=complete,
             applied_level_source=user,
         )
@@ -301,7 +314,7 @@ def test_montage_restore_levels_bind_to_the_current_semantic_source():
     decision = decide_presentation(
         _input(
             _payload(np.full((2, 2), 1000.0)),
-            kind=CommitKind.FULL_MONTAGE_INITIAL,
+            kind=CommitKind.FULL_FRAME_INITIAL,
             semantic_source=partial,
             user_levels=(120.0, 140.0),
         )
@@ -320,7 +333,7 @@ def test_montage_absolute_preserves_numeric_levels_while_histogram_improves():
     decision = decide_presentation(
         _input(
             _payload(np.full((2, 2), 1000.0)),
-            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            kind=CommitKind.PROGRESSIVE_FRAME_PATCH,
             semantic_source=complete,
             applied_level_source=absolute,
             window_mode="absolute",
@@ -357,7 +370,7 @@ def test_montage_dirty_tiles_pass_through_presentation():
         _input(
             payload,
             previous_frame=_frame(),
-            kind=CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+            kind=CommitKind.PROGRESSIVE_FRAME_PATCH,
         )
     )
 
@@ -396,7 +409,7 @@ def test_typed_tile_payloads_create_first_class_tiled_presentation():
     )
 
     decision = decide_presentation(
-        _input(payload, kind=CommitKind.FULL_MONTAGE_INITIAL)
+        _input(payload, kind=CommitKind.FULL_FRAME_INITIAL)
     )
 
     presentation = decision.display_presentation
@@ -447,7 +460,7 @@ def test_tiled_presentation_owns_one_explicit_shader_mapping():
         tile_delta=tile_delta,
     )
 
-    presentation = decide_presentation(_input(payload, kind=CommitKind.FULL_MONTAGE_INITIAL)).display_presentation
+    presentation = decide_presentation(_input(payload, kind=CommitKind.FULL_FRAME_INITIAL)).display_presentation
 
     assert presentation.shader_mapping is mapping
 
@@ -485,4 +498,4 @@ def test_tiled_presentation_rejects_conflicting_payload_shader_mappings():
     )
 
     with np.testing.assert_raises_regex(ValueError, "conflicting shader mappings"):
-        decide_presentation(_input(payload, kind=CommitKind.FULL_MONTAGE_INITIAL))
+        decide_presentation(_input(payload, kind=CommitKind.FULL_FRAME_INITIAL))

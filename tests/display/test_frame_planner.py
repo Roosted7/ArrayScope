@@ -16,7 +16,7 @@ def _target(semantic="sem", viewport=None):
     )
 
 
-def test_small_normal_image_plans_one_tile_region():
+def test_small_frame_plans_one_tile_region():
     state = ViewState.from_shape((32, 48)).with_image_axes(0, 1)
 
     plan = FramePlanner(internal_tile_shape=(64, 64)).plan(
@@ -56,7 +56,7 @@ def test_one_tile_montage_matches_single_region_geometry():
     montage = normal.with_montage_axis(2, columns=1, indices=(0,))
     planner = FramePlanner(internal_tile_shape=(16, 16))
 
-    normal_plan = planner.plan(
+    frame_plan = planner.plan(
         target=_target("same-semantic"),
         view_state=normal,
         display_shape=(12, 14),
@@ -69,10 +69,10 @@ def test_one_tile_montage_matches_single_region_geometry():
         backend_capabilities=PYQTGRAPH_CAPABILITIES,
     )
 
-    assert normal_plan.semantic_key == montage_plan.semantic_key
-    assert normal_plan.active_region_ids == montage_plan.active_region_ids == (0,)
-    assert normal_plan.regions[0].bounds == montage_plan.regions[0].bounds
-    assert normal_plan.tile_shape == montage_plan.tile_shape == (12, 14)
+    assert frame_plan.semantic_key == montage_plan.semantic_key
+    assert frame_plan.active_region_ids == montage_plan.active_region_ids == (0,)
+    assert frame_plan.regions[0].bounds == montage_plan.regions[0].bounds
+    assert frame_plan.tile_shape == montage_plan.tile_shape == (12, 14)
 
 
 def test_multi_tile_montage_marks_active_and_near_regions_from_viewport():

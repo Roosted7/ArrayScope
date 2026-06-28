@@ -109,7 +109,7 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, monkeypatch):
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
 
         win._set_view_state(state)
-        win.update_montage_view()
+        win.update_image_view()
 
         qtbot.waitUntil(
             lambda: getattr(getattr(win, "_committed_display_frame", None), "scene", None) is not None
@@ -145,11 +145,11 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
 
         win._set_view_state(state)
-        win.update_montage_view()
+        win.update_image_view()
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=500)
         first_sources = {tile: state.source_array_id for tile, state in win.img_view._montage_tile_layer.states.items()}
 
-        win.update_montage_view()
+        win.update_image_view()
         timing = win.img_view.lastImageUploadTiming()
         second_sources = {tile: state.source_array_id for tile, state in win.img_view._montage_tile_layer.states.items()}
 
@@ -202,7 +202,7 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: pytest.fail("no tile evaluation expected"))
 
         win._set_view_state(state)
-        win.update_montage_view()
+        win.update_image_view()
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=500)
         initial_level_values = dict(win._montage_session.level_generation.tile_values)
         initial_levels = next(iter(initial_level_values.values()))
@@ -273,7 +273,7 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: pytest.fail("no tile evaluation expected"))
 
         win._set_view_state(state)
-        win.update_montage_view()
+        win.update_image_view()
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=500)
 
         decision = SimpleNamespace(batch_limit=1, budget_ms=100.0, interval_ms=1000, byte_cap=1)
@@ -325,7 +325,7 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
         qtbot.addWidget(win)
         process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
-        win.update_montage_view()
+        win.update_image_view()
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer", timeout=3000)
         monkeypatch.setattr(
             win,
@@ -370,7 +370,7 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
             lambda _fn, **kwargs: len(getattr(win._montage_session, "active_tile_requests", ())) + 1,
         )
         win._set_view_state(win.view_state.with_montage_axis(2, columns=8, indices=tuple(range(8)), text=":"))
-        win.update_montage_view()
+        win.update_image_view()
         # Expanded montage ranges auto-fit by design. Narrow explicitly so this
         # test measures viewport retargeting rather than initial fit policy.
         win.img_view.getView().setRange(xRange=(0.0, 100.0), yRange=(0.0, 4.0), padding=0)
@@ -404,7 +404,7 @@ def test_cold_montage_tile_patches_without_side_panel_refresh(qtbot, monkeypatch
     try:
         process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
-        win.update_montage_view(defer_side_panels=True)
+        win.update_image_view(defer_side_panels=True)
         operation_refreshes.clear()
         inspection_refreshes.clear()
 

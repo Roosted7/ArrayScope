@@ -12,10 +12,8 @@ from arrayscope.core.window_levels import (
     LevelSourceRank,
     WindowLevelController,
     WindowLevelState,
-    choose_window_levels,
     normalize_bounds,
 )
-from arrayscope.display.levels import finite_bounds
 from arrayscope.display.shader_mapping import common_shader_mapping
 from arrayscope.display.model.frame import CommittedDisplayFrame
 from arrayscope.display.model.commit import (
@@ -24,14 +22,6 @@ from arrayscope.display.model.commit import (
     PresentationDecision,
     PresentationInput,
 )
-
-
-def display_data_bounds(data, histogram_data=None) -> tuple[float, float] | None:
-    source = histogram_data if histogram_data is not None else data
-    try:
-        return normalize_bounds(finite_bounds(source))
-    except Exception:
-        return None
 
 
 def fallback_level_source(previous_frame: CommittedDisplayFrame | None, *, fallback=(0.0, 1.0)) -> LevelSource:
@@ -58,65 +48,14 @@ def fallback_level_source(previous_frame: CommittedDisplayFrame | None, *, fallb
 
 def decide_presentation(input: PresentationInput) -> PresentationDecision:
     kind = CommitKind(input.commit_kind)
-    if kind in {CommitKind.FULL_NORMAL, CommitKind.DEGRADED_PREVIEW}:
-        return _decide_normal_presentation(input)
     if kind in {
-        CommitKind.FULL_MONTAGE_INITIAL,
-        CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+        CommitKind.FULL_FRAME_INITIAL,
+        CommitKind.PROGRESSIVE_FRAME_PATCH,
         CommitKind.EXPLICIT_AUTO_WINDOW,
+        CommitKind.DEGRADED_PREVIEW,
     }:
         return _decide_montage_presentation(input)
     raise ValueError(f"unsupported commit kind: {kind!r}")
-
-
-def _decide_normal_presentation(input: PresentationInput) -> PresentationDecision:
-    payload = input.payload
-    default_levels = normalize_bounds(getattr(payload.image, "default_levels", None))
-    current_bounds = (
-        normalize_bounds(input.level_bounds)
-        or display_data_bounds(payload.data, payload.histogram_data)
-        or default_levels
-        or fallback_level_source(input.previous_frame).histogram_range
-    )
-    requested_levels = None if input.force_auto else normalize_bounds(input.user_levels)
-    if requested_levels is None:
-        previous_levels = None if input.previous_frame is None else input.previous_frame.levels
-        previous_bounds = None if input.previous_frame is None else input.previous_frame.histogram_range
-        level_decision = choose_window_levels(
-            mode=input.window_mode,
-            previous_levels=previous_levels,
-            previous_bounds=previous_bounds,
-            current_bounds=current_bounds,
-            default_levels=default_levels or current_bounds,
-            force_auto=bool(input.force_auto),
-        )
-        levels = normalize_bounds(level_decision.levels) or current_bounds or fallback_level_source(input.previous_frame).levels
-        rank = LevelSourceRank.PREVIOUS_COMMITTED
-    else:
-        levels = requested_levels
-        rank = LevelSourceRank.EXPLICIT_USER
-    histogram_range = current_bounds or levels
-    source = LevelSource(
-        levels=levels,
-        histogram_range=histogram_range,
-        rank=rank,
-        source_count=1,
-        expected_count=1,
-        semantic_key=input.context.semantic_key,
-        mode=input.window_mode,
-    )
-    presentation = _presentation_for_payload(payload, levels=levels, histogram_range=histogram_range)
-    return PresentationDecision(
-        display_presentation=presentation,
-        levels=levels,
-        histogram_range=histogram_range,
-        level_source_rank=int(source.rank),
-        level_source_key=source.semantic_key,
-        level_source_count=source.source_count,
-        expected_source_count=source.expected_count,
-        allow_fast_commit=False,
-        applied_level_source=source,
-    )
 
 
 def _decide_montage_presentation(input: PresentationInput) -> PresentationDecision:
@@ -157,7 +96,7 @@ def _decide_montage_presentation(input: PresentationInput) -> PresentationDecisi
         level_source_key=source.semantic_key,
         level_source_count=int(source.source_count),
         expected_source_count=int(source.expected_count),
-        allow_fast_commit=kind == CommitKind.PROGRESSIVE_MONTAGE_PATCH,
+        allow_fast_commit=kind == CommitKind.PROGRESSIVE_FRAME_PATCH,
         applied_level_source=source,
     )
 
@@ -220,7 +159,6 @@ __all__ = [
     "WindowLevelController",
     "WindowLevelState",
     "normalize_bounds",
-    "display_data_bounds",
     "fallback_level_source",
     "decide_presentation",
 ]

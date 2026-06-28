@@ -29,8 +29,7 @@ from arrayscope.display.geometry import display_geometry_coordinates_equal
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
-from arrayscope.window.montage_renderer import MontageRenderMixin
-from arrayscope.window.normal_renderer import NormalImageRenderMixin
+from arrayscope.window.frame_renderer import FrameRenderMixin
 from arrayscope.window.render_prefetch import RenderPrefetchMixin
 from arrayscope.window.render_resources import RenderResourceMixin
 
@@ -42,7 +41,7 @@ def getNumberOfDecimalPlaces(number):
         return int(max(1, (number.as_integer_ratio()[1]).bit_length()))
 
 
-class RenderMixin(DisplayPresentationMixin, NormalImageRenderMixin, MontageRenderMixin, RenderPrefetchMixin, RenderResourceMixin):
+class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixin, RenderResourceMixin):
     def _active_display_colormap_lut(self):
         view = getattr(self, "img_view", None)
         getter = getattr(view, "displayColorMapLookupTable", None)

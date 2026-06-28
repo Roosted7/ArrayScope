@@ -207,7 +207,7 @@ def test_montage_refined_level_values_use_shader_component_for_complex_tiles():
     from types import SimpleNamespace
 
     from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping
-    from arrayscope.window.montage_renderer import _montage_refined_level_values
+    from arrayscope.window.frame_renderer import _montage_refined_level_values
 
     semantic = np.asarray([[1 + 2j, -3 + 4j]], dtype=np.complex128)
     rendered = SimpleNamespace(

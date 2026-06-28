@@ -62,7 +62,7 @@ class MontageTileStatus:
 
 @dataclass(frozen=True)
 class MontagePlan:
-    axis: int
+    axis: int | None
     tile_shape: tuple[int, int]
     grid_shape: tuple[int, int]
     columns: int
@@ -149,7 +149,7 @@ def make_montage_plan(view_state, *, axis, indices, tile_shape, columns=None, vi
     tile_shape = (int(tile_shape[0]), int(tile_shape[1]))
     gap = max(0, int(gap))
     if count == 0:
-        return MontagePlan(int(axis), tile_shape, (0, 1), 1, 0, gap, ())
+        return MontagePlan(None if axis is None else int(axis), tile_shape, (0, 1), 1, 0, gap, ())
     if columns is None:
         if viewport_shape is None:
             columns = int(np.ceil(np.sqrt(count)))
@@ -163,7 +163,7 @@ def make_montage_plan(view_state, *, axis, indices, tile_shape, columns=None, vi
         col = montage_index % columns
         x0 = col * (tile_shape[1] + gap)
         y0 = row * (tile_shape[0] + gap)
-        tile_state = view_state.with_slice(axis, source_index).with_montage_axis(None)
+        tile_state = view_state.with_montage_axis(None) if axis is None else view_state.with_slice(axis, source_index).with_montage_axis(None)
         tiles.append(
             MontageTile(
                 montage_index=montage_index,
@@ -177,7 +177,7 @@ def make_montage_plan(view_state, *, axis, indices, tile_shape, columns=None, vi
                 view_state=tile_state,
             )
         )
-    return MontagePlan(int(axis), tile_shape, (rows, columns), columns, rows, gap, tuple(tiles))
+    return MontagePlan(None if axis is None else int(axis), tile_shape, (rows, columns), columns, rows, gap, tuple(tiles))
 
 
 @dataclass(frozen=True)
