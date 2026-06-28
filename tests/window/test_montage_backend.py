@@ -175,17 +175,232 @@ def test_auto_small_scalar_vispy_montage_uses_tile_layer():
     assert "tiled montage presentation" in decision.reason
 
 
-def test_first_vispy_display_batch_limit_uses_governed_upsert_limit(monkeypatch):
+def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
     import arrayscope.window.frame_renderer as frame_renderer
 
-    session = SimpleNamespace(visible_tiles=tuple(range(100)))
-    monkeypatch.setattr(
-        frame_renderer,
-        "_persistent_tile_upsert_limits",
-        lambda _window, _session, *, first_display_commit: {"max_upserts": 3},
+    session = SimpleNamespace()
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="vispy",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            )
+        ),
+        _viewport_interaction_active=False,
+        _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=11, byte_cap=2 * 1024 * 1024, budget_ms=2.0),
     )
 
-    assert frame_renderer._first_vispy_display_batch_limit(object(), session) == 3
+    limits = frame_renderer._persistent_tile_upsert_limits(window, session)
+
+    assert limits["max_upserts"] == 11
+    assert limits["max_upsert_bytes"] == 2 * 1024 * 1024
+
+
+def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_batch_limit():
+    import arrayscope.window.frame_renderer as frame_renderer
+
+    image = np.zeros((512, 512), dtype=np.float32)
+    texture = np.zeros((512, 512), dtype=np.complex64)
+    semantic = np.zeros((1024, 1024), dtype=np.complex64)
+    payload = SimpleNamespace(
+        image=image,
+        texture_data=texture,
+        histogram_data=None,
+        semantic_data=semantic,
+    )
+    session = SimpleNamespace(
+        rendered_tiles={0: SimpleNamespace(image=image, histogram_data=None, semantic_data=semantic, level_data=None)},
+        display_tile_payloads={},
+        dirty_payloads={0: None},
+        pending_payload_upserts={},
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="vispy",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            )
+        ),
+        _viewport_interaction_active=False,
+        _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=1, byte_cap=1024 * 1024, budget_ms=2.0),
+    )
+
+    limits = frame_renderer._persistent_tile_upsert_limits(window, session)
+
+    assert limits["max_upserts"] == 1
+    assert limits["max_upsert_bytes"] == 1024 * 1024
+    assert limits["upsert_cost_fn"](payload) == texture.nbytes
+
+
+def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
+    import arrayscope.window.frame_renderer as frame_renderer
+
+    image = np.zeros((512, 512), dtype=np.float32)
+    semantic = np.zeros((1024, 1024), dtype=np.complex64)
+    payload = SimpleNamespace(
+        image=image,
+        texture_data=semantic,
+        histogram_data=np.zeros((512, 512), dtype=np.float32),
+        semantic_data=semantic,
+    )
+    session = SimpleNamespace(
+        has_pending_level_update=lambda: True,
+        has_stale_level_presentations=lambda: True,
+        display_tile_payloads={},
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=False,
+                shader_windowing=False,
+            )
+        ),
+        _viewport_interaction_active=False,
+        _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=3, byte_cap=1024 * 1024, budget_ms=2.0),
+    )
+
+    limits = frame_renderer._tile_layer_upsert_limits(window, session)
+
+    assert limits["max_upserts"] == 3
+    assert limits["max_upsert_bytes"] == 1024 * 1024
+    assert limits["upsert_cost_fn"](payload) == image.nbytes
+
+
+def test_tile_presentation_admission_uses_backend_cost_function():
+    from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    tiles = tuple(
+        MontageTile(
+            montage_index=index,
+            source_index=index,
+            row=0,
+            col=index,
+            x0=index * 2,
+            y0=0,
+            width=2,
+            height=2,
+            view_state=None,
+        )
+        for index in range(2)
+    )
+    session = MontageRenderSession(
+        session_id=1,
+        key=("test",),
+        render_generation=1,
+        level_key=None,
+        level_expected_indices=(0, 1),
+        plan=MontagePlan(axis=0, tile_shape=(2, 2), grid_shape=(1, 2), columns=2, rows=1, gap=0, tiles=tiles),
+        view_state=None,
+        document=None,
+        montage_axis=0,
+        colormap_lut=None,
+        viewport_shape=(2, 4),
+        view_range=None,
+        output_dtype=np.dtype("float32"),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    for index in range(2):
+        image = np.zeros((2, 2), dtype=np.float32)
+        semantic = np.zeros((64, 64), dtype=np.float32)
+        session.rendered_tiles[index] = RenderedTile(
+            tile=tiles[index],
+            image=image,
+            histogram_data=None,
+            eval_ms=0.0,
+            slab_shape=image.shape,
+            slab_nbytes=image.nbytes,
+            semantic_data=semantic,
+        )
+        session.dirty_payloads[index] = None
+
+    state, delta = session.build_tile_presentation(
+        {},
+        max_upserts=2,
+        max_upsert_bytes=2 * np.zeros((2, 2), dtype=np.float32).nbytes,
+        upsert_cost_fn=lambda payload: np.asarray(payload.texture_data).nbytes,
+    )
+
+    assert tuple(state.active_payloads(delta)) == (0, 1)
+
+
+def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
+    from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    tiles = tuple(
+        MontageTile(
+            montage_index=index,
+            source_index=index,
+            row=0,
+            col=index,
+            x0=index * 2,
+            y0=0,
+            width=2,
+            height=2,
+            view_state=None,
+        )
+        for index in range(4)
+    )
+    session = MontageRenderSession(
+        session_id=1,
+        key=("test",),
+        render_generation=1,
+        level_key=None,
+        level_expected_indices=tuple(range(4)),
+        plan=MontagePlan(axis=0, tile_shape=(2, 2), grid_shape=(1, 4), columns=4, rows=1, gap=0, tiles=tiles),
+        view_state=None,
+        document=None,
+        montage_axis=0,
+        colormap_lut=None,
+        viewport_shape=(2, 8),
+        view_range=None,
+        output_dtype=np.dtype("float32"),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    for index, tile in enumerate(tiles):
+        image = np.full((2, 2), index, dtype=np.float32)
+        session.rendered_tiles[index] = RenderedTile(
+            tile=tile,
+            image=image,
+            histogram_data=image,
+            eval_ms=0.0,
+            slab_shape=image.shape,
+            slab_nbytes=image.nbytes,
+        )
+        session.dirty_payloads[index] = None
+
+    state, delta = session.build_tile_presentation({})
+    session.tile_presentation_state = state
+    session.presented_tiles = {0}
+    session.visible_tiles = tiles
+
+    _state, delta = session.build_tile_presentation(
+        {},
+        max_upserts=1,
+        max_upsert_bytes=1,
+        upsert_cost_fn=lambda _payload: 1024 * 1024,
+    )
+
+    assert delta.upserts == {}
+    assert delta.active_tiles == (0, 1, 2, 3)
 
 
 def test_auto_policy_uses_renderer_backend_name():

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -384,7 +385,7 @@ class ImageViewShell(QtWidgets.QWidget):
         if timing is not None:
             timing[field] = float(timing.get(field, 0.0) or 0.0) + float(ms)
 
-    def _finish_upload_timing(self) -> None:
+    def _finish_upload_timing(self, *, merge_with_previous: bool = False) -> None:
         timing = self._upload_timing
         if timing is None:
             return
@@ -395,7 +396,7 @@ class ImageViewShell(QtWidgets.QWidget):
             or int(timing["tile_layer_level_updates"]) > 0
             or str(timing["mode"]) in {"full", "fast", "tile_layer", "vispy_full", "vispy_fast", "vispy_tile_layer"}
         )
-        self._last_upload_timing = ImageUploadTiming(
+        upload_timing = ImageUploadTiming(
             total_ms=(perf_counter() - float(timing["start"])) * 1000.0,
             visible_upload_ms=float(timing["visible_upload_ms"]),
             histogram_upload_ms=float(timing["histogram_upload_ms"]),
@@ -451,12 +452,58 @@ class ImageViewShell(QtWidgets.QWidget):
             tile_layer_shader_uniform_updates=int(timing["tile_layer_shader_uniform_updates"]),
             cpu_complex_prep_ms=float(timing["cpu_complex_prep_ms"]),
         )
+        self._last_upload_timing = (
+            self._merge_upload_timing(self._last_upload_timing, upload_timing)
+            if merge_with_previous
+            else upload_timing
+        )
         if visible_changed:
             self._mark_presentation_draw_pending()
         self._upload_timing = None
 
     def lastImageUploadTiming(self) -> ImageUploadTiming:
         return self._last_upload_timing
+
+    @staticmethod
+    def _merge_upload_timing(previous: ImageUploadTiming, current: ImageUploadTiming) -> ImageUploadTiming:
+        additive_fields = (
+            "total_ms",
+            "visible_upload_ms",
+            "histogram_upload_ms",
+            "histogram_bind_ms",
+            "histogram_recompute_ms",
+            "level_sync_ms",
+            "rgb_window_ms",
+            "tile_layer_upload_ms",
+            "tile_layer_rgb_window_ms",
+            "profile_bounds_ms",
+            "visible_bytes",
+            "visible_pixels",
+            "histogram_bytes",
+            "histogram_pixels",
+            "tile_layer_texture_uploads",
+            "tile_layer_texture_upload_bytes",
+            "tile_layer_texture_prepare_ms",
+            "tile_layer_texture_submit_ms",
+            "tile_layer_vertex_uploads",
+            "tile_layer_level_updates",
+            "tile_layer_level_update_pending_items",
+            "tile_layer_mipmap_updates",
+            "tile_layer_complex_texture_uploads",
+            "tile_layer_shader_uniform_updates",
+            "cpu_complex_prep_ms",
+        )
+        values = {}
+        for field in additive_fields:
+            old = getattr(previous, field)
+            new = getattr(current, field)
+            if old is None and new is None:
+                values[field] = None
+            else:
+                values[field] = (0.0 if old is None else old) + (0.0 if new is None else new)
+        values["fast_same_object"] = bool(previous.fast_same_object or current.fast_same_object)
+        values["mode"] = str(previous.mode or current.mode)
+        return replace(previous, **values)
 
     def _mark_presentation_draw_pending(self) -> None:
         self._presentation_draw_pending = True

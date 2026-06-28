@@ -28,9 +28,12 @@ effective worker counts and UI fan-in budgets.
 The governor is intentionally bounded:
 
 - worker changes are damped and step-limited;
-- UI pressure backs off immediately;
-- recovery is gradual;
-- prefetch is admitted per path and remains idle-only;
+- UI fan-in budgets adapt from each channel's own latency feedback;
+- idle-vs-interactive state controls presentation width, so unrelated slow callbacks do not throttle
+  resident tile visibility or cold upload exploration;
+- recovery is gradual within each feedback channel;
+- prefetch is admitted per path and remains idle-only, with memory and visible-work gates rather than
+  unrelated UI-pressure gates;
 - montage tile FFT workers remain one by default to avoid native-worker oversubscription;
 - stage/visible lanes can use more FFT workers because they run at most one job.
 

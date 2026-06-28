@@ -58,6 +58,25 @@ def test_tile_layer_commit_uses_presentation_upload_feedback_ramp():
     assert decision.byte_cap >= 4096 * decision.batch_limit
 
 
+def test_presentation_single_tile_gray_zone_explores_larger_upload_batch():
+    governor = ResourceGovernor(_policy(MemoryProfileChoice.BALANCED), profile=MemoryProfileChoice.BALANCED)
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+
+    governor.record_ui_observation(
+        "tile_layer_commit",
+        17.0,
+        item_count=1,
+        byte_count=451_584,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    decision = governor.decide_ui_work("tile_layer_commit", interactive=False)
+
+    assert decision.batch_limit > 1
+    assert decision.byte_cap >= 451_584 * decision.batch_limit
+
+
 def test_ui_pressure_reduces_batch_and_workers():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0)
     memory = _memory()
@@ -162,7 +181,7 @@ def test_presentation_over_budget_sample_scales_from_measured_cost_not_warning_t
     assert decision.byte_cap >= 12 * 1024 * 1024
 
 
-def test_presentation_probe_above_profile_cap_is_blocked_under_high_ui_pressure():
+def test_presentation_probe_above_profile_cap_is_not_blocked_by_unrelated_ui_pressure():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
     governor.record_ui_observation(
         "montage_present_total",
@@ -183,7 +202,36 @@ def test_presentation_probe_above_profile_cap_is_blocked_under_high_ui_pressure(
 
     decision = governor.decide_ui_work("montage_present_total", interactive=False)
 
-    assert decision.batch_limit <= 12
+    assert governor.diagnostics().pressure.ui_pressure == ResourcePressure.HIGH
+    assert decision.batch_limit > 12
+    assert decision.reason == "feedback target"
+
+
+def test_interaction_state_not_global_pressure_controls_idle_presentation_width():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_present_total",
+        12.0,
+        item_count=12,
+        byte_count=12 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+    governor.record_ui_observation(
+        "montage_commit",
+        80.0,
+        item_count=12,
+        byte_count=0,
+        work_class="presentation_upsert",
+        backend="vispy",
+    )
+
+    idle = governor.decide_ui_work("montage_present_total", interactive=False)
+    interactive = governor.decide_ui_work("montage_present_total", interactive=True)
+
+    assert idle.batch_limit > interactive.batch_limit
+    assert idle.reason == "feedback target"
+    assert interactive.reason == "interactive feedback target"
 
 
 def test_presentation_under_warning_sample_recovers_from_single_item_limit():
@@ -294,6 +342,25 @@ def test_upload_telemetry_does_not_drive_global_ui_pressure():
     assert any(channel.channel == "montage_present_total" for channel in governor.diagnostics().feedback_channels)
 
 
+def test_priority_retarget_metadata_does_not_drive_global_ui_pressure():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    memory = _memory()
+    governor.update_telemetry(_snapshot(memory), memory)
+    governor.record_ui_observation(
+        "montage_priority_retarget",
+        60.0,
+        item_count=8,
+        work_class="queue_metadata",
+        backend="qt",
+    )
+
+    decision = governor.decide_ui_work("montage_commit", interactive=False)
+
+    assert governor.diagnostics().pressure.ui_pressure == ResourcePressure.NORMAL
+    assert decision.batch_limit == 12
+    assert any(channel.channel == "montage_priority_retarget" for channel in governor.diagnostics().feedback_channels)
+
+
 def test_elevated_ui_pressure_preserves_stage_backed_tile_workers():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0)
     memory = _memory()
@@ -336,6 +403,19 @@ def test_memory_pressure_disables_prefetch_first():
 
     assert not decision.allowed
     assert "memory" in decision.reason
+
+
+def test_unrelated_ui_pressure_does_not_disable_idle_montage_prefetch():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    memory = _memory()
+    governor.update_telemetry(_snapshot(memory), memory)
+    governor.record_ui_observation("montage_commit", 80.0, item_count=1)
+
+    decision = governor.decide_montage_prefetch(stage_ready_or_in_flight=True, visible_busy=False)
+
+    assert governor.diagnostics().pressure.ui_pressure == ResourcePressure.HIGH
+    assert decision.allowed
+    assert decision.reason == "stage ready and idle"
 
 
 def test_tile_worker_product_guard_still_holds():

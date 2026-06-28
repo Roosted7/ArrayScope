@@ -10,6 +10,17 @@ from arrayscope.core.memory_policy import MemoryPolicy, format_memory_policy
 from arrayscope.core.resource_governor import ResourceGovernorDiagnostics, ResourcePressure
 
 
+_TELEMETRY_ONLY_FEEDBACK_CHANNELS = frozenset(
+    {
+        "montage_cold_commit",
+        "montage_layout_commit",
+        "montage_present_total",
+        "montage_priority_retarget",
+        "tile_layer_commit",
+    }
+)
+
+
 @dataclass(frozen=True)
 class ImageUploadTiming:
     total_ms: float | None = None
@@ -219,6 +230,14 @@ class MontageTimingDiagnostics:
     cpu_complex_prep_ms: float | None = None
     coalesced_commits: int = 0
 
+    @property
+    def upload_total_bytes(self) -> int:
+        return (
+            int(self.upload_visible_bytes)
+            + int(self.upload_histogram_bytes)
+            + int(self.tile_layer_texture_upload_bytes)
+        )
+
 
 @dataclass(frozen=True)
 class CanvasPreserveRuntimeDiagnostics:
@@ -376,8 +395,10 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         ),
         (
             "Upload: "
+            f"total={format_bytes(snapshot.montage_timing.upload_total_bytes)} "
             f"visible={format_bytes(snapshot.montage_timing.upload_visible_bytes)} "
             f"histogram={format_bytes(snapshot.montage_timing.upload_histogram_bytes)} "
+            f"tile_texture={format_bytes(snapshot.montage_timing.tile_layer_texture_upload_bytes)} "
             f"same object={snapshot.montage_timing.upload_fast_same_object}"
         ),
         (
@@ -415,6 +436,7 @@ def _feedback_lines(diagnostics: ResourceGovernorDiagnostics | None) -> tuple[st
         lines.append("Channels:")
         inactive = []
         active_channel_lines = []
+        telemetry_channel_lines = []
         for channel in diagnostics.feedback_channels:
             if (
                 channel.elapsed_ewma_ms is None
@@ -423,17 +445,16 @@ def _feedback_lines(diagnostics: ResourceGovernorDiagnostics | None) -> tuple[st
             ):
                 inactive.append(channel.channel)
                 continue
-            active_channel_lines.append(
-                f"  {channel.channel}:\n"
-                f"    last={_ms_text(channel.last_elapsed_ms)} "
-                f"ewma={_ms_text(channel.elapsed_ewma_ms)} "
-                f"per-item={_ms_text(channel.per_item_ewma_ms)} "
-                f"bytes={format_bytes(channel.last_byte_count)}\n"
-                f"    batch={channel.batch_limit} "
-                f"budget={channel.budget_ms:.1f} ms "
-                f"interval={channel.interval_ms} ms"
+            target = (
+                telemetry_channel_lines
+                if str(channel.channel) in _TELEMETRY_ONLY_FEEDBACK_CHANNELS
+                else active_channel_lines
             )
+            target.append(_feedback_channel_line(channel))
         lines.extend(active_channel_lines or ("  n/a",))
+        if telemetry_channel_lines:
+            lines.append("Telemetry-only:")
+            lines.extend(telemetry_channel_lines)
         if inactive:
             lines.append("  Inactive:")
             lines.extend(f"    - {name}" for name in inactive)
@@ -507,11 +528,25 @@ def _ui_pressure_source(diagnostics: ResourceGovernorDiagnostics) -> str | None:
         channel
         for channel in diagnostics.feedback_channels
         if channel.elapsed_ewma_ms is not None and float(channel.elapsed_ewma_ms) > 0.0
+        and str(channel.channel) not in _TELEMETRY_ONLY_FEEDBACK_CHANNELS
     )
     if not channels:
         return None
     channel = max(channels, key=lambda item: float(item.elapsed_ewma_ms or 0.0))
     return str(channel.channel)
+
+
+def _feedback_channel_line(channel) -> str:
+    return (
+        f"  {channel.channel}:\n"
+        f"    last={_ms_text(channel.last_elapsed_ms)} "
+        f"ewma={_ms_text(channel.elapsed_ewma_ms)} "
+        f"per-item={_ms_text(channel.per_item_ewma_ms)} "
+        f"bytes={format_bytes(channel.last_byte_count)}\n"
+        f"    batch={channel.batch_limit} "
+        f"budget={channel.budget_ms:.1f} ms "
+        f"interval={channel.interval_ms} ms"
+    )
 
 
 def _bottleneck_text(snapshot: WindowRuntimeDiagnostics) -> str:
@@ -708,8 +743,10 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         f"Coalesced montage commits: {snapshot.montage_timing.coalesced_commits}",
         (
             "Upload: "
+            f"total={format_bytes(snapshot.montage_timing.upload_total_bytes)} "
             f"visible={format_bytes(snapshot.montage_timing.upload_visible_bytes)} "
             f"histogram={format_bytes(snapshot.montage_timing.upload_histogram_bytes)} "
+            f"tile_texture={format_bytes(snapshot.montage_timing.tile_layer_texture_upload_bytes)} "
             f"same object={snapshot.montage_timing.upload_fast_same_object}"
         ),
     )

@@ -311,7 +311,14 @@ def _benchmark_complex_tile_level_preview(view, *, measure_presented: bool) -> R
     )
     measurement = _measure_action(
         view,
-        lambda: view._apply_histogram_preview_levels((0.4, 1.0)),
+        lambda: _present_benchmark_tiled(
+            view,
+            geometry=geometry,
+            payloads=payloads,
+            levels=(0.4, 1.0),
+            histogramRange=(0.0, 1.0),
+            dirty_tiles=(),
+        ),
         measure_presented=measure_presented,
     )
     return _result(view, "complex_tile_level_preview", measurement)
@@ -328,7 +335,14 @@ def _benchmark_large_tile_level_preview(view, *, measure_presented: bool) -> Ren
     )
     measurement = _measure_action(
         view,
-        lambda: view._apply_histogram_preview_levels((0.35, 0.95)),
+        lambda: _present_benchmark_tiled(
+            view,
+            geometry=geometry,
+            payloads=payloads,
+            levels=(0.35, 0.95),
+            histogramRange=(0.0, 1.0),
+            dirty_tiles=(),
+        ),
         measure_presented=measure_presented,
     )
     return _result(view, "large_tile_level_preview", measurement)
@@ -904,7 +918,7 @@ def _sum_gpu_stats(stats, *, mode: str) -> ImageUploadTiming:
     return ImageUploadTiming(
         total_ms=total("upload_ms"),
         tile_layer_upload_ms=total("upload_ms"),
-        visible_bytes=sum(int(stat.texture_upload_bytes) for stat in stats),
+        visible_bytes=0,
         visible_pixels=0,
         fast_same_object=False,
         mode=mode,

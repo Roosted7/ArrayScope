@@ -1572,9 +1572,16 @@ class VisPyImageView2D(ImageViewShell):
         self._vispy_histogram_update_pending = False
         self._pending_vispy_histogram_update = None
         histogramData, histogramPlotData, levels, histogramRange, refresh_curve = pending
-        if refresh_curve:
-            self._update_histogram_for_vispy(histogramData, histogramPlotData, levels)
-        self._sync_vispy_histogram_widget_bounds(levels, histogramRange=histogramRange)
+        started_timing = self._upload_timing is None
+        if started_timing:
+            self._start_upload_timing("vispy_histogram")
+        try:
+            if refresh_curve:
+                self._update_histogram_for_vispy(histogramData, histogramPlotData, levels)
+            self._sync_vispy_histogram_widget_bounds(levels, histogramRange=histogramRange)
+        finally:
+            if started_timing:
+                self._finish_upload_timing(merge_with_previous=True)
 
     def _sync_vispy_histogram_widget_bounds(self, levels, *, histogramRange=None) -> None:
         applying = self._applying_presentation
@@ -1722,9 +1729,6 @@ class VisPyImageView2D(ImageViewShell):
                     capacity_warning=str(exc),
                 )
         self._record_upload_timing("tile_layer_upload_ms", float(stats.upload_ms))
-        timing = self._upload_timing
-        if timing is not None:
-            timing["visible_bytes"] = int(timing["visible_bytes"]) + int(stats.texture_upload_bytes)
         return TileLayerUpdateStats(
             visible_items=int(stats.visible_items),
             presented_tiles=None if stats.presented_tiles is None else tuple(int(tile) for tile in stats.presented_tiles),

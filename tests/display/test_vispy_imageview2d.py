@@ -1469,7 +1469,7 @@ def test_vispy_direct_tiled_clean_and_dirty_counters(qt_app):
         dirty = view.lastImageUploadTiming()
         assert dirty.tile_layer_items_updated == 1
         assert dirty.tile_layer_items_skipped == 1
-        assert dirty.visible_bytes > 0
+        assert dirty.visible_bytes == 0
         assert dirty.tile_layer_texture_uploads >= 1
         assert dirty.tile_layer_texture_upload_bytes > 0
     finally:
@@ -1701,7 +1701,8 @@ def test_vispy_first_class_tiled_new_semantic_state_reuses_resident_textures(qt_
         view.setTiledPresentation(tile_state=TilePresentationState(payloads), tile_delta=delta(1, upserts=payloads), **kwargs)
         first = view.lastImageUploadTiming()
         assert first.tile_layer_items_updated == 2
-        assert first.visible_bytes > 0
+        assert first.visible_bytes == 0
+        assert first.tile_layer_texture_upload_bytes > 0
 
         view.setTiledPresentation(tile_state=TilePresentationState(payloads), tile_delta=delta(2, upserts={}), **kwargs)
         clean = view.lastImageUploadTiming()
@@ -2498,6 +2499,65 @@ def test_vispy_direct_tiled_histogram_only_commit_refreshes_histogram(qt_app, mo
         assert timing.tile_layer_items_skipped == 2
         assert timing.tile_layer_texture_uploads == 0
         assert tuple(float(value) for value in view.getHistogramDataBounds()) == (20.0, 23.0)
+    finally:
+        view.close()
+
+
+def test_vispy_deferred_histogram_upload_merges_with_tile_upload_counters(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload
+
+    view = VisPyImageView2D()
+    placeholder = np.broadcast_to(np.zeros((1, 1, 3), dtype=np.uint8), (2, 5, 3))
+    first_payloads = {
+        0: DisplayTilePayload(0, 0, np.full((2, 2, 3), 180, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", 0)),
+        1: DisplayTilePayload(1, 1, np.full((2, 2, 3), 90, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", 1)),
+    }
+    second_payloads = dict(first_payloads)
+    second_payloads[1] = DisplayTilePayload(
+        1,
+        1,
+        np.full((2, 2, 3), 128, dtype=np.uint8),
+        np.full((2, 2), 3.0, dtype=np.float32),
+        ("tile", 1, "dirty"),
+    )
+    kwargs = dict(
+        histogramData=None,
+        geometry=_montage_geometry(),
+        levels=(0.0, 4.0),
+        rgb_already_windowed=False,
+    )
+    try:
+        _present_vispy_tiled(
+            view,
+            placeholder,
+            histogramPlotData=np.arange(4, dtype=np.float32),
+            histogramRange=(0.0, 4.0),
+            montage_dirty_tiles=None,
+            montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1)},
+            montage_tile_payloads=first_payloads,
+            **kwargs,
+        )
+        view._flush_pending_vispy_histogram_update()
+
+        _present_vispy_tiled(
+            view,
+            placeholder,
+            histogramPlotData=np.arange(4, dtype=np.float32) + 10.0,
+            histogramRange=(10.0, 14.0),
+            montage_dirty_tiles=(1,),
+            montage_tile_source_ids={0: ("tile", 0), 1: ("tile", 1, "dirty")},
+            montage_tile_payloads=second_payloads,
+            **kwargs,
+        )
+        before_flush = view.lastImageUploadTiming()
+        assert before_flush.tile_layer_texture_upload_bytes > 0
+        assert before_flush.histogram_bytes == 0
+
+        view._flush_pending_vispy_histogram_update()
+        after_flush = view.lastImageUploadTiming()
+        assert after_flush.tile_layer_texture_upload_bytes == before_flush.tile_layer_texture_upload_bytes
+        assert after_flush.histogram_bytes == np.arange(4, dtype=np.float32).nbytes
     finally:
         view.close()
 

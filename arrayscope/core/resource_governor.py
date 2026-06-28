@@ -118,6 +118,7 @@ _PRESSURE_TELEMETRY_ONLY_CHANNELS = frozenset(
         "montage_cold_commit",
         "montage_layout_commit",
         "montage_present_total",
+        "montage_priority_retarget",
         "tile_layer_commit",
     }
 )
@@ -245,7 +246,7 @@ class ResourceGovernor:
                 desired = min(desired, max(1, self._lane_targets.get(lane, max_workers) - self.max_worker_step))
                 reasons.append("high tile-result fan-in pressure")
         elif lane == ComputeLane.PREFETCH:
-            if interactive or busy_state.visible_busy or busy_state.montage_busy or pressure.ui_pressure != ResourcePressure.NORMAL:
+            if interactive or busy_state.visible_busy or busy_state.montage_busy:
                 desired = 1
                 reasons.append("prefetch kept narrow while user-visible work is active")
         elif lane in {ComputeLane.VISIBLE, ComputeLane.STAGE, ComputeLane.HISTOGRAM, ComputeLane.PROFILE, ComputeLane.ROI, ComputeLane.PIXEL}:
@@ -270,11 +271,7 @@ class ResourceGovernor:
         snapshot = feedback.channel_snapshot(channel)
         batch = int(feedback.batch_limit(channel, interactive=interactive))
         batch_max = int(feedback.tuning.max_batch)
-        if (
-            channel in _PRESENTATION_UPLOAD_CHANNELS
-            and not interactive
-            and self._pressure.ui_pressure != ResourcePressure.HIGH
-        ):
+        if channel in _PRESENTATION_UPLOAD_CHANNELS and not interactive:
             batch_max = max(batch_max, min(32, int(ceil(batch_max * 1.5))))
         if snapshot.per_item_ewma_ms is not None and snapshot.per_item_ewma_ms > 0.0:
             batch = max(
@@ -292,6 +289,17 @@ class ResourceGovernor:
             bytes_per_item = int(ceil(float(snapshot.last_byte_count) / max(1.0, float(snapshot.last_count))))
             byte_cap = max(int(byte_cap), int(bytes_per_item * max(1, batch)))
         if (
+            channel in _PRESENTATION_UPLOAD_CHANNELS
+            and 0.0 < snapshot.last_elapsed_ms < float(control_budget)
+            and snapshot.last_count <= int(feedback.tuning.min_batch)
+            and batch <= int(feedback.tuning.min_batch)
+            and snapshot.last_byte_count > 0
+        ):
+            scale = float(control_budget) / max(0.25, float(snapshot.last_elapsed_ms))
+            measured_batch = max(int(feedback.tuning.min_batch) + 1, int(ceil(float(snapshot.last_count) * scale)))
+            batch = max(int(batch), min(int(batch_max), measured_batch))
+            byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
+        elif (
             channel in _PRESENTATION_UPLOAD_CHANNELS
             and 0.0 < snapshot.last_elapsed_ms < WARNING_THRESHOLD_MS
             and snapshot.last_count <= int(feedback.tuning.min_batch)
@@ -334,20 +342,7 @@ class ResourceGovernor:
                 measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
                 byte_cap = max(int(byte_cap), measured_byte_cap)
         interval = int(feedback.commit_interval_ms(channel, interactive=interactive))
-        if self._pressure.ui_pressure == ResourcePressure.HIGH:
-            batch = max(1, batch // 2)
-            byte_cap = max(1024, byte_cap // 2)
-            budget = max(2.0, budget * 0.75)
-            interval = min(250, max(interval, int(round(budget * 3.0))))
-            reason = "high UI pressure"
-        elif self._pressure.ui_pressure == ResourcePressure.ELEVATED:
-            if channel in {"montage_commit", "histogram_preview", "roi_refresh", "profile_update", "pixel_hover", "diagnostics_refresh"}:
-                interval = min(250, max(interval, int(round(budget * 2.5))))
-                reason = "elevated UI pressure; spacing UI commits"
-            else:
-                reason = "elevated UI pressure; preserving compute/result throughput"
-        else:
-            reason = "feedback target"
+        reason = "interactive feedback target" if interactive else "feedback target"
         decision = UiWorkDecision(channel, batch, budget, interval, reason, int(byte_cap))
         self._ui_decisions[channel] = decision
         return decision
@@ -367,8 +362,6 @@ class ResourceGovernor:
         tuning = _PROFILE_TUNING[normalize_memory_profile_choice(self.profile)]
         if visible_busy:
             return PrefetchAdmissionDecision("montage_prefetch", False, 0, "visible work is busy")
-        if self._pressure.ui_pressure != ResourcePressure.NORMAL:
-            return PrefetchAdmissionDecision("montage_prefetch", False, 0, "UI pressure")
         if self._pressure.memory_pressure in {ResourcePressure.ELEVATED, ResourcePressure.HIGH}:
             return PrefetchAdmissionDecision("montage_prefetch", False, 0, "memory pressure")
         if not stage_ready_or_in_flight:

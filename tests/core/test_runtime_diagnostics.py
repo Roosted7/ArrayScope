@@ -246,7 +246,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Tile layer RGB window tiles: 1" in text
     assert "Tile layer storage: rebuilds=1 evictions=2 pages=0/0 near=0 warm=0 gpu=8.0 KiB budget=16.0 KiB budget_used=50.0% max_texture=n/a cpu_shadow=0 B" in text
     assert "Tile layer submissions: textures=3 bytes=4.0 KiB vertices=1 levels=1" in text
-    assert "Upload: visible=1.0 KiB histogram=512 B same object=True" in text
+    assert "Upload: total=5.5 KiB visible=1.0 KiB histogram=512 B tile_texture=4.0 KiB same object=True" in text
     assert "Display cache last session: cached=3 missing=4" in text
     assert "Workers: visible=1, montage_tile=2" in text
     assert "FFT workers: visible=4, montage_tile=1" in text
@@ -305,6 +305,7 @@ def test_runtime_diagnostics_avoids_long_feedback_worker_lines():
             ),
             feedback_channels=(
                 FeedbackChannelDiagnostics("montage_commit", 15.0, 1, 15.0, 15.0, 4.0, 1, 30),
+                FeedbackChannelDiagnostics("montage_present_total", 20.0, 1, 20.0, 20.0, 4.0, 1, 30, 1024),
                 FeedbackChannelDiagnostics("roi_refresh", 0.0, 0, None, None, 8.0, 8, 16),
             ),
             ui_decisions=(
@@ -316,6 +317,8 @@ def test_runtime_diagnostics_avoids_long_feedback_worker_lines():
     sections = format_runtime_diagnostics_sections(snapshot)
 
     assert "Lane workers:\n  montage_tile: 8/8" in sections["Feedback"]
+    assert "Channels:\n  montage_commit:" in sections["Feedback"]
+    assert "Telemetry-only:\n  montage_present_total:" in sections["Feedback"]
     assert "UI decisions:\n  montage_commit: batch=4 budget=4.0 ms interval=30 ms byte-cap=2.0 MiB" in sections["Feedback"]
     assert "  Inactive:\n    - roi_refresh" in sections["Feedback"]
     assert all(len(line) <= 145 for line in sections["Render"].splitlines())

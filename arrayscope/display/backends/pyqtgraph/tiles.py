@@ -219,7 +219,7 @@ class MontageTileLayer:
         )
         level_update_tiles = tuple(
             int(tile)
-            for tile in requested_upserts
+            for tile in requested_active
             if int(tile) in self._states and tuple(self._states[int(tile)].levels) != levels
         )
         if level_update_tiles:

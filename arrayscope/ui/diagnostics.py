@@ -77,6 +77,52 @@ class _CompactSegmentBar(QtWidgets.QWidget):
         painter.drawText(rect.adjusted(5, 0, -5, 0), Qt.QtCore.Qt.AlignmentFlag.AlignVCenter, f"{self._label}: {self._summary}")
 
 
+class _CompactCapacitySegmentBar(QtWidgets.QWidget):
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent)
+        self._label = str(label)
+        self._segments = ()
+        self._summary = "n/a"
+        self._total = 1
+        self.setMinimumHeight(16)
+        self.setMaximumHeight(18)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+
+    def set_capacity_segments(self, segments, *, total: int, summary: str) -> None:
+        self._segments = tuple((str(label), max(0, int(value)), str(color)) for label, value, color in segments if int(value) > 0)
+        self._total = max(1, int(total))
+        self._summary = str(summary)
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QtGui.QPainter(self)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        painter.setPen(QtGui.QPen(self.palette().mid().color(), 1))
+        painter.setBrush(self.palette().base())
+        painter.drawRoundedRect(rect, 2, 2)
+        x = rect.x()
+        consumed = 0
+        remaining_width = rect.width()
+        for index, (_label, value, color) in enumerate(self._segments):
+            consumed += int(value)
+            if index == len(self._segments) - 1:
+                width = min(remaining_width, int(round(rect.width() * min(consumed, self._total) / self._total)) - (x - rect.x()))
+            else:
+                width = int(round(rect.width() * min(value, self._total) / self._total))
+            if width > 0:
+                segment_rect = Qt.QtCore.QRect(x, rect.y(), max(1, width), rect.height())
+                painter.setPen(Qt.QtCore.Qt.PenStyle.NoPen)
+                painter.setBrush(QtGui.QColor(color))
+                painter.drawRect(segment_rect)
+                x += width
+                remaining_width = max(0, rect.right() - x + 1)
+        painter.setPen(self.palette().text().color())
+        font = painter.font()
+        font.setPointSize(8)
+        painter.setFont(font)
+        painter.drawText(rect.adjusted(5, 0, -5, 0), Qt.QtCore.Qt.AlignmentFlag.AlignCenter, f"{self._label}: {self._summary}")
+
+
 class _ElidedOverviewLabel(QtWidgets.QLabel):
     def __init__(self, text: str, parent=None):
         super().__init__("", parent)
@@ -126,42 +172,35 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         overview_layout.setVerticalSpacing(3)
         self._overview_labels = {
             "status": _overview_label("Status"),
-            "resources": _overview_label("Resources"),
-            "work": _overview_label("Work"),
-            "render": _overview_label("Render"),
-            "montage": _overview_label("Montage"),
+            "ops": _overview_label("Ops"),
+            "tiles": _overview_label("Tiles"),
         }
-        overview_layout.addWidget(self._overview_labels["status"], 0, 0, 1, 2)
-        overview_layout.addWidget(self._overview_labels["resources"], 1, 0)
-        overview_layout.addWidget(self._overview_labels["work"], 1, 1)
-        overview_layout.addWidget(self._overview_labels["render"], 2, 0)
-        overview_layout.addWidget(self._overview_labels["montage"], 2, 1)
-        bar_row = QtWidgets.QWidget()
-        bar_layout = QtWidgets.QHBoxLayout(bar_row)
-        bar_layout.setContentsMargins(0, 2, 0, 0)
-        bar_layout.setSpacing(6)
+        self._overview_labels["status"].setMinimumWidth(210)
+        self._overview_labels["ops"].setMinimumWidth(210)
+        self._overview_labels["tiles"].setMinimumWidth(210)
         self._compact_bars = {
-            "system": _CompactUsageBar("System"),
-            "rss": _CompactUsageBar("RSS"),
-            "render": _CompactUsageBar("GPU"),
+            "resource": _CompactCapacitySegmentBar("CPU"),
             "stage": _CompactUsageBar("Stage"),
+            "workers": _CompactSegmentBar("Workers"),
+            "gpu": _CompactUsageBar("GPU"),
             "tile": _CompactUsageBar("Tiles"),
         }
-        for bar in self._compact_bars.values():
-            bar_layout.addWidget(bar, 1)
-        overview_layout.addWidget(bar_row, 3, 0, 1, 2)
-        segment_row = QtWidgets.QWidget()
-        segment_layout = QtWidgets.QHBoxLayout(segment_row)
-        segment_layout.setContentsMargins(0, 0, 0, 0)
-        segment_layout.setSpacing(6)
         self._segment_bars = {
-            "work": _CompactSegmentBar("Work"),
             "render": _CompactSegmentBar("Render"),
             "montage": _CompactSegmentBar("Montage"),
         }
-        for bar in self._segment_bars.values():
-            segment_layout.addWidget(bar, 1)
-        overview_layout.addWidget(segment_row, 4, 0, 1, 2)
+        overview_layout.addWidget(self._overview_labels["status"], 0, 0)
+        overview_layout.addWidget(self._compact_bars["resource"], 0, 1)
+        overview_layout.addWidget(self._overview_labels["ops"], 1, 0)
+        overview_layout.addWidget(self._compact_bars["stage"], 1, 1)
+        overview_layout.addWidget(self._compact_bars["workers"], 1, 1)
+        overview_layout.addWidget(self._overview_labels["tiles"], 2, 0)
+        overview_layout.addWidget(self._compact_bars["gpu"], 2, 1)
+        overview_layout.addWidget(self._compact_bars["tile"], 2, 1)
+        overview_layout.addWidget(self._segment_bars["montage"], 3, 0)
+        overview_layout.addWidget(self._segment_bars["render"], 3, 1)
+        overview_layout.setColumnStretch(0, 1)
+        overview_layout.setColumnStretch(1, 1)
         layout.addWidget(overview, 0)
 
         font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
@@ -277,68 +316,43 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             logger.close()
 
     def _update_overview(self, snapshot) -> None:
-        policy = snapshot.memory_policy
-        system_used = max(0, int(policy.system_total_bytes) - int(policy.system_available_bytes))
-        governor = snapshot.resource_governor
-        pressure = "n/a" if governor is None else (
-            f"ui {governor.pressure.ui_pressure.value}, "
-            f"cpu headroom {governor.pressure.cpu_headroom:.0%}, "
-            f"memory {governor.pressure.memory_pressure.value}"
-        )
         self._overview_labels["status"].setText(
-            f"{_overview_bottleneck(snapshot)} | {pressure}"
+            f"{_overview_state(snapshot)} | {_overview_bottleneck(snapshot)} | {_feedback_summary(snapshot)}"
         )
-        cache_parts = _interesting_cache_parts(snapshot)
-        self._overview_labels["resources"].setText(
-            f"RSS {_short_bytes(policy.process_rss_bytes)} | "
-            f"sys {_short_bytes(system_used)}/{_short_bytes(policy.system_total_bytes)}"
-            + (", " + ", ".join(cache_parts) if cache_parts else "")
-        )
-        self._overview_labels["work"].setText(
-            "Work " + _active_work_summary(snapshot.schedulers)
-        )
-        self._overview_labels["render"].setText(
-            f"{snapshot.render.last_decision_kind or 'n/a'} | "
-            f"GPU {_gpu_overview(snapshot)} | "
-            f"sync {_ms_text(snapshot.render_timing.last_render_sync_ms)}, "
-            f"eval {_ms_text(snapshot.render_timing.last_evaluation_ms)}, "
-            f"commit {_ms_text(snapshot.render_timing.last_display_commit_ms)}"
-        )
-        self._overview_labels["montage"].setText(
-            "Montage " + _montage_overview(snapshot)
-        )
-        self._update_compact_bars(snapshot, system_used)
+        self._overview_labels["ops"].setText(_ops_overview(snapshot))
+        self._overview_labels["tiles"].setText(_drawn_tiles_overview(snapshot))
+        self._update_compact_bars(snapshot)
         self._update_segment_bars(snapshot)
 
-    def _update_compact_bars(self, snapshot, system_used: int) -> None:
+    def _update_compact_bars(self, snapshot) -> None:
         policy = snapshot.memory_policy
         bars = self._compact_bars
-        bars["system"].set_usage(used=system_used, total=policy.system_total_bytes)
-        bars["system"].setFormat(f"System {_percent(system_used, policy.system_total_bytes)}")
-        bars["rss"].set_usage(used=policy.process_rss_bytes, total=policy.system_total_bytes)
-        bars["rss"].setFormat(f"RSS {_short_bytes(policy.process_rss_bytes)}")
+        bars["resource"].set_capacity_segments(
+            _resource_segments(snapshot),
+            total=int(policy.system_total_bytes),
+            summary=_resource_bar_summary(snapshot),
+        )
+        workers_active = bool(_worker_segments(snapshot.schedulers))
         gpu_used, gpu_total, gpu_detail = _gpu_bar_usage(snapshot)
-        bars["render"].set_usage(used=gpu_used, total=gpu_total, detail=gpu_detail)
         bars["stage"].set_usage(
             used=snapshot.stage_cache.bytes_used,
             total=snapshot.stage_cache.max_bytes,
             detail=f"{_short_bytes(snapshot.stage_cache.bytes_used)} / {_short_bytes(snapshot.stage_cache.max_bytes)}",
         )
+        bars["workers"].set_segments(_worker_segments(snapshot.schedulers), summary=_active_work_summary(snapshot.schedulers))
+        bars["stage"].setVisible(not workers_active)
+        bars["workers"].setVisible(workers_active)
+        bars["gpu"].set_usage(used=gpu_used, total=gpu_total, detail=gpu_detail)
         bars["tile"].set_usage(
             used=snapshot.display_cache.bytes_used,
             total=snapshot.display_cache.max_bytes,
             detail=f"{_short_bytes(snapshot.display_cache.bytes_used)} / {_short_bytes(snapshot.display_cache.max_bytes)}",
         )
-        bars["stage"].setVisible(bool(snapshot.stage_cache.bytes_used or snapshot.stage_cache.entries))
-        bars["tile"].setVisible(bool(snapshot.display_cache.bytes_used or snapshot.montage.active))
+        show_gpu = str(getattr(snapshot, "image_rendering_backend_actual", "")) == "vispy" and _gpu_available(snapshot)
+        bars["gpu"].setVisible(show_gpu)
+        bars["tile"].setVisible(not show_gpu)
 
     def _update_segment_bars(self, snapshot) -> None:
-        work_segments = []
-        for scheduler, color in zip(snapshot.schedulers, ("#2563eb", "#9333ea", "#0f766e", "#ca8a04", "#0891b2", "#64748b", "#dc2626")):
-            active = int(getattr(scheduler, "pending", 0) or 0) + int(getattr(scheduler, "running", 0) or 0) + int(getattr(scheduler, "queued", 0) or 0)
-            if active:
-                work_segments.append((scheduler.name, active, color))
-        self._segment_bars["work"].set_segments(work_segments, summary=_active_work_summary(snapshot.schedulers))
         self._segment_bars["render"].set_segments(
             _timing_segments(
                 (
@@ -481,6 +495,87 @@ def _percent(used: int, total: int) -> str:
     return f"{(float(used) / max(1.0, float(total)) * 100.0):.0f}%"
 
 
+def _resource_segments(snapshot) -> tuple[tuple[str, int, str], ...]:
+    policy = snapshot.memory_policy
+    total = max(1, int(policy.system_total_bytes))
+    process = max(0, min(total, int(policy.process_rss_bytes)))
+    system_used = max(0, min(total, total - int(policy.system_available_bytes)))
+    other_system = max(0, system_used - process)
+    app_color = "#c2410c" if _memory_pressure_high(snapshot) else "#2563eb"
+    return (
+        ("system", other_system, "#15803d"),
+        ("app", process, app_color),
+    )
+
+
+def _resource_bar_summary(snapshot) -> str:
+    governor = snapshot.resource_governor
+    if governor is None:
+        return "CPU n/a load n/a"
+    return (
+        f"sys {_percent_value(getattr(governor, 'system_cpu_percent', None))} /"
+        f"app {_percent_value(getattr(governor, 'process_cpu_percent', None))} |"
+        f"load {_float_value(getattr(governor, 'load_average_1m', None))}"
+    )
+
+
+def _memory_pressure_high(snapshot) -> bool:
+    governor = snapshot.resource_governor
+    if governor is None:
+        return False
+    pressure = getattr(getattr(governor, "pressure", None), "memory_pressure", None)
+    return str(getattr(pressure, "value", pressure)) == "high"
+
+
+def _feedback_summary(snapshot) -> str:
+    governor = snapshot.resource_governor
+    if governor is None:
+        return "feedback n/a"
+    pressure = governor.pressure
+    return (
+        f"feedback ui {pressure.ui_pressure.value}, "
+        f"mem {pressure.memory_pressure.value}, "
+        f"cache {pressure.cache_pressure.value}"
+    )
+
+
+def _overview_state(snapshot) -> str:
+    if snapshot.montage.active:
+        return f"montage {snapshot.montage.display_mode}"
+    decision = snapshot.render.last_decision_kind or "idle"
+    return str(decision)
+
+
+def _ops_overview(snapshot) -> str:
+    total_ops = int(snapshot.operation_count)
+    computed = int(snapshot.montage.loaded_tiles)
+    total = max(0, int(snapshot.montage.visible_tiles))
+    staged = int(snapshot.montage.tile_compute_stage_backed)
+    optimized = "n/a" if snapshot.optimized_operation_count is None else str(int(snapshot.optimized_operation_count))
+    return (
+        f"Ops {optimized}/{total_ops}: "
+        f"{staged}/{computed}/{total} ({_percent(computed, total or 1)})"
+    )
+
+
+def _drawn_tiles_overview(snapshot) -> str:
+    drawn = int(snapshot.montage_timing.tile_layer_visible_items or snapshot.montage.presented_tiles)
+    total = max(0, int(snapshot.montage.visible_tiles))
+    return f"Drawn {drawn}/{total} ({_percent(drawn, total or 1)}) | Up: {format_bytes(_upload_total_bytes(snapshot))}"
+
+
+def _upload_total_bytes(snapshot) -> int:
+    timing = snapshot.montage_timing
+    total = getattr(timing, "upload_total_bytes", None)
+    if total is not None:
+        return int(total)
+    return (
+        int(getattr(timing, "upload_visible_bytes", 0) or 0)
+        + int(getattr(timing, "upload_histogram_bytes", 0) or 0)
+        + int(getattr(timing, "tile_layer_texture_upload_bytes", 0) or 0)
+    )
+
+
 def _gpu_bar_usage(snapshot) -> tuple[int, int, str]:
     timing = snapshot.montage_timing
     gpu_bytes = int(getattr(timing, "tile_layer_estimated_gpu_bytes", 0) or 0)
@@ -499,6 +594,15 @@ def _gpu_bar_usage(snapshot) -> tuple[int, int, str]:
     return 0, 1, "n/a"
 
 
+def _gpu_available(snapshot) -> bool:
+    timing = snapshot.montage_timing
+    return bool(
+        int(getattr(timing, "tile_layer_budget_bytes", 0) or 0) > 0
+        or int(getattr(timing, "tile_layer_storage_capacity", 0) or 0) > 0
+        or int(getattr(timing, "tile_layer_estimated_gpu_bytes", 0) or 0) > 0
+    )
+
+
 def _gpu_overview(snapshot) -> str:
     timing = snapshot.montage_timing
     gpu_bytes = int(getattr(timing, "tile_layer_estimated_gpu_bytes", 0) or 0)
@@ -510,6 +614,20 @@ def _gpu_overview(snapshot) -> str:
     if capacity > 0:
         return f"slots {resident}/{capacity} {_percent(resident, capacity)}"
     return "n/a"
+
+
+def _worker_segments(schedulers) -> tuple[tuple[str, int, str], ...]:
+    segments = []
+    colors = ("#2563eb", "#9333ea", "#0f766e", "#ca8a04", "#0891b2", "#64748b", "#dc2626")
+    for scheduler, color in zip(schedulers, colors):
+        active = (
+            int(getattr(scheduler, "pending", 0) or 0)
+            + int(getattr(scheduler, "running", 0) or 0)
+            + int(getattr(scheduler, "queued", 0) or 0)
+        )
+        if active:
+            segments.append((scheduler.name, active, color))
+    return tuple(segments)
 
 
 def _overview_bottleneck(snapshot) -> str:
@@ -525,20 +643,6 @@ def _overview_bottleneck(snapshot) -> str:
     if snapshot.montage_timing.tile_layer_rgb_window_tiles:
         return "RGB/window upload"
     return "idle"
-
-
-def _interesting_cache_parts(snapshot) -> list[str]:
-    parts = []
-    for label, cache in (
-        ("display", snapshot.display_cache),
-        ("stage", snapshot.stage_cache),
-    ):
-        used = int(getattr(cache, "bytes_used", 0) or 0)
-        total = max(1, int(getattr(cache, "max_bytes", 1) or 1))
-        fraction = used / float(total)
-        if used and (fraction >= 0.5 or label == "stage"):
-            parts.append(f"{label} {format_bytes(used)} / {format_bytes(total)}")
-    return parts
 
 
 def _active_work_summary(schedulers) -> str:
@@ -567,3 +671,11 @@ def _montage_overview(snapshot) -> str:
 
 def _ms_text(value) -> str:
     return "n/a" if value is None else f"{float(value):.2f} ms"
+
+
+def _percent_value(value) -> str:
+    return "n/a" if value is None else f"{float(value):.0f}%"
+
+
+def _float_value(value) -> str:
+    return "n/a" if value is None else f"{float(value):.2f}"

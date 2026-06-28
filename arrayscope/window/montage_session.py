@@ -586,6 +586,7 @@ class MontageRenderSession:
         cold_deadline_ms: float | None = None,
         max_upserts: int | None = None,
         max_upsert_bytes: int | None = None,
+        upsert_cost_fn=None,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         source_ids = dict(source_ids or {})
         previous_state = self.tile_presentation_state
@@ -683,7 +684,11 @@ class MontageRenderSession:
         admission = TileAdmissionQueue(self._tile_priority_context()).admit(
             tuple(cold_upserts),
             retained=(),
-            cost_fn=lambda tile: int(getattr(cold_upserts[int(tile)], "nbytes", 0) or 0),
+            cost_fn=(
+                (lambda tile: int(upsert_cost_fn(cold_upserts[int(tile)])))
+                if upsert_cost_fn is not None
+                else (lambda tile: int(getattr(cold_upserts[int(tile)], "nbytes", 0) or 0))
+            ),
             max_items=max_upserts,
             max_bytes=max_upsert_bytes,
             deadline_ms=cold_deadline_ms,
@@ -701,6 +706,7 @@ class MontageRenderSession:
         if max_upserts is not None or max_upsert_bytes is not None:
             admitted = set(int(tile) for tile in upserts)
             admitted.update(int(tile) for tile in self.presented_tiles)
+            admitted.update(int(tile) for tile in previous_payloads)
             active = tuple(int(tile) for tile in active if int(tile) in admitted)
         near = tuple(tile for tile in self._near_tile_numbers(margin_tiles=2) if int(tile) not in self.skipped_tiles)
         # Residency is keyed by the complete texture-content identity carried

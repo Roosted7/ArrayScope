@@ -37,10 +37,10 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_result
     results = benchmark_results
 
     assert {result.name for result in results} == {
-        "pyqtgraph_frame_small_initial",
-        "vispy_frame_small_initial",
-        "pyqtgraph_frame_large_initial",
-        "vispy_frame_large_initial",
+        "pyqtgraph_tiled_small_initial",
+        "vispy_tiled_small_initial",
+        "pyqtgraph_tiled_large_initial",
+        "vispy_tiled_large_initial",
         "pyqtgraph_one_tile_montage_initial",
         "vispy_one_tile_montage_initial",
         "pyqtgraph_multi_tile_montage_initial",
@@ -76,7 +76,7 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_result
         assert result.ui_max_gap_ms is None
         assert result.commit_count >= 1
         assert result.timing.mode
-        if result.scenario == "frame_large_initial":
+        if result.scenario == "tiled_large_initial":
             assert result.timing.mode in {"tile_layer", "vispy_tile_layer"}
             assert result.timing.tile_layer_visible_items == 16
         assert result.lod_policy == "native-only"
@@ -110,6 +110,50 @@ def test_benchmark_result_does_not_mask_backend_applied_lod():
     assert "non-native applied" in result.lod_reason
     assert result.work_graph_counters["backend_commit"]["admitted"] == 2
     assert result.work_graph_counters["backend_commit"]["completed"] == 2
+
+
+def test_vispy_gpu_stat_aggregation_keeps_atlas_uploads_out_of_visible_bytes():
+    from arrayscope.display.rendering_benchmarks import _sum_gpu_stats
+
+    stats = (
+        SimpleNamespace(
+            upload_ms=1.0,
+            texture_upload_bytes=4096,
+            texture_uploads=2,
+            visible_items=2,
+            items_updated=2,
+            items_skipped=0,
+            resident_items=2,
+            atlas_capacity=8,
+            atlas_rebuilds=1,
+            atlas_evictions=0,
+            vertex_uploads=1,
+            level_updates=0,
+            estimated_gpu_bytes=8192,
+            cpu_shadow_bytes=0,
+            page_count=1,
+            active_pages=1,
+            device_max_texture_size=4096,
+            budget_bytes=65536,
+            near_resident_items=0,
+            warm_resident_items=0,
+            evicted_near_items=0,
+            lod_level=0,
+            lod_factor=1,
+            source_texels_per_pixel=1.0,
+            gutter_pixels=0,
+            mipmap_updates=0,
+            mipmap_available=False,
+            complex_texture_uploads=0,
+            shader_uniform_updates=0,
+            capacity_warning="",
+        ),
+    )
+
+    timing = _sum_gpu_stats(stats, mode="warm_residency_queue_scaling")
+
+    assert timing.visible_bytes == 0
+    assert timing.tile_layer_texture_upload_bytes == 4096
 
 
 def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(benchmark_results):
@@ -155,7 +199,8 @@ def test_vispy_dirty_and_pan_scenarios_have_deterministic_upload_counters(benchm
 
     assert dirty.tile_layer_items_updated == 1
     assert dirty.tile_layer_items_skipped > 0
-    assert dirty.visible_bytes > 0
+    assert dirty.visible_bytes == 0
+    assert dirty.tile_layer_texture_upload_bytes > 0
     assert pan.tile_layer_items_updated == 0
     assert pan.tile_layer_texture_uploads == 0
     assert pan.tile_layer_texture_upload_bytes == 0

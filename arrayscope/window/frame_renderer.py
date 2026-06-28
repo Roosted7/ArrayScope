@@ -1858,7 +1858,6 @@ class FrameRenderMixin:
             _persistent_tile_residency_backend(self, session)
             and not getattr(session, "display_committed", False)
         )
-        first_batch_limit = _first_vispy_display_batch_limit(self, session) if first_vispy_display else 0
         expected_indices = self._montage_level_expected_indices(session)
         while session.pending_completed_tiles:
             tile, result = session.pending_completed_tiles.popleft()
@@ -1866,8 +1865,6 @@ class FrameRenderMixin:
             processed_tiles.append(tile)
             processed += 1
             budget.record_item(byte_count=byte_count)
-            if first_batch_limit and processed >= first_batch_limit:
-                break
             if budget.should_yield():
                 break
         if processed:
@@ -2110,7 +2107,7 @@ class FrameRenderMixin:
             self._persistent_tile_layer_fast_drain_enabled_count = int(
                 getattr(self, "_persistent_tile_layer_fast_drain_enabled_count", 0) or 0
             ) + int(bool(fast_drain))
-            tile_layer_limits = _tile_layer_upsert_limits(self, session, first_display_commit=not bool(session.display_committed))
+            tile_layer_limits = _tile_layer_upsert_limits(self, session)
             tile_state, tile_delta = session.build_tile_presentation(
                 tile_source_ids,
                 cold_deadline_ms=(
@@ -3430,16 +3427,17 @@ def _persistent_tile_residency_backend(window, session) -> bool:
     )
 
 
-def _persistent_tile_upsert_limits(window, session, *, first_display_commit: bool) -> dict[str, int]:
+def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
     if not _persistent_tile_residency_backend(window, session):
         return {}
+    interactive = _interactive_active(window)
     decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
         "montage_present_total",
-        interactive=_interactive_active(window),
+        interactive=interactive,
     )
     upload_decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
         "montage_cold_commit",
-        interactive=_interactive_active(window),
+        interactive=interactive,
     )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = max(
@@ -3448,25 +3446,36 @@ def _persistent_tile_upsert_limits(window, session, *, first_display_commit: boo
     )
     if batch_limit <= 0:
         feedback = _latency_feedback(window)
-        batch_limit = 4 if feedback is None else int(feedback.batch_limit("montage_present_total", interactive=_interactive_active(window)))
+        batch_limit = 4 if feedback is None else int(feedback.batch_limit("montage_present_total", interactive=interactive))
     if byte_cap <= 0:
-        byte_cap = 8 * 1024 * 1024 if _interactive_active(window) else 32 * 1024 * 1024
-    max_upserts = min(6, int(batch_limit)) if bool(first_display_commit) else int(batch_limit)
+        byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
     limits = {
-        "max_upserts": max(1, int(max_upserts)),
+        "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
+        "upsert_cost_fn": _vispy_payload_upload_nbytes,
     }
     return limits
 
 
-def _first_vispy_display_batch_limit(window, session) -> int:
-    limits = _persistent_tile_upsert_limits(window, session, first_display_commit=True)
-    return max(1, int(limits.get("max_upserts", 1)))
+def _vispy_payload_upload_nbytes(payload) -> int:
+    texture = getattr(payload, "texture_data", None)
+    if texture is None:
+        texture = getattr(payload, "image", None)
+    total = 0 if texture is None else int(getattr(np.asarray(texture), "nbytes", 0) or 0)
+    histogram = getattr(payload, "histogram_data", None)
+    if histogram is not None and histogram is not texture:
+        total += int(getattr(np.asarray(histogram), "nbytes", 0) or 0)
+    return max(1, int(total))
 
 
-def _tile_layer_upsert_limits(window, session, *, first_display_commit: bool) -> dict[str, int]:
+def _pyqtgraph_payload_upload_nbytes(payload) -> int:
+    image = getattr(payload, "image", None)
+    return max(1, 0 if image is None else int(getattr(np.asarray(image), "nbytes", 0) or 0))
+
+
+def _tile_layer_upsert_limits(window, session) -> dict[str, int]:
     if _persistent_tile_residency_backend(window, session):
-        return _persistent_tile_upsert_limits(window, session, first_display_commit=first_display_commit)
+        return _persistent_tile_upsert_limits(window, session)
     capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
     if not (
         not capabilities.shader_windowing
@@ -3488,6 +3497,7 @@ def _tile_layer_upsert_limits(window, session, *, first_display_commit: bool) ->
     return {
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
+        "upsert_cost_fn": _pyqtgraph_payload_upload_nbytes,
     }
 
 

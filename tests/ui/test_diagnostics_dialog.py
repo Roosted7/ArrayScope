@@ -66,11 +66,16 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
         assert dialog.refresh_button.isCheckable()
         assert dialog.refresh_button.isChecked()
         assert dialog.log_button.text() == "Log..."
-        assert dialog._overview_labels["status"].text()
-        assert "RSS" in dialog._overview_labels["resources"].text()
-        assert "sync" in dialog._overview_labels["render"].text()
-        assert dialog._compact_bars["render"].format().startswith("GPU:")
-        assert dialog._overview_labels["montage"].text()
+        assert "State" not in dialog._overview_labels["status"].text()
+        assert "feedback" in dialog._overview_labels["status"].text()
+        assert "Ops" in dialog._overview_labels["ops"].text()
+        assert "/" in dialog._overview_labels["ops"].text()
+        assert "Drawn" in dialog._overview_labels["tiles"].text()
+        assert "Up:" in dialog._overview_labels["tiles"].text()
+        assert dialog._compact_bars["resource"]._label == "CPU"
+        assert "load" in dialog._compact_bars["resource"]._summary
+        assert dialog._compact_bars["gpu"].format().startswith("GPU:")
+        assert dialog._segment_bars["montage"]._summary
     finally:
         win.close()
 
@@ -229,7 +234,8 @@ def test_diagnostics_auto_text_toggle_pauses_text_but_not_bars(qtbot):
         dialog.refresh()
 
         assert dialog.text_edit.toPlainText() == before
-        assert "RSS" in dialog._overview_labels["resources"].text()
+        assert dialog._compact_bars["resource"]._label == "CPU"
+        assert "load" in dialog._compact_bars["resource"]._summary
 
         dialog.refresh_button.setChecked(True)
         assert "entries=1" in dialog.text_edit.toPlainText()
