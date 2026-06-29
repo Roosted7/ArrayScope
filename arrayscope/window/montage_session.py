@@ -78,6 +78,22 @@ def _resident_retarget_upsert_tiles(
     }
 
 
+def _viewport_identity(view_range, viewport_shape: tuple[int, int]) -> tuple[object, ...]:
+    shape = tuple(max(1, int(value)) for value in tuple(viewport_shape or (1, 1))[:2])
+    if view_range is None:
+        return (shape, None)
+    try:
+        return (
+            shape,
+            (
+                (float(view_range[0][0]), float(view_range[0][1])),
+                (float(view_range[1][0]), float(view_range[1][1])),
+            ),
+        )
+    except Exception:
+        return (shape, repr(view_range))
+
+
 @dataclass
 class MontageRenderSession:
     session_id: int
@@ -116,6 +132,8 @@ class MontageRenderSession:
     user_levels_override: tuple[float, float] | None = None
     pending_level_tiles: deque[RenderedTile] = field(default_factory=deque)
     pending_level_sources: set[int] = field(default_factory=set)
+    level_scan_cursor: int = 0
+    level_scan_remaining_tiles: int = 0
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
     pending_refined_level_sources: set[int] = field(default_factory=set)
     pending_completed_tiles: deque[tuple[MontageTile, object]] = field(default_factory=deque)
@@ -159,6 +177,7 @@ class MontageRenderSession:
     _last_active_tiles: tuple[int, ...] = ()
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
+    _last_viewport_identity: tuple[object, ...] | None = None
     _near_tile_numbers_cache_key: tuple[object, ...] | None = None
     _near_tile_numbers_cache: tuple[int, ...] = ()
     _tile_states_cached_revision: int = -1
@@ -218,8 +237,10 @@ class MontageRenderSession:
         reused when the user pans back.
         """
 
-        self.view_range = view_range
         self.viewport_shape = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
+        viewport_identity = _viewport_identity(view_range, self.viewport_shape)
+        viewport_changed = viewport_identity != self._last_viewport_identity
+        self.view_range = view_range
         layout_changed = False
         if plan is not None:
             layout_changed = getattr(plan, "geometry", None) != getattr(self.plan, "geometry", None)
@@ -259,6 +280,7 @@ class MontageRenderSession:
         previous_visible_numbers = tuple(int(tile.montage_index) for tile in self.visible_tiles)
         presentation_changed = (
             layout_changed
+            or viewport_changed
             or active_numbers != previous_visible_numbers
             or near_numbers != self._last_near_tiles
             or planned_numbers != self._last_planned_tiles
@@ -433,6 +455,8 @@ class MontageRenderSession:
         texture_kind = getattr(rendered, "texture_kind", None)
         exact_image = np.asarray(rendered.image)
         exact_histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
+        exact_level_data = None if getattr(rendered, "level_data", None) is None else np.asarray(rendered.level_data)
+        level_stats = getattr(rendered, "level_stats", None)
         semantic = getattr(rendered, "semantic_data", None)
         semantic = exact_image if semantic is None else np.asarray(semantic)
         lod = self._planned_lod_info(rendered, factor=lod_factor)
@@ -450,6 +474,8 @@ class MontageRenderSession:
             and previous.source_id == source_id
             and previous.image is exact_image
             and previous.histogram_data is exact_histogram
+            and previous.level_data is exact_level_data
+            and previous.level_stats is level_stats
             and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
         ):
             return previous
@@ -466,6 +492,8 @@ class MontageRenderSession:
             source_shape=tuple(int(value) for value in exact_image.shape[:2]),
             lod=lod,
             shader_mapping=mapping,
+            level_data=exact_level_data,
+            level_stats=level_stats,
         )
         self.display_tile_payloads[tile_number] = payload
         return payload
@@ -731,8 +759,11 @@ class MontageRenderSession:
         target_revision = base_revision + (1 if upserts or removals else 0)
         if upserts or removals:
             self.payload_revision += 1
+        viewport_identity = _viewport_identity(self.view_range, self.viewport_shape)
+        viewport_changed = viewport_identity != self._last_viewport_identity
         presentation_geometry_changed = bool(
             getattr(self, "_layout_geometry_changed_pending", False)
+            or viewport_changed
             or active != self._last_active_tiles
             or planned != self._last_planned_tiles
             or near != self._last_near_tiles
@@ -741,13 +772,14 @@ class MontageRenderSession:
         self._layout_geometry_changed_pending = False
         if active != self._last_active_tiles or planned != self._last_planned_tiles:
             self.visibility_revision += 1
-        if near != self._last_near_tiles:
+        if viewport_changed or near != self._last_near_tiles:
             self.viewport_revision += 1
         if planned != self._last_planned_tiles:
             self.structure_revision += 1
         self._last_active_tiles = active
         self._last_planned_tiles = planned
         self._last_near_tiles = near
+        self._last_viewport_identity = viewport_identity
 
         delta = TilePresentationDelta(
             structure_revision=self.structure_revision,

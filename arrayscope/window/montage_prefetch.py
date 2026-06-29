@@ -7,6 +7,8 @@ from time import perf_counter
 
 import numpy as np
 
+from arrayscope.display.backend_contract import image_view_backend_capabilities
+from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.display.slice_engine import make_image_from_slab, make_shader_image_from_slab
 from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key
@@ -117,7 +119,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             if not window._is_current_montage_session(session_id, session_key):
                 window.operation_evaluator.note_prefetch_stale()
                 return
-            window.operation_evaluator.store_montage_tile_result(
+            rendered = window.operation_evaluator.store_montage_tile_result(
                 tile,
                 montage_axis=session.montage_axis,
                 colormap_lut=session.colormap_lut,
@@ -125,6 +127,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                 shader_display=shader_display,
             )
             window.operation_evaluator.prefetch_stored += 1
+            _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key)
 
         started = window.prefetch_evaluation_controller.start_prefetch(evaluate, on_done=done, key=("montage_tile_prefetch", tile_key), memory_budget_bytes=window._memory_policy().display_cache_budget_bytes)
         if started.scheduled:
@@ -187,6 +190,55 @@ def _busy(window, session=None) -> bool:
         or window.montage_tile_evaluation_controller.is_busy()
         or window.stage_evaluation_controller.is_busy()
     )
+
+
+def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -> None:
+    capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
+    if not (
+        bool(getattr(capabilities, "persistent_tile_residency", False))
+        and str(getattr(capabilities, "tile_residency_kind", "none") or "none") == "cpu_item"
+    ):
+        return
+    warm = getattr(getattr(window, "img_view", None), "warmTiledResidency", None)
+    if not callable(warm):
+        return
+    if not window._is_current_montage_session(session.session_id, session.key):
+        return
+    tile_number = int(getattr(tile, "montage_index", -1))
+    if tile_number < 0:
+        return
+    try:
+        source_ids = (
+            window._montage_tile_source_ids(session)
+            if hasattr(window, "_montage_tile_source_ids")
+            else {tile_number: tile_key}
+        )
+        payload = session._ensure_display_tile_payload(
+            tile_number,
+            rendered,
+            source_ids,
+            lod_factor=int(session._selected_lod_factor()),
+        )
+        geometry = DisplayGeometry(
+            view_state=session.view_state,
+            display_shape=tuple(session.plan.display_shape),
+            montage=session.plan.geometry,
+            montage_tile_states=session.ensure_tile_states(),
+        )
+        try:
+            levels = tuple(float(value) for value in window.img_view.getLevels())
+        except Exception:
+            levels = tuple(float(value) for value in getattr(session, "user_levels_override", None) or (0.0, 1.0))
+        warm(
+            payloads={tile_number: payload},
+            geometry=geometry,
+            levels=(float(levels[0]), float(levels[1])),
+            rgb_already_windowed=not bool(getattr(session, "shader_display", False)),
+            tile_residency_budget_bytes=0,
+            frame_plan=getattr(session, "frame_plan", None),
+        )
+    except Exception:
+        return
 
 
 def _record(window, decisions: tuple[MontagePrefetchDecision, ...]) -> tuple[MontagePrefetchDecision, ...]:

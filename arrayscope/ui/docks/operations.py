@@ -93,6 +93,7 @@ class OperationStackDock(StandardDockWidget):
         self._operation_dtypes = ()
         self._output_shape = None
         self._derived_estimate = None
+        self._row_snapshot_key = None
 
         body = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout()
@@ -195,19 +196,33 @@ class OperationStackDock(StandardDockWidget):
         steps=None,
         operation_dtypes=None,
     ):
-        self._operations = tuple(operations)
-        self._steps = tuple(steps or ())
-        self._operation_shapes = tuple(operation_shapes or ())
-        self._operation_dtypes = tuple(operation_dtypes or ())
+        operations = tuple(operations)
+        steps = tuple(steps or ())
+        operation_shapes = tuple(operation_shapes or ())
+        operation_dtypes = tuple(operation_dtypes or ())
+        row_snapshot_key = _operation_row_snapshot_key(
+            operations,
+            steps=steps,
+            operation_shapes=operation_shapes,
+            operation_dtypes=operation_dtypes,
+        )
+        rows_unchanged = row_snapshot_key == self._row_snapshot_key
+        self._operations = operations
+        self._steps = steps
+        self._operation_shapes = operation_shapes
+        self._operation_dtypes = operation_dtypes
         self._output_shape = output_shape
         self._cache_status = cache_status
         self._display_cache_status = display_cache_status
         self._profile_cache_status = profile_cache_status
         self._derived_estimate = derived_estimate
         previous_row = self.operation_list.currentRow()
-        self.operation_list.clear()
         row_count = len(self._steps) if self._steps else len(operations)
-        if row_count:
+        if not rows_unchanged:
+            self.operation_list.clear()
+        if rows_unchanged:
+            pass
+        elif row_count:
             for row in range(row_count):
                 operation = self._steps[row].operation if self._steps else operations[row]
                 item = QtWidgets.QListWidgetItem()
@@ -224,6 +239,7 @@ class OperationStackDock(StandardDockWidget):
         else:
             self.operation_list.addItem("No operations")
             self.operation_list.item(0).setFlags(Qt.QtCore.Qt.ItemFlag.NoItemFlags)
+        self._row_snapshot_key = row_snapshot_key
 
         has_operations = bool(row_count)
         self.undo_button.setEnabled(has_operations)
@@ -413,6 +429,25 @@ def _estimate_nbytes(shape, dtype):
         return int(np.prod(tuple(shape), dtype=np.int64)) * np.dtype(dtype).itemsize
     except Exception:
         return 0
+
+
+def _operation_row_snapshot_key(operations, *, steps, operation_shapes, operation_dtypes):
+    if steps:
+        operation_key = tuple(
+            (
+                type(step.operation),
+                step.operation,
+                bool(getattr(step, "enabled", True)),
+            )
+            for step in steps
+        )
+    else:
+        operation_key = tuple((type(operation), operation) for operation in operations)
+    return (
+        operation_key,
+        tuple(tuple(shape) for shape in operation_shapes),
+        tuple(None if dtype is None else str(dtype) for dtype in operation_dtypes),
+    )
 
 
 def _format_nbytes(nbytes):

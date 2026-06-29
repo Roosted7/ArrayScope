@@ -16,13 +16,15 @@ class ImageViewBackendCapabilities:
 
     name: str
     persistent_tile_residency: bool = False
+    tile_residency_kind: str = "none"
     shader_windowing: bool = False
     native_pointer_interaction: bool = True
 
 
 PYQTGRAPH_CAPABILITIES = ImageViewBackendCapabilities(
     name="pyqtgraph",
-    persistent_tile_residency=False,
+    persistent_tile_residency=True,
+    tile_residency_kind="cpu_item",
     shader_windowing=False,
     native_pointer_interaction=True,
 )
@@ -30,6 +32,7 @@ PYQTGRAPH_CAPABILITIES = ImageViewBackendCapabilities(
 VISPY_CAPABILITIES = ImageViewBackendCapabilities(
     name="vispy",
     persistent_tile_residency=True,
+    tile_residency_kind="gpu_atlas",
     shader_windowing=True,
     # The current backend intentionally uses the shared PyQtGraph interaction
     # surface.  Marking this accurately prevents the hybrid experiment from
@@ -54,6 +57,7 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
         return ImageViewBackendCapabilities(
             name=str(getattr(capabilities, "name", "pyqtgraph") or "pyqtgraph"),
             persistent_tile_residency=bool(getattr(capabilities, "persistent_tile_residency", False)),
+            tile_residency_kind=str(getattr(capabilities, "tile_residency_kind", "none") or "none"),
             shader_windowing=bool(getattr(capabilities, "shader_windowing", False)),
             native_pointer_interaction=bool(getattr(capabilities, "native_pointer_interaction", True)),
         )

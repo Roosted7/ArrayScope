@@ -607,6 +607,75 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
     assert state.active_payloads(delta) == {}
 
 
+def test_retarget_viewport_range_change_with_same_tiles_is_presentation_change():
+    state = ViewState.from_shape((2, 2, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8)
+    session = MontageRenderSession(
+        session_id=1,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        level_expected_indices=tuple(range(8)),
+        plan=plan,
+        view_state=state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(2, 4),
+        view_range=((0.0, 4.0), (0.0, 2.0)),
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=(),
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    source_ids = {}
+    for tile in plan.tiles:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
+
+    additions, changed = session.retarget_viewport(
+        view_range=((0.0, 4.0), (0.0, 2.0)),
+        viewport_shape=(2, 4),
+        coverage_margin_tiles=0,
+        near_margin_tiles=0,
+    )
+    assert additions == ()
+    assert changed
+    first_state, first_delta = session.build_tile_presentation(source_ids)
+    session.acknowledge_tile_presentation(
+        first_delta,
+        TileCommitReport(
+            presented_tiles=first_state.active_payloads(first_delta),
+            committed_upserts=frozenset(first_delta.upserts),
+        ),
+    )
+    session.mark_presented(first_state.active_payloads(first_delta))
+    first_active = tuple(int(tile.montage_index) for tile in session.visible_tiles)
+    first_viewport_revision = int(first_delta.viewport_revision)
+
+    additions, changed = session.retarget_viewport(
+        view_range=((0.1, 3.9), (0.0, 2.0)),
+        viewport_shape=(2, 4),
+        coverage_margin_tiles=0,
+        near_margin_tiles=0,
+    )
+
+    assert additions == ()
+    assert tuple(int(tile.montage_index) for tile in session.visible_tiles) == first_active
+    assert changed
+    _state, delta = session.build_tile_presentation(source_ids)
+    assert delta.upserts == {}
+    assert delta.active_tiles == first_active
+    assert delta.viewport_revision == first_viewport_revision + 1
+    assert session.presentation_geometry_changed
+
+
 def test_temporary_materialization_gap_does_not_remove_committed_payloads():
     session = _session()
     source_ids = {}

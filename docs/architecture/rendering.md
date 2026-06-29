@@ -136,6 +136,12 @@ The default path is mature and provides the complete feature baseline. Its tiled
 It accepts typed tiled presentations for internally tiled single planes as well as montages. The
 old direct tile-layer widget API has been removed; tile-layer commits enter through
 `present_tiled` with committed tile state and revisioned tile deltas.
+PyQtGraph now declares persistent CPU/item tile residency separately from VisPy shader residency.
+Inactive tiles are retained as prepared `ImageItem` state under a bounded inactive pool and can be
+rebound by source/content identity without recreating the item or rebuilding display arrays. Viewport,
+camera, and active-set changes may hide, move, or rebind residents, but they must not clear them.
+Only explicit reset/teardown, incompatible source/content identity, or residency-budget eviction can
+destroy PyQtGraph tile residency.
 
 ### VisPy
 

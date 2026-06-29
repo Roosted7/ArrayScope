@@ -28,7 +28,6 @@ from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
 from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.imageview2d import _tile_commit_report
-from arrayscope.display.imageview2d import _histogram_data_from_tile_payloads
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import DisplayInteractionState
@@ -2071,6 +2070,22 @@ def _overlay_vispy_colors(overlay):
 
 def _rgba255(r, g, b, a):
     return (float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, float(a) / 255.0)
+
+
+def _histogram_data_from_tile_payloads(payloads) -> np.ndarray | None:
+    parts = []
+    for payload in dict(payloads or {}).values():
+        source = getattr(payload, "semantic_histogram_data", None)
+        if source is None:
+            source = getattr(payload, "histogram_data", None)
+        if source is None:
+            continue
+        parts.append(np.asarray(source))
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return np.concatenate([np.ravel(part) for part in parts])
 
 
 def _overlay_status_mark_points(overlay):

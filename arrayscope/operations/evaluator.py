@@ -30,6 +30,8 @@ from arrayscope.core.cache_status import (
     CacheStatus,
 )
 from arrayscope.display.montage import RenderedTilePayload
+from arrayscope.display.model.montage_levels import provisional_tile_level_stats, sample_tile_level_stats
+from arrayscope.display.shader_mapping import apply_scale as apply_shader_scale, extract_component
 from arrayscope.display.slice_engine import make_image, make_image_from_slab, make_shader_image_from_slab, make_line, make_line_from_slab, make_scalar_from_slab
 
 
@@ -423,6 +425,15 @@ class OperationEvaluator:
             document=document,
             shader_display=shader_display,
         )
+        level_stats = getattr(result.value, "level_stats", None)
+        level_data = getattr(result.value, "level_data", None)
+        if level_stats is None:
+            values = _display_image_level_values(result.value)
+            level_stats = (
+                sample_tile_level_stats(values, int(tile.source_index), refined=True)
+                if not bool(shader_display)
+                else provisional_tile_level_stats(values, int(tile.source_index))
+            )
         value = RenderedTilePayload(
             image=result.value.data,
             histogram_data=result.value.histogram_data,
@@ -433,8 +444,8 @@ class OperationEvaluator:
             texture_kind=getattr(result.value, "texture_kind", None),
             semantic_data=getattr(result.value, "semantic_data", None),
             lod=getattr(result.value, "lod", None),
-            level_data=getattr(result.value, "level_data", None),
-            level_stats=getattr(result.value, "level_stats", None),
+            level_data=level_data,
+            level_stats=level_stats,
         )
         self._display_cache.last_eval_ms = result.eval_ms
         self.last_region_plan = result.region_plan
@@ -593,13 +604,13 @@ class OperationEvaluator:
 
 def _document_key(document: ArrayDocument):
     dtype = getattr(document.base_data, "dtype", None)
-    dtype_key = None if dtype is None else str(np.dtype(dtype))
+    dtype_key = None if dtype is None else np.dtype(dtype)
     return (id(document.base_data), tuple(np.shape(document.base_data)), dtype_key, int(document.revision), document.steps)
 
 
 def stage_document_key(document: ArrayDocument):
     dtype = getattr(document.base_data, "dtype", None)
-    dtype_key = None if dtype is None else str(np.dtype(dtype))
+    dtype_key = None if dtype is None else np.dtype(dtype)
     return (id(document.base_data), tuple(np.shape(document.base_data)), dtype_key, int(document.revision))
 
 
@@ -807,6 +818,31 @@ def _request_message(prefix, result: EvaluationResult):
 def _check_cancelled(token):
     if token is not None and getattr(token, "cancelled", False):
         raise EvaluationCancelled()
+
+
+def _display_image_level_values(display_image) -> np.ndarray:
+    level_data = getattr(display_image, "level_data", None)
+    if level_data is not None:
+        return np.asarray(level_data)
+    histogram = getattr(display_image, "histogram_data", None)
+    if histogram is not None:
+        return np.asarray(histogram)
+    mapping = getattr(display_image, "shader_mapping", None)
+    semantic = getattr(display_image, "semantic_data", None)
+    if mapping is not None and semantic is not None:
+        values = extract_component(np.asarray(semantic), getattr(mapping, "component", "real"))
+        return apply_shader_scale(
+            values,
+            getattr(mapping, "scale", "linear"),
+            symlog_constant=float(getattr(mapping, "symlog_constant", 0.0) or 0.0),
+        )
+    data = getattr(display_image, "data", None)
+    if data is None:
+        return np.asarray((), dtype=np.float32)
+    data = np.asarray(data)
+    if np.iscomplexobj(data):
+        return np.abs(data).astype(np.float32, copy=False)
+    return data
 
 
 def _format_nbytes(nbytes):

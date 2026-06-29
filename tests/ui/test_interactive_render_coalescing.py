@@ -136,6 +136,54 @@ def test_deferred_side_panels_refresh_once_after_interaction_quiet(qtbot, monkey
         win.close()
 
 
+def test_montage_side_panels_defer_while_viewport_interaction_active(monkeypatch):
+    from types import SimpleNamespace
+
+    import arrayscope.window.frame_renderer as frame_renderer
+
+    monkeypatch.setattr(frame_renderer, "_viewport_gesture_active", lambda: False)
+
+    assert frame_renderer._should_defer_montage_side_panels(
+        SimpleNamespace(_viewport_interaction_active=True),
+        SimpleNamespace(defer_side_panels=False),
+    )
+    assert frame_renderer._should_defer_montage_side_panels(
+        SimpleNamespace(_viewport_interaction_active=False),
+        SimpleNamespace(defer_side_panels=True),
+    )
+    assert not frame_renderer._should_defer_montage_side_panels(
+        SimpleNamespace(_viewport_interaction_active=False),
+        SimpleNamespace(defer_side_panels=False),
+    )
+
+
+def test_operation_dock_identical_refresh_does_not_rebuild_rows(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.operations.pipeline import Crop
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
+    qtbot.addWidget(win)
+    try:
+        win.operation_coordinator.load_operations((Crop(0, 0, 3),))
+        win._set_document(win.operation_coordinator.document)
+        win._update_operation_dock()
+        _process_events(qtbot, count=2)
+        calls = []
+        original_row_widget = win.operation_dock._row_widget
+
+        def record_row_widget(index, operation):
+            calls.append(index)
+            return original_row_widget(index, operation)
+
+        monkeypatch.setattr(win.operation_dock, "_row_widget", record_row_widget)
+        win._update_operation_dock()
+
+        assert calls == []
+    finally:
+        win.close()
+
+
 def test_direct_render_still_refreshes_side_panels(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -338,7 +386,7 @@ def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):
 
         win.update_image_view()
 
-        assert refreshes == []
+        assert refreshes == [{"active_render": False}]
     finally:
         win.close()
 

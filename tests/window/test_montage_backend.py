@@ -1,3 +1,4 @@
+from collections import deque
 from types import SimpleNamespace
 
 import numpy as np
@@ -55,6 +56,238 @@ def _committed_tiled_frame(geometry, *, key):
         key=key,
         value_source=TiledValueSource(payloads),
     )
+
+
+def test_known_montage_level_source_is_not_resampled(monkeypatch):
+    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
+    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class Window(FrameRenderMixin):
+        def __init__(self):
+            self._tracker = MontageLevelTracker()
+
+        def _montage_level_tracker(self):
+            return self._tracker
+
+    key = ("levels",)
+    win = Window()
+    win._tracker.ensure_expected(key, (3,))
+    win._tracker.update_from_stats(
+        key,
+        TileLevelStats(3, (0.0, 1.0), np.asarray([0.0, 1.0], dtype=np.float32), refined=False),
+        aggregate=False,
+    )
+    calls = []
+    monkeypatch.setattr(
+        frame_renderer,
+        "sample_tile_level_stats",
+        lambda *_args, **_kwargs: calls.append("sample") or None,
+    )
+    rendered = SimpleNamespace(
+        tile=SimpleNamespace(source_index=3),
+        level_stats=None,
+        level_data=None,
+        histogram_data=np.arange(16, dtype=np.float32),
+        image=np.arange(16, dtype=np.float32),
+    )
+
+    win._update_montage_level_bounds_from_rendered(key, rendered, expected_indices=(3,))
+
+    assert calls == []
+
+
+def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
+    from arrayscope.display.model.montage_levels import MontageLevelTracker
+    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class Window(FrameRenderMixin):
+        def __init__(self):
+            self._tracker = MontageLevelTracker()
+            self.scheduled = 0
+
+        def _montage_level_tracker(self):
+            return self._tracker
+
+        def _schedule_montage_cached_level_stats(self, session):
+            self.scheduled += 1
+
+    calls = []
+    monkeypatch.setattr(
+        frame_renderer,
+        "sample_tile_level_stats",
+        lambda *_args, **_kwargs: calls.append("sample") or None,
+    )
+    rendered = {
+        index: SimpleNamespace(
+            tile=SimpleNamespace(source_index=index),
+            level_stats=None,
+            level_data=None,
+            histogram_data=np.arange(64, dtype=np.float32),
+            image=np.arange(64, dtype=np.float32),
+        )
+        for index in range(32)
+    }
+    session = SimpleNamespace(
+        level_key=("levels", "bounded"),
+        level_expected_indices=tuple(range(32)),
+        rendered_tiles=rendered,
+        plan=SimpleNamespace(tiles=tuple(SimpleNamespace(source_index=index) for index in range(32))),
+        pending_level_tiles=deque(),
+        pending_level_sources=set(),
+        pending_refined_level_tiles=deque(),
+        pending_refined_level_sources=set(),
+        level_scan_cursor=0,
+        level_scan_remaining_tiles=0,
+    )
+    win = Window()
+
+    merged = win._queue_montage_level_stats_for_payloads(session, {index: object() for index in range(32)})
+
+    assert merged == 0
+    assert calls == []
+    assert len(session.pending_level_tiles) <= frame_renderer.MONTAGE_LEVEL_STATS_COMMIT_BATCH
+    assert session.level_scan_remaining_tiles == 32
+    assert win.scheduled == 1
+
+
+def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypatch):
+    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
+    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class Window(FrameRenderMixin):
+        def __init__(self):
+            self._tracker = MontageLevelTracker()
+            self.scheduled = 0
+
+        def _montage_level_tracker(self):
+            return self._tracker
+
+        def _schedule_montage_cached_level_stats(self, session):
+            self.scheduled += 1
+
+    calls = []
+    monkeypatch.setattr(
+        frame_renderer,
+        "sample_tile_level_stats",
+        lambda *_args, **_kwargs: calls.append("sample") or None,
+    )
+    rendered = {
+        index: SimpleNamespace(
+            tile=SimpleNamespace(source_index=index),
+            level_stats=TileLevelStats(index, (float(index), float(index + 1)), np.asarray([float(index)], dtype=np.float32)),
+            level_data=None,
+            histogram_data=None,
+            image=np.asarray([float(index)], dtype=np.float32),
+        )
+        for index in range(4)
+    }
+    session = SimpleNamespace(
+        level_key=("levels", "prepared"),
+        level_expected_indices=tuple(range(4)),
+        rendered_tiles=rendered,
+        plan=SimpleNamespace(tiles=tuple(SimpleNamespace(source_index=index) for index in range(4))),
+        pending_level_tiles=deque(),
+        pending_level_sources=set(),
+        pending_refined_level_tiles=deque(),
+        pending_refined_level_sources=set(),
+        level_scan_cursor=0,
+        level_scan_remaining_tiles=0,
+    )
+    win = Window()
+
+    merged = win._queue_montage_level_stats_for_payloads(session, {index: object() for index in range(4)})
+
+    assert merged == 4
+    assert calls == []
+    assert len(session.pending_level_tiles) == 0
+    assert win._tracker.summary_for(session.level_key).source_indices == frozenset(range(4))
+
+
+def test_display_tile_payload_retains_prepared_level_stats_for_reuse():
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.montage_levels import TileLevelStats
+    from arrayscope.window.frame_renderer import _rendered_tile_from_previous_payload
+
+    stats = TileLevelStats(5, (2.0, 8.0), np.asarray([2.0, 8.0], dtype=np.float32))
+    level_data = np.asarray([2.0, 8.0], dtype=np.float32)
+    image = np.ones((2, 2), dtype=np.float32)
+    payload = DisplayTilePayload(
+        0,
+        5,
+        image,
+        image,
+        ("tile", 5),
+        level_data=level_data,
+        level_stats=stats,
+    )
+    rendered = _rendered_tile_from_previous_payload(
+        SimpleNamespace(montage_index=0, source_index=5),
+        payload,
+    )
+
+    assert rendered.level_data is level_data
+    assert rendered.level_stats is stats
+
+
+def test_pyqtgraph_auto_levels_wait_for_complete_semantic_source():
+    from arrayscope.core.window_levels import LevelSourceRank
+    from arrayscope.display.model.montage_levels import MontageLevelStats
+    from arrayscope.window.frame_renderer import _tile_layer_auto_levels_wait_for_complete_source
+
+    window = SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")))
+    session = SimpleNamespace(
+        pending_tiles=[],
+        loading_tiles=set(),
+        active_tile_requests=set(),
+        pending_completed_tiles=deque(),
+        pending_level_tiles=deque([object()]),
+        level_scan_remaining_tiles=0,
+    )
+    partial = MontageLevelStats(
+        bounds=(0.0, 1.0),
+        source_indices=frozenset({0}),
+        expected_indices=frozenset({0, 1}),
+        rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+    )
+    complete = MontageLevelStats(
+        bounds=(0.0, 1.0),
+        source_indices=frozenset({0, 1}),
+        expected_indices=frozenset({0, 1}),
+        rank=LevelSourceRank.MONTAGE_COMPLETE,
+    )
+    sampled_full = MontageLevelStats(
+        bounds=(0.0, 1.0),
+        source_indices=frozenset({0, 1}),
+        expected_indices=frozenset({0, 1}),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        refined=True,
+    )
+
+    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, partial) is True
+    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, complete) is True
+    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, sampled_full) is False
+
+
+def test_shader_auto_levels_do_not_wait_for_complete_cpu_window_source():
+    from arrayscope.core.window_levels import LevelSourceRank
+    from arrayscope.display.model.montage_levels import MontageLevelStats
+    from arrayscope.window.frame_renderer import _tile_layer_auto_levels_wait_for_complete_source
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="vispy", shader_windowing=True))
+    )
+    session = SimpleNamespace(pending_level_tiles=deque([object()]), level_scan_remaining_tiles=1)
+    partial = MontageLevelStats(
+        bounds=(0.0, 1.0),
+        source_indices=frozenset({0}),
+        expected_indices=frozenset({0, 1}),
+        rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+    )
+
+    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, partial) is False
 
 
 def test_auto_small_scalar_montage_uses_tile_layer():
@@ -1027,7 +1260,7 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
 
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
     from arrayscope.window.montage_viewport import montage_viewport_retarget_policy
-    from arrayscope.window.frame_renderer import _persistent_tile_residency_backend
+    from arrayscope.window.frame_renderer import _persistent_gpu_tile_residency_backend, _persistent_tile_residency_backend
 
     capabilities = ImageViewBackendCapabilities(
         name="vispy",
@@ -1072,6 +1305,13 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     )
     assert (
         _persistent_tile_residency_backend(
+            SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
+            SimpleNamespace(),
+        )
+        is True
+    )
+    assert (
+        _persistent_gpu_tile_residency_backend(
             SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
             SimpleNamespace(),
         )

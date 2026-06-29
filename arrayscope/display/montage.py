@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Sequence
 from enum import Enum
+import math
 
 import numpy as np
 
@@ -163,7 +164,7 @@ def make_montage_plan(view_state, *, axis, indices, tile_shape, columns=None, vi
         col = montage_index % columns
         x0 = col * (tile_shape[1] + gap)
         y0 = row * (tile_shape[0] + gap)
-        tile_state = view_state.with_montage_axis(None) if axis is None else view_state.with_slice(axis, source_index).with_montage_axis(None)
+        tile_state = view_state.with_montage_axis(None) if axis is None else view_state.tile_state_for_slice(axis, source_index)
         tiles.append(
             MontageTile(
                 montage_index=montage_index,
@@ -352,14 +353,28 @@ def optimal_montage_columns(count, tile_shape, viewport_shape, gap=1):
     tile_height, tile_width = int(tile_shape[0]), int(tile_shape[1])
     viewport_height, viewport_width = int(viewport_shape[0]), int(viewport_shape[1])
     gap = max(0, int(gap))
-    best_columns = 1
-    best_used_fraction = -1.0
-    best_aspect_error = None
-    best_scale = None
-    viewport_area = max(viewport_width * viewport_height, 1)
     viewport_aspect = viewport_width / max(viewport_height, 1)
-    for columns in range(1, count + 1):
-        rows = int(np.ceil(count / columns))
+    stride_width = max(tile_width + gap, 1)
+    stride_height = max(tile_height + gap, 1)
+    estimate = math.sqrt(max(1.0, count * viewport_aspect * stride_height / stride_width))
+    candidates = {1, count}
+    center = int(round(estimate))
+    for value in range(center - 8, center + 9):
+        if 1 <= value <= count:
+            candidates.add(value)
+    row_estimate = math.sqrt(max(1.0, count * stride_width / (viewport_aspect * stride_height)))
+    row_center = int(round(row_estimate))
+    for rows in range(row_center - 8, row_center + 9):
+        if rows > 0:
+            columns = int(math.ceil(count / rows))
+            if 1 <= columns <= count:
+                candidates.add(columns)
+
+    best_columns = 1
+    best_score = (-1.0, -float("inf"), -float("inf"))
+    viewport_area = max(viewport_width * viewport_height, 1)
+    for columns in candidates:
+        rows = int(math.ceil(count / columns))
         total_width = columns * tile_width + gap * (columns - 1)
         total_height = rows * tile_height + gap * (rows - 1)
         scale = min(viewport_width / max(total_width, 1), viewport_height / max(total_height, 1))
@@ -367,21 +382,8 @@ def optimal_montage_columns(count, tile_shape, viewport_shape, gap=1):
         used_fraction = min(used_area / viewport_area, 1.0)
         layout_aspect = total_width / max(total_height, 1)
         aspect_error = abs(np.log(layout_aspect / viewport_aspect)) if layout_aspect > 0 and viewport_aspect > 0 else float("inf")
-        if (
-            used_fraction > best_used_fraction
-            or (
-                np.isclose(used_fraction, best_used_fraction)
-                and (best_aspect_error is None or aspect_error < best_aspect_error)
-            )
-            or (
-                np.isclose(used_fraction, best_used_fraction)
-                and best_aspect_error is not None
-                and np.isclose(aspect_error, best_aspect_error)
-                and (best_scale is None or scale > best_scale)
-            )
-        ):
+        score = (round(float(used_fraction), 12), round(float(-aspect_error), 12), float(scale))
+        if score > best_score:
             best_columns = columns
-            best_used_fraction = used_fraction
-            best_aspect_error = aspect_error
-            best_scale = scale
+            best_score = score
     return best_columns

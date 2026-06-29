@@ -126,9 +126,25 @@ class ViewState:
         axis = self._validate_axis(axis)
         index = int(index)
         self._validate_slice_index(axis, index)
+        if self.slice_indices[axis] == index:
+            return self
         slice_indices = list(self.slice_indices)
         slice_indices[axis] = index
-        return replace(self, slice_indices=tuple(slice_indices))
+        return self._replace_validated(slice_indices=tuple(slice_indices))
+
+    def tile_state_for_slice(self, axis, index):
+        axis = self._validate_axis(axis)
+        index = int(index)
+        self._validate_slice_index(axis, index)
+        slice_indices = list(self.slice_indices)
+        slice_indices[axis] = index
+        return self._replace_validated(
+            slice_indices=tuple(slice_indices),
+            montage_axis=None,
+            montage_columns=None,
+            montage_indices=None,
+            montage_text=None,
+        )
 
     def with_slice_indices(self, slice_indices):
         slice_indices = tuple(slice_indices)
@@ -175,13 +191,20 @@ class ViewState:
 
     def with_montage_axis(self, axis, columns=None, indices=None, text=None):
         if axis is None:
-            return replace(
-                self,
-                montage_axis=None,
-                montage_columns=None if columns is None else max(1, int(columns)),
-                montage_indices=None,
-                montage_text=None,
-            )
+            values = {
+                "montage_axis": None,
+                "montage_columns": None if columns is None else max(1, int(columns)),
+                "montage_indices": None,
+                "montage_text": None,
+            }
+            if (
+                self.montage_axis is values["montage_axis"]
+                and self.montage_columns == values["montage_columns"]
+                and self.montage_indices is None
+                and self.montage_text is None
+            ):
+                return self
+            return self._replace_validated(**values)
         axis = self._validate_axis(axis)
         return replace(
             self,
@@ -366,6 +389,13 @@ class ViewState:
         if index < 0 or index >= size:
             raise ValueError(f"slice index {index} is out of bounds for axis {axis} with size {size}")
         return index
+
+    def _replace_validated(self, **changes):
+        clone = object.__new__(type(self))
+        clone.__dict__.update(self.__dict__)
+        for name, value in changes.items():
+            object.__setattr__(clone, name, value)
+        return clone
 
     def _fallback_distinct_axis(self, axis):
         candidates = list(non_singleton_axes(self.shape)) + list(range(self.ndim))

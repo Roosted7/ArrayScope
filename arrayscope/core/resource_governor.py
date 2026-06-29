@@ -117,6 +117,8 @@ _PRESSURE_TELEMETRY_ONLY_CHANNELS = frozenset(
     {
         "montage_cold_commit",
         "montage_layout_commit",
+        "montage_level_evidence",
+        "montage_level_refinement",
         "montage_present_total",
         "montage_priority_retarget",
         "tile_layer_commit",

@@ -41,6 +41,17 @@ def test_generation_tracker_same_settled_target_is_noop():
     assert tracker.snapshot().settled is True
 
 
+def test_generation_tracker_treats_float_drift_as_same_target():
+    tracker = PresentationGenerationTracker()
+    assert tracker.begin_target((2.0, 4.0), active_tiles=(0, 1))
+    revision = tracker.revision
+    tracker.acknowledge_upserts(revision, (0, 1), levels=(2.0, 4.0))
+
+    assert tracker.begin_target((2.0 + 1e-13, 4.0 - 1e-13), active_tiles=(0, 1)) is False
+    assert tracker.revision == revision
+    assert tracker.snapshot().settled is True
+
+
 def test_generation_tracker_active_set_changes_recompute_scope():
     tracker = PresentationGenerationTracker()
     tracker.begin_target((2.0, 4.0), active_tiles=(0, 1))

@@ -37,8 +37,6 @@ def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=N
         document_key,
         scope_state,
         None if axis is None else int(axis),
-        None if all_indices is None else tuple(int(index) for index in all_indices),
-        None if colormap_lut is None else _lut_identity(colormap_lut),
     )
 
 
@@ -343,13 +341,23 @@ def _sparse_even_random_sample(finite: np.ndarray, *, limit: int) -> np.ndarray:
     if random_count:
         rng = np.random.default_rng(_sample_seed(values.size, limit))
         random_indices = rng.choice(values.size, size=min(random_count, values.size), replace=False)
-        indices = np.unique(np.concatenate((even_indices, random_indices)))
+        indices = _sorted_unique_indices(np.concatenate((even_indices, random_indices)))
     else:
-        indices = np.unique(even_indices)
+        indices = _sorted_unique_indices(even_indices)
     if indices.size < limit:
         filler = np.linspace(0, values.size - 1, limit, dtype=np.int64)
-        indices = np.unique(np.concatenate((indices, filler)))
-    return values[np.sort(indices)[:limit]]
+        indices = _sorted_unique_indices(np.concatenate((indices, filler)))
+    return values[indices[:limit]]
+
+
+def _sorted_unique_indices(indices: np.ndarray) -> np.ndarray:
+    sorted_indices = np.sort(np.asarray(indices, dtype=np.int64).reshape(-1))
+    if sorted_indices.size < 2:
+        return sorted_indices
+    keep = np.empty(sorted_indices.shape, dtype=bool)
+    keep[0] = True
+    keep[1:] = sorted_indices[1:] != sorted_indices[:-1]
+    return sorted_indices[keep]
 
 
 def _sample_seed(size: int, limit: int) -> int:
@@ -411,8 +419,3 @@ def _merge_incremental_samples(existing: np.ndarray, addition: np.ndarray, limit
         return existing[existing_indices].astype(np.float32, copy=False)
     addition_indices = np.linspace(0, addition.size - 1, keep_addition, dtype=np.int64)
     return np.concatenate((existing[existing_indices], addition[addition_indices])).astype(np.float32, copy=False)
-
-
-def _lut_identity(colormap_lut) -> tuple[object, ...]:
-    array = np.asarray(colormap_lut)
-    return (tuple(int(value) for value in array.shape), str(array.dtype), array.tobytes())

@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import replace
 from time import monotonic, perf_counter
+from types import SimpleNamespace
 
 import numpy as np
 import pyqtgraph.Qt as Qt
@@ -82,6 +83,9 @@ from arrayscope.window.display_presenter import tile_residency_budget_bytes
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
 MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
+MONTAGE_LEVEL_STATS_COMMIT_BATCH = 8
+MONTAGE_LEVEL_STATS_BACKGROUND_BATCH = 4
+MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS = 4.0
 
 
 class FrameRenderMixin:
@@ -533,7 +537,7 @@ class FrameRenderMixin:
             self._last_montage_initial_commit_ms = (perf_counter() - initial_commit_start) * 1000.0
         if session.is_complete():
             self._finish_montage_session_if_complete(session)
-            if defer_side_panels:
+            if defer_side_panels or _viewport_interaction_active(self):
                 self._deferred_side_panel_refresh_pending = True
             else:
                 self._update_operation_dock()
@@ -541,7 +545,7 @@ class FrameRenderMixin:
             return
         self.prefetch_evaluation_controller.cancel_prefetch()
         self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image frame")
-        if defer_side_panels:
+        if defer_side_panels or _viewport_interaction_active(self):
             self._deferred_side_panel_refresh_pending = True
         else:
             self._update_operation_dock()
@@ -862,23 +866,61 @@ class FrameRenderMixin:
             expected_indices = () if previous_stats is None else previous_stats.expected_indices
         tracker = self._montage_level_tracker()
         tracker.ensure_expected(level_key, expected_indices)
+        source_index = int(rendered.tile.source_index)
         level_stats = getattr(rendered, "level_stats", None)
+        existing_refined = tracker.has_source(level_key, source_index, refined=True)
+        existing_any = existing_refined or tracker.has_source(level_key, source_index)
+        if existing_refined or (
+            existing_any
+            and not bool(refined)
+            and (level_stats is None or not bool(getattr(level_stats, "refined", False)))
+        ):
+            return
         if level_stats is not None and not refined:
             tracker.update_from_stats(level_key, level_stats, aggregate=False)
             return
         level_data = getattr(rendered, "level_data", None)
         if level_data is not None and not refined:
-            stats = provisional_tile_level_stats(level_data, int(rendered.tile.source_index))
+            stats = provisional_tile_level_stats(level_data, source_index)
             if stats is not None:
                 tracker.update_from_stats(level_key, stats, aggregate=False)
                 return
         stats = sample_tile_level_stats(
             _montage_refined_level_values(rendered),
-            int(rendered.tile.source_index),
+            source_index,
             refined=bool(refined),
         )
         if stats is not None:
             tracker.update_from_stats(level_key, stats, aggregate=False)
+
+    def _update_montage_level_bounds_from_prepared(self, level_key, rendered, *, expected_indices=None, require_refined: bool = False) -> bool:
+        """Merge already-prepared level evidence without sampling source pixels."""
+
+        if expected_indices is None:
+            previous_stats = self._montage_level_tracker().stats_for(level_key)
+            expected_indices = () if previous_stats is None else previous_stats.expected_indices
+        tracker = self._montage_level_tracker()
+        tracker.ensure_expected(level_key, expected_indices)
+        source_index = int(rendered.tile.source_index)
+        if tracker.has_source(level_key, source_index, refined=bool(require_refined)):
+            return True
+        if require_refined and tracker.has_source(level_key, source_index):
+            return False
+        level_stats = getattr(rendered, "level_stats", None)
+        if level_stats is not None:
+            if require_refined and not bool(getattr(level_stats, "refined", False)):
+                return False
+            tracker.update_from_stats(level_key, level_stats, aggregate=False)
+            return True
+        if require_refined:
+            return False
+        level_data = getattr(rendered, "level_data", None)
+        if level_data is not None:
+            stats = provisional_tile_level_stats(level_data, source_index)
+            if stats is not None:
+                tracker.update_from_stats(level_key, stats, aggregate=False)
+                return True
+        return False
 
     def _queue_montage_level_refinement(self, session, rendered) -> None:
         tracker = self._montage_level_tracker()
@@ -939,7 +981,10 @@ class FrameRenderMixin:
         return tracker
 
     def _schedule_montage_cached_level_stats(self, session) -> None:
-        if not getattr(session, "pending_level_tiles", None):
+        if (
+            not getattr(session, "pending_level_tiles", None)
+            and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0
+        ):
             return
         timer = getattr(self, "_montage_level_stats_timer", None)
         if timer is None:
@@ -953,18 +998,7 @@ class FrameRenderMixin:
         if not timer.isActive():
             timer.start(0)
 
-    def _queue_montage_cached_level_stats(self, session, rendered_tiles, *, seed_if_empty: bool) -> None:
-        """Queue cached-payload statistics without scanning every tile inline.
-
-        Cache hits must make pixels available immediately.  Histogram sampling
-        is secondary UI work, so only one tile is allowed to seed a brand-new
-        semantic level scope before the first commit.  Remaining unseen sources
-        are processed in bounded timer slices.
-        """
-
-        tracker = self._montage_level_tracker()
-        expected = self._montage_level_expected_indices(session)
-        tracker.ensure_expected(session.level_key, expected)
+    def _pending_montage_level_sources(self, session):
         pending = getattr(session, "pending_level_tiles", None)
         if pending is None:
             pending = deque()
@@ -973,98 +1007,186 @@ class FrameRenderMixin:
         if queued_sources is None:
             queued_sources = {int(item.tile.source_index) for item in pending}
             session.pending_level_sources = queued_sources
-        unseen = []
-        for rendered in tuple(rendered_tiles or ()):
-            source_index = int(rendered.tile.source_index)
-            if source_index in queued_sources or tracker.has_source(session.level_key, source_index):
-                continue
-            unseen.append(rendered)
-            queued_sources.add(source_index)
+        return pending, queued_sources
 
-        summary = tracker.summary_for(session.level_key)
-        if seed_if_empty and unseen and (summary is None or not summary.source_indices):
-            seed = unseen.pop(0)
-            self._update_montage_level_bounds_from_rendered(
-                session.level_key,
-                seed,
-                expected_indices=expected,
-            )
-            self._queue_montage_level_refinement(session, seed)
-        pending.extend(unseen)
-        self._montage_pending_level_tiles_last_session = len(pending or ())
+    def _mark_montage_level_scan_pending(self, session) -> None:
+        tile_count = len(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        if tile_count <= 0:
+            return
+        if int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0:
+            session.level_scan_remaining_tiles = tile_count
 
-    def _ensure_montage_level_stats_for_payloads(self, session, payloads) -> int:
-        """Merge stats for every tile that is about to be visible.
+    def _queue_montage_cached_level_stats(self, session, rendered_tiles, *, seed_if_empty: bool) -> None:
+        """Admit cached-payload level work without making commit latency scale with tile count.
 
-        Detailed histogram curves may lag, but automatic window/level state must
-        already cover every payload in the same presentation commit.  This keeps
-        bright or high-dynamic-range tiles from being drawn with levels derived
-        from an earlier subset.
+        Prepared per-tile evidence can be merged immediately for a small,
+        bounded batch.  Anything requiring source-pixel sampling is queued for
+        the same timer-driven maintenance path used by later cached residents.
         """
 
         tracker = self._montage_level_tracker()
         expected = self._montage_level_expected_indices(session)
         tracker.ensure_expected(session.level_key, expected)
+        pending, queued_sources = self._pending_montage_level_sources(session)
+        require_refined = _montage_level_evidence_requires_refined(self, session)
+        summary = tracker.summary_for(session.level_key)
+        inspected = 0
+        seeded = bool(summary is not None and summary.source_indices)
+        for rendered in rendered_tiles or ():
+            if inspected >= MONTAGE_LEVEL_STATS_COMMIT_BATCH:
+                self._mark_montage_level_scan_pending(session)
+                break
+            inspected += 1
+            source_index = int(rendered.tile.source_index)
+            if source_index in queued_sources or tracker.has_source(session.level_key, source_index, refined=require_refined):
+                continue
+            if self._update_montage_level_bounds_from_prepared(
+                session.level_key,
+                rendered,
+                expected_indices=expected,
+                require_refined=require_refined,
+            ):
+                seeded = True
+                self._queue_montage_level_refinement(session, rendered)
+                continue
+            pending.append(rendered)
+            queued_sources.add(source_index)
+            if seed_if_empty and not seeded:
+                seeded = True
+        self._montage_pending_level_tiles_last_session = len(pending or ())
+
+    def _queue_montage_level_stats_for_payloads(self, session, payloads) -> int:
+        """Request level evidence for a presentation delta without scanning it inline."""
+
+        tracker = self._montage_level_tracker()
+        expected = self._montage_level_expected_indices(session)
+        tracker.ensure_expected(session.level_key, expected)
         stats_start = perf_counter()
-        added = 0
-        for tile_number in tuple(dict(payloads or {})):
+        merged = 0
+        inspected = 0
+        pending, queued_sources = self._pending_montage_level_sources(session)
+        require_refined = _montage_level_evidence_requires_refined(self, session)
+        for tile_number in payloads or ():
+            if inspected >= MONTAGE_LEVEL_STATS_COMMIT_BATCH:
+                self._mark_montage_level_scan_pending(session)
+                break
+            inspected += 1
             rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
             if rendered is None:
                 continue
             source_index = int(rendered.tile.source_index)
-            if tracker.has_source(session.level_key, source_index):
+            if tracker.has_source(session.level_key, source_index, refined=require_refined):
                 continue
-            self._update_montage_level_bounds_from_rendered(
+            if self._update_montage_level_bounds_from_prepared(
                 session.level_key,
                 rendered,
                 expected_indices=expected,
-            )
-            self._queue_montage_level_refinement(session, rendered)
-            added += 1
-            pending_sources = getattr(session, "pending_level_sources", None)
-            if pending_sources is not None:
-                pending_sources.discard(source_index)
+                require_refined=require_refined,
+            ):
+                self._queue_montage_level_refinement(session, rendered)
+                queued_sources.discard(source_index)
+                merged += 1
+            elif source_index not in queued_sources:
+                pending.append(rendered)
+                queued_sources.add(source_index)
         self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
-        self._montage_level_sources_added_last_commit = int(added)
+        self._montage_level_sources_added_last_commit = int(merged)
         self._montage_pending_level_tiles_last_session = len(getattr(session, "pending_level_tiles", ()) or ())
-        return int(added)
+        self._schedule_montage_cached_level_stats(session)
+        return int(merged)
+
+    def _scan_montage_level_stats_from_session(self, session, *, expected, stats_start: float, processed: int, budget: GuiCallbackBudget) -> int:
+        tile_count = len(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        remaining = int(getattr(session, "level_scan_remaining_tiles", 0) or 0)
+        if tile_count <= 0 or remaining <= 0:
+            session.level_scan_remaining_tiles = 0
+            return int(processed)
+        pending, queued_sources = self._pending_montage_level_sources(session)
+        tracker = self._montage_level_tracker()
+        require_refined = _montage_level_evidence_requires_refined(self, session)
+        cursor = int(getattr(session, "level_scan_cursor", 0) or 0) % tile_count
+        inspected = 0
+        while remaining > 0 and inspected < int(budget.item_cap):
+            rendered = getattr(session, "rendered_tiles", {}).get(cursor)
+            cursor = (cursor + 1) % tile_count
+            remaining -= 1
+            inspected += 1
+            if rendered is None:
+                continue
+            source_index = int(rendered.tile.source_index)
+            if source_index in queued_sources or tracker.has_source(session.level_key, source_index, refined=require_refined):
+                continue
+            if self._update_montage_level_bounds_from_prepared(
+                session.level_key,
+                rendered,
+                expected_indices=expected,
+                require_refined=require_refined,
+            ):
+                self._queue_montage_level_refinement(session, rendered)
+                processed += 1
+            else:
+                pending.append(rendered)
+                queued_sources.add(source_index)
+            budget.record_item(byte_count=_rendered_tile_nbytes(rendered))
+            if budget.should_yield():
+                break
+        session.level_scan_cursor = int(cursor)
+        session.level_scan_remaining_tiles = max(0, int(remaining))
+        return int(processed)
 
     def _process_montage_cached_level_stats(self) -> None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session.session_id, session.key):
             return
         pending = getattr(session, "pending_level_tiles", None)
-        if not pending:
+        if not pending and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0:
             return
+        budget = self._montage_callback_budget(
+            "montage_level_evidence",
+            interactive=_interactive_active(self),
+            work_class="semantic_level_evidence",
+            item_cap=MONTAGE_LEVEL_STATS_BACKGROUND_BATCH,
+            target_ms=MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS,
+        )
         stats_start = perf_counter()
         expected = self._montage_level_expected_indices(session)
+        require_refined = _montage_level_evidence_requires_refined(self, session)
         processed = 0
-        while pending and processed < 4:
+        while pending and processed < int(budget.item_cap):
             rendered = pending.popleft()
             source_index = int(rendered.tile.source_index)
             pending_sources = getattr(session, "pending_level_sources", None)
             if pending_sources is not None:
                 pending_sources.discard(source_index)
-            if not self._montage_level_tracker().has_source(session.level_key, source_index):
-                self._update_montage_level_bounds_from_rendered(session.level_key, rendered, expected_indices=expected)
+            if not self._montage_level_tracker().has_source(session.level_key, source_index, refined=require_refined):
+                self._update_montage_level_bounds_from_rendered(
+                    session.level_key,
+                    rendered,
+                    expected_indices=expected,
+                    refined=require_refined,
+                )
             self._queue_montage_level_refinement(session, rendered)
             processed += 1
-            if processed >= 1 and (perf_counter() - stats_start) * 1000.0 >= 4.0:
+            budget.record_item(byte_count=_rendered_tile_nbytes(rendered))
+            if budget.should_yield():
                 break
+        if not pending and not budget.should_yield():
+            processed = self._scan_montage_level_stats_from_session(
+                session,
+                expected=expected,
+                stats_start=stats_start,
+                processed=processed,
+                budget=budget,
+            )
         self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
         self._montage_pending_level_tiles_last_session = len(pending or ())
+        self._record_gui_budget(budget)
         # A histogram/level refinement is presentation metadata.  It must not
         # force a full tiled-payload refresh or replay stale removals after a
         # viewport change.  Normal display commits will publish richer sources;
         # when there is no visible upload backlog, a non-forced commit can
         # update uniforms/histogram without invalidating residency.
-        if (
-            processed
-            and session.display_committed
-            and not getattr(session, "dirty_payloads", ())
-            and not getattr(session, "pending_removals", ())
-            and getattr(session, "user_levels_override", None) is None
-        ):
+        if processed and not getattr(session, "dirty_payloads", ()) and not getattr(session, "pending_removals", ()):
             self._schedule_montage_presentation_commit(session, force=False)
         self._schedule_montage_cached_level_stats(session)
 
@@ -1074,7 +1196,7 @@ class FrameRenderMixin:
         pending = getattr(session, "pending_refined_level_tiles", None)
         if not pending:
             return
-        controller = getattr(self, "prefetch_evaluation_controller", None)
+        controller = getattr(self, "histogram_evaluation_controller", None)
         if controller is None:
             return
         scheduled = 0
@@ -1101,16 +1223,15 @@ class FrameRenderMixin:
             ):
                 self._on_montage_refined_level_stats_done(session_id, session_key, level_key, source_index, stats)
 
-            started = controller.start_prefetch(
+            started = controller.start_latest(
                 evaluate,
                 on_done=done,
                 key=key,
+                priority=EvalPriority.HISTOGRAM,
+                replace_group=f"montage_level_refinement:{source_index}",
                 memory_budget_bytes=self._memory_policy().display_cache_budget_bytes,
             )
-            if not getattr(started, "scheduled", False):
-                if str(getattr(started, "reason", "")) == "deduped":
-                    scheduled += 1
-                    continue
+            if started is None:
                 pending.appendleft(rendered)
                 break
             scheduled += 1
@@ -1507,7 +1628,7 @@ class FrameRenderMixin:
             if session.pending_tiles:
                 return self._schedule_next_montage_tile(session)
             if self._finish_montage_session_if_complete(session):
-                if getattr(session, "defer_side_panels", False):
+                if _should_defer_montage_side_panels(self, session):
                     self._deferred_side_panel_refresh_pending = True
                 else:
                     self._update_operation_dock()
@@ -1679,7 +1800,11 @@ class FrameRenderMixin:
                         )
                     else:
                         display_image = make_image_from_slab(slab, request, colormap_lut=session.colormap_lut)
-                    display_image = _attach_montage_tile_level_stats(display_image, tile)
+                    display_image = _attach_montage_tile_level_stats(
+                        display_image,
+                        tile,
+                        refined=not bool(getattr(session, "shader_display", False)),
+                    )
                     return EvaluationResult(
                         value=display_image,
                         eval_ms=(perf_counter() - start) * 1000.0,
@@ -1700,7 +1825,14 @@ class FrameRenderMixin:
                 stage_document_key=stage_document_key(session.document),
                 evaluation_context=context,
             )
-            result = replace(result, value=_attach_montage_tile_level_stats(result.value, tile))
+            result = replace(
+                result,
+                value=_attach_montage_tile_level_stats(
+                    result.value,
+                    tile,
+                    refined=not bool(getattr(session, "shader_display", False)),
+                ),
+            )
             return result
         finally:
             self._last_montage_tile_eval_ms = (perf_counter() - start) * 1000.0
@@ -2142,7 +2274,7 @@ class FrameRenderMixin:
                 self._retry_live_profile_after_montage_tile()
                 return
             level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
-            self._ensure_montage_level_stats_for_payloads(session, level_payloads)
+            self._queue_montage_level_stats_for_payloads(session, level_payloads)
             rendered_geometry = replace(
                 rendered_geometry,
                 montage_tile_states=session.ensure_tile_states(),
@@ -2151,6 +2283,11 @@ class FrameRenderMixin:
             level_stats = self._montage_level_stats_for_session(session)
             semantic_commit = bool(active_payloads)
             decision_force_auto = bool(explicit_auto and semantic_commit)
+            if _tile_layer_auto_levels_wait_for_complete_source(self, session, decision_force_auto, level_stats):
+                session.final_commit_pending = True
+                session.flush_pending = True
+                self._schedule_montage_cached_level_stats(session)
+                return
             publish_histogram_plot = _should_publish_montage_histogram_plot(
                 first_display_commit,
                 explicit_auto,
@@ -3356,12 +3493,33 @@ def _montage_refined_level_values(rendered) -> np.ndarray:
     return image
 
 
-def _attach_montage_tile_level_stats(display_image, tile):
+def _attach_montage_tile_level_stats(display_image, tile, *, refined: bool = False):
+    if getattr(display_image, "level_stats", None) is not None:
+        return display_image
     level_data = getattr(display_image, "level_data", None)
     if level_data is not None:
-        stats = provisional_tile_level_stats(level_data, int(tile.source_index))
+        stats = (
+            sample_tile_level_stats(level_data, int(tile.source_index), refined=True)
+            if refined
+            else provisional_tile_level_stats(level_data, int(tile.source_index))
+        )
         if stats is not None:
             return replace(display_image, level_stats=stats)
+    values = _montage_refined_level_values(
+        SimpleNamespace(
+            image=getattr(display_image, "data", None),
+            histogram_data=getattr(display_image, "histogram_data", None),
+            shader_mapping=getattr(display_image, "shader_mapping", None),
+            semantic_data=getattr(display_image, "semantic_data", None),
+        )
+    )
+    stats = (
+        sample_tile_level_stats(values, int(tile.source_index), refined=True)
+        if refined
+        else provisional_tile_level_stats(values, int(tile.source_index))
+    )
+    if stats is not None:
+        return replace(display_image, level_stats=stats)
     return display_image
 
 
@@ -3416,19 +3574,26 @@ def _persistent_tile_layer_fast_drain_enabled(window, session) -> bool:
         return False
     if not bool(getattr(session, "display_committed", False)):
         return False
-    return _persistent_tile_residency_backend(window, session)
+    return _persistent_gpu_tile_residency_backend(window, session)
 
 
 def _persistent_tile_residency_backend(window, session) -> bool:
     capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
+    return bool(capabilities.persistent_tile_residency)
+
+
+def _persistent_gpu_tile_residency_backend(window, session) -> bool:
+    capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
+    kind = str(getattr(capabilities, "tile_residency_kind", "none") or "none")
     return bool(
         capabilities.persistent_tile_residency
         and capabilities.shader_windowing
+        and kind in {"gpu_atlas", "none"}
     )
 
 
 def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
-    if not _persistent_tile_residency_backend(window, session):
+    if not _persistent_gpu_tile_residency_backend(window, session):
         return {}
     interactive = _interactive_active(window)
     decision = getattr(window, "_ui_work_decision", lambda *args, **kwargs: None)(
@@ -3474,7 +3639,7 @@ def _pyqtgraph_payload_upload_nbytes(payload) -> int:
 
 
 def _tile_layer_upsert_limits(window, session) -> dict[str, int]:
-    if _persistent_tile_residency_backend(window, session):
+    if _persistent_gpu_tile_residency_backend(window, session):
         return _persistent_tile_upsert_limits(window, session)
     capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
     if not (
@@ -3604,6 +3769,42 @@ def _interactive_active(window) -> bool:
     return bool(
         coordinator is not None and getattr(coordinator, "interactive_active", False)
         or _viewport_interaction_active(window)
+    )
+
+
+def _should_defer_montage_side_panels(window, session) -> bool:
+    return bool(getattr(session, "defer_side_panels", False) or _viewport_interaction_active(window))
+
+
+def _tile_layer_auto_levels_wait_for_complete_source(window, session, decision_force_auto: bool, level_stats) -> bool:
+    if not bool(decision_force_auto):
+        return False
+    if bool(image_view_backend_capabilities(window.img_view).shader_windowing):
+        return False
+    if level_stats is None:
+        return True
+    if level_stats.rank == LevelSourceRank.MONTAGE_SAMPLED_FULL:
+        return False
+    return bool(
+        getattr(session, "pending_tiles", None)
+        or getattr(session, "loading_tiles", None)
+        or getattr(session, "active_tile_requests", None)
+        or getattr(session, "pending_completed_tiles", None)
+        or getattr(session, "pending_level_tiles", None)
+        or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+    )
+
+
+def _montage_level_evidence_requires_refined(window, session) -> bool:
+    level_generation = getattr(session, "level_generation", None)
+    requested_levels = (
+        normalize_bounds(getattr(level_generation, "target_levels", None))
+        or normalize_bounds(getattr(session, "user_levels_override", None))
+    )
+    return bool(
+        requested_levels is None
+        and getattr(session, "force_auto", False)
+        and not image_view_backend_capabilities(window.img_view).shader_windowing
     )
 
 

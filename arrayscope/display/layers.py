@@ -48,6 +48,12 @@ class ViewLayerOwner:
         self._add_item(item, Z_TILE_IMAGE)
         self._tile_items[new_tile_number] = item
 
+    def unmap_tile_item(self, tile_number: int, item=None) -> None:
+        tile_number = int(tile_number)
+        existing = self._tile_items.get(tile_number)
+        if item is None or existing is item:
+            self._tile_items.pop(tile_number, None)
+
     def remove_tile_item(self, tile_number: int) -> None:
         item = self._tile_items.pop(int(tile_number), None)
         if item is not None:
@@ -79,7 +85,13 @@ class ViewLayerOwner:
         self._montage_overlay_item = item
 
     def _add_item(self, item, z_value: int) -> None:
-        item.setZValue(float(z_value))
+        z_value = float(z_value)
+        try:
+            current_z = float(item.zValue())
+        except Exception:
+            current_z = None
+        if current_z != z_value:
+            item.setZValue(z_value)
         if item.scene() is None:
             self.view.addItem(item)
 

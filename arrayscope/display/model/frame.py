@@ -39,6 +39,8 @@ class DisplayTilePayload:
     source_shape: tuple[int, int] | None = None
     lod: LodInfo | None = None
     shader_mapping: ShaderMapping | None = None
+    level_data: np.ndarray | None = None
+    level_stats: object | None = None
 
     def __post_init__(self) -> None:
         image = np.asarray(self.image)
@@ -75,6 +77,8 @@ class DisplayTilePayload:
         object.__setattr__(self, "source_shape", source_shape)
         if self.histogram_data is not None:
             object.__setattr__(self, "histogram_data", np.asarray(self.histogram_data))
+        if self.level_data is not None:
+            object.__setattr__(self, "level_data", np.asarray(self.level_data))
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -97,6 +101,14 @@ class DisplayTilePayload:
             and self.semantic_histogram_data is not self.semantic_data
         ):
             total += int(np.asarray(self.semantic_histogram_data).nbytes)
+        if (
+            self.level_data is not None
+            and self.level_data is not self.image
+            and self.level_data is not self.histogram_data
+            and self.level_data is not self.semantic_data
+            and self.level_data is not self.semantic_histogram_data
+        ):
+            total += int(np.asarray(self.level_data).nbytes)
         return total
 
 
@@ -159,17 +171,8 @@ class TileCommitReport:
 
     def accepted_upserts(self, delta: "TilePresentationDelta") -> set[int]:
         if self.committed_upserts is not None:
-            return {
-                int(tile)
-                for tile in self.committed_upserts
-                if int(tile) in dict(delta.upserts)
-            }
-        presented = set(int(tile) for tile in self.presented_tiles)
-        return {
-            int(tile)
-            for tile in dict(delta.upserts)
-            if int(tile) in presented
-        }
+            return set(self.committed_upserts.intersection(delta.upserts))
+        return set(self.presented_tiles.intersection(delta.upserts))
 
 
 @dataclass(frozen=True)

@@ -685,6 +685,7 @@ class ImageViewShell(QtWidgets.QWidget):
         montage_tile_source_ids: dict[int, object] | None = None,
         montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
         tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
         frame_plan=None,
     ) -> None:
         self._start_upload_timing("tile_layer")
@@ -713,6 +714,7 @@ class ImageViewShell(QtWidgets.QWidget):
                 montage_tile_source_ids=montage_tile_source_ids,
                 montage_tile_payloads=montage_tile_payloads,
                 tile_delta=tile_delta,
+                tile_residency_budget_bytes=tile_residency_budget_bytes,
                 frame_plan=frame_plan,
             )
             self._record_tile_layer_stats(stats)
@@ -792,9 +794,6 @@ class ImageViewShell(QtWidgets.QWidget):
             tile_state=tile_state,
             tile_delta=tile_delta,
         )
-        histogramData = _histogram_data_from_tile_payloads(tile_payloads)
-        if histogramPlotData is None:
-            histogramPlotData = histogramData
         stats = self._apply_tile_layer_presentation(
             placeholder,
             histogramData=None,
@@ -808,6 +807,7 @@ class ImageViewShell(QtWidgets.QWidget):
             montage_tile_source_ids=tile_source_ids,
             montage_tile_payloads=tile_payloads,
             tile_delta=tile_delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
             frame_plan=frame_plan,
         )
         return _tile_commit_report(tile_payloads, tile_delta, stats)
@@ -819,7 +819,7 @@ class ImageViewShell(QtWidgets.QWidget):
         tile_source_ids = {key: payload.source_id for key, payload in tile_payloads.items()}
         return placeholder, tile_payloads, dirty_tiles, tile_source_ids
 
-    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None, frame_plan=None) -> TileLayerUpdateStats:
+    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None, tile_residency_budget_bytes: int = 0, frame_plan=None) -> TileLayerUpdateStats:
         if self._montage_tile_layer is None:
             return TileLayerUpdateStats()
         if montage_tile_payloads is None or tile_delta is None:
@@ -834,8 +834,38 @@ class ImageViewShell(QtWidgets.QWidget):
             tile_source_ids=montage_tile_source_ids,
             tile_payloads=montage_tile_payloads,
             tile_delta=tile_delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
             frame_plan=frame_plan,
         )
+
+    def warmTiledResidency(
+        self,
+        *,
+        payloads,
+        geometry,
+        levels: tuple[float, float],
+        rgb_already_windowed: bool = False,
+        tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
+    ) -> TileLayerUpdateStats:
+        if self._montage_tile_layer is None:
+            return TileLayerUpdateStats()
+        self._start_upload_timing("tile_warm_residency")
+        try:
+            stats = self._montage_tile_layer.warm_payloads(
+                {int(key): value for key, value in dict(payloads or {}).items()},
+                geometry=geometry,
+                levels=levels,
+                rgb_already_windowed=rgb_already_windowed,
+                tile_residency_budget_bytes=tile_residency_budget_bytes,
+                tile_delta=tile_delta,
+                frame_plan=frame_plan,
+            )
+            self._record_tile_layer_stats(stats)
+            return stats
+        finally:
+            self._finish_upload_timing()
 
     def _record_tile_layer_stats(self, stats: TileLayerUpdateStats) -> None:
         timing = self._upload_timing
@@ -2606,22 +2636,6 @@ def _is_tiled_loading_only_commit(
         and histogramData is None
         and histogramPlotData is None
     )
-
-
-def _histogram_data_from_tile_payloads(payloads) -> np.ndarray | None:
-    parts = []
-    for payload in dict(payloads or {}).values():
-        source = getattr(payload, "semantic_histogram_data", None)
-        if source is None:
-            source = getattr(payload, "histogram_data", None)
-        if source is None:
-            continue
-        parts.append(np.asarray(source))
-    if not parts:
-        return None
-    if len(parts) == 1:
-        return parts[0]
-    return np.concatenate([np.ravel(part) for part in parts])
 
 
 def _point_inside_view_range(view_range, x: float, y: float) -> bool:
