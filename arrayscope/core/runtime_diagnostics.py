@@ -352,7 +352,7 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
     return (
         (
             "Bottleneck: "
-            f"{_bottleneck_text(snapshot)}"
+            f"{runtime_bottleneck_text(snapshot)}"
         ),
         (
             "Feedback: "
@@ -556,8 +556,10 @@ def _feedback_channel_line(channel) -> str:
     )
 
 
-def _bottleneck_text(snapshot: WindowRuntimeDiagnostics) -> str:
-    active_work = _has_live_work(snapshot)
+def runtime_bottleneck_text(snapshot: WindowRuntimeDiagnostics) -> str:
+    """Return the current bottleneck cause from live work, not old timings."""
+
+    active_work = runtime_has_live_work(snapshot)
     governor = snapshot.resource_governor
     if active_work and governor is not None:
         if governor.pressure.ui_pressure in {ResourcePressure.ELEVATED, ResourcePressure.HIGH}:
@@ -573,7 +575,19 @@ def _bottleneck_text(snapshot: WindowRuntimeDiagnostics) -> str:
     return "idle"
 
 
-def _has_live_work(snapshot: WindowRuntimeDiagnostics) -> bool:
+def runtime_has_live_work(snapshot: WindowRuntimeDiagnostics) -> bool:
+    """Return whether the snapshot contains work that can still change the view."""
+
+    coalescer = snapshot.render_coalescer
+    if bool(getattr(coalescer, "pending", False)):
+        return True
+    work_graph = getattr(snapshot, "work_graph", None)
+    if work_graph is not None and (
+        int(getattr(work_graph, "active", 0) or 0)
+        or int(getattr(work_graph, "queued", 0) or 0)
+        or int(getattr(work_graph, "visible_backlog", 0) or 0)
+    ):
+        return True
     if any(
         int(getattr(scheduler, name, 0) or 0)
         for scheduler in tuple(snapshot.schedulers or ())

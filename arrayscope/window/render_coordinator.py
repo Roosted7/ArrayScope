@@ -79,18 +79,21 @@ class RenderCoordinator(Qt.QtCore.QObject):
         if interactive:
             self._interactive_active = True
             cache_hit = self._interactive_cache_hit()
+            supersedes_presentation = False if cache_hit else self._interactive_render_supersedes_presentation(reason)
             if self._presentation_draw_pending():
                 self.presentation_backpressure_skips += 1
-                if not cache_hit:
-                    self._window._cancel_render_dependent_work_for_interactive_change()
-                self._quiet_timer.start(self._quiet_interval_ms)
-                return
+                if cache_hit or not supersedes_presentation:
+                    self._quiet_timer.start(self._quiet_interval_ms)
+                    return
             if not cache_hit:
                 self._window._cancel_render_dependent_work_for_interactive_change()
             self._quiet_timer.start(self._quiet_interval_ms)
             if cache_hit:
                 self.immediate_cache_flushes += 1
                 self._render_timer.start(0)
+            elif supersedes_presentation:
+                self._render_timer.stop()
+                self._flush_timer()
             elif not self._render_timer.isActive():
                 self._render_timer.start(self._interactive_interval_ms)
             return
@@ -112,6 +115,15 @@ class RenderCoordinator(Qt.QtCore.QObject):
             return False
         try:
             return bool(predicate())
+        except Exception:
+            return False
+
+    def _interactive_render_supersedes_presentation(self, reason: str) -> bool:
+        predicate = getattr(self._window, "_interactive_render_supersedes_presentation", None)
+        if not callable(predicate):
+            return False
+        try:
+            return bool(predicate(reason=reason))
         except Exception:
             return False
 
@@ -169,8 +181,11 @@ class RenderCoordinator(Qt.QtCore.QObject):
             return
         if self.has_pending_render:
             if self._presentation_draw_pending():
-                self._quiet_timer.start(self._busy_retry_ms)
-                return
+                request = self._pending_request
+                reason = "" if request is None else request.reason
+                if self._interactive_cache_hit() or not self._interactive_render_supersedes_presentation(reason):
+                    self._quiet_timer.start(self._busy_retry_ms)
+                    return
             self.immediate_cache_flushes += 1
             self._render_timer.start(0)
             return

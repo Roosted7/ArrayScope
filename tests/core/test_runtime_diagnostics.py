@@ -343,3 +343,26 @@ def test_runtime_bottleneck_ignores_stale_ui_pressure_when_idle():
     sections = format_runtime_diagnostics_sections(snapshot)
 
     assert "Bottleneck: idle" in sections["Realtime"]
+
+
+def test_runtime_bottleneck_ignores_stale_rgb_timing_when_idle():
+    snapshot = replace(
+        _snapshot(),
+        montage_timing=MontageTimingDiagnostics(tile_layer_rgb_window_tiles=7),
+    )
+
+    sections = format_runtime_diagnostics_sections(snapshot)
+
+    assert "Bottleneck: idle" in sections["Realtime"]
+
+
+def test_runtime_bottleneck_reports_rgb_only_for_live_presentation_work():
+    snapshot = replace(
+        _snapshot(),
+        montage=replace(_snapshot().montage, pending_payload_upserts=3),
+        montage_timing=MontageTimingDiagnostics(tile_layer_rgb_window_tiles=7),
+    )
+
+    sections = format_runtime_diagnostics_sections(snapshot)
+
+    assert "Bottleneck: RGB window/upload" in sections["Realtime"]

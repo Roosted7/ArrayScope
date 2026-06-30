@@ -129,8 +129,7 @@ def test_compact_overview_bottleneck_ignores_stale_ui_pressure_when_idle():
         ResourcePressure,
         ResourcePressureState,
     )
-    from arrayscope.core.runtime_diagnostics import MontageTimingDiagnostics
-    from arrayscope.ui.diagnostics import _overview_bottleneck
+    from arrayscope.core.runtime_diagnostics import MontageTimingDiagnostics, runtime_bottleneck_text
     from tests.core.test_runtime_diagnostics import _snapshot
 
     snapshot = replace(
@@ -141,7 +140,21 @@ def test_compact_overview_bottleneck_ignores_stale_ui_pressure_when_idle():
         ),
     )
 
-    assert _overview_bottleneck(snapshot) == "idle"
+    assert runtime_bottleneck_text(snapshot) == "idle"
+
+
+def test_compact_overview_bottleneck_ignores_stale_rgb_timing_when_idle():
+    from dataclasses import replace
+
+    from arrayscope.core.runtime_diagnostics import MontageTimingDiagnostics, runtime_bottleneck_text
+    from tests.core.test_runtime_diagnostics import _snapshot
+
+    snapshot = replace(
+        _snapshot(),
+        montage_timing=MontageTimingDiagnostics(tile_layer_rgb_window_tiles=5),
+    )
+
+    assert runtime_bottleneck_text(snapshot) == "idle"
 
 
 def test_diagnostics_reports_actual_image_backend_separately_from_setting(qtbot):

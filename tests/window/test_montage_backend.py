@@ -1680,6 +1680,58 @@ def test_montage_commit_token_ignores_viewport_only_revision_changes():
     assert _montage_work_token(session, "priority_retarget") != priority_token
 
 
+def test_interactive_cache_hit_requires_committed_semantic_montage_mapping():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.operations.evaluator import _document_key
+    from arrayscope.operations.pipeline import ArrayDocument
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class Evaluator:
+        def cached_montage_tile(self, *_args, **_kwargs):
+            return object()
+
+    class Window(FrameRenderMixin):
+        def __init__(self, document, state, viewport_plan):
+            self.document = document
+            self.view_state = state
+            self._viewport_plan = viewport_plan
+            self.operation_evaluator = Evaluator()
+            self.img_view = SimpleNamespace(
+                rendering_capabilities=ImageViewBackendCapabilities(
+                    name="pyqtgraph",
+                    persistent_tile_residency=True,
+                    shader_windowing=False,
+                )
+            )
+
+        def _montage_viewport_plan(self, view_state, *, view_range=None):
+            return self._viewport_plan
+
+        def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
+            return None
+
+    document = ArrayDocument(np.zeros((2, 2, 6), dtype=np.float32))
+    old_state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
+    new_state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=2, indices=(1, 2), text="1:3")
+    old_plan = make_montage_plan(old_state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
+    new_plan = make_montage_plan(new_state, axis=2, indices=(1, 2), tile_shape=(2, 2), columns=2)
+    old_viewport = MontageViewportPlan(2, (0, 1), (4, 8), (2, 2), old_plan, ((0.0, 4.0), (0.0, 2.0)), False, True)
+    new_viewport = MontageViewportPlan(2, (1, 2), (4, 8), (2, 2), new_plan, ((0.0, 4.0), (0.0, 2.0)), False, True)
+    old_key = montage_session_key(_document_key(document), old_state, old_viewport, None)
+    new_key = montage_session_key(_document_key(document), new_state, new_viewport, None)
+
+    win = Window(document, new_state, new_viewport)
+    win._committed_display_frame = SimpleNamespace(key=SimpleNamespace(request_key=old_key))
+
+    assert old_key != new_key
+    assert win._interactive_frame_cache_hit() is False
+
+    win._committed_display_frame = SimpleNamespace(key=SimpleNamespace(request_key=new_key))
+
+    assert win._interactive_frame_cache_hit() is True
+
+
 def test_montage_viewport_update_token_tracks_viewport_revision():
     from arrayscope.window.frame_renderer import _montage_work_token
 

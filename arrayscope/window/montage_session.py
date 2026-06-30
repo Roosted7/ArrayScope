@@ -406,9 +406,9 @@ class MontageRenderSession:
         self.active_tile_requests.discard(index)
         self.skipped_tiles.discard(index)
         self.discard_pending_tile(index)
-        if index not in self.presented_tiles:
-            self.loading_tiles.add(index)
-            self.mark_tile_state(rendered.tile, MontageTileState.LOADING)
+        self.presented_tiles.discard(index)
+        self.loading_tiles.add(index)
+        self.mark_tile_state(rendered.tile, MontageTileState.LOADING)
 
     def mark_presented(self, tile_numbers) -> None:
         for tile_number in tuple(tile_numbers or ()):
@@ -923,6 +923,14 @@ class MontageRenderSession:
             or self.pending_removals
             or self.has_pending_level_update()
         )
+
+    def visible_plan_complete(self) -> bool:
+        required = set(int(tile) for tile in self.visible_tile_numbers) - set(int(tile) for tile in self.skipped_tiles)
+        if not required:
+            return True
+        if self.has_stale_level_presentations():
+            return False
+        return required.issubset(set(int(tile) for tile in self.presented_tiles))
 
     def has_stale_level_presentations(self) -> bool:
         snapshot = self.level_presentation_snapshot()

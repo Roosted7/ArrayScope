@@ -276,7 +276,7 @@ def test_cached_interactive_render_skips_intermediate_requests_until_draw_comple
     assert [call["reason"] for call in win.rendered] == ["slice-3"]
 
 
-def test_uncached_interactive_render_also_waits_for_draw_slot(qtbot):
+def test_uncached_interactive_render_supersedes_pending_draw(qtbot):
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.window.render_coordinator import RenderCoordinator
@@ -302,6 +302,9 @@ def test_uncached_interactive_render_also_waits_for_draw_slot(qtbot):
         def _interactive_frame_cache_hit(self):
             return False
 
+        def _interactive_render_supersedes_presentation(self, *, reason):
+            return True
+
         def _cancel_render_dependent_work_for_interactive_change(self):
             self.cancelled += 1
 
@@ -311,17 +314,11 @@ def test_uncached_interactive_render_also_waits_for_draw_slot(qtbot):
     win = DummyWindow()
     win.render_coordinator.request(reason="slice-1", interactive=True)
     win.render_coordinator.request(reason="slice-2", interactive=True)
-    _process_events(qtbot, count=3)
+    qtbot.waitUntil(lambda: len(win.rendered) == 2, timeout=250)
 
-    assert win.rendered == []
     assert win.cancelled == 2
     assert win.render_coordinator.presentation_backpressure_skips == 2
-
-    win.img_view.pending = False
-    win.img_view.presentationDrawn.emit()
-    qtbot.waitUntil(lambda: bool(win.rendered), timeout=250)
-
-    assert [call["reason"] for call in win.rendered] == ["slice-2"]
+    assert [call["reason"] for call in win.rendered] == ["slice-1", "slice-2"]
 
 
 def test_quiet_timer_flushes_pending_render_if_draw_signal_was_missed(qtbot):

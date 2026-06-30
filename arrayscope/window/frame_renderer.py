@@ -93,12 +93,24 @@ class FrameRenderMixin:
         view_state = getattr(self, "view_state", None)
         if view_state is None or view_state.image_axes is None:
             return False
+        if view_state.montage_axis is None:
+            return False
         evaluator = getattr(self, "operation_evaluator", None)
         if evaluator is None:
             return False
         shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
         colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
         viewport_plan = self._montage_viewport_plan(view_state)
+        expected_key = montage_session_key(
+            _document_key(self.document),
+            view_state,
+            viewport_plan,
+            colormap_lut,
+        )
+        frame = getattr(self, "_committed_display_frame", None)
+        frame_key = None if frame is None else getattr(frame, "key", None)
+        if getattr(frame_key, "request_key", None) != expected_key:
+            return False
         for tile in viewport_plan.candidate_tiles(margin_tiles=0):
             if (
                 evaluator.cached_montage_tile(
@@ -113,6 +125,26 @@ class FrameRenderMixin:
             ):
                 return False
         return True
+
+    def _interactive_render_supersedes_presentation(self, *, reason: str) -> bool:
+        view_state = getattr(self, "view_state", None)
+        if view_state is None or view_state.image_axes is None or view_state.montage_axis is None:
+            return False
+        frame = getattr(self, "_committed_display_frame", None)
+        frame_key = None if frame is None else getattr(frame, "key", None)
+        return getattr(frame_key, "request_key", None) != self._montage_session_key_for_view(view_state)
+
+    def _montage_session_key_for_view(self, view_state):
+        capabilities = image_view_backend_capabilities(self.img_view)
+        shader_display = bool(capabilities.shader_windowing)
+        colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
+        viewport_plan = self._montage_viewport_plan(view_state)
+        return montage_session_key(
+            _document_key(self.document),
+            view_state,
+            viewport_plan,
+            colormap_lut,
+        )
 
     def _montage_frame_planner(self) -> FramePlanner:
         provider = getattr(self, "_frame_planner", None)
@@ -539,13 +571,16 @@ class FrameRenderMixin:
                 self._update_operation_dock()
             self._schedule_montage_cached_level_stats(session)
             return
+        visible_complete = self._settle_montage_visible_plan_if_complete(session)
         self.prefetch_evaluation_controller.cancel_prefetch()
-        self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image frame")
+        if not visible_complete:
+            self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image frame")
         if defer_side_panels or _viewport_interaction_active(self):
             self._deferred_side_panel_refresh_pending = True
         else:
             self._update_operation_dock()
-        self._schedule_montage_session_slow_overlay(session)
+        if not visible_complete:
+            self._schedule_montage_session_slow_overlay(session)
         self._schedule_montage_cached_level_stats(session)
         self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
         self._schedule_montage_attached_stage_waits(session)
@@ -1881,12 +1916,16 @@ class FrameRenderMixin:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, key):
             return
+        if session.visible_plan_complete():
+            return
         if not session.pending_tiles and not session.loading_tiles and not session.stage_fan_in.attached_requests:
             return
         self._show_montage_session_loading_overlay(session)
 
     def _show_montage_session_loading_overlay(self, session):
         if not self._is_current_montage_session(session.session_id, session.key):
+            return
+        if session.visible_plan_complete():
             return
         session.show_loading_overlays = True
         self._schedule_montage_presentation_commit(session, force=True)
@@ -2177,6 +2216,7 @@ class FrameRenderMixin:
         self._commit_montage_session_presentation(session, force=False)
         if (
             getattr(session, "show_loading_overlays", False)
+            and not session.visible_plan_complete()
             and (session.pending_tiles or session.loading_tiles or session.active_tile_requests or session.stage_fan_in.attached_requests)
         ):
             self.img_view.setImageStale(True)
@@ -2272,6 +2312,7 @@ class FrameRenderMixin:
                 session.flush_pending = False
                 self._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
                 session.note_committed()
+                self._settle_montage_visible_plan_if_complete(session)
                 self._finish_montage_session_if_complete(session)
                 if not (getattr(session, "dirty_payloads", None) or getattr(session, "pending_removals", None)):
                     schedule_near_viewport_montage_prefetch(self, session)
@@ -2504,6 +2545,7 @@ class FrameRenderMixin:
         self._notify_file_session_montage_committed()
         if upload_backlog:
             self._schedule_montage_ready_display_commit(session)
+        self._settle_montage_visible_plan_if_complete(session)
         self._finish_montage_session_if_complete(session)
         if not upload_backlog:
             schedule_near_viewport_montage_prefetch(self, session)
@@ -2664,6 +2706,15 @@ class FrameRenderMixin:
             return False
         if not session.is_complete():
             return False
+        self._settle_montage_visible_plan_if_complete(session)
+        self._schedule_montage_refined_level_stats(session)
+        return True
+
+    def _settle_montage_visible_plan_if_complete(self, session) -> bool:
+        if not self._is_current_montage_session(session.session_id, session.key):
+            return False
+        if not session.visible_plan_complete():
+            return False
         session.show_loading_overlays = False
         self._stop_montage_session_slow_overlay()
         self.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Image frame ready")
@@ -2671,7 +2722,6 @@ class FrameRenderMixin:
         self.img_view.setEvaluationOverlay(False)
         if hasattr(self.img_view, "clearMontageTileOverlays"):
             self.img_view.clearMontageTileOverlays()
-        self._schedule_montage_refined_level_stats(session)
         return True
 
     def _sync_committed_montage_geometry(self, geometry, *, semantic_commit: bool = True) -> None:

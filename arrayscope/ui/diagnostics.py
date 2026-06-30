@@ -11,7 +11,11 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.core.memory_budget import format_bytes
-from arrayscope.core.runtime_diagnostics import format_runtime_diagnostics, format_runtime_diagnostics_sections
+from arrayscope.core.runtime_diagnostics import (
+    format_runtime_diagnostics,
+    format_runtime_diagnostics_sections,
+    runtime_bottleneck_text,
+)
 from arrayscope.ui.file_dialogs import get_save_file_name
 from arrayscope.ui.diagnostics_logging import DiagnosticsJsonlLogger, default_diagnostics_log_path
 
@@ -317,7 +321,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
 
     def _update_overview(self, snapshot) -> None:
         self._overview_labels["status"].setText(
-            f"{_overview_state(snapshot)} | {_overview_bottleneck(snapshot)} | {_feedback_summary(snapshot)}"
+            f"{_overview_state(snapshot)} | {runtime_bottleneck_text(snapshot)} | {_feedback_summary(snapshot)}"
         )
         self._overview_labels["ops"].setText(_ops_overview(snapshot))
         self._overview_labels["tiles"].setText(_drawn_tiles_overview(snapshot))
@@ -628,46 +632,6 @@ def _worker_segments(schedulers) -> tuple[tuple[str, int, str], ...]:
         if active:
             segments.append((scheduler.name, active, color))
     return tuple(segments)
-
-
-def _overview_bottleneck(snapshot) -> str:
-    governor = snapshot.resource_governor
-    active_work = _overview_has_live_work(snapshot)
-    if active_work and governor is not None and governor.pressure.ui_pressure.value in {"elevated", "high"}:
-        return "UI fan-in"
-    if active_work and governor is not None and governor.pressure.memory_pressure.value in {"elevated", "high"}:
-        return "memory"
-    if snapshot.montage.active and snapshot.montage.tile_compute_waiting_for_stage:
-        return "stage compute"
-    if snapshot.montage.pending_tiles:
-        return "tile compute"
-    if snapshot.montage_timing.tile_layer_rgb_window_tiles:
-        return "RGB/window upload"
-    return "idle"
-
-
-def _overview_has_live_work(snapshot) -> bool:
-    if any(
-        int(getattr(scheduler, name, 0) or 0)
-        for scheduler in tuple(snapshot.schedulers or ())
-        for name in ("pending", "running", "queued")
-    ):
-        return True
-    montage = snapshot.montage
-    return bool(
-        int(getattr(montage, "pending_tiles", 0) or 0)
-        or int(getattr(montage, "pending_completed_tiles", 0) or 0)
-        or int(getattr(montage, "pending_payload_upserts", 0) or 0)
-        or int(getattr(montage, "pending_removals", 0) or 0)
-        or int(getattr(montage, "loading_tiles", 0) or 0)
-        or int(getattr(montage, "pending_level_tiles", 0) or 0)
-        or int(getattr(montage, "level_scan_remaining_tiles", 0) or 0)
-        or int(getattr(montage, "attached_stage_requests", 0) or 0)
-        or int(getattr(montage, "waiting_stage_requests", 0) or 0)
-        or bool(getattr(montage, "final_commit_pending", False))
-        or bool(getattr(montage, "flush_pending", False))
-        or bool(getattr(montage, "tile_presentation_draw_pending", False))
-    )
 
 
 def _active_work_summary(schedulers) -> str:

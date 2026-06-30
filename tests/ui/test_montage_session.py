@@ -310,6 +310,64 @@ def test_montage_render_session_dirty_payloads_keep_session_incomplete_until_ack
     assert session.is_complete()
 
 
+def test_montage_render_session_visible_plan_ignores_deferred_offscreen_work():
+    session = _session()
+    session.pending_tiles.clear()
+    session.loading_tiles.clear()
+    session.visible_tiles = (session.plan.tiles[0],)
+    session.visible_tile_numbers = frozenset({0})
+    session.presented_tiles = {0}
+    session.pending_tiles.append(session.plan.tiles[2])
+    session.loading_tiles.add(3)
+
+    assert session.visible_plan_complete()
+    assert not session.is_complete()
+
+
+def test_montage_render_session_visible_plan_tracks_visible_work_only():
+    session = _session()
+    session.pending_tiles.clear()
+    session.loading_tiles.clear()
+    session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
+    session.visible_tile_numbers = frozenset({0, 1})
+    session.presented_tiles = {0}
+
+    assert not session.visible_plan_complete()
+
+    session.pending_tiles.append(session.plan.tiles[1])
+    assert not session.visible_plan_complete()
+    session.pending_tiles.discard(1)
+    session.loading_tiles.add(1)
+    assert not session.visible_plan_complete()
+    session.loading_tiles.clear()
+    session.presented_tiles.add(1)
+
+    assert session.visible_plan_complete()
+
+
+def test_montage_render_session_replacement_materialization_reopens_visible_plan():
+    session = _session()
+    session.pending_tiles.clear()
+    session.loading_tiles.clear()
+    session.visible_tiles = (session.plan.tiles[0],)
+    session.visible_tile_numbers = frozenset({0})
+    session.presented_tiles = {0}
+
+    session.mark_materialized(
+        RenderedTile(
+            session.plan.tiles[0],
+            np.ones((2, 2), dtype=np.float32),
+            np.ones((2, 2), dtype=np.float32),
+            0.0,
+            (2, 2),
+            16,
+        )
+    )
+
+    assert 0 not in session.presented_tiles
+    assert not session.visible_plan_complete()
+
+
 def test_montage_render_session_delta_carries_near_sources_without_payloads():
     session = _session()
     tile = session.plan.tiles[0]
