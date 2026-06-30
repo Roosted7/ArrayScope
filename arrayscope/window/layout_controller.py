@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.core.view_session import ViewportSession, viewport_from_mapping, viewport_to_mapping
 from arrayscope.window.canvas_preserve import CanvasPreserveController
 from arrayscope.window.panels import PanelLocation
 
@@ -30,44 +31,39 @@ class WindowLayoutManager:
     def restore_window_settings(
         self,
         *,
-        initial_window_size=None,
-        initial_viewport_shape=None,
+        initial_viewport: ViewportSession | None = None,
         defer_progressive_docks: bool = False,
     ):
         win = self.window
-        geometry = win._settings.value("geometry")
-        if geometry is not None:
-            win.restoreGeometry(geometry)
         state = win._settings.value("window_state")
         if state is not None:
             win.restoreState(state)
         self._hide_managed_docks_after_state_restore()
         self._reset_session_dock_visibility_preferences()
-        if initial_window_size is not None:
-            self.resize_to_dockless_window_size(initial_window_size)
-        elif initial_viewport_shape is not None:
-            self.resize_to_dockless_viewport_shape(initial_viewport_shape)
-        else:
-            self._restore_saved_base_window_size()
+        viewport = initial_viewport if initial_viewport is not None else self._saved_viewport_session()
+        if viewport is not None:
+            self._begin_settings_viewport_continuity(viewport)
+            self._restore_viewport_continuity_shape()
         if not win.profile_dock.isVisible() and win.data.ndim == 1:
             self.set_managed_dock_visible(win.profile_dock, True, reason="restore-one-dimensional", preserve_canvas=False)
         if not defer_progressive_docks:
             self.sync_progressive_docks(preserve_canvas=False)
             # Qt event-turn barrier. Dock sizes are applied after Qt has
-            # accepted restored visibility/state.
-            Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
+            # accepted restored visibility/state, then the viewport shape is
+            # restored again as the final size owner.
+            def settle_docks_and_viewport(viewport=viewport):
+                self.resize_default_docks()
+                if viewport is not None:
+                    self._restore_viewport_continuity_shape()
+
+            Qt.QtCore.QTimer.singleShot(0, settle_docks_and_viewport)
 
     def save_window_settings(self):
         win = self.window
-        win._settings.setValue("geometry", win.saveGeometry())
         win._settings.setValue("window_state", win.saveState())
-        win._settings.setValue("window_base_size", self._window_size_excluding_docked_panels())
-
-    def window_size_for_file_session(self) -> tuple[int, int] | None:
-        size = self._window_size_excluding_docked_panels()
-        if size is None or not size.isValid() or size.isEmpty():
-            return None
-        return (int(size.width()), int(size.height()))
+        viewport = self._current_viewport_session()
+        if viewport is not None:
+            win._settings.setValue("viewport_session", viewport_to_mapping(viewport))
 
     def _reset_session_dock_visibility_preferences(self):
         win = self.window
@@ -251,9 +247,9 @@ class WindowLayoutManager:
             transition_name="show-docked" if visible else "hide-docked",
         )
         self.schedule_view_geometry_refresh()
-        restore_viewport_shape = getattr(win, "_restore_file_session_viewport_shape_after_show", None)
-        locked_restore_range = getattr(win, "_file_session_restore_locked_view_range", lambda: None)
-        if callable(restore_viewport_shape) and callable(locked_restore_range) and locked_restore_range() is not None:
+        restore_viewport_shape = getattr(win, "_restore_viewport_continuity_shape_after_layout", None)
+        restore_shape = getattr(win, "_viewport_continuity_shape_target", lambda: None)
+        if callable(restore_viewport_shape) and callable(restore_shape) and restore_shape() is not None:
             # Qt event-turn barrier. A restored file viewport shape follows the
             # dock visibility transition that changed the central viewport.
             Qt.QtCore.QTimer.singleShot(0, restore_viewport_shape)
@@ -431,40 +427,56 @@ class WindowLayoutManager:
             max(int(minimum.height()), int(size.height()) - int(height_delta)),
         )
 
-    def _restore_saved_base_window_size(self):
-        win = self.window
-        if win.isMaximized() or win.isFullScreen():
+    def _restore_saved_viewport_session(self):
+        viewport = self._saved_viewport_session()
+        if viewport is None:
             return
-        size = self._settings_size("window_base_size")
-        if size is None or not size.isValid() or size.isEmpty():
-            return
-        minimum = self._dockless_minimum_window_size()
-        target = Qt.QtCore.QSize(
-            max(int(minimum.width()), int(size.width())),
-            max(int(minimum.height()), int(size.height())),
-        )
-        if target != win.size():
-            win.resize(target)
+        self._begin_settings_viewport_continuity(viewport)
+        self._restore_viewport_continuity_shape()
 
-    def resize_to_dockless_window_size(self, size) -> bool:
-        win = self.window
-        if win.isMaximized() or win.isFullScreen():
-            return False
-        self.canvas_preserver.cancel()
+    def _saved_viewport_session(self) -> ViewportSession | None:
+        value = self.window._settings.value("viewport_session")
+        if value is None:
+            return None
         try:
-            target_width = max(1, int(size[0]))
-            target_height = max(1, int(size[1]))
+            return viewport_from_mapping(value)
         except Exception:
-            return False
-        width_delta, height_delta = self._visible_docked_panel_deltas()
-        minimum = win.minimumSize()
-        new_width = max(int(minimum.width()), int(target_width) + int(width_delta))
-        new_height = max(int(minimum.height()), int(target_height) + int(height_delta))
-        if new_width == win.width() and new_height == win.height():
-            return False
-        win.resize(new_width, new_height)
-        self.refresh_view_geometry()
-        return True
+            return None
+
+    def _begin_settings_viewport_continuity(self, viewport: ViewportSession) -> None:
+        begin = getattr(self.window, "_begin_viewport_continuity", None)
+        if not callable(begin):
+            return
+        viewport_shape = viewport.viewport_shape
+        if viewport_shape is None:
+            return
+        current = getattr(self.window, "_viewport_continuity_transaction", lambda: None)()
+        if (
+            current is not None
+            and not current.released
+            and current.viewport_shape is not None
+            and tuple(current.viewport_shape) == tuple(max(1, int(value)) for value in tuple(viewport_shape)[:2])
+        ):
+            return
+        begin(
+            reason="settings-restore",
+            viewport=viewport,
+            message_enabled=False,
+        )
+
+    def _restore_viewport_continuity_shape(self) -> None:
+        restore_viewport_shape = getattr(self.window, "_restore_viewport_continuity_shape_after_layout", None)
+        if callable(restore_viewport_shape):
+            restore_viewport_shape()
+
+    def _viewport_shape_matches(self, viewport_shape) -> bool:
+        try:
+            target_height = max(1, int(viewport_shape[0]))
+            target_width = max(1, int(viewport_shape[1]))
+            size = self.window.img_view.graphicsView.viewport().size()
+            return abs(int(size.height()) - target_height) <= 1 and abs(int(size.width()) - target_width) <= 1
+        except Exception:
+            return True
 
     def _visible_docked_panel_deltas(self) -> tuple[int, int]:
         width_delta = 0
@@ -532,18 +544,11 @@ class WindowLayoutManager:
             minimum = minimum.expandedTo(central.minimumSizeHint()).expandedTo(central.minimumSize())
         return minimum
 
-    def _settings_size(self, key):
-        value = self.window._settings.value(key)
-        if value is None:
+    def _current_viewport_session(self) -> ViewportSession | None:
+        current = getattr(self.window, "_current_viewport_session", None)
+        if not callable(current):
             return None
-        if isinstance(value, Qt.QtCore.QSize):
-            return Qt.QtCore.QSize(value)
-        if isinstance(value, (tuple, list)) and len(value) == 2:
-            try:
-                return Qt.QtCore.QSize(int(value[0]), int(value[1]))
-            except Exception:
-                return None
-        return None
+        return current()
 
     def _restore_visible_dock_extents(self, dock_extents) -> None:
         for orientation in (Qt.QtCore.Qt.Orientation.Horizontal, Qt.QtCore.Qt.Orientation.Vertical):

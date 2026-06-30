@@ -169,7 +169,7 @@ class DisplayPresentationMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
-                apply_restored_viewport = getattr(self, "_apply_file_session_viewport_when_ready", None)
+                apply_restored_viewport = getattr(self, "_apply_viewport_continuity_when_ready", None)
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
                 show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
@@ -289,7 +289,7 @@ class DisplayPresentationMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
-                apply_restored_viewport = getattr(self, "_apply_file_session_viewport_when_ready", None)
+                apply_restored_viewport = getattr(self, "_apply_viewport_continuity_when_ready", None)
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
                 show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)

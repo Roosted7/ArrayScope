@@ -136,12 +136,10 @@ def test_deferred_side_panels_refresh_once_after_interaction_quiet(qtbot, monkey
         win.close()
 
 
-def test_montage_side_panels_defer_while_viewport_interaction_active(monkeypatch):
+def test_montage_side_panels_defer_while_viewport_interaction_active():
     from types import SimpleNamespace
 
     import arrayscope.window.frame_renderer as frame_renderer
-
-    monkeypatch.setattr(frame_renderer, "_viewport_gesture_active", lambda: False)
 
     assert frame_renderer._should_defer_montage_side_panels(
         SimpleNamespace(_viewport_interaction_active=True),

@@ -88,9 +88,10 @@ updates, native-only LOD diagnostics, and benchmark convergence state.
   refit. ROI selections remap by source index and tile-local coordinate when the same montage sources
   move. See
   [ADR 0042](decisions/0042-montage-viewport-reflow-and-roi-ownership.md).
-- File-session restore now uses one transaction with separated consumers. Layout restores a saved
-  dockless window size before first show, viewport range is applied only after a committed scene/plan,
-  and panel visibility returns through managed-panel intent. See
+- Viewport continuity now uses one transaction with separated consumers. File sessions and QSettings
+  both persist a `ViewportSession`; layout preserves the saved graphics viewport/canvas size, viewport
+  range is applied only after a committed scene/plan, and panel visibility returns through
+  managed-panel intent. See
   [ADR 0043](decisions/0043-file-session-restore-boundaries.md).
 
 ## Material risks

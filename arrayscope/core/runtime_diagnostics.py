@@ -86,12 +86,19 @@ class MontageRuntimeDiagnostics:
     loaded_tiles: int = 0
     loading_tiles: int = 0
     pending_tiles: int = 0
+    pending_completed_tiles: int = 0
+    pending_payload_upserts: int = 0
+    pending_removals: int = 0
     pending_level_tiles: int = 0
+    level_scan_remaining_tiles: int = 0
     skipped_tiles: int = 0
     visible_tiles: int = 0
     presented_tiles: int = 0
     overlay_count: int = 0
     attached_stage_requests: int = 0
+    waiting_stage_requests: int = 0
+    final_commit_pending: bool = False
+    flush_pending: bool = False
     presentation_draw_count: int = 0
     tile_presentation_request_count: int = 0
     tile_presentation_draw_count: int = 0
@@ -550,19 +557,44 @@ def _feedback_channel_line(channel) -> str:
 
 
 def _bottleneck_text(snapshot: WindowRuntimeDiagnostics) -> str:
+    active_work = _has_live_work(snapshot)
     governor = snapshot.resource_governor
-    if governor is not None:
+    if active_work and governor is not None:
         if governor.pressure.ui_pressure in {ResourcePressure.ELEVATED, ResourcePressure.HIGH}:
             return "UI fan-in"
         if governor.pressure.memory_pressure in {ResourcePressure.ELEVATED, ResourcePressure.HIGH}:
             return "memory"
-    if snapshot.montage.active and snapshot.montage.tile_compute_waiting_for_stage:
+    if active_work and snapshot.montage.active and snapshot.montage.tile_compute_waiting_for_stage:
         return "stage compute"
-    if snapshot.montage_timing.tile_layer_rgb_window_tiles:
+    if active_work and snapshot.montage_timing.tile_layer_rgb_window_tiles:
         return "RGB window/upload"
-    if snapshot.montage.pending_tiles:
+    if active_work and snapshot.montage.pending_tiles:
         return "tile compute"
     return "idle"
+
+
+def _has_live_work(snapshot: WindowRuntimeDiagnostics) -> bool:
+    if any(
+        int(getattr(scheduler, name, 0) or 0)
+        for scheduler in tuple(snapshot.schedulers or ())
+        for name in ("pending", "running", "queued")
+    ):
+        return True
+    montage = snapshot.montage
+    return bool(
+        int(getattr(montage, "pending_tiles", 0) or 0)
+        or int(getattr(montage, "pending_completed_tiles", 0) or 0)
+        or int(getattr(montage, "pending_payload_upserts", 0) or 0)
+        or int(getattr(montage, "pending_removals", 0) or 0)
+        or int(getattr(montage, "loading_tiles", 0) or 0)
+        or int(getattr(montage, "pending_level_tiles", 0) or 0)
+        or int(getattr(montage, "level_scan_remaining_tiles", 0) or 0)
+        or int(getattr(montage, "attached_stage_requests", 0) or 0)
+        or int(getattr(montage, "waiting_stage_requests", 0) or 0)
+        or bool(getattr(montage, "final_commit_pending", False))
+        or bool(getattr(montage, "flush_pending", False))
+        or bool(getattr(montage, "tile_presentation_draw_pending", False))
+    )
 
 
 def _render_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:

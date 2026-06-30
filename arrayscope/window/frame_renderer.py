@@ -150,9 +150,9 @@ class FrameRenderMixin:
         pending_restore_range = None
         pending_restore_columns = None
         if view_range is None:
-            pending_restore = getattr(self, "_pending_file_session_viewport_range", None)
+            pending_restore = getattr(self, "_pending_viewport_continuity_range", None)
             pending_restore_range = pending_restore() if callable(pending_restore) else None
-            pending_columns = getattr(self, "_pending_file_session_montage_columns", None)
+            pending_columns = getattr(self, "_pending_viewport_continuity_columns", None)
             pending_restore_columns = pending_columns() if callable(pending_columns) else None
         current_range = view_range if view_range is not None else (
             pending_restore_range
@@ -225,18 +225,14 @@ class FrameRenderMixin:
     def _on_image_viewport_resized(self, *, previous_viewport_size=None, base_view_range=None, resize_focus=None) -> None:
         if getattr(self, "_closing", False):
             return
-        locked_restore_range = getattr(self, "_file_session_restore_locked_view_range", lambda: None)()
-        if locked_restore_range is not None and not _viewport_gesture_active():
-            restore_viewport_shape = getattr(self, "_restore_file_session_viewport_shape_after_show", None)
+        active_continuity_range = getattr(self, "_active_viewport_continuity_range", lambda: None)()
+        if active_continuity_range is not None:
+            restore_viewport_shape = getattr(self, "_restore_viewport_continuity_shape_after_layout", None)
             if callable(restore_viewport_shape):
                 restore_viewport_shape()
-            self._set_montage_view_range(locked_restore_range)
+            self._set_montage_view_range(active_continuity_range)
             self._schedule_montage_viewport_update(delay_ms=0)
             return
-        if locked_restore_range is not None:
-            release_restore_camera = getattr(self, "_release_file_session_restore_camera_lock", None)
-            if callable(release_restore_camera):
-                release_restore_camera()
         self._montage_live_layout_reflow = True
         self._montage_viewport_update_pending = False
         viewport_plan = self._retarget_montage_resize_camera(
@@ -505,7 +501,7 @@ class FrameRenderMixin:
         )
         session.shader_display = bool(shader_display)
         self._montage_session = session
-        apply_restored_viewport = getattr(self, "_apply_file_session_viewport_when_ready", None)
+        apply_restored_viewport = getattr(self, "_apply_viewport_continuity_when_ready", None)
         if callable(apply_restored_viewport):
             apply_restored_viewport()
         _complete_inline_work(
@@ -1693,14 +1689,18 @@ class FrameRenderMixin:
         previous_viewport_shape=None,
         focus=None,
     ) -> MontageViewportPlan:
-        skip_remap = bool(getattr(self, "_skip_next_montage_viewport_remap", False))
-        if skip_remap:
-            self._skip_next_montage_viewport_remap = False
+        continuity = getattr(self, "_viewport_continuity_transaction", lambda: None)()
+        skip_remap = bool(
+            continuity is not None
+            and not continuity.released
+            and continuity.range_applied
+            and continuity.view_range is not None
+        )
 
         viewport_controller = getattr(self.img_view, "viewport_controller", None)
         current_range = viewport_plan.view_range
         intent = montage_viewport_intent(viewport_controller, current_range)
-        focus = focus if focus is not None else (None if current_range is None else _montage_priority_focus(self, current_range))
+        camera_focus = focus if focus is not None else (None if current_range is None else _montage_priority_focus(self, current_range))
         reflow = retarget_montage_viewport_plan(
             getattr(session, "plan", None),
             viewport_plan,
@@ -1708,12 +1708,16 @@ class FrameRenderMixin:
             fit_locked=intent.fit_locked,
             auto_active=intent.auto_active,
             skip_remap=skip_remap,
-            focus=focus,
+            focus=camera_focus,
         )
         if viewport_controller is not None and reflow.last_auto_view_range is not None:
             viewport_controller.last_auto_view_range = reflow.last_auto_view_range
         if reflow.view_range_to_apply is not None:
             self._set_montage_view_range(reflow.view_range_to_apply)
+        if skip_remap:
+            complete_continuity = getattr(self, "_complete_viewport_continuity_if_settled", None)
+            if callable(complete_continuity):
+                complete_continuity()
         view_range = reflow.viewport_plan.view_range
         priority_focus = focus if focus is not None else (None if view_range is None else _montage_priority_focus(self, view_range))
         return replace(
@@ -2589,7 +2593,7 @@ class FrameRenderMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(session.user_levels_override)
                 self._note_display_level_source(decision)
-                apply_restored_viewport = getattr(self, "_apply_file_session_viewport_when_ready", None)
+                apply_restored_viewport = getattr(self, "_apply_viewport_continuity_when_ready", None)
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
                 show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
@@ -2688,7 +2692,7 @@ class FrameRenderMixin:
                 schedule_refresh("montage-semantic-commit")
 
     def _notify_file_session_montage_committed(self) -> None:
-        restore = getattr(self, "_schedule_file_session_viewport_when_ready", None)
+        restore = getattr(self, "_schedule_viewport_continuity_when_ready", None)
         if callable(restore):
             restore()
         if not bool(getattr(self, "_file_session_roi_refresh_pending", False)):
@@ -2700,8 +2704,11 @@ class FrameRenderMixin:
     def _maybe_auto_fit_montage_tiles(self, plan_or_geometry) -> bool:
         if bool(getattr(self, "_montage_live_layout_reflow", False)):
             return False
-        pending_restore = getattr(self, "_pending_file_session_viewport_range", None)
-        if callable(pending_restore) and pending_restore() is not None:
+        pending_continuity = getattr(self, "_pending_viewport_continuity_range", None)
+        active_continuity = getattr(self, "_active_viewport_continuity_range", None)
+        if callable(pending_continuity) and pending_continuity() is not None:
+            return False
+        if callable(active_continuity) and active_continuity() is not None:
             return False
         plan = plan_or_geometry if hasattr(plan_or_geometry, "geometry") else None
         geometry = getattr(plan_or_geometry, "geometry", plan_or_geometry)
@@ -3719,46 +3726,74 @@ def _latency_feedback(window):
     return getattr(window, "latency_feedback", None)
 
 
-def _viewport_gesture_active() -> bool:
+def _view_range_center(view_range) -> tuple[float, float] | None:
     try:
-        buttons = Qt.QtWidgets.QApplication.mouseButtons()
-        return bool(buttons & Qt.QtCore.Qt.MouseButton.LeftButton)
+        x_range, y_range = view_range
+        return (
+            (float(x_range[0]) + float(x_range[1])) * 0.5,
+            (float(y_range[0]) + float(y_range[1])) * 0.5,
+        )
     except Exception:
-        return False
+        return None
 
 
 def _montage_priority_focus(window, view_range) -> tuple[float, float] | None:
     """Return the user-attention point for scheduling visible montage tiles."""
 
-    pos = getattr(window, "_last_image_mouse_scene_pos", None)
-    if pos is not None:
+    focus = getattr(window, "_last_image_hover_focus", None)
+    if focus is not None:
         try:
-            graphics_view = window.img_view.graphicsView
-            viewport_point = graphics_view.mapFromScene(pos)
-            if not graphics_view.viewport().rect().contains(viewport_point):
-                raise ValueError("stored hover point is outside the image viewport")
-            point = window.img_view.getView().mapSceneToView(pos)
-            x = float(point.x())
-            y = float(point.y())
-            geometry = getattr(window, "display_geometry", None)
-            status = None if geometry is None else geometry.view_point_to_tile_point(x, y, require_loaded=False)
-            if status is not None and status.kind not in {"outside", "gap"}:
-                return (x, y)
+            frame = getattr(window, "_committed_display_frame", None)
+            if getattr(window, "_last_image_hover_focus_frame_key", None) != getattr(frame, "key", None):
+                raise ValueError("stored hover focus belongs to an older committed frame")
+            x = float(focus[0])
+            y = float(focus[1])
+            x_range, y_range = view_range
+            x0, x1 = sorted((float(x_range[0]), float(x_range[1])))
+            y0, y1 = sorted((float(y_range[0]), float(y_range[1])))
+            if x < x0 or x > x1 or y < y0 or y > y1:
+                raise ValueError("stored hover focus is outside the current viewport")
+            return (x, y)
         except Exception:
             pass
     try:
         plan = getattr(getattr(window, "_montage_session", None), "plan", None)
-        viewport_shape = getattr(getattr(window, "_montage_session", None), "viewport_shape", None)
         if plan is not None:
-            rect = montage_rect_for_viewport(plan, view_range=view_range, viewport_shape=viewport_shape)
-            return (
-                (float(rect[0]) + float(rect[2])) * 0.5,
-                (float(rect[1]) + float(rect[3])) * 0.5,
-            )
-        x_range, y_range = view_range
+            focus = _nearest_montage_tile_center(plan, view_range)
+            if focus is not None:
+                return focus
+        return _view_range_center(view_range)
+    except Exception:
+        return None
+
+
+def _nearest_montage_tile_center(plan, view_range) -> tuple[float, float] | None:
+    center = _view_range_center(view_range)
+    if center is None:
+        return None
+    tiles = getattr(plan, "tiles", ())
+    if not tiles:
+        return None
+    try:
+        tile_height, tile_width = (int(value) for value in plan.tile_shape[:2])
+        gap = max(0, int(plan.gap))
+        columns = max(1, int(plan.columns))
+        rows = max(1, int(plan.rows))
+        count = len(tiles)
+        stride_x = max(1, tile_width + gap)
+        stride_y = max(1, tile_height + gap)
+        col = int(round((float(center[0]) - float(tile_width) * 0.5) / float(stride_x)))
+        row = int(round((float(center[1]) - float(tile_height) * 0.5) / float(stride_y)))
+        row = max(0, min(rows - 1, row))
+        max_col = min(columns - 1, count - row * columns - 1)
+        if max_col < 0:
+            row = max(0, min((count - 1) // columns, rows - 1))
+            max_col = min(columns - 1, count - row * columns - 1)
+        col = max(0, min(max_col, col))
+        tile = tiles[row * columns + col]
         return (
-            (float(x_range[0]) + float(x_range[1])) * 0.5,
-            (float(y_range[0]) + float(y_range[1])) * 0.5,
+            float(tile.x0) + float(tile.width) * 0.5,
+            float(tile.y0) + float(tile.height) * 0.5,
         )
     except Exception:
         return None
@@ -3809,4 +3844,4 @@ def _montage_level_evidence_requires_refined(window, session) -> bool:
 
 
 def _viewport_interaction_active(window) -> bool:
-    return bool(getattr(window, "_viewport_interaction_active", False) or _viewport_gesture_active())
+    return bool(getattr(window, "_viewport_interaction_active", False))

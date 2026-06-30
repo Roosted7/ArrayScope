@@ -476,13 +476,11 @@ class WindowMenuMixin:
     def _restore_window_settings(
         self,
         *,
-        initial_window_size=None,
-        initial_viewport_shape=None,
+        initial_viewport=None,
         defer_progressive_docks: bool = False,
     ):
         self.layout_manager.restore_window_settings(
-            initial_window_size=initial_window_size,
-            initial_viewport_shape=initial_viewport_shape,
+            initial_viewport=initial_viewport,
             defer_progressive_docks=defer_progressive_docks,
         )
 

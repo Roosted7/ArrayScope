@@ -261,6 +261,33 @@ def test_presentation_under_warning_sample_recovers_from_single_item_limit():
     assert decision.byte_cap > 4 * 1024 * 1024
 
 
+def test_presentation_single_item_fast_sample_recovers_from_sticky_min_batch():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "tile_layer_commit",
+        80.0,
+        item_count=12,
+        byte_count=12 * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="pyqtgraph",
+    )
+    assert governor.decide_ui_work("tile_layer_commit", interactive=False).batch_limit <= 7
+
+    governor.record_ui_observation(
+        "tile_layer_commit",
+        2.0,
+        item_count=1,
+        byte_count=256 * 1024,
+        work_class="presentation_upsert",
+        backend="pyqtgraph",
+    )
+
+    decision = governor.decide_ui_work("tile_layer_commit", interactive=False)
+
+    assert decision.batch_limit >= 3
+    assert decision.byte_cap >= 256 * 1024 * decision.batch_limit
+
+
 def test_presentation_feedback_records_but_filters_isolated_outlier():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
     governor.record_ui_observation(

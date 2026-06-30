@@ -162,11 +162,12 @@ class ArrayScopeWindow(
                 self.combineAsComplex(complex_dim) # valid
         
         # Initialize dimension controls based on the authoritative view state.
-        initial_window_size = self._file_session_restore_initial_window_size() if restored_file_view_session else None
-        initial_viewport_shape = self._file_session_restore_initial_viewport_shape() if restored_file_view_session else None
+        initial_viewport = None
+        if restored_file_view_session:
+            tx = self._viewport_continuity_transaction()
+            initial_viewport = None if tx is None else tx.viewport
         self._restore_window_settings(
-            initial_window_size=initial_window_size,
-            initial_viewport_shape=initial_viewport_shape,
+            initial_viewport=initial_viewport,
             defer_progressive_docks=bool(restored_file_view_session),
         )
         if restored_file_view_session:
@@ -184,10 +185,10 @@ class ArrayScopeWindow(
             self.render(reason="initial", force_autolevel=True)
             self.show()
         if restored_file_view_session:
-            self._restore_file_session_viewport_shape_after_show()
+            self._restore_viewport_continuity_shape_after_layout()
 
             def finish_restored_file_session_viewport():
-                apply_restored_viewport = getattr(self, "_apply_file_session_viewport_when_ready", None)
+                apply_restored_viewport = getattr(self, "_apply_viewport_continuity_when_ready", None)
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
 
@@ -263,7 +264,34 @@ class ArrayScopeWindow(
             if controller is not None and controller.is_busy():
                 return True
         coordinator = getattr(self, "render_coordinator", None)
-        return bool(coordinator is not None and getattr(coordinator, "has_pending_render", False))
+        if bool(coordinator is not None and getattr(coordinator, "has_pending_render", False)):
+            return True
+        view = getattr(self, "img_view", None)
+        draw_pending = getattr(view, "presentationDrawPending", None)
+        if callable(draw_pending):
+            try:
+                if bool(draw_pending()):
+                    return True
+            except Exception:
+                pass
+        session = getattr(self, "_montage_session", None)
+        if session is None:
+            return False
+        return bool(
+            getattr(session, "pending_tiles", None)
+            or getattr(session, "loading_tiles", None)
+            or getattr(session, "active_tile_requests", None)
+            or getattr(session, "pending_completed_tiles", None)
+            or getattr(session, "pending_level_tiles", None)
+            or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+            or getattr(session, "pending_payload_upserts", None)
+            or getattr(session, "pending_removals", None)
+            or getattr(session, "dirty_payloads", None)
+            or bool(getattr(session, "final_commit_pending", False))
+            or bool(getattr(session, "flush_pending", False))
+            or getattr(session.stage_fan_in, "attached_requests", None)
+            or getattr(session.stage_fan_in, "waiting_tiles", None)
+        )
 
     def _scheduler_busy_state(self) -> SchedulerBusyState:
         session = getattr(self, "_montage_session", None)
@@ -275,7 +303,11 @@ class ArrayScopeWindow(
                 or session.stage_fan_in.active_requests
                 or session.stage_fan_in.attached_requests
             )
-            backlog = len(getattr(session, "pending_completed_tiles", ()) or ())
+            backlog = (
+                len(getattr(session, "pending_completed_tiles", ()) or ())
+                + len(getattr(session, "pending_payload_upserts", ()) or ())
+                + len(getattr(session, "pending_removals", ()) or ())
+            )
         return SchedulerBusyState(
             visible_busy=getattr(getattr(self, "visible_evaluation_controller", None), "is_busy", lambda: False)(),
             montage_busy=getattr(getattr(self, "montage_tile_evaluation_controller", None), "is_busy", lambda: False)(),
@@ -365,12 +397,10 @@ class ArrayScopeWindow(
         return None
 
     def _note_viewport_interaction(self, reason: str = "viewport") -> None:
-        if str(reason) == "range":
-            try:
-                if not Qt.QtWidgets.QApplication.mouseButtons():
-                    return
-            except Exception:
-                return
+        if str(reason) == "range-programmatic":
+            return
+        if str(reason) == "range-pointer":
+            self._release_viewport_continuity()
         self._viewport_interaction_active = True
         timer = getattr(self, "_viewport_interaction_quiet_timer", None)
         if timer is None:

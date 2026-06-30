@@ -303,7 +303,7 @@ class VisPyImageView2D(ImageViewShell):
         return self.graphicsView.mapTo(parent, local)
 
     def clearMontageTileLayer(self) -> None:
-        self.hide_tiled_presentation("legacy-clear")
+        self.hide_tiled_presentation("surface-reset")
 
     def hide_tiled_presentation(self, reason: str) -> None:
         layer = getattr(self, "_vispy_gpu_montage_layer", None)

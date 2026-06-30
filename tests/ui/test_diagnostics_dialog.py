@@ -121,6 +121,29 @@ def test_diagnostics_refresh_updates_cache_text(qtbot):
         win.close()
 
 
+def test_compact_overview_bottleneck_ignores_stale_ui_pressure_when_idle():
+    from dataclasses import replace
+
+    from arrayscope.core.resource_governor import (
+        ResourceGovernorDiagnostics,
+        ResourcePressure,
+        ResourcePressureState,
+    )
+    from arrayscope.core.runtime_diagnostics import MontageTimingDiagnostics
+    from arrayscope.ui.diagnostics import _overview_bottleneck
+    from tests.core.test_runtime_diagnostics import _snapshot
+
+    snapshot = replace(
+        _snapshot(),
+        montage_timing=MontageTimingDiagnostics(),
+        resource_governor=ResourceGovernorDiagnostics(
+            pressure=ResourcePressureState(ResourcePressure.HIGH, 0.5, ResourcePressure.LOW, ResourcePressure.NORMAL, "")
+        ),
+    )
+
+    assert _overview_bottleneck(snapshot) == "idle"
+
+
 def test_diagnostics_reports_actual_image_backend_separately_from_setting(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import ImageRenderingBackendChoice

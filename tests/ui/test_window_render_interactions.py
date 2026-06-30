@@ -116,6 +116,53 @@ def test_reload_button_uses_standard_tool_button_chrome(qtbot, tmp_path):
         win.close()
 
 
+def test_reload_preserves_montage_camera_and_levels(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    render_calls = []
+    try:
+        _process_events(qtbot, count=20)
+        win._set_view_state(ViewState.from_shape(data.shape).with_montage_axis(2, indices=tuple(range(6)), text=":"))
+        win.render(reason="test-montage", force_autolevel=False)
+        _process_events(qtbot, count=30)
+        requested_range = ((3.0, 11.0), (4.0, 12.0))
+        win._set_montage_view_range(requested_range)
+        _process_events(qtbot, count=5)
+        accepted_range = win.img_view.getView().viewRange()
+        preserved_range = (
+            tuple(round(float(value), 6) for value in accepted_range[0]),
+            tuple(round(float(value), 6) for value in accepted_range[1]),
+        )
+        win.img_view.setLevels(10.0, 50.0)
+        monkeypatch.setattr(
+            win,
+            "render",
+            lambda *, reason="state", force_autolevel=False, defer_side_panels=False: render_calls.append(
+                (reason, force_autolevel, defer_side_panels)
+            ),
+        )
+
+        win._reset_data(data + 1.0)
+
+        assert render_calls[-1] == ("reload", False, False)
+        tx = win._viewport_continuity_transaction()
+        assert tx is not None
+        assert tx.reason == "reload"
+        _process_events(qtbot, count=5)
+        current_range = win.img_view.getView().viewRange()
+        current_x = tuple(round(float(value), 6) for value in current_range[0])
+        current_y = tuple(round(float(value), 6) for value in current_range[1])
+        assert round(sum(current_x) * 0.5, 6) == round(sum(preserved_range[0]) * 0.5, 6)
+        assert current_y == preserved_range[1]
+    finally:
+        win.close()
+
+
 def test_main_canvas_remains_embedded_in_window(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
@@ -223,6 +270,7 @@ def test_image_viewport_leave_clears_hover_status(qtbot):
         win._on_image_mouse_moved(scene_pos)
         _process_events(qtbot, count=5)
         assert win._last_image_mouse_scene_pos is not None
+        assert win._last_image_hover_focus is not None
         assert win.widgets["labels"]["pixelValue"].text()
 
         event = QtCore.QEvent(QtCore.QEvent.Type.Leave)
@@ -230,6 +278,7 @@ def test_image_viewport_leave_clears_hover_status(qtbot):
         _process_events(qtbot, count=5)
 
         assert win._last_image_mouse_scene_pos is None
+        assert win._last_image_hover_focus is None
         assert win.widgets["labels"]["pixelValue"].text() == ""
     finally:
         win.close()
@@ -240,10 +289,12 @@ def test_clear_image_hover_state_tolerates_early_initialization():
 
     win = object.__new__(RenderMixin)
     win._last_image_mouse_scene_pos = object()
+    win._last_image_hover_focus = (1.0, 2.0)
 
     win._clear_image_hover_state()
 
     assert win._last_image_mouse_scene_pos is None
+    assert win._last_image_hover_focus is None
 
 
 def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot):

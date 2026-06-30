@@ -217,7 +217,7 @@ def test_remap_montage_view_range_shrink_shows_less_content_at_same_zoom():
     assert remapped[1][1] - remapped[1][0] == 40.0
 
 
-def test_remap_montage_view_range_growth_shows_more_content_at_same_zoom():
+def test_remap_montage_view_range_growth_shows_more_content_when_explicitly_remapped():
     from arrayscope.window.montage_viewport import remap_montage_view_range
 
     plan = _plan_with_columns(3)
@@ -789,6 +789,51 @@ def test_retarget_layout_reflow_keeps_far_zoomed_out_manual_range_manual():
     assert applied != [square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)]
 
 
+def test_released_viewport_continuity_does_not_skip_manual_resize_reflow():
+    from types import SimpleNamespace
+
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.montage_viewport import MontageViewportPlan
+    from arrayscope.window.viewport_continuity import ViewportContinuityTransaction
+
+    class ManualController:
+        def is_fit_locked(self):
+            return False
+
+        def is_auto_active(self):
+            return False
+
+    plan = _plan_with_columns(3)
+    viewport_plan = MontageViewportPlan(
+        axis=2,
+        all_indices=tuple(range(6)),
+        viewport_shape=(50, 50),
+        tile_shape=(10, 10),
+        plan=plan,
+        view_range=((0.0, 20.0), (0.0, 20.0)),
+        shader_display=False,
+        persistent_tile_residency=False,
+    )
+    applied = []
+    continuity = ViewportContinuityTransaction(
+        view_range=((-100.0, 100.0), (-100.0, 100.0)),
+        range_applied=True,
+        released=True,
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(viewport_controller=ManualController()),
+        _set_montage_view_range=lambda view_range: applied.append(view_range),
+        _viewport_continuity_transaction=lambda: continuity,
+        _montage_session=SimpleNamespace(plan=plan),
+    )
+    session = SimpleNamespace(plan=plan, viewport_shape=(50, 100))
+
+    retargeted = FrameRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+
+    assert retargeted.view_range == ((2.5, 12.5), (0.0, 20.0))
+    assert applied == [((2.5, 12.5), (0.0, 20.0))]
+
+
 def test_retarget_layout_reflow_refits_when_near_previous_auto_range():
     from types import SimpleNamespace
 
@@ -954,6 +999,21 @@ def test_montage_live_layout_reflow_skips_autofit_helper():
     assert not FrameRenderMixin._maybe_auto_fit_montage_tiles(window, geometry)
 
 
+def test_active_viewport_continuity_skips_autofit_helper():
+    from types import SimpleNamespace
+
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    geometry = _plan_with_columns(3).geometry
+    window = SimpleNamespace(
+        _montage_live_layout_reflow=False,
+        _pending_viewport_continuity_range=lambda: None,
+        _active_viewport_continuity_range=lambda: ((10.0, 20.0), (30.0, 40.0)),
+    )
+
+    assert not FrameRenderMixin._maybe_auto_fit_montage_tiles(window, geometry)
+
+
 def test_montage_autofit_signature_ignores_layout_only_reflow():
     from arrayscope.window.frame_renderer import _montage_autofit_scope_grew, _montage_autofit_signature
 
@@ -964,6 +1024,27 @@ def test_montage_autofit_signature_ignores_layout_only_reflow():
         _montage_autofit_signature(previous),
         _montage_autofit_signature(next_geometry),
     )
+
+
+def test_montage_priority_focus_uses_semantic_hover_focus():
+    from types import SimpleNamespace
+
+    from arrayscope.window.frame_renderer import _montage_priority_focus
+
+    window = SimpleNamespace(_last_image_hover_focus=(3.5, 4.25))
+
+    assert _montage_priority_focus(window, ((0.0, 10.0), (0.0, 10.0))) == (3.5, 4.25)
+
+
+def test_montage_priority_focus_falls_back_to_nearest_center_tile():
+    from types import SimpleNamespace
+
+    from arrayscope.window.frame_renderer import _montage_priority_focus
+
+    plan = _plan_with_columns(3)
+    window = SimpleNamespace(_montage_session=SimpleNamespace(plan=plan))
+
+    assert _montage_priority_focus(window, ((0.0, 20.0), (0.0, 20.0))) == (5.0, 5.0)
 
 
 def test_montage_session_key_excludes_effective_columns():

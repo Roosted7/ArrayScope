@@ -632,9 +632,10 @@ def _worker_segments(schedulers) -> tuple[tuple[str, int, str], ...]:
 
 def _overview_bottleneck(snapshot) -> str:
     governor = snapshot.resource_governor
-    if governor is not None and governor.pressure.ui_pressure.value in {"elevated", "high"}:
+    active_work = _overview_has_live_work(snapshot)
+    if active_work and governor is not None and governor.pressure.ui_pressure.value in {"elevated", "high"}:
         return "UI fan-in"
-    if governor is not None and governor.pressure.memory_pressure.value in {"elevated", "high"}:
+    if active_work and governor is not None and governor.pressure.memory_pressure.value in {"elevated", "high"}:
         return "memory"
     if snapshot.montage.active and snapshot.montage.tile_compute_waiting_for_stage:
         return "stage compute"
@@ -643,6 +644,30 @@ def _overview_bottleneck(snapshot) -> str:
     if snapshot.montage_timing.tile_layer_rgb_window_tiles:
         return "RGB/window upload"
     return "idle"
+
+
+def _overview_has_live_work(snapshot) -> bool:
+    if any(
+        int(getattr(scheduler, name, 0) or 0)
+        for scheduler in tuple(snapshot.schedulers or ())
+        for name in ("pending", "running", "queued")
+    ):
+        return True
+    montage = snapshot.montage
+    return bool(
+        int(getattr(montage, "pending_tiles", 0) or 0)
+        or int(getattr(montage, "pending_completed_tiles", 0) or 0)
+        or int(getattr(montage, "pending_payload_upserts", 0) or 0)
+        or int(getattr(montage, "pending_removals", 0) or 0)
+        or int(getattr(montage, "loading_tiles", 0) or 0)
+        or int(getattr(montage, "pending_level_tiles", 0) or 0)
+        or int(getattr(montage, "level_scan_remaining_tiles", 0) or 0)
+        or int(getattr(montage, "attached_stage_requests", 0) or 0)
+        or int(getattr(montage, "waiting_stage_requests", 0) or 0)
+        or bool(getattr(montage, "final_commit_pending", False))
+        or bool(getattr(montage, "flush_pending", False))
+        or bool(getattr(montage, "tile_presentation_draw_pending", False))
+    )
 
 
 def _active_work_summary(schedulers) -> str:

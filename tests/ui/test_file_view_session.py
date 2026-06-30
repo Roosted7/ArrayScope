@@ -7,7 +7,9 @@ import numpy as np
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from arrayscope.window.file_view_session import FileSessionRestoreTransaction, FileViewSessionMixin
+from arrayscope.window.file_view_session import FileViewSessionMixin
+from arrayscope.window.viewport_continuity import ViewportContinuityTransaction
+from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
 
 
 class _FakeFileSessionWindow(FileViewSessionMixin):
@@ -19,10 +21,9 @@ class _FakeFileSessionWindow(FileViewSessionMixin):
         self._settings = settings
 
 
-def _restore_transaction(*, viewport=None, window_size=None, profile_visible=False):
-    return FileSessionRestoreTransaction(
+def _restore_transaction(*, viewport=None, profile_visible=False):
+    return ViewportContinuityTransaction(
         viewport=viewport,
-        window_size=window_size,
         profile_visible=bool(profile_visible),
         defaults={"recipe": SimpleNamespace(display=SimpleNamespace(profile_visible=False))},
     )
@@ -126,7 +127,7 @@ def test_restored_roi_session_schedules_semantic_stats_refresh(qt_app, tmp_path)
     assert refresh_reasons == ["file-session-restore"]
 
 
-def test_restored_file_session_viewport_releases_camera_lock_after_apply(qt_app, tmp_path):
+def test_restored_file_session_viewport_releases_continuity_after_apply(qt_app, tmp_path):
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.core.view_session import ViewportSession
@@ -152,22 +153,23 @@ def test_restored_file_session_viewport_releases_camera_lock_after_apply(qt_app,
     window._committed_display_frame = SimpleNamespace(geometry=SimpleNamespace(display_shape=(4, 5)))
     window._is_committed_display_frame_current = lambda _frame: True
     window._suppress_montage_autofit_revert_message = True
-    window._schedule_file_session_viewport_retarget = lambda: None
-    window._file_session_restore = _restore_transaction(
+    window._schedule_viewport_continuity_retarget = lambda: None
+    window._viewport_continuity = _restore_transaction(
         viewport=ViewportSession(
             mode="user",
             view_range=((1.0, 3.0), (1.0, 3.0)),
             viewport_shape=(200, 300),
         )
     )
-    window._file_session_restore.message_enabled = False
+    window._viewport_continuity.message_enabled = False
+    window._viewport_continuity.shape_settled = True
 
-    window._apply_file_session_viewport_when_ready()
-    window._apply_file_session_viewport_when_ready()
+    window._apply_viewport_continuity_when_ready()
+    window._apply_viewport_continuity_when_ready()
 
     assert calls == [((1.0, 3.0), (1.0, 3.0), 0)]
-    assert window._file_session_restore.applied
-    assert not window._file_session_restore.camera_locked
+    assert window._viewport_continuity.applied
+    assert window._viewport_continuity.released
 
 
 def test_restored_file_session_viewport_rejects_invalid_range(qt_app, tmp_path):
@@ -192,20 +194,20 @@ def test_restored_file_session_viewport_rejects_invalid_range(qt_app, tmp_path):
     window._committed_display_frame = SimpleNamespace(geometry=SimpleNamespace(display_shape=(4, 5)))
     window._is_committed_display_frame_current = lambda _frame: True
     window._suppress_montage_autofit_revert_message = True
-    window._file_session_restore = _restore_transaction(
+    window._viewport_continuity = _restore_transaction(
         viewport=ViewportSession(
             mode="user",
             view_range=((1.0, 1.0), (0.0, 4.0)),
             viewport_shape=(200, 300),
         )
     )
-    window._file_session_restore.message_enabled = False
+    window._viewport_continuity.message_enabled = False
 
-    window._apply_file_session_viewport_when_ready()
+    window._apply_viewport_continuity_when_ready()
 
     assert calls == ["fit"]
-    assert window._file_session_restore.applied
-    assert not window._file_session_restore.camera_locked
+    assert window._viewport_continuity.applied
+    assert window._viewport_continuity.released
 
 
 def test_restored_file_session_uses_restore_render_path(qtbot, monkeypatch):
@@ -228,7 +230,7 @@ def test_restored_file_session_uses_restore_render_path(qtbot, monkeypatch):
     assert calls == [("file-view-session-restore", False, True)]
 
 
-def test_restored_file_session_seeds_initial_size_from_session_window_size(qtbot, monkeypatch):
+def test_restored_file_session_uses_viewport_shape_authority(qtbot, monkeypatch):
     from arrayscope.core.view_session import ViewportSession
     from arrayscope.window.layout_controller import WindowLayoutManager
     from arrayscope.window.main import ArrayScopeWindow
@@ -236,45 +238,7 @@ def test_restored_file_session_seeds_initial_size_from_session_window_size(qtbot
     calls = []
 
     def restore_session(self):
-        self._file_session_restore = _restore_transaction(
-            viewport=ViewportSession(
-                mode="user",
-                view_range=((0.0, 1.0), (0.0, 1.0)),
-                viewport_shape=(222, 333),
-            ),
-            window_size=(700, 500),
-        )
-        return True
-
-    monkeypatch.setattr(ArrayScopeWindow, "_restore_file_view_session_if_available", restore_session)
-    monkeypatch.setattr(ArrayScopeWindow, "_pending_display_levels_for_render", lambda self: (0.0, 1.0))
-    monkeypatch.setattr(
-        ArrayScopeWindow,
-        "render",
-        lambda self, *, reason=None, force_autolevel=False, defer_side_panels=False: None,
-    )
-    monkeypatch.setattr(WindowLayoutManager, "_restore_saved_base_window_size", lambda self: calls.append("settings"))
-    monkeypatch.setattr(
-        WindowLayoutManager,
-        "resize_to_dockless_window_size",
-        lambda self, size: calls.append(("session", tuple(size))) or True,
-    )
-
-    window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
-    qtbot.addWidget(window)
-
-    assert calls == [("session", (700, 500))]
-
-
-def test_restored_file_session_without_window_size_uses_viewport_shape(qtbot, monkeypatch):
-    from arrayscope.core.view_session import ViewportSession
-    from arrayscope.window.layout_controller import WindowLayoutManager
-    from arrayscope.window.main import ArrayScopeWindow
-
-    calls = []
-
-    def restore_session(self):
-        self._file_session_restore = _restore_transaction(
+        self._viewport_continuity = _restore_transaction(
             viewport=ViewportSession(
                 mode="user",
                 view_range=((0.0, 1.0), (0.0, 1.0)),
@@ -290,12 +254,7 @@ def test_restored_file_session_without_window_size_uses_viewport_shape(qtbot, mo
         "render",
         lambda self, *, reason=None, force_autolevel=False, defer_side_panels=False: None,
     )
-    monkeypatch.setattr(WindowLayoutManager, "_restore_saved_base_window_size", lambda self: calls.append("settings"))
-    monkeypatch.setattr(
-        WindowLayoutManager,
-        "resize_to_dockless_window_size",
-        lambda self, size: calls.append(("session", tuple(size))) or True,
-    )
+    monkeypatch.setattr(WindowLayoutManager, "_restore_saved_viewport_session", lambda self: calls.append("settings"))
     monkeypatch.setattr(
         WindowLayoutManager,
         "resize_to_dockless_viewport_shape",
@@ -304,10 +263,88 @@ def test_restored_file_session_without_window_size_uses_viewport_shape(qtbot, mo
 
     window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(window)
+    qtbot.wait(20)
 
     assert calls
     assert calls[0] == ("viewport", (222, 333))
     assert "settings" not in calls
+
+
+def test_restored_file_session_uses_viewport_shape_without_general_settings(qtbot, monkeypatch):
+    from arrayscope.core.view_session import ViewportSession
+    from arrayscope.window.layout_controller import WindowLayoutManager
+    from arrayscope.window.main import ArrayScopeWindow
+
+    calls = []
+
+    def restore_session(self):
+        self._viewport_continuity = _restore_transaction(
+            viewport=ViewportSession(
+                mode="user",
+                view_range=((0.0, 1.0), (0.0, 1.0)),
+                viewport_shape=(222, 333),
+            )
+        )
+        return True
+
+    monkeypatch.setattr(ArrayScopeWindow, "_restore_file_view_session_if_available", restore_session)
+    monkeypatch.setattr(ArrayScopeWindow, "_pending_display_levels_for_render", lambda self: (0.0, 1.0))
+    monkeypatch.setattr(
+        ArrayScopeWindow,
+        "render",
+        lambda self, *, reason=None, force_autolevel=False, defer_side_panels=False: None,
+    )
+    monkeypatch.setattr(WindowLayoutManager, "_restore_saved_viewport_session", lambda self: calls.append("settings"))
+    monkeypatch.setattr(
+        WindowLayoutManager,
+        "resize_to_dockless_viewport_shape",
+        lambda self, shape: calls.append(("viewport", tuple(shape))) or True,
+    )
+
+    window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(window)
+    qtbot.wait(20)
+
+    assert calls
+    assert calls[0] == ("viewport", (222, 333))
+    assert "settings" not in calls
+
+
+def test_settings_viewport_session_uses_viewport_continuity_transaction(qtbot, monkeypatch):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.view_session import ViewportSession, viewport_to_mapping
+    from arrayscope.window.layout_controller import WindowLayoutManager
+    from arrayscope.window.main import ArrayScopeWindow
+
+    _clear_arrayscope_settings()
+    settings = QtCore.QSettings()
+    settings.setValue(
+        "viewport_session",
+        viewport_to_mapping(
+            ViewportSession(
+                mode="user",
+                view_range=((1.0, 2.0), (3.0, 4.0)),
+                viewport_shape=(222, 333),
+                montage_columns=3,
+            )
+        ),
+    )
+    settings.sync()
+    calls = []
+    monkeypatch.setattr(
+        WindowLayoutManager,
+        "resize_to_dockless_viewport_shape",
+        lambda self, shape: calls.append((tuple(shape), getattr(self.window._viewport_continuity, "reason", None))) or True,
+    )
+
+    window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(window)
+    qtbot.wait(20)
+
+    assert calls
+    assert calls[0] == ((222, 333), "settings-restore")
+    _clear_arrayscope_settings()
 
 
 def test_restored_file_session_defers_progressive_docks_until_window_is_visible(qtbot, monkeypatch):
@@ -318,7 +355,7 @@ def test_restored_file_session_defers_progressive_docks_until_window_is_visible(
     sync_calls = []
 
     def restore_session(self):
-        self._file_session_restore = _restore_transaction(
+        self._viewport_continuity = _restore_transaction(
             viewport=ViewportSession(
                 mode="user",
                 view_range=((0.0, 1.0), (0.0, 1.0)),
@@ -339,7 +376,7 @@ def test_restored_file_session_defers_progressive_docks_until_window_is_visible(
         "render",
         lambda self, *, reason=None, force_autolevel=False, defer_side_panels=False: None,
     )
-    monkeypatch.setattr(WindowLayoutManager, "resize_to_dockless_window_size", lambda self, size: True)
+    monkeypatch.setattr(WindowLayoutManager, "resize_to_dockless_viewport_shape", lambda self, shape: True)
     monkeypatch.setattr(WindowLayoutManager, "sync_progressive_docks", sync_progressive_docks)
 
     window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
@@ -357,7 +394,7 @@ def test_restored_file_session_does_not_run_default_dock_resize_after_show(qtbot
     default_resize_calls = []
 
     def restore_session(self):
-        self._file_session_restore = _restore_transaction(
+        self._viewport_continuity = _restore_transaction(
             viewport=ViewportSession(
                 mode="user",
                 view_range=((0.0, 1.0), (0.0, 1.0)),
@@ -373,7 +410,7 @@ def test_restored_file_session_does_not_run_default_dock_resize_after_show(qtbot
         "render",
         lambda self, *, reason=None, force_autolevel=False, defer_side_panels=False: None,
     )
-    monkeypatch.setattr(WindowLayoutManager, "resize_to_dockless_window_size", lambda self, size: True)
+    monkeypatch.setattr(WindowLayoutManager, "resize_to_dockless_viewport_shape", lambda self, shape: True)
     monkeypatch.setattr(WindowLayoutManager, "resize_default_docks", lambda self: default_resize_calls.append(True))
 
     window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
@@ -393,7 +430,7 @@ def test_restored_file_session_defers_saved_profile_dock_visibility(qtbot, monke
     original_set_visible = WindowLayoutManager.set_managed_dock_visible
 
     def restore_session(self):
-        self._file_session_restore = _restore_transaction(
+        self._viewport_continuity = _restore_transaction(
             viewport=ViewportSession(
                 mode="user",
                 view_range=((0.0, 1.0), (0.0, 1.0)),
@@ -427,7 +464,7 @@ def test_restored_file_session_defers_saved_profile_dock_visibility(qtbot, monke
     monkeypatch.setattr(ArrayScopeWindow, "_restore_file_view_session_if_available", restore_session)
     monkeypatch.setattr(ArrayScopeWindow, "_pending_display_levels_for_render", lambda self: (0.0, 1.0))
     monkeypatch.setattr(ArrayScopeWindow, "render", lambda self, *, reason=None, force_autolevel=False, defer_side_panels=False: None)
-    monkeypatch.setattr(WindowLayoutManager, "resize_to_dockless_window_size", lambda self, size: True)
+    monkeypatch.setattr(WindowLayoutManager, "resize_to_dockless_viewport_shape", lambda self, shape: True)
     monkeypatch.setattr(WindowLayoutManager, "set_managed_dock_visible", set_visible)
 
     window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
@@ -453,6 +490,7 @@ def test_restored_montage_viewport_schedules_retarget_after_set_range(qt_app, mo
     scheduled = []
     single_shots = []
     window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
+    window.isVisible = lambda: True
     window.view_state = SimpleNamespace(montage_axis=2)
     window._montage_session = SimpleNamespace(plan=object(), display_committed=False)
     window._current_montage_geometry = None
@@ -461,7 +499,7 @@ def test_restored_montage_viewport_schedules_retarget_after_set_range(qt_app, mo
         getView=lambda: view,
         viewport_controller=SimpleNamespace(mode=None),
     )
-    window._file_session_restore = _restore_transaction(
+    window._viewport_continuity = _restore_transaction(
         viewport=ViewportSession(
             mode="user",
             view_range=((10.0, 20.0), (30.0, 40.0)),
@@ -471,10 +509,11 @@ def test_restored_montage_viewport_schedules_retarget_after_set_range(qt_app, mo
     monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
 
-    window._apply_file_session_viewport_when_ready()
+    window._apply_viewport_continuity_when_ready()
 
     assert view.ranges == [((10.0, 20.0), (30.0, 40.0), 0)]
-    assert window._skip_next_montage_viewport_remap is True
+    assert window._viewport_continuity.range_applied
+    assert not window._viewport_continuity.released
     assert not scheduled
     assert len(single_shots) == 1
     assert single_shots[0][0] == 0
@@ -505,23 +544,166 @@ def test_restored_montage_auto_range_reopens_as_user_camera(qt_app, monkeypatch)
         getView=lambda: view,
         viewport_controller=controller,
     )
-    window._file_session_restore = _restore_transaction(
+    window._viewport_continuity = _restore_transaction(
         viewport=ViewportSession(
             mode="auto_untouched",
             view_range=((10.0, 20.0), (30.0, 40.0)),
         )
     )
-    window._schedule_file_session_viewport_retarget = lambda: None
+    window._schedule_viewport_continuity_retarget = lambda: None
     monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
 
-    window._apply_file_session_viewport_when_ready()
+    window._apply_viewport_continuity_when_ready()
 
     assert view.ranges == [((10.0, 20.0), (30.0, 40.0), 0)]
     assert controller.mode is ViewportMode.USER
     assert controller.last_auto_view_range is None
 
 
-def test_locked_restored_camera_is_saved_instead_of_live_aspect_adjusted_range(qt_app):
+def test_restored_viewport_continuity_survives_pending_viewport_shape(qt_app, monkeypatch):
+    import arrayscope.window.file_view_session as file_view_session
+    from arrayscope.core.view_session import ViewportSession
+
+    class FakeView:
+        def __init__(self):
+            self.ranges = []
+
+        def setRange(self, *, xRange, yRange, padding):
+            self.ranges.append((tuple(xRange), tuple(yRange), padding))
+
+    view = FakeView()
+    window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
+    window.isVisible = lambda: True
+    window.view_state = SimpleNamespace(montage_axis=2)
+    window._montage_session = SimpleNamespace(plan=object(), display_committed=False)
+    window._current_montage_geometry = None
+    window.img_view = SimpleNamespace(
+        _viewport_applying=False,
+        getView=lambda: view,
+        viewport_controller=SimpleNamespace(mode=None),
+    )
+    window._viewport_continuity = _restore_transaction(
+        viewport=ViewportSession(
+            mode="user",
+            view_range=((10.0, 20.0), (30.0, 40.0)),
+            viewport_shape=(222, 333),
+        )
+    )
+    window._viewport_continuity.shape_settled = False
+    window._schedule_viewport_continuity_retarget = lambda: None
+    monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(window, "_viewport_continuity_shape_matches", lambda _shape: True)
+
+    window._apply_viewport_continuity_when_ready()
+
+    assert view.ranges == [((10.0, 20.0), (30.0, 40.0), 0)]
+    assert window._viewport_continuity.applied
+    assert not window._viewport_continuity.released
+
+    window._viewport_continuity.shape_settled = True
+    window._apply_viewport_continuity_when_ready()
+    window._complete_viewport_continuity_if_settled()
+
+    assert view.ranges == [
+        ((10.0, 20.0), (30.0, 40.0), 0),
+        ((10.0, 20.0), (30.0, 40.0), 0),
+    ]
+    assert window._viewport_continuity.released
+
+
+def test_restored_viewport_shape_retry_reapplies_range_after_continuity_release(qt_app, monkeypatch):
+    import arrayscope.window.file_view_session as file_view_session
+    from arrayscope.core.view_session import ViewportSession
+
+    class FakeView:
+        def __init__(self):
+            self.ranges = []
+
+        def setRange(self, *, xRange, yRange, padding):
+            self.ranges.append((tuple(xRange), tuple(yRange), padding))
+
+    view = FakeView()
+    window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
+    window.isVisible = lambda: True
+    window.view_state = SimpleNamespace(montage_axis=2)
+    window._montage_session = SimpleNamespace(plan=object(), display_committed=True)
+    window._current_montage_geometry = None
+    window.img_view = SimpleNamespace(
+        _viewport_applying=False,
+        getView=lambda: view,
+        viewport_controller=SimpleNamespace(mode=None),
+    )
+    window._viewport_continuity = _restore_transaction(
+        viewport=ViewportSession(
+            mode="user",
+            view_range=((10.0, 20.0), (30.0, 40.0)),
+            viewport_shape=(222, 333),
+        )
+    )
+    window._viewport_continuity.applied = True
+    window._viewport_continuity.released = True
+    window._viewport_continuity.shape_settled = False
+    window._schedule_viewport_continuity_retarget = lambda: None
+    monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(window, "_viewport_continuity_shape_matches", lambda _shape: True)
+
+    window._restore_viewport_continuity_shape_step(
+        (222, 333),
+        attempts=1,
+        generation=window._viewport_continuity.generation,
+    )
+
+    assert view.ranges == [((10.0, 20.0), (30.0, 40.0), 0)]
+
+
+def test_viewport_continuity_reopens_shape_settle_after_dock_layout_change(qt_app, monkeypatch):
+    import arrayscope.window.file_view_session as file_view_session
+    from arrayscope.core.view_session import ViewportSession
+
+    window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
+    window._viewport_continuity = _restore_transaction(
+        viewport=ViewportSession(
+            mode="user",
+            view_range=((10.0, 20.0), (30.0, 40.0)),
+            viewport_shape=(222, 333),
+        )
+    )
+    window._viewport_continuity.shape_settled = True
+    matches = [False]
+    single_shots = []
+    monkeypatch.setattr(window, "_viewport_continuity_shape_matches", lambda _shape: bool(matches[-1]))
+    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
+
+    window._restore_viewport_continuity_shape_after_layout()
+
+    assert not window._viewport_continuity.shape_settled
+    assert len(single_shots) == 1
+
+
+def test_viewport_continuity_settled_shape_does_not_resize_for_pending_range(qt_app, monkeypatch):
+    import arrayscope.window.file_view_session as file_view_session
+    from arrayscope.core.view_session import ViewportSession
+
+    window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
+    window._viewport_continuity = _restore_transaction(
+        viewport=ViewportSession(
+            mode="user",
+            view_range=((10.0, 20.0), (30.0, 40.0)),
+            viewport_shape=(222, 333),
+        )
+    )
+    window._viewport_continuity.shape_settled = True
+    single_shots = []
+    monkeypatch.setattr(window, "_viewport_continuity_shape_matches", lambda _shape: True)
+    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
+
+    window._restore_viewport_continuity_shape_after_layout()
+
+    assert window._viewport_continuity.shape_settled
+    assert single_shots == []
+
+
+def test_active_restored_viewport_is_saved_instead_of_live_aspect_adjusted_range(qt_app):
     from arrayscope.core.view_session import ViewportSession
 
     restored_viewport = ViewportSession(
@@ -531,12 +713,31 @@ def test_locked_restored_camera_is_saved_instead_of_live_aspect_adjusted_range(q
         montage_columns=3,
     )
     window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
-    window._file_session_restore = _restore_transaction(viewport=restored_viewport)
+    window._viewport_continuity = _restore_transaction(viewport=restored_viewport)
 
-    assert window._current_viewport_session() is restored_viewport
+    assert window._current_viewport_session() == restored_viewport
 
 
-def test_programmatic_range_change_does_not_release_restored_camera_lock(qt_app, monkeypatch):
+def test_applied_viewport_continuity_does_not_lock_future_resize(qt_app):
+    from arrayscope.core.view_session import ViewportSession
+
+    restored_viewport = ViewportSession(
+        mode="user",
+        view_range=((10.0, 200.0), (-50.0, 80.0)),
+        montage_columns=3,
+    )
+    window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
+    tx = _restore_transaction(viewport=restored_viewport)
+    tx.range_applied = True
+    tx.released = False
+    window._viewport_continuity = tx
+
+    assert window._pending_viewport_continuity_range() is None
+    assert window._pending_viewport_continuity_columns() is None
+    assert window._active_viewport_continuity_range() is None
+
+
+def test_programmatic_range_change_does_not_release_viewport_continuity(qt_app, monkeypatch):
     from pyqtgraph.Qt import QtCore
 
     import arrayscope.window.viewport_bridge as viewport_bridge
@@ -545,7 +746,7 @@ def test_programmatic_range_change_does_not_release_restored_camera_lock(qt_app,
     released = []
     owner = SimpleNamespace(
         img_view=SimpleNamespace(_viewport_applying=False),
-        _release_file_session_restore_camera_lock=lambda: released.append(True),
+        _release_viewport_continuity=lambda: released.append(True),
         _note_viewport_interaction=lambda _reason: None,
         _update_display_group_title=lambda: None,
         view_state=SimpleNamespace(montage_axis=None),
@@ -571,7 +772,7 @@ def test_tiled_single_scene_range_change_schedules_frame_viewport_update(qt_app,
     scheduled = []
     owner = SimpleNamespace(
         img_view=SimpleNamespace(_viewport_applying=False),
-        _release_file_session_restore_camera_lock=lambda: None,
+        _release_viewport_continuity=lambda: None,
         _note_viewport_interaction=lambda _reason: None,
         _update_display_group_title=lambda: None,
             _committed_display_frame=SimpleNamespace(
@@ -619,7 +820,7 @@ def test_restored_viewport_waits_until_frame_committed(qt_app, monkeypatch):
         getView=lambda: view,
         viewport_controller=SimpleNamespace(mode=None),
     )
-    window._file_session_restore = _restore_transaction(
+    window._viewport_continuity = _restore_transaction(
         viewport=ViewportSession(
             mode="user",
             view_range=((1.0, 2.0), (3.0, 4.0)),
@@ -628,15 +829,15 @@ def test_restored_viewport_waits_until_frame_committed(qt_app, monkeypatch):
     monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
 
-    window._apply_file_session_viewport_when_ready()
+    window._apply_viewport_continuity_when_ready()
 
     assert view.ranges == []
     assert single_shots == []
     window._committed_display_frame = "stale"
-    window._apply_file_session_viewport_when_ready()
+    window._apply_viewport_continuity_when_ready()
     assert view.ranges == []
     window._committed_display_frame = "current"
-    window._apply_file_session_viewport_when_ready()
+    window._apply_viewport_continuity_when_ready()
     assert view.ranges == [((1.0, 2.0), (3.0, 4.0), 0)]
 
 
@@ -662,7 +863,7 @@ def test_restored_montage_viewport_waits_for_plan_not_tile_completion(qt_app, mo
         getView=lambda: view,
         viewport_controller=SimpleNamespace(mode=None),
     )
-    window._file_session_restore = _restore_transaction(
+    window._viewport_continuity = _restore_transaction(
         viewport=ViewportSession(
             mode="user",
             view_range=((10.0, 20.0), (30.0, 40.0)),
@@ -671,26 +872,25 @@ def test_restored_montage_viewport_waits_for_plan_not_tile_completion(qt_app, mo
     monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
 
-    window._apply_file_session_viewport_when_ready()
+    window._apply_viewport_continuity_when_ready()
 
     assert view.ranges == []
     assert single_shots == []
 
     window._montage_session.plan = object()
-    window._schedule_file_session_viewport_when_ready()
+    window._schedule_viewport_continuity_when_ready()
 
     assert len(single_shots) == 1
     single_shots[0][1]()
     assert view.ranges == [((10.0, 20.0), (30.0, 40.0), 0)]
 
 
-def test_file_session_persists_dockless_window_size(qt_app):
+def test_file_session_persists_viewport_session_only(qt_app):
     window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5), dtype=np.float32), None)
     window._current_file_session_metadata = lambda: {"path": "scan.npy"}
     window._file_view_session_persistence_disabled = lambda _metadata: False
     window._current_view_recipe = lambda: SimpleNamespace()
     window._current_viewport_session = lambda: None
     window.roi_store = SimpleNamespace(selections=(), selected_id=None)
-    window.layout_manager = SimpleNamespace(window_size_for_file_session=lambda: (700, 500))
 
-    assert window._current_file_view_session().window_size == (700, 500)
+    assert window._current_file_view_session().viewport is None

@@ -322,8 +322,8 @@ def test_initial_montage_plan_uses_pending_restored_viewport_range():
         getView=lambda: SimpleNamespace(viewRange=lambda: ((0.0, 1.0), (0.0, 1.0))),
         rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
     )
-    win._pending_file_session_viewport_range = lambda: ((100.0, 120.0), (200.0, 220.0))
-    win._pending_file_session_montage_columns = lambda: 3
+    win._pending_viewport_continuity_range = lambda: ((100.0, 120.0), (200.0, 220.0))
+    win._pending_viewport_continuity_columns = lambda: 3
 
     viewport_plan = FrameRenderMixin._montage_viewport_plan(win, state)
 
@@ -354,8 +354,8 @@ def test_initial_montage_plan_ignores_invalid_restored_columns():
         getView=lambda: SimpleNamespace(viewRange=lambda: ((0.0, 1.0), (0.0, 1.0))),
         rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
     )
-    win._pending_file_session_viewport_range = lambda: ((100.0, 120.0), (200.0, 220.0))
-    win._pending_file_session_montage_columns = lambda: "auto"
+    win._pending_viewport_continuity_range = lambda: ((100.0, 120.0), (200.0, 220.0))
+    win._pending_viewport_continuity_columns = lambda: "auto"
 
     viewport_plan = FrameRenderMixin._montage_viewport_plan(win, state)
 
@@ -369,7 +369,7 @@ def test_montage_commit_reschedules_restored_roi_stats():
     calls = []
     win = SimpleNamespace(
         _file_session_roi_refresh_pending=True,
-        _schedule_file_session_viewport_when_ready=lambda: calls.append("viewport"),
+        _schedule_viewport_continuity_when_ready=lambda: calls.append("viewport"),
         _schedule_file_session_roi_refresh=lambda reason: calls.append(("roi", reason)),
     )
 
@@ -875,7 +875,7 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
     assert len(resolved) == 3
     pending = [int(tile.montage_index) for tile in session.pending_tiles]
     assert pending == resolved
-    assert pending[0] in {4, 5}
+    assert pending[0] == 6
     assert session.loading_tiles == set()
     assert win.tile_schedules == 0
     assert win._montage_viewport_update_pending is True

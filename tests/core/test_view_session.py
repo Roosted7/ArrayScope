@@ -1,4 +1,5 @@
 import numpy as np
+import json
 
 
 def test_file_view_session_round_trips_recipe_viewport_and_rois(tmp_path):
@@ -30,17 +31,16 @@ def test_file_view_session_round_trips_recipe_viewport_and_rois(tmp_path):
             ),
         ),
         viewport=ViewportSession(mode="user", view_range=((1.0, 3.0), (2.0, 4.0)), viewport_shape=(240, 320)),
-        window_size=(900, 700),
         rois=(RoiSelection("roi-7", "ROI 7", RoiGeometry(RoiKind.RECTANGLE, rect=(1.0, 2.0, 3.0, 4.0))),),
         selected_roi_id="roi-7",
     )
 
-    loaded = loads_session(dumps_session(session), data.shape)
+    text = dumps_session(session)
+    loaded = loads_session(text, data.shape)
 
     assert loaded.metadata == metadata
     assert loaded.viewport.view_range == ((1.0, 3.0), (2.0, 4.0))
     assert loaded.viewport.viewport_shape == (240, 320)
-    assert loaded.window_size == (900, 700)
     assert loaded.rois[0].id == "roi-7"
     assert loaded.rois[0].geometry.rect == (1.0, 2.0, 3.0, 4.0)
     assert loaded.selected_roi_id == "roi-7"
@@ -140,15 +140,6 @@ def test_viewport_session_rejects_malformed_viewport_shape():
 
     with pytest.raises(ValueError, match="viewport.viewport_shape"):
         viewport_from_mapping({"mode": "user", "view_range": None, "viewport_shape": [100]})
-
-
-def test_file_view_session_rejects_malformed_window_size():
-    import pytest
-
-    from arrayscope.core.view_session import window_size_from_mapping
-
-    with pytest.raises(ValueError, match="window_size"):
-        window_size_from_mapping([100])
 
 
 def test_roi_session_round_trip_normalizes_geometry_and_rgb_color():

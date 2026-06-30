@@ -343,6 +343,16 @@ class ResourceGovernor:
             if snapshot.last_byte_count > 0:
                 measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
                 byte_cap = max(int(byte_cap), measured_byte_cap)
+        if (
+            channel in _PRESENTATION_UPLOAD_CHANNELS
+            and not interactive
+            and 0.0 < snapshot.last_elapsed_ms <= float(feedback.tuning.target_idle_ms)
+            and snapshot.last_count <= max(1, int(feedback.tuning.min_batch))
+            and batch <= int(feedback.tuning.min_batch)
+        ):
+            batch = min(int(batch_max), max(3, int(feedback.tuning.min_batch) + 2))
+            if snapshot.last_byte_count > 0:
+                byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
         interval = int(feedback.commit_interval_ms(channel, interactive=interactive))
         reason = "interactive feedback target" if interactive else "feedback target"
         decision = UiWorkDecision(channel, batch, budget, interval, reason, int(byte_cap))

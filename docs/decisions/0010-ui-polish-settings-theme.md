@@ -28,7 +28,7 @@ Add a small theme/settings layer instead of hard-coding a third-party theme:
 
 Persist the following through `QSettings`:
 
-- main window geometry;
+- dock/window state plus a `ViewportSession` for the graphics viewport;
 - dock placement and visibility;
 - selected theme;
 

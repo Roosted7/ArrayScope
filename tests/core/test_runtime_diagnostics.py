@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
 from arrayscope.core.diagnostics_jsonl import (
@@ -322,3 +323,23 @@ def test_runtime_diagnostics_avoids_long_feedback_worker_lines():
     assert "UI decisions:\n  montage_commit: batch=4 budget=4.0 ms interval=30 ms byte-cap=2.0 MiB" in sections["Feedback"]
     assert "  Inactive:\n    - roi_refresh" in sections["Feedback"]
     assert all(len(line) <= 145 for line in sections["Render"].splitlines())
+
+
+def test_runtime_bottleneck_ignores_stale_ui_pressure_when_idle():
+    from arrayscope.core.resource_governor import (
+        ResourceGovernorDiagnostics,
+        ResourcePressure,
+        ResourcePressureState,
+    )
+
+    snapshot = replace(
+        _snapshot(),
+        montage_timing=MontageTimingDiagnostics(),
+        resource_governor=ResourceGovernorDiagnostics(
+            pressure=ResourcePressureState(ResourcePressure.HIGH, 0.5, ResourcePressure.LOW, ResourcePressure.NORMAL, "")
+        ),
+    )
+
+    sections = format_runtime_diagnostics_sections(snapshot)
+
+    assert "Bottleneck: idle" in sections["Realtime"]

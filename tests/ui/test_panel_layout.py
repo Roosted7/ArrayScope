@@ -506,8 +506,10 @@ def test_queued_dock_visibility_is_latest_only_per_dock(qtbot):
         win.close()
 
 
-def test_restored_window_size_excludes_visible_docked_panels(qtbot):
+def test_restored_layout_uses_saved_viewport_session(qtbot):
     _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
@@ -518,13 +520,13 @@ def test_restored_window_size_excludes_visible_docked_panels(qtbot):
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
         win.layout_manager.set_managed_dock_visible(win.operation_dock, True, reason="test", preserve_canvas=False)
         _process_events(qtbot, count=40)
-        expanded_size = win.size()
-        base_size = win.layout_manager._window_size_excluding_docked_panels()
-
-        assert base_size.width() < expanded_size.width()
+        viewport_size = win.img_view.graphicsView.viewport().size()
+        saved_viewport_shape = (int(viewport_size.height()), int(viewport_size.width()))
 
         win.close()
         _process_events(qtbot, count=10)
+        settings = QtCore.QSettings()
+        assert settings.value("viewport_session") is not None
     finally:
         if win.isVisible():
             win.close()
@@ -533,10 +535,10 @@ def test_restored_window_size_excludes_visible_docked_panels(qtbot):
     qtbot.addWidget(restored)
     try:
         _process_events(qtbot, count=40)
+        restored_viewport = restored.img_view.graphicsView.viewport().size()
 
-        assert abs(restored.size().width() - base_size.width()) <= 2
-        assert abs(restored.size().height() - base_size.height()) <= 2
-        assert restored.size().width() < expanded_size.width() - 10
+        assert abs(int(restored_viewport.height()) - saved_viewport_shape[0]) <= 2
+        assert abs(int(restored_viewport.width()) - saved_viewport_shape[1]) <= 2
     finally:
         restored.close()
         _clear_arrayscope_settings()

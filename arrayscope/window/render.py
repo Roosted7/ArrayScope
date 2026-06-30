@@ -257,6 +257,8 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
 
     def _on_image_mouse_moved(self, pos):
         self._last_image_mouse_scene_pos = pos
+        self._last_image_hover_focus = self._image_hover_focus_from_scene_pos(pos)
+        self._last_image_hover_focus_frame_key = getattr(getattr(self, "_committed_display_frame", None), "key", None)
         self.getPixel(pos)
         schedule_priority = getattr(self, "_schedule_montage_priority_retarget_from_hover", None)
         if callable(schedule_priority):
@@ -264,6 +266,8 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
 
     def _clear_image_hover_state(self) -> None:
         self._last_image_mouse_scene_pos = None
+        self._last_image_hover_focus = None
+        self._last_image_hover_focus_frame_key = None
         label = None
         widgets = getattr(self, "widgets", None)
         if isinstance(widgets, dict):
@@ -283,7 +287,22 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
     def _refresh_hover_after_display_commit(self) -> None:
         pos = getattr(self, "_last_image_mouse_scene_pos", None)
         if pos is not None:
+            self._last_image_hover_focus = self._image_hover_focus_from_scene_pos(pos)
+            self._last_image_hover_focus_frame_key = getattr(getattr(self, "_committed_display_frame", None), "key", None)
             self.getPixel(pos)
+
+    def _image_hover_focus_from_scene_pos(self, pos):
+        try:
+            view_point = self.img_view.getView().mapSceneToView(pos)
+            x = float(view_point.x())
+            y = float(view_point.y())
+            geometry = getattr(self, "display_geometry", None)
+            status = None if geometry is None else geometry.view_point_to_tile_point(x, y, require_loaded=False)
+            if status is None or status.kind in {"outside", "gap"}:
+                return None
+            return (x, y)
+        except Exception:
+            return None
 
     def _on_profile_marker_moved(self, image_x, image_y):
         if not self.widgets['buttons']['display']['live_profile'].isChecked():
@@ -902,6 +921,10 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
             self._update_operation_dock()
             self._sync_progressive_docks()
             self._refresh_inspection_dock()
+            restore_viewport_shape = getattr(self, "_restore_viewport_continuity_shape_after_layout", None)
+            restore_shape = getattr(self, "_viewport_continuity_shape_target", lambda: None)
+            if callable(restore_viewport_shape) and callable(restore_shape) and restore_shape() is not None:
+                restore_viewport_shape()
         finally:
             self._deferred_side_panel_refresh_pending = False
 

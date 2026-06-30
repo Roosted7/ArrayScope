@@ -46,7 +46,7 @@ class QtViewNavigationDriver:
                 x_inverted=bool(view_state.get("xInverted", False)),
                 y_inverted=bool(view_state.get("yInverted", True)),
             )
-            _release_restore_camera_lock(owner)
+            _release_viewport_continuity(owner)
             event.accept()
             return True
         if event_type == QtCore.QEvent.Type.MouseMove and self._pan is not None:
@@ -82,17 +82,17 @@ class QtViewNavigationDriver:
         if focus is None:
             return False
         view_range = wheel_zoom_view_range(self._owner.view.viewRange(), focus, delta / 120.0)
-        _release_restore_camera_lock(self._owner)
+        _release_viewport_continuity(self._owner)
         self._owner.view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
         return True
 
 
-def _release_restore_camera_lock(owner) -> None:
+def _release_viewport_continuity(owner) -> None:
     try:
         window = owner.window()
     except Exception:
         window = None
-    release = getattr(window, "_release_file_session_restore_camera_lock", None)
+    release = getattr(window, "_release_viewport_continuity", None)
     if callable(release):
         release()
 

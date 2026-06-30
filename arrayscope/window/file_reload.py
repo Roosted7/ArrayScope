@@ -101,6 +101,7 @@ class FileReloadMixin:
         """Replace the displayed data, clamping slice positions to the new shape."""
         old_ndim = self.data.ndim
         new_ndim = new_data.ndim
+        reload_viewport = self._begin_reload_viewport_continuity()
 
         preserve_steps = bool(getattr(self.document, "steps", ()))
         try:
@@ -153,8 +154,38 @@ class FileReloadMixin:
         self.update_complex_indicators()
         self.update_shift_indicators()
         self.update_dimension_controls()
-        self._force_autolevel = True
-        self.render(reason="reload", force_autolevel=True)
+        try:
+            self.render(reason="reload", force_autolevel=False)
+        finally:
+            self._finish_reload_viewport_continuity(reload_viewport)
+
+    def _begin_reload_viewport_continuity(self):
+        if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
+            return None
+        try:
+            view_range = self.img_view.getView().viewRange()
+            preserved = (
+                (float(view_range[0][0]), float(view_range[0][1])),
+                (float(view_range[1][0]), float(view_range[1][1])),
+            )
+        except Exception:
+            return None
+        controller = getattr(getattr(self, "img_view", None), "viewport_controller", None)
+        mode = getattr(getattr(controller, "mode", None), "value", None)
+        return self._begin_viewport_continuity(
+            reason="reload",
+            view_range=preserved,
+            viewport_shape=self._current_image_viewport_shape(),
+            mode=mode,
+            semantic_key=("reload", getattr(getattr(self, "document", None), "revision", None)),
+            message_enabled=False,
+        )
+
+    def _finish_reload_viewport_continuity(self, reload_viewport) -> None:
+        if reload_viewport is None:
+            return
+        self._apply_viewport_continuity_when_ready()
+        self._schedule_montage_viewport_update(delay_ms=0)
 
     def _confirm_reload_clearing_operations(self, exc):
         box = QtWidgets.QMessageBox(self)

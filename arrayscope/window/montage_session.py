@@ -22,6 +22,7 @@ from arrayscope.display.model.level_convergence import ProgressiveTileLevelConve
 from arrayscope.display.model.presentation_generation import (
     PresentationGenerationSnapshot as LevelPresentationSnapshot,
     PresentationGenerationTracker,
+    levels_match,
 )
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
 from arrayscope.operations.stage_fanin import StageFanInState
@@ -931,7 +932,7 @@ class MontageRenderSession:
         if target is None:
             return True
         return (
-            self.level_generation.tile_values.get(int(tile)) == target
+            levels_match(self.level_generation.tile_values.get(int(tile)), target)
             and self.level_generation.tile_revisions.get(int(tile)) == int(self.level_revision)
         )
 

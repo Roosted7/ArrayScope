@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 from pathlib import Path
 
@@ -20,24 +19,52 @@ from arrayscope.core.view_session import (
 )
 from arrayscope.display.viewport import ViewportMode, constrain_view_range
 from arrayscope.ui.toasts import show_revert_action, show_status_action, show_status_message
+from arrayscope.window.viewport_continuity import ViewportContinuityTransaction
 
 
 FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS = 16
 FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS = 12
 
 
-@dataclass
-class FileSessionRestoreTransaction:
-    viewport: ViewportSession | None
-    window_size: tuple[int, int] | None
-    profile_visible: bool
-    defaults: dict[str, object]
-    applied: bool = False
-    camera_locked: bool = True
-    message_enabled: bool = True
-
-
 class FileViewSessionMixin:
+    def _viewport_continuity_transaction(self) -> ViewportContinuityTransaction | None:
+        tx = getattr(self, "_viewport_continuity", None)
+        return tx if isinstance(tx, ViewportContinuityTransaction) else None
+
+    def _begin_viewport_continuity(
+        self,
+        *,
+        reason: str,
+        viewport: ViewportSession | None = None,
+        view_range=None,
+        viewport_shape: tuple[int, int] | None = None,
+        montage_columns: int | None = None,
+        mode: str | None = None,
+        semantic_key: object | None = None,
+        profile_visible: bool = False,
+        defaults: dict[str, object] | None = None,
+        message_enabled: bool = True,
+    ) -> ViewportContinuityTransaction:
+        generation = int(getattr(self, "_viewport_continuity_generation", 0) or 0) + 1
+        self._viewport_continuity_generation = generation
+        tx = ViewportContinuityTransaction(
+            reason=reason,
+            generation=generation,
+            viewport=viewport,
+            view_range=view_range,
+            viewport_shape=viewport_shape,
+            montage_columns=montage_columns,
+            mode=mode,
+            semantic_key=semantic_key,
+            profile_visible=profile_visible,
+            defaults=defaults,
+            message_enabled=message_enabled,
+        )
+        if tx.viewport_shape is not None and self._viewport_continuity_shape_matches(tx.viewport_shape):
+            tx.shape_settled = True
+        self._viewport_continuity = tx
+        return tx
+
     def _current_file_session_metadata(self):
         filepath = getattr(self, "_filepath", None)
         if not canonical_file_exists(filepath):
@@ -57,15 +84,14 @@ class FileViewSessionMixin:
             metadata=metadata,
             recipe=self._current_view_recipe(),
             viewport=self._current_viewport_session(),
-            window_size=self._current_file_session_window_size(),
             rois=tuple(getattr(getattr(self, "roi_store", None), "selections", ()) or ()),
             selected_roi_id=getattr(getattr(self, "roi_store", None), "selected_id", None),
         )
 
     def _current_viewport_session(self):
-        restore = self._file_session_restore_transaction()
-        if restore is not None and restore.camera_locked and restore.viewport is not None:
-            return restore.viewport
+        tx = self._viewport_continuity_transaction()
+        if tx is not None and not tx.released and tx.view_range is not None and not tx.range_applied and tx.viewport is not None:
+            return tx.viewport
         view = getattr(getattr(self, "img_view", None), "getView", lambda: None)()
         if view is None:
             return None
@@ -93,13 +119,6 @@ class FileViewSessionMixin:
             viewport_shape=self._current_image_viewport_shape(),
             montage_columns=montage_columns,
         )
-
-    def _current_file_session_window_size(self) -> tuple[int, int] | None:
-        layout_manager = getattr(self, "layout_manager", None)
-        size_for_session = getattr(layout_manager, "window_size_for_file_session", None)
-        if not callable(size_for_session):
-            return None
-        return size_for_session()
 
     def _save_file_view_session_on_close(self) -> None:
         session = self._current_file_view_session()
@@ -147,9 +166,9 @@ class FileViewSessionMixin:
             self._set_view_state(session.recipe.view_state.for_shape(self.data.shape, preserve_flags=True))
             self._apply_display_settings(session.recipe.display)
             self._restore_roi_session(session.rois, selected_id=session.selected_roi_id)
-            self._file_session_restore = FileSessionRestoreTransaction(
+            self._begin_viewport_continuity(
+                reason="file-session-restore",
                 viewport=session.viewport,
-                window_size=session.window_size,
                 profile_visible=bool(session.recipe.display.profile_visible),
                 defaults=defaults,
             )
@@ -173,86 +192,114 @@ class FileViewSessionMixin:
             self._suspend_progressive_dock_sync = previous_suspend_progressive
         return True
 
-    def _file_session_restore_transaction(self) -> FileSessionRestoreTransaction | None:
-        restore = getattr(self, "_file_session_restore", None)
-        return restore if isinstance(restore, FileSessionRestoreTransaction) else None
+    def _pending_viewport_continuity_range(self):
+        tx = self._viewport_continuity_transaction()
+        if tx is None or tx.released or tx.range_applied:
+            return None
+        return tx.view_range
 
-    def _pending_file_session_viewport_range(self):
-        restore = self._file_session_restore_transaction()
-        viewport = None if restore is None or (restore.applied and not restore.camera_locked) else restore.viewport
-        return None if viewport is None else viewport.view_range
+    def _pending_viewport_continuity_columns(self):
+        tx = self._viewport_continuity_transaction()
+        if tx is None or tx.released or tx.range_applied:
+            return None
+        return tx.montage_columns
 
-    def _pending_file_session_montage_columns(self):
-        restore = self._file_session_restore_transaction()
-        viewport = None if restore is None or (restore.applied and not restore.camera_locked) else restore.viewport
-        return None if viewport is None else viewport.montage_columns
+    def _active_viewport_continuity_range(self):
+        tx = self._viewport_continuity_transaction()
+        if tx is None or tx.released or tx.view_range is None:
+            return None
+        if tx.range_applied and self._viewport_continuity_shape_settled():
+            return None
+        return tx.view_range
 
-    def _file_session_restore_locked_view_range(self):
-        restore = self._file_session_restore_transaction()
-        viewport = None if restore is None or not restore.camera_locked else restore.viewport
-        return None if viewport is None else viewport.view_range
+    def _release_viewport_continuity(self) -> None:
+        tx = self._viewport_continuity_transaction()
+        if tx is not None:
+            tx.released = True
 
-    def _release_file_session_restore_camera_lock(self) -> None:
-        restore = self._file_session_restore_transaction()
-        if restore is not None:
-            restore.camera_locked = False
+    def _viewport_continuity_shape_target(self) -> tuple[int, int] | None:
+        tx = self._viewport_continuity_transaction()
+        if tx is None or tx.released:
+            return None
+        if tx.viewport_shape is not None and tx.shape_settled and self._viewport_continuity_shape_matches(tx.viewport_shape):
+            return None
+        viewport = None if tx is None else tx.viewport
+        return None if viewport is None else viewport.viewport_shape
 
-    def _file_session_restore_initial_window_size(self) -> tuple[int, int] | None:
-        restore = self._file_session_restore_transaction()
-        return None if restore is None else restore.window_size
+    def _restore_viewport_continuity_shape_after_layout(self) -> None:
+        self._schedule_viewport_continuity_shape_restore()
 
-    def _file_session_restore_initial_viewport_shape(self) -> tuple[int, int] | None:
-        restore = self._file_session_restore_transaction()
-        viewport = None if restore is None else restore.viewport
-        return None if viewport is None or restore.window_size is not None else viewport.viewport_shape
-
-    def _restore_file_session_viewport_shape_after_show(self) -> None:
-        self._schedule_file_session_viewport_shape_restore()
-
-    def _schedule_file_session_viewport_shape_restore(self) -> None:
-        viewport_shape = self._file_session_restore_initial_viewport_shape()
+    def _schedule_viewport_continuity_shape_restore(self) -> None:
+        viewport_shape = self._viewport_continuity_shape_target()
         if viewport_shape is None:
             return
-        if bool(getattr(self, "_file_session_viewport_shape_restore_pending", False)):
+        tx = self._viewport_continuity_transaction()
+        if tx is None or tx.viewport_shape is None or tx.shape_settled:
+            if tx is None or tx.viewport_shape is None:
+                return
+            if tx.shape_settled and self._viewport_continuity_shape_matches(tx.viewport_shape):
+                if tx.view_range is None:
+                    tx.released = True
+                    if tx.reason == "settings-restore":
+                        self._viewport_continuity = None
+                return
+            tx.shape_settled = False
+        if getattr(self, "_viewport_continuity_shape_generation", None) == tx.generation:
             return
-        self._file_session_viewport_shape_restore_pending = True
-        # Qt event-turn barrier. File-session viewport sizing must wait until
-        # the first show/layout pass; attempts and closing checks bound retries.
+        self._viewport_continuity_shape_generation = tx.generation
+        # Qt event-turn barrier. Viewport sizing must wait until the current
+        # show/dock/layout pass has produced the real graphics viewport.
         Qt.QtCore.QTimer.singleShot(
             0,
-            lambda shape=tuple(viewport_shape): self._restore_file_session_viewport_shape_step(
+            lambda shape=tuple(viewport_shape), generation=int(tx.generation): self._restore_viewport_continuity_shape_step(
                 shape,
                 attempts=FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS,
+                generation=generation,
             ),
         )
 
-    def _restore_file_session_viewport_shape_step(self, viewport_shape, *, attempts: int) -> None:
+    def _restore_viewport_continuity_shape_step(self, viewport_shape, *, attempts: int, generation: int | None = None) -> None:
+        tx = self._viewport_continuity_transaction()
+        if tx is None or (generation is not None and int(tx.generation) != int(generation)):
+            return
         if bool(getattr(self, "_closing", False)):
-            self._file_session_viewport_shape_restore_pending = False
+            tx.shape_settled = True
             return
         try:
             self.isVisible()
         except RuntimeError:
-            self._file_session_viewport_shape_restore_pending = False
+            tx.shape_settled = True
             return
         layout_manager = getattr(self, "layout_manager", None)
         resize = getattr(layout_manager, "resize_to_dockless_viewport_shape", None)
         if callable(resize):
             resize(viewport_shape)
-        if attempts <= 1 or self._file_session_viewport_shape_matches(viewport_shape):
-            self._file_session_viewport_shape_restore_pending = False
+        if attempts <= 1 or self._viewport_continuity_shape_matches(viewport_shape):
+            tx.shape_settled = True
+            self._viewport_continuity_shape_generation = None
+            if tx.view_range is None:
+                tx.released = True
+                if tx.reason == "settings-restore":
+                    self._viewport_continuity = None
+                return
+            if tx is not None:
+                if not tx.released and tx.view_range is not None:
+                    self._apply_viewport_continuity_when_ready()
+                else:
+                    self._reapply_viewport_continuity_range_after_layout()
             return
         # Qt layout retry. Bounded by FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS and
-        # removable when dockless viewport restore has a reliable post-layout signal.
+        # removable when viewport restore has a reliable post-layout signal.
         Qt.QtCore.QTimer.singleShot(
             FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS,
-            lambda shape=tuple(viewport_shape), attempts=int(attempts) - 1: self._restore_file_session_viewport_shape_step(
+            lambda shape=tuple(viewport_shape), attempts=int(attempts) - 1, generation=generation: self._restore_viewport_continuity_shape_step(
                 shape,
                 attempts=attempts,
+                generation=generation,
             ),
         )
 
-    def _file_session_viewport_shape_matches(self, viewport_shape) -> bool:
+    def _viewport_continuity_shape_matches(self, viewport_shape) -> bool:
         try:
             target_height = max(1, int(viewport_shape[0]))
             target_width = max(1, int(viewport_shape[1]))
@@ -262,7 +309,9 @@ class FileViewSessionMixin:
             return True
 
     def _apply_file_session_layout_intent(self) -> None:
-        restore = self._file_session_restore_transaction()
+        restore = self._viewport_continuity_transaction()
+        if restore is not None and restore.reason != "file-session-restore":
+            restore = None
         if restore is not None and restore.profile_visible:
             self._profile_dock_user_visible = True
 
@@ -304,17 +353,17 @@ class FileViewSessionMixin:
             if not callable(pending_values) or not pending_values():
                 self._file_session_roi_refresh_pending = False
 
-    def _apply_file_session_viewport_when_ready(self) -> None:
-        restore = self._file_session_restore_transaction()
-        viewport = None if restore is None else restore.viewport
-        if viewport is None or (restore.applied and not restore.camera_locked):
+    def _apply_viewport_continuity_when_ready(self) -> None:
+        tx = self._viewport_continuity_transaction()
+        viewport = None if tx is None else tx.viewport
+        if viewport is None or (tx.range_applied and tx.released):
             return
-        if not self._file_session_viewport_restore_ready():
+        if not self._viewport_continuity_ready():
             return
         view = getattr(getattr(self, "img_view", None), "getView", lambda: None)()
         if view is None:
             return
-        view_range = self._validated_file_session_view_range(viewport.view_range)
+        view_range = self._validated_viewport_continuity_range(viewport.view_range)
         controller = getattr(self.img_view, "viewport_controller", None)
         if controller is not None:
             try:
@@ -331,12 +380,50 @@ class FileViewSessionMixin:
         if view_range is None:
             if controller is not None:
                 controller.fit(view)
-            restore.camera_locked = False
-            restore.applied = True
+            tx.range_applied = True
+            tx.released = True
             self._suppress_montage_autofit_revert_message = False
             sync_viewport = getattr(self.img_view, "_sync_vispy_camera_to_view", None)
             if callable(sync_viewport):
                 sync_viewport()
+            return
+        first_apply = not tx.range_applied
+        previous_applying = bool(getattr(self.img_view, "_viewport_applying", False))
+        self.img_view._viewport_applying = True
+        try:
+            view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+        finally:
+            self.img_view._viewport_applying = previous_applying
+        sync_viewport = getattr(self.img_view, "_sync_vispy_camera_to_view", None)
+        if callable(sync_viewport):
+            sync_viewport()
+        self._schedule_viewport_continuity_retarget()
+        tx.range_applied = True
+        if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
+            tx.released = self._viewport_continuity_shape_settled()
+        else:
+            tx.released = False
+        self._suppress_montage_autofit_revert_message = False
+        if first_apply and tx.message_enabled and tx.reason == "file-session-restore":
+            show_revert_action(
+                self,
+                "Restored saved view for this file.",
+                self._revert_file_view_session_restore,
+                timeout=7000,
+            )
+
+    def _reapply_viewport_continuity_range_after_layout(self) -> None:
+        tx = self._viewport_continuity_transaction()
+        viewport = None if tx is None else tx.viewport
+        if viewport is None or viewport.view_range is None:
+            return
+        if not self._viewport_continuity_ready():
+            return
+        view = getattr(getattr(self, "img_view", None), "getView", lambda: None)()
+        if view is None:
+            return
+        view_range = self._validated_viewport_continuity_range(viewport.view_range)
+        if view_range is None:
             return
         previous_applying = bool(getattr(self.img_view, "_viewport_applying", False))
         self.img_view._viewport_applying = True
@@ -347,32 +434,33 @@ class FileViewSessionMixin:
         sync_viewport = getattr(self.img_view, "_sync_vispy_camera_to_view", None)
         if callable(sync_viewport):
             sync_viewport()
-        if getattr(getattr(self, "view_state", None), "montage_axis", None) is not None:
-            self._skip_next_montage_viewport_remap = True
-        self._schedule_file_session_viewport_retarget()
-        first_apply = not restore.applied
-        restore.applied = True
-        restore.camera_locked = False
-        self._suppress_montage_autofit_revert_message = False
-        if first_apply and restore.message_enabled:
-            show_revert_action(
-                self,
-                "Restored saved view for this file.",
-                self._revert_file_view_session_restore,
-                timeout=7000,
-            )
+        self._schedule_viewport_continuity_retarget()
 
-    def _validated_file_session_view_range(self, view_range):
+    def _viewport_continuity_shape_settled(self) -> bool:
+        tx = self._viewport_continuity_transaction()
+        if tx is None or tx.viewport_shape is None:
+            return True
+        return bool(tx.shape_settled and self._viewport_continuity_shape_matches(tx.viewport_shape))
+
+    def _complete_viewport_continuity_if_settled(self) -> None:
+        tx = self._viewport_continuity_transaction()
+        if tx is None or not tx.range_applied or not self._viewport_continuity_shape_settled():
+            return
+        tx.released = True
+        if tx.reason != "file-session-restore":
+            self._viewport_continuity = None
+
+    def _validated_viewport_continuity_range(self, view_range):
         normalized = _normalize_saved_view_range(view_range)
         if normalized is None:
             return None
-        content_rect = self._file_session_current_content_rect()
+        content_rect = self._viewport_continuity_content_rect()
         if content_rect is None:
             return normalized
         constrained = constrain_view_range(normalized, content_rect)
         return constrained if _view_range_overlaps_content(constrained, content_rect) else None
 
-    def _file_session_current_content_rect(self):
+    def _viewport_continuity_content_rect(self):
         controller = getattr(getattr(self, "img_view", None), "viewport_controller", None)
         content_rect = getattr(controller, "last_display_rect", None)
         if content_rect is not None:
@@ -402,7 +490,7 @@ class FileViewSessionMixin:
             return None
         return (height, width)
 
-    def _file_session_viewport_restore_ready(self) -> bool:
+    def _viewport_continuity_ready(self) -> bool:
         if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
             frame = getattr(self, "_committed_display_frame", None)
             if frame is None:
@@ -414,15 +502,15 @@ class FileViewSessionMixin:
             return False
         return getattr(session, "plan", None) is not None
 
-    def _schedule_file_session_viewport_when_ready(self) -> None:
-        restore = self._file_session_restore_transaction()
-        if restore is None or restore.viewport is None or restore.applied:
+    def _schedule_viewport_continuity_when_ready(self) -> None:
+        tx = self._viewport_continuity_transaction()
+        if tx is None or tx.viewport is None or (tx.range_applied and tx.released):
             return
         # Qt event-turn barrier. The callback rechecks committed frame/session
         # readiness before applying the saved view range.
-        Qt.QtCore.QTimer.singleShot(0, self._apply_file_session_viewport_when_ready)
+        Qt.QtCore.QTimer.singleShot(0, self._apply_viewport_continuity_when_ready)
 
-    def _schedule_file_session_viewport_retarget(self) -> None:
+    def _schedule_viewport_continuity_retarget(self) -> None:
         if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
             return
         scheduler = getattr(self, "_schedule_montage_viewport_update", None)
@@ -440,7 +528,9 @@ class FileViewSessionMixin:
             scheduler(delay_ms=0)
 
     def _revert_file_view_session_restore(self) -> None:
-        restore = self._file_session_restore_transaction()
+        restore = self._viewport_continuity_transaction()
+        if restore is not None and restore.reason != "file-session-restore":
+            restore = None
         defaults = None if restore is None else restore.defaults
         if not defaults:
             return
@@ -450,12 +540,11 @@ class FileViewSessionMixin:
         self._set_view_state(recipe.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._apply_display_settings(recipe.display)
         self._restore_roi_session(defaults.get("rois", ()), selected_id=defaults.get("selected_roi_id"))
-        self._file_session_restore = FileSessionRestoreTransaction(
+        self._begin_viewport_continuity(
+            reason="file-session-restore",
             viewport=defaults.get("viewport"),
-            window_size=None,
             profile_visible=bool(getattr(recipe.display, "profile_visible", False)),
             defaults=defaults,
-            applied=False,
             message_enabled=False,
         )
         self.render(reason="file-view-session-revert", force_autolevel=True)

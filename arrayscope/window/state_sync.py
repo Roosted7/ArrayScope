@@ -291,8 +291,7 @@ class StateSyncMixin:
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._coerce_channel_for_current_dtype()
         self._sync_controls_to_current_data()
-        self._force_autolevel = True
-        self.render(reason="data-changed", force_autolevel=True)
+        self.render(reason="data-changed", force_autolevel=False)
         return self.document.revision
 
     def _derived_info(self):

@@ -658,7 +658,7 @@ class ImageViewShell(QtWidgets.QWidget):
         return str(self._montage_display_mode)
 
     def clearMontageTileLayer(self) -> None:
-        self.reset_tiled_residency("legacy-clear")
+        self.reset_tiled_residency("surface-reset")
 
     def hide_tiled_presentation(self, reason: str) -> None:
         if self._montage_tile_layer is not None:
@@ -2286,6 +2286,9 @@ class ImageViewShell(QtWidgets.QWidget):
             QtCore.QEvent.Type.FocusOut,
             QtCore.QEvent.Type.Hide,
         ):
+            clear_window_hover = getattr(self.window(), "_clear_image_hover_state", None)
+            if callable(clear_window_hover):
+                clear_window_hover()
             self._cancel_interaction("window-deactivate")
         return super().event(event)
 
