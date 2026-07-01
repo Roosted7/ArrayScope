@@ -55,6 +55,11 @@ dev = [
     "tomli>=2.0.0; python_version < '3.11'",
     "twine>=4.0.0",
 ]
+[tool.pytest.ini_options]
+markers = [
+    "real_system_memory: opt out of the pinned deterministic system-memory snapshot",
+]
+
 [tool.setuptools.packages.find]
 include = ["arrayscope*"]
 

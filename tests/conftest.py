@@ -7,6 +7,31 @@ import arrayscope  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
+def _pin_system_memory_snapshot(request, monkeypatch):
+    """Make memory policy deterministic across hosts.
+
+    Budgets derive from sampled system memory; without pinning, the same test
+    passes on a 32 GiB workstation and fails on a 4 GiB CI runner. Tests that
+    intentionally exercise host sampling can opt out with
+    ``@pytest.mark.real_system_memory``.
+    """
+
+    if request.node.get_closest_marker("real_system_memory") is not None:
+        yield
+        return
+    from arrayscope.core import memory_policy
+
+    pinned = memory_policy.SystemMemorySnapshot(
+        total_bytes=32 * memory_policy.GiB,
+        available_bytes=24 * memory_policy.GiB,
+        process_rss_bytes=1 * memory_policy.GiB,
+        source="pinned-test-snapshot",
+    )
+    monkeypatch.setattr(memory_policy, "sample_system_memory", lambda **_: pinned)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _restore_fft_runtime_options():
     from arrayscope.operations import fft_backend
 

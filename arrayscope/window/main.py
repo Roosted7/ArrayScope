@@ -426,6 +426,9 @@ class ArrayScopeWindow(
 
     def closeEvent(self, event):
         self._closing = True
+        layout_manager = getattr(self, "layout_manager", None)
+        if layout_manager is not None:
+            layout_manager.canvas_preserver.cancel()
         coordinator = getattr(self, "render_coordinator", None)
         if coordinator is not None:
             coordinator.cancel_pending()

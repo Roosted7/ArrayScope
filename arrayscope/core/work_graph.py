@@ -8,13 +8,18 @@ was superseded, and how admitted work completed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 from time import perf_counter_ns
 
 from arrayscope.core.scheduler import FrameTarget
 
 
-class WorkLane(StrEnum):
+class WorkLane(str, Enum):
+    """String-valued lane enum (kept 3.10-compatible; behaves like ``StrEnum``)."""
+
+    __str__ = str.__str__
+    __format__ = str.__format__
+
     VISIBLE_PLANNING = "visible_planning"
     VISIBLE_MATERIALIZATION = "visible_materialization"
     DISPLAY_PREPARATION = "display_preparation"

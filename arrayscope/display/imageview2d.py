@@ -2219,13 +2219,18 @@ class ImageViewShell(QtWidgets.QWidget):
         return super().eventFilter(obj, event)
 
     def _notify_viewport_content_resized(self, **kwargs) -> None:
+        # This runs inside a C++ resizeEvent override; an escaping exception
+        # here corrupts Qt's event dispatch (observed as a segfault). Report
+        # handler failures through the standard UI error path instead.
         parent = self.window()
         handler = getattr(parent, "_on_image_viewport_resized", None)
         if callable(handler):
             try:
                 handler(**kwargs)
-            except TypeError:
-                handler()
+            except Exception as exc:  # noqa: BLE001 - boundary with C++ dispatch
+                from arrayscope.app.errors import handle_ui_exception
+
+                handle_ui_exception("viewport-resize", exc)
 
     def _viewport_resize_owned_by_parent(self) -> bool:
         parent = self.window()

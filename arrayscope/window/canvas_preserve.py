@@ -92,6 +92,19 @@ class CanvasPreserveController:
         self._record("cancel", f"gen={self._generation}")
         self._release_strong_preserve_constraints(force=True)
 
+    def _single_shot(self, interval_ms: int, callback) -> None:
+        """Schedule a window-lifetime-scoped timer callback.
+
+        The window is passed as the receiver context so Qt drops the callback
+        when the window's C++ object is destroyed. Without this, a queued
+        retry could fire after close and touch a deleted ``QMainWindow``
+        (observed as a segfault during teardown). Generation guards protect
+        against *stale* callbacks; the receiver context protects against
+        *dead* receivers — both are required.
+        """
+
+        Qt.QtCore.QTimer.singleShot(interval_ms, self.window, callback)
+
     def run(self, transition, *, preserve_canvas: bool, allow_strong: bool = True, transition_name: str = "") -> None:
         mode = self._current_mode()
         platform = self._qt_platform_name()
@@ -136,7 +149,7 @@ class CanvasPreserveController:
         # Qt event-turn barrier guarded by `generation`. The correction needs
         # the post-transition viewport size; remove when Qt exposes a reliable
         # dock-layout-complete signal.
-        Qt.QtCore.QTimer.singleShot(
+        self._single_shot(
             0,
             lambda: self._correct_canvas_size(
                 target_canvas_size,
@@ -261,7 +274,7 @@ class CanvasPreserveController:
         next_attempts = attempts if attempts == 1 and self.constraints_active and not strong_used else attempts - 1
         # Qt layout retry guarded by `generation` and bounded attempt count.
         # This handles compositor-delayed resize application.
-        Qt.QtCore.QTimer.singleShot(
+        self._single_shot(
             _CANVAS_PRESERVE_RETRY_MS,
             lambda: self._correct_canvas_size(
                 target_canvas_size,
@@ -307,7 +320,7 @@ class CanvasPreserveController:
             handle.requestUpdate()
         # Wayland commit nudge guarded by `generation`; remove when the strong
         # preserve path no longer needs compositor acknowledgement nudges.
-        Qt.QtCore.QTimer.singleShot(
+        self._single_shot(
             _CANVAS_STRONG_PRESERVE_NUDGE_MS,
             lambda: self._nudge_window_resize_commit(generation, target_size=current_size),
         )
@@ -331,7 +344,7 @@ class CanvasPreserveController:
             handle.resize(nudge_size)
             handle.requestUpdate()
         # Wayland commit nudge completion guarded by `generation`.
-        Qt.QtCore.QTimer.singleShot(
+        self._single_shot(
             _CANVAS_STRONG_PRESERVE_NUDGE_MS,
             lambda: self._finish_window_resize_commit_nudge(generation, target_size=target_size),
         )
@@ -390,7 +403,7 @@ class CanvasPreserveController:
             return
         # User/layout timeout guarded by `generation`. It releases temporary
         # size constraints after the compositor has had time to apply them.
-        Qt.QtCore.QTimer.singleShot(
+        self._single_shot(
             _CANVAS_STRONG_PRESERVE_HOLD_MS,
             lambda: self._release_strong_preserve_constraints(generation),
         )

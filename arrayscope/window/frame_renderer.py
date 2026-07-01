@@ -290,6 +290,12 @@ class FrameRenderMixin:
         if session is None or not self._is_current_montage_session(session.session_id, session.key):
             return None
         view_state = self.view_state
+        if view_state.image_axes is None:
+            # The live view state no longer presents an image (e.g. a reduction
+            # switched to line-plot mode) while the montage session from the
+            # previous state is still attached. There is nothing to retarget;
+            # the pending render replaces the session.
+            return None
         capabilities = image_view_backend_capabilities(self.img_view)
         viewport_plan = self._montage_viewport_plan(view_state, view_range=base_view_range)
         colormap_lut = self._evaluation_colormap_lut(
