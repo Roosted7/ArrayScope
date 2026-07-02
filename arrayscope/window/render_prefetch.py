@@ -9,9 +9,11 @@ from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import stage_document_key
-from arrayscope.operations.render_plan import MAX_IDLE_PREFETCH_SLICES
 from arrayscope.operations.slabs import plan_slab, request_for_image
 
+
+# Bounded idle prefetch: at most this many neighboring slices are warmed.
+MAX_IDLE_PREFETCH_SLICES = 2
 
 class RenderPrefetchMixin:
     def _schedule_prefetch_nearby_slices(self, view_state, colormap_lut):

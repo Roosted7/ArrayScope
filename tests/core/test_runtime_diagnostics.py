@@ -20,7 +20,6 @@ from arrayscope.core.runtime_diagnostics import (
     format_runtime_diagnostics_sections,
 )
 from arrayscope.operations.stage_cache import StageCacheDiagnostics
-from arrayscope.window.stage_warmup import StageWarmupDecision
 from arrayscope.window.montage_prefetch import MontagePrefetchDecision
 from arrayscope.core.scheduler import FrameTarget, SchedulerDiagnostics
 
@@ -95,7 +94,6 @@ def _snapshot():
         ),
         canvas_preserve=CanvasPreserveRuntimeDiagnostics(events=("start gen=1",)),
         render_timing=RenderTimingDiagnostics(last_render_sync_ms=1.25),
-        stage_warmup=StageWarmupDecision("scheduled", candidate_bytes=128, budget_bytes=1024, reason="tiles wait for shared stage"),
         montage_prefetch=(MontagePrefetchDecision(12, 12, "skipped_stage_missing", "would recompute expensive stage per tile"),),
         montage_timing=MontageTimingDiagnostics(
             last_viewport_plan_ms=0.5,
@@ -210,7 +208,6 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "removed Conjugate pair" in text
     assert "stage 1 CenteredFFT" in text
     assert "Stage cache:" in text
-    assert "Stage warmup: decision=scheduled" in text
     assert "Stage cache last miss: stage=1" in text
     assert "Stage cache last store: stage=1" in text
     assert "Montage prefetch: tile=12 source=12 decision=skipped_stage_missing reason=would recompute expensive stage per tile" in text

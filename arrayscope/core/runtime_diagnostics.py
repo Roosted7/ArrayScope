@@ -300,7 +300,6 @@ class WindowRuntimeDiagnostics:
     render_coalescer: RenderCoalescerDiagnostics = field(default_factory=RenderCoalescerDiagnostics)
     work_graph: object | None = None
     stage_materialization: object | None = None
-    stage_warmup: object | None = None
     montage_prefetch: tuple[object, ...] = ()
     resource_governor: ResourceGovernorDiagnostics | None = None
     image_rendering_backend: str = "stable"
@@ -326,7 +325,6 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 _cache_line("Profiles/scalars", snapshot.profile_cache),
                 _stage_cache_line("Stage cache", snapshot.stage_cache),
                 _stage_materialization_line("Stage materialization", snapshot.stage_materialization),
-                _stage_warmup_line("Stage warmup", snapshot.stage_warmup),
             )
         ),
         "Memory": format_memory_policy(snapshot.memory_policy),
@@ -415,7 +413,6 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"flushed={snapshot.render_coalescer.flushed}, "
             f"coalesced={snapshot.render_coalescer.coalesced}"
         ),
-        _stage_warmup_line("Stage warmup", snapshot.stage_warmup),
         _montage_prefetch_line("Montage prefetch", snapshot.montage_prefetch),
     )
 
@@ -858,17 +855,6 @@ def _stage_materialization_line(name: str, diagnostics) -> str:
         f"refused={getattr(diagnostics, 'refused', 0)}, consequence={getattr(diagnostics, 'consequence', '') or 'n/a'}"
     )
 
-
-def _stage_warmup_line(name: str, diagnostics) -> str:
-    if diagnostics is None:
-        return f"{name}: n/a"
-    candidate = getattr(diagnostics, "candidate_bytes", None)
-    candidate_text = "unknown" if candidate is None else format_bytes(int(candidate))
-    return (
-        f"{name}: decision={getattr(diagnostics, 'decision', '') or 'n/a'}, "
-        f"candidate={candidate_text}, budget={format_bytes(int(getattr(diagnostics, 'budget_bytes', 0)))}, "
-        f"reason={getattr(diagnostics, 'reason', '') or 'n/a'}"
-    )
 
 
 def _montage_prefetch_line(name: str, decisions: tuple[object, ...]) -> str:

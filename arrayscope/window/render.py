@@ -21,7 +21,6 @@ from arrayscope.operations.evaluator import (
     evaluate_scalar_snapshot,
     stage_document_key,
 )
-from arrayscope.operations.render_plan import choose_visible_render_decision
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.display.model.frame import CommittedDisplayFrame, TiledValueSource

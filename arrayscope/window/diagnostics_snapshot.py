@@ -168,7 +168,6 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         profile_cache=window.operation_evaluator.profile_cache_diagnostics(),
         stage_cache=stage_cache_diagnostics,
         stage_materialization=stage_materialization_diagnostics,
-        stage_warmup=getattr(window, "_last_stage_warmup_decision", None),
         montage_prefetch=tuple(getattr(window.renderer, "_last_montage_prefetch_decisions", ()) or ()),
         resource_governor=(
             None

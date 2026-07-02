@@ -359,16 +359,6 @@ class ResourceGovernor:
         self._ui_decisions[channel] = decision
         return decision
 
-    def decide_stage_warmup(self, candidate, *, app_idle: bool, stage_cached: bool, stage_in_flight: bool) -> PrefetchAdmissionDecision:
-        if stage_cached:
-            return PrefetchAdmissionDecision("stage_warmup", False, 0, "stage already cached")
-        if stage_in_flight:
-            return PrefetchAdmissionDecision("stage_warmup", False, 0, "stage already in flight")
-        if not app_idle:
-            return PrefetchAdmissionDecision("stage_warmup", False, 0, "visible work is busy")
-        if self._pressure.memory_pressure in {ResourcePressure.ELEVATED, ResourcePressure.HIGH}:
-            return PrefetchAdmissionDecision("stage_warmup", False, 0, "memory pressure")
-        return PrefetchAdmissionDecision("stage_warmup", True, 1, "idle and memory healthy")
 
     def decide_montage_prefetch(self, *, stage_ready_or_in_flight: bool, visible_busy: bool) -> PrefetchAdmissionDecision:
         tuning = _PROFILE_TUNING[normalize_memory_profile_choice(self.profile)]

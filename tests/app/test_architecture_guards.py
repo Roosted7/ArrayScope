@@ -322,7 +322,6 @@ def test_image_view_z_order_is_centralized_in_layer_owner():
 def test_predictive_compute_modules_exist():
     for rel in (
         Path("arrayscope/core/compute_policy.py"),
-        Path("arrayscope/window/stage_warmup.py"),
         Path("arrayscope/window/montage_prefetch.py"),
         Path("arrayscope/operations/chunked_stage.py"),
     ):
@@ -545,7 +544,6 @@ def test_operation_evaluator_owns_unified_display_cache():
 
 def test_scheduler_v2_pure_modules_are_qt_free():
     for rel in (
-        Path("arrayscope/operations/render_plan.py"),
         Path("arrayscope/operations/chunked.py"),
     ):
         text = (ROOT / rel).read_text()
