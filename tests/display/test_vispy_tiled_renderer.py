@@ -12,6 +12,7 @@ from arrayscope.display.backends.vispy.tiles import (
     GpuWindowedTileVisual,
     TextureAtlasPage,
     TextureAtlasPool,
+    PayloadBatchQueue,
     _atlas_reserve_count,
     _complex_rg_texture,
     _fit_color,
@@ -1076,6 +1077,18 @@ def test_speculative_payload_batches_are_bounded_by_items_and_bytes():
 
     assert tuple(batch) == (0, 1)
     assert tuple(remaining) == (2, 3, 4, 5)
+
+
+def test_speculative_payload_queue_removes_batches_without_rebuilding_remaining_mapping():
+    values = {index: payload(index, float(index)) for index in range(6)}
+    queue = PayloadBatchQueue(values)
+
+    first = queue.take(max_items=3, max_bytes=33)
+    second = queue.take(max_items=3, max_bytes=33)
+
+    assert tuple(first) == (0, 1)
+    assert tuple(second) == (2, 3)
+    assert tuple(queue.remaining_payloads()) == (4, 5)
 
 
 def test_quad_generation_iterates_active_payloads_not_the_complete_plan():

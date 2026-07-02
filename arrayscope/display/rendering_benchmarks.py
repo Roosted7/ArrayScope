@@ -546,7 +546,7 @@ def _benchmark_progressive_tile_stream_configured(
 
 
 def _benchmark_warm_residency_queue_scaling(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    from arrayscope.display.backends.vispy.tiles import take_payload_batch
+    from arrayscope.display.backends.vispy.tiles import PayloadBatchQueue
 
     active_count = 8
     total_count = 40
@@ -588,9 +588,9 @@ def _benchmark_warm_residency_queue_scaling(view, *, measure_presented: bool) ->
     stats = []
 
     def warm_batches():
-        remaining = dict(warm_payloads)
-        while remaining:
-            batch, remaining = take_payload_batch(remaining, max_items=4, max_bytes=8 * 1024 * 1024)
+        queue = PayloadBatchQueue(warm_payloads)
+        while queue:
+            batch = queue.take(max_items=4, max_bytes=8 * 1024 * 1024)
             stats.append(
                 layer.warm_residency(
                     payloads=batch,

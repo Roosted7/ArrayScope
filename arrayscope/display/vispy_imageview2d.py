@@ -779,7 +779,9 @@ class VisPyImageView2D(ImageViewShell):
             return
         if getattr(self, "_vispy_pending_warm_tile_payloads", None):
             return
-        self._vispy_pending_warm_tile_payloads = payloads
+        from arrayscope.display.backends.vispy.tiles import PayloadBatchQueue
+
+        self._vispy_pending_warm_tile_payloads = PayloadBatchQueue(payloads)
         self._vispy_pending_warm_tile_context = {
             "geometry": geometry,
             "rgb_already_windowed": bool(rgb_already_windowed),
@@ -799,15 +801,16 @@ class VisPyImageView2D(ImageViewShell):
         timer.start(0)
 
     def _process_vispy_warm_tile_residency(self) -> None:
-        payloads = dict(getattr(self, "_vispy_pending_warm_tile_payloads", {}) or {})
+        pending = getattr(self, "_vispy_pending_warm_tile_payloads", None)
         context = dict(getattr(self, "_vispy_pending_warm_tile_context", {}) or {})
-        if not payloads:
+        if not pending:
             return
-        from arrayscope.display.backends.vispy.tiles import take_payload_batch
+        from arrayscope.display.backends.vispy.tiles import PayloadBatchQueue
 
-        batch, remaining = take_payload_batch(payloads)
-        self._vispy_pending_warm_tile_payloads = remaining
-        self._vispy_pending_warm_tile_context = context if remaining else {}
+        queue = pending if isinstance(pending, PayloadBatchQueue) else PayloadBatchQueue(pending)
+        batch = queue.take()
+        self._vispy_pending_warm_tile_payloads = queue if queue else {}
+        self._vispy_pending_warm_tile_context = context if queue else {}
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         if layer is None or not hasattr(layer, "warm_residency"):
             self._vispy_pending_warm_tile_payloads = {}
@@ -825,7 +828,7 @@ class VisPyImageView2D(ImageViewShell):
             self._vispy_pending_warm_tile_payloads = {}
             self._vispy_pending_warm_tile_context = {}
             return
-        if remaining:
+        if queue:
             timer = self._vispy_warm_tile_timer
             if timer is not None:
                 timer.start(8)

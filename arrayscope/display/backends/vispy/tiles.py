@@ -7,6 +7,7 @@ unchanged resident texture slots.  Level-only changes update uniforms only.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -1618,29 +1619,66 @@ def _page_geometry_key(payloads, pool, page, layout, *, rgb_already_windowed: bo
     )
 
 
+class PayloadBatchQueue:
+    """Ordered speculative-upload queue with bounded batch removal.
+
+    Repeatedly splitting ``dict`` objects for warm residency makes the queue
+    O(n²) over a large near-tile set.  This queue materializes the upload order
+    once and removes accepted work from the left in O(batch_size).
+    """
+
+    def __init__(self, payloads=()) -> None:
+        items = () if payloads is None else payloads.items()
+        self._pending = deque((int(tile), payload) for tile, payload in items)
+
+    def __bool__(self) -> bool:
+        return bool(self._pending)
+
+    def __len__(self) -> int:
+        return len(self._pending)
+
+    def take(
+        self,
+        *,
+        max_items: int = 4,
+        max_bytes: int = 8 * 1024 * 1024,
+    ) -> dict[int, DisplayTilePayload]:
+        max_items = max(1, int(max_items))
+        max_bytes = max(1, int(max_bytes))
+        batch: dict[int, DisplayTilePayload] = {}
+        batch_bytes = 0
+        while self._pending:
+            tile, payload = self._pending[0]
+            payload_bytes = _payload_upload_nbytes(payload)
+            fits_items = len(batch) < max_items
+            fits_bytes = not batch or batch_bytes + payload_bytes <= max_bytes
+            if not (fits_items and fits_bytes):
+                break
+            self._pending.popleft()
+            batch[int(tile)] = payload
+            batch_bytes += payload_bytes
+        return batch
+
+    def remaining_payloads(self) -> dict[int, DisplayTilePayload]:
+        return {int(tile): payload for tile, payload in self._pending}
+
+
 def take_payload_batch(
     payloads,
     *,
     max_items: int = 4,
     max_bytes: int = 8 * 1024 * 1024,
 ) -> tuple[dict[int, DisplayTilePayload], dict[int, DisplayTilePayload]]:
-    """Split speculative upload work into a bounded UI-event-loop batch."""
+    """Split speculative upload work into a bounded UI-event-loop batch.
 
-    max_items = max(1, int(max_items))
-    max_bytes = max(1, int(max_bytes))
-    batch: dict[int, DisplayTilePayload] = {}
-    remaining: dict[int, DisplayTilePayload] = {}
-    batch_bytes = 0
-    for tile, payload in dict(payloads or {}).items():
-        payload_bytes = _payload_upload_nbytes(payload)
-        fits_items = len(batch) < max_items
-        fits_bytes = not batch or batch_bytes + payload_bytes <= max_bytes
-        if fits_items and fits_bytes:
-            batch[int(tile)] = payload
-            batch_bytes += payload_bytes
-        else:
-            remaining[int(tile)] = payload
-    return batch, remaining
+    Compatibility wrapper for callers that still expect ``(batch, remaining)``.
+    Production warm-residency code should keep a ``PayloadBatchQueue`` and avoid
+    rebuilding the remaining mapping on every timer tick.
+    """
+
+    queue = PayloadBatchQueue(payloads)
+    batch = queue.take(max_items=max_items, max_bytes=max_bytes)
+    return batch, queue.remaining_payloads()
 
 
 def _payload_upload_nbytes(payload: DisplayTilePayload) -> int:
