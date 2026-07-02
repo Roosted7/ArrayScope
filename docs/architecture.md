@@ -164,11 +164,13 @@ state/document change
   -> committed frame
 ```
 
-The last valid frame remains visible during slow or refused work. Small images become one tiled region;
-large single planes and montages become multiple tiled regions through the same backend surface.
-Evaluation scheduling still has separate normal/montage orchestration, but committed presentation
-semantics are always `DisplayTiledPresentation` commits through `present_tiled`; obsolete direct
-tile-layer widget APIs are intentionally absent.
+The last valid frame remains visible during slow or refused work. Small images become one semantic
+tiled region; large single planes and montages become multiple tiled regions through the same backend
+surface. Evaluation scheduling still has separate normal/montage orchestration, but committed
+presentation semantics are always `DisplayTiledPresentation` commits through `present_tiled`; obsolete
+direct tile-layer widget APIs are intentionally absent. The physical strategy under the surface may
+still be singleton/direct, resident tiled, or virtual tiled when X5 evidence shows that choice is faster
+and within proven backend capabilities.
 
 ### Montage (current)
 
@@ -206,11 +208,12 @@ ViewIntent
 ```
 
 A small plane, huge plane, one-tile montage, and many-tile montage should share semantic planning.
-One-tile and small-tile cases are optimized inside the tiled engine; backend surfaces may commit them
-through different physical mechanics without changing their meaning.
+One-tile and small-tile cases are optimized below the surface; backend surfaces may commit them through
+different physical mechanics without changing their meaning. ADR 0046 makes this explicit: semantic
+unification is mandatory, identical physical storage is not.
 The `FramePlanner`, typed tiled surface, explicit `WorkGraph` admission, and
-`ImageViewShell`/`ImageSurface` boundary are implemented. X4 now owns the remaining shared pointer
-capture and drag-lifecycle migration.
+`ImageViewShell`/`ImageSurface` boundary are implemented. X5 now owns hardware evidence, physical
+strategy policy, acknowledged residency, and region-first materialization.
 
 ## Non-negotiable invariants
 
@@ -222,7 +225,7 @@ capture and drag-lifecycle migration.
 - First pixels do not wait for a detailed histogram plot; they do require a valid semantic level source for the pixels shown.
 - GUI callbacks have item, byte, and elapsed-time limits; an item cap alone is not a time budget.
 - Cold upload/preparation is measured separately from warm rebind/visibility work.
-- Warm/speculative residency is separately budgeted and yields to visible residency.
+- Warm/speculative residency is separately budgeted, queue-based, and yields to visible residency.
 - Hidden side panels do not continuously compute.
 - The committed frame, not a compatibility placeholder, answers hover/value queries.
 - Backend branches are based on declared capabilities, not concrete class-name tests.
@@ -262,5 +265,13 @@ are complete (see the roadmap for what each delivered). Remaining known debt:
   (`setImage`, `setTiledPresentation`, `setupUI`); shared semantics live in
   `ImageViewShell` and are pinned by
   `tests/display/test_imagesurface_contract.py`.
+- `RenderOrchestrator` is now the right owner but remains a large file. Split
+  it by proven workflow boundaries only: presentation commit, residency,
+  viewport retarget, prefetch/resource policy. Do not perform another broad
+  renderer rewrite without conformance tests and traces.
+- The surface contract intentionally permits different physical strategies for
+  one-region frames, large tiled planes, and montages. Do not reintroduce a
+  separate normal-image semantic path, and do not force every small frame
+  through atlas machinery without X5 evidence.
 
 These are tracked observations, not invitations to perform a single broad rewrite. Each migration step must leave at least one runnable backend and retain semantic conformance tests.

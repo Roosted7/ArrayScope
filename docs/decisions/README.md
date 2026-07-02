@@ -73,6 +73,7 @@ Status terminology:
 | [0042](0042-montage-viewport-reflow-and-roi-ownership.md) | Montage viewport reflow and ROI ownership | Implemented for tiled montage. |
 | [0044](0044-viewport-scoped-tiled-residency.md) | Viewport-scoped tiled residency | Accepted; acknowledgement repair implemented, normal-image retarget remains roadmap work. |
 | [0045](0045-render-orchestrator-composition.md) | Render orchestrator composition | Implemented (v32); render state owned by one composed object instead of window mixins. |
+| [0046](0046-evidence-first-performance-strategy.md) | Evidence-first performance strategy | Accepted; X5 decides physical strategies, backend defaults, and LOD from hardware traces and residency conformance. |
 
 ## Adding or changing a decision
 

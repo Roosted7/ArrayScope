@@ -136,38 +136,55 @@ Exit gate:
 - profiler output is produced by production composition;
 - one eviction/priority implementation with focused tests.
 
-## Next — hardware evidence
+## Now — evidence-first performance gates
 
 ### X5. Hardware evidence and residency policy
 
-**Status:** Gated behind Y1–Y3. This is the evidence and residency gate for tiled surfaces, not a
-general performance bucket. Note: VisPy under Xvfb/software GL is intermittently unstable; headless
-GL runs are not evidence for or against the VisPy backend — only real-hardware traces count here.
+**Status:** Active after Y1–Y3; refined by
+[ADR 0046](decisions/0046-evidence-first-performance-strategy.md). This is the evidence and residency
+gate for tiled surfaces and physical strategy selection, not a general performance bucket. VisPy under
+Xvfb/software GL is intermittently unstable; headless GL runs are not evidence for or against the VisPy
+backend — only real-hardware traces count here.
 
-**Goal:** base GPU, backend-default, viewport-residency, and multi-resolution decisions on real device
-behavior.
+**Goal:** base GPU, backend-default, singleton/direct fast-path, viewport-residency, and
+multi-resolution decisions on real device behavior.
 
-Work:
+Ordered gates:
 
-- Record queried texture/format limits and proven allocation outcomes.
+1. **X5a — Telemetry baseline.** Record queried texture/format limits, proven allocation outcomes,
+   upload timings, accepted/rejected tile counts, event-loop gaps, RSS, and context-loss/fallback
+   behavior.
+2. **X5b — Acknowledged residency.** Treat committed tiled-scene residency as backend-acknowledged
+   state only; requested upserts are not resident until accepted by the backend. Add conformance
+   coverage for partially accepted, deferred, rejected, evicted, and context-lost tiled commits so
+   `DisplayScene.resident_region_ids` follows acknowledged payloads.
+3. **X5c — Viewport-scoped tiled scenes.** Change viewport retarget scheduling from montage-mode
+   checks to tiled-scene/storage checks before enabling visible-only active regions for internally
+   tiled normal images.
+4. **X5d — Region-first materialization and physical strategy policy.** Introduce region-first display
+   materialization so huge single-plane tiling can read and prepare visible regions without requiring
+   a full display image first. Add a measured physical strategy policy below `ImageSurface`: small or
+   one-region frames may use a singleton/direct surface when measured faster, while large planes and
+   montages use resident or virtual tiled storage. This must not restore the old separate normal-image
+   semantic path.
+5. **X5e — Backend and LOD decisions.** Benchmark huge normal-plane first frame, pan into cold tiles,
+   pan across warm/resident tiles, level-only changes, backend reset/context loss, and allocation
+   fallback on both PyQtGraph and VisPy paths. Build Linux X11/Wayland, Windows, and macOS reference
+   traces on integrated and discrete GPUs. Decide whether/where VisPy becomes default from measured
+   latency, stability, memory, and parity — not theoretical throughput. Implement asynchronous or
+   source-provided LOD only after the acknowledged-residency, viewport-retarget, region-first
+   materialization, and compatible-residency contracts are proven.
+
+Policy constraints:
+
 - Separate estimated GPU residency from CPU caches and track eviction/reupload.
-- Treat committed tiled-scene residency as backend-acknowledged state only; requested upserts are not
-  resident until accepted by the backend.
-- Add conformance coverage for partially accepted, deferred, rejected, evicted, and context-lost tiled
-  commits so `DisplayScene.resident_region_ids` follows acknowledged payloads.
-- Change viewport retarget scheduling from montage-mode based to tiled-scene based before enabling
-  visible-only active regions for internally tiled normal images.
-- Introduce region-first display materialization so huge single-plane tiling can read and prepare visible
-  regions without requiring a full display image first.
-- Benchmark huge normal-plane first frame, pan into cold tiles, pan across warm/resident tiles, level-only
-  changes, backend reset/context loss, and allocation fallback on both PyQtGraph and VisPy paths.
-- Build Linux X11/Wayland, Windows, and macOS reference traces on integrated and discrete GPUs.
-- Decide whether/where VisPy becomes default from measured latency, stability, memory, and parity—not
-  theoretical throughput.
-- Implement asynchronous/source-provided LOD materialization only after the acknowledged-residency,
-  viewport-retarget, and region-first materialization contracts are proven.
+- Keep exact inspection values independent of display LOD.
 - Use separate compatible LOD pages/arrays or virtual textures; retain adjacent levels during
   transitions when budget allows.
+- Warm/speculative residency must be queue-based, bounded before admission, and superseded by newer
+  visible work. Do not copy the remaining payload map on every timer tick.
+- Do not make every small image pay atlas or quad overhead just because its semantic presentation is
+  tiled; semantic unification and physical storage are different decisions.
 
 Exit gate:
 
@@ -181,12 +198,15 @@ Exit gate:
   blanking, full-frame rematerialization, or montage-specific assumptions;
 - region-first materialization works for eager array-backed sources and has a clear extension point for
   memory-mapped/chunked sources;
+- singleton/direct and tiled physical strategies are chosen by measured capability and latency, while
+  sharing the same semantic frame/value/interaction contracts;
 - context loss and allocation failure recover without semantic corruption;
 - repeated zoom threshold crossings do not rebuild/re-upload the full active set;
 - exact inspection values remain independent of display LOD;
 - backend-default and LOD-enable decisions have documented evidence.
 
-See [ADR 0044](decisions/0044-viewport-scoped-tiled-residency.md).
+See [ADR 0044](decisions/0044-viewport-scoped-tiled-residency.md) and
+[ADR 0046](decisions/0046-evidence-first-performance-strategy.md).
 
 ## Later — product capabilities that fit the mission
 

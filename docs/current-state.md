@@ -1,13 +1,16 @@
 # Current state
 
-**Snapshot:** ArrayScope v32 composition line with the Y1–Y3 ownership gates
-complete, 2026-07-02. The v30/X1–X4 control-plane work is preserved; v32 moved
-render orchestration off the window into a composed `RenderOrchestrator` and
-fixed the crash class that motivated it; Y1–Y3 then unified the staleness
-vocabulary, the shared backend shell logic, UI state mirroring, and cache
-eviction. Evidence: [v32 composition audit](reviews/v32-composition-audit.md),
-[ADR 0045](decisions/0045-render-orchestrator-composition.md), and the Y1–Y3
-entries in the [roadmap](roadmap.md).
+**Snapshot:** ArrayScope v33/Y1–Y3 plus v34 review adjustments, 2026-07-02.
+The v30/X1–X4 control-plane work is preserved; v32 moved render orchestration
+off the window into a composed `RenderOrchestrator` and fixed the crash class
+that motivated it; Y1–Y3 then unified the staleness vocabulary, the shared
+backend shell logic, UI state mirroring, and cache eviction. The v34 review
+keeps that route, fixes low-level boundedness/copying issues in retained tiled
+payloads and VisPy warm residency, and reframes X5 as an evidence-first
+physical strategy gate. Evidence: [v32 composition audit](reviews/v32-composition-audit.md),
+[ADR 0045](decisions/0045-render-orchestrator-composition.md),
+[ADR 0046](decisions/0046-evidence-first-performance-strategy.md), and the
+Y1–Y3/X5 entries in the [roadmap](roadmap.md).
 
 ## Maturity map
 
@@ -24,13 +27,13 @@ entries in the [roadmap](roadmap.md).
 | Progressive montage | Advanced | Control-plane models extracted and exercised. |
 | Backend shell sharing | Consolidated (Y2) | Shared semantic drivers live in `ImageViewShell` behind small hooks; one tile-stats contract; surface parity tests run on both backends. |
 | UI state sync | Declarative (Y3) | `ViewStateBinder` mirrors `ViewState` into widgets; one registration per control; guarded by architecture tests. |
-| Caches | Unified (Y3) | `core/bounded_cache.py` is the one eviction/priority implementation under the display, stage, and payload caches. |
+| Caches | Unified (Y3) | `core/bounded_cache.py` is the one eviction/priority implementation under the display, stage, and payload caches. Retained tiled payloads are bounded before large inserts in the v34 review branch. |
 | PyQtGraph backend | Production default | Bounded CPU/item convergence; large item counts remain costly. |
-| VisPy backend | Experimental | Promising; real-hardware evidence is the X5 gate. Unstable under software GL (Xvfb/llvmpipe) — do not treat CI GL runs as evidence. |
+| VisPy backend | Experimental | Promising; real-hardware evidence is the X5 gate. Warm residency now uses an ordered queue in the v34 review branch. Unstable under software GL (Xvfb/llvmpipe) — do not treat CI GL runs as evidence. |
 | LOD | Native-only policy | Desired vs applied factor reported separately; multi-resolution waits on ADR 0041/X5. |
 | Diagnostics/benchmarks | Good | Work-graph counters, JSONL, benchmark records; profilers drive the production window composition. |
 | Test suite | Repaired (v32) + contract coverage (Y2) | Host-independent, no `sys.modules` replacement; `test_imagesurface_contract.py` pins cross-backend semantics; architecture guards pin the Y1/Y3 invariants. |
-| Documentation/ADRs | Updated through Y3 | Roadmap gates Y1–Y3 recorded as done with what each delivered; X5 is next. |
+| Documentation/ADRs | Updated through ADR 0046 | Roadmap gates Y1–Y3 recorded as done; X5 is now an evidence-first physical strategy gate. |
 
 ## What is working well
 
@@ -43,9 +46,10 @@ entries in the [roadmap](roadmap.md).
 - Render state has a single owner and a single staleness vocabulary
   (`render_contract`). Timer lifetime is structural: every deferred callback
   carries a receiver context, enforced by an architecture guard.
-- The tiled pipeline is the only presentation path; its memory protection
-  (montage/tile budgets, skip warnings) replaced the old refuse/degrade
-  decisions and is covered by tests.
+- The tiled pipeline is the only semantic presentation path; its memory
+  protection (montage/tile budgets, skip warnings) replaced the old
+  refuse/degrade decisions and is covered by tests. Physical storage remains a
+  strategy decision below the shared surface.
 - Cross-backend semantics are pinned by contract tests; the Y2 pass found and
   fixed two real one-backend-only forks (close-path interaction cancel, hidden
   presentation mode).
@@ -61,12 +65,20 @@ entries in the [roadmap](roadmap.md).
    `setTiledPresentation`, `setupUI`, the two `tiles.py`). That is by design
    (CPU items vs. GPU atlas), but changes there are only covered by the
    contract tests at the semantic level, not mechanically.
-4. **Real-hardware regression checks after the Y1–Y3 refactors are owed**;
+4. **The composed `RenderOrchestrator` is still too large for comfortable
+   performance debugging.** The ownership boundary is correct, but future
+   splits should follow measured workflows (residency, presentation commit,
+   prefetch/resource policy), not another broad mechanical rewrite.
+5. **Semantic tiled unification can become a physical pessimization** if small
+   frames are forced through the same atlas/quad machinery as huge scenes. X5
+   must measure singleton/direct physical strategies under the same semantic
+   contract.
+6. **Real-hardware regression checks after the Y1–Y3 refactors are owed**;
    the automated suites all run offscreen.
 
 ## Current direction
 
-The structural gates are done. Next is X5: base GPU, backend-default,
-viewport-residency, and multi-resolution decisions on measured device
-behavior, not headless runs. Ordered gates and exit criteria are in the
-[roadmap](roadmap.md).
+The structural gates are done enough to stop broad refactoring. Current work is
+X5: base GPU, backend-default, singleton/direct fast-path, viewport-residency,
+and multi-resolution decisions on measured device behavior, not headless runs.
+Ordered gates and exit criteria are in the [roadmap](roadmap.md).
