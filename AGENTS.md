@@ -35,6 +35,11 @@ Headless GUI tests normally use `QT_QPA_PLATFORM=offscreen`. VisPy/OpenGL tests 
 ## Architecture rules
 
 - `ViewState` and document objects own semantic state; widgets mirror state and emit intent.
+- Rendering orchestration state lives on `window.renderer` (`RenderOrchestrator`), never flat on the
+  window. Orchestration code reaches window services via `self.win`; the window exposes only the thin
+  rendering API and read-only presentation properties (ADR 0045).
+- Deferred callbacks and timers carry both a generation guard and a Qt receiver context; a timer must
+  not be able to outlive its window, and a guard must not be able to accept a stale generation.
 - Keep GUI callbacks thin. Do bounded work, publish progress, and reschedule the remainder.
 - Keep authoritative identities separate: document, semantic target, viewport, presentation, and physical residency.
 - Separate materialization identity from presentation identity. Levels/LUT changes must not imply new source pixels.
@@ -51,6 +56,17 @@ Headless GUI tests normally use `QT_QPA_PLATFORM=offscreen`. VisPy/OpenGL tests 
 Prefer small, reviewable fixes. Add an ADR only for a durable architecture, API, packaging, test-strategy, or major UX decision. Update live docs when behavior, maturity, ownership, or roadmap status changes; move obsolete process notes to the archive instead of layering another contradictory section on top.
 
 Every new array operation needs shape/value coverage. Every visible feature needs an interaction/smoke test where practical. Performance work needs deterministic work counters plus real timing evidence; wall-clock headless timings alone are not a GPU claim.
+
+Test-suite rules:
+
+- Never load a production module with `spec_from_file_location` and install it in `sys.modules`;
+  plain imports only. Duplicated module objects cause order-dependent identity failures.
+- Memory-policy budgets are pinned to a deterministic system snapshot in `tests/conftest.py`; use the
+  `real_system_memory` marker only when a test intentionally exercises host sampling.
+- Fake windows used with orchestrator methods model the composition (`fake.win = fake`); prefer real
+  `MontageRenderSession`/`ViewState` objects over `SimpleNamespace` stand-ins.
+- Prefer driving the real pipeline and asserting deterministic work counters and committed-frame
+  semantics over monkeypatching orchestration internals.
 
 ## Validation
 

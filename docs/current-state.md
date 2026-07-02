@@ -1,155 +1,72 @@
 # Current state
 
-**Snapshot:** ArrayScope v30 (and updated!) deadline-work-graph branch, reviewed on 2026-06-26. The v30
-rendering-consistency repairs are preserved. X1 unified frame planning/tiled surface work and X2
-deadline work admission are now implemented on top.
-
-ArrayScope has a strong semantic/evaluation foundation and a recently extracted rendering control
-plane. The project is not on the wrong overall path; the immediate v30 risk was that recent
-optimization work crossed too many queues, timers, backend contracts, and presentation identities.
-N6 moved presentation-generation, tile-admission, level-convergence, and stage-fan-in state machines
-into Qt-free models so local rendering fixes are easier to reason about. X1 then put normal images,
-large single planes, and montages behind the same `FramePlanner`/typed tiled presentation contract.
-X2 added a Qt-free `WorkGraph` above those models so visible, side-analysis, stage, fan-in, backend
-commit, retained warmup, and speculative work publish explicit admission and lifecycle counters.
+**Snapshot:** ArrayScope v32 composition line, reviewed 2026-07-02. The v30/X1–X4
+control-plane work is preserved; v32 moved render orchestration off the window
+into a composed `RenderOrchestrator`, fixed the crash class that motivated it,
+and deleted the orphaned pre-tiles decision layer. Evidence:
+[v32 composition audit](reviews/v32-composition-audit.md),
+[ADR 0045](decisions/0045-render-orchestrator-composition.md).
 
 ## Maturity map
 
 | Area | State | Notes |
 |---|---|---|
-| Basic launch, slicing, image/line display | Established | Broad automated coverage; platform/Qt integration still needs real-system checks. |
-| Dimension roles, ranges, flips/FFT shift | Established with recent change | Keep interaction regressions across cropped/ranged axes. |
+| Basic launch, slicing, image/line display | Established | Broad automated coverage; real-hardware checks still owed after v32. |
+| Dimension roles, ranges, flips/FFT shift | Established | |
 | Reversible operation document/recipes | Established | Optimizer preserves public step history. |
-| Region planning, stage cache, cost/memory estimates | Substantial | Strong Qt-free coverage; workload heuristics need field evidence. |
-| Profiles and ROI inspection | Substantial | Shared pointer capture/drag lifecycle now owns ROI/profile semantics with indexed hover candidates; hardware parity checks remain. |
-| Histogram and window/level | Substantial, under stabilization | Semantic auto bounds and latest-only refinement exist; PyQtGraph binding remains brittle. |
-| Frame planning and tiled presentation | Implemented foundation | `FramePlanner` covers single images, internally tiled large planes, and montages; real PyQtGraph/VisPy tests cover montage-optional tiled commits. |
-| Progressive montage | Advanced, stabilizing | Core control-plane state machines are extracted; viewport retargets now refresh frame-plan activity; renderer/session orchestration is still large. |
-| PyQtGraph backend | Production fallback | Correctly requires progressive CPU/item convergence for some level changes; large item counts remain costly. |
-| VisPy backend | Experimental | Persistent textures/shader levels are promising; real-hardware evidence remains a gap. |
-| LOD | Explicit native-only production policy | Demand selection records desired/applied factor, per-axis texels, policy, and reason; applied factor remains 1 until async compatible residency exists. |
-| Diagnostics/benchmarks | Good internal base, recently corrected | Completion, level-work, work-graph, and large-normal tiled-surface counters now reflect committed backend work and rejected optional admission. |
-| Documentation/ADRs | Updated for post v30 findings | X1, X2, X3, and X4 shared pointer capture are implemented; X5 hardware evidence remains. |
+| Region planning, stage cache, cost/memory estimates | Substantial | Qt-free and well covered. |
+| Profiles and ROI inspection | Substantial | Shared pointer capture owns ROI/profile semantics on both backends. |
+| Histogram and window/level | Substantial | PyQtGraph binding isolated in an adapter; still version-sensitive. |
+| Frame planning and tiled presentation | Established | One `FramePlanner`/typed tiled path for single images, large planes, montages. v32: the applied `MontagePlan` is the layout source of truth. |
+| Render orchestration | Restructured (v32) | One `RenderOrchestrator` owns render state; window keeps semantic state + thin API. Internal split of the orchestrator and token unification are the next gates (Y1). |
+| Progressive montage | Advanced | Control-plane models extracted and exercised. |
+| PyQtGraph backend | Production default | Bounded CPU/item convergence; large item counts remain costly. |
+| VisPy backend | Experimental | Promising; real-hardware evidence is the X5 gate. Unstable under software GL (Xvfb/llvmpipe) — do not treat CI GL runs as evidence. |
+| LOD | Native-only policy | Desired vs applied factor reported separately; multi-resolution waits on ADR 0041/X5. |
+| Diagnostics/benchmarks | Good | Work-graph counters, JSONL, benchmark records; stage-warmup reporting removed with the dead path. |
+| Test suite | Repaired (v32) | Host-independent (pinned memory snapshot), no `sys.modules` replacement, drifted/removed-path tests rewritten or deleted; fakes model the composition. |
+| Documentation/ADRs | Updated for v32 | Roadmap gates renumbered: Y1–Y3 structural, X5 hardware evidence. |
 
 ## What is working well
 
-### Semantic and physical identities are mostly explicit
-
-`ViewState`, `ArrayDocument`, operation plans, display geometry, committed frames, level sources, tile
-payloads, and memory policy are mostly Qt-free. Materialization identity is separated from ordinary
-levels/LUT state. Requested, materialized, resident, and presented are named lifecycle states.
-
-### Expensive work has real policy levers
-
-The project has operation capabilities, region plans, cost estimates, stage materialization and
-singleflight, separate caches, cancellation/supersession keys, lane worker policy, GUI callback
-budgets, latency feedback, and a resource governor. These are worth preserving.
-
-### Recent performance work improved important hot paths
-
-Active-plus-latest scheduling preserves useful visible progress. Stage-plan/candidate caching, direct
-typed tile deltas, stable texture identity, retained residency, dynamic tile priority, and separation of
-cold upload from warm visibility/rebind are sensible optimizations. VisPy level changes can remain
-uniform-only, while PyQtGraph can reuse the same priority/admission queue for CPU redraws.
-Large normal single-plane presentations use the same typed tiled backend path as every other image.
-
-### Tests increasingly protect lifecycle contracts
-
-The suite now covers stale delta rejection, accepted-upsert acknowledgement, rapid level
-supersession, one-tile batches, auto-window within a committed session, zero-upload VisPy level
-updates, native-only LOD diagnostics, and benchmark convergence state.
-
-## Correctness repairs in this review
-
-- Backend reports now distinguish drawable retained tiles from upserts actually accepted in a commit.
-- PyQtGraph progressive level generations retry deferred tiles and settle only after every active tile
-  acknowledges the latest target.
-- Auto-window no longer replaces a useful committed montage session.
-- A concrete level command supersedes older automatic work still attached to that session.
-- Benchmark completion uses target revision/stale coverage rather than “all tiles are visible.”
-- Large auto-window bounds apply immediately while detailed histogram refinement remains latest-only.
-- Per-view histogram background requests are coalesced instead of accumulating stale work.
-- LOD diagnostics expose desired versus applied factor and the native-only reason.
-- PyQtGraph scalar/RGB per-tile level work is counted accurately for diagnostics and resource feedback.
-- Obsolete duplicate level-acknowledgement fields were removed.
-- Montage level convergence now has a single session snapshot for target revision, stale active tiles,
-  pending target work, and settled state. Profile and rendering benchmark records expose those fields
-  beside backend-specific physical work counters.
-- Normal, internally tiled large-plane, one-tile montage, and multi-tile montage presentations now
-  share `FramePlanner`, `DisplayTiledPresentation`, tile layout, and committed tiled value-source
-  semantics. Tile-layer commits are typed tiled commits only; old public/direct widget tile-layer
-  APIs have been removed.
-- Backend scene conversion uses cached frame-plan region signatures and current tile-delta active/
-  planned/near sets, avoiding stale viewport-retarget semantics and repeated full region rebuilding
-  when the plan is unchanged.
-- Montage resize/layout reflow now has explicit viewport owners. `ViewportController` preserves
-  manual screen zoom across resize; Qt-free montage reflow translates same-source layout changes
-  without adding another zoom change. Fit and true near-auto views are the only resize paths that
-  refit. ROI selections remap by source index and tile-local coordinate when the same montage sources
-  move. See
-  [ADR 0042](decisions/0042-montage-viewport-reflow-and-roi-ownership.md).
-- Viewport continuity now uses one transaction with separated consumers. File sessions and QSettings
-  both persist a `ViewportSession`; layout preserves the saved graphics viewport/canvas size, viewport
-  range is applied only after a committed scene/plan, and panel visibility returns through
-  managed-panel intent. See
-  [ADR 0043](decisions/0043-file-session-restore-boundaries.md).
+- The Qt-free semantic core (`core/`, `operations/`) is cleanly layered and
+  well tested; nothing there needed structural change in the v32 audit.
+- The extracted control-plane models (`FramePlanner`, `WorkGraph`,
+  `TileAdmissionQueue`, `PresentationGenerationTracker`,
+  `LevelConvergenceStrategy`, `StageFanInState`) are the right shape; v32
+  built on them rather than replacing them.
+- Render state now has a single owner. Timer lifetime is structural
+  (orchestrator is a `QObject` child of the window; deferred callbacks carry a
+  receiver context), which removed an entire crash class at teardown/close.
+- The tiled pipeline is the only presentation path; its memory protection
+  (montage/tile budgets, skip warnings) replaced the old refuse/degrade
+  decisions and is covered by tests.
 
 ## Material risks
 
-### 1. Renderer/session orchestration remains large
-
-`window/frame_renderer.py` and `window/montage_session.py` are still substantial orchestration
-modules. N6 removed ownership of level generation, convergence strategy, admission caps, and stage
-fan-in from the session, X1 unified frame planning/presentation semantics, and X2 added work-graph
-admission/counters. ADR 0042 also moved montage resize/reflow and ROI layout semantics out to a
-Qt-free viewport helper. The frame renderer still coordinates Qt timers, committed frames, overlays,
-side panels, diagnostics, and backend commits. Future X4/X5 work should reuse the extracted models
-rather than growing another scheduler.
-
-### 2. Semantic parity is being confused with mechanical uniformity
-
-PyQtGraph and VisPy must agree on target levels, values, source ranks, revisions, and completion. They
-must not be forced into one physical update method. PyQtGraph may need many bounded CPU/item updates;
-VisPy can update resident visuals through uniforms. ADR 0040 makes that distinction durable.
-
-### 3. Histogram ownership is adapter-isolated but still version-sensitive
-
-PyQtGraph histogram rebinding is isolated in `display/backends/pyqtgraph/histogram_adapter.py`, which
-owns `HistogramLUTWidget.setImageItem`, private `HistogramLUTItem.imageItem` rebinding, lookup-table
-refreshes, region refreshes, and `sigImageChanged` cleanup. This keeps `ImageView2D` out of PyQtGraph
-internals, but the adapter still depends on private API shape and needs explicit coverage when
-PyQtGraph changes.
-
-### 4. LOD is intentionally unavailable, not merely failing to trigger
-
-The selector runs, records per-axis source-texel demand, and the native-only policy applies factor
-one. The old implementation built CPU pyramids in a GUI commit path and mixed incompatible tile
-dimensions with fixed atlas assumptions; the production callable path is gone and guarded. ADR 0041
-defines the required split before non-native LOD can be enabled.
-
-### 5. Timer interactions still need audit discipline
-
-Debounce, commit, warm-residency, prefetch, histogram, stage-wait, and overlay timers are useful
-rescheduling tools. Montage commit/result fan-in/stage-wait/priority-retarget callbacks now carry
-explicit session/revision work tokens; future timer paths must keep that pattern and avoid owning
-semantic order.
-
-### 6. Hardware evidence remains incomplete
-
-Headless tests prove models and deterministic work counters. They do not prove OpenGL upload latency,
-texture limits, Wayland behavior, high-DPI pointer mapping, frame pacing, or interaction feel.
+1. **Parallel token schemes remain (Y1).** The orchestrator still contains
+   several revision counters and staleness patterns that predate `WorkGraph`.
+   They are now in one namespace, which makes the unification tractable, but
+   until Y1 lands a fix can still pick the wrong guard.
+2. **Backend duplication (Y2).** ~1,200 lines are implemented twice across
+   the PyQtGraph and VisPy view classes; divergence between the two `tiles.py`
+   files is a standing source of "works on one backend" bugs.
+3. **Manual UI sync (Y3).** 17 `_sync_*` methods mirror `ViewState` into ~50
+   widgets; every new control is a chance to miss one path.
+4. **Profiling tools drift (Y3).** `tools/profile_montage_workflow.py`
+   re-implements window composition; its numbers can silently diverge from the
+   product.
+5. **Hardware evidence is still absent (X5).** Nothing measured in this
+   repository under Xvfb/software GL says anything about real GPU latency,
+   texture limits, Wayland, or interaction feel. VisPy claims remain
+   unproven either way.
+6. **Histogram adapter remains version-sensitive** to private PyQtGraph API.
 
 ## Current direction
 
-Do not discard the operation/evaluation core, display models, unified frame planner, typed tiled
-surface, resource policy, extracted control-plane models, or backend mechanics. Do discard the unsafe
-synchronous LOD route and stop adding cross-cutting behavior to the session and renderer. The next
-architecture step is hardware-backed evidence and residency policy: the surface contract exists,
-VisPy no longer inherits the PyQtGraph concrete view, backend reset/teardown is explicit, and shared
-pointer capture/drag lifecycle owns ROI/profile interaction for both built-in surfaces. Plain VisPy
-pan/zoom uses backend-native event handling with shared `display.view_navigation` range math, while
-ROI/profile hits still use the shared semantic interaction controller. Non-native LOD waits for the
-ADR 0041 async materialization and compatible-residency gates.
-
-The ordered acceptance gates are in the [roadmap](roadmap.md). Full evidence and recommendations are
-in [the v30 rendering-consistency audit](reviews/v30-rendering-consistency-audit.md).
+Keep the semantic core and control-plane models. Finish ownership: Y1 (one
+generation contract, admission only through `WorkGraph`), Y2 (backend
+de-duplication against `ImageSurface`), Y3 (declarative UI binding, tools on
+production composition, one cache core). Only then spend effort on X5 hardware
+evidence, which gates LOD and any backend-default change. Ordered gates and
+exit criteria are in the [roadmap](roadmap.md).

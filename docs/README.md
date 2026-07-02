@@ -7,7 +7,7 @@ ArrayScope documentation is organized so a reader can stop at the first useful l
 - [Project README](../README.md): install, launch, and feature overview.
 - [Mission](mission.md): who ArrayScope serves, what it promises, and what it will not become.
 - [Current state](current-state.md): a candid maturity map and the most important risks.
-- [Project status supplement](project-status.md): supplemental v28 status snapshot restored from the audit notes.
+- [v32 composition audit](reviews/v32-composition-audit.md): the current findings and measurements behind the roadmap. (Older status snapshot archived at [archive/project-status-v30.md](archive/project-status-v30.md).)
 - [Roadmap](roadmap.md): the active sequence of measurable gates.
 
 These documents should answer most product and planning questions.

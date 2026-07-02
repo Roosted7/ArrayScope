@@ -2,7 +2,8 @@
 
 Reviews are dated assessments and trace interpretations. They may identify risks or recommend direction, but the current source of truth remains tested code, accepted ADRs, and the live architecture/roadmap.
 
-- [v31 rendering and roadmap audit](v31-rendering-roadmap-audit.md): rendering architecture, residency, viewport, backend policy, and roadmap/ADR review (2026-06-27).
+- [v32 composition audit](v32-composition-audit.md): full-project ownership/structure review, measured coupling, crash root causes, dead-path removal, and the Y1-Y3 gates (2026-07-02). **Current.**
+- [v31 rendering and roadmap audit](v31-rendering-roadmap-audit.md): rendering architecture, residency, viewport, backend policy, and roadmap/ADR review (2026-06-27). Superseded by v32 where they overlap.
 - [v30 rendering-consistency audit](v30-rendering-consistency-audit.md): histogram/level convergence, LOD, rendering control-plane, roadmap, and ADR review (2026-06-24).
 - [v28 project audit](v28-project-audit.md): holistic code, performance, documentation, and ArrayShow/ArrayView review (2026-06-22).
 - [v28 supplemental audit](project-audit-v28.md): alternate audit report restored from the v28 notes for completeness.

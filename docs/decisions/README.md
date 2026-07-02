@@ -67,11 +67,12 @@ Status terminology:
 | [0036](0036-vispy-rendering-backend-experiment.md) | VisPy experiment | Experiment completed; led to 0037/0038. |
 | [0037](0037-first-class-vispy-tiled-renderer.md) | VisPy tiled renderer | Preferred large-tiled target; CPU-side LOD portions superseded by 0041. |
 | [0038](0038-render-backend-composition.md) | Backend composition | Implemented; surfaces own presentation/lifecycle and mirror shared interaction state. |
-| [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Partly implemented; unified frame planner, typed tiled surface, X2 work graph, X3 backend composition, and X4 shared pointer capture are done. |
+| [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Implemented (frame planner, typed tiled surface, work graph, backend composition, shared pointer capture); residual residency work moved to 0044/X5. |
 | [0040](0040-backend-aware-presentation-convergence.md) | Backend-aware presentation convergence | Implemented for tiled presentation. |
 | [0041](0041-lod-selection-materialization-and-residency.md) | LOD selection/materialization/residency | Accepted design; production remains native-only. |
 | [0042](0042-montage-viewport-reflow-and-roi-ownership.md) | Montage viewport reflow and ROI ownership | Implemented for tiled montage. |
 | [0044](0044-viewport-scoped-tiled-residency.md) | Viewport-scoped tiled residency | Accepted; acknowledgement repair implemented, normal-image retarget remains roadmap work. |
+| [0045](0045-render-orchestrator-composition.md) | Render orchestrator composition | Implemented (v32); render state owned by one composed object instead of window mixins. |
 
 ## Adding or changing a decision
 

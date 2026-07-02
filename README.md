@@ -68,7 +68,10 @@ The operation stack supports reversible, ordered steps such as crop, reverse, re
 - Runtime memory policy, latency feedback, a resource governor, and diagnostics expose why work was admitted, delayed, degraded, or refused.
 - PyQtGraph is the default backend. VisPy provides experimental shader windowing and persistent tiled residency.
 
-These mechanisms substantially improve bounded behavior, but the unified frame scheduler and backend-composition migration are not complete. The live plan is in the [roadmap](docs/roadmap.md).
+These mechanisms substantially improve bounded behavior. The unified frame planner, work-graph
+admission, backend composition, and the v32 render-orchestrator extraction are in place; the live
+plan (token unification, backend de-duplication, hardware evidence) is in the
+[roadmap](docs/roadmap.md).
 
 ### Export and load data
 
@@ -120,7 +123,7 @@ Core runtime dependencies include NumPy, PySide6, PyQtGraph, SciPy, h5py, pydico
 - [Architecture](docs/architecture.md) — ownership and invariants.
 - [Roadmap](docs/roadmap.md) — current gates rather than historical phases.
 - [ArrayShow and ArrayView comparison](docs/comparison.md) — product and technical lessons.
-- [v28 project audit](docs/reviews/v28-project-audit.md) — findings behind the current plan.
+- [v32 composition audit](docs/reviews/v32-composition-audit.md) — findings behind the current plan.
 
 Historical phase notes and manual checklists remain under [`docs/archive/`](docs/archive/README.md); they are evidence, not current instructions.
 
