@@ -27,42 +27,20 @@ class StateSyncMixin:
     def _sync_controls_from_view_state(self):
         if not hasattr(self, "widgets"):
             return
-        for axis, spinbox in enumerate(self.widgets['spins']['slice_indices'][: self.data.ndim]):
-            spinbox.blockSignals(True)
-            try:
-                spinbox.setMaximum(self.data.shape[axis] - 1)
-                spinbox.setValue(self.view_state.slice_indices[axis])
-            finally:
-                spinbox.blockSignals(False)
+        self.state_binder.sync(self)
 
-        channel_buttons = self.widgets['buttons']['channel']
-        if self.view_state.channel.value in channel_buttons:
-            channel_buttons[self.view_state.channel.value].setChecked(True)
-        self.widgets['buttons']['processing']['linear'].setChecked(self.view_state.scale == ScaleMode.LINEAR)
-        if 'log' in self.widgets['buttons']['processing']:
-            self.widgets['buttons']['processing']['log'].setChecked(self.view_state.scale == ScaleMode.LOG)
-        self.widgets['buttons']['processing']['symlog'].setChecked(self.view_state.scale == ScaleMode.SYMLOG)
-        if hasattr(self, "dimension_strip"):
-            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
-        if hasattr(self, "display_toolbar"):
-            self.display_toolbar.set_current(
-                channel=self.view_state.channel.value,
-                scale=self.view_state.scale.value,
-                window_mode="absolute" if self.widgets['buttons']['display']['window_absolute'].isChecked() else "relative",
-            )
+    def _reset_controls_to_view_state(self):
+        """Re-apply bindings even if state is unchanged (widget-side drift)."""
+
+        if not hasattr(self, "widgets"):
+            return
+        self.state_binder.forget()
+        self.state_binder.sync(self)
 
     def _sync_slice_controls_immediately(self, axis: int) -> None:
         axis = int(axis)
-        if hasattr(self, "widgets") and axis < len(self.widgets["spins"]["slice_indices"]):
-            spinbox = self.widgets["spins"]["slice_indices"][axis]
-            spinbox.blockSignals(True)
-            try:
-                spinbox.setMaximum(self.data.shape[axis] - 1)
-                spinbox.setValue(self.view_state.slice_indices[axis])
-            finally:
-                spinbox.blockSignals(False)
-        if hasattr(self, "dimension_strip"):
-            self.dimension_strip.update_axis_state(axis, self.data.shape, self.view_state, self.profile_axes)
+        if hasattr(self, "widgets"):
+            self.state_binder.sync(self, names=(f"slice-axis-{axis}", f"strip-axis-{axis}"))
         self._interactive_slice_controls_synced_state = self.view_state
 
     def _apply_slice_state(self, axis: int, state, *, reason: str, interactive: bool, immediate_axis_only: bool) -> None:
@@ -104,12 +82,12 @@ class StateSyncMixin:
             selection = parse_slice_selection(text, self.data.shape[axis])
         except ValueError:
             show_status_message(self, f"Could not understand slice selection: {text}", timeout=2000)
-            self._sync_controls_from_view_state()
+            self._reset_controls_to_view_state()
             return
         indices = selection.indices
         if not indices:
             show_status_message(self, f"Could not understand slice selection: {text}", timeout=2000)
-            self._sync_controls_from_view_state()
+            self._reset_controls_to_view_state()
             return
         text = selection.text
         if selection.kind == "scalar":
@@ -224,6 +202,9 @@ class StateSyncMixin:
         self.update_complex_indicators()
         self.update_shift_indicators()
         self.update_dimension_controls()
+        # The structural rebuild above wrote bound widgets directly, so the
+        # binder's change detection must not skip the re-apply.
+        self.state_binder.forget()
         self._sync_controls_from_view_state()
 
     def _update_operation_dock(self):

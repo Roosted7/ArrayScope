@@ -1,71 +1,61 @@
-"""Small bounded LRU cache for display evaluation results."""
+"""Bounded LRU cache for display evaluation results."""
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from dataclasses import dataclass, field
-from threading import RLock
 from time import perf_counter
 
 import numpy as np
 
+from arrayscope.core.bounded_cache import BoundedCache
 from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
 
 
-@dataclass
 class BoundedArrayCache:
-    max_bytes: int
-    max_entries: int
-    _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
-
-    def __post_init__(self):
-        self.max_bytes = int(self.max_bytes)
-        self.max_entries = int(self.max_entries)
-        self._items = OrderedDict()
-        self.bytes_used = 0
-        self.hits = 0
-        self.misses = 0
-        self.evictions = 0
+    def __init__(self, max_bytes: int, max_entries: int):
+        self._cache = BoundedCache(max_bytes=int(max_bytes), max_entries=int(max_entries))
         self.last_eval_ms = None
 
+    @property
+    def max_bytes(self) -> int:
+        return int(self._cache.max_bytes)
+
+    @property
+    def max_entries(self) -> int:
+        return int(self._cache.max_entries)
+
+    @property
+    def bytes_used(self) -> int:
+        return int(self._cache.bytes_used)
+
+    @property
+    def hits(self) -> int:
+        return int(self._cache.hits)
+
+    @property
+    def misses(self) -> int:
+        return int(self._cache.misses)
+
+    @property
+    def evictions(self) -> int:
+        return int(self._cache.evictions)
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
     def clear(self):
-        with self._lock:
-            self._items.clear()
-            self.bytes_used = 0
+        self._cache.clear()
 
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
-        with self._lock:
-            if max_bytes is not None:
-                self.max_bytes = int(max_bytes)
-            if max_entries is not None:
-                self.max_entries = int(max_entries)
-            self._evict_locked()
+        self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
 
     def clear_counters(self) -> None:
-        with self._lock:
-            self.hits = 0
-            self.misses = 0
-            self.evictions = 0
+        self._cache.clear_counters()
 
     def get(self, key):
-        with self._lock:
-            if key not in self._items:
-                self.misses += 1
-                return None
-            value, nbytes = self._items.pop(key)
-            self._items[key] = (value, nbytes)
-            self.hits += 1
-            return value
+        return self._cache.get(key)
 
     def put(self, key, value):
-        nbytes = _nbytes(value)
-        with self._lock:
-            if key in self._items:
-                _old_value, old_nbytes = self._items.pop(key)
-                self.bytes_used -= old_nbytes
-            self._items[key] = (value, nbytes)
-            self.bytes_used += nbytes
-            self._evict_locked()
+        self._cache.put(key, value, nbytes=_nbytes(value))
         return value
 
     def get_or_compute(self, key, compute):
@@ -75,19 +65,18 @@ class BoundedArrayCache:
         start = perf_counter()
         value = compute()
         elapsed_ms = (perf_counter() - start) * 1000.0
-        with self._lock:
-            self.last_eval_ms = elapsed_ms
+        self.last_eval_ms = elapsed_ms
         self.put(key, value)
         return value, False
 
     def diagnostics(self, status=CacheStatus.READY, message="", **extra):
-        with self._lock:
+        with self._cache.lock:
             total = int(self.hits) + int(self.misses)
             hit_rate = None if total == 0 else float(self.hits) / float(total)
             return CacheDiagnosticsSnapshot(
                 status=status,
                 message=message,
-                entries=len(self._items),
+                entries=len(self._cache),
                 bytes_used=int(self.bytes_used),
                 max_bytes=int(self.max_bytes),
                 hits=int(self.hits),
@@ -97,12 +86,6 @@ class BoundedArrayCache:
                 hit_rate=hit_rate,
                 **extra,
             )
-
-    def _evict_locked(self):
-        while self._items and (len(self._items) > self.max_entries or self.bytes_used > self.max_bytes):
-            _key, (_value, nbytes) = self._items.popitem(last=False)
-            self.bytes_used -= nbytes
-            self.evictions += 1
 
 
 def _nbytes(value):

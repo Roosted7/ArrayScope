@@ -36,7 +36,7 @@ def test_bounded_array_cache_resize_evicts_to_new_byte_limit():
     cache.resize(max_bytes=64)
 
     assert cache.bytes_used <= 64
-    assert len(cache._items) == 1
+    assert len(cache) == 1
     assert cache.evictions == 1
 
 
@@ -77,12 +77,12 @@ def test_bounded_cache_counts_rendered_tile_bytes():
     large_cache = BoundedArrayCache(max_bytes=100_000, max_entries=96)
     large_cache.put("tile", rendered)
     assert large_cache.bytes_used == 80_000
-    assert len(large_cache._items) == 1
+    assert len(large_cache) == 1
 
     small_cache = BoundedArrayCache(max_bytes=1024, max_entries=96)
     small_cache.put("tile", rendered)
     assert small_cache.bytes_used == 0
-    assert len(small_cache._items) == 0
+    assert len(small_cache) == 0
     assert small_cache.evictions == 1
 
 

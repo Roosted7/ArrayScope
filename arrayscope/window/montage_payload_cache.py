@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from arrayscope.core.bounded_cache import BoundedCache
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.shader_mapping import TexturePlaneKind
 
@@ -48,7 +48,7 @@ class RetainedTiledPayloadStore:
     """
 
     limit: int = 4096
-    _payloads_by_base_source: OrderedDict[object, object] = field(default_factory=OrderedDict)
+    _payloads: BoundedCache = field(default_factory=BoundedCache)
     last_clear_reason: str = ""
 
     def remember_acknowledged(self, payloads, *, limit: int | None = None) -> None:
@@ -57,13 +57,11 @@ class RetainedTiledPayloadStore:
             key = base_tile_source_id(getattr(payload, "source_id", None))
             if key is None or not payload_matches_texture_kind(payload):
                 continue
-            self._payloads_by_base_source.pop(key, None)
-            self._payloads_by_base_source[key] = payload
-        while len(self._payloads_by_base_source) > max_items:
-            self._payloads_by_base_source.popitem(last=False)
+            self._payloads.put(key, payload)
+        self._payloads.resize(max_entries=max_items)
 
     def resolve(self, tile_key, lod_factor: int, tile_state, *, shader_display: bool):
-        payload = self._payloads_by_base_source.get(tile_key)
+        payload = self._payloads.peek(tile_key)
         if payload is None:
             return None
         if not payload_lod_matches(payload, lod_factor):
@@ -73,7 +71,7 @@ class RetainedTiledPayloadStore:
         return payload
 
     def payloads_by_base_source(self, *, lod_factor: int | None = None) -> dict[object, object]:
-        payloads = dict(self._payloads_by_base_source)
+        payloads = dict(self._payloads.items())
         if lod_factor is None:
             return payloads
         return {
@@ -83,7 +81,7 @@ class RetainedTiledPayloadStore:
         }
 
     def clear_for_document_or_context_change(self, reason: str) -> None:
-        self._payloads_by_base_source.clear()
+        self._payloads.clear()
         self.last_clear_reason = str(reason)
 
 

@@ -659,3 +659,35 @@ def test_render_staleness_vocabulary_is_defined_once():
         "def montage_work_token_is_current",
     ):
         assert predicate in contract
+
+
+def test_view_state_sync_goes_through_the_binder():
+    """Sync entry points delegate to ViewStateBinder; they do not enumerate
+    widgets (roadmap Y3: adding a control means registering one binding)."""
+
+    text = (ROOT / "arrayscope" / "window" / "state_sync.py").read_text()
+    for name in ("_sync_controls_from_view_state", "_sync_slice_controls_immediately"):
+        marker = f"def {name}"
+        assert marker in text
+        body = text.split(marker, 1)[1].split("\n    def ", 1)[0]
+        assert "state_binder" in body
+        assert "blockSignals" not in body
+        assert "setChecked" not in body
+        assert "setValue" not in body
+
+
+def test_bounded_caches_share_the_core_eviction_implementation():
+    """One eviction/priority implementation (roadmap Y3): every bounded cache
+    builds on core.bounded_cache instead of hand-rolling an eviction loop."""
+
+    core = (ROOT / "arrayscope" / "core" / "bounded_cache.py").read_text()
+    assert "def _evict" in core
+    for rel in (
+        "operations/cache.py",
+        "operations/stage_cache.py",
+        "window/montage_payload_cache.py",
+    ):
+        text = (ROOT / "arrayscope" / rel).read_text()
+        assert "bounded_cache import BoundedCache" in text, rel
+        assert "def _evict" not in text, rel
+        assert "popitem(" not in text, rel

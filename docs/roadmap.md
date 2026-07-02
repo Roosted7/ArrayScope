@@ -92,7 +92,28 @@ Exit gate:
 
 ### Y3. Declarative UI sync, tools on production composition, one cache core
 
-**Status:** Ready.
+**Status:** Done (2026-07-02).
+
+- `ui/state_binding.py` (`ViewStateBinder`) owns ViewState→widget mirroring:
+  each control registers one binding where it is created, applies run with
+  signals blocked and only on value change, and the sync entry points in
+  `state_sync.py` are thin delegates (guarded by an architecture test).
+  Widget-side drift recovery goes through `_reset_controls_to_view_state()`.
+- The profiling tools already drive the production `ArrayScopeWindow`
+  composition (`profile_montage_workflow.py` and `profile_scroll_input.py`
+  construct the real window and call `render()`); the audit's
+  re-implementation claim was resolved before this gate, so the remaining
+  2,000 lines are scenario/measurement code, which is what "thin scripts over
+  production wiring" means here.
+- `core/bounded_cache.py` (`BoundedCache`) is the one eviction/priority
+  implementation: byte/entry budgets, LRU order, and a pluggable
+  `retention_key`. `BoundedArrayCache` (plain LRU), `StageCache`
+  (priority-weighted retention score), and `RetainedTiledPayloadStore`
+  (entry-bounded payload reuse) all build on it, with focused tests in
+  `tests/core/test_bounded_cache.py` and a guard forbidding hand-rolled
+  eviction loops.
+- Idle stage warmup stays removed; if it returns it must be admitted through
+  the `WorkGraph` speculative-residency lane (unchanged policy).
 
 **Goal:** remove the remaining drift machines.
 

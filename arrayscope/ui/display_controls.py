@@ -13,6 +13,7 @@ from arrayscope.ui.dimension_strip import DimensionStrip
 from arrayscope.ui.display_toolbar import DisplayToolbar
 from arrayscope.ui.hud import PixelHud
 from arrayscope.ui.icons import set_button_icon
+from arrayscope.ui.state_binding import ViewStateBinder
 from arrayscope.ui.status_label import PixelStatusLabel
 from arrayscope.ui.widgets import configure_tool_button
 from arrayscope.window.layout_controller import WindowLayoutManager
@@ -31,6 +32,7 @@ def _scale_value_for_button(window, button) -> str:
 
 class DisplayControlBuildMixin:
     def _build_window_ui(self, data, filepath):
+        self.state_binder = ViewStateBinder()
         self._create_widget_registry(data)
         self._create_button_groups_and_profile_timer()
         self._create_layout_registry()
@@ -86,6 +88,45 @@ class DisplayControlBuildMixin:
                 'slice_indices': [QtWidgets.QSpinBox(minimum=0, maximum=data.shape[i]-1) for i in range(data.ndim)]
             }
         }
+        self._register_view_state_bindings()
+
+    def _register_view_state_bindings(self):
+        """One registration per control; sync methods never enumerate widgets."""
+
+        def slice_snapshot(win, axis):
+            if axis >= win.data.ndim:
+                return None
+            return (int(win.data.shape[axis]) - 1, int(win.view_state.slice_indices[axis]))
+
+        def apply_slice(value, spinbox):
+            if value is None:
+                return
+            spinbox.setMaximum(value[0])
+            spinbox.setValue(value[1])
+
+        for axis, spinbox in enumerate(self.widgets['spins']['slice_indices']):
+            self.state_binder.bind(
+                f"slice-axis-{axis}",
+                read=lambda win, axis=axis: slice_snapshot(win, axis),
+                apply=lambda value, spinbox=spinbox: apply_slice(value, spinbox),
+                widgets=(spinbox,),
+            )
+
+        channel_buttons = self.widgets['buttons']['channel']
+        self.state_binder.bind(
+            "channel",
+            read=lambda win: win.view_state.channel.value,
+            apply=lambda value: channel_buttons[value].setChecked(True) if value in channel_buttons else None,
+            widgets=tuple(channel_buttons.values()),
+        )
+
+        processing_buttons = self.widgets['buttons']['processing']
+        self.state_binder.bind(
+            "scale",
+            read=lambda win: win.view_state.scale.value,
+            apply=lambda value: [button.setChecked(name == value) for name, button in processing_buttons.items()],
+            widgets=tuple(processing_buttons.values()),
+        )
 
     def _create_button_groups_and_profile_timer(self):
         # Create a button group for the channel radio buttons
@@ -252,6 +293,24 @@ class DisplayControlBuildMixin:
         for container in self.dim_containers:
             container.hide()
         self.layouts['dims'].addWidget(self.dimension_strip, 0, Qt.QtCore.Qt.AlignmentFlag.AlignHCenter)
+        self.state_binder.bind(
+            "dimension-strip",
+            read=lambda win: (tuple(win.data.shape), win.view_state, tuple(win.profile_axes)),
+            apply=lambda value: self.dimension_strip.update_state(value[0], value[1], value[2]),
+        )
+        for axis in range(data.ndim):
+            self.state_binder.bind(
+                f"strip-axis-{axis}",
+                read=lambda win, axis=axis: (
+                    None
+                    if axis >= win.data.ndim
+                    else (tuple(win.data.shape), win.view_state, tuple(win.profile_axes))
+                ),
+                apply=lambda value, axis=axis: (
+                    None if value is None else self.dimension_strip.update_axis_state(axis, value[0], value[1], value[2])
+                ),
+                on_demand=True,
+            )
 
     def _build_display_controls_panel(self):
         # Create a single compact control panel with all radio buttons
@@ -439,6 +498,15 @@ class DisplayControlBuildMixin:
         self.display_toolbar.windowModeChanged.connect(self._on_window_mode_changed)
         self.display_toolbar.autoWindowRequested.connect(self.auto_window_levels)
         self.layouts['topUp'].addWidget(self.display_toolbar)
+        self.state_binder.bind(
+            "display-toolbar",
+            read=lambda win: (
+                win.view_state.channel.value,
+                win.view_state.scale.value,
+                "absolute" if win.widgets['buttons']['display']['window_absolute'].isChecked() else "relative",
+            ),
+            apply=lambda value: self.display_toolbar.set_current(channel=value[0], scale=value[1], window_mode=value[2]),
+        )
         self.layouts['topUp'].addWidget(self.widgets['labels']['pixelValue'])
         self.layouts['topUp'].addWidget(self.widgets['labels']['arrayInfo'])
 

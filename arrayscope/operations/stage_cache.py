@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from dataclasses import dataclass
 from math import log2
-from threading import RLock
 from time import perf_counter
 
+from arrayscope.core.bounded_cache import BoundedCache
 from arrayscope.operations.regions import RegionSpec, StageKey, region_contains, region_text
 
 
@@ -56,14 +55,12 @@ class StageValue:
 
 class StageCache:
     def __init__(self, *, max_bytes: int, max_entries: int = 64):
-        self._max_bytes = int(max_bytes)
-        self._max_entries = int(max_entries)
-        self._items: OrderedDict[StageKey, StageValue] = OrderedDict()
-        self._bytes_used = 0
-        self._lock = RLock()
-        self.hits = 0
-        self.misses = 0
-        self.evictions = 0
+        self._cache = BoundedCache(
+            max_bytes=int(max_bytes),
+            max_entries=int(max_entries),
+            retention_key=lambda key, value: (self.retention_score(key, value), int(value.last_access_counter)),
+        )
+        self._lock = self._cache.lock
         self.candidates_seen = 0
         self.stores = 0
         self.refused_over_budget = 0
@@ -77,15 +74,27 @@ class StageCache:
 
     @property
     def max_bytes(self) -> int:
-        return self._max_bytes
+        return int(self._cache.max_bytes)
 
     @property
     def max_entries(self) -> int:
-        return self._max_entries
+        return int(self._cache.max_entries)
 
     @property
     def bytes_used(self) -> int:
-        return self._bytes_used
+        return int(self._cache.bytes_used)
+
+    @property
+    def hits(self) -> int:
+        return int(self._cache.hits)
+
+    @property
+    def misses(self) -> int:
+        return int(self._cache.misses)
+
+    @property
+    def evictions(self) -> int:
+        return int(self._cache.evictions)
 
     def note_candidate(self, summary: str = "") -> None:
         with self._lock:
@@ -102,16 +111,13 @@ class StageCache:
     def get(self, key: StageKey) -> StageValue | None:
         start = perf_counter()
         with self._lock:
-            value = self._items.pop(key, None)
+            value = self._cache.get(key)
             if value is None:
-                self.misses += 1
                 self.last_miss = _key_summary(key)
                 self.last_lookup_hit = False
                 self.last_lookup_ms = (perf_counter() - start) * 1000.0
                 return None
             value = self._touch_value(value)
-            self._items[key] = value
-            self.hits += 1
             self.last_hit = _key_summary(key)
             self.last_lookup_hit = True
             self.last_lookup_ms = (perf_counter() - start) * 1000.0
@@ -120,7 +126,7 @@ class StageCache:
     def get_containing(self, key: StageKey) -> StageValue | None:
         start = perf_counter()
         with self._lock:
-            for candidate_key, value in list(self._items.items()):
+            for candidate_key, value in self._cache.items():
                 if (
                     candidate_key.document_key == key.document_key
                     and candidate_key.operation_prefix == key.operation_prefix
@@ -128,15 +134,13 @@ class StageCache:
                     and tuple(candidate_key.shape) == tuple(key.shape)
                     and region_contains(value.region, key.region, key.shape)
                 ):
-                    self._items.pop(candidate_key)
+                    self._cache.get(candidate_key)
                     value = self._touch_value(value)
-                    self._items[candidate_key] = value
-                    self.hits += 1
                     self.last_hit = _key_summary(candidate_key)
                     self.last_lookup_hit = True
                     self.last_lookup_ms = (perf_counter() - start) * 1000.0
                     return value
-            self.misses += 1
+            self._cache.note_miss()
             self.last_miss = _key_summary(key)
             self.last_lookup_hit = False
             self.last_lookup_ms = (perf_counter() - start) * 1000.0
@@ -145,40 +149,26 @@ class StageCache:
     def put(self, key: StageKey, value: StageValue) -> bool:
         with self._lock:
             nbytes = max(0, int(value.nbytes))
-            if nbytes > self._max_bytes:
+            if not self._cache.would_fit(nbytes):
                 self.refused_over_budget += 1
                 self.last_refused = _key_summary(key)
                 return False
-            if key in self._items:
-                old = self._items.pop(key)
-                self._bytes_used -= int(old.nbytes)
             self._access_counter += 1
             object.__setattr__(value, "last_access_counter", self._access_counter)
-            self._items[key] = value
-            self._bytes_used += nbytes
+            self._cache.put(key, value, nbytes=nbytes)
             self.stores += 1
             self.last_store = _key_summary(key)
-            self._evict()
             return True
 
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
-        with self._lock:
-            if max_bytes is not None:
-                self._max_bytes = int(max_bytes)
-            if max_entries is not None:
-                self._max_entries = int(max_entries)
-            self._evict()
+        self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
 
     def clear(self) -> None:
-        with self._lock:
-            self._items.clear()
-            self._bytes_used = 0
+        self._cache.clear()
 
     def clear_counters(self) -> None:
         with self._lock:
-            self.hits = 0
-            self.misses = 0
-            self.evictions = 0
+            self._cache.clear_counters()
             self.candidates_seen = 0
             self.stores = 0
             self.refused_over_budget = 0
@@ -194,9 +184,9 @@ class StageCache:
             total = int(self.hits) + int(self.misses)
             hit_rate = None if total == 0 else float(self.hits) / float(total)
             return StageCacheDiagnostics(
-                entries=len(self._items),
-                bytes_used=int(self._bytes_used),
-                max_bytes=int(self._max_bytes),
+                entries=len(self._cache),
+                bytes_used=int(self.bytes_used),
+                max_bytes=int(self.max_bytes),
                 hits=int(self.hits),
                 misses=int(self.misses),
                 evictions=int(self.evictions),
@@ -211,19 +201,6 @@ class StageCache:
                 last_lookup_ms=self.last_lookup_ms,
                 last_lookup_hit=self.last_lookup_hit,
             )
-
-    def _evict(self) -> None:
-        while self._items and (len(self._items) > self._max_entries or self._bytes_used > self._max_bytes):
-            key = self._eviction_key()
-            value = self._items.pop(key)
-            self._bytes_used -= int(value.nbytes)
-            self.evictions += 1
-
-    def _eviction_key(self):
-        return min(
-            self._items.items(),
-            key=lambda item: (self.retention_score(item[0], item[1]), int(item[1].last_access_counter)),
-        )[0]
 
     def retention_score(self, key: StageKey, value: StageValue) -> float:
         del key

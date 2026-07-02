@@ -85,6 +85,8 @@ meaning, and backend adapters own concrete textures/items/visuals only.
 ### UI and interaction
 
 - `ui.dimension_strip` and controls translate dimension intent into state changes.
+- `ui.state_binding` (`ViewStateBinder`) owns ViewState→widget mirroring: one registration per
+  control, signal-blocked applies, change detection. Controls emit intent only.
 - `display.interaction` and `overlay_hit_test` own backend-independent hover/target/cursor semantics where migrated.
 - `display.view_navigation` owns backend-independent background pan/zoom range math; backends may
   provide native event paths that apply it to the canonical viewport range.
@@ -236,7 +238,7 @@ capture and drag-lifecycle migration.
 | Axis/slice/range/channel state | `core.view_state`, `core.slice_selection` |
 | New operation semantics | `operations.pipeline` + declarations/tests |
 | Request expansion/planning | `operations.regions`, `planner`, `slabs` |
-| Cache/stage behavior | `operations.cache`, `stage_cache`, evaluator |
+| Cache/stage behavior | `core.bounded_cache` (eviction core), `operations.cache`, `stage_cache`, evaluator |
 | Frame/presentation meaning | `display.model`, `planning`, `commit` |
 | Coordinate conversion | `display.geometry` |
 | Montage viewport reflow and source-local ROI remapping | `window.montage_viewport` |
@@ -251,13 +253,14 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 
 ## Known architectural debt
 
-Tracked as roadmap gates Y1–Y3; measured in the
-[v32 audit](reviews/v32-composition-audit.md):
+The Y1–Y3 gates measured in the [v32 audit](reviews/v32-composition-audit.md)
+are complete (see the roadmap for what each delivered). Remaining known debt:
 
-- UI state sync is manual (`_sync_*` fan-out), the profiling tools
-  re-implement window composition, and three caches duplicate
-  eviction/priority logic; Y3 addresses all three drift machines.
 - Histogram binding still reaches into private PyQtGraph state (isolated in
   the adapter).
+- The two backend view classes still override physical upload/visual paths
+  (`setImage`, `setTiledPresentation`, `setupUI`); shared semantics live in
+  `ImageViewShell` and are pinned by
+  `tests/display/test_imagesurface_contract.py`.
 
-These are roadmap items, not invitations to perform a single broad rewrite. Each migration step must leave at least one runnable backend and retain semantic conformance tests.
+These are tracked observations, not invitations to perform a single broad rewrite. Each migration step must leave at least one runnable backend and retain semantic conformance tests.
