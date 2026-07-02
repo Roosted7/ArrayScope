@@ -17,8 +17,8 @@ class RenderResourceMixin:
         for axis in view_state.image_axes:
             indices = view_state.axis_range_indices[axis]
             shape.append(len(indices) if indices is not None else view_state.shape[axis])
-        dtypes = self.operation_coordinator.operation_dtype_estimates()
-        dtype = dtypes[-1] if dtypes else getattr(self.document.base_data, "dtype", np.dtype(float))
+        dtypes = self.win.operation_coordinator.operation_dtype_estimates()
+        dtype = dtypes[-1] if dtypes else getattr(self.win.document.base_data, "dtype", np.dtype(float))
         rgb = view_state.channel == ChannelMode.COMPLEX
         return estimate_display_image_bytes(tuple(shape), dtype, rgb=rgb, histogram=rgb)
 
@@ -39,9 +39,9 @@ class RenderResourceMixin:
 
     def _refresh_memory_policy(self, *, active_render: bool = False):
         current = compute_memory_policy(
-            profile=getattr(getattr(self, "app_settings", None), "memory_profile", "balanced"),
-            render_cap_mb=getattr(getattr(self, "app_settings", None), "render_memory_budget_mb", 512),
-            input_nbytes=input_nbytes_for(getattr(self, "base_data", None)),
+            profile=getattr(getattr(self.win, "app_settings", None), "memory_profile", "balanced"),
+            render_cap_mb=getattr(getattr(self.win, "app_settings", None), "render_memory_budget_mb", 512),
+            input_nbytes=input_nbytes_for(getattr(self.win, "base_data", None)),
         )
         policy = apply_policy_hysteresis(
             getattr(self, "_current_memory_policy", None),
@@ -53,7 +53,7 @@ class RenderResourceMixin:
         return policy
 
     def _apply_memory_policy_to_caches(self, policy) -> None:
-        evaluator = getattr(self, "operation_evaluator", None)
+        evaluator = getattr(self.win, "operation_evaluator", None)
         if evaluator is not None and hasattr(evaluator, "apply_memory_policy"):
             evaluator.apply_memory_policy(policy)
 

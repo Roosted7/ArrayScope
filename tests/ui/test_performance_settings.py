@@ -81,7 +81,7 @@ def test_render_memory_budget_persists_through_settings(qtbot):
         _process_events(qtbot)
         assert win.app_settings.render_memory_budget_mb == 1024
         assert win.app_settings.memory_profile == MemoryProfileChoice.CUSTOM
-        assert win._memory_policy().visible_render_budget_bytes == 1024 * 1024 * 1024
+        assert win.renderer._memory_policy().visible_render_budget_bytes == 1024 * 1024 * 1024
     finally:
         win.close()
 
@@ -124,7 +124,7 @@ def test_selecting_memory_profile_recomputes_policy(qtbot):
         _process_events(qtbot)
 
         assert win.app_settings.memory_profile == MemoryProfileChoice.CONSERVATIVE
-        assert win._memory_policy().profile == MemoryProfileChoice.CONSERVATIVE
+        assert win.renderer._memory_policy().profile == MemoryProfileChoice.CONSERVATIVE
     finally:
         win.close()
 
@@ -144,7 +144,7 @@ def test_memory_stress_actions_adjust_profile_budget_and_policy(qtbot):
         _process_events(qtbot)
         assert win.app_settings.memory_profile == MemoryProfileChoice.CONSERVATIVE
         assert win.app_settings.render_memory_budget_mb == 256
-        assert win._memory_policy().profile == MemoryProfileChoice.CONSERVATIVE
+        assert win.renderer._memory_policy().profile == MemoryProfileChoice.CONSERVATIVE
 
         _menu_action(win, "Performance", "Decrease Render Budget").trigger()
         _process_events(qtbot)

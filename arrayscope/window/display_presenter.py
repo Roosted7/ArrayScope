@@ -169,7 +169,7 @@ class DisplayPresentationMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
-                apply_restored_viewport = getattr(self, "_apply_viewport_continuity_when_ready", None)
+                apply_restored_viewport = getattr(self.win, "_apply_viewport_continuity_when_ready", None)
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
                 show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
@@ -179,22 +179,22 @@ class DisplayPresentationMixin:
                 if callable(refresh_hover):
                     refresh_hover()
             if defer_side_panels:
-                self._deferred_side_panel_refresh_pending = True
+                self.win._deferred_side_panel_refresh_pending = True
             elif semantic_frame_commit:
-                self._update_operation_dock()
+                self.win._update_operation_dock()
         
             # Apply axis flips after setting the image
-            self.apply_axis_flips()
-            self.img_view.setImageStale(False)
-            self.img_view.setEvaluationOverlay(False)
+            self.win.apply_axis_flips()
+            self.win.img_view.setImageStale(False)
+            self.win.img_view.setEvaluationOverlay(False)
             if defer_side_panels:
-                self._deferred_side_panel_refresh_pending = True
+                self.win._deferred_side_panel_refresh_pending = True
             elif semantic_frame_commit:
-                self._refresh_inspection_dock()
+                self.win._refresh_inspection_dock()
         
         except Exception as e:
             handle_ui_exception("image update", e)
-            show_status_message(self, f"Image update failed: {e}")
+            show_status_message(self.win, f"Image update failed: {e}")
         finally:
             self._last_display_commit_ms = (perf_counter() - commit_start) * 1000.0
 
@@ -289,7 +289,7 @@ class DisplayPresentationMixin:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
-                apply_restored_viewport = getattr(self, "_apply_viewport_continuity_when_ready", None)
+                apply_restored_viewport = getattr(self.win, "_apply_viewport_continuity_when_ready", None)
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
                 show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
@@ -298,11 +298,11 @@ class DisplayPresentationMixin:
                 refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
                 if callable(refresh_hover):
                     refresh_hover()
-            self.apply_axis_flips()
-            self.img_view.setImageStale(False)
+            self.win.apply_axis_flips()
+            self.win.img_view.setImageStale(False)
         except Exception as e:
             handle_ui_exception("progressive image update", e)
-            show_status_message(self, f"Image update failed: {e}")
+            show_status_message(self.win, f"Image update failed: {e}")
         finally:
             self._last_progressive_commit_ms = (perf_counter() - commit_start) * 1000.0
             self._last_display_commit_ms = self._last_progressive_commit_ms
@@ -326,8 +326,8 @@ class DisplayPresentationMixin:
 
     def _display_committer(self) -> DisplayCommitter:
         committer = getattr(self, "_display_committer_instance", None)
-        if committer is None or getattr(committer, "image_view", None) is not self.img_view:
-            committer = DisplayCommitter(self.img_view)
+        if committer is None or getattr(committer, "image_view", None) is not self.win.img_view:
+            committer = DisplayCommitter(self.win.img_view)
             self._display_committer_instance = committer
         return committer
 
@@ -351,22 +351,22 @@ class DisplayPresentationMixin:
             target=target,
             view_state=geometry.view_state,
             display_shape=display_shape,
-            backend_capabilities=image_view_backend_capabilities(self.img_view),
+            backend_capabilities=image_view_backend_capabilities(self.win.img_view),
             memory_policy=self._memory_policy(),
         )
 
     def _previous_display_frame_for_policy(self, *, force_auto: bool) -> CommittedDisplayFrame | None:
         if force_auto:
             return None
-        frame = getattr(self, "_committed_display_frame", None)
+        frame = getattr(self.win, "_committed_display_frame", None)
         if frame is None:
             return None
         return frame if self._is_level_history_frame_usable(frame) else None
 
     def _is_level_history_frame_usable(self, frame: CommittedDisplayFrame | None) -> bool:
-        if frame is None or getattr(self, "_closing", False):
+        if frame is None or getattr(self.win, "_closing", False):
             return False
-        if frame.key.document_key != _document_key(self.document):
+        if frame.key.document_key != _document_key(self.win.document):
             return False
         if normalize_bounds(frame.levels) is None:
             return False
@@ -392,9 +392,9 @@ class DisplayPresentationMixin:
 
     def _render_request_context(self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None) -> RenderRequestContext:
         if document_key is None:
-            document_key = _document_key(self.document)
+            document_key = _document_key(self.win.document)
         if request_key is None:
-            request_key = ("display", document_key, self.view_state)
+            request_key = ("display", document_key, self.win.view_state)
         if render_generation is None:
             render_generation = self._capture_render_generation()
         return RenderRequestContext(
@@ -405,7 +405,7 @@ class DisplayPresentationMixin:
         )
 
     def _note_display_level_source(self, decision) -> None:
-        frame = getattr(self, "_committed_display_frame", None)
+        frame = getattr(self.win, "_committed_display_frame", None)
         session = getattr(self, "_montage_session", None)
         if session is None or frame is None or frame.key.semantic_key != getattr(session, "level_key", None):
             return
@@ -421,7 +421,7 @@ class DisplayPresentationMixin:
         return bridge
 
     def _schedule_frame_viewport_update(self, *, delay_ms: int | None = None) -> None:
-        if getattr(self.view_state, "montage_axis", None) is not None:
+        if getattr(self.win.view_state, "montage_axis", None) is not None:
             scheduler = getattr(self, "_schedule_montage_viewport_update", None)
             if callable(scheduler):
                 scheduler(delay_ms=delay_ms)
@@ -447,7 +447,7 @@ class DisplayPresentationMixin:
             getattr(self, "_frame_viewport_update_revision", 0) or 0
         ):
             return
-        frame = getattr(self, "_committed_display_frame", None)
+        frame = getattr(self.win, "_committed_display_frame", None)
         scene = getattr(frame, "scene", None)
         if frame is None or scene is None:
             return
@@ -472,7 +472,7 @@ class DisplayPresentationMixin:
             ),
             view_state=frame.geometry.view_state,
             display_shape=frame.geometry.display_shape,
-            backend_capabilities=image_view_backend_capabilities(self.img_view),
+            backend_capabilities=image_view_backend_capabilities(self.win.img_view),
             view_range=view_range,
             memory_policy=self._memory_policy(),
         )
@@ -507,13 +507,13 @@ class DisplayPresentationMixin:
         committed = self._display_committer().commit_tile_layer(presentation, frame.key)
         self.display_geometry = committed.geometry
         self._set_committed_display_frame(committed)
-        self.apply_axis_flips()
+        self.win.apply_axis_flips()
 
     def _display_frame_key(self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None) -> DisplayFrameKey:
         if document_key is None:
-            document_key = _document_key(self.document)
+            document_key = _document_key(self.win.document)
         if request_key is None:
-            request_key = ("display", document_key, self.view_state)
+            request_key = ("display", document_key, self.win.view_state)
         if render_generation is None:
             render_generation = self._capture_render_generation()
         return DisplayFrameKey(
@@ -527,8 +527,8 @@ class DisplayPresentationMixin:
         if not getattr(frame, "is_tiled", False):
             raise RuntimeError("Committed display frames must be tiled.")
         self._committed_display_request_key = frame.key.request_key
-        self._committed_display_frame = frame
-        refresh_hidden_roi_overlay = getattr(self, "_refresh_hidden_roi_overlay_from_committed_frame", None)
+        self.win._committed_display_frame = frame
+        refresh_hidden_roi_overlay = getattr(self.win, "_refresh_hidden_roi_overlay_from_committed_frame", None)
         if callable(refresh_hidden_roi_overlay):
             refresh_hidden_roi_overlay()
 
@@ -573,7 +573,7 @@ class DisplayPresentationMixin:
         levels = normalize_bounds(levels)
         if levels is None:
             return None
-        frame = getattr(self, "_committed_display_frame", None)
+        frame = getattr(self.win, "_committed_display_frame", None)
         session = getattr(self, "_montage_session", None)
         if semantic_key is None and frame is not None:
             semantic_key = frame.key.semantic_key
@@ -581,7 +581,7 @@ class DisplayPresentationMixin:
             semantic_key = getattr(session, "level_key", None)
         histogram_range = (
             normalize_bounds(histogram_range)
-            or normalize_bounds(self.img_view.getHistogramDataBounds())
+            or normalize_bounds(self.win.img_view.getHistogramDataBounds())
             or levels
         )
         source = LevelSource(
@@ -597,11 +597,11 @@ class DisplayPresentationMixin:
         previous_override = getattr(self, "_level_presentation_source_override", None)
         self._level_presentation_source_override = source
         try:
-            apply_levels = getattr(self.img_view, "_apply_display_levels", None)
+            apply_levels = getattr(self.win.img_view, "_apply_display_levels", None)
             if callable(apply_levels):
                 apply_levels(levels[0], levels[1], emit_user=bool(emit_user))
             else:
-                self.img_view.setLevels(levels[0], levels[1])
+                self.win.img_view.setLevels(levels[0], levels[1])
         finally:
             self._level_presentation_source_override = previous_override
 
@@ -610,9 +610,9 @@ class DisplayPresentationMixin:
             if session is not None:
                 session.user_levels_override = None
 
-        frame = getattr(self, "_committed_display_frame", None)
+        frame = getattr(self.win, "_committed_display_frame", None)
         if frame is not None:
-            self._committed_display_frame = replace(
+            self.win._committed_display_frame = replace(
                 frame,
                 levels=levels,
                 histogram_range=histogram_range,
@@ -623,13 +623,13 @@ class DisplayPresentationMixin:
 
     def _on_display_levels_changed(self) -> None:
         try:
-            levels = normalize_bounds(self.img_view.getLevels())
+            levels = normalize_bounds(self.win.img_view.getLevels())
         except Exception:
             levels = None
         if levels is None:
             return
         try:
-            histogram_range = normalize_bounds(self.img_view.getHistogramDataBounds())
+            histogram_range = normalize_bounds(self.win.img_view.getHistogramDataBounds())
         except Exception:
             histogram_range = None
         mode = self._current_window_mode()
@@ -647,10 +647,10 @@ class DisplayPresentationMixin:
         if session is not None:
             session.applied_level_source = source
 
-        frame = getattr(self, "_committed_display_frame", None)
+        frame = getattr(self.win, "_committed_display_frame", None)
         if frame is None or not self._is_level_history_frame_usable(frame):
             return
-        self._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range or frame.histogram_range)
+        self.win._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range or frame.histogram_range)
 
     def _on_level_presentation_changed(self, levels, *, final: bool = False) -> bool:
         levels = normalize_bounds(levels)
@@ -659,10 +659,10 @@ class DisplayPresentationMixin:
         session = getattr(self, "_montage_session", None)
         if session is None or not bool(getattr(session, "display_committed", False)):
             return False
-        if str(getattr(self.img_view, "montageDisplayMode", lambda: "none")()) not in {"tile_layer", "vispy_tile_layer"}:
+        if str(getattr(self.win.img_view, "montageDisplayMode", lambda: "none")()) not in {"tile_layer", "vispy_tile_layer"}:
             return False
 
-        histogram_range = normalize_bounds(getattr(self.img_view, "getHistogramDataBounds", lambda: None)()) or levels
+        histogram_range = normalize_bounds(getattr(self.win.img_view, "getHistogramDataBounds", lambda: None)()) or levels
         mode = self._current_window_mode()
         source_override = getattr(self, "_level_presentation_source_override", None)
         if source_override is None:
@@ -696,13 +696,13 @@ class DisplayPresentationMixin:
         session.force_auto = False
         needs_level_work = bool(session.begin_level_presentation_update(levels))
 
-        if image_view_backend_capabilities(self.img_view).shader_windowing:
+        if image_view_backend_capabilities(self.win.img_view).shader_windowing:
             session.acknowledge_uniform_level_presentation(levels)
             needs_level_work = False
 
-        frame = getattr(self, "_committed_display_frame", None)
+        frame = getattr(self.win, "_committed_display_frame", None)
         if frame is not None and self._is_level_history_frame_usable(frame):
-            self._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range)
+            self.win._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range)
 
         if not needs_level_work:
             return True
@@ -731,7 +731,7 @@ def tile_residency_budget_bytes(policy: MemoryPolicy) -> int:
 
 def _current_view_range(window):
     try:
-        view_range = window.img_view.getView().viewRange()
+        view_range = window.win.img_view.getView().viewRange()
         return (
             (float(view_range[0][0]), float(view_range[0][1])),
             (float(view_range[1][0]), float(view_range[1][1])),

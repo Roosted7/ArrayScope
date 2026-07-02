@@ -952,6 +952,7 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     session = _session()
     image_view = ImageView()
     owner = SimpleNamespace(img_view=image_view, _montage_session=session)
+    owner.win = owner
     rect = (0, 0, 20, 20)
 
     FrameRenderMixin._update_montage_tile_overlays_for_plan(

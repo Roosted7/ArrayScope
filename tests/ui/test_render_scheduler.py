@@ -95,7 +95,7 @@ def test_refused_render_formats_fallback_memory_message(qtbot, monkeypatch):
     try:
         _process_events(qtbot, count=20)
         win.operation_evaluator.clear_cache()
-        monkeypatch.setattr(win, "_estimated_image_display_bytes", lambda _state: 2048)
+        monkeypatch.setattr(win.renderer, "_estimated_image_display_bytes", lambda _state: 2048)
         monkeypatch.setattr(
             render_module,
             "choose_visible_render_decision",
@@ -239,7 +239,7 @@ def test_prefetch_never_runs_during_montage(qtbot):
         win._active_slice_axis = 2
         state = win.view_state.with_montage_axis(2, indices=(0, 1, 2), text=":")
         before = win.operation_evaluator.display_cache_diagnostics()
-        win._prefetch_nearby_slices(state, None)
+        win.renderer._prefetch_nearby_slices(state, None)
         _process_events(qtbot, count=20)
         after = win.operation_evaluator.display_cache_diagnostics()
 

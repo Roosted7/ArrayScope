@@ -169,7 +169,7 @@ def test_hidden_roi_overlay_refreshes_when_tiled_frame_commits(qtbot, monkeypatc
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
         _process_events(qtbot, count=10)
         win._committed_display_frame = None
-        win._committed_display_request_key = None
+        win.renderer._committed_display_request_key = None
 
         win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
         win.img_view.setRoiInfoText("")
@@ -205,7 +205,7 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1],
     )
     try:
-        win._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4))
+        win.renderer._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4))
         win.render(reason="test-tiled-roi")
         _process_events(qtbot, count=30)
         assert getattr(win._committed_display_frame, "is_tiled", False)
@@ -311,7 +311,7 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
     try:
         if image_view_backend_capabilities(win.img_view).name != "vispy":
             pytest.skip("VisPy backend unavailable in this Qt environment")
-        win._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4))
+        win.renderer._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4))
         win.render(reason="test-vispy-tiled-roi")
         _process_events(qtbot, count=30)
         assert getattr(win._committed_display_frame, "is_tiled", False)

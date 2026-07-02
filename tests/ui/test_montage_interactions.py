@@ -153,7 +153,7 @@ def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
         assert context is not None
         assert context.mapping.local_x == 1
         assert context.mapping.local_y == 1
-        assert win._hover_value_from_display(context.mapping) == pytest.approx(10.0)
+        assert win.renderer._hover_value_from_display(context.mapping) == pytest.approx(10.0)
     finally:
         win.close()
 
@@ -368,7 +368,7 @@ def test_montage_commits_cached_tiles_immediately_with_loading_placeholders(qtbo
         win._set_view_state(state)
         plan = make_montage_plan(state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=3)
         win.operation_evaluator.store_montage_tile_result(plan.tiles[0], montage_axis=2, colormap_lut=None, result=_tile_result(plan.tiles[0], 10))
-        monkeypatch.setattr(win, "_schedule_next_montage_tile", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "_schedule_next_montage_tile", lambda _session: None)
 
         win.update_image_view()
 
@@ -491,7 +491,7 @@ def test_montage_loading_overlay_clears_after_final_delayed_commit(qtbot, monkey
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_image_view()
-        win._show_montage_session_loading_overlay(win._montage_session)
+        win.renderer._show_montage_session_loading_overlay(win._montage_session)
         assert win.img_view._evaluation_overlay.isVisible()
 
         while calls:
@@ -526,10 +526,8 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
     )
     calls = []
     try:
-        monkeypatch.setattr(win, "_is_current_montage_session", lambda session_id, key: session_id == 1 and key == ("test-session",))
-        monkeypatch.setattr(
-            win,
-            "_flush_montage_presentation_commit",
+        monkeypatch.setattr(win.renderer, "_is_current_montage_session", lambda session_id, key: session_id == 1 and key == ("test-session",))
+        monkeypatch.setattr(win.renderer, "_flush_montage_presentation_commit",
             lambda: calls.append(
                 (
                     bool(session.final_commit_pending),
@@ -539,7 +537,7 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
         )
         win._montage_session = session
 
-        win._schedule_montage_ready_display_commit(session)
+        win.renderer._schedule_montage_ready_display_commit(session)
 
         assert session.final_commit_pending
         assert session.flush_pending
@@ -559,7 +557,7 @@ def test_montage_active_tiles_are_all_accounted_for(qtbot, monkeypatch):
     try:
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":"))
-        monkeypatch.setattr(win, "_schedule_next_montage_tile", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "_schedule_next_montage_tile", lambda _session: None)
         win.update_image_view()
 
         states = win._montage_session.ensure_tile_states()
@@ -608,7 +606,7 @@ def test_cached_montage_tile_rebinds_to_current_layout(qtbot, monkeypatch):
         old_state = ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=1, indices=(0, 1, 2), text=":")
         old_plan = make_montage_plan(old_state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=1)
         win.operation_evaluator.store_montage_tile_result(old_plan.tiles[1], montage_axis=2, colormap_lut=None, result=_tile_result(old_plan.tiles[1], 11))
-        monkeypatch.setattr(win, "_schedule_next_montage_tile", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "_schedule_next_montage_tile", lambda _session: None)
 
         new_state = win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
         win._set_view_state(new_state)
@@ -631,7 +629,7 @@ def test_montage_skipped_tiles_show_detailed_warning(qtbot, monkeypatch):
     monkeypatch.setattr(render_module.Qt.QtWidgets.QMessageBox, "warning", lambda _parent, _title, message: messages.append(message))
     try:
         _process_events(qtbot)
-        win._warn_montage_tiles_skipped(
+        win.renderer._warn_montage_tiles_skipped(
             skipped_count=2,
             tile_bytes=2048,
             budget_bytes=1024,
@@ -729,7 +727,7 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
         win.update_image_view()
         win._montage_tile_result_batch_size = 4
         commit_calls = []
-        original_schedule_ready_commit = win._schedule_montage_ready_display_commit
+        original_schedule_ready_commit = win.renderer._schedule_montage_ready_display_commit
 
         def record_schedule_ready_commit(session):
             commit_calls.append(
@@ -739,7 +737,7 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
             )
             return original_schedule_ready_commit(session)
 
-        monkeypatch.setattr(win, "_schedule_montage_ready_display_commit", record_schedule_ready_commit)
+        monkeypatch.setattr(win.renderer, "_schedule_montage_ready_display_commit", record_schedule_ready_commit)
         tile0 = _tile_for_callback(win, calls[0])
         tile1 = _tile_for_callback(win, calls[1])
         calls[0]["on_done"](_tile_result(tile0, 7))
@@ -824,8 +822,8 @@ def test_montage_loading_presentation_preserves_levels_until_first_real_tile(qtb
         assert win._montage_session.applied_level_source.source_count == 2
 
         tile2 = win._montage_session.plan.tiles[2]
-        win._apply_montage_tile_result(win._montage_session, tile2, _tile_result(tile2, 300))
-        win._schedule_montage_presentation_commit(win._montage_session, force=True)
+        win.renderer._apply_montage_tile_result(win._montage_session, tile2, _tile_result(tile2, 300))
+        win.renderer._schedule_montage_presentation_commit(win._montage_session, force=True)
         _process_events(qtbot)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (144.333333, 280.333333)
@@ -886,7 +884,7 @@ def test_montage_auto_window_button_applies_current_semantic_bounds_immediately(
         win.auto_window_levels()
 
         assert win._montage_session is original_session
-        assert win._explicit_user_level_source is None
+        assert win.renderer._explicit_user_level_source is None
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == expected
         _process_events(qtbot, count=20)
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == expected
@@ -910,8 +908,8 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
 
         session = win._montage_session
         for index, tile in enumerate(session.plan.tiles):
-            win._apply_montage_tile_result(session, tile, _tile_result(tile, 100 * (index + 1)))
-        win._schedule_montage_presentation_commit(session, force=True)
+            win.renderer._apply_montage_tile_result(session, tile, _tile_result(tile, 100 * (index + 1)))
+        win.renderer._schedule_montage_presentation_commit(session, force=True)
         _process_events(qtbot)
 
         before_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
@@ -920,7 +918,7 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
         assert session.applied_level_source.expected_count == tile_count
 
         win.img_view.getView().setRange(xRange=(0.0, 2.0), yRange=(0.0, 2.0), padding=0)
-        win._run_montage_viewport_update()
+        win.renderer._run_montage_viewport_update()
         _process_events(qtbot)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == before_levels
@@ -949,7 +947,7 @@ def test_enabling_montage_with_cached_tile_preserves_relative_window_fractions(q
         plan = make_montage_plan(state, axis=2, indices=(1, 2), tile_shape=(4, 5), columns=3)
         tile = plan.tiles[0]
         win.operation_evaluator.store_montage_tile_result(tile, montage_axis=2, colormap_lut=None, result=_tile_result(tile, 100.0))
-        monkeypatch.setattr(win, "_schedule_next_montage_tile", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "_schedule_next_montage_tile", lambda _session: None)
 
         win._set_view_state(state)
         win.update_image_view()
@@ -984,7 +982,7 @@ def test_shifting_montage_range_preserves_relative_window_fractions(qtbot, monke
         first_plan = make_montage_plan(first_state, axis=2, indices=(0, 1), tile_shape=(4, 5), columns=2)
         for tile in first_plan.tiles:
             win.operation_evaluator.store_montage_tile_result(tile, montage_axis=2, colormap_lut=None, result=result_for(tile, data[:, :, tile.source_index]))
-        monkeypatch.setattr(win, "_schedule_next_montage_tile", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "_schedule_next_montage_tile", lambda _session: None)
 
         win._set_view_state(first_state)
         win.update_image_view()
@@ -1023,7 +1021,7 @@ def test_cached_montage_commit_uses_all_loaded_tiles_for_initial_histogram(qtbot
                 colormap_lut=None,
                 result=_tile_result(tile, value),
             )
-        monkeypatch.setattr(win, "_schedule_next_montage_tile", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "_schedule_next_montage_tile", lambda _session: None)
 
         win.img_view.getView().setRange(xRange=(0, 20), yRange=(0, 2), padding=0)
         win._set_view_state(state)
@@ -1092,20 +1090,20 @@ def test_montage_panning_without_new_tiles_does_not_change_levels(qtbot, monkeyp
 
         tile = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile, 1000.0))
-        win._commit_montage_session_presentation(win._montage_session, force=True)
+        win.renderer._commit_montage_session_presentation(win._montage_session, force=True)
         _process_events(qtbot, count=10)
         assert win._montage_session.applied_level_source.source_count == 1
 
         before_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
         before_bounds = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
-        before_stats = win._montage_level_stats_for_session(win._montage_session)
+        before_stats = win.renderer._montage_level_stats_for_session(win._montage_session)
 
         win.img_view.getView().setRange(xRange=(402, 605), yRange=(0, 199), padding=0)
         _process_events(qtbot, count=30)
         win.update_image_view()
         _process_events(qtbot, count=10)
 
-        after_stats = win._montage_level_stats_for_session(win._montage_session)
+        after_stats = win.renderer._montage_level_stats_for_session(win._montage_session)
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == before_levels
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == before_bounds
         assert after_stats.rank == before_stats.rank
@@ -1352,7 +1350,7 @@ def test_large_complex_montage_auto_uses_tile_layer(qtbot):
         qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=5000)
 
         assert win.img_view.montageDisplayMode() == "tile_layer"
-        assert getattr(win, "_last_montage_backend_actual", None) == "tile_layer"
+        assert getattr(win.renderer, "_last_montage_backend_actual", None) == "tile_layer"
     finally:
         win.close()
 
@@ -1439,10 +1437,12 @@ def test_stale_montage_tile_result_does_not_mutate_current_ui_state(qtbot, monke
 
 
 def test_visible_render_budget_uses_app_setting():
+    from types import SimpleNamespace
+
     from arrayscope.app.settings_state import AppSettingsState
-    from arrayscope.window.render import RenderMixin
+    from arrayscope.window.render import RenderOrchestrator
 
-    mixin = RenderMixin()
-    mixin.app_settings = AppSettingsState(render_memory_budget_mb=256)
+    renderer = RenderOrchestrator.__new__(RenderOrchestrator)
+    renderer.win = SimpleNamespace(app_settings=AppSettingsState(render_memory_budget_mb=256))
 
-    assert mixin._visible_render_budget_bytes() == 256 * 1024 * 1024
+    assert renderer._visible_render_budget_bytes() == 256 * 1024 * 1024

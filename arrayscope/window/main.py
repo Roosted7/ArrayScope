@@ -27,7 +27,7 @@ from arrayscope.window.file_reload import FileReloadMixin
 from arrayscope.window.inspection import InspectionWorkflowMixin
 from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.operation_actions import OperationActionsMixin
-from arrayscope.window.render import RenderMixin
+from arrayscope.window.render import RenderOrchestrator
 from arrayscope.window.render_coordinator import RenderCoordinator
 from arrayscope.window.render_generation import RenderGeneration
 from arrayscope.window.state_sync import StateSyncMixin
@@ -41,7 +41,6 @@ class ArrayScopeWindow(
     FileViewSessionMixin,
     InspectionWorkflowMixin,
     DimensionControlMixin,
-    RenderMixin,
     ExportWorkflowMixin,
     FileReloadMixin,
     QtWidgets.QMainWindow,
@@ -65,6 +64,7 @@ class ArrayScopeWindow(
 
     def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
         super(ArrayScopeWindow, self).__init__()
+        self.renderer = RenderOrchestrator(self)
         self.resize(600,800)
         self._settings = Qt.QtCore.QSettings()
         self.app_settings = self._load_app_settings()
@@ -77,7 +77,7 @@ class ArrayScopeWindow(
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document
         self.operation_evaluator = self.operation_coordinator.evaluator
-        self._refresh_memory_policy(active_render=False)
+        self.renderer._refresh_memory_policy(active_render=False)
         self.resource_governor = ResourceGovernor(
             self.compute_policy,
             profile=self.app_settings.memory_profile,
@@ -85,7 +85,7 @@ class ArrayScopeWindow(
         self.latency_feedback = self.resource_governor.latency_feedback
         self.resource_governor.update_telemetry(
             sample_resource_snapshot(),
-            self._memory_policy(),
+            self.renderer._memory_policy(),
         )
         self._init_compare_document(data)
         self._render_generation = RenderGeneration()
@@ -212,7 +212,7 @@ class ArrayScopeWindow(
             lane=lane,
             cancellation_token=token,
             fft_workers=self.compute_policy.fft_workers_for_lane(lane),
-            memory_policy=self._memory_policy(),
+            memory_policy=self.renderer._memory_policy(),
         )
 
     def _apply_compute_policy(self) -> None:
@@ -446,3 +446,151 @@ class ArrayScopeWindow(
             if controller is not None:
                 controller.shutdown_for_close()
         super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    # Rendering API — the window's public rendering surface.
+    #
+    # Rendering orchestration state and scheduling live on
+    # ``self.renderer`` (RenderOrchestrator). The window exposes only the
+    # semantic entry points below; siblings and widgets call these instead
+    # of reaching into orchestration internals.
+    # ------------------------------------------------------------------
+
+    @property
+    def _montage_session(self):
+        return getattr(self.renderer, "_montage_session", None)
+
+    @property
+    def display_geometry(self):
+        return getattr(self.renderer, "display_geometry", None)
+
+    def render(self, *args, **kwargs):
+        return self.renderer.render(*args, **kwargs)
+
+    def request_render(self, *args, **kwargs):
+        return self.renderer.request_render(*args, **kwargs)
+
+    def update_image_view(self, *args, **kwargs):
+        return self.renderer.update_image_view(*args, **kwargs)
+
+    def update_line_plot(self, *args, **kwargs):
+        return self.renderer.update_line_plot(*args, **kwargs)
+
+    def update_display_mode(self, *args, **kwargs):
+        return self.renderer.update_display_mode(*args, **kwargs)
+
+    def auto_window_levels(self, *args, **kwargs):
+        return self.renderer.auto_window_levels(*args, **kwargs)
+
+    def fit_image_to_view(self, *args, **kwargs):
+        return self.renderer.fit_image_to_view(*args, **kwargs)
+
+    def one_to_one_image(self, *args, **kwargs):
+        return self.renderer.one_to_one_image(*args, **kwargs)
+
+    def is_line_plot_mode(self, *args, **kwargs):
+        return self.renderer.is_line_plot_mode(*args, **kwargs)
+
+    def toggle_profile_dock(self, *args, **kwargs):
+        return self.renderer.toggle_profile_dock(*args, **kwargs)
+
+    def on_tab_changed(self, *args, **kwargs):
+        return self.renderer.on_tab_changed(*args, **kwargs)
+
+    def getPixel(self, *args, **kwargs):
+        return self.renderer.getPixel(*args, **kwargs)
+
+    def _on_view_range_changed(self, *args, **kwargs):
+        return self.renderer._on_view_range_changed(*args, **kwargs)
+
+    def _on_display_levels_changed(self, *args, **kwargs):
+        return self.renderer._on_display_levels_changed(*args, **kwargs)
+
+    def _on_level_presentation_changed(self, *args, **kwargs):
+        return self.renderer._on_level_presentation_changed(*args, **kwargs)
+
+    def _on_image_mouse_moved(self, *args, **kwargs):
+        return self.renderer._on_image_mouse_moved(*args, **kwargs)
+
+    def _on_image_viewport_resized(self, *args, **kwargs):
+        return self.renderer._on_image_viewport_resized(*args, **kwargs)
+
+    def _on_inspection_dock_visibility_changed(self, *args, **kwargs):
+        return self.renderer._on_inspection_dock_visibility_changed(*args, **kwargs)
+
+    def _on_operation_dock_visibility_changed(self, *args, **kwargs):
+        return self.renderer._on_operation_dock_visibility_changed(*args, **kwargs)
+
+    def _on_profile_dock_visibility_changed(self, *args, **kwargs):
+        return self.renderer._on_profile_dock_visibility_changed(*args, **kwargs)
+
+    def _on_live_profile_toggled(self, *args, **kwargs):
+        return self.renderer._on_live_profile_toggled(*args, **kwargs)
+
+    def _on_profile_marker_moved(self, *args, **kwargs):
+        return self.renderer._on_profile_marker_moved(*args, **kwargs)
+
+    def _on_window_mode_changed(self, *args, **kwargs):
+        return self.renderer._on_window_mode_changed(*args, **kwargs)
+
+    def _update_live_profile_from_pending_pos(self, *args, **kwargs):
+        return self.renderer._update_live_profile_from_pending_pos(*args, **kwargs)
+
+    def _processing_pressed(self, *args, **kwargs):
+        return self.renderer._processing_pressed(*args, **kwargs)
+
+    def _apply_channel_colormap(self, *args, **kwargs):
+        return self.renderer._apply_channel_colormap(*args, **kwargs)
+
+    def _set_display_colormap(self, *args, **kwargs):
+        return self.renderer._set_display_colormap(*args, **kwargs)
+
+    def _phase_colormap(self, *args, **kwargs):
+        return self.renderer._phase_colormap(*args, **kwargs)
+
+    def _clear_image_hover_state(self, *args, **kwargs):
+        return self.renderer._clear_image_hover_state(*args, **kwargs)
+
+    def _queue_display_levels(self, *args, **kwargs):
+        return self.renderer._queue_display_levels(*args, **kwargs)
+
+    def _pending_display_levels_for_render(self, *args, **kwargs):
+        return self.renderer._pending_display_levels_for_render(*args, **kwargs)
+
+    def _current_window_mode(self, *args, **kwargs):
+        return self.renderer._current_window_mode(*args, **kwargs)
+
+    def _refresh_memory_policy(self, *args, **kwargs):
+        return self.renderer._refresh_memory_policy(*args, **kwargs)
+
+    def _run_deferred_side_panel_refresh(self, *args, **kwargs):
+        return self.renderer._run_deferred_side_panel_refresh(*args, **kwargs)
+
+    def _schedule_montage_viewport_update(self, *args, **kwargs):
+        return self.renderer._schedule_montage_viewport_update(*args, **kwargs)
+
+    def _visible_render_budget_bytes(self, *args, **kwargs):
+        return self.renderer._visible_render_budget_bytes(*args, **kwargs)
+
+    def _current_montage_resize_focus(self, *args, **kwargs):
+        return self.renderer._current_montage_resize_focus(*args, **kwargs)
+
+    @property
+    def _current_montage_plan(self):
+        return getattr(self.renderer, "_current_montage_plan", None)
+
+    @property
+    def _current_montage_geometry(self):
+        return getattr(self.renderer, "_current_montage_geometry", None)
+
+    def _is_committed_display_frame_current(self, *args, **kwargs):
+        return self.renderer._is_committed_display_frame_current(*args, **kwargs)
+
+    def _interactive_frame_cache_hit(self, *args, **kwargs):
+        return self.renderer._interactive_frame_cache_hit(*args, **kwargs)
+
+    def _interactive_render_supersedes_presentation(self, *args, **kwargs):
+        return self.renderer._interactive_render_supersedes_presentation(*args, **kwargs)
+
+    def _cancel_render_dependent_work_for_interactive_change(self, *args, **kwargs):
+        return self.renderer._cancel_render_dependent_work_for_interactive_change(*args, **kwargs)

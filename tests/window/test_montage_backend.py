@@ -19,6 +19,13 @@ from arrayscope.window.montage_viewport import (
 )
 
 
+
+def _window_ns(**kwargs):
+    ns = SimpleNamespace(**kwargs)
+    ns.win = ns
+    return ns
+
+
 def _geometry():
     return SimpleNamespace(montage=object())
 
@@ -65,6 +72,7 @@ def test_known_montage_level_source_is_not_resampled(monkeypatch):
 
     class Window(FrameRenderMixin):
         def __init__(self):
+            self.win = self
             self._tracker = MontageLevelTracker()
 
         def _montage_level_tracker(self):
@@ -104,6 +112,7 @@ def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
 
     class Window(FrameRenderMixin):
         def __init__(self):
+            self.win = self
             self._tracker = MontageLevelTracker()
             self.scheduled = 0
 
@@ -159,6 +168,7 @@ def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypa
 
     class Window(FrameRenderMixin):
         def __init__(self):
+            self.win = self
             self._tracker = MontageLevelTracker()
             self.scheduled = 0
 
@@ -238,6 +248,7 @@ def test_pyqtgraph_auto_levels_wait_for_complete_semantic_source():
     from arrayscope.window.frame_renderer import _tile_layer_auto_levels_wait_for_complete_source
 
     window = SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")))
+    window.win = window
     session = SimpleNamespace(
         pending_tiles=[],
         loading_tiles=set(),
@@ -279,6 +290,7 @@ def test_shader_auto_levels_do_not_wait_for_complete_cpu_window_source():
     window = SimpleNamespace(
         img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="vispy", shader_windowing=True))
     )
+    window.win = window
     session = SimpleNamespace(pending_level_tiles=deque([object()]), level_scan_remaining_tiles=1)
     partial = MontageLevelStats(
         bounds=(0.0, 1.0),
@@ -306,9 +318,11 @@ def test_initial_montage_plan_uses_pending_restored_viewport_range():
     from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class Window(FrameRenderMixin):
-        pass
+        def __init__(self):
+            self.win = self
 
     win = Window()
+    win.win = win
     state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, columns=None, indices=tuple(range(8)), text=":")
     win.img_view = SimpleNamespace(
         image=None,
@@ -339,9 +353,11 @@ def test_initial_montage_plan_ignores_invalid_restored_columns():
     from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class Window(FrameRenderMixin):
-        pass
+        def __init__(self):
+            self.win = self
 
     win = Window()
+    win.win = win
     state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, columns=None, indices=tuple(range(8)), text=":")
     win.img_view = SimpleNamespace(
         image=None,
@@ -372,6 +388,7 @@ def test_montage_commit_reschedules_restored_roi_stats():
         _schedule_viewport_continuity_when_ready=lambda: calls.append("viewport"),
         _schedule_file_session_roi_refresh=lambda reason: calls.append(("roi", reason)),
     )
+    win.win = win
 
     FrameRenderMixin._notify_file_session_montage_committed(win)
 
@@ -423,6 +440,7 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
         _viewport_interaction_active=False,
         _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=11, byte_cap=2 * 1024 * 1024, budget_ms=2.0),
     )
+    window.win = window
 
     limits = frame_renderer._persistent_tile_upsert_limits(window, session)
 
@@ -459,6 +477,7 @@ def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_
         _viewport_interaction_active=False,
         _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=1, byte_cap=1024 * 1024, budget_ms=2.0),
     )
+    window.win = window
 
     limits = frame_renderer._persistent_tile_upsert_limits(window, session)
 
@@ -494,6 +513,7 @@ def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
         _viewport_interaction_active=False,
         _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=3, byte_cap=1024 * 1024, budget_ms=2.0),
     )
+    window.win = window
 
     limits = frame_renderer._tile_layer_upsert_limits(window, session)
 
@@ -680,6 +700,7 @@ def test_interactive_montage_commit_is_timer_coalesced(qt_app, monkeypatch):
     class Window(QtCore.QObject, FrameRenderMixin):
         def __init__(self):
             super().__init__()
+            self.win = self
             self.view_state = ViewState.from_shape((2, 2, 1)).with_montage_axis(2, indices=(0,), text=":")
             self._commits = 0
 
@@ -737,7 +758,9 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
             self.groups.append(group)
 
     class Window(QtCore.QObject, FrameRenderMixin):
-        pass
+        def __init__(self):
+            super().__init__()
+            self.win = self
 
     state = ViewState.from_shape((2, 2, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8, gap=1)
@@ -795,6 +818,7 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
     class Window(QtCore.QObject, FrameRenderMixin):
         def __init__(self, document, state, viewport_plan):
             super().__init__()
+            self.win = self
             self.document = document
             self.view_state = state
             self._viewport_plan = viewport_plan
@@ -895,6 +919,7 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypa
     class Window(QtCore.QObject, FrameRenderMixin):
         def __init__(self, document, state, viewport_plan):
             super().__init__()
+            self.win = self
             self.document = document
             self.view_state = state
             self._viewport_plan = viewport_plan
@@ -996,6 +1021,7 @@ def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
     class Window(QtCore.QObject, FrameRenderMixin):
         def __init__(self):
             super().__init__()
+            self.win = self
             self.view_state = ViewState.from_shape((4, 4, 4)).with_montage_axis(2, indices=tuple(range(4)), text=":")
             self.document = ArrayDocument(np.zeros((4, 4, 4), dtype=np.float32))
             self.img_view = SimpleNamespace(
@@ -1052,6 +1078,7 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
     class Window(QtCore.QObject, FrameRenderMixin):
         def __init__(self, document, state, viewport_plan):
             super().__init__()
+            self.win = self
             self.document = document
             self.view_state = state
             self._viewport_plan = viewport_plan
@@ -1136,6 +1163,7 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
     class Window(QtCore.QObject, FrameRenderMixin):
         def __init__(self, state, viewport_plan):
             super().__init__()
+            self.win = self
             self.view_state = state
             self._viewport_plan = viewport_plan
             self.scheduled = []
@@ -1196,6 +1224,10 @@ def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
     from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class Window(QtCore.QObject, FrameRenderMixin):
+        def __init__(self):
+            super().__init__()
+            self.win = self
+
         def _set_committed_display_frame(self, frame):
             self._committed_display_frame = frame
 
@@ -1229,6 +1261,10 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
     from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class Window(QtCore.QObject, FrameRenderMixin):
+        def __init__(self):
+            super().__init__()
+            self.win = self
+
         def _set_committed_display_frame(self, frame):
             self._committed_display_frame = frame
 
@@ -1286,7 +1322,8 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
             montageDisplayMode=lambda: "vispy_tile_layer",
         )
     )
-    fallback = SimpleNamespace(
+    window.win = window
+    fallback = _window_ns(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
             montageDisplayMode=lambda: "tile_layer",
@@ -1298,21 +1335,21 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     assert montage_viewport_retarget_policy(capabilities, "vispy_tile_layer").coverage_margin_tiles == 1
     assert (
         _persistent_tile_residency_backend(
-            SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=persistent_nonvispy)),
+            _window_ns(img_view=SimpleNamespace(rendering_capabilities=persistent_nonvispy)),
             SimpleNamespace(),
         )
         is True
     )
     assert (
         _persistent_tile_residency_backend(
-            SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
+            _window_ns(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
             SimpleNamespace(),
         )
         is True
     )
     assert (
         _persistent_gpu_tile_residency_backend(
-            SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
+            _window_ns(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
             SimpleNamespace(),
         )
         is False
@@ -1369,7 +1406,8 @@ def test_montage_cache_resolver_accepts_single_display_image_cache_hit():
             return cached
 
     class _Window(FrameRenderMixin):
-        pass
+        def __init__(self):
+            self.win = self
 
     win = _Window()
     win.operation_evaluator = _Evaluator()
@@ -1421,7 +1459,8 @@ def test_montage_cache_resolver_uses_retained_payloads_when_current_frame_is_sin
             return tile_key
 
     class _Window(FrameRenderMixin):
-        pass
+        def __init__(self):
+            self.win = self
 
     win = _Window()
     win.operation_evaluator = _Evaluator()
@@ -1552,7 +1591,8 @@ def test_stage_wait_release_falls_back_to_direct_tile_evaluation():
     from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class _Window(FrameRenderMixin):
-        pass
+        def __init__(self):
+            self.win = self
 
     class _Session:
         def __init__(self):
@@ -1589,7 +1629,8 @@ def test_stage_activation_uses_bounded_batches_without_losing_waiting_tiles():
     from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class _Window(FrameRenderMixin):
-        pass
+        def __init__(self):
+            self.win = self
 
     class _Session:
         def __init__(self):
@@ -1623,6 +1664,7 @@ def test_ready_display_commit_refreshes_stale_commit_token_at_source(qt_app):
     class _Window(QtCore.QObject, FrameRenderMixin):
         def __init__(self):
             super().__init__()
+            self.win = self
             self.img_view = SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
 
         def _is_current_montage_session(self, session_id, key):
@@ -1693,6 +1735,7 @@ def test_interactive_cache_hit_requires_committed_semantic_montage_mapping():
 
     class Window(FrameRenderMixin):
         def __init__(self, document, state, viewport_plan):
+            self.win = self
             self.document = document
             self.view_state = state
             self._viewport_plan = viewport_plan
@@ -1755,6 +1798,7 @@ def test_stale_montage_viewport_update_token_does_not_run():
 
     class _Window(FrameRenderMixin):
         def __init__(self):
+            self.win = self
             self.view_state = SimpleNamespace(montage_axis=2)
             self._montage_session = SimpleNamespace(
                 session_id=1,
@@ -1798,6 +1842,7 @@ def test_loading_montage_profile_retry_waits_for_visibility_without_timer():
 
     class _Window(FrameRenderMixin):
         def __init__(self):
+            self.win = self
             self.view_state = SimpleNamespace(montage_axis=2)
             self.widgets = {"buttons": {"display": {"live_profile": _LiveProfile()}}}
             self.profile_dock = _ProfileDock()
@@ -1876,6 +1921,9 @@ def test_stage_wait_in_flight_is_not_actionable_timer_work():
         stage_materializer = _Materializer()
 
     class _Window(FrameRenderMixin):
+        def __init__(self):
+            self.win = self
+
         operation_evaluator = _Evaluator()
 
     session = SimpleNamespace(
@@ -1902,6 +1950,9 @@ def test_stage_wait_completed_stage_is_actionable_timer_work():
         stage_materializer = _Materializer()
 
     class _Window(FrameRenderMixin):
+        def __init__(self):
+            self.win = self
+
         operation_evaluator = _Evaluator()
 
     session = SimpleNamespace(

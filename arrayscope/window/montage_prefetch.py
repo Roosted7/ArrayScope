@@ -32,9 +32,9 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
     if not session.document.enabled_operations:
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_no_stage", "raw montage tiles rely on visible-level commit ordering"),))
-    if window.operation_evaluator._display_cache.bytes_used > int(window.operation_evaluator._display_cache.max_bytes * 0.8):
+    if window.win.operation_evaluator._display_cache.bytes_used > int(window.win.operation_evaluator._display_cache.max_bytes * 0.8):
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_budget", "display cache is near capacity"),))
-    governor = getattr(window, "resource_governor", None)
+    governor = getattr(window.win, "resource_governor", None)
     if governor is not None:
         decision = governor.decide_montage_prefetch(stage_ready_or_in_flight=True, visible_busy=False)
         if not decision.allowed:
@@ -49,7 +49,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
     for tile in _candidate_tiles(session):
         if scheduled >= int(max_tiles):
             break
-        tile_key = window.operation_evaluator.montage_tile_key(
+        tile_key = window.win.operation_evaluator.montage_tile_key(
             tile.view_state,
             montage_axis=session.montage_axis,
             source_index=tile.source_index,
@@ -57,7 +57,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             document=session.document,
             shader_display=shader_display,
         )
-        if window.operation_evaluator.cached_montage_tile(
+        if window.win.operation_evaluator.cached_montage_tile(
             tile.view_state,
             montage_axis=session.montage_axis,
             source_index=tile.source_index,
@@ -75,7 +75,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             continue
 
         def evaluate(tile=tile, stage=stage):
-            context = window._evaluation_context(ComputeLane.PREFETCH, None)
+            context = window.win._evaluation_context(ComputeLane.PREFETCH, None)
             start = perf_counter()
             if stage is not None:
                 stage_value, candidate, plan = stage
@@ -108,7 +108,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                 session.document,
                 tile.view_state,
                 colormap_lut=session.colormap_lut,
-                stage_cache=window.operation_evaluator.stage_cache,
+                stage_cache=window.win.operation_evaluator.stage_cache,
                 stage_document_key=stage_document_key(session.document),
                 evaluation_context=context,
                 shader_display=shader_display,
@@ -117,25 +117,25 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
 
         def done(result, tile=tile, session_id=session.session_id, session_key=session.key):
             if not window._is_current_montage_session(session_id, session_key):
-                window.operation_evaluator.note_prefetch_stale()
+                window.win.operation_evaluator.note_prefetch_stale()
                 return
-            rendered = window.operation_evaluator.store_montage_tile_result(
+            rendered = window.win.operation_evaluator.store_montage_tile_result(
                 tile,
                 montage_axis=session.montage_axis,
                 colormap_lut=session.colormap_lut,
                 result=result,
                 shader_display=shader_display,
             )
-            window.operation_evaluator.prefetch_stored += 1
+            window.win.operation_evaluator.prefetch_stored += 1
             _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key)
 
-        started = window.prefetch_evaluation_controller.start_prefetch(evaluate, on_done=done, key=("montage_tile_prefetch", tile_key), memory_budget_bytes=window._memory_policy().display_cache_budget_bytes)
+        started = window.win.prefetch_evaluation_controller.start_prefetch(evaluate, on_done=done, key=("montage_tile_prefetch", tile_key), memory_budget_bytes=window._memory_policy().display_cache_budget_bytes)
         if started.scheduled:
             scheduled += 1
-            window.operation_evaluator.note_prefetch_scheduled()
+            window.win.operation_evaluator.note_prefetch_scheduled()
             decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "scheduled", tile_key=tile_key))
         elif started.reason == "deduped":
-            window.operation_evaluator.note_prefetch_deduped()
+            window.win.operation_evaluator.note_prefetch_deduped()
             decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "deduped", tile_key=tile_key))
         else:
             decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), started.reason, tile_key=tile_key))
@@ -162,11 +162,11 @@ def _stage_for_tile(window, session, tile):
     if not retained:
         return None
     candidate = retained[-1]
-    key = window.operation_evaluator.stage_materializer.key_for_candidate(stage_document_key(session.document), candidate)
-    cache = window.operation_evaluator.stage_cache
+    key = window.win.operation_evaluator.stage_materializer.key_for_candidate(stage_document_key(session.document), candidate)
+    cache = window.win.operation_evaluator.stage_cache
     value = cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)
     if value is None:
-        in_flight = getattr(window.operation_evaluator.stage_materializer, "_in_flight", {})
+        in_flight = getattr(window.win.operation_evaluator.stage_materializer, "_in_flight", {})
         if key in in_flight:
             return "in_flight"
         return None
@@ -186,20 +186,20 @@ def _busy(window, session=None) -> bool:
     ):
         return True
     return bool(
-        window.visible_evaluation_controller.is_busy()
-        or window.montage_tile_evaluation_controller.is_busy()
-        or window.stage_evaluation_controller.is_busy()
+        window.win.visible_evaluation_controller.is_busy()
+        or window.win.montage_tile_evaluation_controller.is_busy()
+        or window.win.stage_evaluation_controller.is_busy()
     )
 
 
 def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -> None:
-    capabilities = image_view_backend_capabilities(getattr(window, "img_view", None))
+    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     if not (
         bool(getattr(capabilities, "persistent_tile_residency", False))
         and str(getattr(capabilities, "tile_residency_kind", "none") or "none") == "cpu_item"
     ):
         return
-    warm = getattr(getattr(window, "img_view", None), "warmTiledResidency", None)
+    warm = getattr(getattr(window.win, "img_view", None), "warmTiledResidency", None)
     if not callable(warm):
         return
     if not window._is_current_montage_session(session.session_id, session.key):
@@ -226,7 +226,7 @@ def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -
             montage_tile_states=session.ensure_tile_states(),
         )
         try:
-            levels = tuple(float(value) for value in window.img_view.getLevels())
+            levels = tuple(float(value) for value in window.win.img_view.getLevels())
         except Exception:
             levels = tuple(float(value) for value in getattr(session, "user_levels_override", None) or (0.0, 1.0))
         warm(

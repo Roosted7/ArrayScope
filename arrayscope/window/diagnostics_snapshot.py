@@ -42,7 +42,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         if controller is not None:
             schedulers.append(controller.diagnostics())
 
-    session = getattr(window, "_montage_session", None)
+    session = getattr(window.renderer, "_montage_session", None)
     overlay_count = _montage_overlay_count(window)
     presentation = _presentation_diagnostics(window)
     lod_decision = None if session is None else getattr(session, "lod_policy_decision", None)
@@ -73,9 +73,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_visual_visible_pages=int(presentation.get("tile_visual_visible_pages", 0) or 0),
         overlays_above_tiles=bool(presentation.get("overlays_above_tiles", False)),
         display_mode=str(getattr(window.img_view, "montageDisplayMode", lambda: "none")()),
-        backend_chosen=str(getattr(window, "_last_montage_backend_actual", getattr(getattr(window, "_last_montage_backend_choice", None), "backend", "none"))),
-        backend_reason=str(getattr(getattr(window, "_last_montage_backend_choice", None), "reason", "")),
-        backend_warning=str(getattr(window, "_last_montage_backend_warning", "") or ""),
+        backend_chosen=str(getattr(window.renderer, "_last_montage_backend_actual", getattr(getattr(window.renderer, "_last_montage_backend_choice", None), "backend", "none"))),
+        backend_reason=str(getattr(getattr(window.renderer, "_last_montage_backend_choice", None), "reason", "")),
+        backend_warning=str(getattr(window.renderer, "_last_montage_backend_warning", "") or ""),
         show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
         tile_lod_desired_factor=1 if lod_demand is None else int(getattr(lod_demand, "desired_factor", 1) or 1),
         tile_lod_applied_factor=1 if lod_decision is None else int(getattr(lod_decision, "applied_factor", 1) or 1),
@@ -169,7 +169,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         stage_cache=stage_cache_diagnostics,
         stage_materialization=stage_materialization_diagnostics,
         stage_warmup=getattr(window, "_last_stage_warmup_decision", None),
-        montage_prefetch=tuple(getattr(window, "_last_montage_prefetch_decisions", ()) or ()),
+        montage_prefetch=tuple(getattr(window.renderer, "_last_montage_prefetch_decisions", ()) or ()),
         resource_governor=(
             None
             if getattr(window, "resource_governor", None) is None
@@ -203,31 +203,31 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             else CanvasPreserveRuntimeDiagnostics()
         ),
         render_timing=RenderTimingDiagnostics(
-            last_render_sync_ms=getattr(window, "_last_render_sync_ms", None),
-            last_control_sync_ms=getattr(window, "_last_control_sync_ms", None),
+            last_render_sync_ms=getattr(window.renderer, "_last_render_sync_ms", None),
+            last_control_sync_ms=getattr(window.renderer, "_last_control_sync_ms", None),
             last_planning_ms=getattr(window, "_last_planning_ms", None),
             last_worker_queue_wait_ms=getattr(window, "_last_worker_queue_wait_ms", None),
             last_evaluation_ms=getattr(window, "_last_render_completed_ms", None),
-            last_display_commit_ms=getattr(window, "_last_display_commit_ms", None),
-            last_set_image_ms=getattr(window, "_last_set_image_ms", None),
-            last_levels_histogram_ms=getattr(window, "_last_levels_histogram_ms", None),
+            last_display_commit_ms=getattr(window.renderer, "_last_display_commit_ms", None),
+            last_set_image_ms=getattr(window.renderer, "_last_set_image_ms", None),
+            last_levels_histogram_ms=getattr(window.renderer, "_last_levels_histogram_ms", None),
             last_operation_dock_ms=getattr(window, "_last_operation_dock_ms", None),
             last_inspection_refresh_ms=getattr(window, "_last_inspection_refresh_ms", None),
         ),
         montage_timing=MontageTimingDiagnostics(
-            last_viewport_plan_ms=getattr(window, "_last_montage_viewport_plan_ms", None),
-            last_cache_resolve_ms=getattr(window, "_last_montage_cache_resolve_ms", None),
-            last_stage_plan_ms=getattr(window, "_last_montage_stage_plan_ms", None),
-            last_session_setup_ms=getattr(window, "_last_montage_session_setup_ms", None),
-            last_initial_commit_ms=getattr(window, "_last_montage_initial_commit_ms", None),
-            last_tile_eval_ms=getattr(window, "_last_montage_tile_eval_ms", None),
-            last_display_cache_lookup_ms=getattr(window, "_last_montage_display_cache_lookup_ms", None),
-            last_display_cache_hit=getattr(window, "_last_montage_display_cache_hit", None),
+            last_viewport_plan_ms=getattr(window.renderer, "_last_montage_viewport_plan_ms", None),
+            last_cache_resolve_ms=getattr(window.renderer, "_last_montage_cache_resolve_ms", None),
+            last_stage_plan_ms=getattr(window.renderer, "_last_montage_stage_plan_ms", None),
+            last_session_setup_ms=getattr(window.renderer, "_last_montage_session_setup_ms", None),
+            last_initial_commit_ms=getattr(window.renderer, "_last_montage_initial_commit_ms", None),
+            last_tile_eval_ms=getattr(window.renderer, "_last_montage_tile_eval_ms", None),
+            last_display_cache_lookup_ms=getattr(window.renderer, "_last_montage_display_cache_lookup_ms", None),
+            last_display_cache_hit=getattr(window.renderer, "_last_montage_display_cache_hit", None),
             last_stage_cache_lookup_ms=getattr(stage_cache_diagnostics, "last_lookup_ms", None),
             last_stage_cache_hit=getattr(stage_cache_diagnostics, "last_lookup_hit", None),
-            last_stage_attach_wait_ms=getattr(window, "_last_montage_stage_attach_wait_ms", None),
-            last_level_stats_ms=getattr(window, "_last_montage_level_stats_ms", None),
-            last_tile_payload_build_ms=getattr(window, "_last_montage_tile_payload_build_ms", None),
+            last_stage_attach_wait_ms=getattr(window.renderer, "_last_montage_stage_attach_wait_ms", None),
+            last_level_stats_ms=getattr(window.renderer, "_last_montage_level_stats_ms", None),
+            last_tile_payload_build_ms=getattr(window.renderer, "_last_montage_tile_payload_build_ms", None),
             last_visible_upload_ms=None if upload_timing is None else upload_timing.visible_upload_ms,
             last_histogram_upload_ms=None if upload_timing is None else upload_timing.histogram_upload_ms,
             last_histogram_recompute_ms=None if upload_timing is None else upload_timing.histogram_recompute_ms,
@@ -235,12 +235,12 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             last_tile_layer_upload_ms=None if upload_timing is None else upload_timing.tile_layer_upload_ms,
             last_tile_layer_rgb_window_ms=None if upload_timing is None else upload_timing.tile_layer_rgb_window_ms,
             last_level_sync_ms=None if upload_timing is None else upload_timing.level_sync_ms,
-            last_tile_commit_ms=getattr(window, "_last_montage_tile_commit_ms", None),
-            last_set_image_ms=getattr(window, "_last_set_image_ms", None),
-            last_overlay_update_ms=getattr(window, "_last_montage_overlay_update_ms", None),
-            cached_tiles_last_session=int(getattr(window, "_montage_cached_tiles_last_session", 0) or 0),
-            missing_tiles_last_session=int(getattr(window, "_montage_missing_tiles_last_session", 0) or 0),
-            committed_tile_upserts_last_flush=int(getattr(window, "_montage_committed_tile_upserts_last_flush", 0) or 0),
+            last_tile_commit_ms=getattr(window.renderer, "_last_montage_tile_commit_ms", None),
+            last_set_image_ms=getattr(window.renderer, "_last_set_image_ms", None),
+            last_overlay_update_ms=getattr(window.renderer, "_last_montage_overlay_update_ms", None),
+            cached_tiles_last_session=int(getattr(window.renderer, "_montage_cached_tiles_last_session", 0) or 0),
+            missing_tiles_last_session=int(getattr(window.renderer, "_montage_missing_tiles_last_session", 0) or 0),
+            committed_tile_upserts_last_flush=int(getattr(window.renderer, "_montage_committed_tile_upserts_last_flush", 0) or 0),
             upload_visible_bytes=0 if upload_timing is None else int(upload_timing.visible_bytes),
             upload_histogram_bytes=0 if upload_timing is None else int(upload_timing.histogram_bytes),
             upload_fast_same_object=False if upload_timing is None else bool(upload_timing.fast_same_object),
@@ -281,7 +281,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             tile_layer_complex_texture_uploads=0 if upload_timing is None else int(upload_timing.tile_layer_complex_texture_uploads),
             tile_layer_shader_uniform_updates=0 if upload_timing is None else int(upload_timing.tile_layer_shader_uniform_updates),
             cpu_complex_prep_ms=None if upload_timing is None else upload_timing.cpu_complex_prep_ms,
-            coalesced_commits=int(getattr(window, "_montage_coalesced_commits", 0) or 0),
+            coalesced_commits=int(getattr(window.renderer, "_montage_coalesced_commits", 0) or 0),
         ),
         render_coalescer=RenderCoalescerDiagnostics(
             pending=False if coalescer is None else bool(coalescer.has_pending_render),

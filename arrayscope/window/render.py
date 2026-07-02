@@ -41,9 +41,31 @@ def getNumberOfDecimalPlaces(number):
         return int(max(1, (number.as_integer_ratio()[1]).bit_length()))
 
 
-class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixin, RenderResourceMixin):
+class RenderOrchestrator(
+    DisplayPresentationMixin,
+    FrameRenderMixin,
+    RenderPrefetchMixin,
+    RenderResourceMixin,
+    Qt.QtCore.QObject,
+):
+    """Owner of rendering orchestration state and scheduling.
+
+    The window composes exactly one orchestrator (``window.renderer``). All
+    frame-planning, montage-session, presentation-commit, prefetch, and
+    resource-budget state lives here rather than on the window; window-level
+    semantic state and services (``view_state``, ``document``, widgets,
+    evaluation controllers) are reached through ``self.win``.
+
+    Being a ``QObject`` child of the window ties every orchestrator timer to
+    the window's lifetime.
+    """
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+
     def _active_display_colormap_lut(self):
-        view = getattr(self, "img_view", None)
+        view = getattr(self.win, "img_view", None)
         getter = getattr(view, "displayColorMapLookupTable", None)
         if callable(getter):
             return getter()
@@ -52,53 +74,53 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
     def _evaluation_colormap_lut(self, view_state=None, *, shader_display: bool | None = None):
         """Return a LUT only when CPU materialization genuinely depends on it."""
 
-        state = self.view_state if view_state is None else view_state
+        state = self.win.view_state if view_state is None else view_state
         if state.channel != ChannelMode.COMPLEX:
             return None
         if shader_display is None:
             from arrayscope.display.backend_contract import image_view_backend_capabilities
 
-            shader_display = bool(image_view_backend_capabilities(self.img_view).shader_windowing)
+            shader_display = bool(image_view_backend_capabilities(self.win.img_view).shader_windowing)
         if shader_display:
             return None
         return self._active_display_colormap_lut()
 
     def getPixel(self, pos):
-        source = getattr(self.img_view, "histogramSource", None)
+        source = getattr(self.win.img_view, "histogramSource", None)
         if source is None:
-            source = getattr(self.img_view, "image", None)
-        if source is None or self.view_state.image_axes is None:
-            label = self.widgets['labels']['pixelValue']
+            source = getattr(self.win.img_view, "image", None)
+        if source is None or self.win.view_state.image_axes is None:
+            label = self.win.widgets['labels']['pixelValue']
             if hasattr(label, "set_pixel_status"):
                 label.set_pixel_status("", self._slice_context_text())
             else:
                 label.setText("")
-            if hasattr(self, "img_view"):
-                self.img_view.hideHud()
+            if hasattr(self.win, "img_view"):
+                self.win.img_view.hideHud()
             return
-        container = self.img_view.getView()
+        container = self.win.img_view.getView()
         mousePoint = container.mapSceneToView(pos)
         geometry = getattr(self, "display_geometry", None)
         status = None if geometry is None else geometry.view_point_to_tile_point(mousePoint.x(), mousePoint.y(), require_loaded=True)
         if status is not None and status.kind != "loaded":
             text_pair = self._montage_status_value_text(status)
             if text_pair is None:
-                if hasattr(self, "img_view"):
-                    self.img_view.hideHud()
-                label = self.widgets['labels']['pixelValue']
+                if hasattr(self.win, "img_view"):
+                    self.win.img_view.hideHud()
+                label = self.win.widgets['labels']['pixelValue']
                 if hasattr(label, "set_pixel_status"):
                     label.set_pixel_status("", self._slice_context_text())
                 else:
                     label.setText("")
                 return
             value_text, context = text_pair
-            label = self.widgets['labels']['pixelValue']
+            label = self.win.widgets['labels']['pixelValue']
             if hasattr(label, "set_pixel_status"):
                 label.set_pixel_status(value_text, context)
             else:
                 label.setText(value_text if not context else f"{value_text} | {context}")
-            if hasattr(self, "img_view"):
-                self.img_view.showHudText(value_text if not context else f"{value_text} | {context}", pos)
+            if hasattr(self.win, "img_view"):
+                self.win.img_view.showHudText(value_text if not context else f"{value_text} | {context}", pos)
             return
         point_context = None if geometry is None else geometry.context_for_view_point(mousePoint.x(), mousePoint.y())
         if point_context is not None:
@@ -112,14 +134,14 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
             if value is not None:
                 self._commit_pixel_value(value, x_i, y_i, context, pos)
             return
-        if hasattr(self, "img_view"):
-            self.img_view.hideHud()
+        if hasattr(self.win, "img_view"):
+            self.win.img_view.hideHud()
 
     def _montage_status_value_text(self, status):
         if status.kind in {"gap", "outside"}:
             return None
         context = ""
-        axis = self.view_state.montage_axis
+        axis = self.win.view_state.montage_axis
         if axis is not None and status.source_index is not None:
             context = f"d{axis}={status.source_index}"
         if status.kind == "skipped":
@@ -127,7 +149,7 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         return "tile loading...", context
 
     def _hover_value_from_display(self, mapping):
-        frame = getattr(self, "_committed_display_frame", None)
+        frame = getattr(self.win, "_committed_display_frame", None)
         if frame is None or not self._is_committed_display_frame_current(frame):
             return None
         value_source = getattr(frame, "value_source", None)
@@ -138,7 +160,7 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
     def _is_committed_display_frame_current(self, frame: CommittedDisplayFrame) -> bool:
         if not self._is_current_render_generation(int(frame.key.render_generation)):
             return False
-        if frame.key.document_key != _document_key(self.document):
+        if frame.key.document_key != _document_key(self.win.document):
             return False
         display_geometry = getattr(self, "display_geometry", None)
         if frame.geometry != display_geometry and not (
@@ -158,8 +180,8 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         return True
 
     def _request_pixel_value(self, index, x_i, y_i, context, pos):
-        view_state = self.view_state
-        document = self.document
+        view_state = self.win.view_state
+        document = self.win.document
         self._pixel_request_id = getattr(self, "_pixel_request_id", 0) + 1
         request_id = self._pixel_request_id
 
@@ -168,23 +190,23 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
                 return
             self._commit_pixel_value(value, x_i, y_i, context, pos)
 
-        cached = self.operation_evaluator.cached_scalar(view_state, index)
+        cached = self.win.operation_evaluator.cached_scalar(view_state, index)
         if cached is not None:
             done(cached)
             return
 
         def evaluate():
-            eval_context = self._evaluation_context(ComputeLane.PIXEL, None)
+            eval_context = self.win._evaluation_context(ComputeLane.PIXEL, None)
             return evaluate_scalar_snapshot(
                 document,
                 view_state,
                 index,
-                stage_cache=self.operation_evaluator.stage_cache,
+                stage_cache=self.win.operation_evaluator.stage_cache,
                 stage_document_key=stage_document_key(document),
                 evaluation_context=eval_context,
             )
 
-        request_key = self.operation_evaluator.scalar_key(view_state, index, document=document)
+        request_key = self.win.operation_evaluator.scalar_key(view_state, index, document=document)
         frame_target = FrameTarget(
             semantic_key=request_key,
             viewport_key=("pixel", tuple(int(value) for value in index)),
@@ -195,11 +217,11 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         def done_result(result):
             if request_id != getattr(self, "_pixel_request_id", 0):
                 return
-            if request_key != self.operation_evaluator.scalar_key(view_state, index):
+            if request_key != self.win.operation_evaluator.scalar_key(view_state, index):
                 return
-            done(self.operation_evaluator.store_scalar_result(view_state, index, result))
+            done(self.win.operation_evaluator.store_scalar_result(view_state, index, result))
 
-        self.pixel_evaluation_controller.start_latest(
+        self.win.pixel_evaluation_controller.start_latest(
             evaluate,
             key=request_key,
             priority=EvalPriority.HOVER,
@@ -241,24 +263,24 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         except Exception:
             value_text = f"({x_i}, {y_i}) = {value}"
         text = value_text if not context else f"{value_text} | {context}"
-        label = self.widgets['labels']['pixelValue']
+        label = self.win.widgets['labels']['pixelValue']
         if hasattr(label, "set_pixel_status"):
             label.set_pixel_status(value_text, context)
         else:
             label.setText(text)
-        if hasattr(self, "img_view"):
-            self.img_view.showHudText(text, pos)
+        if hasattr(self.win, "img_view"):
+            self.win.img_view.showHudText(text, pos)
 
     def _slice_context_text(self):
-        axes = self.view_state.non_display_axes()
+        axes = self.win.view_state.non_display_axes()
         if not axes:
             return ""
-        return " ".join(f"d{axis}={self.view_state.slice_indices[axis]}" for axis in axes)
+        return " ".join(f"d{axis}={self.win.view_state.slice_indices[axis]}" for axis in axes)
 
     def _on_image_mouse_moved(self, pos):
         self._last_image_mouse_scene_pos = pos
         self._last_image_hover_focus = self._image_hover_focus_from_scene_pos(pos)
-        self._last_image_hover_focus_frame_key = getattr(getattr(self, "_committed_display_frame", None), "key", None)
+        self._last_image_hover_focus_frame_key = getattr(getattr(self.win, "_committed_display_frame", None), "key", None)
         self.getPixel(pos)
         schedule_priority = getattr(self, "_schedule_montage_priority_retarget_from_hover", None)
         if callable(schedule_priority):
@@ -269,7 +291,7 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         self._last_image_hover_focus = None
         self._last_image_hover_focus_frame_key = None
         label = None
-        widgets = getattr(self, "widgets", None)
+        widgets = getattr(self.win, "widgets", None)
         if isinstance(widgets, dict):
             labels = widgets.get("labels", {})
             if isinstance(labels, dict):
@@ -279,7 +301,7 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
                 label.set_pixel_status("", self._slice_context_text())
             elif hasattr(label, "setText"):
                 label.setText("")
-        view = getattr(self, "img_view", None)
+        view = getattr(self.win, "img_view", None)
         hide_hud = getattr(view, "hideHud", None)
         if callable(hide_hud):
             hide_hud()
@@ -288,12 +310,12 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         pos = getattr(self, "_last_image_mouse_scene_pos", None)
         if pos is not None:
             self._last_image_hover_focus = self._image_hover_focus_from_scene_pos(pos)
-            self._last_image_hover_focus_frame_key = getattr(getattr(self, "_committed_display_frame", None), "key", None)
+            self._last_image_hover_focus_frame_key = getattr(getattr(self.win, "_committed_display_frame", None), "key", None)
             self.getPixel(pos)
 
     def _image_hover_focus_from_scene_pos(self, pos):
         try:
-            view_point = self.img_view.getView().mapSceneToView(pos)
+            view_point = self.win.img_view.getView().mapSceneToView(pos)
             x = float(view_point.x())
             y = float(view_point.y())
             geometry = getattr(self, "display_geometry", None)
@@ -305,54 +327,54 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
             return None
 
     def _on_profile_marker_moved(self, image_x, image_y):
-        if not self.widgets['buttons']['display']['live_profile'].isChecked():
+        if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
             return
-        if not self.profile_dock.isVisible():
+        if not self.win.profile_dock.isVisible():
             return
-        if self.view_state.image_axes is None:
+        if self.win.view_state.image_axes is None:
             return
         clamped = self._clamp_profile_marker_point(image_x, image_y)
         if clamped is None:
             self._clear_live_profile_marker()
             return
         if (float(clamped[0]), float(clamped[1])) != (float(image_x), float(image_y)):
-            self.img_view.setProfileMarker(clamped[0], clamped[1], visible=True)
-        self._pending_profile_point = (float(clamped[0]), float(clamped[1]))
-        if not self._profile_timer.isActive():
-            self._profile_timer.start()
+            self.win.img_view.setProfileMarker(clamped[0], clamped[1], visible=True)
+        self.win._pending_profile_point = (float(clamped[0]), float(clamped[1]))
+        if not self.win._profile_timer.isActive():
+            self.win._profile_timer.start()
 
     def _update_live_profile_from_pending_pos(self):
         from time import perf_counter
 
         profile_update_start = perf_counter()
-        point = self._pending_profile_point
-        pos = self._pending_profile_pos
-        self._pending_profile_point = None
-        self._pending_profile_pos = None
+        point = self.win._pending_profile_point
+        pos = self.win._pending_profile_pos
+        self.win._pending_profile_point = None
+        self.win._pending_profile_pos = None
         if point is None and pos is None:
             return
-        if not self.widgets['buttons']['display']['live_profile'].isChecked():
+        if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
             return
-        if not self.profile_dock.isVisible():
+        if not self.win.profile_dock.isVisible():
             return
         if self.is_line_plot_mode():
             return
 
         if point is None:
-            view = self.img_view.getView()
+            view = self.win.img_view.getView()
             if not view.sceneBoundingRect().contains(pos):
                 self._clear_live_profile_marker()
                 return
             mouse_point = view.mapSceneToView(pos)
             point = (mouse_point.x(), mouse_point.y())
 
-        view_state = self.view_state
-        document = self.document
+        view_state = self.win.view_state
+        document = self.win.document
         self._profile_request_id = getattr(self, "_profile_request_id", 0) + 1
         request_id = self._profile_request_id
-        image_levels = self.img_view.getLevels()
-        y_range_mode = self.profile_dock.y_range_mode()
-        profile_axes = tuple(getattr(self, "profile_axes", ()) or ((self.view_state.line_axis,) if self.view_state.line_axis is not None else ()))
+        image_levels = self.win.img_view.getLevels()
+        y_range_mode = self.win.profile_dock.y_range_mode()
+        profile_axes = tuple(getattr(self.win, "profile_axes", ()) or ((self.win.view_state.line_axis,) if self.win.view_state.line_axis is not None else ()))
         clamped = self._clamp_profile_marker_point(point[0], point[1])
         if clamped is None:
             self._clear_live_profile_marker()
@@ -369,7 +391,7 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         y_range = profile_y_range(y_range_mode, image_levels)
         cached_entries = []
         for profile_state in profile_states:
-            cached = self.operation_evaluator.cached_line(profile_state)
+            cached = self.win.operation_evaluator.cached_line(profile_state)
             if cached is None:
                 cached_entries = []
                 break
@@ -377,22 +399,22 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         if cached_entries:
             if request_id != getattr(self, "_profile_request_id", 0):
                 return
-            self.profile_dock.update_line_results(tuple(cached_entries), y_range=y_range)
-            self._update_operation_dock()
-            self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
-            if hasattr(self, "_record_ui_work"):
-                self._record_ui_work("profile_update", (perf_counter() - profile_update_start) * 1000.0)
+            self.win.profile_dock.update_line_results(tuple(cached_entries), y_range=y_range)
+            self.win._update_operation_dock()
+            self.win.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
+            if hasattr(self.win, "_record_ui_work"):
+                self.win._record_ui_work("profile_update", (perf_counter() - profile_update_start) * 1000.0)
             return
 
         def evaluate():
-            eval_context = self._evaluation_context(ComputeLane.PROFILE, None)
+            eval_context = self.win._evaluation_context(ComputeLane.PROFILE, None)
             return tuple(
                 (
                     profile_state,
                     evaluate_line_snapshot(
                         document,
                         profile_state,
-                        stage_cache=self.operation_evaluator.stage_cache,
+                        stage_cache=self.win.operation_evaluator.stage_cache,
                         stage_document_key=stage_document_key(document),
                         evaluation_context=eval_context,
                     ),
@@ -400,31 +422,31 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
                 for profile_state in profile_states
             )
 
-        request_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
+        request_keys = {profile_state: self.win.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
 
         def done(results):
             if request_id != getattr(self, "_profile_request_id", 0):
                 return
             entries = []
             for profile_state, result in results:
-                if request_keys[profile_state] != self.operation_evaluator.line_key(profile_state):
+                if request_keys[profile_state] != self.win.operation_evaluator.line_key(profile_state):
                     return
-                line_result = self.operation_evaluator.store_line_result(profile_state, result)
+                line_result = self.win.operation_evaluator.store_line_result(profile_state, result)
                 entries.append((line_result, profile_state, f"dim {profile_state.line_axis}{profile_label_suffix}"))
-            self.profile_dock.update_line_results(tuple(entries), y_range=y_range)
-            self._update_operation_dock()
-            self.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
-            if hasattr(self, "_record_ui_work"):
-                self._record_ui_work("profile_update", (perf_counter() - profile_update_start) * 1000.0)
+            self.win.profile_dock.update_line_results(tuple(entries), y_range=y_range)
+            self.win._update_operation_dock()
+            self.win.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
+            if hasattr(self.win, "_record_ui_work"):
+                self.win._record_ui_work("profile_update", (perf_counter() - profile_update_start) * 1000.0)
             if view_state.montage_axis is None:
                 for axis in profile_axes:
                     self._prefetch_profiles_near_marker(view_state, point[0], point[1], line_axis=axis)
 
         def error(exc):
-            show_status_message(self, f"Live profile update failed: {exc}")
+            show_status_message(self.win, f"Live profile update failed: {exc}")
             self._clear_live_profile_marker()
 
-        self.profile_evaluation_controller.start_latest(
+        self.win.profile_evaluation_controller.start_latest(
             evaluate,
             key=tuple(request_keys.values()),
             priority=EvalPriority.LIVE_PROFILE,
@@ -474,72 +496,72 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         return states, suffix
 
     def _clear_live_profile_marker(self):
-        if hasattr(self, "img_view"):
-            self.img_view.hideProfileMarker()
+        if hasattr(self.win, "img_view"):
+            self.win.img_view.hideProfileMarker()
 
     def _on_live_profile_toggled(self, enabled):
-        if enabled and hasattr(self, "profile_dock"):
-            self.interaction_mode = InteractionMode.LIVE_PROFILE
-            self._profile_dock_user_visible = None
-            if hasattr(self, "img_view"):
-                self.img_view.cancelPendingRoiDrawing()
-                self.img_view.setInspectionTool("profile")
-            self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="live-profile")
-            self._schedule_view_geometry_refresh()
-            self.img_view.getView().setCursor(Qt.QtCore.Qt.CursorShape.CrossCursor)
+        if enabled and hasattr(self.win, "profile_dock"):
+            self.win.interaction_mode = InteractionMode.LIVE_PROFILE
+            self.win._profile_dock_user_visible = None
+            if hasattr(self.win, "img_view"):
+                self.win.img_view.cancelPendingRoiDrawing()
+                self.win.img_view.setInspectionTool("profile")
+            self.win.layout_manager.set_managed_dock_visible(self.win.profile_dock, True, reason="live-profile")
+            self.win._schedule_view_geometry_refresh()
+            self.win.img_view.getView().setCursor(Qt.QtCore.Qt.CursorShape.CrossCursor)
             self._ensure_profile_marker()
         if not enabled:
-            if getattr(self, "interaction_mode", None) == InteractionMode.LIVE_PROFILE:
-                self.interaction_mode = InteractionMode.CURSOR
-            if getattr(self, "_profile_dock_user_visible", None) is not True:
-                self._profile_dock_user_visible = None
-            self._pending_profile_pos = None
-            self._pending_profile_point = None
-            self._profile_timer.stop()
+            if getattr(self.win, "interaction_mode", None) == InteractionMode.LIVE_PROFILE:
+                self.win.interaction_mode = InteractionMode.CURSOR
+            if getattr(self.win, "_profile_dock_user_visible", None) is not True:
+                self.win._profile_dock_user_visible = None
+            self.win._pending_profile_pos = None
+            self.win._pending_profile_point = None
+            self.win._profile_timer.stop()
             self._clear_live_profile_marker()
-            self.img_view.getView().unsetCursor()
+            self.win.img_view.getView().unsetCursor()
             self.update_line_plot()
 
     def _on_profile_dock_visibility_changed(self, visible):
-        if getattr(self, "_closing", False):
+        if getattr(self.win, "_closing", False):
             return
-        if getattr(self.layout_manager, "_visibility_preserve_active", False):
+        if getattr(self.win.layout_manager, "_visibility_preserve_active", False):
             return
         if not visible:
-            self._profile_dock_user_visible = False
-        if not visible and self.widgets['buttons']['display']['live_profile'].isChecked():
-            self.widgets['buttons']['display']['live_profile'].setChecked(False)
+            self.win._profile_dock_user_visible = False
+        if not visible and self.win.widgets['buttons']['display']['live_profile'].isChecked():
+            self.win.widgets['buttons']['display']['live_profile'].setChecked(False)
         if visible:
             retry_profile = getattr(self, "_retry_loading_montage_profile", None)
             if callable(retry_profile):
                 retry_profile()
 
     def _on_inspection_dock_visibility_changed(self, visible):
-        if getattr(self, "_closing", False):
+        if getattr(self.win, "_closing", False):
             return
-        if getattr(self.layout_manager, "_visibility_preserve_active", False):
+        if getattr(self.win.layout_manager, "_visibility_preserve_active", False):
             return
         if not visible:
-            self._inspection_dock_user_visible = False
-        if visible and getattr(self, "_inspection_stale", False):
-            self._refresh_inspection_dock_now()
+            self.win._inspection_dock_user_visible = False
+        if visible and getattr(self.win, "_inspection_stale", False):
+            self.win._refresh_inspection_dock_now()
 
     def _on_operation_dock_visibility_changed(self, visible):
-        if getattr(self, "_closing", False):
+        if getattr(self.win, "_closing", False):
             return
-        if getattr(self.layout_manager, "_visibility_preserve_active", False):
+        if getattr(self.win.layout_manager, "_visibility_preserve_active", False):
             return
         if not visible:
-            self._operation_dock_user_visible = False
+            self.win._operation_dock_user_visible = False
 
     def _resize_profile_dock_default(self):
-        self.layout_manager.resize_profile_dock_default()
+        self.win.layout_manager.resize_profile_dock_default()
 
     def _ensure_profile_marker(self):
-        position = self.img_view.profileMarkerPosition()
+        position = self.win.img_view.profileMarkerPosition()
         if position is None:
             x, y = self._default_profile_marker_position()
-            self.img_view.setProfileMarker(x, y, visible=True)
+            self.win.img_view.setProfileMarker(x, y, visible=True)
             self._on_profile_marker_moved(x, y)
         else:
             self._on_profile_marker_moved(*position)
@@ -554,27 +576,27 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         return (round(x), round(y))
 
     def _current_profile_y_range(self):
-        if not hasattr(self, "profile_dock"):
+        if not hasattr(self.win, "profile_dock"):
             return None
         try:
-            image_levels = self.img_view.getLevels()
+            image_levels = self.win.img_view.getLevels()
         except Exception as exc:
             handle_ui_exception("profile y range levels", exc)
             image_levels = None
-        return profile_y_range(self.profile_dock.y_range_mode(), image_levels)
+        return profile_y_range(self.win.profile_dock.y_range_mode(), image_levels)
 
     def _phase_colormap(self):
         return phase_colormap()
 
     def _apply_channel_colormap(self):
         name = resolved_colormap_name(
-            self.view_state.channel,
-            getattr(self, "current_colormap", None),
-            user_selected=bool(getattr(self, "_colormap_user_selected", False)),
+            self.win.view_state.channel,
+            getattr(self.win, "current_colormap", None),
+            user_selected=bool(getattr(self.win, "_colormap_user_selected", False)),
         )
         self._set_display_colormap(
             name,
-            user_selected=bool(getattr(self, "_colormap_user_selected", False)),
+            user_selected=bool(getattr(self.win, "_colormap_user_selected", False)),
             request_render=False,
         )
 
@@ -584,11 +606,11 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         colormap = named_colormap(str(name))
         if colormap is None:
             raise ValueError(f"unknown colormap: {name}")
-        key_getter = getattr(self.img_view, "displayColorMapKey", None)
+        key_getter = getattr(self.win.img_view, "displayColorMapKey", None)
         previous_key = key_getter() if callable(key_getter) else None
-        self.img_view.setColorMap(colormap)
-        self.current_colormap = str(name)
-        self._colormap_user_selected = bool(user_selected)
+        self.win.img_view.setColorMap(colormap)
+        self.win.current_colormap = str(name)
+        self.win._colormap_user_selected = bool(user_selected)
         current_key = key_getter() if callable(key_getter) else None
 
         # Shader-backed paths update uniforms in setColorMap.  The CPU complex
@@ -596,7 +618,7 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         # materialization/cache key.
         if request_render and previous_key != current_key and self._evaluation_colormap_lut() is not None:
             self.render(reason="colormap")
-        return self.current_colormap
+        return self.win.current_colormap
 
     def _viewport_policy_for_display_shape(self, display_shape):
         display_shape = tuple(int(size) for size in display_shape)
@@ -612,16 +634,16 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         return ViewportPolicy.PRESERVE
 
     def _current_window_mode(self):
-        if self.widgets['buttons']['display']['window_absolute'].isChecked():
+        if self.win.widgets['buttons']['display']['window_absolute'].isChecked():
             return "absolute"
         return "relative"
 
     def update_display_mode(self):
         """Update the display mode for the image view"""
-        if self.widgets['buttons']['display']['square_pixels'].isChecked():
-            self.img_view.setDisplayMode('square_pixels')
-        elif self.widgets['buttons']['display']['fit'].isChecked():
-            self.img_view.setDisplayMode('fit')
+        if self.win.widgets['buttons']['display']['square_pixels'].isChecked():
+            self.win.img_view.setDisplayMode('square_pixels')
+        elif self.win.widgets['buttons']['display']['fit'].isChecked():
+            self.win.img_view.setDisplayMode('fit')
 
     def _on_aspect_toolbar_changed(self, mode):
         if mode == "one_to_one":
@@ -630,43 +652,43 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         self.fit_image_to_view()
 
     def _on_window_mode_changed(self, mode):
-        self.widgets['buttons']['display']['window_relative'].setChecked(mode != "absolute")
-        self.widgets['buttons']['display']['window_absolute'].setChecked(mode == "absolute")
+        self.win.widgets['buttons']['display']['window_relative'].setChecked(mode != "absolute")
+        self.win.widgets['buttons']['display']['window_absolute'].setChecked(mode == "absolute")
         self.render(reason="window-mode")
 
     def _set_live_profile_checked(self, enabled):
-        self.widgets['buttons']['display']['live_profile'].setChecked(bool(enabled))
+        self.win.widgets['buttons']['display']['live_profile'].setChecked(bool(enabled))
 
     def fit_image_to_view(self, enabled=True):
-        self.widgets['buttons']['display']['fit'].setChecked(bool(enabled))
-        if hasattr(self, "display_toolbar"):
-            blocker = Qt.QtCore.QSignalBlocker(self.display_toolbar.fit_action)
+        self.win.widgets['buttons']['display']['fit'].setChecked(bool(enabled))
+        if hasattr(self.win, "display_toolbar"):
+            blocker = Qt.QtCore.QSignalBlocker(self.win.display_toolbar.fit_action)
             try:
-                self.display_toolbar.fit_action.setChecked(bool(enabled))
+                self.win.display_toolbar.fit_action.setChecked(bool(enabled))
             finally:
                 blocker.unblock()
-        self.img_view.setFitLocked(bool(enabled))
-        self._sync_controls_from_view_state()
+        self.win.img_view.setFitLocked(bool(enabled))
+        self.win._sync_controls_from_view_state()
 
     def one_to_one_image(self):
-        self.widgets['buttons']['display']['square_pixels'].setChecked(True)
-        if hasattr(self, "display_toolbar"):
-            blocker = Qt.QtCore.QSignalBlocker(self.display_toolbar.fit_action)
+        self.win.widgets['buttons']['display']['square_pixels'].setChecked(True)
+        if hasattr(self.win, "display_toolbar"):
+            blocker = Qt.QtCore.QSignalBlocker(self.win.display_toolbar.fit_action)
             try:
-                self.display_toolbar.fit_action.setChecked(False)
+                self.win.display_toolbar.fit_action.setChecked(False)
             finally:
                 blocker.unblock()
-        self.img_view.oneToOne()
-        self._sync_controls_from_view_state()
+        self.win.img_view.oneToOne()
+        self.win._sync_controls_from_view_state()
 
     def auto_window_levels(self):
-        cancel_level_interaction = getattr(self.img_view, "cancelHistogramLevelInteraction", None)
+        cancel_level_interaction = getattr(self.win.img_view, "cancelHistogramLevelInteraction", None)
         if callable(cancel_level_interaction):
             cancel_level_interaction()
-        previous_levels = normalize_bounds(self.img_view.getLevels())
-        auto_bounds = normalize_bounds(self.img_view.getHistogramDataBounds())
+        previous_levels = normalize_bounds(self.win.img_view.getLevels())
+        auto_bounds = normalize_bounds(self.win.img_view.getHistogramDataBounds())
         has_committed_target = bool(
-            getattr(self, "_committed_display_frame", None) is not None
+            getattr(self.win, "_committed_display_frame", None) is not None
             or bool(getattr(getattr(self, "_montage_session", None), "display_committed", False))
         )
         auto_source = self._apply_display_level_override(
@@ -677,16 +699,16 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         )
         if has_committed_target and auto_source is not None:
             self._pending_auto_level_source = None
-            self._force_autolevel = False
+            self.win._force_autolevel = False
         else:
             self._pending_auto_level_source = auto_source
-            self._force_autolevel = True
+            self.win._force_autolevel = True
             self.render(reason="auto-window", force_autolevel=True)
             if getattr(self, "_pending_auto_level_source", None) is auto_source:
                 self._pending_auto_level_source = None
         if previous_levels is not None:
             show_revert_action(
-                self,
+                self.win,
                 "Auto window levels applied.",
                 lambda levels=previous_levels: self._revert_auto_window_levels(levels),
                 timeout=5000,
@@ -696,14 +718,14 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         levels = normalize_bounds(levels)
         if levels is None:
             return
-        cancel_level_interaction = getattr(self.img_view, "cancelHistogramLevelInteraction", None)
+        cancel_level_interaction = getattr(self.win.img_view, "cancelHistogramLevelInteraction", None)
         if callable(cancel_level_interaction):
             cancel_level_interaction()
-        self._force_autolevel = False
+        self.win._force_autolevel = False
         self._pending_auto_level_source = None
         session = getattr(self, "_montage_session", None)
         has_committed_target = bool(
-            getattr(self, "_committed_display_frame", None) is not None
+            getattr(self.win, "_committed_display_frame", None) is not None
             or bool(getattr(session, "display_committed", False))
         )
         if has_committed_target:
@@ -719,24 +741,24 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
         if session is not None:
             session.force_auto = False
             session.user_levels_override = levels
-        self.img_view.setLevels(levels[0], levels[1])
+        self.win.img_view.setLevels(levels[0], levels[1])
         self.render(reason="auto-window-revert", force_autolevel=False)
 
     def toggle_profile_dock(self):
-        visible = not self.profile_dock.isVisible()
-        self.layout_manager.set_profile_dock_visible_from_user(visible)
+        visible = not self.win.profile_dock.isVisible()
+        self.win.layout_manager.set_profile_dock_visible_from_user(visible)
 
     def _processing_pressed(self, btn):
         """Called on processing button press; if the button is already checked
         the user is re-clicking it and we should force an auto-level on next update."""
         try:
             if btn.isChecked():
-                self._force_autolevel = True
+                self.win._force_autolevel = True
             else:
-                self._force_autolevel = False
+                self.win._force_autolevel = False
         except Exception as exc:
             handle_ui_exception("processing button", exc)
-            self._force_autolevel = False
+            self.win._force_autolevel = False
 
         # Update the display group title
         self._update_display_group_title()
@@ -746,20 +768,20 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
 
     def _update_display_group_title(self):
         """Update the display group title with aspect ratio information."""
-        mode = self.img_view.displayMode
+        mode = self.win.img_view.displayMode
         aspect_str = ''
 
         if mode == 'square_pixels': # Simple
-            self.display_group.setTitle('Display (1:1)')
+            self.win.display_group.setTitle('Display (1:1)')
             return
 
         if mode == 'fit': #use the viewport aspect ratio
             aspect_str = ''
             try:
-                if hasattr(self.img_view, 'image') and self.img_view.image is not None:
-                    view = self.img_view.getView()
+                if hasattr(self.win.img_view, 'image') and self.win.img_view.image is not None:
+                    view = self.win.img_view.getView()
 
-                    img_height, img_width = self.img_view.image.shape[:2]
+                    img_height, img_width = self.win.img_view.image.shape[:2]
                     widget_ratio = view.size().width() / view.size().height()
                     img_ratio = img_width / img_height
                     ratio = img_ratio * widget_ratio
@@ -769,45 +791,45 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
                     else:
                         aspect_str = f'({ratio:.2f}:1)'
             finally:
-                self.display_group.setTitle(f'Display {aspect_str}')
+                self.win.display_group.setTitle(f'Display {aspect_str}')
 
         else:
-            self.display_group.setTitle('Display')
+            self.win.display_group.setTitle('Display')
 
     def update_line_plot(self):
-        if not hasattr(self, "profile_dock") or not self.profile_dock.isVisible():
+        if not hasattr(self.win, "profile_dock") or not self.win.profile_dock.isVisible():
             return
-        if self.widgets['buttons']['display']['live_profile'].isChecked():
-            position = self.img_view.profileMarkerPosition()
+        if self.win.widgets['buttons']['display']['live_profile'].isChecked():
+            position = self.win.img_view.profileMarkerPosition()
             if position is not None:
                 self._on_profile_marker_moved(*position)
                 return
-        view_state = self.view_state
+        view_state = self.win.view_state
         y_range = self._current_profile_y_range()
-        document = self.document
-        profile_axes = tuple(getattr(self, "profile_axes", ()) or ((view_state.line_axis,) if view_state.line_axis is not None else ()))
+        document = self.win.document
+        profile_axes = tuple(getattr(self.win, "profile_axes", ()) or ((view_state.line_axis,) if view_state.line_axis is not None else ()))
         profile_states = tuple(view_state.with_line_axis(axis) for axis in profile_axes)
         cached_entries = []
         for profile_state in profile_states:
-            cached = self.operation_evaluator.cached_line(profile_state)
+            cached = self.win.operation_evaluator.cached_line(profile_state)
             if cached is None:
                 cached_entries = []
                 break
             cached_entries.append((cached, profile_state, f"dim {profile_state.line_axis}"))
         if cached_entries:
-            self.profile_dock.update_line_results(tuple(cached_entries), y_range=y_range)
-            self._update_operation_dock()
+            self.win.profile_dock.update_line_results(tuple(cached_entries), y_range=y_range)
+            self.win._update_operation_dock()
             return
 
         def evaluate():
-            eval_context = self._evaluation_context(ComputeLane.PROFILE, None)
+            eval_context = self.win._evaluation_context(ComputeLane.PROFILE, None)
             return tuple(
                 (
                     profile_state,
                     evaluate_line_snapshot(
                         document,
                         profile_state,
-                        stage_cache=self.operation_evaluator.stage_cache,
+                        stage_cache=self.win.operation_evaluator.stage_cache,
                         stage_document_key=stage_document_key(document),
                         evaluation_context=eval_context,
                     ),
@@ -815,19 +837,19 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
                 for profile_state in profile_states
             )
 
-        request_keys = {profile_state: self.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
+        request_keys = {profile_state: self.win.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
 
         def done(results):
             entries = []
             for profile_state, result in results:
-                if request_keys[profile_state] != self.operation_evaluator.line_key(profile_state):
+                if request_keys[profile_state] != self.win.operation_evaluator.line_key(profile_state):
                     return
-                line_result = self.operation_evaluator.store_line_result(profile_state, result)
+                line_result = self.win.operation_evaluator.store_line_result(profile_state, result)
                 entries.append((line_result, profile_state, f"dim {profile_state.line_axis}"))
-            self.profile_dock.update_line_results(tuple(entries), y_range=y_range)
-            self._update_operation_dock()
+            self.win.profile_dock.update_line_results(tuple(entries), y_range=y_range)
+            self.win._update_operation_dock()
 
-        self.profile_evaluation_controller.start_latest(
+        self.win.profile_evaluation_controller.start_latest(
             evaluate,
             key=tuple(request_keys.values()),
             priority=EvalPriority.LIVE_PROFILE,
@@ -856,18 +878,18 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
                 reusable_output=True,
             ),
             on_done=done,
-            on_error=lambda exc: show_status_message(self, f"Profile update failed: {exc}"),
+            on_error=lambda exc: show_status_message(self.win, f"Profile update failed: {exc}"),
         )
 
-    def _on_view_range_changed(self):
+    def _on_view_range_changed(self, *_args):
         """Update display group title when view range changes (for fit mode)."""
         self._viewport_bridge().on_view_range_changed()
 
     def on_tab_changed(self, index):
         """Handle central image tab changes."""
-        self.update_dimension_controls()
-        self.update()
-        self.line_plot.hide_crosshair()
+        self.win.update_dimension_controls()
+        self.win.update()
+        self.win.line_plot.hide_crosshair()
 
     def is_line_plot_mode(self):
         """Line-plot mode is disabled while the 2D viewer owns the primary surface."""
@@ -875,25 +897,25 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
 
     def request_render(self, *, reason: str, force_autolevel: bool = False, interactive: bool = False) -> None:
         self._advance_render_generation(f"request:{reason}")
-        coordinator = getattr(self, "render_coordinator", None)
+        coordinator = getattr(self.win, "render_coordinator", None)
         if coordinator is None:
             self.render(reason=reason, force_autolevel=force_autolevel)
             return
         coordinator.request(reason=reason, force_autolevel=force_autolevel, interactive=interactive)
 
     def _advance_render_generation(self, reason: str) -> int:
-        generation = getattr(self, "_render_generation", None)
+        generation = getattr(self.win, "_render_generation", None)
         if generation is None:
             return 0
         return generation.advance(reason)
 
     def _capture_render_generation(self) -> int:
-        generation = getattr(self, "_render_generation", None)
+        generation = getattr(self.win, "_render_generation", None)
         return 0 if generation is None else generation.capture()
 
     def _is_current_render_generation(self, generation: int) -> bool:
-        guard = getattr(self, "_render_generation", None)
-        return (guard is None or guard.is_current(generation)) and not getattr(self, "_closing", False)
+        guard = getattr(self.win, "_render_generation", None)
+        return (guard is None or guard.is_current(generation)) and not getattr(self.win, "_closing", False)
 
     def _cancel_render_dependent_work_for_interactive_change(self) -> None:
         for controller_name, groups in (
@@ -902,61 +924,61 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
             ("roi_evaluation_controller", ("roi-inspection",)),
             ("pixel_evaluation_controller", ("pixel",)),
         ):
-            controller = getattr(self, controller_name, None)
+            controller = getattr(self.win, controller_name, None)
             if controller is None:
                 continue
             for group in groups:
                 controller.clear_group(group)
-        prefetch = getattr(self, "prefetch_evaluation_controller", None)
+        prefetch = getattr(self.win, "prefetch_evaluation_controller", None)
         if prefetch is not None:
             prefetch.cancel_prefetch()
 
     def _run_deferred_side_panel_refresh(self, *, reason: str) -> None:
         self._last_deferred_side_panel_refresh_reason = str(reason)
-        if getattr(self, "_closing", False) or not hasattr(self, "widgets"):
+        if getattr(self.win, "_closing", False) or not hasattr(self.win, "widgets"):
             return
         try:
-            if self.profile_dock.isVisible() or self.widgets['buttons']['display']['live_profile'].isChecked():
+            if self.win.profile_dock.isVisible() or self.win.widgets['buttons']['display']['live_profile'].isChecked():
                 self.update_line_plot()
-            self._update_operation_dock()
-            self._sync_progressive_docks()
-            self._refresh_inspection_dock()
-            restore_viewport_shape = getattr(self, "_restore_viewport_continuity_shape_after_layout", None)
-            restore_shape = getattr(self, "_viewport_continuity_shape_target", lambda: None)
+            self.win._update_operation_dock()
+            self.win._sync_progressive_docks()
+            self.win._refresh_inspection_dock()
+            restore_viewport_shape = getattr(self.win, "_restore_viewport_continuity_shape_after_layout", None)
+            restore_shape = getattr(self.win, "_viewport_continuity_shape_target", lambda: None)
             if callable(restore_viewport_shape) and callable(restore_shape) and restore_shape() is not None:
                 restore_viewport_shape()
         finally:
-            self._deferred_side_panel_refresh_pending = False
+            self.win._deferred_side_panel_refresh_pending = False
 
     def render(self, *, reason: str = "state", force_autolevel: bool = False, defer_side_panels: bool = False):
         render_start = perf_counter()
         self._cancel_render_dependent_work_for_interactive_change()
         self._advance_render_generation(f"render:{reason}")
-        self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
-        self._coerce_channel_for_current_dtype()
+        self.win._set_view_state(self.win.view_state.for_shape(self.win.data.shape, preserve_flags=True))
+        self.win._coerce_channel_for_current_dtype()
         control_start = perf_counter()
         if self._interactive_slice_controls_are_current(reason=reason, defer_side_panels=defer_side_panels):
-            if hasattr(self, "tab_widget"):
-                self.tab_widget.setVisible(self.data.ndim >= 2)
+            if hasattr(self.win, "tab_widget"):
+                self.win.tab_widget.setVisible(self.win.data.ndim >= 2)
         else:
-            self._sync_controls_from_view_state()
-            if hasattr(self, "tab_widget"):
-                self.tab_widget.setVisible(self.data.ndim >= 2)
-            self._update_channel_controls()
-            self.update_dimension_controls()
-            self.update_complex_indicators()
-            self.update_shift_indicators()
-            self._interactive_slice_controls_synced_state = None
+            self.win._sync_controls_from_view_state()
+            if hasattr(self.win, "tab_widget"):
+                self.win.tab_widget.setVisible(self.win.data.ndim >= 2)
+            self.win._update_channel_controls()
+            self.win.update_dimension_controls()
+            self.win.update_complex_indicators()
+            self.win.update_shift_indicators()
+            self.win._interactive_slice_controls_synced_state = None
         self._last_control_sync_ms = (perf_counter() - control_start) * 1000.0
         self.update_image_view(force_autolevel=force_autolevel, defer_side_panels=defer_side_panels)
         if defer_side_panels:
-            self._deferred_side_panel_refresh_pending = True
+            self.win._deferred_side_panel_refresh_pending = True
         else:
-            if self.profile_dock.isVisible() or self.widgets['buttons']['display']['live_profile'].isChecked():
+            if self.win.profile_dock.isVisible() or self.win.widgets['buttons']['display']['live_profile'].isChecked():
                 self.update_line_plot()
-            self._update_operation_dock()
-            self._sync_progressive_docks()
-            self._deferred_side_panel_refresh_pending = False
+            self.win._update_operation_dock()
+            self.win._sync_progressive_docks()
+            self.win._deferred_side_panel_refresh_pending = False
         self._last_render_sync_ms = (perf_counter() - render_start) * 1000.0
 
     def _interactive_slice_controls_are_current(self, *, reason: str, defer_side_panels: bool) -> bool:
@@ -964,5 +986,5 @@ class RenderMixin(DisplayPresentationMixin, FrameRenderMixin, RenderPrefetchMixi
             return False
         if str(reason) != "slice":
             return False
-        synced_state = getattr(self, "_interactive_slice_controls_synced_state", None)
-        return synced_state == self.view_state
+        synced_state = getattr(self.win, "_interactive_slice_controls_synced_state", None)
+        return synced_state == self.win.view_state

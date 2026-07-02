@@ -131,7 +131,7 @@ def test_reload_preserves_montage_camera_and_levels(qtbot, monkeypatch):
         win.render(reason="test-montage", force_autolevel=False)
         _process_events(qtbot, count=30)
         requested_range = ((3.0, 11.0), (4.0, 12.0))
-        win._set_montage_view_range(requested_range)
+        win.renderer._set_montage_view_range(requested_range)
         _process_events(qtbot, count=5)
         accepted_range = win.img_view.getView().viewRange()
         preserved_range = (
@@ -269,32 +269,35 @@ def test_image_viewport_leave_clears_hover_status(qtbot):
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(2.1, 1.1))
         win._on_image_mouse_moved(scene_pos)
         _process_events(qtbot, count=5)
-        assert win._last_image_mouse_scene_pos is not None
-        assert win._last_image_hover_focus is not None
+        assert win.renderer._last_image_mouse_scene_pos is not None
+        assert win.renderer._last_image_hover_focus is not None
         assert win.widgets["labels"]["pixelValue"].text()
 
         event = QtCore.QEvent(QtCore.QEvent.Type.Leave)
         QtGui.QGuiApplication.sendEvent(win.img_view.graphicsView.viewport(), event)
         _process_events(qtbot, count=5)
 
-        assert win._last_image_mouse_scene_pos is None
-        assert win._last_image_hover_focus is None
+        assert win.renderer._last_image_mouse_scene_pos is None
+        assert win.renderer._last_image_hover_focus is None
         assert win.widgets["labels"]["pixelValue"].text() == ""
     finally:
         win.close()
 
 
 def test_clear_image_hover_state_tolerates_early_initialization():
-    from arrayscope.window.render import RenderMixin
+    from types import SimpleNamespace
 
-    win = object.__new__(RenderMixin)
-    win._last_image_mouse_scene_pos = object()
-    win._last_image_hover_focus = (1.0, 2.0)
+    from arrayscope.window.render import RenderOrchestrator
 
-    win._clear_image_hover_state()
+    renderer = RenderOrchestrator.__new__(RenderOrchestrator)
+    renderer.win = SimpleNamespace()
+    renderer._last_image_mouse_scene_pos = object()
+    renderer._last_image_hover_focus = (1.0, 2.0)
 
-    assert win._last_image_mouse_scene_pos is None
-    assert win._last_image_hover_focus is None
+    renderer._clear_image_hover_state()
+
+    assert renderer._last_image_mouse_scene_pos is None
+    assert renderer._last_image_hover_focus is None
 
 
 def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot):

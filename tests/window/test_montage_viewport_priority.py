@@ -592,6 +592,7 @@ def test_montage_layout_reflow_updates_roi_mirror_geometry():
         _set_roi_geometry=set_geometry,
     )
     window = SimpleNamespace(img_view=img_view)
+    window.win = window
 
     FrameRenderMixin._remap_montage_rois_for_layout_reflow(window, previous, next_plan)
 
@@ -781,6 +782,7 @@ def test_retarget_layout_reflow_keeps_far_zoomed_out_manual_range_manual():
         img_view=SimpleNamespace(viewport_controller=ManualController()),
         _set_montage_view_range=lambda view_range: applied.append(view_range),
     )
+    window.win = window
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
 
     retargeted = FrameRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
@@ -826,6 +828,7 @@ def test_released_viewport_continuity_does_not_skip_manual_resize_reflow():
         _viewport_continuity_transaction=lambda: continuity,
         _montage_session=SimpleNamespace(plan=plan),
     )
+    window.win = window
     session = SimpleNamespace(plan=plan, viewport_shape=(50, 100))
 
     retargeted = FrameRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
@@ -868,6 +871,7 @@ def test_retarget_layout_reflow_refits_when_near_previous_auto_range():
         img_view=SimpleNamespace(viewport_controller=controller),
         _set_montage_view_range=lambda view_range: applied.append(view_range),
     )
+    window.win = window
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
     expected = square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)
 
@@ -913,6 +917,7 @@ def test_retarget_layout_reflow_refits_only_when_near_next_auto_range():
         img_view=SimpleNamespace(viewport_controller=controller),
         _set_montage_view_range=lambda view_range: applied.append(view_range),
     )
+    window.win = window
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
 
     retargeted = FrameRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
@@ -960,6 +965,7 @@ def test_retarget_layout_reflow_refits_when_auto_active_even_if_far_from_next_au
         img_view=SimpleNamespace(viewport_controller=controller),
         _set_montage_view_range=lambda view_range: applied.append(view_range),
     )
+    window.win = window
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
 
     retargeted = FrameRenderMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
@@ -995,6 +1001,7 @@ def test_montage_live_layout_reflow_skips_autofit_helper():
 
     geometry = _plan_with_columns(3).geometry
     window = SimpleNamespace(_montage_live_layout_reflow=True)
+    window.win = window
 
     assert not FrameRenderMixin._maybe_auto_fit_montage_tiles(window, geometry)
 
@@ -1010,6 +1017,7 @@ def test_active_viewport_continuity_skips_autofit_helper():
         _pending_viewport_continuity_range=lambda: None,
         _active_viewport_continuity_range=lambda: ((10.0, 20.0), (30.0, 40.0)),
     )
+    window.win = window
 
     assert not FrameRenderMixin._maybe_auto_fit_montage_tiles(window, geometry)
 
@@ -1032,6 +1040,7 @@ def test_montage_priority_focus_uses_semantic_hover_focus():
     from arrayscope.window.frame_renderer import _montage_priority_focus
 
     window = SimpleNamespace(_last_image_hover_focus=(3.5, 4.25))
+    window.win = window
 
     assert _montage_priority_focus(window, ((0.0, 10.0), (0.0, 10.0))) == (3.5, 4.25)
 
@@ -1043,6 +1052,7 @@ def test_montage_priority_focus_falls_back_to_nearest_center_tile():
 
     plan = _plan_with_columns(3)
     window = SimpleNamespace(_montage_session=SimpleNamespace(plan=plan))
+    window.win = window
 
     assert _montage_priority_focus(window, ((0.0, 20.0), (0.0, 20.0))) == (5.0, 5.0)
 

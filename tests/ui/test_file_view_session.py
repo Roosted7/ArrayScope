@@ -757,6 +757,7 @@ def test_programmatic_range_change_does_not_release_viewport_continuity(qt_app, 
         lambda: QtCore.Qt.MouseButton.NoButton,
     )
 
+    owner.win = owner
     ViewportBridge(owner).on_view_range_changed()
 
     assert released == []
@@ -793,6 +794,7 @@ def test_tiled_single_scene_range_change_schedules_frame_viewport_update(qt_app,
         lambda: QtCore.Qt.MouseButton.NoButton,
     )
 
+    owner.win = owner
     ViewportBridge(owner).on_view_range_changed()
 
     assert scheduled == ["frame"]
