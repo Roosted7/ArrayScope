@@ -1385,6 +1385,28 @@ def test_retained_payload_store_is_keyed_by_semantic_source_identity():
     assert cache[("plain", 1)] is other
 
 
+def test_retained_payload_store_is_bounded_before_large_insert_batches():
+    from arrayscope.display.model.frame import DisplayTilePayload
+
+    store = RetainedTiledPayloadStore(limit=2)
+    payloads = {
+        index: DisplayTilePayload(
+            index,
+            index,
+            np.ones((2, 2), dtype=np.float32),
+            None,
+            ("payload", index),
+        )
+        for index in range(5)
+    }
+
+    store.remember_acknowledged(payloads)
+
+    retained = store.payloads_by_base_source()
+    assert len(retained) == 2
+    assert set(retained) == {("payload", 3), ("payload", 4)}
+
+
 def test_recent_payload_cache_requires_matching_lod_factor():
     lod4 = SimpleNamespace(factor=4)
     lod1 = SimpleNamespace(factor=1)

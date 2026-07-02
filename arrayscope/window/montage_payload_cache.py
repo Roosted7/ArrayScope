@@ -51,14 +51,21 @@ class RetainedTiledPayloadStore:
     _payloads: BoundedCache = field(default_factory=BoundedCache)
     last_clear_reason: str = ""
 
+    def __post_init__(self) -> None:
+        self.limit = max(1, int(self.limit))
+        self._payloads.resize(max_entries=self.limit)
+
     def remember_acknowledged(self, payloads, *, limit: int | None = None) -> None:
         max_items = max(1, int(self.limit if limit is None else limit))
+        # Bound the store before insertion.  Large montage commits can hand us
+        # thousands of acknowledged payloads; retaining all of them and only
+        # then trimming creates an avoidable allocation spike.
+        self._payloads.resize(max_entries=max_items)
         for payload in dict(payloads or {}).values():
             key = base_tile_source_id(getattr(payload, "source_id", None))
             if key is None or not payload_matches_texture_kind(payload):
                 continue
             self._payloads.put(key, payload)
-        self._payloads.resize(max_entries=max_items)
 
     def resolve(self, tile_key, lod_factor: int, tile_state, *, shader_display: bool):
         payload = self._payloads.peek(tile_key)
