@@ -287,7 +287,7 @@ class FrameRenderMixin:
         resize_focus=None,
     ) -> MontageViewportPlan | None:
         session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return None
         view_state = self.win.view_state
         if view_state.image_axes is None:
@@ -308,6 +308,8 @@ class FrameRenderMixin:
             viewport_plan,
             colormap_lut,
         )
+        # Not the shared currency predicate: this compares the session against
+        # the key re-derived from the *live* view state (semantic-match check).
         if session.key != expected_key:
             return None
         previous_plan = getattr(session, "plan", None)
@@ -322,7 +324,7 @@ class FrameRenderMixin:
 
     def _retarget_montage_resize_payloads(self, viewport_plan: MontageViewportPlan) -> bool:
         session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return False
         capabilities = image_view_backend_capabilities(self.win.img_view)
         try:
@@ -682,7 +684,7 @@ class FrameRenderMixin:
         """Retarget a persistent tiled session without restarting evaluation."""
 
         session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return False
         capabilities = image_view_backend_capabilities(self.win.img_view)
         try:
@@ -707,6 +709,8 @@ class FrameRenderMixin:
             viewport_plan,
             colormap_lut,
         )
+        # Not the shared currency predicate: this compares the session against
+        # the key re-derived from the *live* view state (semantic-match check).
         if session.key != expected_key:
             self._montage_live_layout_reflow = False
             return False
@@ -1176,7 +1180,7 @@ class FrameRenderMixin:
 
     def _process_montage_cached_level_stats(self) -> None:
         session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         pending = getattr(session, "pending_level_tiles", None)
         if not pending and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0:
@@ -1231,7 +1235,7 @@ class FrameRenderMixin:
         self._schedule_montage_cached_level_stats(session)
 
     def _schedule_montage_refined_level_stats(self, session) -> None:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         pending = getattr(session, "pending_refined_level_tiles", None)
         if not pending:
@@ -1397,7 +1401,7 @@ class FrameRenderMixin:
         }
 
     def _schedule_montage_stage_jobs(self, session, stage_requests) -> None:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         controller = getattr(self.win, "stage_evaluation_controller", self.win.visible_evaluation_controller)
         for request, plan in tuple(stage_requests):
@@ -1511,7 +1515,7 @@ class FrameRenderMixin:
 
     def _process_montage_attached_stage_waits(self) -> None:
         session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         token = getattr(self, "_montage_attached_stage_token", None)
         if token is not None and token != _montage_work_token(session, "stage_wait"):
@@ -1644,7 +1648,7 @@ class FrameRenderMixin:
             handle_ui_exception("montage skipped warning", exc)
 
     def _schedule_montage_tiles(self, session: MontageRenderSession) -> None:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         if hasattr(self.win, "_apply_resource_governor_decisions"):
             self.win._apply_resource_governor_decisions()
@@ -1656,7 +1660,7 @@ class FrameRenderMixin:
                 break
 
     def _schedule_next_montage_tile(self, session: MontageRenderSession) -> bool:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return False
         tile = session.next_tile()
         if tile is None:
@@ -1887,6 +1891,8 @@ class FrameRenderMixin:
 
     def _on_montage_tile_slow(self, session_id):
         session = getattr(self, "_montage_session", None)
+        # Not the shared predicate: on_slow callbacks capture only the session
+        # id, so this is intentionally an id-only currency check.
         if session is None or int(session.session_id) != int(session_id):
             return
         self._show_montage_session_loading_overlay(session)
@@ -1932,7 +1938,7 @@ class FrameRenderMixin:
         self._show_montage_session_loading_overlay(session)
 
     def _show_montage_session_loading_overlay(self, session):
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         if session.visible_plan_complete():
             return
@@ -1988,7 +1994,7 @@ class FrameRenderMixin:
         return stored
 
     def _schedule_montage_tile_result_flush(self, session) -> None:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         self._montage_tile_result_key = (int(session.session_id), session.key)
         self._montage_tile_result_token = _montage_work_token(session, "tile_result")
@@ -2089,7 +2095,7 @@ class FrameRenderMixin:
             self._schedule_montage_tile_result_flush(session)
 
     def _apply_montage_tile_result(self, session, tile, result, *, expected_indices=None) -> int:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return 0
         if not self._is_current_render_generation(session.render_generation):
             return 0
@@ -2160,7 +2166,7 @@ class FrameRenderMixin:
         self._schedule_montage_tiles(session)
 
     def _schedule_montage_presentation_commit(self, session, *, force=False) -> None:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         self._montage_commit_token = _montage_work_token(session, "commit")
         interval_ms = self._montage_commit_interval_ms(session, force=force)
@@ -2232,7 +2238,7 @@ class FrameRenderMixin:
             self.win.img_view.setEvaluationOverlay(True, "Updating image frame...")
 
     def _commit_montage_session_presentation(self, session, *, force=False) -> None:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         commit_start = perf_counter()
         self._classify_visible_montage_tiles(session)
@@ -2658,7 +2664,7 @@ class FrameRenderMixin:
         return True
 
     def _schedule_montage_ready_display_commit(self, session) -> None:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         has_commit_work = (
             getattr(session, "dirty_rects", None)
@@ -2711,7 +2717,7 @@ class FrameRenderMixin:
         return False
 
     def _finish_montage_session_if_complete(self, session) -> bool:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return False
         if not session.is_complete():
             return False
@@ -2720,7 +2726,7 @@ class FrameRenderMixin:
         return True
 
     def _settle_montage_visible_plan_if_complete(self, session) -> bool:
-        if not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return False
         if not session.visible_plan_complete():
             return False
@@ -3074,6 +3080,18 @@ class FrameRenderMixin:
             return False
         return int(session.session_id) == int(session_id) and session.key == key
 
+    def _montage_session_is_current(self, session) -> bool:
+        """Shared staleness predicate for a montage session object.
+
+        Delegates to :meth:`_is_current_montage_session` so tests that stub the
+        (session_id, key) predicate keep controlling both forms. Callbacks that
+        captured a raw ``(session_id, key)`` pair call the canonical predicate
+        directly.
+        """
+        if session is None:
+            return False
+        return self._is_current_montage_session(session.session_id, session.key)
+
     def _retry_live_profile_after_montage_tile(self) -> None:
         try:
             if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
@@ -3174,7 +3192,7 @@ class FrameRenderMixin:
         if getattr(self.win.view_state, "montage_axis", None) is None:
             return
         session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         if not (session.pending_tiles or session.stage_fan_in.waiting_tiles):
             return
@@ -3197,7 +3215,7 @@ class FrameRenderMixin:
         if getattr(self.win, "_closing", False):
             return
         session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session.session_id, session.key):
+        if not self._montage_session_is_current(session):
             return
         token = getattr(self, "_montage_priority_retarget_token", None)
         if token is not None and token != _montage_work_token(session, "priority_retarget"):

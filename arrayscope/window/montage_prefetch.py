@@ -28,7 +28,7 @@ class MontagePrefetchDecision:
 def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int | None = None) -> tuple[MontagePrefetchDecision, ...]:
     if _busy(window, session):
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_visible_busy", "visible work is busy"),))
-    if not window._is_current_montage_session(session.session_id, session.key):
+    if not window._montage_session_is_current(session):
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
     if not session.document.enabled_operations:
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_no_stage", "raw montage tiles rely on visible-level commit ordering"),))
@@ -202,7 +202,7 @@ def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -
     warm = getattr(getattr(window.win, "img_view", None), "warmTiledResidency", None)
     if not callable(warm):
         return
-    if not window._is_current_montage_session(session.session_id, session.key):
+    if not window._montage_session_is_current(session):
         return
     tile_number = int(getattr(tile, "montage_index", -1))
     if tile_number < 0:

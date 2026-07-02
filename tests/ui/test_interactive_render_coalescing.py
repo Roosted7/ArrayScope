@@ -141,16 +141,20 @@ def test_montage_side_panels_defer_while_viewport_interaction_active():
 
     import arrayscope.window.frame_renderer as frame_renderer
 
+    def _renderer(active):
+        renderer = SimpleNamespace(win=SimpleNamespace(_viewport_interaction_active=active))
+        return renderer
+
     assert frame_renderer._should_defer_montage_side_panels(
-        SimpleNamespace(_viewport_interaction_active=True),
+        _renderer(True),
         SimpleNamespace(defer_side_panels=False),
     )
     assert frame_renderer._should_defer_montage_side_panels(
-        SimpleNamespace(_viewport_interaction_active=False),
+        _renderer(False),
         SimpleNamespace(defer_side_panels=True),
     )
     assert not frame_renderer._should_defer_montage_side_panels(
-        SimpleNamespace(_viewport_interaction_active=False),
+        _renderer(False),
         SimpleNamespace(defer_side_panels=False),
     )
 
@@ -377,7 +381,7 @@ def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):
             shader_display=bool(win.img_view.rendering_capabilities.shader_windowing),
         ) is not None
         refreshes = []
-        monkeypatch.setattr(win, "_refresh_memory_policy", lambda **kwargs: refreshes.append(kwargs))
+        monkeypatch.setattr(win.renderer, "_refresh_memory_policy", lambda **kwargs: refreshes.append(kwargs))
 
         win.update_image_view()
 
