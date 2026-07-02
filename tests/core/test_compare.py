@@ -4,18 +4,10 @@ import types
 from pathlib import Path
 
 import numpy as np
+import arrayscope.core.compare as compare
 
 
-ROOT = Path(__file__).parents[2]
-PACKAGE = types.ModuleType("arrayscope")
-PACKAGE.__path__ = [str(ROOT / "arrayscope")]
-sys.modules.setdefault("arrayscope", PACKAGE)
 
-COMPARE_PATH = ROOT / "arrayscope" / "core" / "compare.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope.core.compare", COMPARE_PATH)
-compare = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = compare
-SPEC.loader.exec_module(compare)
 
 
 def test_compare_document_adds_compatible_layers():

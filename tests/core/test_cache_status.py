@@ -1,14 +1,9 @@
 import importlib.util
 import sys
 from pathlib import Path
+import arrayscope.core.cache_status as cache_status
 
 
-ROOT = Path(__file__).parents[2]
-PATH = ROOT / "arrayscope" / "core" / "cache_status.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope.core.cache_status", PATH)
-cache_status = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = cache_status
-SPEC.loader.exec_module(cache_status)
 
 
 def test_cache_status_for_hit_miss_and_error():

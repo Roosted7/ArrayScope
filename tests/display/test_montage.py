@@ -4,18 +4,10 @@ import types
 from pathlib import Path
 
 import numpy as np
+import arrayscope.display.montage as montage
 
 
-ROOT = Path(__file__).parents[2]
-PACKAGE = types.ModuleType("arrayscope")
-PACKAGE.__path__ = [str(ROOT / "arrayscope")]
-sys.modules.setdefault("arrayscope", PACKAGE)
 
-MONTAGE_PATH = ROOT / "arrayscope" / "display" / "montage.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope.display.montage", MONTAGE_PATH)
-montage = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = montage
-SPEC.loader.exec_module(montage)
 
 
 def test_optimal_montage_columns_match_viewport_shape():

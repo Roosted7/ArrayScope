@@ -6,18 +6,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import arrayscope.core.roi as roi
+
+ROI_PATH = Path(roi.__file__)
 
 
-ROOT = Path(__file__).parents[2]
-PACKAGE = types.ModuleType("arrayscope")
-PACKAGE.__path__ = [str(ROOT / "arrayscope")]
-sys.modules.setdefault("arrayscope", PACKAGE)
 
-ROI_PATH = ROOT / "arrayscope" / "core" / "roi.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope.core.roi", ROI_PATH)
-roi = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = roi
-SPEC.loader.exec_module(roi)
 
 
 def test_polyline_sampling_across_horizontal_and_vertical_segments():

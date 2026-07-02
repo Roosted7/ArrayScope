@@ -8,9 +8,6 @@ import pytest
 
 
 ROOT = Path(__file__).parents[2]
-PACKAGE = types.ModuleType("arrayscope")
-PACKAGE.__path__ = [str(ROOT / "arrayscope")]
-sys.modules.setdefault("arrayscope", PACKAGE)
 
 
 MODULE_PATHS = {
@@ -35,12 +32,8 @@ MODULE_PATHS = {
 
 
 def load_module(name):
-    module_name, path = MODULE_PATHS[name]
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    module_name, _path = MODULE_PATHS[name]
+    return importlib.import_module(module_name)
 
 
 load_module("axis_utils")

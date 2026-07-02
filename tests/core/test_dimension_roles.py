@@ -4,14 +4,11 @@ import sys
 from pathlib import Path
 
 import pytest
+import arrayscope.core.dimension_roles as dimension_roles
+
+DIMENSION_ROLES_PATH = Path(dimension_roles.__file__)
 
 
-ROOT = Path(__file__).parents[2]
-DIMENSION_ROLES_PATH = ROOT / "arrayscope" / "core" / "dimension_roles.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope.core.dimension_roles", DIMENSION_ROLES_PATH)
-dimension_roles = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = dimension_roles
-SPEC.loader.exec_module(dimension_roles)
 
 DimensionRoles = dimension_roles.DimensionRoles
 

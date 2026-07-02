@@ -5,18 +5,11 @@ import types
 from pathlib import Path
 
 import pytest
+import arrayscope.core.view_state as view_state_module
 
-ROOT = Path(__file__).parents[2]
-PACKAGE = types.ModuleType("arrayscope")
-PACKAGE.__path__ = [str(ROOT / "arrayscope")]
-PACKAGE.__version__ = "0.0.1"
-sys.modules.setdefault("arrayscope", PACKAGE)
+VIEW_STATE_PATH = Path(view_state_module.__file__)
 
-VIEW_STATE_PATH = ROOT / "arrayscope" / "core" / "view_state.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope.core.view_state", VIEW_STATE_PATH)
-view_state_module = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = view_state_module
-SPEC.loader.exec_module(view_state_module)
+
 
 ChannelMode = view_state_module.ChannelMode
 ScaleMode = view_state_module.ScaleMode

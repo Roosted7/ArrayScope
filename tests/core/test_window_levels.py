@@ -2,14 +2,11 @@ import ast
 import importlib.util
 import sys
 from pathlib import Path
+import arrayscope.core.window_levels as window_levels
+
+WINDOW_LEVELS_PATH = Path(window_levels.__file__)
 
 
-ROOT = Path(__file__).parents[2]
-WINDOW_LEVELS_PATH = ROOT / "arrayscope" / "core" / "window_levels.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope.core.window_levels", WINDOW_LEVELS_PATH)
-window_levels = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = window_levels
-SPEC.loader.exec_module(window_levels)
 
 
 def test_absolute_window_reuses_previous_numeric_levels():

@@ -5,18 +5,10 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import arrayscope.core.histograms as histograms
 
 
-ROOT = Path(__file__).parents[2]
-PACKAGE = types.ModuleType("arrayscope")
-PACKAGE.__path__ = [str(ROOT / "arrayscope")]
-sys.modules.setdefault("arrayscope", PACKAGE)
 
-HISTOGRAMS_PATH = ROOT / "arrayscope" / "core" / "histograms.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope.core.histograms", HISTOGRAMS_PATH)
-histograms = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = histograms
-SPEC.loader.exec_module(histograms)
 
 
 def test_comparison_histograms_use_shared_range():

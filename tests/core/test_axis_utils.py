@@ -3,13 +3,10 @@ import sys
 from pathlib import Path
 
 import pytest
+import arrayscope.core.axis_utils as axis_utils
 
 
 AXIS_UTILS_PATH = Path(__file__).parents[2] / "arrayscope" / "core" / "axis_utils.py"
-SPEC = importlib.util.spec_from_file_location("arrayscope.core.axis_utils", AXIS_UTILS_PATH)
-axis_utils = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = axis_utils
-SPEC.loader.exec_module(axis_utils)
 
 
 def test_validate_axis_accepts_shape_or_ndim():
