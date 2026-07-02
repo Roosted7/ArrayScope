@@ -304,9 +304,10 @@ class EvaluationController(Qt.QtCore.QObject):
         self._handlers[generation] = (on_done, on_error, on_stale, None)
         self._index_request(request)
         if on_slow is not None:
-            # User-visible timeout. `_emit_slow` rechecks generation and
-            # supersession before surfacing delayed-work feedback.
-            Qt.QtCore.QTimer.singleShot(int(slow_ms), lambda generation=generation: self._emit_slow(generation, on_slow))
+            # User-visible timeout with this controller as receiver context.
+            # `_emit_slow` rechecks generation and supersession before
+            # surfacing delayed-work feedback.
+            Qt.QtCore.QTimer.singleShot(int(slow_ms), self, lambda generation=generation: self._emit_slow(generation, on_slow))
 
         runnable = _EvaluationRunnable(
             request,
@@ -376,9 +377,10 @@ class EvaluationController(Qt.QtCore.QObject):
         self._handlers[generation] = (on_done, on_error, on_stale, on_reuse_stale)
         self._index_request(request)
         if on_slow is not None:
-            # User-visible timeout. `_emit_slow` rechecks generation and
-            # supersession before surfacing delayed-work feedback.
-            Qt.QtCore.QTimer.singleShot(int(slow_ms), lambda generation=generation: self._emit_slow(generation, on_slow))
+            # User-visible timeout with this controller as receiver context.
+            # `_emit_slow` rechecks generation and supersession before
+            # surfacing delayed-work feedback.
+            Qt.QtCore.QTimer.singleShot(int(slow_ms), self, lambda generation=generation: self._emit_slow(generation, on_slow))
 
         runnable = _EvaluationRunnable(
             request,

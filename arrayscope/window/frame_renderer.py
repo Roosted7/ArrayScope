@@ -75,6 +75,11 @@ from arrayscope.window.montage_viewport import (
     square_montage_fit_view_range,
 )
 from arrayscope.window.montage_session import MontageRenderSession
+from arrayscope.window.render_contract import (
+    montage_work_token as _montage_work_token,
+    montage_work_token_is_current as _montage_work_token_is_current,
+    session_token_is_current as _session_token_is_current,
+)
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, fallback_level_source, normalize_bounds
 from arrayscope.display.model.commit import CommitKind, DisplayPayload, PresentationInput
 from arrayscope.display.model.frame import TiledValueSource
@@ -1225,6 +1230,25 @@ class FrameRenderMixin:
         self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
         self._montage_pending_level_tiles_last_session = len(pending or ())
         self._record_gui_budget(budget)
+        if processed:
+            _complete_inline_work(
+                self,
+                WorkItem(
+                    key=(
+                        "montage_level_evidence",
+                        session.key,
+                        int(session.session_id),
+                        int(getattr(session, "level_revision", 0) or 0),
+                        int(processed),
+                    ),
+                    lane=WorkLane.HISTOGRAM_REFINEMENT,
+                    quality="retained",
+                    supersession_key=("montage-level-evidence", session.key),
+                    supersession_value=int(session.session_id),
+                    estimated_cpu_ms=float(self._last_montage_level_stats_ms or 0.0),
+                    estimated_bytes=int(budget.processed_bytes),
+                ),
+            )
         # A histogram/level refinement is presentation metadata.  It must not
         # force a full tiled-payload refresh or replay stale removals after a
         # viewport change.  Normal display commits will publish richer sources;
@@ -1518,7 +1542,7 @@ class FrameRenderMixin:
         if not self._montage_session_is_current(session):
             return
         token = getattr(self, "_montage_attached_stage_token", None)
-        if token is not None and token != _montage_work_token(session, "stage_wait"):
+        if not _montage_work_token_is_current(session, token, "stage_wait"):
             return
         pending_keys = tuple(
             dict.fromkeys(
@@ -2032,7 +2056,7 @@ class FrameRenderMixin:
         if session is None or key is None or not self._is_current_montage_session(key[0], key[1]):
             return
         token = getattr(self, "_montage_tile_result_token", None)
-        if token is not None and token != _montage_work_token(session, "tile_result"):
+        if not _montage_work_token_is_current(session, token, "tile_result"):
             return
         interactive = _interactive_active(self)
         budget = self._montage_callback_budget(
@@ -2226,7 +2250,7 @@ class FrameRenderMixin:
         if session is None or not session.final_commit_pending:
             return
         token = getattr(self, "_montage_commit_token", None)
-        if token is not None and token != _montage_work_token(session, "commit"):
+        if not _montage_work_token_is_current(session, token, "commit"):
             return
         self._commit_montage_session_presentation(session, force=False)
         if (
@@ -2694,8 +2718,9 @@ class FrameRenderMixin:
             return
         try:
             # Qt event-turn barrier guarded by `_montage_commit_token`; the
-            # fallback timer exists only for bindings that reject singleShot.
-            Qt.QtCore.QTimer.singleShot(0, self._flush_montage_presentation_commit)
+            # fallback timer exists only for bindings that reject the
+            # receiver-context singleShot overload.
+            Qt.QtCore.QTimer.singleShot(0, self, self._flush_montage_presentation_commit)
         except Exception:
             self._start_montage_commit_timer(1)
 
@@ -3075,10 +3100,7 @@ class FrameRenderMixin:
         self.win.img_view.setMontageTileOverlays(tuple(overlays))
 
     def _is_current_montage_session(self, session_id, key) -> bool:
-        session = getattr(self, "_montage_session", None)
-        if session is None:
-            return False
-        return int(session.session_id) == int(session_id) and session.key == key
+        return _session_token_is_current(getattr(self, "_montage_session", None), session_id, key)
 
     def _montage_session_is_current(self, session) -> bool:
         """Shared staleness predicate for a montage session object.
@@ -3218,7 +3240,7 @@ class FrameRenderMixin:
         if not self._montage_session_is_current(session):
             return
         token = getattr(self, "_montage_priority_retarget_token", None)
-        if token is not None and token != _montage_work_token(session, "priority_retarget"):
+        if not _montage_work_token_is_current(session, token, "priority_retarget"):
             return
         if not (session.pending_tiles or session.stage_fan_in.waiting_tiles):
             return
@@ -3236,6 +3258,21 @@ class FrameRenderMixin:
         )
         if processed:
             budget.record_item(item_count=processed)
+            _complete_inline_work(
+                self,
+                WorkItem(
+                    key=(
+                        "montage_priority_retarget",
+                        session.key,
+                        int(session.session_id),
+                        int(getattr(session, "viewport_revision", 0) or 0),
+                    ),
+                    lane=WorkLane.VISIBLE_PLANNING,
+                    quality="retained",
+                    supersession_key=("montage-priority-retarget", session.key),
+                    supersession_value=int(session.session_id),
+                ),
+            )
         self._last_montage_priority_retarget_count = int(processed)
         self._last_montage_priority_retarget_pending = len(session.pending_tiles)
         self._record_gui_budget(budget)
@@ -3247,7 +3284,7 @@ class FrameRenderMixin:
             return
         session = getattr(self, "_montage_session", None)
         token = getattr(self, "_montage_viewport_update_token", None)
-        if token is not None and (session is None or token != _montage_work_token(session, "viewport_update")):
+        if token is not None and (session is None or not _montage_work_token_is_current(session, token, "viewport_update")):
             return
         if getattr(self, "_montage_viewport_update_running", False):
             self.win._montage_viewport_update_pending = True
@@ -3255,7 +3292,25 @@ class FrameRenderMixin:
         self._montage_viewport_update_running = True
         self.win._montage_viewport_update_pending = False
         try:
-            if not self._try_update_montage_viewport_only():
+            if self._try_update_montage_viewport_only():
+                retargeted = getattr(self, "_montage_session", None)
+                if retargeted is not None:
+                    _complete_inline_work(
+                        self,
+                        WorkItem(
+                            key=(
+                                "montage_viewport_retarget",
+                                retargeted.key,
+                                int(retargeted.session_id),
+                                int(getattr(retargeted, "viewport_revision", 0) or 0),
+                            ),
+                            lane=WorkLane.DISPLAY_PREPARATION,
+                            quality="retained",
+                            supersession_key=("montage-viewport-retarget", retargeted.key),
+                            supersession_value=int(retargeted.session_id),
+                        ),
+                    )
+            else:
                 self.update_image_view()
         finally:
             self._montage_viewport_update_running = False
@@ -3758,26 +3813,6 @@ def _montage_commit_interval_ms(window, *, force: bool) -> int:
     if feedback is None:
         return 8 if force else 16
     return int(feedback.commit_interval_ms("montage_commit", force=force, interactive=_interactive_active(window)))
-
-
-def _montage_work_token(session, reason: str) -> tuple[object, ...]:
-    base = (
-        str(reason),
-        int(getattr(session, "session_id", 0) or 0),
-        getattr(session, "key", None),
-        int(getattr(session, "render_generation", 0) or 0),
-    )
-    if reason == "commit":
-        return (
-            *base,
-            int(getattr(session, "payload_revision", 0) or 0),
-            int(getattr(session, "level_revision", 0) or 0),
-        )
-    if reason == "priority_retarget":
-        return (*base, int(getattr(session, "viewport_revision", 0) or 0))
-    if reason == "viewport_update":
-        return (*base, int(getattr(session, "viewport_revision", 0) or 0))
-    return base
 
 
 def _safe_tiled_payload_geometry_retarget(previous_geometry, geometry) -> bool:

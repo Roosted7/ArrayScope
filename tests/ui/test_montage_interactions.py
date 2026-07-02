@@ -1493,3 +1493,33 @@ def test_visible_render_budget_uses_app_setting():
     renderer.win = SimpleNamespace(app_settings=AppSettingsState(render_memory_budget_mb=256))
 
     assert renderer._visible_render_budget_bytes() == 256 * 1024 * 1024
+
+
+def test_montage_render_admissions_are_observable_in_work_graph(qtbot):
+    """Y1 exit gate: orchestrator admission decisions land in WorkGraph counters."""
+
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        assert win.renderer.work_graph is win.work_graph
+        win._set_view_state(win.view_state.with_montage_axis(2, indices=(0, 1, 2, 3), text=":"))
+        win.render(reason="test-montage")
+
+        def planning_recorded():
+            lanes = win.work_graph.diagnostics().lanes
+            return lanes.get("visible_planning", {}).get("admitted", 0) >= 1
+
+        qtbot.waitUntil(planning_recorded, timeout=5000)
+
+        def fan_in_recorded():
+            _process_events(qtbot)
+            lanes = win.work_graph.diagnostics().lanes
+            return lanes.get("gui_fan_in", {}).get("completed", 0) >= 1
+
+        qtbot.waitUntil(fan_in_recorded, timeout=5000)
+    finally:
+        win.close()

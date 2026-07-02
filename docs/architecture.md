@@ -76,7 +76,10 @@ meaning, and backend adapters own concrete textures/items/visuals only.
   window exposes only a thin rendering API and read-only presentation
   properties. See [ADR 0045](decisions/0045-render-orchestrator-composition.md).
 - `window.montage_session`, payload cache, viewport planning, tile provider, and extracted control-plane models separate parts of montage lifecycle from the orchestrator.
-- `window.evaluation_controller`, render generation, coalescing, and prefetch coordinate work around Qt.
+- `window.render_contract` defines the one staleness/ordering vocabulary: the render generation,
+  montage-session currency, and per-kind work tokens. Orchestrator predicates delegate to it;
+  no orchestration site defines a local staleness comparison (roadmap Y1).
+- `window.evaluation_controller`, coalescing, and prefetch coordinate work around Qt.
 - `core.memory_policy`, compute policy, latency feedback, telemetry, and resource governor decide limits/admission inputs.
 
 ### UI and interaction
@@ -251,9 +254,6 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 Tracked as roadmap gates Y1–Y3; measured in the
 [v32 audit](reviews/v32-composition-audit.md):
 
-- The orchestrator still contains parallel revision/staleness schemes that
-  predate `WorkGraph`; Y1 collapses them into one generation contract and one
-  admission path.
 - ~40 methods are implemented in both backend view classes and the two
   `tiles.py` files are parallel-divergent; Y2 hoists shared logic into
   `ImageViewShell` and a common tile model.

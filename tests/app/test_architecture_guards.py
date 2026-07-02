@@ -604,3 +604,58 @@ def test_frame_renderer_has_no_legacy_normal_degraded_preview_branch():
     text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
     assert "RenderDecisionKind.DEGRADED_PREVIEW" not in text
     assert "store_display_tile_result" not in text
+
+
+def test_deferred_single_shot_callbacks_carry_receiver_context():
+    """QTimer.singleShot must use the (interval, receiver, callable) overload.
+
+    A receiver context ties the callback to a QObject lifetime so it cannot
+    fire into a destroyed window; generation guards alone only reject *stale*
+    callbacks, not *dead* receivers (ADR 0045, roadmap Y1).
+    """
+
+    offenders = []
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "singleShot"
+                and len(node.args) < 3
+            ):
+                offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+    assert offenders == []
+
+
+def test_render_staleness_vocabulary_is_defined_once():
+    """render_contract owns staleness; orchestration modules only delegate.
+
+    No orchestration module may compare montage work tokens or session
+    identities inline — the predicates live in window/render_contract.py
+    (roadmap Y1 exit gate).
+    """
+
+    orchestration = (
+        "window/render.py",
+        "window/frame_renderer.py",
+        "window/display_presenter.py",
+        "window/render_prefetch.py",
+        "window/render_resources.py",
+        "window/montage_prefetch.py",
+    )
+    for rel in orchestration:
+        text = (ROOT / "arrayscope" / rel).read_text()
+        assert "!= _montage_work_token(" not in text, rel
+        assert "== _montage_work_token(" not in text, rel
+        assert "session_id) == int(" not in text, rel
+        assert "class RenderGeneration" not in text, rel
+    contract = (ROOT / "arrayscope" / "window" / "render_contract.py").read_text()
+    for predicate in (
+        "def generation_is_current",
+        "def session_is_current",
+        "def session_token_is_current",
+        "def montage_work_token",
+        "def montage_work_token_is_current",
+    ):
+        assert predicate in contract

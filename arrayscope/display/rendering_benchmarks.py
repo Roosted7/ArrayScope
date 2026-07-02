@@ -1002,7 +1002,7 @@ def _measure_presented_action(view, action) -> _ActionMeasurement:
         class PaintProbe(QtCore.QObject):
             def eventFilter(self, obj, event):
                 if obj is paint_target and event.type() == QtCore.QEvent.Type.Paint:
-                    QtCore.QTimer.singleShot(0, note_frame)
+                    QtCore.QTimer.singleShot(0, self, note_frame)
                 return False
 
         paint_probe = PaintProbe(paint_target)

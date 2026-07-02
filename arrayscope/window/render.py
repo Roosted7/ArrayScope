@@ -29,6 +29,7 @@ from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.frame_renderer import FrameRenderMixin
+from arrayscope.window.render_contract import RenderGeneration, generation_is_current
 from arrayscope.window.render_prefetch import RenderPrefetchMixin
 from arrayscope.window.render_resources import RenderResourceMixin
 
@@ -62,6 +63,13 @@ class RenderOrchestrator(
     def __init__(self, win):
         super().__init__(win)
         self.win = win
+        self._render_generation = RenderGeneration()
+
+    @property
+    def work_graph(self):
+        """The window's admission graph; orchestrator work records land there."""
+
+        return getattr(self.win, "work_graph", None)
 
     def _active_display_colormap_lut(self):
         view = getattr(self.win, "img_view", None)
@@ -903,18 +911,18 @@ class RenderOrchestrator(
         coordinator.request(reason=reason, force_autolevel=force_autolevel, interactive=interactive)
 
     def _advance_render_generation(self, reason: str) -> int:
-        generation = getattr(self.win, "_render_generation", None)
+        generation = getattr(self, "_render_generation", None)
         if generation is None:
             return 0
         return generation.advance(reason)
 
     def _capture_render_generation(self) -> int:
-        generation = getattr(self.win, "_render_generation", None)
+        generation = getattr(self, "_render_generation", None)
         return 0 if generation is None else generation.capture()
 
     def _is_current_render_generation(self, generation: int) -> bool:
-        guard = getattr(self.win, "_render_generation", None)
-        return (guard is None or guard.is_current(generation)) and not getattr(self.win, "_closing", False)
+        guard = getattr(self, "_render_generation", None)
+        return generation_is_current(guard, generation) and not getattr(self.win, "_closing", False)
 
     def _cancel_render_dependent_work_for_interactive_change(self) -> None:
         for controller_name, groups in (

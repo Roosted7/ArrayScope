@@ -507,7 +507,7 @@ def test_restored_montage_viewport_schedules_retarget_after_set_range(qt_app, mo
     )
     window._schedule_montage_viewport_update = lambda *, delay_ms=None: scheduled.append(delay_ms)
     monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
+    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, receiver, callback: single_shots.append((delay, callback)))
 
     window._apply_viewport_continuity_when_ready()
 
@@ -672,7 +672,7 @@ def test_viewport_continuity_reopens_shape_settle_after_dock_layout_change(qt_ap
     matches = [False]
     single_shots = []
     monkeypatch.setattr(window, "_viewport_continuity_shape_matches", lambda _shape: bool(matches[-1]))
-    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
+    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, receiver, callback: single_shots.append((delay, callback)))
 
     window._restore_viewport_continuity_shape_after_layout()
 
@@ -695,7 +695,7 @@ def test_viewport_continuity_settled_shape_does_not_resize_for_pending_range(qt_
     window._viewport_continuity.shape_settled = True
     single_shots = []
     monkeypatch.setattr(window, "_viewport_continuity_shape_matches", lambda _shape: True)
-    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
+    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, receiver, callback: single_shots.append((delay, callback)))
 
     window._restore_viewport_continuity_shape_after_layout()
 
@@ -829,7 +829,7 @@ def test_restored_viewport_waits_until_frame_committed(qt_app, monkeypatch):
         )
     )
     monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
+    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, receiver, callback: single_shots.append((delay, callback)))
 
     window._apply_viewport_continuity_when_ready()
 
@@ -872,7 +872,7 @@ def test_restored_montage_viewport_waits_for_plan_not_tile_completion(qt_app, mo
         )
     )
     monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, callback: single_shots.append((delay, callback)))
+    monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, receiver, callback: single_shots.append((delay, callback)))
 
     window._apply_viewport_continuity_when_ready()
 

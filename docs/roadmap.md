@@ -16,7 +16,15 @@ The v32 composition change (render orchestration off the window) is recorded in
 
 ### Y1. One generation contract and one admission path
 
-**Status:** Next.
+**Status:** Done (2026-07-02). `window/render_contract.py` owns the staleness
+vocabulary (render generation, session currency, per-kind work tokens);
+orchestrator predicates delegate to it and architecture guards forbid local
+reimplementations and context-free `singleShot` callbacks. The orchestrator
+exposes `work_graph`, fixing silently dropped admission records after the v32
+extraction; montage tile prefetch, level-evidence batches, and
+viewport/priority retargets now record admissions. The redundant
+prefetch-dispatch and frame-viewport-update revision counters were deleted
+(coalescing is structural: one queued flag / one restarted timer).
 
 **Goal:** a single staleness/ordering vocabulary inside `RenderOrchestrator`
 so that no fix ever has to choose between parallel token schemes.

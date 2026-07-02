@@ -56,7 +56,7 @@ class WindowLayoutManager:
                 if viewport is not None:
                     self._restore_viewport_continuity_shape()
 
-            Qt.QtCore.QTimer.singleShot(0, settle_docks_and_viewport)
+            Qt.QtCore.QTimer.singleShot(0, self.window, settle_docks_and_viewport)
 
     def save_window_settings(self):
         win = self.window
@@ -101,7 +101,7 @@ class WindowLayoutManager:
         self._add_dock_to_panel_area(win.profile_dock)
         # Qt event-turn barrier. Default dock resize depends on the redocked
         # widgets being present in the main window layout.
-        Qt.QtCore.QTimer.singleShot(0, self.resize_default_docks)
+        Qt.QtCore.QTimer.singleShot(0, self.window, self.resize_default_docks)
 
     def set_operation_dock_visible_from_user(self, visible):
         win = self.window
@@ -152,7 +152,7 @@ class WindowLayoutManager:
     def schedule_view_geometry_refresh(self):
         # Qt event-turn barrier. View geometry is sampled after pending dock
         # visibility changes settle.
-        Qt.QtCore.QTimer.singleShot(0, self.refresh_view_geometry)
+        Qt.QtCore.QTimer.singleShot(0, self.window, self.refresh_view_geometry)
 
     def set_dock_visible_later(self, dock, visible, *, preserve_canvas=True):
         self._state_for(dock).auto_visible = bool(visible)
@@ -162,6 +162,7 @@ class WindowLayoutManager:
         # visibility requests cannot apply later.
         Qt.QtCore.QTimer.singleShot(
             0,
+            self.window,
             lambda dock=dock, visible=visible, preserve_canvas=preserve_canvas, generation=generation: self.apply_queued_dock_visibility(
                 dock,
                 visible,
@@ -252,7 +253,7 @@ class WindowLayoutManager:
         if callable(restore_viewport_shape) and callable(restore_shape) and restore_shape() is not None:
             # Qt event-turn barrier. A restored file viewport shape follows the
             # dock visibility transition that changed the central viewport.
-            Qt.QtCore.QTimer.singleShot(0, restore_viewport_shape)
+            Qt.QtCore.QTimer.singleShot(0, self.window, restore_viewport_shape)
 
     def _window_alive(self) -> bool:
         win = self.window

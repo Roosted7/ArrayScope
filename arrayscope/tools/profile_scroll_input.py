@@ -156,7 +156,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
             )
             if state_box["tick"] >= int(args.ticks):
                 timer.stop()
-                QtCore.QTimer.singleShot(500, app.quit)
+                QtCore.QTimer.singleShot(500, app, app.quit)
 
         timer.timeout.connect(on_tick)
         state_box["start"] = perf_counter()

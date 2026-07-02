@@ -15,6 +15,7 @@ import numpy as np
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.memory_policy import MiB, MemoryPolicy
 from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.work_graph import WorkItem, WorkLane, complete_inline_work as _complete_inline_work
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.region_source import EagerDisplayRegionSource
@@ -426,16 +427,14 @@ class DisplayPresentationMixin:
             if callable(scheduler):
                 scheduler(delay_ms=delay_ms)
             return
-        revision = int(getattr(self, "_frame_viewport_update_revision", 0) or 0) + 1
-        self._frame_viewport_update_revision = revision
-        self._frame_viewport_update_scheduled_revision = revision
         timer = getattr(self, "_frame_viewport_update_timer", None)
         if timer is None:
             from pyqtgraph.Qt import QtCore
 
-            # Qt event-turn barrier. The revision guard below makes this a
-            # coalesced viewport retarget, not an ordering source for frame
-            # semantics; remove when viewport retargeting is a WorkGraph item.
+            # Qt event-turn barrier. Restarting the single timer coalesces
+            # bursts to one retarget, and the callback re-derives everything
+            # from the committed frame, so this is pure rescheduling — not an
+            # ordering source for frame semantics.
             timer = QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._run_frame_viewport_update)
@@ -443,10 +442,6 @@ class DisplayPresentationMixin:
         timer.start(0 if delay_ms is None else max(0, int(delay_ms)))
 
     def _run_frame_viewport_update(self) -> None:
-        if int(getattr(self, "_frame_viewport_update_scheduled_revision", 0) or 0) != int(
-            getattr(self, "_frame_viewport_update_revision", 0) or 0
-        ):
-            return
         frame = getattr(self.win, "_committed_display_frame", None)
         scene = getattr(frame, "scene", None)
         if frame is None or scene is None:
@@ -508,6 +503,16 @@ class DisplayPresentationMixin:
         self.display_geometry = committed.geometry
         self._set_committed_display_frame(committed)
         self.win.apply_axis_flips()
+        _complete_inline_work(
+            self,
+            WorkItem(
+                key=("frame_viewport_retarget", frame.key.request_key, view_range),
+                lane=WorkLane.DISPLAY_PREPARATION,
+                quality="retained",
+                supersession_key=("frame-viewport-retarget", frame.key.request_key),
+                supersession_value=view_range,
+            ),
+        )
 
     def _display_frame_key(self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None) -> DisplayFrameKey:
         if document_key is None:

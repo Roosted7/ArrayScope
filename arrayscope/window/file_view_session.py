@@ -251,6 +251,7 @@ class FileViewSessionMixin:
         # show/dock/layout pass has produced the real graphics viewport.
         Qt.QtCore.QTimer.singleShot(
             0,
+            self,
             lambda shape=tuple(viewport_shape), generation=int(tx.generation): self._restore_viewport_continuity_shape_step(
                 shape,
                 attempts=FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS,
@@ -292,6 +293,7 @@ class FileViewSessionMixin:
         # removable when viewport restore has a reliable post-layout signal.
         Qt.QtCore.QTimer.singleShot(
             FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS,
+            self,
             lambda shape=tuple(viewport_shape), attempts=int(attempts) - 1, generation=generation: self._restore_viewport_continuity_shape_step(
                 shape,
                 attempts=attempts,
@@ -508,7 +510,7 @@ class FileViewSessionMixin:
             return
         # Qt event-turn barrier. The callback rechecks committed frame/session
         # readiness before applying the saved view range.
-        Qt.QtCore.QTimer.singleShot(0, self._apply_viewport_continuity_when_ready)
+        Qt.QtCore.QTimer.singleShot(0, self, self._apply_viewport_continuity_when_ready)
 
     def _schedule_viewport_continuity_retarget(self) -> None:
         if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
@@ -523,7 +525,7 @@ class FileViewSessionMixin:
         try:
             # Qt event-turn barrier. Retargeting follows the restored view range
             # after the ViewBox has accepted it.
-            Qt.QtCore.QTimer.singleShot(0, schedule_once)
+            Qt.QtCore.QTimer.singleShot(0, self, schedule_once)
         except Exception:
             scheduler(delay_ms=0)
 

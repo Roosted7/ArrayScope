@@ -21,24 +21,17 @@ class RenderPrefetchMixin:
             self.win.operation_evaluator.note_prefetch_skipped()
             return
         self._pending_prefetch_request = (view_state, colormap_lut)
-        revision = int(getattr(self, "_prefetch_dispatch_revision", 0) or 0) + 1
-        self._prefetch_dispatch_revision = revision
         if bool(getattr(self, "_prefetch_dispatch_queued", False)):
             return
         self._prefetch_dispatch_queued = True
-        # Qt event-turn barrier. The queued callback collapses rapid slice
-        # changes to the latest request; WorkGraph/resource gates below decide
-        # whether speculation is actually allowed.
-        Qt.QtCore.QTimer.singleShot(0, lambda revision=revision: self._run_pending_prefetch(revision))
+        # Qt event-turn barrier with the orchestrator as receiver context. The
+        # queued callback reads the latest pending request, so rapid slice
+        # changes collapse without a revision counter; WorkGraph/resource gates
+        # below decide whether speculation is actually allowed.
+        Qt.QtCore.QTimer.singleShot(0, self, self._run_pending_prefetch)
 
-    def _run_pending_prefetch(self, revision: int | None = None):
+    def _run_pending_prefetch(self):
         self._prefetch_dispatch_queued = False
-        if revision is not None and int(revision) != int(getattr(self, "_prefetch_dispatch_revision", 0) or 0):
-            if getattr(self, "_pending_prefetch_request", None) is not None:
-                self._prefetch_dispatch_queued = True
-                latest = int(getattr(self, "_prefetch_dispatch_revision", 0) or 0)
-                Qt.QtCore.QTimer.singleShot(0, lambda revision=latest: self._run_pending_prefetch(revision))
-            return
         request = getattr(self, "_pending_prefetch_request", None)
         self._pending_prefetch_request = None
         if request is None:

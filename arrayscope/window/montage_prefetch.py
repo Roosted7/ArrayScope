@@ -10,6 +10,8 @@ import numpy as np
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.display.slice_engine import make_image_from_slab, make_shader_image_from_slab
 from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.slabs import evaluate_slab_from_stage, plan_slab, request_for_image
@@ -129,7 +131,28 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             window.win.operation_evaluator.prefetch_stored += 1
             _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key)
 
-        started = window.win.prefetch_evaluation_controller.start_prefetch(evaluate, on_done=done, key=("montage_tile_prefetch", tile_key), memory_budget_bytes=window._memory_policy().display_cache_budget_bytes)
+        budget_bytes = int(window._memory_policy().display_cache_budget_bytes)
+        started = window.win.prefetch_evaluation_controller.start_prefetch(
+            evaluate,
+            on_done=done,
+            key=("montage_tile_prefetch", tile_key),
+            memory_budget_bytes=budget_bytes,
+            work_item=WorkItem(
+                key=("montage_tile_prefetch", tile_key),
+                lane=WorkLane.SPECULATIVE_RESIDENCY,
+                frame_target=FrameTarget(
+                    semantic_key=tile_key,
+                    viewport_key=("montage-near", int(tile.montage_index)),
+                    presentation_key=("prefetch",),
+                    quality="retained",
+                ),
+                supersession_key=("montage-tile-prefetch", session.key, int(tile.montage_index)),
+                supersession_value=tile_key,
+                estimated_bytes=budget_bytes,
+                expected_value=1.0,
+                reusable_output=True,
+            ),
+        )
         if started.scheduled:
             scheduled += 1
             window.win.operation_evaluator.note_prefetch_scheduled()

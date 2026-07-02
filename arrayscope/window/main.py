@@ -29,7 +29,6 @@ from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.operation_actions import OperationActionsMixin
 from arrayscope.window.render import RenderOrchestrator
 from arrayscope.window.render_coordinator import RenderCoordinator
-from arrayscope.window.render_generation import RenderGeneration
 from arrayscope.window.state_sync import StateSyncMixin
 
 
@@ -88,7 +87,6 @@ class ArrayScopeWindow(
             self.renderer._memory_policy(),
         )
         self._init_compare_document(data)
-        self._render_generation = RenderGeneration()
         self.work_graph = WorkGraph()
         self.visible_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.visible_workers, name="visible")
         self.evaluation_controller = self.visible_evaluation_controller
@@ -194,10 +192,10 @@ class ArrayScopeWindow(
 
             # Qt event-turn barrier. The callback rechecks restore readiness
             # after the first show/layout pass.
-            Qt.QtCore.QTimer.singleShot(0, finish_restored_file_session_viewport)
+            Qt.QtCore.QTimer.singleShot(0, self, finish_restored_file_session_viewport)
         # Qt event-turn barrier. Progressive dock preservation starts after
         # startup layout has settled.
-        Qt.QtCore.QTimer.singleShot(0, lambda: setattr(self, "_progressive_preserve_enabled", True))
+        Qt.QtCore.QTimer.singleShot(0, self, lambda: setattr(self, "_progressive_preserve_enabled", True))
 
         # Set up file watcher if a filepath was provided (QFileSystemWatcher uses
         # OS-native events: inotify on Linux, FSEvents on macOS, ReadDirectoryChanges on Windows)

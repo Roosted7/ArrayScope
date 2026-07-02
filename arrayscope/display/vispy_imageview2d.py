@@ -1835,7 +1835,7 @@ class VisPyImageView2D(ImageViewShell):
 
         # Qt event-turn barrier. Multiple range changes collapse to one camera
         # sync; remove if VisPy exposes a direct safe same-turn camera update.
-        QtCore.QTimer.singleShot(0, apply_sync)
+        QtCore.QTimer.singleShot(0, self, apply_sync)
 
     def _on_vispy_mouse_move(self, event) -> None:
         # The PyQtGraph overlay owns interaction.  This bridge is only useful if
