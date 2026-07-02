@@ -68,11 +68,44 @@ def _assert_committed_tile_value(win, tile, value):
     np.testing.assert_array_equal(np.asarray(payload.image), expected)
 
 
+def _reset_warm_tile_state(win):
+    """Return the window to a semantically cold tile state.
+
+    The tiled pipeline renders plain slices through the montage tile lane and
+    keeps their payloads resident (evaluator cache, retained payload store,
+    committed frame).  Tests that pin the cold montage contract (loading
+    placeholders, progressive level warm-up) must drop that warm state first,
+    as a document/context change would.
+    """
+
+    win.operation_evaluator.clear_cache()
+    win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change("test-cold-start")
+    # The slice render's session would re-acknowledge its payloads on the next
+    # presentation commit; drop it so no warm tile state can be resurrected.
+    win.renderer._montage_session = None
+    frame = getattr(win, "_committed_display_frame", None)
+    payloads = getattr(getattr(frame, "value_source", None), "payloads", None)
+    if isinstance(payloads, dict):
+        payloads.clear()
+
+
 def _use_slice_zero(win, qtbot):
     win._set_view_state(win.view_state.with_slice(2, 0))
     win.render(reason="test-initial-slice")
     _process_events(qtbot, count=20)
-    win.operation_evaluator.clear_cache()
+    qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
+    _reset_warm_tile_state(win)
+
+
+def _settle_initial_render(win, qtbot):
+    """Wait for the startup render (which flows through the montage tile lane
+    since the tiled pipeline handles single slices too) and drop its warm
+    tiles, so tests control exactly which tiles are warm and which calls the
+    patched montage controller sees."""
+
+    qtbot.waitUntil(lambda: getattr(win, "_committed_display_frame", None) is not None, timeout=3000)
+    qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
+    _reset_warm_tile_state(win)
 
 
 def test_montage_status_does_not_remain_computing(qtbot):
@@ -364,6 +397,7 @@ def test_montage_commits_cached_tiles_immediately_with_loading_placeholders(qtbo
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
+        _settle_initial_render(win, qtbot)
         state = win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
         win._set_view_state(state)
         plan = make_montage_plan(state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=3)
@@ -436,9 +470,10 @@ def test_montage_loading_overlays_wait_for_slow_callback(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
+        _settle_initial_render(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
@@ -512,13 +547,16 @@ def test_montage_loading_overlay_clears_after_final_delayed_commit(qtbot, monkey
 
 def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
     _clear_arrayscope_settings()
+    from arrayscope.operations.stage_fanin import StageFanInState
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     session = SimpleNamespace(
-        session_id=1,
+        session_id=999,
         key=("test-session",),
+        render_generation=win.renderer._capture_render_generation(),
+        stage_fan_in=StageFanInState(),
         final_commit_pending=False,
         flush_pending=False,
         pending_removals=set(),
@@ -526,7 +564,9 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
     )
     calls = []
     try:
-        monkeypatch.setattr(win.renderer, "_is_current_montage_session", lambda session_id, key: session_id == 1 and key == ("test-session",))
+        _process_events(qtbot)
+        _settle_initial_render(win, qtbot)
+        monkeypatch.setattr(win.renderer, "_is_current_montage_session", lambda session_id, key: session_id == 999 and key == ("test-session",))
         monkeypatch.setattr(win.renderer, "_flush_montage_presentation_commit",
             lambda: calls.append(
                 (
@@ -535,7 +575,7 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
                 )
             ),
         )
-        win._montage_session = session
+        win.renderer._montage_session = session
 
         win.renderer._schedule_montage_ready_display_commit(session)
 
@@ -584,7 +624,7 @@ def test_montage_pan_schedules_viewport_update(qtbot, monkeypatch):
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":"))
         win.update_image_view()
-        monkeypatch.setattr(win, "_schedule_montage_viewport_update", lambda *args, **kwargs: calls.append((args, kwargs)))
+        monkeypatch.setattr(win.renderer, "_schedule_montage_viewport_update", lambda *args, **kwargs: calls.append((args, kwargs)))
 
         win.img_view.getView().setRange(xRange=(6, 9), yRange=(0, 2), padding=0)
 
@@ -685,9 +725,10 @@ def test_montage_finished_tile_commits_payload_before_all_tiles_finish(qtbot, mo
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
+        _settle_initial_render(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_image_view()
         tile = _tile_for_callback(win, calls[0])
@@ -720,30 +761,22 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
         calls.append(kwargs)
         return len(calls)
 
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_start_latest)
     try:
         _process_events(qtbot)
+        _settle_initial_render(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_start_latest)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
         win.update_image_view()
         win._montage_tile_result_batch_size = 4
-        commit_calls = []
-        original_schedule_ready_commit = win.renderer._schedule_montage_ready_display_commit
-
-        def record_schedule_ready_commit(session):
-            commit_calls.append(
-                bool(
-                    getattr(session, "dirty_payloads", None)
-                )
-            )
-            return original_schedule_ready_commit(session)
-
-        monkeypatch.setattr(win.renderer, "_schedule_montage_ready_display_commit", record_schedule_ready_commit)
         tile0 = _tile_for_callback(win, calls[0])
         tile1 = _tile_for_callback(win, calls[1])
         calls[0]["on_done"](_tile_result(tile0, 7))
         calls[1]["on_done"](_tile_result(tile1, 9))
 
+        # Completed tiles are queued, not applied inline in the done callback.
         assert win._montage_session.pending_completed_tiles
+        assert not _committed_tile_has_value(win, tile0, 7)
+        assert not _committed_tile_has_value(win, tile1, 9)
         qtbot.waitUntil(
             lambda: (
                 _committed_tile_has_value(win, tile0, 7)
@@ -752,8 +785,9 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
             timeout=1000,
         )
 
-        assert len(commit_calls) == 1
-        assert commit_calls == [True]
+        # Both queued results were drained by one batched flush before the
+        # presentation commit rather than one commit per tile result.
+        assert win.renderer._last_montage_tile_result_flush_count == 2
     finally:
         win.close()
 
@@ -765,9 +799,10 @@ def test_montage_progressive_tile_commit_preserves_current_levels(qtbot, monkeyp
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
+        _settle_initial_render(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
@@ -791,10 +826,10 @@ def test_montage_loading_presentation_preserves_levels_until_first_real_tile(qtb
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
         _use_slice_zero(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
         win.img_view.setLevels(2.0, 8.0)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_image_view()
@@ -833,17 +868,17 @@ def test_montage_loading_presentation_preserves_levels_until_first_real_tile(qtb
         win.close()
 
 
-def test_montage_force_auto_waits_for_first_real_tile_before_changing_levels(qtbot, monkeypatch):
+def test_montage_force_auto_waits_for_complete_visible_source_before_changing_levels(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
         _use_slice_zero(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
         win.img_view.setLevels(2.0, 8.0)
         previous_frame = win._committed_display_frame
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
@@ -854,8 +889,17 @@ def test_montage_force_auto_waits_for_first_real_tile_before_changing_levels(qtb
         assert win._committed_display_frame is previous_frame
         assert not win._montage_session.display_committed
 
+        # A CPU-windowed backend applies an explicit auto window only once the
+        # complete visible source has arrived, so the first tile must not
+        # rewrite the user's levels with a partial window.
         tile = _tile_for_callback(win, calls[0])
         calls[0]["on_done"](_tile_result(tile, 100))
+        _process_events(qtbot, count=10)
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (2.0, 8.0)
+        assert not win._montage_session.display_committed
+
+        for call in calls[1:]:
+            call["on_done"](_tile_result(_tile_for_callback(win, call), 100))
         qtbot.waitUntil(lambda: bool(win._montage_session.display_committed), timeout=1000)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (99.0, 101.0)
@@ -1046,10 +1090,10 @@ def test_montage_degenerate_previous_levels_do_not_become_one_tile_window(qtbot,
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
         _use_slice_zero(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
         initial_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
         assert initial_levels == (-0.5, 0.5)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
@@ -1081,9 +1125,10 @@ def test_montage_panning_without_new_tiles_does_not_change_levels(qtbot, monkeyp
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
+        _settle_initial_render(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
         win.update_image_view()
         assert calls
@@ -1119,9 +1164,10 @@ def test_montage_visible_tiles_do_not_define_relative_levels(qtbot, monkeypatch)
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
+        _settle_initial_render(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.update_image_view()
 
@@ -1151,16 +1197,16 @@ def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypa
     qtbot.addWidget(win)
     stage_calls = []
     tile_calls = []
-    monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
 
     def capture_tile_call(fn, **kwargs):
         kwargs["fn"] = fn
         tile_calls.append(kwargs)
         return len(tile_calls)
 
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_tile_call)
     try:
         _process_events(qtbot)
+        monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_tile_call)
         win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
         win._set_document(win.operation_coordinator.document)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
@@ -1235,10 +1281,10 @@ def test_fft_montage_keeps_waiting_tiles_behind_in_flight_lead_warmup(qtbot, mon
     qtbot.addWidget(win)
     stage_calls = []
     tile_calls = []
-    monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: tile_calls.append(kwargs) or len(tile_calls))
     try:
         _process_events(qtbot)
+        monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: tile_calls.append(kwargs) or len(tile_calls))
         win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
         win._set_document(win.operation_coordinator.document)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
@@ -1263,16 +1309,16 @@ def test_fft_montage_attached_stage_still_schedules_visible_lead_tile(qtbot, mon
     qtbot.addWidget(win)
     stage_calls = []
     tile_calls = []
-    monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
 
     def capture_tile_call(fn, **kwargs):
         kwargs["fn"] = fn
         tile_calls.append(kwargs)
         return len(tile_calls)
 
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_tile_call)
     try:
         _process_events(qtbot)
+        monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_tile_call)
         win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
         win._set_document(win.operation_coordinator.document)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
@@ -1405,9 +1451,10 @@ def test_stale_montage_tile_result_does_not_mutate_current_ui_state(qtbot, monke
     win = ArrayScopeWindow(np.arange(2 * 2 * 4, dtype=np.float32).reshape(2, 2, 4))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
+        _settle_initial_render(win, qtbot)
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
         win.update_image_view()
         old_callback = calls[0]["on_done"]

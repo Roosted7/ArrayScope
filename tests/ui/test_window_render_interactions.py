@@ -345,10 +345,11 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot,
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         _process_events(qtbot, count=20)
+        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
-        monkeypatch.setattr(win.visible_evaluation_controller, "start_active_plus_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
 
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
@@ -382,27 +383,47 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         _process_events(qtbot, count=20)
+        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
+        # Drop warm tile state (evaluator cache and resident payloads from the
+        # startup render of the middle slice) so slice 1 starts uncached.
         win.operation_evaluator.clear_cache()
+        win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change("test-cold-start")
+        frame = getattr(win, "_committed_display_frame", None)
+        payloads = getattr(getattr(frame, "value_source", None), "payloads", None)
+        if isinstance(payloads, dict):
+            payloads.clear()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
-        monkeypatch.setattr(win.visible_evaluation_controller, "start_active_plus_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
+        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
 
+        # Uncached path: the tile result arrives through the evaluation lane.
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
         slice1 = data[:, :, 1]
         captured[-1]["on_done"](EvaluationResult(DisplayImage(slice1), 0.0, slice1.shape, int(slice1.nbytes)))
         _process_events(qtbot, count=20)
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
 
-        slice2_state = win.view_state.with_slice(2, 2)
-        slice2 = data[:, :, 2]
-        win.operation_evaluator.store_display_tile_result(slice2_state, None, EvaluationResult(DisplayImage(slice2), 0.0, slice2.shape, int(slice2.nbytes)))
         win._on_slice_index_changed(2, 2)
+        win.render_coordinator.flush_now()
+        slice2 = data[:, :, 2]
+        captured[-1]["on_done"](EvaluationResult(DisplayImage(slice2), 0.0, slice2.shape, int(slice2.nbytes)))
+        _process_events(qtbot, count=20)
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+
+        # Cached path: revisiting slice 1 must reuse the stored tile without a
+        # new evaluation and produce the same relative window as the uncached
+        # pass did.
+        calls_before = len(captured)
+        win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
         _process_events(qtbot, count=20)
 
-        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
-        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+        assert len(captured) == calls_before
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
     finally:
         win.close()
 

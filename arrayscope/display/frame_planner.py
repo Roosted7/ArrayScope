@@ -105,6 +105,7 @@ class FramePlanner:
         viewport_shape: tuple[int, int] | None = None,
         view_range=None,
         memory_policy=None,
+        montage_plan=None,
     ) -> FramePlan:
         display_shape = _shape2(display_shape)
         if getattr(view_state, "montage_axis", None) is not None:
@@ -114,6 +115,7 @@ class FramePlanner:
                 display_shape=display_shape,
                 viewport_shape=viewport_shape,
                 view_range=view_range,
+                montage_plan=montage_plan,
             )
         return self._plan_single(
             target=target,
@@ -172,22 +174,32 @@ class FramePlanner:
         display_shape: tuple[int, int],
         viewport_shape: tuple[int, int] | None,
         view_range,
+        montage_plan=None,
     ) -> FramePlan:
         axis = int(view_state.montage_axis)
-        indices = tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
-        image_axes = tuple(view_state.image_axes or ())
-        tile_shape = (
-            _display_axis_size(view_state, image_axes[0]),
-            _display_axis_size(view_state, image_axes[1]),
-        )
-        montage_plan = make_montage_plan(
-            view_state,
-            axis=axis,
-            indices=indices,
-            tile_shape=tile_shape,
-            columns=view_state.montage_columns,
-            viewport_shape=viewport_shape,
-        )
+        if montage_plan is not None:
+            # The applied montage layout is the single source of truth.  The
+            # viewport planner may override requested columns (automatic
+            # layout while the camera is auto-owned), so re-deriving columns
+            # from the raw view state here would disagree with the applied
+            # plan and commit a geometry the camera was never fitted to.
+            indices = tuple(int(tile.source_index) for tile in montage_plan.tiles)
+            tile_shape = tuple(int(value) for value in montage_plan.tile_shape)
+        else:
+            indices = tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
+            image_axes = tuple(view_state.image_axes or ())
+            tile_shape = (
+                _display_axis_size(view_state, image_axes[0]),
+                _display_axis_size(view_state, image_axes[1]),
+            )
+            montage_plan = make_montage_plan(
+                view_state,
+                axis=axis,
+                indices=indices,
+                tile_shape=tile_shape,
+                columns=view_state.montage_columns,
+                viewport_shape=viewport_shape,
+            )
         geometry = DisplayGeometry(
             view_state=view_state,
             display_shape=display_shape,

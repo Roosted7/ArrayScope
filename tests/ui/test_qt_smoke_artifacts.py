@@ -20,6 +20,18 @@ def _process_events(app, count=8):
         app.processEvents()
 
 
+def _wait_until(app, predicate, timeout_s=5.0):
+    import time
+
+    deadline = time.monotonic() + float(timeout_s)
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
 def _grab_widget(widget, name, *, min_width=80, min_height=40):
     from PIL import Image
 
@@ -292,7 +304,12 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         _process_events(qt_app, count=12)
 
         assert not win.inspection_dock.isVisible()
-        assert win.img_view._roi_info_panel is not None
+        # ROI statistics are computed on the roi evaluation lane; wait for the
+        # overlay to materialize instead of counting event-loop turns.
+        assert _wait_until(
+            qt_app,
+            lambda: win.img_view._roi_info_panel is not None and win.img_view._roi_info_panel.isVisible(),
+        )
         assert win.img_view._roi_info_panel.isVisible()
         assert len(win.img_view.roiSelections()) == 3
         assert rectangle.geometry.kind == RoiKind.RECTANGLE
@@ -304,9 +321,10 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         _process_events(qt_app)
         assert win.inspection_dock.isVisible()
         assert win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
-        _process_events(qt_app, count=12)
-        assert win.inspection_dock.roi_model.rowCount() == 3
-        assert len(win.inspection_dock.histogram_plot.listDataItems()) >= 6
+        assert _wait_until(qt_app, lambda: win.inspection_dock.roi_model.rowCount() == 3)
+        # The tiled ROI demand path histograms committed display tiles per ROI;
+        # compare layers no longer contribute extra histogram overlays.
+        assert _wait_until(qt_app, lambda: len(win.inspection_dock.histogram_plot.listDataItems()) == 3)
         _grab_widget(win.inspection_dock.widget(), "arrayscope_roi_inspection_dock.png", min_width=240, min_height=260)
     finally:
         win.close()

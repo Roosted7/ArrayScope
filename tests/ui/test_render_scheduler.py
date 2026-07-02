@@ -14,195 +14,44 @@ from tests.ui.helpers import (
 )
 
 
-def test_visible_render_controller_uses_active_plus_latest_group(qtbot, monkeypatch):
+def test_over_budget_view_skips_tiles_without_clearing_previous_image(qtbot, monkeypatch):
+    """Memory protection now happens through the tiled render budgets.
+
+    A view whose tiles exceed the visible render budget must be skipped with a
+    warning while the previously committed presentation stays on screen.
+    """
+
     _clear_arrayscope_settings()
-    from arrayscope.window import ArrayScopeWindow
+    from dataclasses import replace as dataclass_replace
 
-    win = ArrayScopeWindow(np.arange(8 * 9 * 10, dtype=float).reshape(8, 9, 10))
-    qtbot.addWidget(win)
-    calls = []
-    original_start_active_plus_latest = win.visible_evaluation_controller.start_active_plus_latest
-
-    def recording_start_active_plus_latest(fn, **kwargs):
-        calls.append(kwargs)
-
-        def slow_fn(*args):
-            time.sleep(0.02)
-            return fn(*args)
-
-        return original_start_active_plus_latest(slow_fn, **kwargs)
-
-    monkeypatch.setattr(win.visible_evaluation_controller, "start_active_plus_latest", recording_start_active_plus_latest)
-    try:
-        _process_events(qtbot, count=20)
-        win._set_view_state(win.view_state.with_slice(2, 1))
-        win.render(reason="test-1")
-        win._set_view_state(win.view_state.with_slice(2, 2))
-        win.render(reason="test-2")
-        _process_events(qtbot, count=40)
-
-        assert any(call.get("replace_group") == "visible-image" for call in calls)
-        assert all(call.get("supersession_key") == "visible-image" for call in calls)
-        assert all(isinstance(call.get("supersession_value"), tuple) for call in calls)
-        assert win.visible_evaluation_controller.pool.maxThreadCount() == 1
-    finally:
-        win.close()
-
-
-def test_visible_render_uses_cost_decision_refuse_without_clearing_previous_image(qtbot, monkeypatch):
-    _clear_arrayscope_settings()
-    import arrayscope.window.render as render_module
-    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
+    from pyqtgraph.Qt import QtWidgets
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    warnings = []
     try:
         _process_events(qtbot, count=20)
-        previous = win.img_view.image.copy()
+        qtbot.waitUntil(lambda: getattr(win, "_committed_display_frame", None) is not None, timeout=3000)
+        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
+        previous_image = win.img_view.image.copy()
+        previous_frame = win._committed_display_frame
         win.operation_evaluator.clear_cache()
-        monkeypatch.setattr(
-            render_module,
-            "choose_visible_render_decision",
-            lambda _context: RenderDecision(
-                RenderDecisionKind.REFUSE,
-                "test refuse",
-                should_show_overlay=True,
-                overlay_text="Exact view over budget",
-                status_text="refused",
-            ),
-        )
+        # Force a fresh session so the budget decision is actually re-evaluated.
+        win.renderer._montage_session = None
+        tiny_policy = dataclass_replace(win.renderer._memory_policy(), single_tile_budget_bytes=1)
+        monkeypatch.setattr(win.renderer, "_refresh_memory_policy", lambda *args, **kwargs: tiny_policy)
+        monkeypatch.setattr(win.renderer, "_memory_policy", lambda *args, **kwargs: tiny_policy)
+        monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda _parent, _title, message: warnings.append(message))
 
         win.update_image_view()
-        _process_events(qtbot, count=5)
+        _process_events(qtbot, count=10)
 
-        np.testing.assert_array_equal(win.img_view.image, previous)
-        assert win.operation_evaluator.display_cache_diagnostics().refused_evaluations == 1
-    finally:
-        win.close()
-
-
-def test_refused_render_formats_fallback_memory_message(qtbot, monkeypatch):
-    _clear_arrayscope_settings()
-    import arrayscope.window.frame_renderer as frame_renderer
-    import arrayscope.window.render as render_module
-    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
-    from arrayscope.window import ArrayScopeWindow
-
-    win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
-    qtbot.addWidget(win)
-    messages = []
-    try:
-        _process_events(qtbot, count=20)
-        win.operation_evaluator.clear_cache()
-        monkeypatch.setattr(win.renderer, "_estimated_image_display_bytes", lambda _state: 2048)
-        monkeypatch.setattr(
-            render_module,
-            "choose_visible_render_decision",
-            lambda _context: RenderDecision(RenderDecisionKind.REFUSE, "test refuse"),
-        )
-        monkeypatch.setattr(
-            frame_renderer,
-            "show_status_message",
-            lambda _owner, text, **_kwargs: messages.append(text),
-        )
-
-        win.update_image_view()
-
-        assert messages == [
-            "Image view would allocate 2.0 KiB. Reduce image-axis ranges or switch axes."
-        ]
-    finally:
-        win.close()
-
-
-def test_degraded_preview_commits_with_overlay_and_not_exact_cache(qtbot, monkeypatch):
-    _clear_arrayscope_settings()
-    import arrayscope.window.render as render_module
-    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
-    from arrayscope.window import ArrayScopeWindow
-
-    win = ArrayScopeWindow(np.arange(16 * 16, dtype=float).reshape(16, 16))
-    qtbot.addWidget(win)
-    try:
-        _process_events(qtbot, count=20)
-        win.operation_evaluator.clear_cache()
-        monkeypatch.setattr(
-            render_module,
-            "choose_visible_render_decision",
-            lambda _context: RenderDecision(
-                RenderDecisionKind.DEGRADED_PREVIEW,
-                "preview",
-                should_show_overlay=True,
-                overlay_text="Preview only: exact view exceeds budget",
-                status_text="preview",
-                degraded_factor=2,
-            ),
-        )
-
-        win.update_image_view()
-        qtbot.waitUntil(lambda: getattr(win, "_last_render_was_degraded", False), timeout=3000)
-
-        assert win.img_view._evaluation_overlay.isVisible()
-        assert win.operation_evaluator.cached_display_tile(win.view_state) is None
-    finally:
-        win.close()
-
-
-def test_next_exact_render_clears_degraded_overlay(qtbot, monkeypatch):
-    _clear_arrayscope_settings()
-    import arrayscope.window.render as render_module
-    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
-    from arrayscope.window import ArrayScopeWindow
-
-    win = ArrayScopeWindow(np.arange(16 * 16, dtype=float).reshape(16, 16))
-    qtbot.addWidget(win)
-    try:
-        _process_events(qtbot, count=20)
-        win.operation_evaluator.clear_cache()
-        monkeypatch.setattr(
-            render_module,
-            "choose_visible_render_decision",
-            lambda _context: RenderDecision(RenderDecisionKind.DEGRADED_PREVIEW, "preview", overlay_text="Preview only", degraded_factor=2),
-        )
-        win.update_image_view()
-        qtbot.waitUntil(lambda: getattr(win, "_last_render_was_degraded", False), timeout=3000)
-        win.operation_evaluator.clear_cache()
-        monkeypatch.setattr(
-            render_module,
-            "choose_visible_render_decision",
-            lambda _context: RenderDecision(RenderDecisionKind.ASYNC_EXACT, "exact"),
-        )
-
-        win.update_image_view()
-        qtbot.waitUntil(lambda: not getattr(win, "_last_render_was_degraded", False), timeout=3000)
-
-        assert not win.img_view._evaluation_overlay.isVisible()
-    finally:
-        win.close()
-
-
-def test_chunked_visible_render_commits_exact_result(qtbot, monkeypatch):
-    _clear_arrayscope_settings()
-    import arrayscope.window.render as render_module
-    from arrayscope.operations.render_plan import RenderDecision, RenderDecisionKind
-    from arrayscope.window import ArrayScopeWindow
-
-    win = ArrayScopeWindow(np.arange(16 * 16, dtype=float).reshape(16, 16))
-    qtbot.addWidget(win)
-    try:
-        _process_events(qtbot, count=20)
-        win.operation_evaluator.clear_cache()
-        monkeypatch.setattr(
-            render_module,
-            "choose_visible_render_decision",
-            lambda _context: RenderDecision(RenderDecisionKind.ASYNC_CHUNKED, "chunk", chunk_axis=0, chunk_size=4),
-        )
-
-        win.update_image_view()
-        qtbot.waitUntil(lambda: win.operation_evaluator.cached_display_tile(win.view_state) is not None, timeout=3000)
-
-        assert win.operation_evaluator.display_cache_diagnostics().chunked_evaluations >= 1
+        np.testing.assert_array_equal(win.img_view.image, previous_image)
+        assert win._committed_display_frame is previous_frame
+        assert win._montage_session.skipped_tiles
+        assert warnings
+        assert "over the visible render budget" in warnings[0]
     finally:
         win.close()
 
@@ -301,28 +150,48 @@ def test_histogram_background_work_uses_histogram_priority_not_prefetch(qtbot, m
         win.close()
 
 
-def test_stale_visible_result_does_not_clear_updating_overlay(qtbot, monkeypatch):
+def test_stale_tile_result_does_not_clear_updating_overlay(qtbot, monkeypatch):
+    """A result for a superseded render must not clear the updating overlay.
+
+    Visible rendering flows through the montage tile lane; the stale path is
+    the tile-done callback of a superseded session.
+    """
+
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9 * 10, dtype=float).reshape(8, 9, 10))
     qtbot.addWidget(win)
-    captured = {}
-
-    def capture_start_active_plus_latest(_fn, **kwargs):
-        captured.update(kwargs)
-        kwargs["on_slow"]()
-        return 1
-
-    monkeypatch.setattr(win.visible_evaluation_controller, "start_active_plus_latest", capture_start_active_plus_latest)
+    calls = []
     try:
         _process_events(qtbot, count=20)
+        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
         win.operation_evaluator.clear_cache()
+        win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change("test-cold-start")
+        win.renderer._montage_session = None
+        frame = getattr(win, "_committed_display_frame", None)
+        payloads = getattr(getattr(frame, "value_source", None), "payloads", None)
+        if isinstance(payloads, dict):
+            payloads.clear()
+        monkeypatch.setattr(
+            win.montage_tile_evaluation_controller,
+            "start_latest",
+            lambda _fn, **kwargs: calls.append(kwargs) or len(calls),
+        )
         win.update_image_view()
+        assert calls
+        stale = calls[0]
+        stale["on_slow"]()
         assert win.img_view._evaluation_overlay is not None
         assert win.img_view._evaluation_overlay.isVisible()
 
-        captured["on_stale"]()
+        # Supersede the render, then let the old work report slow/stale.
+        win._set_view_state(win.view_state.with_slice(2, 2))
+        win.update_image_view()
+        win.img_view.setEvaluationOverlay(True, "Updating image frame...")
+        stale["on_slow"]()
+        stale["on_stale"]()
+
         assert win.img_view._evaluation_overlay.isVisible()
     finally:
         win.close()

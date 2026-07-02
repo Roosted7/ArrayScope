@@ -55,20 +55,8 @@ def benchmark_fft_slice(shape=(32, 128, 128), dtype=np.float32, workers=1) -> Be
 
 def benchmark_montage_tile_payloads(shape=(32, 128, 128), dtype=np.float32) -> BenchmarkResult:
     data = np.arange(int(np.prod(shape)), dtype=dtype).reshape(shape)
-
-    class _State:
-        image_axes = (1, 2)
-
-        def __init__(self, source_shape):
-            self.shape = tuple(source_shape)
-
-        def with_slice(self, _axis, _index):
-            return self
-
-        def with_montage_axis(self, _axis):
-            return self
-
-    plan = make_montage_plan(_State(shape), axis=0, indices=range(min(8, shape[0])), tile_shape=shape[1:], columns=4)
+    state = ViewState.from_shape(shape).with_image_axes(1, 2)
+    plan = make_montage_plan(state, axis=0, indices=range(min(8, shape[0])), tile_shape=shape[1:], columns=4)
     start = perf_counter()
     payloads = {
         int(tile.montage_index): DisplayTilePayload(
@@ -117,7 +105,7 @@ def benchmark_large_rgb_montage_histogram_drag(shape=(768, 1024), dtype=np.float
 
 def benchmark_tile_layer_clean_commit(shape=(8, 128, 128), dtype=np.float32) -> BenchmarkResult:
     data = np.arange(int(np.prod(shape)), dtype=dtype).reshape(shape)
-    state = _BenchmarkState(shape)
+    state = ViewState.from_shape(shape).with_image_axes(1, 2)
     plan = make_montage_plan(state, axis=0, indices=range(min(8, shape[0])), tile_shape=shape[1:], columns=4)
     sources = {int(tile.montage_index): ("montage_tile", int(tile.source_index)) for tile in plan.tiles}
     start = perf_counter()
@@ -289,16 +277,3 @@ def _result(
 
 def _elapsed_ms(start) -> float:
     return (perf_counter() - start) * 1000.0
-
-
-class _BenchmarkState:
-    image_axes = (1, 2)
-
-    def __init__(self, source_shape):
-        self.shape = tuple(source_shape)
-
-    def with_slice(self, _axis, _index):
-        return self
-
-    def with_montage_axis(self, _axis):
-        return self

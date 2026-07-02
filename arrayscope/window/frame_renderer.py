@@ -358,6 +358,7 @@ class FrameRenderMixin:
             viewport_shape=viewport_plan.viewport_shape,
             view_range=viewport_plan.view_range,
             memory_policy=self._memory_policy() if hasattr(self, "_memory_policy") else None,
+            montage_plan=viewport_plan.plan,
         )
         if presentation_changed:
             self._commit_montage_resize_presentation_retarget(session)
@@ -486,6 +487,7 @@ class FrameRenderMixin:
             viewport_shape=viewport_shape,
             view_range=current_range,
             memory_policy=policy,
+            montage_plan=plan,
         )
         session_id = int(getattr(self, "_montage_session_id", 0)) + 1
         self._montage_session_id = session_id
@@ -736,6 +738,7 @@ class FrameRenderMixin:
             viewport_shape=viewport_plan.viewport_shape,
             view_range=viewport_plan.view_range,
             memory_policy=memory_policy,
+            montage_plan=viewport_plan.plan,
         )
         additions = viewport_plan.prioritize_tiles(additions)
         self._prune_stale_montage_tile_work(session)
