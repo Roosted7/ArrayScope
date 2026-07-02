@@ -40,8 +40,9 @@ from arrayscope.display.levels import finite_bounds
 from arrayscope.display.shader_mapping import default_gray_lut, normalize_lut_rgb
 from arrayscope.display.layers import ViewLayerOwner
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
-from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer, TileLayerUpdateStats
+from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
 from arrayscope.display.model.frame import TileCommitReport
+from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.overlay_hit_test import RoiHitIndex
 from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
 from arrayscope.display.profile_marker import ProfileMarkerOwner
@@ -1358,35 +1359,45 @@ class ImageViewShell(QtWidgets.QWidget):
             self._histogram_preview_controller.interval_ms = max(1, int(interval_ms))
         self._histogram_retry_interval_ms = max(1, int(interval_ms))
 
+    _level_preview_timing_channel = "level_preview"
+
     def _apply_histogram_preview_levels(self, levels, *, final: bool = False) -> None:
+        """Shared preview-level driver; backends apply through
+        :meth:`_apply_preview_levels_to_display` only."""
+
         levels = (float(levels[0]), float(levels[1]))
         preview = getattr(self, "_histogram_preview_controller", None)
         if preview is not None:
             preview.last_applied_levels = levels
         started_timing = self._upload_timing is None
         if started_timing:
-            self._start_upload_timing("level_preview")
+            self._start_upload_timing(self._level_preview_timing_channel)
         try:
             self._displayLevels = levels
-            if self._montage_display_mode == "tile_layer":
-                handler = getattr(self, "_level_presentation_change_handler", None)
-                if callable(handler) and bool(handler(levels, final=bool(final))):
-                    return
-                return
-            if self._rgbBaseImage is None or self.histogramSource is None:
-                if self.imageItem is not None and self.imageDisp is not None and not self._is_rgb_image(self.image):
-                    try:
-                        self.imageItem.setLevels(levels)
-                    except Exception:
-                        pass
-                return
-            rgb_start = perf_counter()
-            self.imageDisp = self._rgb_display_for_levels(levels)
-            self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
-            self._set_image_item_data(self.imageItem, self.imageDisp, (0, 255), role="visible", emit_histogram_change=False)
+            self._apply_preview_levels_to_display(levels, final=bool(final))
         finally:
             if started_timing:
                 self._finish_upload_timing()
+
+    def _apply_preview_levels_to_display(self, levels, *, final: bool) -> None:
+        """Backend mechanics for one preview-level application."""
+
+        if self._montage_display_mode == "tile_layer":
+            handler = getattr(self, "_level_presentation_change_handler", None)
+            if callable(handler):
+                handler(levels, final=bool(final))
+            return
+        if self._rgbBaseImage is None or self.histogramSource is None:
+            if self.imageItem is not None and self.imageDisp is not None and not self._is_rgb_image(self.image):
+                try:
+                    self.imageItem.setLevels(levels)
+                except Exception:
+                    pass
+            return
+        rgb_start = perf_counter()
+        self.imageDisp = self._rgb_display_for_levels(levels)
+        self._record_upload_timing("rgb_window_ms", (perf_counter() - rgb_start) * 1000.0)
+        self._set_image_item_data(self.imageItem, self.imageDisp, (0, 255), role="visible", emit_histogram_change=False)
 
     def _finish_histogram_preview_levels(self, levels) -> None:
         """Finalize an already-applied preview without repeating pixel work.
@@ -1538,6 +1549,9 @@ class ImageViewShell(QtWidgets.QWidget):
             self._profile_marker_updating = False
         self._last_profile_marker_position = (float(x), float(y))
 
+    def _after_profile_marker_sync(self) -> None:
+        """Backend hook: profile-marker model state changed."""
+
     def hideProfileMarker(self):
         """Hide the image-space profile marker."""
         self._profile_marker_requested_visible = False
@@ -1547,6 +1561,7 @@ class ImageViewShell(QtWidgets.QWidget):
             self._profile_hline.setVisible(False)
         if self._profile_handle is not None:
             self._profile_handle.setVisible(False)
+        self._after_profile_marker_sync()
 
     def profileMarkerPosition(self):
         """Return the current profile marker position in image coordinates."""
@@ -1584,6 +1599,7 @@ class ImageViewShell(QtWidgets.QWidget):
             self._profile_handle.setPos(x, y)
         finally:
             self._profile_marker_updating = False
+        self._after_profile_marker_sync()
         if self._profile_marker_callback is not None:
             self._profile_marker_callback(x, y)
 
@@ -1606,6 +1622,7 @@ class ImageViewShell(QtWidgets.QWidget):
                 self.view.update()
         finally:
             self._profile_marker_updating = False
+        self._after_profile_marker_sync()
         if self._profile_marker_callback is not None:
             self._profile_marker_callback(x, y)
 
@@ -1651,6 +1668,7 @@ class ImageViewShell(QtWidgets.QWidget):
             self._profile_hline.setVisible(visible)
         if self._profile_handle is not None:
             self._profile_handle.setVisible(visible)
+        self._after_profile_marker_sync()
         
     def clear(self):
         """Clear the displayed image"""
@@ -1722,12 +1740,21 @@ class ImageViewShell(QtWidgets.QWidget):
                 self.viewport_controller.set_fit_locked(
                     self.view,
                     bool(enabled),
-                    image_shape=self.image.shape[:2],
+                    image_shape=self._viewport_content_shape(),
                     viewport_size=self.graphicsView.viewport().size(),
                     display_rect=self._current_image_viewport_rect(),
                 )
             finally:
                 self._viewport_applying = False
+            self._after_viewport_camera_change()
+
+    def _viewport_content_shape(self):
+        """(height, width) the viewport controller should treat as content."""
+
+        return self.image.shape[:2]
+
+    def _after_viewport_camera_change(self) -> None:
+        """Backend hook: the viewport controller changed the canonical range."""
 
     def oneToOne(self):
         self.setDisplayMode("square_pixels")
@@ -1735,10 +1762,11 @@ class ImageViewShell(QtWidgets.QWidget):
         if self.image is not None:
             self._viewport_applying = True
             try:
-                self.viewport_controller.one_to_one(self.view, self.image.shape[:2], self.graphicsView.viewport().size(), display_rect=self._current_image_viewport_rect())
+                self.viewport_controller.one_to_one(self.view, self._viewport_content_shape(), self.graphicsView.viewport().size(), display_rect=self._current_image_viewport_rect())
             finally:
                 self._viewport_applying = False
             self._enforce_viewport_constraints()
+            self._after_viewport_camera_change()
 
     def autoWindow(self):
         self.autoLevels()
@@ -1746,10 +1774,14 @@ class ImageViewShell(QtWidgets.QWidget):
     def _display_overlay_parent(self):
         """Widget that must remain above the active pixel-rendering surface."""
 
-        return self.graphicsView
+        return getattr(self, "_display_container", self.graphicsView)
 
     def _map_scene_to_display_overlay(self, scene_pos):
-        return self.graphicsView.mapFromScene(scene_pos)
+        local = self.graphicsView.mapFromScene(scene_pos)
+        parent = self._display_overlay_parent()
+        if parent is self.graphicsView:
+            return local
+        return self.graphicsView.mapTo(parent, local)
 
     def setHudWidget(self, widget):
         self._hud_widget = widget

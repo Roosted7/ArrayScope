@@ -165,7 +165,7 @@ def test_atlas_keeps_stable_slots_when_active_set_changes():
     assert second_uvs[1] == first_uvs[1]
     assert second.items_updated == 1
     assert second.items_skipped == 1
-    assert second.atlas_evictions == 1
+    assert second.storage_evictions == 1
     assert ("tile", 0, 10.0) not in pool.source_ids.values()
     assert ("tile", 2, 30.0) in pool.source_ids.values()
 

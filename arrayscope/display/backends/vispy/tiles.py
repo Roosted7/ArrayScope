@@ -21,50 +21,13 @@ from arrayscope.display.shader_mapping import (
     shader_component_uniform,
 )
 from arrayscope.display.model.frame import DisplayTilePayload
+from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
 
 try:
     from vispy.visuals import Visual
 except Exception:  # pragma: no cover - optional dependency import path
     Visual = object
-
-
-@dataclass(frozen=True)
-class GpuMontageLayerStats:
-    visible_items: int = 0
-    presented_tiles: tuple[int, ...] | None = None
-    committed_upserts: tuple[int, ...] | None = None
-    resident_items: int = 0
-    atlas_capacity: int = 0
-    atlas_rebuilds: int = 0
-    atlas_evictions: int = 0
-    texture_uploads: int = 0
-    texture_upload_bytes: int = 0
-    vertex_uploads: int = 0
-    items_updated: int = 0
-    items_skipped: int = 0
-    level_updates: int = 0
-    estimated_gpu_bytes: int = 0
-    cpu_shadow_bytes: int = 0
-    upload_ms: float = 0.0
-    texture_prepare_ms: float = 0.0
-    texture_submit_ms: float = 0.0
-    page_count: int = 0
-    active_pages: int = 0
-    device_max_texture_size: int = 0
-    budget_bytes: int = 0
-    near_resident_items: int = 0
-    warm_resident_items: int = 0
-    evicted_near_items: int = 0
-    capacity_warning: str = ""
-    lod_level: int = 0
-    lod_factor: int = 1
-    source_texels_per_pixel: float = 0.0
-    gutter_pixels: int = 0
-    mipmap_updates: int = 0
-    mipmap_available: bool = False
-    complex_texture_uploads: int = 0
-    shader_uniform_updates: int = 0
 
 
 @dataclass(frozen=True)
@@ -388,7 +351,7 @@ class TextureAtlasPool:
         near_tile_source_ids: dict[int, object] | None = None,
         budget_bytes: int | None = None,
         tile_delta=None,
-    ) -> tuple[dict[int, tuple[float, float, float, float]], GpuMontageLayerStats]:
+    ) -> tuple[dict[int, tuple[float, float, float, float]], TileLayerUpdateStats]:
         # Residency is a data-keyed cache; visibility is a presentation choice.
         # A viewport commit may hide or reveal tile mappings, but it must not
         # make resident sources cold again.  Only incompatible atlas storage,
@@ -537,7 +500,7 @@ class TextureAtlasPool:
             )
         uvs = self.tile_uvs
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
-        return uvs, GpuMontageLayerStats(
+        return uvs, TileLayerUpdateStats(
             visible_items=len(presented_tiles),
             presented_tiles=presented_tiles,
             committed_upserts=tuple(
@@ -546,9 +509,9 @@ class TextureAtlasPool:
                 if int(tile) in presented_set
             ),
             resident_items=self.resident_count,
-            atlas_capacity=self.capacity,
-            atlas_rebuilds=int(rebuilt),
-            atlas_evictions=self.eviction_count - evictions_before,
+            storage_capacity=self.capacity,
+            storage_rebuilds=int(rebuilt),
+            storage_evictions=self.eviction_count - evictions_before,
             texture_uploads=uploads,
             texture_upload_bytes=upload_bytes,
             items_updated=updated,
@@ -582,12 +545,12 @@ class TextureAtlasPool:
         rgb_already_windowed: bool,
         near_tile_source_ids: dict[int, object] | None = None,
         budget_bytes: int | None = None,
-    ) -> GpuMontageLayerStats:
+    ) -> TileLayerUpdateStats:
         start = perf_counter()
         if not payloads:
-            return GpuMontageLayerStats(
+            return TileLayerUpdateStats(
                 resident_items=self.resident_count,
-                atlas_capacity=self.capacity,
+                storage_capacity=self.capacity,
                 estimated_gpu_bytes=self.estimated_gpu_bytes,
                 cpu_shadow_bytes=self.cpu_shadow_bytes,
                 page_count=len(self.pages),
@@ -600,9 +563,9 @@ class TextureAtlasPool:
         if self.storage_mode is not None and self.storage_mode != requested_mode:
             # Warm work must never replace the active atlas layout.  A later
             # visible commit can deliberately switch storage modes.
-            return GpuMontageLayerStats(
+            return TileLayerUpdateStats(
                 resident_items=self.resident_count,
-                atlas_capacity=self.capacity,
+                storage_capacity=self.capacity,
                 items_skipped=len(payload_items),
                 estimated_gpu_bytes=self.estimated_gpu_bytes,
                 cpu_shadow_bytes=self.cpu_shadow_bytes,
@@ -713,10 +676,10 @@ class TextureAtlasPool:
             updated += 1
 
         elapsed = (perf_counter() - start) * 1000.0 if updated else 0.0
-        return GpuMontageLayerStats(
+        return TileLayerUpdateStats(
             resident_items=self.resident_count,
-            atlas_capacity=self.capacity,
-            atlas_evictions=self.eviction_count - evictions_before,
+            storage_capacity=self.capacity,
+            storage_evictions=self.eviction_count - evictions_before,
             texture_uploads=uploads,
             texture_upload_bytes=upload_bytes,
             items_updated=updated,
@@ -856,7 +819,7 @@ class GpuMontageLayer:
         self._shader_mapping = None
         self._shader_mapping_key = None
         self._visible_items = 0
-        self._last_stats = GpuMontageLayerStats()
+        self._last_stats = TileLayerUpdateStats()
         self._ensure_visual_count(1)
 
     @property
@@ -865,7 +828,7 @@ class GpuMontageLayer:
         return self._visuals_by_page[0]
 
     @property
-    def last_stats(self) -> GpuMontageLayerStats:
+    def last_stats(self) -> TileLayerUpdateStats:
         return self._last_stats
 
     def reset_residency(self) -> None:
@@ -877,7 +840,7 @@ class GpuMontageLayer:
         self._montage_geometry_key = None
         self._atlas_serial = -1
         self._visible_items = 0
-        self._last_stats = GpuMontageLayerStats()
+        self._last_stats = TileLayerUpdateStats()
 
     def clear(self) -> None:
         # Hiding a layer must not discard useful GPU residency.  A later
@@ -890,13 +853,13 @@ class GpuMontageLayer:
         self._atlas_serial = -1
         self._visible_items = 0
 
-    def set_levels(self, levels) -> GpuMontageLayerStats:
+    def set_levels(self, levels) -> TileLayerUpdateStats:
         return self.set_presentation_uniforms(levels=levels)
 
-    def set_shader_mapping(self, mapping) -> GpuMontageLayerStats:
+    def set_shader_mapping(self, mapping) -> TileLayerUpdateStats:
         return self.set_presentation_uniforms(shader_mapping=mapping)
 
-    def set_presentation_uniforms(self, *, levels=_UNSET, shader_mapping=_UNSET) -> GpuMontageLayerStats:
+    def set_presentation_uniforms(self, *, levels=_UNSET, shader_mapping=_UNSET) -> TileLayerUpdateStats:
         level_updates = 0
         mapping_updates = 0
         if levels is not _UNSET:
@@ -913,11 +876,11 @@ class GpuMontageLayer:
                 for visual in self._visuals_by_page:
                     mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
         previous = self._last_stats
-        self._last_stats = GpuMontageLayerStats(
+        self._last_stats = TileLayerUpdateStats(
             visible_items=self._visible_items,
             presented_tiles=tuple(int(tile) for tile in sorted(self._pool.tile_slots)),
             resident_items=self._pool.resident_count,
-            atlas_capacity=self._pool.capacity,
+            storage_capacity=self._pool.capacity,
             level_updates=int(bool(level_updates)),
             shader_uniform_updates=level_updates + mapping_updates,
             items_skipped=self._visible_items,
@@ -959,11 +922,11 @@ class GpuMontageLayer:
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
         frame_plan=None,
-    ) -> GpuMontageLayerStats:
+    ) -> TileLayerUpdateStats:
         layout = tile_layout_map(geometry, frame_plan=frame_plan)
         if not layout:
             self.clear()
-            return GpuMontageLayerStats()
+            return TileLayerUpdateStats()
         payloads = {int(key): value for key, value in dict(payloads or {}).items()}
         reserve_count = max(
             _atlas_reserve_count(geometry, minimum=len(payloads), frame_plan=frame_plan),
@@ -1044,14 +1007,14 @@ class GpuMontageLayer:
             for tile in tuple(texture_stats.presented_tiles or ())
         )
         self._visible_items = len(effective_presented_tiles)
-        self._last_stats = GpuMontageLayerStats(
+        self._last_stats = TileLayerUpdateStats(
             visible_items=len(effective_presented_tiles),
             presented_tiles=effective_presented_tiles,
             committed_upserts=tuple(texture_stats.committed_upserts or ()),
             resident_items=texture_stats.resident_items,
-            atlas_capacity=texture_stats.atlas_capacity,
-            atlas_rebuilds=texture_stats.atlas_rebuilds,
-            atlas_evictions=texture_stats.atlas_evictions,
+            storage_capacity=texture_stats.storage_capacity,
+            storage_rebuilds=texture_stats.storage_rebuilds,
+            storage_evictions=texture_stats.storage_evictions,
             texture_uploads=texture_stats.texture_uploads,
             texture_upload_bytes=texture_stats.texture_upload_bytes,
             vertex_uploads=vertex_uploads,
@@ -1128,10 +1091,10 @@ class GpuMontageLayer:
         rgb_already_windowed: bool,
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
-    ) -> GpuMontageLayerStats:
+    ) -> TileLayerUpdateStats:
         montage = getattr(geometry, "montage", None)
         if montage is None:
-            return GpuMontageLayerStats()
+            return TileLayerUpdateStats()
         try:
             return self._pool.warm_payloads(
                 {int(key): value for key, value in dict(payloads or {}).items()},
@@ -1142,11 +1105,11 @@ class GpuMontageLayer:
             )
         except AtlasCapacityError as exc:
             previous = self._last_stats
-            return GpuMontageLayerStats(
+            return TileLayerUpdateStats(
                 visible_items=int(previous.visible_items),
                 presented_tiles=previous.presented_tiles,
                 resident_items=self._pool.resident_count,
-                atlas_capacity=self._pool.capacity,
+                storage_capacity=self._pool.capacity,
                 estimated_gpu_bytes=self._pool.estimated_gpu_bytes,
                 cpu_shadow_bytes=self._pool.cpu_shadow_bytes,
                 page_count=len(self._pool.pages),

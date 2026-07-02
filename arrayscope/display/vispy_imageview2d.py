@@ -198,10 +198,6 @@ class VisPyImageView2D(ImageViewShell):
             state_signal.connect(lambda *_args: self._request_vispy_camera_sync())
 
 
-    def closeEvent(self, event) -> None:
-        self.teardown_surface()
-        super().closeEvent(event)
-
     def _cancel_vispy_speculative_work(self) -> None:
         warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
         if warm_timer is not None:
@@ -263,9 +259,6 @@ class VisPyImageView2D(ImageViewShell):
             or self._vispy_tile_presentation_draw_pending()
         )
 
-    def interaction_event_owner(self) -> str:
-        return "shared-controller"
-
     def _paints_qgraphics_scene(self) -> bool:
         return False
 
@@ -292,16 +285,6 @@ class VisPyImageView2D(ImageViewShell):
                 pass
         super().teardown_surface()
 
-    def _display_overlay_parent(self):
-        return getattr(self, "_display_container", self.graphicsView)
-
-    def _map_scene_to_display_overlay(self, scene_pos):
-        local = self.graphicsView.mapFromScene(scene_pos)
-        parent = self._display_overlay_parent()
-        if parent is self.graphicsView:
-            return local
-        return self.graphicsView.mapTo(parent, local)
-
     def clearMontageTileLayer(self) -> None:
         self.hide_tiled_presentation("surface-reset")
 
@@ -310,7 +293,7 @@ class VisPyImageView2D(ImageViewShell):
         if layer is not None:
             layer.clear()
         self.clearMontageTileOverlays()
-        self._montage_display_mode = "idle"
+        self._montage_display_mode = "none"
         self.imageItem.setVisible(False)
         _set_visual_visible(getattr(self, "_vispy_image", None), False)
         _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
@@ -331,7 +314,7 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_tiled_histogram_key = None
         self._last_vispy_frame_viewport_key = None
         self._last_vispy_tiled_reset_reason = str(reason)
-        self._montage_display_mode = "idle"
+        self._montage_display_mode = "none"
         self.imageItem.setVisible(False)
         _set_visual_visible(getattr(self, "_vispy_image", None), False)
         _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
@@ -625,7 +608,7 @@ class VisPyImageView2D(ImageViewShell):
             self._montage_display_mode = "vispy_tile_layer"
 
             if data_unchanged and not levels_changed and not mapping_changed:
-                from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
+                from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 
                 visible = len(montage_tile_payloads or {})
                 presented = getattr(previous_layer_stats, "presented_tiles", None)
@@ -636,7 +619,7 @@ class VisPyImageView2D(ImageViewShell):
                     items_skipped=len(tuple(presented or ())) if presented is not None else visible,
                     rgb_window_tiles=0,
                     resident_items=int(getattr(previous_layer_stats, "resident_items", 0) or 0),
-                    storage_capacity=int(getattr(previous_layer_stats, "atlas_capacity", 0) or 0),
+                    storage_capacity=int(getattr(previous_layer_stats, "storage_capacity", 0) or 0),
                     estimated_gpu_bytes=int(getattr(previous_layer_stats, "estimated_gpu_bytes", 0) or 0),
                     cpu_shadow_bytes=int(getattr(previous_layer_stats, "cpu_shadow_bytes", 0) or 0),
                     page_count=int(getattr(previous_layer_stats, "page_count", 0) or 0),
@@ -847,51 +830,41 @@ class VisPyImageView2D(ImageViewShell):
             if timer is not None:
                 timer.start(8)
 
-    def _apply_histogram_preview_levels(self, levels, *, final: bool = False) -> None:
-        levels = (float(levels[0]), float(levels[1]))
-        preview = getattr(self, "_histogram_preview_controller", None)
-        if preview is not None:
-            preview.last_applied_levels = levels
-        started_timing = self._upload_timing is None
-        if started_timing:
-            self._start_upload_timing("vispy_level_preview")
-        try:
-            self._displayLevels = levels
-            self._vispy_last_levels = levels
-            if self._montage_display_mode == "vispy_tile_layer":
-                stats = self._update_vispy_tile_layer(
-                    self.image,
-                    histogram_data=self.histogramSource,
-                    geometry=getattr(self, "_last_vispy_geometry", None),
-                    levels=levels,
-                    rgb_already_windowed=False,
-                    dirty_tiles=(),
-                    tile_source_ids=None,
-                    tile_payloads=getattr(self, "_last_vispy_tile_payloads", None),
-                    shader_mapping=getattr(self, "_last_vispy_tiled_shader_mapping", None),
-                    tile_delta=None,
-                    tile_residency_budget_bytes=0,
-                    force_levels=True,
-                )
-                self._record_tile_layer_stats(stats)
-                self._request_vispy_tile_layer_redraw()
-                handler = getattr(self, "_level_presentation_change_handler", None)
-                if callable(handler):
-                    handler(levels, final=bool(final))
-                return
-            if self._is_windowed_rgb_vispy_main():
-                self._vispy_windowed_image.set_levels(levels)
-                self._request_vispy_canvas_update()
-            elif self._is_rgb_image(self.image):
-                self._upload_vispy_main_image(self.image, histogramData=self.histogramSource, levels=levels, image_origin=getattr(self, "_last_vispy_origin", (0.0, 0.0)))
-            else:
-                try:
-                    self._vispy_image.clim = levels
-                except Exception:
-                    pass
-        finally:
-            if started_timing:
-                self._finish_upload_timing()
+    _level_preview_timing_channel = "vispy_level_preview"
+
+    def _apply_preview_levels_to_display(self, levels, *, final: bool) -> None:
+        self._vispy_last_levels = levels
+        if self._montage_display_mode == "vispy_tile_layer":
+            stats = self._update_vispy_tile_layer(
+                self.image,
+                histogram_data=self.histogramSource,
+                geometry=getattr(self, "_last_vispy_geometry", None),
+                levels=levels,
+                rgb_already_windowed=False,
+                dirty_tiles=(),
+                tile_source_ids=None,
+                tile_payloads=getattr(self, "_last_vispy_tile_payloads", None),
+                shader_mapping=getattr(self, "_last_vispy_tiled_shader_mapping", None),
+                tile_delta=None,
+                tile_residency_budget_bytes=0,
+                force_levels=True,
+            )
+            self._record_tile_layer_stats(stats)
+            self._request_vispy_tile_layer_redraw()
+            handler = getattr(self, "_level_presentation_change_handler", None)
+            if callable(handler):
+                handler(levels, final=bool(final))
+            return
+        if self._is_windowed_rgb_vispy_main():
+            self._vispy_windowed_image.set_levels(levels)
+            self._request_vispy_canvas_update()
+        elif self._is_rgb_image(self.image):
+            self._upload_vispy_main_image(self.image, histogramData=self.histogramSource, levels=levels, image_origin=getattr(self, "_last_vispy_origin", (0.0, 0.0)))
+        else:
+            try:
+                self._vispy_image.clim = levels
+            except Exception:
+                pass
 
     def _upload_vispy_main_image(
         self,
@@ -1202,41 +1175,26 @@ class VisPyImageView2D(ImageViewShell):
         self._vispy_profile_hover_part = part
         self._sync_vispy_profile_marker()
 
-    def setProfileMarker(self, x, y, visible=True):
-        super().setProfileMarker(x, y, visible=visible)
-        self._sync_vispy_profile_marker()
+    def _viewport_content_shape(self):
+        return getattr(self, "_vispy_display_shape", None) or self.image.shape[:2]
 
-    def hideProfileMarker(self):
-        self._vispy_profile_hover_part = None
-        super().hideProfileMarker()
-        for visual in getattr(self, "_vispy_profile_visuals", {}).values():
-            _set_visual_visible(visual, False)
-        self._request_vispy_canvas_update()
+    def _after_viewport_camera_change(self) -> None:
+        self._sync_vispy_camera_to_view()
 
-    def _sync_profile_marker_visibility(self):
-        super()._sync_profile_marker_visibility()
-        self._sync_vispy_profile_marker()
-
-    def _on_profile_marker_changed(self, *_args):
-        super()._on_profile_marker_changed(*_args)
-        self._sync_vispy_profile_marker()
-
-    def _on_profile_handle_changed(self, *_args):
-        super()._on_profile_handle_changed(*_args)
+    def _after_profile_marker_sync(self) -> None:
         self._sync_vispy_profile_marker()
 
     def _sync_vispy_profile_marker(self) -> None:
         if self.image is None or not bool(getattr(self, "_profile_marker_requested_visible", False)):
-            for visual in getattr(self, "_vispy_profile_visuals", {}).values():
-                _set_visual_visible(visual, False)
+            self._vispy_profile_hover_part = None
+            self._hide_vispy_profile_visuals()
             return
         position = self.profileMarkerPosition()
         if position is None:
             return
         x, y = (float(position[0]), float(position[1]))
         if not _point_inside_view_range(self.view.viewRange(), x, y):
-            for visual in getattr(self, "_vispy_profile_visuals", {}).values():
-                _set_visual_visible(visual, False)
+            self._hide_vispy_profile_visuals()
             return
         x0, y0, x1, y1 = self._current_profile_bounds()
         hovered = self._vispy_profile_hover_part is not None
@@ -1248,6 +1206,11 @@ class VisPyImageView2D(ImageViewShell):
         self._upsert_vispy_line("profile_handle_x", np.asarray([[x - marker, y], [x + marker, y]], dtype=np.float32), line_color, width=3.0 if hovered else 2.0)
         self._upsert_vispy_line("profile_handle_y", np.asarray([[x, y - marker], [x, y + marker]], dtype=np.float32), line_color, width=3.0 if hovered else 2.0)
         self._upsert_vispy_profile_dot(x, y, hovered=hovered)
+        self._request_vispy_canvas_update()
+
+    def _hide_vispy_profile_visuals(self) -> None:
+        for visual in getattr(self, "_vispy_profile_visuals", {}).values():
+            _set_visual_visible(visual, False)
         self._request_vispy_canvas_update()
 
     def _upsert_vispy_line(self, key: str, points, color, *, width: float, order: int = 10_000):
@@ -1482,28 +1445,6 @@ class VisPyImageView2D(ImageViewShell):
             camera.aspect = 1.0 if getattr(self, "displayMode", "square_pixels") == "square_pixels" else None
             self._request_vispy_canvas_update()
 
-    def setFitLocked(self, enabled):
-        super().setFitLocked(enabled)
-        if self.image is not None:
-            self._sync_vispy_camera_to_view()
-
-    def oneToOne(self):
-        self.setDisplayMode("square_pixels")
-        self.view.setMouseEnabled(x=True, y=True)
-        if self.image is not None:
-            self._viewport_applying = True
-            try:
-                self.viewport_controller.one_to_one(
-                    self.view,
-                    getattr(self, "_vispy_display_shape", self.image.shape[:2]),
-                    self.graphicsView.viewport().size(),
-                    display_rect=self._current_image_viewport_rect(),
-                )
-            finally:
-                self._viewport_applying = False
-            self._enforce_viewport_constraints()
-            self._sync_vispy_camera_to_view()
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.image is not None and self.viewport_controller.is_fit_locked():
@@ -1634,7 +1575,7 @@ class VisPyImageView2D(ImageViewShell):
         force_mapping: bool = False,
         frame_plan=None,
     ):
-        from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
+        from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 
         if geometry is None or (getattr(geometry, "montage", None) is None and frame_plan is None):
             return TileLayerUpdateStats()
@@ -1671,7 +1612,7 @@ class VisPyImageView2D(ImageViewShell):
         force_mapping: bool = False,
         frame_plan=None,
     ):
-        from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
+        from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 
         if geometry is None or (getattr(geometry, "montage", None) is None and frame_plan is None):
             return TileLayerUpdateStats()
@@ -1709,16 +1650,16 @@ class VisPyImageView2D(ImageViewShell):
                     frame_plan=frame_plan,
                 )
             except Exception as exc:
-                from arrayscope.display.backends.vispy.tiles import AtlasCapacityError, GpuMontageLayerStats
+                from arrayscope.display.backends.vispy.tiles import AtlasCapacityError
 
                 if not isinstance(exc, AtlasCapacityError):
                     raise
                 previous = getattr(layer, "last_stats", None)
-                stats = GpuMontageLayerStats(
+                stats = TileLayerUpdateStats(
                     visible_items=len(active_set),
                     presented_tiles=(),
                     resident_items=int(getattr(previous, "resident_items", 0) or 0),
-                    atlas_capacity=int(getattr(previous, "atlas_capacity", 0) or 0),
+                    storage_capacity=int(getattr(previous, "storage_capacity", 0) or 0),
                     estimated_gpu_bytes=int(getattr(previous, "estimated_gpu_bytes", 0) or 0),
                     cpu_shadow_bytes=int(getattr(previous, "cpu_shadow_bytes", 0) or 0),
                     page_count=int(getattr(previous, "page_count", 0) or 0),
@@ -1728,42 +1669,7 @@ class VisPyImageView2D(ImageViewShell):
                     capacity_warning=str(exc),
                 )
         self._record_upload_timing("tile_layer_upload_ms", float(stats.upload_ms))
-        return TileLayerUpdateStats(
-            visible_items=int(stats.visible_items),
-            presented_tiles=None if stats.presented_tiles is None else tuple(int(tile) for tile in stats.presented_tiles),
-            items_updated=int(stats.items_updated),
-            items_skipped=int(stats.items_skipped),
-            rgb_window_tiles=0,
-            resident_items=int(stats.resident_items),
-            storage_capacity=int(stats.atlas_capacity),
-            storage_rebuilds=int(stats.atlas_rebuilds),
-            storage_evictions=int(stats.atlas_evictions),
-            texture_uploads=int(stats.texture_uploads),
-            texture_upload_bytes=int(stats.texture_upload_bytes),
-            texture_prepare_ms=float(getattr(stats, "texture_prepare_ms", 0.0) or 0.0),
-            texture_submit_ms=float(getattr(stats, "texture_submit_ms", 0.0) or 0.0),
-            vertex_uploads=int(stats.vertex_uploads),
-            level_updates=int(stats.level_updates),
-            estimated_gpu_bytes=int(stats.estimated_gpu_bytes),
-            cpu_shadow_bytes=int(stats.cpu_shadow_bytes),
-            page_count=int(getattr(stats, "page_count", 0)),
-            active_pages=int(getattr(stats, "active_pages", 0)),
-            device_max_texture_size=int(getattr(stats, "device_max_texture_size", 0)),
-            budget_bytes=int(getattr(stats, "budget_bytes", 0)),
-            near_resident_items=int(getattr(stats, "near_resident_items", 0)),
-            warm_resident_items=int(getattr(stats, "warm_resident_items", 0)),
-            evicted_near_items=int(getattr(stats, "evicted_near_items", 0)),
-            capacity_warning=str(getattr(stats, "capacity_warning", "")),
-            lod_level=int(getattr(stats, "lod_level", 0)),
-            lod_factor=int(getattr(stats, "lod_factor", 1)),
-            source_texels_per_pixel=float(getattr(stats, "source_texels_per_pixel", 0.0)),
-            gutter_pixels=int(getattr(stats, "gutter_pixels", 0)),
-            mipmap_updates=int(getattr(stats, "mipmap_updates", 0)),
-            mipmap_available=bool(getattr(stats, "mipmap_available", False)),
-            complex_texture_uploads=int(getattr(stats, "complex_texture_uploads", 0)),
-            shader_uniform_updates=int(getattr(stats, "shader_uniform_updates", 0)),
-            upload_ms=float(getattr(stats, "upload_ms", 0.0) or 0.0),
-        )
+        return stats
 
     def _request_vispy_tile_layer_redraw(self) -> None:
         self._vispy_tile_presentation_request_count = int(

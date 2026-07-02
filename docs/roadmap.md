@@ -53,7 +53,22 @@ Exit gate:
 
 ### Y2. Backend de-duplication against the surface contract
 
-**Status:** Ready after Y1 (independent of it in code, ordered by risk).
+**Status:** Done (2026-07-02). Measured reality differed from the audit
+estimate: `ImageView2D` is an empty subclass (the shell *is* the PyQtGraph
+implementation) and the two `tiles.py` files share zero functions — their
+divergence is physical (CPU items vs. GPU atlas), with semantic tile
+bookkeeping already owned above them by `montage_session`, `frame_planner`,
+and `montage_viewport`. What was unified: the shared semantic drivers now
+live once in `ImageViewShell` behind small backend hooks
+(`_apply_preview_levels_to_display`, `_after_viewport_camera_change`,
+`_after_profile_marker_sync`, `_viewport_content_shape`), eleven VisPy
+overrides were deleted, the tile-layer stats contract moved to
+`display/model/tile_stats.py` (deleting `GpuMontageLayerStats`, its
+conversion layer, and the vispy→pyqtgraph import), and
+`tests/display/test_imagesurface_contract.py` runs the surface contract on
+both backends. Two real forks were found and fixed by those tests: VisPy's
+close path had lost `_cancel_interaction`, and VisPy hid tiled presentation
+into a private `"idle"` mode instead of the shared `"none"`.
 
 **Goal:** one implementation of everything that is not texture/atlas vs.
 QGraphicsItem mechanics.

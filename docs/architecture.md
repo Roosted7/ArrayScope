@@ -254,9 +254,6 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 Tracked as roadmap gates Y1–Y3; measured in the
 [v32 audit](reviews/v32-composition-audit.md):
 
-- ~40 methods are implemented in both backend view classes and the two
-  `tiles.py` files are parallel-divergent; Y2 hoists shared logic into
-  `ImageViewShell` and a common tile model.
 - UI state sync is manual (`_sync_*` fan-out), the profiling tools
   re-implement window composition, and three caches duplicate
   eviction/priority logic; Y3 addresses all three drift machines.

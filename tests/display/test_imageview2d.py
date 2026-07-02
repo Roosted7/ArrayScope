@@ -301,8 +301,8 @@ def test_image_presentation_keeps_levels_and_histogram_range_separate(qt_app):
 def test_tile_commit_report_uses_backend_presented_tile_ids_for_middle_holes():
     from types import SimpleNamespace
 
-    from arrayscope.display.backends.pyqtgraph.tiles import TileLayerUpdateStats
     from arrayscope.display.imageview2d import _tile_commit_report
+    from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 
     payloads = {0: object(), 1: object(), 2: object()}
     stats = TileLayerUpdateStats(
