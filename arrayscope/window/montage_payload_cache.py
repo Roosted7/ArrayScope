@@ -61,7 +61,8 @@ class RetainedTiledPayloadStore:
         # thousands of acknowledged payloads; retaining all of them and only
         # then trimming creates an avoidable allocation spike.
         self._payloads.resize(max_entries=max_items)
-        for payload in dict(payloads or {}).values():
+        values = () if payloads is None else payloads.values()
+        for payload in values:
             key = base_tile_source_id(getattr(payload, "source_id", None))
             if key is None or not payload_matches_texture_kind(payload):
                 continue

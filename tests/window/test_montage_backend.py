@@ -1407,6 +1407,33 @@ def test_retained_payload_store_is_bounded_before_large_insert_batches():
     assert set(retained) == {("payload", 3), ("payload", 4)}
 
 
+def test_retained_payload_store_reads_mapping_values_without_copying():
+    from arrayscope.display.model.frame import DisplayTilePayload
+
+    class ValuesOnlyPayloads:
+        def __init__(self, values):
+            self._values = values
+
+        def values(self):
+            return self._values
+
+        def __iter__(self):
+            raise AssertionError("remember_acknowledged must not copy the whole payload mapping")
+
+    payload = DisplayTilePayload(
+        0,
+        0,
+        np.ones((2, 2), dtype=np.float32),
+        None,
+        ("payload", 0),
+    )
+    store = RetainedTiledPayloadStore(limit=2)
+
+    store.remember_acknowledged(ValuesOnlyPayloads((payload,)))
+
+    assert store.payloads_by_base_source()[("payload", 0)] is payload
+
+
 def test_recent_payload_cache_requires_matching_lod_factor():
     lod4 = SimpleNamespace(factor=4)
     lod1 = SimpleNamespace(factor=1)
