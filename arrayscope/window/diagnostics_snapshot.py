@@ -186,8 +186,10 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
                     "visible_queue_drain",
                     "montage_queue_drain",
                     "stage_queue_drain",
+                    "histogram_queue_drain",
                     "profile_queue_drain",
                     "roi_queue_drain",
+                    "pixel_queue_drain",
                     "prefetch_queue_drain",
                 )
             )

@@ -108,6 +108,61 @@ def test_burst_of_changes_coalesces_through_trailing_timer(qtbot, make_window):
     _settled(qtbot, lambda: win_b.view_state.slice_indices[2] == 3)
 
 
+def test_sustained_changes_publish_periodically_and_trail_final_value(qtbot, make_window, monkeypatch):
+    # Drives schedule_publish directly with a fake clock. Going through the
+    # spinbox cascade is racy here: event processing inside setValue can fire
+    # the real trailing QTimer mid-step, re-stamping the fake-clock publish
+    # bookkeeping. The widget -> controller path is covered by the leading-edge
+    # and burst-coalesce tests above.
+    win = make_window(np.arange(8 * 6 * 8, dtype=float).reshape(8, 6, 8))
+    controller = win.sync_controller
+    win.sync_dims_button.setChecked(True)
+
+    now = [1000.0]
+    published = []
+    value = [0]
+    # Patch the namespace the controller's methods actually resolve
+    # `monotonic` from. Importing arrayscope.sync.controller here can yield a
+    # different module object when another test re-imported the package, and
+    # patching that copy would leave the controller on the real clock.
+    controller_globals = controller.schedule_publish.__func__.__globals__
+    monkeypatch.setitem(controller_globals, "monotonic", lambda: now[0])
+    monkeypatch.setattr(controller.bus, "publish", published.append)
+    monkeypatch.setattr(controller, "_build_payload", lambda facet: {"slice_indices": [0, 0, value[0]]})
+
+    def _set(new_value):
+        value[0] = new_value
+        controller.schedule_publish("dims")
+
+    def _state_values():
+        return [
+            message["payload"]["slice_indices"][2]
+            for message in published
+            if message.get("kind") == "state"
+        ]
+
+    _set(1)
+    assert _state_values() == [1]
+
+    now[0] += 0.060
+    _set(2)
+    assert _state_values() == [1]
+
+    now[0] += 0.130
+    _set(3)
+    timer = controller._publish_timers.get("dims")
+    assert timer is None or not timer.isActive()
+    assert _state_values() == [1, 3]
+
+    now[0] += 0.060
+    _set(4)
+    timer = controller._publish_timers.get("dims")
+    assert timer is not None and timer.isActive()
+
+    qtbot.waitUntil(lambda: len(_state_values()) == 3, timeout=5000)
+    assert _state_values() == [1, 3, 4]
+
+
 def test_dimension_sync_clamps_for_smaller_arrays_and_ignores_extra_dims(qtbot, make_window):
     win_a = make_window(np.arange(9 * 6 * 4, dtype=float).reshape(9, 6, 4))
     win_b = make_window(np.arange(5 * 3, dtype=float).reshape(5, 3))

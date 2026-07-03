@@ -142,13 +142,15 @@ Latency feedback records callback duration and work count. Resource telemetry sa
 
 Overload backoff should be immediate; recovery gradual. Metrics must be path/backend/payload aware, or a cheap warm rebind can incorrectly justify a larger cold-upload batch.
 
-Feedback loops must be closed on the channel that is actually measured: each
+Feedback loops must be closed on the channel that is actually measured. Each
 evaluation controller's drain observes and is governed by its own
-`<lane>_queue_drain` channel. Isolated latency outliers (GC pauses, one-off
-relayouts, event-loop stalls) are suppressed for a single sample on every
-channel — a repeat is accepted as a real cost change — and drains that finish
-under budget while hitting their batch cap regrow the cap from the measured
-rate rather than waiting for the EWMA to decay.
+`<lane>_queue_drain` channel; non-controller GUI fan-in paths such as
+`montage_tile_result`, `histogram_refresh`, `roi_refresh`, and
+`profile_update` keep their own measured channels. Isolated latency outliers
+(GC pauses, one-off relayouts, event-loop stalls) are suppressed for a single
+sample on every channel — a repeat is accepted as a real cost change — and
+drains that finish under budget while hitting their batch cap regrow the cap
+from the measured rate rather than waiting for the EWMA to decay.
 
 Governor decisions are applied on two paths: a periodic sampling timer
 (250 ms active, 1 s idle) that also refreshes telemetry, and an immediate
@@ -159,9 +161,9 @@ up to a sampling period late.
 The per-controller drain-fallback timer is a safety net for missed
 cross-thread signals, not a scheduling mechanism: it backs off exponentially
 (10 → 100 ms) while polls come up empty and snaps back to 10 ms whenever it
-recovers an event the signal path should have delivered. The
-`fallback_recovered_events` / `fallback_idle_polls` counters make signal
-health observable per controller.
+finds pending queue work. The `fallback_event_polls` / `fallback_idle_polls`
+counters make fallback activity observable per controller without treating an
+event-bearing poll as proof of signal failure.
 
 Idle slice prefetch is momentum-aware (`core.prefetch_policy`): sustained
 same-direction scrubbing deepens speculation ahead of the motion (bounded,

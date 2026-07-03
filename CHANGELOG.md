@@ -37,10 +37,11 @@ This file records user-visible release changes. Detailed development history and
   immediately; bursts still coalesce through the existing 120 ms trailing
   timer, which now also flushes periodically during continuous drags.
 - Background-work fallback polling backs off (10 → 100 ms) while the
-  cross-thread signal path is healthy, cutting idle wakeups and GIL churn
-  during long computations; it snaps back to 10 ms if a missed signal is
-  ever detected. New `fallback_recovered_events`/`fallback_idle_polls`
-  diagnostics counters make this observable.
+  queue is empty, cutting idle wakeups and GIL churn during long
+  computations; it snaps back to 10 ms when a poll finds pending queue work.
+  New `fallback_event_polls`/`fallback_idle_polls` diagnostics counters make
+  this observable without claiming every event-bearing poll was a missed
+  signal.
 - Worker pools are sized from the CPUs actually available to the process
   (affinity mask / container limits via `os.process_cpu_count` or
   `os.sched_getaffinity`) rather than the machine's total CPU count.

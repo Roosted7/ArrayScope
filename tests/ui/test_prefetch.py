@@ -129,6 +129,39 @@ def test_prefetch_deepens_with_sustained_directional_scrub(qtbot):
         win.close()
 
 
+def test_montage_prefetch_denial_does_not_cap_slice_prefetch(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.core.prefetch_policy import SliceScrubMomentum
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 16, dtype=float).reshape(3, 4, 16))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win._active_slice_axis = 2
+        win.prefetch_evaluation_controller.set_max_prefetch(32)
+
+        # With no montage stage ready, the montage-prefetch decision denies
+        # montage speculation. That local decision must not shrink the shared
+        # prefetch controller and accidentally throttle ordinary slice prefetch.
+        win._apply_resource_governor_decisions()
+        assert win.prefetch_evaluation_controller._max_prefetch == 32
+
+        momentum = SliceScrubMomentum()
+        base = time.monotonic() - 0.3
+        for step, index in enumerate((2, 3, 4, 5)):
+            momentum.observe(index, now=base + 0.1 * step)
+        win.renderer._prefetch_momentum = momentum
+        win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 6), None)
+        _process_events(qtbot, count=40)
+
+        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > 2
+    finally:
+        win.close()
+
+
 def test_prefetch_skips_while_visible_controller_busy(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import AppSettingsState

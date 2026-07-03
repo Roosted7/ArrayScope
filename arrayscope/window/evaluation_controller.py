@@ -158,7 +158,7 @@ class EvaluationController(Qt.QtCore.QObject):
         self._drain_fallback_min_ms = 10
         self._drain_fallback_max_ms = 100
         self._drain_fallback_interval_ms = self._drain_fallback_min_ms
-        self._fallback_recovered_events_count = 0
+        self._fallback_event_polls_count = 0
         self._fallback_idle_polls_count = 0
         self._drain_fallback_timer = Qt.QtCore.QTimer(self)
         self._drain_fallback_timer.setSingleShot(True)
@@ -523,7 +523,7 @@ class EvaluationController(Qt.QtCore.QObject):
             active_preserved=int(self._active_preserved_count),
             queued_collapsed=int(self._queued_collapsed_count),
             stale_reused=int(self._stale_reused_count),
-            fallback_recovered_events=int(self._fallback_recovered_events_count),
+            fallback_event_polls=int(self._fallback_event_polls_count),
             fallback_idle_polls=int(self._fallback_idle_polls_count),
             presented_target=progress.presented,
             active_target=progress.active,
@@ -639,11 +639,12 @@ class EvaluationController(Qt.QtCore.QObject):
 
     def _on_drain_fallback(self) -> None:
         # Adapt the safety-net cadence from what this poll actually found.
-        # Events sitting in the queue mean a cross-thread signal was missed
-        # (or the event loop starved the queued connection): poll fast again.
+        # Events sitting in the queue mean the fallback found pending work:
+        # poll fast again, but report this as an event-bearing poll rather
+        # than proof that the queued signal path failed.
         # An empty poll means the signal path is doing its job: back off.
         if self._pending_queue_events or not self._queue.empty():
-            self._fallback_recovered_events_count += 1
+            self._fallback_event_polls_count += 1
             self._drain_fallback_interval_ms = self._drain_fallback_min_ms
         else:
             self._fallback_idle_polls_count += 1

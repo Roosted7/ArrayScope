@@ -122,6 +122,9 @@ class WindowSyncController(Qt.QtCore.QObject):
         now = monotonic()
         last = self._last_publish_monotonic.get(facet)
         if last is None or (now - last) * 1000.0 >= PUBLISH_COALESCE_MS:
+            timer = self._publish_timers.get(facet)
+            if timer is not None:
+                timer.stop()
             self._publish_now(facet)
             return
         timer = self._publish_timers.get(facet)

@@ -6,7 +6,6 @@ prefer_pyside6()
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 import platform
-from time import monotonic
 from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
@@ -339,12 +338,7 @@ class ArrayScopeWindow(
         active = self._interaction_active_now()
         if active == bool(getattr(self, "_governor_interactive_applied", None)):
             return
-        self._governor_interactive_applied = active
-        now = monotonic()
-        last = float(getattr(self, "_governor_edge_applied_monotonic", 0.0))
-        if (now - last) * 1000.0 >= 50.0:
-            self._governor_edge_applied_monotonic = now
-            self._apply_resource_governor_decisions(refresh_telemetry=False)
+        self._apply_resource_governor_decisions(refresh_telemetry=False)
         timer = getattr(self, "_resource_governor_timer", None)
         if timer is not None and active:
             timer.start(250)
@@ -383,13 +377,10 @@ class ArrayScopeWindow(
         profile_timer = getattr(self, "_profile_timer", None)
         if profile_timer is not None:
             profile_timer.setInterval(max(1, int(profile_decision.interval_ms)))
-        prefetch_decision = governor.decide_montage_prefetch(
-            stage_ready_or_in_flight=busy.stage_ready_or_in_flight,
-            visible_busy=busy.visible_busy or busy.montage_busy or busy.stage_busy,
-        )
-        prefetch = getattr(self, "prefetch_evaluation_controller", None)
-        if prefetch is not None:
-            prefetch.set_max_prefetch(max(1, prefetch_decision.max_items if prefetch_decision.allowed else 1))
+        # Montage prefetch asks the governor for a per-run tile budget in
+        # `window.montage_prefetch`. Do not project that local decision onto
+        # the shared prefetch controller: slice/profile prefetch have their
+        # own policy depth and admission gates.
 
     def _record_ui_work(
         self,

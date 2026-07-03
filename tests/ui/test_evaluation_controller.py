@@ -64,13 +64,13 @@ def test_drain_fallback_backs_off_while_signal_path_is_healthy(qtbot):
     assert intervals[-1] == controller._drain_fallback_max_ms
     assert controller.diagnostics().fallback_idle_polls == 6
 
-    # The net catching a queued event the signal should have delivered means
-    # the signal path is unhealthy: snap back to the fast interval.
+    # An event-bearing fallback poll snaps back to the fast interval. The
+    # counter is intentionally descriptive, not proof that a Qt signal failed.
     controller._queue.put(("started", -1, None))
     controller._on_drain_fallback()
 
     assert controller._drain_fallback_interval_ms == controller._drain_fallback_min_ms
-    assert controller.diagnostics().fallback_recovered_events == 1
+    assert controller.diagnostics().fallback_event_polls == 1
 
 
 def test_evaluation_controller_dedupes_and_limits_prefetch(qtbot):

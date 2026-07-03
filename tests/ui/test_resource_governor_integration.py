@@ -57,7 +57,6 @@ def test_interaction_edge_applies_interactive_budgets_immediately(qtbot):
         win._apply_resource_governor_decisions()
         idle_budget = win.visible_evaluation_controller._callback_budget_ms
         assert idle_budget is not None
-        win._governor_edge_applied_monotonic = 0.0
 
         # The sampling timer runs at 250 ms (1 s idle); an interactive
         # request must not run against idle budgets until the next tick.
@@ -66,5 +65,50 @@ def test_interaction_edge_applies_interactive_budgets_immediately(qtbot):
         interactive_budget = win.visible_evaluation_controller._callback_budget_ms
         assert win._governor_interactive_applied is True
         assert interactive_budget < idle_budget
+    finally:
+        win.close()
+
+
+def test_interaction_stop_edge_restores_idle_budgets_immediately(qtbot):
+    clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        process_events(qtbot)
+        qtbot.waitUntil(lambda: not win._interaction_active_now(), timeout=5000)
+        for _ in range(6):
+            win.resource_governor.record_ui_observation("visible_queue_drain", 10.0, item_count=2)
+        win._apply_resource_governor_decisions()
+        idle_budget = win.visible_evaluation_controller._callback_budget_ms
+
+        win.render_coordinator.request(reason="interaction-stop-edge-test", interactive=True)
+        interactive_budget = win.visible_evaluation_controller._callback_budget_ms
+        assert interactive_budget < idle_budget
+
+        win.render_coordinator._quiet_timer_elapsed()
+
+        assert win._governor_interactive_applied is False
+        assert win.visible_evaluation_controller._callback_budget_ms == idle_budget
+    finally:
+        win.close()
+
+
+def test_runtime_diagnostics_lists_all_controller_drain_channels(qtbot):
+    clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        process_events(qtbot)
+        channels = {
+            channel.channel
+            for channel in win.collect_runtime_diagnostics().resource_governor.feedback_channels
+        }
+
+        assert "histogram_queue_drain" in channels
+        assert "pixel_queue_drain" in channels
     finally:
         win.close()
