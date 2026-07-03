@@ -3227,19 +3227,30 @@ class FrameRenderMixin:
         """
         if not (session.pending_tiles or session.stage_fan_in.waiting_tiles):
             return 0
-        try:
-            viewport_plan = self._montage_viewport_plan(self.win.view_state)
-        except Exception:
-            return 0
-        if viewport_plan.view_range is None:
-            return 0
+        # While a viewport-continuity restore (reload, layout change) is in
+        # flight, the live camera range is transitional; prioritizing against
+        # it anchors the fill order at an arbitrary point. Use the restore's
+        # target range instead.
+        continuity_range = getattr(self.win, "_active_viewport_continuity_range", lambda: None)()
+        if continuity_range is not None:
+            view_range = continuity_range
+            focus = _montage_priority_focus(self, view_range)
+        else:
+            try:
+                viewport_plan = self._montage_viewport_plan(self.win.view_state)
+            except Exception:
+                return 0
+            if viewport_plan.view_range is None:
+                return 0
+            view_range = viewport_plan.view_range
+            focus = viewport_plan.priority_focus
         total = len(session.pending_tiles) + sum(
             len(waiting) for waiting in session.stage_fan_in.waiting_tiles.values()
         )
         return session.retarget_tile_priority(
-            focus=viewport_plan.priority_focus,
+            focus=focus,
             max_items=max(1, int(total)),
-            view_range=viewport_plan.view_range,
+            view_range=view_range,
         )
 
     def _run_montage_priority_retarget(self) -> None:

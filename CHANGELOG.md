@@ -45,6 +45,14 @@ This file records user-visible release changes. Detailed development history and
   diagnostics, plus `presented_order_sample` and priority retarget/fairness
   counters in montage diagnostics so fill-order violations are visible in
   diagnostics logs.
+- Reloading a file no longer fills the montage from a corner or wherever
+  the pointer last crossed the image: the stale hover focus is cleared on
+  reload (the transitional reload viewport let it pass the in-viewport
+  validation), and priority retargeting prefers the viewport-continuity
+  target range over the mid-restore camera range. Presentation batch sizing
+  also no longer flaps between one tile and the maximum when the estimated
+  per-commit overhead hovers around the budget — the batch now grows
+  continuously to amortize the overhead.
 - Montage tiles now genuinely fill center/mouse-first. Three paths ignored
   the priority order: stage fan-in released waiting tiles in the plan's
   row-major order under budget caps (filling from a corner regardless of the

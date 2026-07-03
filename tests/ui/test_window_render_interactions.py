@@ -543,3 +543,34 @@ def test_strict_ui_mode_raises_callback_exceptions(monkeypatch):
 
     with pytest.raises(RuntimeError, match="boom"):
         handle_ui_exception("test callback", RuntimeError("boom"))
+
+
+def test_reload_clears_stale_hover_focus(qtbot, monkeypatch):
+    # The stored hover focus predates the reload; during the reload's
+    # transitional viewport almost any point passes the in-viewport
+    # validation, so a stale focus would anchor the whole montage fill order
+    # at wherever the pointer last crossed the image.
+    _clear_arrayscope_settings()
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win._set_view_state(ViewState.from_shape(data.shape).with_montage_axis(2, indices=tuple(range(6)), text=":"))
+        win.render(reason="test-montage", force_autolevel=False)
+        _process_events(qtbot, count=30)
+
+        win.renderer._last_image_hover_focus = (1.0, 2.0)
+        win.renderer._last_image_hover_focus_frame_key = getattr(
+            getattr(win, "_committed_display_frame", None), "key", None
+        )
+
+        win._reset_data(data + 1.0)
+
+        assert win.renderer._last_image_hover_focus is None
+        assert win.renderer._last_image_hover_focus_frame_key is None
+    finally:
+        win.close()

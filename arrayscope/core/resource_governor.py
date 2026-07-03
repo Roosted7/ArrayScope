@@ -297,10 +297,13 @@ class ResourceGovernor:
             # minimizes total GUI occupancy rather than per-commit time.
             overhead_ms, marginal_ms = presentation_model
             headroom_ms = float(control_budget) - float(overhead_ms)
-            if headroom_ms > 0.0:
-                model_batch = int(headroom_ms // max(0.05, float(marginal_ms)))
-            else:
-                model_batch = int(batch_max)
+            # Batch large enough to fill the budget headroom, but never so
+            # small that the fixed overhead dominates: amortizing it down to
+            # at most one marginal-cost share per item needs
+            # overhead/marginal items. A hard budget cutoff here would flap
+            # between 1 and max whenever the overhead estimate hovers around
+            # the budget.
+            model_batch = int(max(headroom_ms, float(overhead_ms)) // max(0.05, float(marginal_ms)))
             batch = max(int(feedback.tuning.min_batch), min(int(batch_max), model_batch))
         default_byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
         byte_cap = default_byte_cap

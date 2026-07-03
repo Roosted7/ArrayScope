@@ -102,6 +102,14 @@ class FileReloadMixin:
         old_ndim = self.data.ndim
         new_ndim = new_data.ndim
         reload_viewport = self._begin_reload_viewport_continuity()
+        # The stored hover focus predates the reload (typically wherever the
+        # pointer last crossed the image before reaching the reload control).
+        # The transitional reload viewport is huge, so the stale point passes
+        # the in-viewport validation and would anchor the whole montage
+        # fill order there.
+        clear_hover = getattr(getattr(self, "renderer", None), "_clear_image_hover_state", None)
+        if callable(clear_hover):
+            clear_hover()
 
         preserve_steps = bool(getattr(self.document, "steps", ()))
         try:
