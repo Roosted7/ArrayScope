@@ -42,8 +42,8 @@ This file records user-visible release changes. Detailed development history and
   overhead and per-item marginal rate (an exponentially-weighted
   regression over batch size vs elapsed) and size batches from the
   marginal rate. New `overhead_ewma_ms` / `marginal_per_item_ms` feedback
-  diagnostics, plus `presented_order_sample` and priority retarget/fairness
-  counters in montage diagnostics so fill-order violations are visible in
+  diagnostics, plus `presented_order_sample` and a priority retarget
+  counter in montage diagnostics so fill-order violations are visible in
   diagnostics logs.
 - Montage presentation no longer sags in the middle of a fill and bursts
   at the end: the upload byte cap was derived from a per-byte rate that
