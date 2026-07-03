@@ -540,3 +540,21 @@ def test_presentation_model_still_keeps_genuinely_expensive_items_small():
         governor.record_ui_observation("montage_present_total", 12.0 * count, item_count=count)
     decision = governor.decide_ui_work("montage_present_total", interactive=False)
     assert decision.batch_limit <= 3, decision
+
+
+def test_presentation_byte_cap_escapes_overhead_inflated_per_byte_rate():
+    # 900 KB tiles at ~2.5 ms marginal upload cost plus ~15 ms fixed commit
+    # overhead: the naive per-byte EWMA folds the overhead into the byte rate
+    # and caps uploads at a fraction of what the budget sustains, which
+    # throttled montage presentation mid-fill.
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    tile = 900 * 1024
+    for count in (2, 5, 3, 7, 2, 6, 4, 7, 3, 5):
+        governor.record_ui_observation(
+            "montage_present_total", 15.0 + 2.5 * count, item_count=count, byte_count=tile * count
+        )
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+    # Non-interactive amortization allows ~2x overhead of marginal work:
+    # 2*15ms / (2.5ms/tile) = 12 tiles ~= 10.8 MB. The inflated per-byte rate
+    # would have allowed only ~4-6 tiles.
+    assert decision.byte_cap >= 8 * tile, decision

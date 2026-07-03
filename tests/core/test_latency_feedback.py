@@ -61,3 +61,18 @@ def test_overhead_and_marginal_model_needs_varied_batch_sizes():
     # Per-item EWMA misreads 17 ms / 2 items as 8.5 ms per item; the model
     # correctly declines to guess until counts vary.
     assert feedback.channel_snapshot("montage_present_total").per_item_ewma_ms > 8.0
+
+
+def test_overhead_and_marginal_per_byte_model():
+    from arrayscope.core.latency_feedback import LatencyFeedbackController
+
+    feedback = LatencyFeedbackController()
+    tile = 900 * 1024
+    # 15 ms fixed + 2.5 ms per tile-of-bytes, over varied batch sizes.
+    for count in (1, 4, 2, 8, 1, 6, 3, 8, 2, 5, 1, 7, 4, 8, 2, 6):
+        feedback.observe("montage_present_total", 15.0 + 2.5 * count, count=count, byte_count=tile * count)
+    model = feedback.overhead_and_marginal_per_byte_ms("montage_present_total")
+    assert model is not None
+    overhead, marginal = model
+    assert 10.0 < overhead < 20.0
+    assert 0.7 * 2.5 / tile < marginal < 1.5 * 2.5 / tile

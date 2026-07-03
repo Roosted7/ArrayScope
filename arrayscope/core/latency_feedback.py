@@ -29,6 +29,10 @@ class LatencyFeedbackChannel:
     count_ewma: float | None = None
     count_var_ewma: float = 0.0
     count_elapsed_cov_ewma: float = 0.0
+    byte_ewma: float | None = None
+    byte_var_ewma: float = 0.0
+    byte_elapsed_cov_ewma: float = 0.0
+    byte_observations: int = 0
     observations: int = 0
 
 
@@ -72,6 +76,18 @@ class LatencyFeedbackController:
             state.count_ewma = float(state.count_ewma) + alpha * delta_count
             state.count_var_ewma = (1.0 - alpha) * (state.count_var_ewma + alpha * delta_count * delta_count)
             state.count_elapsed_cov_ewma = (1.0 - alpha) * (state.count_elapsed_cov_ewma + alpha * delta_count * delta_elapsed)
+        if byte_count > 0:
+            if state.byte_ewma is None or state.elapsed_ewma_ms is None:
+                state.byte_ewma = float(byte_count)
+                state.byte_var_ewma = 0.0
+                state.byte_elapsed_cov_ewma = 0.0
+            else:
+                delta_bytes = float(byte_count) - float(state.byte_ewma)
+                delta_elapsed = elapsed - float(state.elapsed_ewma_ms)
+                state.byte_ewma = float(state.byte_ewma) + alpha * delta_bytes
+                state.byte_var_ewma = (1.0 - alpha) * (state.byte_var_ewma + alpha * delta_bytes * delta_bytes)
+                state.byte_elapsed_cov_ewma = (1.0 - alpha) * (state.byte_elapsed_cov_ewma + alpha * delta_bytes * delta_elapsed)
+            state.byte_observations += 1
         state.observations += 1
         state.elapsed_ewma_ms = _ewma(state.elapsed_ewma_ms, elapsed, self.tuning.ewma_alpha)
         state.per_item_ewma_ms = _ewma(state.per_item_ewma_ms, elapsed / count, self.tuning.ewma_alpha)
@@ -96,6 +112,24 @@ class LatencyFeedbackController:
             return None
         marginal = max(0.01, float(state.count_elapsed_cov_ewma) / float(state.count_var_ewma))
         overhead = max(0.0, float(state.elapsed_ewma_ms) - marginal * float(state.count_ewma))
+        return overhead, marginal
+
+    def overhead_and_marginal_per_byte_ms(self, channel: str) -> tuple[float, float] | None:
+        """Byte-denominated counterpart of :meth:`overhead_and_marginal_ms`.
+
+        Per-byte EWMAs suffer the same misattribution as per-item ones:
+        small commits fold the fixed per-call overhead into the byte rate,
+        which shrinks the byte cap and locks presentation into tiny,
+        overhead-dominated uploads. Returns ``(overhead_ms, marginal_ms_per
+        _byte)``, or ``None`` until byte counts have varied enough.
+        """
+        state = self._channels.get(str(channel))
+        if state is None or state.byte_ewma is None or state.elapsed_ewma_ms is None:
+            return None
+        if state.byte_observations < 4 or state.byte_var_ewma <= max(1.0, 0.0001 * float(state.byte_ewma) ** 2):
+            return None
+        marginal = max(1e-12, float(state.byte_elapsed_cov_ewma) / float(state.byte_var_ewma))
+        overhead = max(0.0, float(state.elapsed_ewma_ms) - marginal * float(state.byte_ewma))
         return overhead, marginal
 
     def work_budget_ms(self, channel: str, *, interactive: bool = False) -> float:

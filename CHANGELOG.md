@@ -45,6 +45,14 @@ This file records user-visible release changes. Detailed development history and
   diagnostics, plus `presented_order_sample` and priority retarget/fairness
   counters in montage diagnostics so fill-order violations are visible in
   diagnostics logs.
+- Montage presentation no longer sags in the middle of a fill and bursts
+  at the end: the upload byte cap was derived from a per-byte rate that
+  folded the fixed per-commit overhead into it, capping commits at a
+  fraction of what the budget sustains while tiles were still streaming
+  in. The byte cap now uses the same overhead/marginal cost split as the
+  item batch, and idle fills may amortize up to two overheads of upload
+  work per commit. Back-to-back reloads of a 272-tile complex montage now
+  present tiles at the compute rate throughout the fill.
 - Montage fill order is now correct by construction instead of by
   carefully-timed retargets. Three structural fixes, each verified against
   the actual GPU upload order on a live display: (1) queued tile objects

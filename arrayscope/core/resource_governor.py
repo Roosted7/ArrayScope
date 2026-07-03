@@ -298,12 +298,14 @@ class ResourceGovernor:
             overhead_ms, marginal_ms = presentation_model
             headroom_ms = float(control_budget) - float(overhead_ms)
             # Batch large enough to fill the budget headroom, but never so
-            # small that the fixed overhead dominates: amortizing it down to
-            # at most one marginal-cost share per item needs
-            # overhead/marginal items. A hard budget cutoff here would flap
-            # between 1 and max whenever the overhead estimate hovers around
-            # the budget.
-            model_batch = int(max(headroom_ms, float(overhead_ms)) // max(0.05, float(marginal_ms)))
+            # small that the fixed overhead dominates. Idle fills may
+            # amortize down to half a marginal-cost share per item
+            # (2x overhead of work per commit); interaction keeps the
+            # per-commit stall at one share. A hard budget cutoff here would
+            # flap between 1 and max whenever the overhead estimate hovers
+            # around the budget.
+            amortize = 1.0 if interactive else 2.0
+            model_batch = int(max(headroom_ms, amortize * float(overhead_ms)) // max(0.05, float(marginal_ms)))
             batch = max(int(feedback.tuning.min_batch), min(int(batch_max), model_batch))
         default_byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
         byte_cap = default_byte_cap
@@ -315,6 +317,20 @@ class ResourceGovernor:
         if channel in _PRESENTATION_UPLOAD_CHANNELS and snapshot.last_count > 0 and snapshot.last_byte_count > 0:
             bytes_per_item = int(ceil(float(snapshot.last_byte_count) / max(1.0, float(snapshot.last_count))))
             byte_cap = max(int(byte_cap), int(bytes_per_item * max(1, batch)))
+        if presentation_model is not None:
+            byte_model = feedback.overhead_and_marginal_per_byte_ms(channel)
+            if byte_model is not None:
+                # The byte cap suffers the same misattribution as the item
+                # batch: fixed commit overhead folded into the per-byte rate
+                # shrank upload batches to a fraction of what the budget
+                # sustains.
+                amortize = 1.0 if interactive else 2.0
+                byte_overhead_ms, marginal_per_byte_ms = byte_model
+                byte_headroom_ms = float(control_budget) - float(byte_overhead_ms)
+                byte_cap = max(
+                    int(byte_cap),
+                    int(max(byte_headroom_ms, amortize * float(byte_overhead_ms)) / max(1e-12, float(marginal_per_byte_ms))),
+                )
         if (
             channel in _PRESENTATION_UPLOAD_CHANNELS
             and presentation_model is None
