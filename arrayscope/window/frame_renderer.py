@@ -1378,20 +1378,19 @@ class FrameRenderMixin:
                     tile_stage_candidates[int(tile.montage_index)] = candidate
                 continue
             if result.decision == "scheduled":
-                _direct_tiles, waiting_tiles = _lead_direct_tiles(tiles)
-                lead_direct_tile_count += len(_direct_tiles)
-                if waiting_tiles:
-                    stage_waiting_tiles[key] = list(waiting_tiles)
-                for tile in waiting_tiles:
+                # Compute the shared stage as a stage-lane job and keep every
+                # tile behind the fan-in. A montage-tile "lead" computing the
+                # stage inline runs it with the tile lane's single FFT worker
+                # while the whole montage waits; the stage lane gets the
+                # multi-worker FFT context. The stage cache's in-flight claim
+                # keeps any concurrent direct evaluation from duplicating it.
+                stage_waiting_tiles[key] = list(tiles)
+                for tile in tiles:
                     tile_stage_keys[int(tile.montage_index)] = key
                     tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
                     tile_stage_candidates[int(tile.montage_index)] = candidate
                     waiting_indices.add(int(tile.montage_index))
-                if _direct_tiles and _stage_fits_cache(candidate, self._memory_policy()):
-                    for tile in _direct_tiles:
-                        lead_stage_warmups[int(tile.montage_index)] = key
-                else:
-                    stage_requests.append((result.request, group["plan"]))
+                stage_requests.append((result.request, group["plan"]))
                 continue
             if result.decision == "attached":
                 stage_waiting_tiles[key] = list(tiles)
@@ -2102,8 +2101,6 @@ class FrameRenderMixin:
             if first_vispy_display and (getattr(session, "dirty_tiles", None) or getattr(session, "dirty_payloads", None)):
                 self._commit_montage_session_presentation(session, force=False)
                 first_visible_committed = bool(getattr(session, "display_committed", False))
-            for tile in processed_tiles:
-                self._resolve_lead_stage_warmup(session, tile)
             self._activate_cached_waiting_stages(session, release_missing=True)
             self._schedule_montage_cached_level_stats(session)
             if session.pending_tiles:
@@ -2154,36 +2151,12 @@ class FrameRenderMixin:
         session.dirty_tiles.append(int(tile.montage_index))
         return _rendered_tile_nbytes(rendered)
 
-    def _resolve_lead_stage_warmup(self, session, tile) -> None:
-        key = session.stage_fan_in.lead_warmups.pop(int(tile.montage_index), None)
-        if key is None:
-            return
-        cache = self.win.operation_evaluator.stage_cache
-        value = cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)
-        if value is not None:
-            self.win.operation_evaluator.stage_materializer.complete(key, value)
-            budget = self._montage_callback_budget(
-                "montage_stage_wait",
-                interactive=_interactive_active(self),
-                work_class="stage_wait_activation",
-            )
-            self._activate_montage_stage_value(session, key, value, budget=budget)
-            self._record_gui_budget(budget)
-            return
-        # The lead direct tile was expected to seed this reusable stage.  If it
-        # did not, drop the fake in-flight marker so the existing release path
-        # can fall back to direct work and still converge.
-        self.win.operation_evaluator.stage_materializer.cancel(key)
-
     def _on_montage_tile_error(self, session_id, tile, exc) -> None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, session.key):
             return
         if not self._is_current_render_generation(session.render_generation):
             return
-        key = session.stage_fan_in.lead_warmups.pop(int(tile.montage_index), None)
-        if key is not None:
-            self.win.operation_evaluator.stage_materializer.cancel(key)
         session.mark_skipped(tile)
         show_status_message(self.win, f"Montage tile update failed: {exc}", timeout=4000)
         self._schedule_montage_presentation_commit(session, force=True)
@@ -3465,25 +3438,12 @@ def _montage_tile_layer_placeholder(session) -> np.ndarray:
     return np.broadcast_to(base, (height, width))
 
 
-def _lead_direct_tiles(tiles, *, count: int = 1):
-    tiles = tuple(tiles)
-    count = max(0, min(int(count), len(tiles)))
-    return tiles[:count], tiles[count:]
-
-
 def _enqueue_session_pending_tile(session, tile) -> None:
     enqueue = getattr(session, "enqueue_pending_tile", None)
     if callable(enqueue):
         enqueue(tile)
         return
     session.pending_tiles.append(tile)
-
-
-def _stage_fits_cache(candidate, memory_policy) -> bool:
-    estimated = getattr(candidate, "estimated_nbytes", None)
-    if estimated is None:
-        return False
-    return int(estimated) <= int(getattr(memory_policy, "stage_cache_budget_bytes", 0) or 0)
 
 
 def _montage_tile_result_batch_limit(window, *, interactive: bool) -> int:

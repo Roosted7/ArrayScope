@@ -1188,7 +1188,11 @@ def test_montage_visible_tiles_do_not_define_relative_levels(qtbot, monkeypatch)
         win.close()
 
 
-def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypatch):
+def test_fft_montage_computes_shared_stage_on_stage_lane(qtbot, monkeypatch):
+    # The shared stage must run as a stage-lane job (multi-worker FFT
+    # context), with every tile waiting on the fan-in — not inline in a
+    # montage-tile lead, whose lane evaluates FFTs single-threaded while the
+    # whole montage waits on it.
     _clear_arrayscope_settings()
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.window import ArrayScopeWindow
@@ -1198,6 +1202,11 @@ def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypa
     stage_calls = []
     tile_calls = []
 
+    def capture_stage_call(fn, **kwargs):
+        kwargs["fn"] = fn
+        stage_calls.append(kwargs)
+        return len(stage_calls)
+
     def capture_tile_call(fn, **kwargs):
         kwargs["fn"] = fn
         tile_calls.append(kwargs)
@@ -1205,7 +1214,7 @@ def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypa
 
     try:
         _process_events(qtbot)
-        monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", lambda _fn, **kwargs: stage_calls.append(kwargs) or len(stage_calls))
+        monkeypatch.setattr(win.stage_evaluation_controller, "start_latest", capture_stage_call)
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_tile_call)
         win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
         win._set_document(win.operation_coordinator.document)
@@ -1213,15 +1222,17 @@ def test_fft_montage_uses_one_lead_tile_for_fitting_shared_stage(qtbot, monkeypa
 
         win.update_image_view()
 
-        assert stage_calls == []
-        assert len(tile_calls) == 1
-        assert win._montage_session.stage_fan_in.waiting_tiles
+        assert len(stage_calls) == 1
+        assert tile_calls == []
+        assert not win._montage_session.stage_fan_in.lead_warmups
+        assert win._montage_session.tile_compute_waiting_for_stage == 4
+        assert sum(len(tiles) for tiles in win._montage_session.stage_fan_in.waiting_tiles.values()) == 4
 
-        result = tile_calls[0]["fn"](None)
-        tile_calls[0]["on_done"](result)
+        result = stage_calls[0]["fn"](None)
+        stage_calls[0]["on_done"](result)
 
-        qtbot.waitUntil(lambda: len(tile_calls) > 1, timeout=1000)
-        assert not win._montage_session.stage_fan_in.waiting_tiles
+        qtbot.waitUntil(lambda: len(tile_calls) >= 1, timeout=1000)
+        qtbot.waitUntil(lambda: not win._montage_session.stage_fan_in.waiting_tiles, timeout=1000)
     finally:
         win.close()
 
@@ -1272,7 +1283,7 @@ def test_fft_montage_stage_cache_hit_keeps_per_tile_slab_plans(qtbot, monkeypatc
         win.close()
 
 
-def test_fft_montage_keeps_waiting_tiles_behind_in_flight_lead_warmup(qtbot, monkeypatch):
+def test_fft_montage_keeps_waiting_tiles_behind_in_flight_stage_job(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.window import ArrayScopeWindow
@@ -1292,14 +1303,17 @@ def test_fft_montage_keeps_waiting_tiles_behind_in_flight_lead_warmup(qtbot, mon
         win.update_image_view()
         win.update_image_view()
 
-        assert len(stage_calls) == 1
-        assert len(tile_calls) == 1
+        # A re-render while the shared stage is in flight must not release
+        # tiles to direct evaluation or schedule a different stage job.
+        assert len(stage_calls) >= 1
+        assert len({call["key"] for call in stage_calls}) == 1
+        assert tile_calls == []
         assert win._montage_session.stage_fan_in.waiting_tiles
     finally:
         win.close()
 
 
-def test_fft_montage_attached_stage_still_schedules_visible_lead_tile(qtbot, monkeypatch):
+def test_fft_montage_attached_stage_keeps_all_tiles_waiting(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.operations.stage_materialization import StageMaterializationResult

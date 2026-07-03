@@ -28,6 +28,12 @@ This file records user-visible release changes. Detailed development history and
   first computation instead of each running the full transform. New
   `compute_claims` / `compute_wait_reuses` stage-cache diagnostics make the
   deduplication observable.
+- A montage whose tiles share a reusable stage now always computes that
+  stage as a stage-lane job with the multi-worker FFT context, instead of
+  inline in a "lead" montage tile whose lane runs FFTs single-threaded.
+  The whole montage used to idle behind that one single-threaded transform
+  — the "slow start" where tiles only pour in near the end; the stage now
+  starts immediately and uses the configured FFT workers.
 - Scheduling responsiveness during interaction: resource-governor decisions
   (worker counts, drain batch limits, callback budgets) are now reapplied on
   interaction start/stop edges instead of waiting for the next 250 ms–1 s
