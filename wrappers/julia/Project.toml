@@ -1,0 +1,7 @@
+name = "ArrayScope"
+uuid = "9b2f61c4-7d3a-4e0b-a9c8-2f4d5e6a7b81"
+authors = ["ArrayScope contributors"]
+version = "0.1.0"
+
+[compat]
+julia = "1.6"

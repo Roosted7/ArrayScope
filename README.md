@@ -37,6 +37,18 @@ asc(data, block=True)
 
 When Qt already exists in the current process, ArrayScope avoids an unsafe fork. In IPython/Jupyter with `%gui qt`, it opens inline; without a running Qt event loop it falls back to blocking mode with a warning.
 
+From Julia or MATLAB, dependency-free wrappers in [`wrappers/`](wrappers/README.md) hand the array to a detached viewer process through a raw, memory-mapped `.npy` file — no in-process Python bridge, no compression, and the host session stays responsive:
+
+```julia
+arrayscope(vol; name="kspace")          # Julia
+```
+
+```matlab
+arrayscope(vol, 'name', 'kspace');      % MATLAB
+```
+
+See [Invocation](docs/invocation.md) for all routes and the handoff efficiency contract.
+
 ## What it does today
 
 ### Navigate and reshape the view

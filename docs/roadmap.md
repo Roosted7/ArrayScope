@@ -251,6 +251,11 @@ or decoding.
 Improve Jupyter and editor launch routes only when they call one stable semantic API. Avoid duplicating
 a frontend/state machine per host.
 
+Julia and MATLAB launch wrappers exist under `wrappers/` (2026-07-03) and follow this rule: both are
+thin adapters that write a raw `.npy` handoff and invoke the CLI (`--mmap --consume`), re-implementing
+no viewer behavior. The handoff contract is documented in [`invocation.md`](invocation.md) and pinned
+by `tests/io/test_language_handoff.py`.
+
 ## Explicitly not now
 
 - General plugin marketplace/layer ecosystem.

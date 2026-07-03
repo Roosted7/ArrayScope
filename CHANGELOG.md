@@ -2,6 +2,13 @@
 
 This file records user-visible release changes. Detailed development history and architecture decisions live under `docs/` and in Git.
 
+## Unreleased
+
+### Added
+
+- Julia and MATLAB invocation wrappers (`wrappers/julia`, `wrappers/matlab`) that open the viewer from those languages on Linux, macOS, and Windows with no in-process Python bridge. Arrays are handed off through a raw, uncompressed `.npy` file (single buffer write, native column-major layout) and loaded memory-mapped copy-on-write, so large arrays avoid compression, transposes, and eager second copies. See `docs/invocation.md`.
+- CLI flags supporting that route and general use: `--mmap` (copy-on-write memory-mapped `.npy` loading), `--consume` (delete a temporary handoff file once loaded), and `--title` (window title override).
+
 ## 0.8.0 — ArrayScope v28 release candidate
 
 This is the first ArrayScope release-candidate baseline after the rebrand from

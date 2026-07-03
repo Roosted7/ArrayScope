@@ -89,7 +89,7 @@ def test_cli_file_launch_blocks(monkeypatch, tmp_path):
     path.write_bytes(b"placeholder")
     calls = []
 
-    def fake_load_path(filepath):
+    def fake_load_path(filepath, *, mmap=False):
         assert filepath == path
         return SimpleNamespace(data=np.zeros((2, 2)), metadata={})
 
@@ -122,7 +122,7 @@ def test_cli_multi_file_launches_valid_paths_before_final_block(monkeypatch, tmp
         path.write_bytes(b"placeholder")
     events = []
 
-    def fake_load_path(filepath):
+    def fake_load_path(filepath, *, mmap=False):
         events.append(("load", filepath.name))
         if filepath == bad:
             raise RuntimeError("broken file")
@@ -244,3 +244,40 @@ def test_cli_multi_path_single_dataset_selector_opens_inline(monkeypatch, tmp_pa
         ("open", "single.npz", "arr", "FakeSelector", False),
         ("loop",),
     ]
+
+
+def test_cli_wrapper_handoff_flags(monkeypatch, tmp_path):
+    """--mmap/--consume/--title: the language-wrapper invocation contract."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from arrayscope import __main__ as cli
+
+    path = tmp_path / "kspace-123.npy"
+    path.write_bytes(b"placeholder")
+    seen = {}
+
+    def fake_load_path(filepath, *, mmap=False):
+        seen["mmap"] = mmap
+        return SimpleNamespace(data=np.zeros((2, 2)), metadata={"detected_format": "numpy"})
+
+    def fake_open_array_window(**kwargs):
+        seen["title"] = kwargs["title"]
+        seen["file_exists_at_open"] = kwargs["filepath"].exists()
+        return object()
+
+    monkeypatch.setattr(cli, "load_path", fake_load_path)
+    monkeypatch.setattr(cli, "_open_array_window", fake_open_array_window)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["arrayscope", "--mmap", "--consume", "--title", "kspace", str(path)],
+    )
+
+    cli.main()
+
+    assert seen["mmap"] is True
+    assert seen["title"] == "kspace"
+    # --consume removes the handoff file before the window opens.
+    assert seen["file_exists_at_open"] is False
+    assert not path.exists()

@@ -18,6 +18,7 @@ These documents should answer most product and planning questions.
 - [Rendering](architecture/rendering.md): semantic tiled presentations, frames, geometry, residency, and backends.
 - [Scheduling and memory](architecture/scheduling-and-memory.md): visible work, montage sessions, budgets, feedback, and cancellation.
 - [Interaction and UI](architecture/interaction-and-ui.md): widget/state boundaries, viewport behavior, ROI/profile interaction, and panels.
+- [Invocation](invocation.md): launch routes — Python API, CLI, Jupyter, and the Julia/MATLAB wrappers — and the handoff efficiency contract.
 
 Read only the deep dive related to the change being made.
 

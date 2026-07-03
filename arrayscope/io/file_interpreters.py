@@ -539,7 +539,16 @@ class TextLoader:
         return data
 
 
-def load_path(filepath):
+def load_path(filepath, *, mmap=False):
+    """Load a supported file into a LoadedPath.
+
+    With ``mmap=True``, ``.npy`` files are memory-mapped copy-on-write
+    (``mmap_mode='c'``) instead of read eagerly: pages are shared with the OS
+    page cache, reads are lazy, and in-place edits stay private to this
+    process without touching the file. This is the fast path used by the
+    Julia/MATLAB invocation wrappers (see ``wrappers/`` and
+    ``docs/invocation.md``); other formats ignore the flag.
+    """
     filepath = Path(filepath)
 
     if filepath.is_dir():
@@ -550,7 +559,7 @@ def load_path(filepath):
     suffix = data_file_suffix(filepath)
 
     if suffix == '.npy':
-        data = np.load(filepath)
+        data = np.load(filepath, mmap_mode='c' if mmap else None)
         return LoadedPath(
             data=data,
             metadata={
@@ -583,6 +592,21 @@ def load_path(filepath):
     }
     metadata.update(getattr(loader, 'metadata', {}))
     return LoadedPath(data=data, metadata=metadata)
+
+
+def consume_handoff_file(filepath):
+    """Best-effort removal of a temporary handoff file (wrapper invocation).
+
+    Returns True when the file was removed. On POSIX, unlinking succeeds even
+    while the file is memory-mapped (the mapping keeps the data alive until
+    the viewer closes). On Windows, unlinking a mapped file fails; the
+    language wrappers clean up stale handoff files on their next call.
+    """
+    try:
+        Path(filepath).unlink()
+        return True
+    except OSError:
+        return False
 
 
 
