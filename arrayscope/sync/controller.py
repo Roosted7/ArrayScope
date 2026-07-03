@@ -220,7 +220,13 @@ class WindowSyncController(Qt.QtCore.QObject):
         win.update_dimension_controls()
         win.update_complex_indicators()
         win.update_shift_indicators()
-        win.request_render(reason="sync-dims", interactive=True)
+        # A received dimension change is a discrete state application on this
+        # (often background) window, not a local interactive scrub. Render it
+        # directly like the other synced facets: the interactive render path
+        # defers behind a pending presentation draw, and a window that is not
+        # actively repainting never clears that, so an interactive request is
+        # starved and the frame never updates even though view_state changed.
+        win.request_render(reason="sync-dims", interactive=False)
 
     def _apply_operations(self, payload) -> None:
         win = self.win

@@ -183,3 +183,38 @@ def test_sync_does_not_feedback_loop(qtbot, make_window):
     assert dict(win_b.sync_controller._revisions) == revisions_b
     assert win_a.view_state.slice_indices[0] == 6
     assert win_b.view_state.slice_indices[0] == 6
+
+
+def test_dimension_sync_renders_receiver_even_with_pending_presentation_draw(qtbot, make_window):
+    """A received dimension change must re-render the receiver even when it is a
+    background window with a pending presentation draw.
+
+    Regression: _apply_dims used the interactive render path, which the render
+    coordinator defers behind a pending presentation draw. A window that is not
+    actively repainting never clears that flag, so the interactive request was
+    starved and the displayed frame never updated even though view_state did --
+    dimension sync looked completely broken while levels/operations/ROIs (which
+    render directly) worked.
+    """
+
+    win_a = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_b = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_a.sync_dims_button.setChecked(True)
+    win_b.sync_dims_button.setChecked(True)
+
+    # Simulate a background receiver whose presentation draw stays pending.
+    win_b.img_view.presentationDrawPending = lambda: True
+
+    rendered_reasons = []
+    original_render = win_b.renderer.render
+
+    def _tracking_render(*args, **kwargs):
+        rendered_reasons.append(kwargs.get("reason"))
+        return original_render(*args, **kwargs)
+
+    win_b.renderer.render = _tracking_render
+
+    win_a.widgets["spins"]["slice_indices"][2].setValue(3)
+    _settled(qtbot, lambda: win_b.view_state.slice_indices[2] == 3)
+    # The frame must actually render, not just the view_state update.
+    _settled(qtbot, lambda: any("sync-dims" in (reason or "") for reason in rendered_reasons))
