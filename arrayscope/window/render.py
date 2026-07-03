@@ -904,12 +904,36 @@ class RenderOrchestrator(
         return False
 
     def request_render(self, *, reason: str, force_autolevel: bool = False, interactive: bool = False) -> None:
-        self._advance_render_generation(f"request:{reason}")
         coordinator = getattr(self.win, "render_coordinator", None)
         if coordinator is None:
+            self._advance_render_generation(f"request:{reason}")
             self.render(reason=reason, force_autolevel=force_autolevel)
             return
-        coordinator.request(reason=reason, force_autolevel=force_autolevel, interactive=interactive)
+        target_key = self._render_request_key()
+        if coordinator.has_equivalent_pending(
+            reason=reason,
+            force_autolevel=force_autolevel,
+            interactive=interactive,
+            target_key=target_key,
+        ):
+            return
+        self._advance_render_generation(f"request:{reason}")
+        coordinator.request(
+            reason=reason,
+            force_autolevel=force_autolevel,
+            interactive=interactive,
+            target_key=target_key,
+        )
+
+    def _render_request_key(self):
+        document = getattr(self.win, "document", None)
+        return (
+            None if document is None else _document_key(document),
+            getattr(self.win, "view_state", None),
+            getattr(self.win, "current_colormap", None),
+            self._pending_display_levels_for_render(),
+            self._current_window_mode(),
+        )
 
     def _advance_render_generation(self, reason: str) -> int:
         generation = getattr(self, "_render_generation", None)

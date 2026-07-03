@@ -53,6 +53,35 @@ def test_rapid_slice_burst_renders_only_latest_state(qtbot, monkeypatch):
         win.close()
 
 
+def test_duplicate_pending_render_request_is_ignored(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=float).reshape(4, 5, 8))
+    qtbot.addWidget(win)
+    advances = []
+    renders = []
+    monkeypatch.setattr(
+        win.renderer,
+        "_advance_render_generation",
+        lambda reason: advances.append(reason) or len(advances),
+    )
+    monkeypatch.setattr(win, "render", lambda **kwargs: renders.append(kwargs))
+    try:
+        _process_events(qtbot, count=2)
+        win.request_render(reason="same-state", interactive=False)
+        win.request_render(reason="same-state", interactive=False)
+
+        assert advances == ["request:same-state"]
+        assert win.render_coordinator.requested == 1
+        assert win.render_coordinator.coalesced == 0
+
+        _process_events(qtbot, count=3)
+        assert [call["reason"] for call in renders] == ["same-state"]
+    finally:
+        win.close()
+
+
 def test_coalescer_throttles_without_starving_continuous_bursts(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

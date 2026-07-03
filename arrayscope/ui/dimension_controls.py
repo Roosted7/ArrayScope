@@ -15,21 +15,10 @@ from arrayscope.ui.toasts import show_status_message
 
 class DimensionControlMixin:
     def update_shift_indicators(self):
-        for i, shift_label in enumerate(self.widgets['labels']['shift']):
-            if i >= self.data.ndim:
-                shift_label.setText('')
-                shift_label.setToolTip('')
-                shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
-                continue
-            if self.singleton[i]:
-                shift_label.setText('')
-                shift_label.setToolTip('')
-                shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
-                continue
-
+        for shift_label in self.widgets['labels']['shift']:
             shift_label.setText('')
-            shift_label.setToolTip('')
-            shift_label.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
+            _set_tooltip_if_changed(shift_label, '')
+            _set_cursor_if_changed(shift_label, Qt.QtCore.Qt.CursorShape.ArrowCursor)
     
     def flipAxisClicked(self, event, dim):
         """Handle click on flip axis icon"""
@@ -109,24 +98,41 @@ class DimensionControlMixin:
 
     def update_complex_indicators(self):
         """Initialize or update indicators for dimensions that can be combined as complex."""
+        state = getattr(self, "_complex_indicator_state", None)
+        if state is None:
+            state = {}
+            self._complex_indicator_state = state
         for i in range(self.data.ndim):
             indicator = self.widgets['labels']['complex'][i]
             
             if self.combined_as_complex[i]:
-                set_label_icon(indicator, "functions")
-                indicator.setStyleSheet(self.FLIP_ICON_STYLE + " QLabel {font-weight: bold; }")
-                indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
-                indicator.setToolTip(f'Split to real')
+                _set_complex_indicator_state(
+                    indicator,
+                    state,
+                    "functions",
+                    self.FLIP_ICON_STYLE + " QLabel {font-weight: bold; }",
+                    Qt.QtCore.Qt.CursorShape.PointingHandCursor,
+                    "Split to real",
+                )
             elif self.can_combine_as_complex[i]:
-                set_label_icon(indicator, "data_object")
-                indicator.setStyleSheet(self.FLIP_ICON_STYLE + " QLabel {font-weight: bold; }")
-                indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.PointingHandCursor))
-                indicator.setToolTip(f'Combine as complex')
+                _set_complex_indicator_state(
+                    indicator,
+                    state,
+                    "data_object",
+                    self.FLIP_ICON_STYLE + " QLabel {font-weight: bold; }",
+                    Qt.QtCore.Qt.CursorShape.PointingHandCursor,
+                    "Combine as complex",
+                )
             else:
                 # No indicator, already-complex data or non-size-2 dimensions
-                clear_label_icon(indicator)
-                indicator.setToolTip('')
-                indicator.setCursor(QtGui.QCursor(Qt.QtCore.Qt.CursorShape.ArrowCursor))
+                _set_complex_indicator_state(
+                    indicator,
+                    state,
+                    None,
+                    "",
+                    Qt.QtCore.Qt.CursorShape.ArrowCursor,
+                    "",
+                )
 
     def _update_channel_controls(self):
         """Keep channel options in sync with the current array dtype."""
@@ -491,6 +497,37 @@ def _set_flip_label_state(label, state, icon_name, tooltip: str, cursor_shape) -
         clear_label_icon(label)
     else:
         set_label_icon(label, icon_name)
-    label.setToolTip(str(tooltip or ""))
-    label.setCursor(QtGui.QCursor(cursor_shape))
+    _set_tooltip_if_changed(label, tooltip)
+    _set_cursor_if_changed(label, cursor_shape)
     state[label] = key
+
+
+def _set_complex_indicator_state(label, state, icon_name, style: str, cursor_shape, tooltip: str) -> None:
+    key = (None if icon_name is None else str(icon_name), str(style or ""), cursor_shape, str(tooltip or ""))
+    if state.get(label) == key:
+        return
+    if icon_name is None:
+        clear_label_icon(label)
+    else:
+        set_label_icon(label, icon_name)
+    _set_stylesheet_if_changed(label, style)
+    _set_tooltip_if_changed(label, tooltip)
+    _set_cursor_if_changed(label, cursor_shape)
+    state[label] = key
+
+
+def _set_tooltip_if_changed(widget, tooltip: str) -> None:
+    tooltip = str(tooltip or "")
+    if widget.toolTip() != tooltip:
+        widget.setToolTip(tooltip)
+
+
+def _set_stylesheet_if_changed(widget, stylesheet: str) -> None:
+    stylesheet = str(stylesheet or "")
+    if widget.styleSheet() != stylesheet:
+        widget.setStyleSheet(stylesheet)
+
+
+def _set_cursor_if_changed(widget, cursor_shape) -> None:
+    if widget.cursor().shape() != cursor_shape:
+        widget.setCursor(QtGui.QCursor(cursor_shape))

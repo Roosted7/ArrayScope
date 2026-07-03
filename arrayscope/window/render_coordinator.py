@@ -16,6 +16,7 @@ class RenderRequest:
     reason: str
     force_autolevel: bool = False
     interactive: bool = False
+    target_key: object = None
 
 
 class RenderCoordinator(Qt.QtCore.QObject):
@@ -64,18 +65,44 @@ class RenderCoordinator(Qt.QtCore.QObject):
     def has_pending_render(self) -> bool:
         return self._pending_request is not None
 
-    def request(self, *, reason: str, force_autolevel: bool = False, interactive: bool = False) -> None:
-        if getattr(self._window, "_closing", False):
-            return
-        self._connect_presentation_draw_signal()
-        self.requested += 1
-        if self._pending_request is not None:
-            self.coalesced += 1
-        self._pending_request = RenderRequest(
+    def has_equivalent_pending(
+        self,
+        *,
+        reason: str,
+        force_autolevel: bool = False,
+        interactive: bool = False,
+        target_key=None,
+    ) -> bool:
+        return self._pending_request == RenderRequest(
             reason=str(reason),
             force_autolevel=bool(force_autolevel),
             interactive=bool(interactive),
+            target_key=target_key,
         )
+
+    def request(
+        self,
+        *,
+        reason: str,
+        force_autolevel: bool = False,
+        interactive: bool = False,
+        target_key=None,
+    ) -> bool:
+        if getattr(self._window, "_closing", False):
+            return False
+        self._connect_presentation_draw_signal()
+        request = RenderRequest(
+            reason=str(reason),
+            force_autolevel=bool(force_autolevel),
+            interactive=bool(interactive),
+            target_key=target_key,
+        )
+        if self._pending_request == request:
+            return False
+        self.requested += 1
+        if self._pending_request is not None:
+            self.coalesced += 1
+        self._pending_request = request
         if interactive:
             self._interactive_active = True
             cache_hit = self._interactive_cache_hit()
@@ -96,8 +123,9 @@ class RenderCoordinator(Qt.QtCore.QObject):
                 self._flush_timer()
             elif not self._render_timer.isActive():
                 self._render_timer.start(self._interactive_interval_ms)
-            return
+            return True
         self._render_timer.start(0)
+        return True
 
     def flush_now(self) -> None:
         self._render_timer.stop()
