@@ -212,7 +212,7 @@ class DimensionControlMixin:
                 self._set_view_state(self.view_state.with_axis_flipped(axis, not self._axis_flipped(axis)))
                 self.update_flip_icons()
                 if hasattr(self, "dimension_strip"):
-                    self.dimension_strip.update_axis_state(axis, self.data.shape, self.view_state, self.profile_axes)
+                    self.dimension_strip.update_axis_state(axis, self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes)
                 self.apply_axis_flips()
                 return
             previous = self.view_state
@@ -350,7 +350,7 @@ class DimensionControlMixin:
         self.update_flip_icons()
         self.update_shift_indicators()
         if hasattr(self, "dimension_strip"):
-            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
+            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes)
             for container in getattr(self, "dim_containers", []):
                 container.hide()
     

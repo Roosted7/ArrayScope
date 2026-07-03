@@ -4,9 +4,11 @@ import struct
 import subprocess
 import tempfile
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import shutil
+
+from arrayscope.core.axis_info import AxisInfo, default_axes
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -16,6 +18,47 @@ _LOGGER = logging.getLogger(__name__)
 class LoadedPath:
     data: object  # np.ndarray, or LazySourceArray for lazily opened sources
     metadata: dict
+    axes: tuple | None = None
+
+
+def _axes_matching_shape(axes, shape):
+    """Reconcile loader-provided axis metadata with the final data shape.
+
+    Loaders describe axes for the array they intend to produce, but trailing
+    singleton removal can shorten the shape. Trim trailing axis entries in that
+    case; discard the metadata entirely when it cannot be aligned.
+    """
+    if axes is None:
+        return None
+    axes = tuple(axes)
+    shape = tuple(int(size) for size in shape)
+    if len(axes) > len(shape):
+        axes = axes[: len(shape)]
+    if len(axes) != len(shape):
+        return None
+    if any(axis.size != size for axis, size in zip(axes, shape)):
+        return None
+    return axes
+
+
+def _labeled_axes(shape, labels=(), units=(), spacings=()):
+    """Build axis metadata from per-axis label/unit/spacing sequences.
+
+    Shorter sequences describe only the leading axes; `None` entries keep the
+    conservative default for that axis.
+    """
+    axes = list(default_axes(shape))
+    for index in range(len(axes)):
+        label = labels[index] if index < len(labels) else None
+        unit = units[index] if index < len(units) else None
+        spacing = spacings[index] if index < len(spacings) else None
+        if label is not None:
+            axes[index] = replace(axes[index], label=str(label))
+        if unit is not None:
+            axes[index] = replace(axes[index], unit=str(unit))
+        if spacing is not None and float(spacing) != 0.0:
+            axes[index] = replace(axes[index], spacing=float(spacing))
+    return tuple(axes)
 
 
 def remove_trailing_singletons(data):
@@ -211,7 +254,9 @@ class PhilipsRECLoader:
             for img_idx in range(len(self.image_infos)):
                 self._next_slice(fid, img_idx)
 
-        return remove_trailing_singletons(self.data)
+        data = remove_trailing_singletons(self.data)
+        self.axes = _labeled_axes(data.shape, labels=_PHILIPS_REC_AXIS_LABELS)
+        return data
 
 
 class BartLoader:
@@ -280,6 +325,7 @@ class DicomLoader:
             )
 
         data = remove_trailing_singletons(np.asarray(dcm.pixel_array))
+        self.axes = _dicom_axes(dcm, data.shape)
         self.metadata.update({
             'shape': tuple(data.shape),
             'dtype': str(data.dtype),
@@ -292,6 +338,46 @@ class DicomLoader:
             },
         })
         return data
+
+
+def _dicom_axes(dcm, shape):
+    """Axis metadata for single-file DICOM pixel data (rows/cols, optional frames)."""
+    if len(shape) < 2:
+        return None
+    labels = [None] * len(shape)
+    units = [None] * len(shape)
+    spacings = [None] * len(shape)
+    row_axis = len(shape) - 2
+    column_axis = len(shape) - 1
+    labels[row_axis] = "Row"
+    labels[column_axis] = "Column"
+    pixel_spacing = getattr(dcm, 'PixelSpacing', None)
+    if pixel_spacing is not None and len(pixel_spacing) == 2:
+        spacings[row_axis] = float(pixel_spacing[0])
+        spacings[column_axis] = float(pixel_spacing[1])
+        units[row_axis] = "mm"
+        units[column_axis] = "mm"
+    if len(shape) == 3:
+        labels[0] = "Frame"
+        frame_spacing = getattr(dcm, 'SpacingBetweenSlices', None)
+        if frame_spacing is None:
+            frame_spacing = getattr(dcm, 'SliceThickness', None)
+        if frame_spacing is not None and float(frame_spacing) != 0.0:
+            spacings[0] = float(frame_spacing)
+            units[0] = "mm"
+    return _labeled_axes(shape, labels=labels, units=units, spacings=spacings)
+
+
+_PHILIPS_REC_AXIS_LABELS = (
+    "X",
+    "Y",
+    "Slice",
+    "Echo",
+    "Grad Orient",
+    "B Value",
+    "Phase",
+    "Dynamic",
+)
 
 
 def _find_dicom_files(directory_path):
@@ -403,6 +489,7 @@ class DicomDirectoryLoader:
         with tempfile.TemporaryDirectory(prefix='arrayscope_dicom_') as temp_dir:
             nifti_outputs = _run_dcm2niix(self.directory_path, temp_dir)
             arrays = []
+            array_axes = []
             nifti_paths = []
             json_paths = []
             sidecar_metadata = []
@@ -410,12 +497,14 @@ class DicomDirectoryLoader:
             for nifti_path, json_path in nifti_outputs:
                 nifti_loader = NiftiLoader(nifti_path)
                 arrays.append(nifti_loader.load())
+                array_axes.append(getattr(nifti_loader, 'axes', None))
                 nifti_paths.append(str(nifti_path))
                 json_paths.append(str(json_path) if json_path else None)
                 sidecar_metadata.append(_read_json_sidecar(json_path))
 
             if len(arrays) == 1:
                 data = arrays[0]
+                self.axes = array_axes[0]
                 stacking_label = None
                 stacking_key = None
                 stacking_values = None
@@ -437,6 +526,7 @@ class DicomDirectoryLoader:
                     if any(description is not None for description in series_descriptions):
                         _LOGGER.info("  SeriesDescription: %s", series_descriptions)
                 data = np.stack(arrays, axis=-1)
+                self.axes = _stacked_axes(array_axes[0], data.shape, stacking_label)
 
             self.metadata.update({
                 'shape': tuple(data.shape),
@@ -448,6 +538,20 @@ class DicomDirectoryLoader:
                 'stacked_dimension_values': stacking_values,
             })
             return data
+
+
+def _stacked_axes(base_axes, shape, stacking_label):
+    """Axis metadata for series stacked along a new trailing axis."""
+    if base_axes is None or len(base_axes) != len(shape) - 1:
+        base_axes = default_axes(shape[:-1])
+    stacked_index = len(shape) - 1
+    stacked = AxisInfo(
+        id=f"axis-{stacked_index}",
+        label=str(stacking_label).capitalize() if stacking_label else f"Dim {stacked_index}",
+        size=int(shape[-1]),
+        source_index=stacked_index,
+    )
+    return tuple(base_axes) + (stacked,)
 
 
 class NiftiLoader:
@@ -469,14 +573,45 @@ class NiftiLoader:
                 "nibabel is required to read NIfTI files.\n"
                 "Install it with: pip install nibabel"
             )
-        
-        data = nib.load(self.file_path).get_fdata()
+
+        image = nib.load(self.file_path)
+        data = image.get_fdata()
         data = remove_trailing_singletons(data)
+        self.axes = _nifti_axes(image.header, data.shape)
         self.metadata.update({
             'shape': tuple(data.shape),
             'dtype': str(data.dtype),
         })
         return data
+
+
+def _nifti_axes(header, shape):
+    """Axis metadata from a NIfTI header: zooms as spacing, xyzt units.
+
+    Axis names stay conservative defaults; NIfTI does not name axes, and
+    ArrayScope does not force sources into a medical-imaging model.
+    """
+    try:
+        zooms = tuple(float(zoom) for zoom in header.get_zooms())
+    except Exception:
+        zooms = ()
+    try:
+        space_unit, time_unit = header.get_xyzt_units()
+    except Exception:
+        space_unit, time_unit = None, None
+    space_unit = _unit_or_none(space_unit)
+    time_unit = _unit_or_none(time_unit)
+    units = tuple(
+        space_unit if index < 3 else (time_unit if index == 3 else None)
+        for index in range(len(shape))
+    )
+    return _labeled_axes(shape, units=units, spacings=zooms)
+
+
+def _unit_or_none(unit):
+    if unit in (None, "", "unknown"):
+        return None
+    return str(unit)
 
 
 class TextLoader:
@@ -561,7 +696,11 @@ def load_path(filepath, *, mmap=False, lazy="auto", lazy_threshold_bytes=None):
     if filepath.is_dir():
         loader = DicomDirectoryLoader(filepath)
         data = loader.load()
-        return LoadedPath(data=data, metadata=loader.metadata)
+        return LoadedPath(
+            data=data,
+            metadata=loader.metadata,
+            axes=_axes_matching_shape(getattr(loader, 'axes', None), data.shape),
+        )
 
     suffix = data_file_suffix(filepath)
 
@@ -603,7 +742,11 @@ def load_path(filepath, *, mmap=False, lazy="auto", lazy_threshold_bytes=None):
         'dtype': str(data.dtype),
     }
     metadata.update(getattr(loader, 'metadata', {}))
-    return LoadedPath(data=data, metadata=metadata)
+    return LoadedPath(
+        data=data,
+        metadata=metadata,
+        axes=_axes_matching_shape(getattr(loader, 'axes', None), data.shape),
+    )
 
 
 def consume_handoff_file(filepath):

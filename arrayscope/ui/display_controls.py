@@ -304,8 +304,8 @@ class DisplayControlBuildMixin:
         self.layouts['dims'].addWidget(self.sync_dims_button, 0, Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
         self.state_binder.bind(
             "dimension-strip",
-            read=lambda win: (tuple(win.data.shape), win.view_state, tuple(win.profile_axes)),
-            apply=lambda value: self.dimension_strip.update_state(value[0], value[1], value[2]),
+            read=lambda win: (tuple(win.data.shape), win.view_state, tuple(win.profile_axes), win.document.current_axes),
+            apply=lambda value: self.dimension_strip.update_state(value[0], value[1], value[2], axes=value[3]),
         )
         for axis in range(data.ndim):
             self.state_binder.bind(
@@ -313,10 +313,12 @@ class DisplayControlBuildMixin:
                 read=lambda win, axis=axis: (
                     None
                     if axis >= win.data.ndim
-                    else (tuple(win.data.shape), win.view_state, tuple(win.profile_axes))
+                    else (tuple(win.data.shape), win.view_state, tuple(win.profile_axes), win.document.current_axes)
                 ),
                 apply=lambda value, axis=axis: (
-                    None if value is None else self.dimension_strip.update_axis_state(axis, value[0], value[1], value[2])
+                    None
+                    if value is None
+                    else self.dimension_strip.update_axis_state(axis, value[0], value[1], value[2], axes=value[3])
                 ),
                 on_demand=True,
             )

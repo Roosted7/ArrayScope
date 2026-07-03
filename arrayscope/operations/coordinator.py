@@ -12,9 +12,9 @@ from arrayscope.operations.stack import delete_step, move_step, reorder_steps, r
 
 
 class OperationCoordinator:
-    def __init__(self, base_data, operations=()):
+    def __init__(self, base_data, operations=(), *, axes=None):
         self.base_data = base_data
-        self.document = ArrayDocument(base_data, operations=tuple(operations))
+        self.document = ArrayDocument(base_data, operations=tuple(operations), axes=axes)
         self.evaluator = OperationEvaluator(self.document)
         self._reject_scalar(self.document)
 

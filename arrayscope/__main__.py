@@ -13,7 +13,7 @@ from arrayscope.io.file_interpreters import consume_handoff_file, data_file_suff
 _CLI_WINDOWS = []
 
 
-def _open_array_window(*, data, title, block, filepath, dataset_path=None, selector_class_name=None):
+def _open_array_window(*, data, title, block, filepath, dataset_path=None, selector_class_name=None, axes=None):
     if block:
         return arrayscope(
             data=data,
@@ -22,6 +22,7 @@ def _open_array_window(*, data, title, block, filepath, dataset_path=None, selec
             filepath=filepath,
             dataset_path=dataset_path,
             selector_class_name=selector_class_name,
+            axes=axes,
         )
     from arrayscope.app.launch import _create_window
 
@@ -31,6 +32,7 @@ def _open_array_window(*, data, title, block, filepath, dataset_path=None, selec
         filepath=filepath,
         dataset_path=dataset_path,
         selector_class_name=selector_class_name,
+        axes=axes,
     )
     _CLI_WINDOWS.append(win)
     return win
@@ -66,7 +68,8 @@ def _open_loaded_file(filepath: Path, *, block: bool, mmap: bool = False,
         if detected_format:
             suffix = ", lazy" if loaded.metadata.get('lazy') else ""
             title = f"{title} [{detected_format}{suffix}]"
-    _open_array_window(data=loaded.data, title=title, block=block, filepath=filepath)
+    _open_array_window(data=loaded.data, title=title, block=block, filepath=filepath,
+                       axes=getattr(loaded, "axes", None))
     return not block
 
 

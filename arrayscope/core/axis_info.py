@@ -14,6 +14,8 @@ class AxisInfo:
     unit: str | None = None
     coordinate: str | None = None
     source_index: int | None = None
+    spacing: float | None = None
+    origin: float | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "id", str(self.id))
@@ -27,6 +29,13 @@ class AxisInfo:
             object.__setattr__(self, "coordinate", str(self.coordinate))
         if self.source_index is not None:
             object.__setattr__(self, "source_index", int(self.source_index))
+        if self.spacing is not None:
+            spacing = float(self.spacing)
+            if spacing == 0.0:
+                raise ValueError("axis spacing must be nonzero")
+            object.__setattr__(self, "spacing", spacing)
+        if self.origin is not None:
+            object.__setattr__(self, "origin", float(self.origin))
 
 
 AxisInfoTuple = Tuple[AxisInfo, ...]
@@ -37,6 +46,41 @@ def default_axes(shape) -> AxisInfoTuple:
         AxisInfo(id=f"axis-{axis}", label=f"Dim {axis}", size=int(size), source_index=axis)
         for axis, size in enumerate(shape)
     )
+
+
+def default_label(index) -> str:
+    return f"Dim {int(index)}"
+
+
+def has_custom_label(axis_info, index) -> bool:
+    return bool(axis_info.label) and axis_info.label != default_label(index)
+
+
+def axis_display_name(axis_info, index) -> str:
+    """Short name for compact UI surfaces: custom label if set, else the position."""
+    if axis_info is not None and has_custom_label(axis_info, index):
+        return axis_info.label
+    return str(int(index))
+
+
+def axis_metadata_summary(axis_info) -> str:
+    """Human-readable one-per-line metadata summary for tooltips/status surfaces."""
+    parts = [f"{axis_info.label} [{axis_info.size}]"]
+    if axis_info.unit is not None:
+        parts.append(f"unit: {axis_info.unit}")
+    if axis_info.spacing is not None:
+        spacing_text = f"spacing: {axis_info.spacing:g}"
+        if axis_info.unit is not None:
+            spacing_text += f" {axis_info.unit}"
+        parts.append(spacing_text)
+    if axis_info.origin is not None:
+        origin_text = f"origin: {axis_info.origin:g}"
+        if axis_info.unit is not None:
+            origin_text += f" {axis_info.unit}"
+        parts.append(origin_text)
+    if axis_info.coordinate is not None:
+        parts.append(f"coordinate: {axis_info.coordinate}")
+    return "\n".join(parts)
 
 
 def axes_for_shape(axes, shape) -> AxisInfoTuple:
@@ -60,19 +104,51 @@ def output_axes_for_operation(axes, operation) -> AxisInfoTuple:
     name = type(operation).__name__
     if name in {"Crop"}:
         axis = _axis(operation, axes)
-        return _replace_axis_size(axes, axis, int(operation.stop) - int(operation.start))
-    if name in {"ReverseAxis", "FFTShift", "CenteredFFT", "CenteredIFFT", "Conjugate"}:
+        return _replace_axis(axes, axis, _cropped_axis(axes[axis], int(operation.start), int(operation.stop)))
+    if name in {"ReverseAxis"}:
+        axis = _axis(operation, axes)
+        return _replace_axis(axes, axis, _reversed_axis(axes[axis]))
+    if name in {"FFTShift"}:
+        # Samples are rotated, so index->coordinate mapping is no longer affine.
+        axis = _axis(operation, axes)
+        return _replace_axis(axes, axis, replace(axes[axis], spacing=None, origin=None))
+    if name in {"CenteredFFT", "CenteredIFFT"}:
+        # The axis moves to a reciprocal domain; physical unit/spacing no longer apply.
+        axis = _axis(operation, axes)
+        return _replace_axis(axes, axis, replace(axes[axis], unit=None, spacing=None, origin=None))
+    if name in {"Conjugate"}:
         return tuple(axes)
     if name in {"Mean", "Sum", "Maximum", "Minimum", "RootSumSquares"}:
         axis = _axis(operation, axes)
         return tuple(axis_info for index, axis_info in enumerate(axes) if index != axis)
     if name in {"CombineRealImagAxis"}:
         axis = _axis(operation, axes)
-        return _replace_axis(axes, axis, replace(axes[axis], size=1, coordinate="complex"))
+        return _replace_axis(
+            axes, axis, replace(axes[axis], size=1, coordinate="complex", unit=None, spacing=None, origin=None)
+        )
     if name in {"SplitComplexAxis"}:
         axis = _axis(operation, axes)
-        return _replace_axis(axes, axis, replace(axes[axis], size=2, coordinate="real-imag"))
+        return _replace_axis(
+            axes, axis, replace(axes[axis], size=2, coordinate="real-imag", unit=None, spacing=None, origin=None)
+        )
     return tuple(axes)
+
+
+def _cropped_axis(axis_info, start, stop) -> AxisInfo:
+    origin = axis_info.origin
+    if origin is not None and axis_info.spacing is not None:
+        origin = origin + start * axis_info.spacing
+    return replace(axis_info, size=stop - start, origin=origin)
+
+
+def _reversed_axis(axis_info) -> AxisInfo:
+    spacing = axis_info.spacing
+    origin = axis_info.origin
+    if origin is not None and spacing is not None:
+        origin = origin + (axis_info.size - 1) * spacing
+    if spacing is not None:
+        spacing = -spacing
+    return replace(axis_info, spacing=spacing, origin=origin)
 
 
 def _coerce_axis_info(axis) -> AxisInfo:
@@ -90,12 +166,7 @@ def _axis(operation, axes) -> int:
     return axis
 
 
-def _replace_axis_size(axes, axis, size):
-    return _replace_axis(axes, axis, replace(axes[axis], size=int(size)))
-
-
 def _replace_axis(axes, axis, axis_info):
     result = list(axes)
     result[int(axis)] = axis_info
     return tuple(result)
-

@@ -211,7 +211,7 @@ class StateSyncMixin:
             if ndim == 1:
                 self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="one-dimensional")
         if hasattr(self, "dimension_strip"):
-            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes)
+            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes)
 
         self.update_complex_indicators()
         self.update_shift_indicators()

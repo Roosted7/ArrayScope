@@ -69,6 +69,58 @@ def test_dimension_strip_wraps_to_allocated_width(qt_app):
     strip.close()
 
 
+def test_chip_labels_show_axis_metadata_when_available(qt_app):
+    from arrayscope.core.axis_info import AxisInfo, default_axes
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.ui.dimension_strip import DimensionStrip
+
+    strip = DimensionStrip(3)
+    state = ViewState.from_shape((4, 5, 6))
+    axes = (
+        AxisInfo("readout", "Readout", 4, unit="mm", spacing=1.5),
+        AxisInfo("axis-1", "Dim 1", 5),
+        AxisInfo("slice", "Slice", 6, unit="mm", spacing=3.0, origin=-9.0),
+    )
+
+    strip.update_state((4, 5, 6), state, profile_axes=(2,), axes=axes)
+
+    assert strip.chip(0).axis_label.text() == "Readout [4]"
+    assert strip.chip(1).axis_label.text() == "1 [5]"
+    assert strip.chip(2).axis_label.text() == "Slice [6]"
+    assert "spacing: 1.5 mm" in strip.chip(0).axis_label.toolTip()
+    assert "origin: -9 mm" in strip.chip(2).axis_label.toolTip()
+
+    # Default axes keep the compact positional label.
+    strip.update_state((4, 5, 6), state, profile_axes=(2,), axes=default_axes((4, 5, 6)))
+    assert strip.chip(0).axis_label.text() == "0 [4]"
+
+    # Without metadata, behavior is unchanged.
+    strip.update_state((4, 5, 6), state, profile_axes=(2,))
+    assert strip.chip(0).axis_label.text() == "0 [4]"
+    strip.close()
+
+
+def test_chip_ignores_axes_that_do_not_match_shape(qt_app):
+    from arrayscope.core.axis_info import AxisInfo
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.ui.dimension_strip import DimensionStrip
+
+    strip = DimensionStrip(2)
+    state = ViewState.from_shape((4, 5))
+
+    strip.update_state((4, 5), state, axes=(AxisInfo("readout", "Readout", 4),))
+
+    assert strip.chip(0).axis_label.text() == "0 [4]"
+    strip.close()
+
+
+def test_long_axis_labels_are_elided(qt_app):
+    from arrayscope.ui.dimension_strip import _elide
+
+    assert _elide("Slice") == "Slice"
+    assert _elide("A Very Long Axis Label") == "A Very Long…"
+
+
 def test_slice_selection_validator_rejects_unsupported_characters(qt_app):
     from PySide6 import QtGui
 

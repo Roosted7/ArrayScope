@@ -85,7 +85,7 @@ def _retain_window_reference(app, win):
 
 
 def _create_window(data, title="", complex_dim=None, filepath=None,
-                   dataset_path=None, selector_class_name=None):
+                   dataset_path=None, selector_class_name=None, axes=None):
     _prepare_qt_environment()
 
     app = pg.mkQApp()
@@ -99,6 +99,7 @@ def _create_window(data, title="", complex_dim=None, filepath=None,
         filepath=filepath,
         dataset_path=dataset_path,
         selector_class_name=selector_class_name,
+        axes=axes,
     )
     win.setWindowTitle(title)
     win.show()
@@ -107,7 +108,7 @@ def _create_window(data, title="", complex_dim=None, filepath=None,
 
 
 def _run_window(data, title="", complex_dim=None, filepath=None,
-                dataset_path=None, selector_class_name=None):
+                dataset_path=None, selector_class_name=None, axes=None):
     """Open a viewer window in this process and block on the Qt event loop."""
     try:
         app, _win = _create_window(
@@ -117,6 +118,7 @@ def _run_window(data, title="", complex_dim=None, filepath=None,
             filepath=filepath,
             dataset_path=dataset_path,
             selector_class_name=selector_class_name,
+            axes=axes,
         )
         return app.exec()
     except BaseException:
@@ -126,7 +128,7 @@ def _run_window(data, title="", complex_dim=None, filepath=None,
 
 
 def _show_window_inline(data, title="", complex_dim=None, filepath=None,
-                        dataset_path=None, selector_class_name=None):
+                        dataset_path=None, selector_class_name=None, axes=None):
     """Open a viewer window in this process without starting app.exec()."""
     app, win = _create_window(
         data,
@@ -135,6 +137,7 @@ def _show_window_inline(data, title="", complex_dim=None, filepath=None,
         filepath=filepath,
         dataset_path=dataset_path,
         selector_class_name=selector_class_name,
+        axes=axes,
     )
 
     _retain_window_reference(app, win)
@@ -143,7 +146,7 @@ def _show_window_inline(data, title="", complex_dim=None, filepath=None,
 
 
 def arrayscope(data, title="", block=False, complex_dim=None, filepath=None,
-               dataset_path=None, selector_class_name=None):
+               dataset_path=None, selector_class_name=None, axes=None):
     if not isinstance(data, np.ndarray):
         raise TypeError("data must be a numpy array")
     if data.ndim < 1:
@@ -153,6 +156,7 @@ def arrayscope(data, title="", block=False, complex_dim=None, filepath=None,
         "filepath": filepath,
         "dataset_path": dataset_path,
         "selector_class_name": selector_class_name,
+        "axes": axes,
     }
 
     if block:

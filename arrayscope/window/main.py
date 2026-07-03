@@ -61,7 +61,7 @@ class ArrayScopeWindow(
             font.setFamily('Apple Color Emoji')
             widget.setFont(font)
 
-    def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None):
+    def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None, axes=None):
         super(ArrayScopeWindow, self).__init__()
         self.renderer = RenderOrchestrator(self)
         self.resize(600,800)
@@ -71,7 +71,7 @@ class ArrayScopeWindow(
         self._apply_performance_settings(persist=False)
         self.compute_policy = compute_policy_from_settings(self.app_settings)
 
-        self.operation_coordinator = OperationCoordinator(data)
+        self.operation_coordinator = OperationCoordinator(data, axes=axes)
         self.profile_coordinator = ProfileCoordinator()
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document

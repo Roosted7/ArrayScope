@@ -250,6 +250,12 @@ inspection adapters.
 Surface axis names, units, coordinates, spacing, and orientation without making every data source
 conform to a medical-imaging model. Continue the `AxisInfo` proposal incrementally.
 
+Progress (2026-07-03): `AxisInfo` carries optional unit/spacing/origin with conservative operation
+propagation, loaders that know axis metadata provide it (NIfTI, DICOM, Philips REC), and the
+dimension strip surfaces labels plus a metadata tooltip. See
+[the AxisInfo proposal](proposals/axis-info.md) for what remains (coordinate arrays, orientation,
+physical cursor readout, session role matching).
+
 ### Out-of-core and lazy sources
 
 **Status:** First slice done (2026-07-03), [ADR 0049](decisions/0049-out-of-core-lazy-sources.md).

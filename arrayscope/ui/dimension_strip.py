@@ -5,6 +5,7 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from arrayscope.core.axis_info import axis_display_name, axis_metadata_summary
 from arrayscope.core.slice_selection import (
     parse_slice_selection,
     selection_text_is_allowed,
@@ -111,10 +112,12 @@ class DimensionChip(QtWidgets.QFrame):
         self.setMaximumWidth(238)
         self._button_icon_state: dict[QtWidgets.QAbstractButton, tuple[str, str | None]] = {}
 
-    def update_state(self, shape, view_state, profile_axes=()):
+    def update_state(self, shape, view_state, profile_axes=(), axes=None):
         size = int(shape[self.axis])
         self._axis_size = size
-        _set_text_if_changed(self.axis_label, f"{self.axis} [{size}]")
+        axis_info = _axis_info_for(axes, shape, self.axis)
+        _set_text_if_changed(self.axis_label, f"{_elide(axis_display_name(axis_info, self.axis))} [{size}]")
+        _set_tooltip_if_changed(self.axis_label, "" if axis_info is None else axis_metadata_summary(axis_info))
         image_axes = view_state.image_axes or ()
         is_y = len(image_axes) > 0 and image_axes[0] == self.axis
         is_x = len(image_axes) > 1 and image_axes[1] == self.axis
@@ -245,14 +248,14 @@ class DimensionStrip(QtWidgets.QWidget):
             chip.setVisible(axis < len(shape))
         self._relayout()
 
-    def update_state(self, shape, view_state, profile_axes=()):
+    def update_state(self, shape, view_state, profile_axes=(), axes=None):
         self.update_shape(shape)
         for axis, chip in enumerate(self.chips):
             if axis < len(shape):
-                chip.update_state(shape, view_state, profile_axes)
+                chip.update_state(shape, view_state, profile_axes, axes=axes)
 
-    def update_axis_state(self, axis: int, shape, view_state, profile_axes=()) -> None:
-        self.chip(axis).update_state(shape, view_state, profile_axes)
+    def update_axis_state(self, axis: int, shape, view_state, profile_axes=(), axes=None) -> None:
+        self.chip(axis).update_state(shape, view_state, profile_axes, axes=axes)
 
     def chip(self, axis):
         return self.chips[int(axis)]
@@ -318,6 +321,17 @@ class DimensionStrip(QtWidgets.QWidget):
 
 def _shift_slice_text(text, delta, axis_size):
     return shift_slice_selection_text(text, delta, axis_size)
+
+
+def _axis_info_for(axes, shape, axis):
+    """Return the AxisInfo for `axis` when metadata aligns with the shape."""
+    if axes is None or len(axes) != len(shape) or axis >= len(axes):
+        return None
+    return axes[axis]
+
+
+def _elide(name: str, limit: int = 12) -> str:
+    return name if len(name) <= limit else name[: limit - 1] + "…"
 
 
 def _set_text_if_changed(widget, text: str) -> None:
