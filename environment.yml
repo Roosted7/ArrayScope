@@ -21,6 +21,7 @@ dependencies:
   - ruff
   - twine
   - vispy>=0.14
+  - pytest-xdist
   - pip
   - pip:
       - -e .

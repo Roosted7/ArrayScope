@@ -125,6 +125,8 @@ The project’s maintained environment is described by `environment.yml` and act
 PATH=~/miniconda3/bin:$PATH direnv exec . pytest -q tests/core
 ```
 
+The suite runs in parallel by default (`pytest-xdist`); append `-n 0` to run serially when debugging. See [testing strategy](docs/testing/strategy.md#parallel-execution) for details.
+
 Core runtime dependencies include NumPy, PySide6, PyQtGraph, SciPy, h5py, pydicom, nibabel, imageio, Pillow, and psutil. VisPy is optional.
 
 ## Project documentation

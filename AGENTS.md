@@ -67,9 +67,15 @@ Test-suite rules:
   `MontageRenderSession`/`ViewState` objects over `SimpleNamespace` stand-ins.
 - Prefer driving the real pipeline and asserting deterministic work counters and committed-frame
   semantics over monkeypatching orchestration internals.
+- The suite runs in parallel by default (`pytest-xdist`, configured in `pyproject.toml`). Never assert
+  on a *fixed* wait window — e.g. `QTest.qWait(220)` after launching background work, or a short
+  `qtbot.waitUntil(..., timeout=250)`. Those pass only on an idle CPU and flake under parallel load.
+  Wait on the actual signal/condition with a generous timeout instead. See
+  `docs/testing/strategy.md` (Parallel execution) for the worker model and per-worker isolation.
 
 ## Validation
 
+The suite is parallel by default (`-n auto`, capped at half the cores; see `docs/testing/strategy.md`).
 Run focused tests first, then the broadest affordable layer:
 
 ```bash
@@ -77,6 +83,9 @@ pytest -q tests/core tests/operations
 QT_QPA_PLATFORM=offscreen pytest -q tests/display tests/window
 QT_QPA_PLATFORM=offscreen pytest -q tests/ui tests/app
 ```
+
+Add `-n 0` to any command to run serially when debugging (clean tracebacks, working `-s`/`pdb`):
+`pytest -q -n 0 tests/ui/test_foo.py::test_bar`.
 
 Also run:
 

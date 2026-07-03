@@ -139,7 +139,7 @@ jobs:
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-qt hypothesis "vispy>=0.14.0"
+          python -m pip install pytest pytest-qt pytest-xdist hypothesis "vispy>=0.14.0"
       - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
@@ -166,7 +166,10 @@ jobs:
         continue-on-error: true
         env:
           QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
-        run: pytest tests/ui/test_qt_smoke_artifacts.py -q
+        # Serial (-n 0): this step must write PNGs to the canonical
+        # tests/artifacts/ that a later step uploads; under xdist workers each
+        # worker redirects that directory to a private temp path.
+        run: pytest tests/ui/test_qt_smoke_artifacts.py -q -n 0
       - name: Run rendering benchmark smoke
         id: benchmarks
         continue-on-error: true
@@ -185,7 +188,9 @@ jobs:
         continue-on-error: true
         env:
           QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
-        run: pytest -q tests/display tests/window tests/app/test_public_api.py
+        # Serial (-n 0): runs on macOS/Windows too, where the per-worker
+        # XDG_CONFIG_HOME QSettings isolation (Linux-only) does not apply.
+        run: pytest -q tests/display tests/window tests/app/test_public_api.py -n 0
       - name: Upload platform artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -284,7 +289,10 @@ jobs:
             --runs 1 \
             --jsonl tests/artifacts/v0.8.0-rendering-benchmark-linux.jsonl
       - name: Generate screenshot smoke artifacts
-        run: pytest tests/ui/test_qt_smoke_artifacts.py -q
+        # Serial (-n 0): this step must write PNGs to the canonical
+        # tests/artifacts/ that a later step uploads; under xdist workers each
+        # worker redirects that directory to a private temp path.
+        run: pytest tests/ui/test_qt_smoke_artifacts.py -q -n 0
       - name: Upload RC artifacts
         uses: actions/upload-artifact@v4
         with:

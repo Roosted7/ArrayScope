@@ -52,10 +52,22 @@ dev = [
     "hypothesis>=6.0.0",
     "pytest>=7.0.0",
     "pytest-qt>=4.4.0",
+    "pytest-xdist>=3.5.0",
     "tomli>=2.0.0; python_version < '3.11'",
     "twine>=4.0.0",
 ]
 [tool.pytest.ini_options]
+# Run in parallel by default across all cores (pytest-xdist).
+#   -n auto          one worker process per CPU; each worker is a separate
+#                    Python process, which is what makes this safe for a Qt /
+#                    C-extension codebase (no shared GIL-bound global state).
+#   --dist loadfile  keep every test in a file on one worker: module-scoped
+#                    fixtures build once, related tests stay together, and a
+#                    single-file run stays effectively serial for easy debugging.
+# To debug serially (clean tracebacks, working -s / pdb), append `-n 0`.
+# Per-worker filesystem isolation (QSettings + artifacts) lives in
+# tests/conftest.py; see docs/testing/strategy.md for the rationale.
+addopts = "-n auto --dist loadfile"
 markers = [
     "real_system_memory: opt out of the pinned deterministic system-memory snapshot",
 ]

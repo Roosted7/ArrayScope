@@ -115,6 +115,55 @@ Headless `offscreen` runs cannot validate:
 - pointer capture feel;
 - HiDPI visual correctness.
 
+## Parallel execution
+
+The suite runs in parallel by default via [`pytest-xdist`](https://pytest-xdist.readthedocs.io/).
+The configuration lives in `pyproject.toml`:
+
+```toml
+addopts = "-n auto --dist loadfile"
+```
+
+**Why xdist (processes), not threads.** xdist runs each worker as a separate OS process, so
+global C-extension and Qt state is fully isolated. That is essential here: `QApplication`, all
+`QObject`/widget code, and the GL surfaces must live on one main thread and are not thread-safe.
+Thread-based runners (e.g. `pytest-parallel`) would share one interpreter and corrupt that state —
+do not use them. `pytest-xdist` is also the actively maintained, pytest-org tool.
+
+**`--dist loadfile`.** Every test in a file runs on one worker. Module-scoped fixtures build once,
+related tests stay together, and running a single file is effectively serial — convenient for
+debugging. The session-scoped `qt_app` fixture is *correct* under xdist: each worker is its own
+process, so each builds and reuses exactly one `QApplication`. Do not make it function-scoped.
+
+**Worker cap.** `-n auto` is capped at half the logical cores by
+`pytest_xdist_auto_num_workers` in `tests/conftest.py`. Many tests create real GL contexts
+(vispy/pyqtgraph surfaces); one worker per core saturates the CPU and has every worker building GL
+contexts against the same offscreen/software-GL stack simultaneously, which intermittently
+**segfaults** the driver. Leaving half the cores free for each worker's Qt/GL threads keeps workers
+stable while still giving a large speedup (full suite ≈150s serial → ≈35s here). On 2-core CI
+runners the cap floors at 2, so CI parallelism is unaffected.
+
+**Per-worker filesystem isolation.** Workers share one filesystem, so `tests/conftest.py` gives each
+worker (keyed on `PYTEST_XDIST_WORKER`) its own directory for the two shared on-disk resources:
+
+- **QSettings** — the test `QApplication` uses a fixed org/app name, so all workers would otherwise
+  read/write the same store and the autouse `_clear_qt_settings` fixture in one worker would wipe
+  another's writes. Each worker gets its own `XDG_CONFIG_HOME`.
+- **`tests/artifacts/`** — the Qt smoke test writes fixed filenames; each worker gets its own
+  `ARRAYSCOPE_ARTIFACT_DIR`.
+
+Both redirects are no-ops for serial runs (`-n 0` / no xdist), so CI steps that must publish PNGs to
+the canonical `tests/artifacts/` run those commands with `-n 0`.
+
+**No fixed-time assertions.** Parallel load makes wall-clock timing nondeterministic. A test that
+launches background work and then asserts state after a *fixed* window — `QTest.qWait(220)`, or a
+short `qtbot.waitUntil(..., timeout=250)` — passes only on an idle CPU and flakes under load. Wait on
+the actual signal or condition with a generous timeout instead. This is the counterpart to the
+"deterministic work counters, not elapsed time" rule elsewhere in this doc.
+
+**Debugging serially.** Append `-n 0` to any command to disable parallelism and get clean tracebacks
+and working `-s`/`pdb`: `pytest -q -n 0 tests/ui/test_foo.py::test_bar`.
+
 ## Test hygiene
 
 - Import the real `arrayscope` package in the shared conftest before direct-import isolation tests can install package stubs.

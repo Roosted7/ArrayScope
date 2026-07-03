@@ -1,7 +1,50 @@
 import os
 import sys
+import tempfile
 
 import pytest
+
+# --- Parallel-worker filesystem isolation (pytest-xdist) ---------------------
+# xdist workers are separate processes but share one filesystem. Two shared
+# on-disk resources would otherwise race between workers:
+#   * QSettings — the test QApplication uses a fixed organization/application
+#     name, so every worker reads and writes the same on-disk store, and the
+#     autouse ``_clear_qt_settings`` fixture in one worker wipes another
+#     worker's writes mid-test.
+#   * ``tests/artifacts/`` — the Qt smoke test writes fixed filenames there.
+# Point each worker at its own config + artifact directory. This must happen at
+# import time, before Qt (and thus QSettings) resolves any path. It is a no-op
+# for serial runs (``PYTEST_XDIST_WORKER`` is unset under ``-n 0`` / no xdist),
+# so single-process runs keep their normal paths — which is what CI relies on
+# when generating artifacts into the canonical ``tests/artifacts/``.
+_XDIST_WORKER = os.environ.get("PYTEST_XDIST_WORKER")
+if _XDIST_WORKER:
+    _worker_root = os.path.join(tempfile.gettempdir(), f"arrayscope-xdist-{_XDIST_WORKER}")
+    _worker_config = os.path.join(_worker_root, "config")
+    os.makedirs(_worker_config, exist_ok=True)
+    # On Linux/Unix QSettings (UserScope) resolves under XDG_CONFIG_HOME;
+    # isolating it per worker keeps each worker's settings store private.
+    os.environ["XDG_CONFIG_HOME"] = _worker_config
+    os.environ.setdefault(
+        "ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_worker_root, "artifacts")
+    )
+
+
+def pytest_xdist_auto_num_workers(config):
+    """Cap ``-n auto`` at half the logical cores.
+
+    Many tests create real GL contexts (vispy/pyqtgraph surfaces). Running one
+    worker per core saturates the CPU and, more importantly, has every worker
+    building GL contexts against the same offscreen/software-GL stack at once,
+    which intermittently segfaults the driver and starves the timing-sensitive
+    UI tests. Leaving half the cores free for each worker's Qt/GL threads keeps
+    workers stable while still giving a large speedup. On small CI runners
+    (2 cores) this floors at 2, so CI parallelism is unaffected.
+    """
+
+    cpus = os.cpu_count() or 2
+    return max(2, cpus // 2)
+
 
 # Keep direct-import test modules from replacing the real package in sys.modules.
 import arrayscope  # noqa: F401
