@@ -13,13 +13,13 @@ from arrayscope.operations.planner import apply_operation_to_region, plan_region
 from arrayscope.operations.regions import (
     StageCacheCandidate,
     StageKey,
-    apply_region,
     apply_subregion,
     index_spec_from_region,
     region_contains,
     region_shape,
 )
 from arrayscope.operations.cancellation import EvaluationCancelled
+from arrayscope.operations.source_read import read_base_region
 from arrayscope.operations.stage_cache import StageValue
 
 
@@ -112,7 +112,7 @@ def evaluate_slab_from_plan(document: ArrayDocument, _request: SlabRequest, plan
     _check_cancelled(cancellation_token)
     if stage_cache is not None and region_plan.cache_candidates:
         return _evaluate_slab_with_stage_cache(document, region_plan, stage_cache, document_key, cancellation_token=cancellation_token, evaluation_context=evaluation_context)
-    data = apply_region(document.base_data, region_plan.required_input_region)
+    data = read_base_region(document.base_data, region_plan.required_input_region, cancellation_token=cancellation_token, evaluation_context=evaluation_context)
     _check_cancelled(cancellation_token)
     for transition in region_plan.transitions:
         _check_cancelled(cancellation_token)
@@ -141,7 +141,7 @@ def materialize_stage_candidate(document: ArrayDocument, region_plan, candidate:
     document_key = _default_stage_document_key(document) if document_key is None else document_key
     candidate = StageCacheCandidate(**candidate.__dict__) if not isinstance(candidate, StageCacheCandidate) else candidate
     _check_cancelled(cancellation_token)
-    data = apply_region(document.base_data, region_plan.required_input_region)
+    data = read_base_region(document.base_data, region_plan.required_input_region, cancellation_token=cancellation_token, evaluation_context=evaluation_context)
     current_region = region_plan.required_input_region
     _check_cancelled(cancellation_token)
     for transition in region_plan.transitions:
@@ -247,7 +247,7 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
 
     if data is None:
         _check_cancelled(cancellation_token)
-        data = apply_region(document.base_data, region_plan.required_input_region)
+        data = read_base_region(document.base_data, region_plan.required_input_region, cancellation_token=cancellation_token, evaluation_context=evaluation_context)
         current_region = region_plan.required_input_region
         hit_stage = 0
         _check_cancelled(cancellation_token)

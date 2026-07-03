@@ -176,7 +176,7 @@ def test_cli_multi_path_selector_uses_nonblocking_view(monkeypatch, tmp_path):
             events.append(("selector", self.filepath.name, block))
             return True
 
-    monkeypatch.setattr(cli, "load_path", lambda filepath: SimpleNamespace(data=np.zeros((2, 2)), metadata={}))
+    monkeypatch.setattr(cli, "load_path", lambda filepath, **kwargs: SimpleNamespace(data=np.zeros((2, 2)), metadata={}))
     monkeypatch.setattr(cli, "NpzDatasetSelector", FakeSelector)
     monkeypatch.setattr(
         cli,

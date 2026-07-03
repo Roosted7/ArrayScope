@@ -68,7 +68,9 @@ Human-readable axis labels, units, physical coordinates, and spacing in dimensio
 
 ### Lazy source adapter
 
-Protocol for shape/dtype/metadata plus cancellable region reads. First adapters: NumPy memmap and chunked HDF5/Zarr-like sources. Evaluate dependencies and remote semantics separately.
+Largely landed via [ADR 0049](decisions/0049-out-of-core-lazy-sources.md): source protocol, budgeted
+read seam, and NumPy memmap adapters. Still exploratory here: chunked HDF5/Zarr-like adapters,
+chunk-aligned request planning, and remote-source semantics/dependencies.
 
 ### Editor/Jupyter integration
 

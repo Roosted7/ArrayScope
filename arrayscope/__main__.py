@@ -64,7 +64,8 @@ def _open_loaded_file(filepath: Path, *, block: bool, mmap: bool = False,
         title = filepath.name or str(filepath)
         detected_format = loaded.metadata.get('detected_format')
         if detected_format:
-            title = f"{title} [{detected_format}]"
+            suffix = ", lazy" if loaded.metadata.get('lazy') else ""
+            title = f"{title} [{detected_format}{suffix}]"
     _open_array_window(data=loaded.data, title=title, block=block, filepath=filepath)
     return not block
 

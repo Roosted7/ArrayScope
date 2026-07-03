@@ -14,7 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class LoadedPath:
-    data: np.ndarray
+    data: object  # np.ndarray, or LazySourceArray for lazily opened sources
     metadata: dict
 
 
@@ -539,15 +539,22 @@ class TextLoader:
         return data
 
 
-def load_path(filepath, *, mmap=False):
+def load_path(filepath, *, mmap=False, lazy="auto", lazy_threshold_bytes=None):
     """Load a supported file into a LoadedPath.
 
-    With ``mmap=True``, ``.npy`` files are memory-mapped copy-on-write
-    (``mmap_mode='c'``) instead of read eagerly: pages are shared with the OS
-    page cache, reads are lazy, and in-place edits stay private to this
-    process without touching the file. This is the fast path used by the
-    Julia/MATLAB invocation wrappers (see ``wrappers/`` and
-    ``docs/invocation.md``); other formats ignore the flag.
+    Two distinct memory-mapped ``.npy`` strategies coexist here:
+
+    - ``mmap=True`` maps the file copy-on-write (``np.load(mmap_mode='c')``)
+      into a plain ndarray: pages are shared with the OS page cache, reads are
+      lazy, and in-place edits stay private to this process. This is the fast
+      path used by the Julia/MATLAB invocation wrappers (see ``wrappers/`` and
+      ``docs/invocation.md``); other formats ignore the flag. An explicit
+      ``mmap=True`` bypasses the lazy source seam below — the wrapper wants a
+      private editable map, not a read-only budgeted source.
+    - ``lazy`` (``"auto"``/``True``/``False``) opens supported files as
+      out-of-core :class:`LazySourceArray` proxies through the budgeted read
+      seam (ADR 0049). ``"auto"`` maps files at or above a memory-based size
+      threshold.
     """
     filepath = Path(filepath)
 
@@ -557,6 +564,11 @@ def load_path(filepath, *, mmap=False):
         return LoadedPath(data=data, metadata=loader.metadata)
 
     suffix = data_file_suffix(filepath)
+
+    if not mmap:
+        lazy_loaded = _load_lazy_source(filepath, suffix, lazy=lazy, lazy_threshold_bytes=lazy_threshold_bytes)
+        if lazy_loaded is not None:
+            return lazy_loaded
 
     if suffix == '.npy':
         data = np.load(filepath, mmap_mode='c' if mmap else None)
@@ -612,10 +624,41 @@ def consume_handoff_file(filepath):
 
 
 
-def load_file(filepath):
+def _load_lazy_source(filepath, suffix, *, lazy, lazy_threshold_bytes):
+    """Open .npy/.cfl files as lazy memory-mapped sources when requested or large.
+
+    Returns None to fall through to eager loading. Explicit lazy=True raises on
+    unmappable files; lazy="auto" silently falls back to eager for them.
+    """
+    from arrayscope.io.lazy_sources import open_memmap_source, should_load_lazily, supports_memmap_source
+
+    if not supports_memmap_source(suffix):
+        return None
+    if not should_load_lazily(filepath, lazy=lazy, threshold_bytes=lazy_threshold_bytes):
+        return None
+    try:
+        source = open_memmap_source(filepath)
+    except ValueError:
+        if lazy is True:
+            raise
+        return None
+    return LoadedPath(
+        data=source,
+        metadata={
+            'source_path': str(filepath),
+            'detected_format': 'numpy' if suffix == '.npy' else suffix.lstrip('.'),
+            'shape': tuple(source.shape),
+            'dtype': str(source.dtype),
+            'lazy': True,
+            'source_label': source.label,
+        },
+    )
+
+
+def load_file(filepath, *, lazy="auto"):
     """
     Generic path loader - automatically detects format and returns a NumPy array.
-    
+
     Supported formats:
     - directory: DICOM directory via dcm2niix
     - .npy: NumPy binary format
@@ -629,10 +672,11 @@ def load_file(filepath):
         filepath: Path to data file or DICOM directory
         
     Returns:
-        NumPy array
-        
+        NumPy array, or a LazySourceArray when the file is opened lazily
+        (lazy="auto" maps supported large files instead of loading them)
+
     """
-    return load_path(filepath).data
+    return load_path(filepath, lazy=lazy).data
 
 
 def data_file_suffix(filepath):

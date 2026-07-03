@@ -28,12 +28,15 @@ Operation edits can change dimensionality. State synchronization remaps roles an
 
 `ArrayDocument` contains:
 
-- the base array;
+- the base array (an in-memory array, or a `LazySourceArray` proxy over an
+  out-of-core `ArraySource`, ADR 0049);
 - an explicit `revision` token;
 - ordered `OperationStep` rows, including enabled state and stable row identity;
 - derived shape/dtype information.
 
 The base array is treated as immutable for cache identity. In-place external mutation requires `notify_data_changed()` or a new document/source revision.
+
+Evaluation reads base data through one seam, `operations/source_read.read_base_region`. Eager arrays are indexed directly; lazy sources (`core/array_source.py`) get an explicit `read_region` for the planner's `required_input_region`, checked against a lane-aware byte budget and the cancellation token first. Request planning, cancellation, and memory budgets therefore stay above the source adapter; an adapter only transports and decodes the exact region it is asked for.
 
 `operations` means the enabled runtime sequence. `steps` means the user-visible document sequence. Undo/redo, recipes, row IDs, disabled rows, and UI presentation use `steps` and must not be mutated by optimizer shortcuts.
 

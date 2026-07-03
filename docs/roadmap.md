@@ -252,6 +252,14 @@ conform to a medical-imaging model. Continue the `AxisInfo` proposal incremental
 
 ### Out-of-core and lazy sources
 
+**Status:** First slice done (2026-07-03), [ADR 0049](decisions/0049-out-of-core-lazy-sources.md).
+`core/array_source.py` defines the source protocol (`ArraySource`, `LazySourceArray`);
+`operations/source_read.read_base_region` is the single budgeted, cancellable base-data read seam
+under slab/stage evaluation; `io/lazy_sources.py` provides memory-mapped `.npy`/`.cfl` adapters and
+`load_path(lazy="auto")` opens large supported files lazily. Remaining: a chunked (Zarr/HDF5-like)
+adapter behind the same protocol, lazy dataset selectors, chunk-aligned planning hints, and UI
+surfacing of budget refusals.
+
 Add a source protocol for memory-mapped/chunked arrays and explicit region reads. Keep request planning,
 cancellation, and memory budgets above the source adapter so “lazy” does not mean unbounded transport
 or decoding.
