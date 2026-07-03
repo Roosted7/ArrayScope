@@ -100,6 +100,11 @@ def test_broker_exit_triggers_reelection_and_messages_flow_again(qtbot, make_bus
     new_broker = client_a if client_a.role == "broker" else client_b
     survivor = client_b if new_broker is client_a else client_a
     at_survivor = _received(qtbot, survivor)
+    # The survivor's role flips to "client" the instant its socket connects,
+    # but the new broker registers it as a relay peer asynchronously (server
+    # side newConnection). Wait for the relay path to be established before
+    # publishing, otherwise the message races reconnection and is dropped.
+    qtbot.waitUntil(lambda: new_broker.peer_count >= 1, timeout=2000)
     message = state_message("levels", "window-x", 5, {"levels": [0.0, 2.0], "window_mode": "absolute"})
     new_broker.publish(message)
     qtbot.waitUntil(lambda: at_survivor == [message], timeout=2000)

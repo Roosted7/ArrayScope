@@ -84,6 +84,17 @@ class SyncBus(Qt.QtCore.QObject):
     def is_running(self) -> bool:
         return self._role in ("broker", "client")
 
+    @property
+    def peer_count(self) -> int:
+        """Number of participants this broker currently relays to.
+
+        Non-zero only in the broker role, and only once the server side has
+        accepted each connection. A newly elected broker reports 0 until its
+        surviving clients have reconnected, so this is the readiness signal for
+        "the relay path to the rest of the group is established".
+        """
+        return len(self._peers)
+
     def start(self) -> str:
         """Connect to the group broker, or become the broker; returns role."""
 
