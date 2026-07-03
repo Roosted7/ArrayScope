@@ -1939,11 +1939,18 @@ def _resident_key(payload: DisplayTilePayload) -> object:
     through a different tile number.  Residency is therefore keyed by
     ``source_id`` whenever possible, with an object-id fallback for rare
     unhashable identities.
+
+    The key is a pure function of immutable payload identity fields, and a
+    commit visits every active payload several times, so it is memoized on the
+    payload instance.
     """
 
+    cached = payload.__dict__.get("_vispy_resident_key")
+    if cached is not None:
+        return cached
     texture = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
     lod = getattr(payload, "lod", None)
-    return (
+    key = (
         _source_resident_key(payload.source_id),
         "texture_kind",
         None if payload.texture_kind is None else getattr(payload.texture_kind, "value", payload.texture_kind),
@@ -1954,6 +1961,11 @@ def _resident_key(payload: DisplayTilePayload) -> object:
         "lod",
         None if lod is None else (int(lod.factor), int(lod.level), int(lod.gutter)),
     )
+    try:
+        object.__setattr__(payload, "_vispy_resident_key", key)
+    except Exception:
+        pass
+    return key
 
 
 def _source_resident_key(source_id: object) -> object:

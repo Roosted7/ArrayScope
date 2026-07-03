@@ -555,6 +555,7 @@ class VisPyImageView2D(ImageViewShell):
                 histogramPlotData=histogramPlotData,
                 source_key=source_key,
                 tile_delta=tile_delta,
+                tile_payloads=montage_tile_payloads,
             )
             viewport_key = (
                 structure_key,
@@ -670,6 +671,17 @@ class VisPyImageView2D(ImageViewShell):
             # cost on every scroll step.
             histogram_changed = histogram_key != previous_histogram_key
             if histogram_changed and not loading_only:
+                if histogramPlotData is None and montage_tile_payloads:
+                    # Defer the tile-payload histogram fallback to the coalescing
+                    # histogram timer.  Concatenating every visible tile on every
+                    # commit is O(n^2) across a progressive stream; a provider
+                    # lets bursts of commits collapse into one materialization,
+                    # and its stable identity avoids per-commit repaints.
+                    payloads_for_histogram = montage_tile_payloads
+
+                    def histogramPlotData(payloads=payloads_for_histogram):
+                        return _histogram_data_from_tile_payloads(payloads)
+
                 self._request_histogram_for_vispy(
                     histogramData,
                     histogramPlotData,
@@ -738,11 +750,10 @@ class VisPyImageView2D(ImageViewShell):
             for tile, payload in tile_state.near_payloads(tile_delta).items()
             if int(tile) not in tile_payloads
         }
-        histogram_data = _histogram_data_from_tile_payloads(tile_payloads)
         stats = self._apply_vispy_tile_layer_presentation(
             placeholder,
             histogramData=None,
-            histogramPlotData=histogramPlotData if histogramPlotData is not None else histogram_data,
+            histogramPlotData=histogramPlotData,
             geometry=geometry,
             levels=levels,
             histogramRange=histogramRange,
@@ -1454,6 +1465,11 @@ class VisPyImageView2D(ImageViewShell):
             self._sync_vispy_camera_to_view()
 
     def _update_histogram_for_vispy(self, histogramData, histogramPlotData, levels) -> None:
+        if callable(histogramPlotData):
+            # Deferred tiled-commit fallback: materialize once at consumption
+            # and persist it, matching the eager path's stored plot source.
+            histogramPlotData = histogramPlotData()
+            self.histogramPlotSource = histogramPlotData
         previous_plot_source = self.histogramPlotSource
         self.histogramPlotSource = histogramPlotData
         try:
@@ -1486,6 +1502,15 @@ class VisPyImageView2D(ImageViewShell):
                 self._update_histogram_for_vispy(histogramData, histogramPlotData, levels)
             self._sync_vispy_histogram_widget_bounds(levels, histogramRange=histogramRange)
             return
+        pending = self._pending_vispy_histogram_update
+        if pending is not None:
+            # Coalesce: keep the newest levels/range but never let a data-less
+            # re-request (for example a levels-only refresh) drop pending
+            # histogram data or its deferred provider.
+            if histogramData is None:
+                histogramData = pending[0]
+            if histogramPlotData is None:
+                histogramPlotData = pending[1]
         self._pending_vispy_histogram_update = (
             histogramData,
             histogramPlotData,
@@ -1829,20 +1854,37 @@ def _tiled_structure_key(geometry, *, rgb_already_windowed, frame_plan=None):
     )
 
 
-def _tiled_histogram_key(histogram_range, *, histogramPlotData, source_key, tile_delta):
+def _tiled_histogram_key(histogram_range, *, histogramPlotData, source_key, tile_delta, tile_payloads=None):
     if tile_delta is None:
         raise ValueError("VisPy tiled histogram identity requires a TilePresentationDelta")
     source = None if histogramPlotData is None else np.asarray(histogramPlotData)
+    fallback_identity = None
+    if histogramPlotData is None and tile_payloads:
+        # Without explicit plot data the histogram stream falls back to the
+        # tile payload histograms, so replaced histogram arrays must change the
+        # identity even when revisions and source ids stay the same.
+        fallback_identity = tuple(
+            (int(tile), id(_payload_histogram_source(payload)))
+            for tile, payload in sorted(dict(tile_payloads).items())
+        )
     return (
         "revision",
         int(getattr(tile_delta, "histogram_revision")),
         id(histogramPlotData),
+        fallback_identity,
         source_key,
         None if source is None else tuple(int(value) for value in source.shape),
         None if source is None else str(source.dtype),
         None if source is None else tuple(int(value) for value in source.strides),
         (float(histogram_range[0]), float(histogram_range[1])),
     )
+
+
+def _payload_histogram_source(payload):
+    source = getattr(payload, "semantic_histogram_data", None)
+    if source is None:
+        source = getattr(payload, "histogram_data", None)
+    return source
 
 
 def _set_visual_visible(visual, visible: bool) -> None:
@@ -1984,9 +2026,7 @@ def _rgba255(r, g, b, a):
 def _histogram_data_from_tile_payloads(payloads) -> np.ndarray | None:
     parts = []
     for payload in dict(payloads or {}).values():
-        source = getattr(payload, "semantic_histogram_data", None)
-        if source is None:
-            source = getattr(payload, "histogram_data", None)
+        source = _payload_histogram_source(payload)
         if source is None:
             continue
         parts.append(np.asarray(source))
