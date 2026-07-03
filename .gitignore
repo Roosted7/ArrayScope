@@ -55,3 +55,6 @@ docs/references/arrShow
 
 # Test artifacts
 tests/artifacts/
+
+# In-folder worktrees
+.worktrees/
