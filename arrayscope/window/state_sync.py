@@ -70,6 +70,25 @@ class StateSyncMixin:
         self.request_render(reason=reason, interactive=interactive)
         self._notify_sync("dims")
 
+    def _apply_synced_dimension_state(self, state) -> None:
+        """Apply dimension sync through the window's normal state boundary."""
+
+        previous = self.view_state
+        if state == previous:
+            return
+        line_axis_changed = previous.line_axis != state.line_axis
+        self._set_view_state(state)
+        if line_axis_changed and self.view_state.line_axis is not None:
+            self.profile_axes = (self.view_state.line_axis,)
+            if hasattr(self, "profile_dock"):
+                self.profile_dock.set_axes(self.data.shape, self.view_state.line_axis)
+        self._sync_controls_from_view_state()
+        self.update_dimension_controls()
+        self.update_complex_indicators()
+        self.update_shift_indicators()
+        self.apply_axis_flips()
+        self.request_render(reason="sync-dims", interactive=False)
+
     def _on_slice_index_changed(self, axis, value):
         axis = int(axis)
         if axis >= self.view_state.ndim:

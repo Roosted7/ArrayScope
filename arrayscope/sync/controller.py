@@ -39,7 +39,8 @@ from arrayscope.sync.messages import (
     FACETS,
     KIND_REQUEST,
     KIND_STATE,
-    merged_slice_indices,
+    dimension_state_payload,
+    merged_dimension_state,
     request_message,
     state_message,
 )
@@ -137,11 +138,7 @@ class WindowSyncController(Qt.QtCore.QObject):
                 "window_mode": str(self.win._current_window_mode()),
             }
         if facet == FACET_DIMS:
-            state = self.win.view_state
-            return {
-                "shape": [int(size) for size in state.shape],
-                "slice_indices": [int(index) for index in state.slice_indices],
-            }
+            return dimension_state_payload(self.win.view_state)
         if facet == FACET_OPERATIONS:
             return {"recipe": recipe_from_steps(self.win.document.steps)}
         if facet == FACET_ROIS:
@@ -211,22 +208,8 @@ class WindowSyncController(Qt.QtCore.QObject):
 
     def _apply_dims(self, payload) -> None:
         win = self.win
-        state = win.view_state
-        merged = merged_slice_indices(state.shape, state.slice_indices, payload.get("slice_indices", ()))
-        if merged == tuple(state.slice_indices):
-            return
-        win._set_view_state(state.with_slice_indices(merged))
-        win._sync_controls_from_view_state()
-        win.update_dimension_controls()
-        win.update_complex_indicators()
-        win.update_shift_indicators()
-        # A received dimension change is a discrete state application on this
-        # (often background) window, not a local interactive scrub. Render it
-        # directly like the other synced facets: the interactive render path
-        # defers behind a pending presentation draw, and a window that is not
-        # actively repainting never clears that, so an interactive request is
-        # starved and the frame never updates even though view_state changed.
-        win.request_render(reason="sync-dims", interactive=False)
+        merged = merged_dimension_state(win.view_state, payload)
+        win._apply_synced_dimension_state(merged)
 
     def _apply_operations(self, payload) -> None:
         win = self.win

@@ -218,3 +218,75 @@ def test_dimension_sync_renders_receiver_even_with_pending_presentation_draw(qtb
     _settled(qtbot, lambda: win_b.view_state.slice_indices[2] == 3)
     # The frame must actually render, not just the view_state update.
     _settled(qtbot, lambda: any("sync-dims" in (reason or "") for reason in rendered_reasons))
+
+
+def test_dimension_role_and_transpose_sync_between_windows(qtbot, make_window):
+    win_a = make_window(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
+    win_b = make_window(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
+    win_a.sync_dims_button.setChecked(True)
+    win_b.sync_dims_button.setChecked(True)
+    qtbot.wait(300)
+
+    rendered_reasons = []
+    original_render = win_b.renderer.render
+
+    def _tracking_render(*args, **kwargs):
+        rendered_reasons.append(kwargs.get("reason"))
+        return original_render(*args, **kwargs)
+
+    win_b.renderer.render = _tracking_render
+
+    win_a.set_dimension_role("x", 2)
+    _settled(qtbot, lambda: win_b.view_state.image_axes == (0, 2))
+    assert win_b.dimension_strip.chip(2).x_button.isChecked()
+    assert win_b.view_state.slice_indices == win_a.view_state.slice_indices
+
+    win_a.transposeView(None)
+    _settled(qtbot, lambda: win_b.view_state.image_axes == (2, 0))
+    assert win_b.dimension_strip.chip(2).y_button.isChecked()
+    assert any("sync-dims" in (reason or "") for reason in rendered_reasons)
+
+
+def test_dimension_axis_flip_syncs_without_slice_change(qtbot, make_window):
+    win_a = make_window(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
+    win_b = make_window(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
+    win_a.sync_dims_button.setChecked(True)
+    win_b.sync_dims_button.setChecked(True)
+    qtbot.wait(300)
+
+    rendered_reasons = []
+    original_render = win_b.renderer.render
+
+    def _tracking_render(*args, **kwargs):
+        rendered_reasons.append(kwargs.get("reason"))
+        return original_render(*args, **kwargs)
+
+    win_b.renderer.render = _tracking_render
+    before_slices = win_b.view_state.slice_indices
+
+    # Clicking the already-selected X role flips that axis; slice indices stay unchanged.
+    win_a.set_dimension_role("x", 1)
+    _settled(qtbot, lambda: win_b.view_state.axis_flipped[1])
+    qtbot.wait(250)
+
+    assert win_b.view_state.slice_indices == before_slices
+    assert any("sync-dims" in (reason or "") for reason in rendered_reasons)
+
+
+def test_dimension_role_change_publishes_payload_when_slices_are_unchanged(qtbot, make_window):
+    from arrayscope.sync.messages import FACET_DIMS
+
+    win = make_window(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
+    win.sync_dims_button.setChecked(True)
+    qtbot.wait(300)
+    controller = win.sync_controller
+    before_revision = controller._revisions[FACET_DIMS]
+    before_payload = controller._build_payload(FACET_DIMS)
+
+    win.set_dimension_role("x", 2)
+    _settled(qtbot, lambda: controller._revisions[FACET_DIMS] > before_revision)
+    after_payload = controller._last_payload[FACET_DIMS]
+
+    assert after_payload["slice_indices"] == before_payload["slice_indices"]
+    assert after_payload["image_axes"] == [0, 2]
+    assert after_payload != before_payload

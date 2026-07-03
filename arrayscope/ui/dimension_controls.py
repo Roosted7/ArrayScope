@@ -39,6 +39,7 @@ class DimensionControlMixin:
         self._set_view_state(self.view_state.with_axis_flipped(dim, not self._axis_flipped(dim)))
         self.update_flip_icons()
         self.apply_axis_flips()
+        self._notify_sync("dims")
         
     def update_flip_icons(self):
         state = getattr(self, "_flip_icon_state", None)
@@ -175,6 +176,7 @@ class DimensionControlMixin:
         self.render(reason="profile-axis")
 
     def set_profile_axes_exactly(self, axes):
+        previous = self.view_state
         axes = tuple(int(axis) for axis in axes)
         axes = tuple(axis for axis in axes if 0 <= axis < self.data.ndim and not self.singleton[axis])
         if not axes and self.view_state.line_axis is not None:
@@ -185,6 +187,8 @@ class DimensionControlMixin:
         self._set_view_state(self.view_state.with_line_axis(axes[0]))
         if hasattr(self, "profile_dock"):
             self.profile_dock.set_axes(self.data.shape, self.view_state.line_axis)
+        if self.view_state != previous:
+            self._notify_sync("dims")
         return self.view_state
 
     def set_dimension_role(self, role, axis):
@@ -214,6 +218,7 @@ class DimensionControlMixin:
                 if hasattr(self, "dimension_strip"):
                     self.dimension_strip.update_axis_state(axis, self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes)
                 self.apply_axis_flips()
+                self._notify_sync("dims")
                 return
             previous = self.view_state
             state = previous
@@ -243,12 +248,14 @@ class DimensionControlMixin:
             else:
                 self._set_view_state(self.view_state.with_montage_axis(int(axis)))
         self.render(reason=f"dimension-{role}")
+        self._notify_sync("dims")
 
     def transposeView(self, event):
         if self.view_state.image_axes is None:
             return
         self._set_view_state(self.view_state.transposed_image_axes())
         self.render(reason="transpose")
+        self._notify_sync("dims")
 
     def update(self):
         self.render(reason="dimension-update")
