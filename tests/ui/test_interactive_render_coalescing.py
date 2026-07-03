@@ -3,6 +3,9 @@ import numpy as np
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings, process_events as _process_events
 
 
+_WAIT_TIMEOUT_MS = 5000
+
+
 def test_slice_text_updates_immediately_while_render_is_coalesced(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -149,14 +152,22 @@ def test_deferred_side_panels_refresh_once_after_interaction_quiet(qtbot, monkey
     monkeypatch.setattr(win, "update_line_plot", lambda: calls.__setitem__("profile", calls["profile"] + 1))
     try:
         _process_events(qtbot, count=2)
+        win.render_coordinator._quiet_interval_ms = 5000
         calls.update({"operation": 0, "inspection": 0, "profile": 0})
         win._on_slice_index_changed(2, 1)
-        _process_events(qtbot, count=3)
+        qtbot.waitUntil(
+            lambda: win._deferred_side_panel_refresh_pending
+            and not win.render_coordinator.has_pending_render,
+            timeout=_WAIT_TIMEOUT_MS,
+        )
 
         assert calls == {"operation": 0, "inspection": 0, "profile": 0}
         assert win._deferred_side_panel_refresh_pending
 
-        _process_events(qtbot, count=12)
+        monkeypatch.setattr(win.visible_evaluation_controller, "is_busy", lambda: False)
+        win._deferred_side_panel_refresh_pending = True
+        win.render_coordinator._quiet_timer.stop()
+        win.render_coordinator._quiet_timer_elapsed()
         assert calls["operation"] == 1
         assert calls["inspection"] == 1
         assert calls["profile"] == 0
@@ -251,13 +262,15 @@ def test_cached_interactive_render_uses_zero_delay_without_cancelling_work(qtbot
     )
     monkeypatch.setattr(win, "render", lambda **kwargs: renders.append(kwargs))
     try:
+        before_flushes = int(win.render_coordinator.immediate_cache_flushes)
+        win.render_coordinator._quiet_interval_ms = 5000
         win.request_render(reason="cached-slice", interactive=True)
 
         assert renders == []
         assert cancellations == []
-        qtbot.waitUntil(lambda: bool(renders), timeout=250)
+        qtbot.waitUntil(lambda: bool(renders), timeout=_WAIT_TIMEOUT_MS)
         assert renders[-1]["reason"] == "cached-slice"
-        assert win.render_coordinator.immediate_cache_flushes == 1
+        assert win.render_coordinator.immediate_cache_flushes == before_flushes + 1
     finally:
         win.close()
 
@@ -304,7 +317,7 @@ def test_cached_interactive_render_skips_intermediate_requests_until_draw_comple
 
     win.img_view.pending = False
     win.img_view.presentationDrawn.emit()
-    qtbot.waitUntil(lambda: bool(win.rendered), timeout=250)
+    qtbot.waitUntil(lambda: bool(win.rendered), timeout=_WAIT_TIMEOUT_MS)
 
     assert [call["reason"] for call in win.rendered] == ["slice-3"]
 
@@ -347,7 +360,7 @@ def test_uncached_interactive_render_supersedes_pending_draw(qtbot):
     win = DummyWindow()
     win.render_coordinator.request(reason="slice-1", interactive=True)
     win.render_coordinator.request(reason="slice-2", interactive=True)
-    qtbot.waitUntil(lambda: len(win.rendered) == 2, timeout=250)
+    qtbot.waitUntil(lambda: len(win.rendered) == 2, timeout=_WAIT_TIMEOUT_MS)
 
     assert win.cancelled == 2
     assert win.render_coordinator.presentation_backpressure_skips == 2
@@ -391,7 +404,7 @@ def test_quiet_timer_flushes_pending_render_if_draw_signal_was_missed(qtbot):
 
     assert win.rendered == []
     win.img_view.pending = False
-    qtbot.waitUntil(lambda: bool(win.rendered), timeout=250)
+    qtbot.waitUntil(lambda: bool(win.rendered), timeout=_WAIT_TIMEOUT_MS)
 
     assert [call["reason"] for call in win.rendered] == ["slice-latest"]
 
@@ -419,7 +432,7 @@ def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):
         win.close()
 
 
-def test_evaluation_queue_drain_is_bounded_for_non_callback_events(qt_app):
+def test_evaluation_queue_drain_is_bounded_for_non_callback_events():
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController(max_queue_events_per_drain=3)

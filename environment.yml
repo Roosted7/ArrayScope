@@ -16,6 +16,7 @@ dependencies:
   - pillow>=8.0
   - psutil
   - pytest
+  - pytest-cov
   - hypothesis
   - py-spy
   - ruff

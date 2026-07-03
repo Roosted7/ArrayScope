@@ -1,5 +1,10 @@
 # ArrayScope
 
+[![CI](https://github.com/Roosted7/ArrayScope/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Roosted7/ArrayScope/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Roosted7/ArrayScope/branch/main/graph/badge.svg)](https://codecov.io/gh/Roosted7/ArrayScope)
+[![Python 3.10-3.14](https://img.shields.io/badge/python-3.10--3.14-blue.svg)](https://github.com/Roosted7/ArrayScope/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 ArrayScope is a Python/Qt viewer for quickly understanding n-dimensional NumPy arrays. It is aimed at scientific and reconstruction workflows where the useful first questions are usually: *which dimensions matter, what does this slice contain, how do values change, and what happens after a small operation such as an FFT, crop, reduction, or axis change?*
 
 The current repository is the ArrayScope `0.8.0` release-candidate line. It has moved well beyond the original lightweight ndslice viewer: the implementation now contains a staged operation evaluator, bounded caches, progressive montage rendering, ROI/profile inspection, runtime diagnostics, and an experimental VisPy backend. See [Current state](docs/current-state.md) before treating every advanced path as production-stable.
@@ -126,6 +131,12 @@ PATH=~/miniconda3/bin:$PATH direnv exec . pytest -q tests/core
 ```
 
 The suite runs in parallel by default (`pytest-xdist`); append `-n 0` to run serially when debugging. See [testing strategy](docs/testing/strategy.md#parallel-execution) for details.
+
+Pull requests run a dedicated coverage job in CI. To reproduce it locally:
+
+```bash
+PATH=~/miniconda3/bin:$PATH direnv exec . pytest tests/ -q --cov=arrayscope --cov-report=term-missing:skip-covered --cov-report=xml
+```
 
 Core runtime dependencies include NumPy, PySide6, PyQtGraph, SciPy, h5py, pydicom, nibabel, imageio, Pillow, and psutil. VisPy is optional.
 

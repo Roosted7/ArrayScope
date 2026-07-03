@@ -173,6 +173,20 @@ and working `-s`/`pdb`: `pytest -q -n 0 tests/ui/test_foo.py::test_bar`.
 - Keep fixture data deterministic and small; generate large patterns when possible.
 - Mark optional-backend/platform skips with a concrete reason.
 
+## Coverage reporting
+
+CI runs one dedicated full-suite coverage job on Linux/Python 3.12 and uploads
+`coverage.xml` as both a GitHub artifact and a Codecov report. Keep coverage
+as a trend and review signal: it can reveal unexercised code, but it does not
+replace the semantic assertions, deterministic counters, visual smoke tests,
+or real-hardware checks required elsewhere in this strategy.
+
+Run the same coverage pass locally with:
+
+```bash
+pytest tests/ -q --cov=arrayscope --cov-report=term-missing:skip-covered --cov-report=xml
+```
+
 ## Recommended change matrix
 
 | Change | Minimum validation |

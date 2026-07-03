@@ -51,6 +51,7 @@ dev = [
     "build>=0.10.0",
     "hypothesis>=6.0.0",
     "pytest>=7.0.0",
+    "pytest-cov>=6.0.0",
     "pytest-qt>=4.4.0",
     "pytest-xdist>=3.5.0",
     "tomli>=2.0.0; python_version < '3.11'",
@@ -71,6 +72,18 @@ addopts = "-n auto --dist loadfile"
 markers = [
     "real_system_memory: opt out of the pinned deterministic system-memory snapshot",
 ]
+
+[tool.coverage.run]
+branch = true
+source = ["arrayscope"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.coverage.xml]
+output = "coverage.xml"
 
 [tool.setuptools.packages.find]
 include = ["arrayscope*"]
