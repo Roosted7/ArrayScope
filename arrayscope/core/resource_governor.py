@@ -81,6 +81,8 @@ class FeedbackChannelDiagnostics:
     interval_ms: int
     last_byte_count: int = 0
     per_byte_ewma_ms: float | None = None
+    overhead_ewma_ms: float | None = None
+    marginal_per_item_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -280,6 +282,26 @@ class ResourceGovernor:
                 int(feedback.tuning.min_batch),
                 min(int(batch_max), int(control_budget // max(0.25, snapshot.per_item_ewma_ms))),
             )
+        presentation_model = (
+            feedback.overhead_and_marginal_ms(channel)
+            if channel in _PRESENTATION_UPLOAD_CHANNELS
+            else None
+        )
+        if presentation_model is not None:
+            # Per-item EWMAs misattribute fixed per-commit overhead (level
+            # sync, histogram, presentation build) to the items: small commits
+            # look expensive per item, which shrinks the next batch further —
+            # a montage fill can pin itself at 1-2 tiles per commit and only
+            # recover near the end. Size the batch from the marginal rate;
+            # when the overhead alone exceeds the budget, batching wide
+            # minimizes total GUI occupancy rather than per-commit time.
+            overhead_ms, marginal_ms = presentation_model
+            headroom_ms = float(control_budget) - float(overhead_ms)
+            if headroom_ms > 0.0:
+                model_batch = int(headroom_ms // max(0.05, float(marginal_ms)))
+            else:
+                model_batch = int(batch_max)
+            batch = max(int(feedback.tuning.min_batch), min(int(batch_max), model_batch))
         default_byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
         byte_cap = default_byte_cap
         if snapshot.per_byte_ewma_ms is not None and snapshot.per_byte_ewma_ms > 0.0:
@@ -292,6 +314,7 @@ class ResourceGovernor:
             byte_cap = max(int(byte_cap), int(bytes_per_item * max(1, batch)))
         if (
             channel in _PRESENTATION_UPLOAD_CHANNELS
+            and presentation_model is None
             and 0.0 < snapshot.last_elapsed_ms < float(control_budget)
             and snapshot.last_count <= int(feedback.tuning.min_batch)
             and batch <= int(feedback.tuning.min_batch)
@@ -303,6 +326,7 @@ class ResourceGovernor:
             byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
         elif (
             channel in _PRESENTATION_UPLOAD_CHANNELS
+            and presentation_model is None
             and 0.0 < snapshot.last_elapsed_ms < WARNING_THRESHOLD_MS
             and snapshot.last_count <= int(feedback.tuning.min_batch)
             and snapshot.last_count >= batch
@@ -315,6 +339,7 @@ class ResourceGovernor:
                 byte_cap = max(int(byte_cap), measured_byte_cap)
         elif (
             channel in _PRESENTATION_UPLOAD_CHANNELS
+            and presentation_model is None
             and snapshot.last_elapsed_ms > float(control_budget)
             and (snapshot.elapsed_ewma_ms or 0.0) > float(control_budget)
             and snapshot.last_count > 0
@@ -334,6 +359,7 @@ class ResourceGovernor:
                 byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
         elif (
             channel in _PRESENTATION_UPLOAD_CHANNELS
+            and presentation_model is None
             and 0.0 < snapshot.last_elapsed_ms < WARNING_THRESHOLD_MS
             and snapshot.last_count >= batch
         ):
@@ -345,6 +371,7 @@ class ResourceGovernor:
                 byte_cap = max(int(byte_cap), measured_byte_cap)
         if (
             channel in _PRESENTATION_UPLOAD_CHANNELS
+            and presentation_model is None
             and not interactive
             and 0.0 < snapshot.last_elapsed_ms <= float(feedback.tuning.target_idle_ms)
             and snapshot.last_count <= max(1, int(feedback.tuning.min_batch))
@@ -402,6 +429,8 @@ class ResourceGovernor:
                     budget_ms=decision.budget_ms,
                     batch_limit=decision.batch_limit,
                     interval_ms=decision.interval_ms,
+                    overhead_ewma_ms=snapshot.overhead_ewma_ms,
+                    marginal_per_item_ms=snapshot.marginal_per_item_ms,
                 )
             )
         telemetry = self._telemetry

@@ -34,6 +34,17 @@ This file records user-visible release changes. Detailed development history and
   The whole montage used to idle behind that one single-threaded transform
   — the "slow start" where tiles only pour in near the end; the stage now
   starts immediately and uses the configured FFT workers.
+- Montage presentation no longer starts as a trickle: per-item latency
+  feedback misattributed the fixed per-commit overhead (level sync,
+  histogram, presentation build) to the tiles themselves, so small commits
+  looked expensive per tile and pinned upload batches at 1-2 tiles until
+  late in the fill. Presentation channels now split cost into per-commit
+  overhead and per-item marginal rate (an exponentially-weighted
+  regression over batch size vs elapsed) and size batches from the
+  marginal rate. New `overhead_ewma_ms` / `marginal_per_item_ms` feedback
+  diagnostics, plus `presented_order_sample` and priority retarget/fairness
+  counters in montage diagnostics so fill-order violations are visible in
+  diagnostics logs.
 - Montage tiles now genuinely fill center/mouse-first. Three paths ignored
   the priority order: stage fan-in released waiting tiles in the plan's
   row-major order under budget caps (filling from a corner regardless of the

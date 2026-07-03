@@ -170,6 +170,9 @@ class MontageRenderSession:
     priority_focus: tuple[float, float] | None = None
     priority_retargeted_tiles: int = 0
     priority_fairness_pops: int = 0
+    # First presented tile numbers in presentation order (capped): makes
+    # priority-order violations observable in diagnostics logs.
+    presented_order: list[int] = field(default_factory=list)
     presentation_geometry_changed: bool = False
     _layout_geometry_changed_pending: bool = False
     lod_policy_decision: LodPolicyDecision = field(
@@ -420,6 +423,8 @@ class MontageRenderSession:
             index = int(tile_number)
             if index not in self.rendered_tiles:
                 continue
+            if index not in self.presented_tiles and len(self.presented_order) < 64:
+                self.presented_order.append(index)
             self.presented_tiles.add(index)
             if index in self.visible_tile_numbers and index in self.display_tile_payloads:
                 level_scope_additions.append(index)

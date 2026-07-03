@@ -503,3 +503,40 @@ def test_result_drain_under_budget_batch_recovers_from_measured_rate():
     recovered = governor.decide_ui_work("montage_queue_drain", interactive=False)
 
     assert recovered.batch_limit > slow.batch_limit
+
+
+def test_presentation_batches_escape_fixed_overhead_death_spiral():
+    # Replays the observed montage fill pathology: commits cost ~15 ms fixed
+    # (level sync, histogram, presentation build) plus ~1 ms per tile. With
+    # per-item EWMAs, a 2-tile commit measures ~8.5 ms/item, the batch shrinks
+    # to 1-2, and every subsequent small commit looks over budget, pinning the
+    # whole fill at a trickle. The overhead/marginal model must recover a
+    # batch that amortizes the fixed cost.
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+
+    def commit(count):
+        governor.record_ui_observation("montage_present_total", 15.0 + 1.0 * count, item_count=count)
+        return governor.decide_ui_work("montage_present_total", interactive=False).batch_limit
+
+    batches = [commit(2), commit(1), commit(2), commit(1)]
+    # Once counts have varied, the model kicks in; drive a few more commits
+    # using whatever batch the governor allows.
+    for _ in range(6):
+        batches.append(commit(max(1, batches[-1])))
+
+    # Balanced idle control budget for presentation channels is
+    # max(budget, 16+8) = 24 ms; with 15 ms overhead and 1 ms marginal the
+    # sustainable batch is ~9, not 1-2.
+    assert batches[-1] >= 6, batches
+    # And it converges rather than oscillating back to a trickle.
+    assert min(batches[-3:]) >= 6, batches
+
+
+def test_presentation_model_still_keeps_genuinely_expensive_items_small():
+    # 12 ms per item with no meaningful fixed cost: the model must not
+    # inflate batches (24 ms control budget / 12 ms per item = 2).
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    for count in (1, 3, 2, 4, 1, 3, 2, 4):
+        governor.record_ui_observation("montage_present_total", 12.0 * count, item_count=count)
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+    assert decision.batch_limit <= 3, decision

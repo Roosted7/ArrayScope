@@ -103,6 +103,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         retained_stage_index=None if session is None else getattr(session, "retained_stage_index", None),
         retained_stage_decision="" if session is None else str(getattr(session, "retained_stage_decision", "") or ""),
         repeated_expensive_stage_per_tile=False if session is None else bool(getattr(session, "repeated_expensive_stage_per_tile", False)),
+        priority_retargeted_tiles=0 if session is None else int(getattr(session, "priority_retargeted_tiles", 0) or 0),
+        priority_fairness_pops=0 if session is None else int(getattr(session, "priority_fairness_pops", 0) or 0),
+        presented_order_sample=() if session is None else tuple(int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]),
     )
 
     decision = getattr(window, "_last_render_decision", None)
