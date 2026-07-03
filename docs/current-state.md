@@ -28,12 +28,12 @@ Y1–Y3/X5 entries in the [roadmap](roadmap.md).
 | Backend shell sharing | Consolidated (Y2) | Shared semantic drivers live in `ImageViewShell` behind small hooks; one tile-stats contract; surface parity tests run on both backends. |
 | UI state sync | Declarative (Y3) | `ViewStateBinder` mirrors `ViewState` into widgets; one registration per control; guarded by architecture tests. |
 | Caches | Unified (Y3) | `core/bounded_cache.py` is the one eviction/priority implementation under the display, stage, and payload caches. Retained tiled payloads are bounded before large inserts in the v34 review branch. |
-| PyQtGraph backend | Production default | Bounded CPU/item convergence; large item counts remain costly. |
-| VisPy backend | Experimental | Promising; real-hardware evidence is the X5 gate. Warm residency now uses an ordered queue in the v34 review branch. Unstable under software GL (Xvfb/llvmpipe) — do not treat CI GL runs as evidence. |
+| PyQtGraph backend | Fallback default (ADR 0047) | Bounded CPU/item convergence; large item counts and level re-window drains remain costly (X5a fixed starvation: 272-tile level drag never converged, now ~4.3 s). Selected by `auto` wherever hardware GL is absent or traces are missing. |
+| VisPy backend | Auto-selected on Linux hardware GL (ADR 0047) | X5a Linux traces: first frame faster in every scenario (1.4–13×); level changes are uniform-only (272-tile level drag ~0.26 s vs ~8 s). Still unstable under software GL (Xvfb/llvmpipe) — do not treat CI GL runs as evidence. |
 | LOD | Native-only policy | Desired vs applied factor reported separately; multi-resolution waits on ADR 0041/X5. |
 | Diagnostics/benchmarks | Good | Work-graph counters, JSONL, benchmark records; profilers drive the production window composition. |
 | Test suite | Repaired (v32) + contract coverage (Y2) | Host-independent, no `sys.modules` replacement; `test_imagesurface_contract.py` pins cross-backend semantics; architecture guards pin the Y1/Y3 invariants. |
-| Documentation/ADRs | Updated through ADR 0046 | Roadmap gates Y1–Y3 recorded as done; X5 is now an evidence-first physical strategy gate. |
+| Documentation/ADRs | Updated through ADR 0047 | Roadmap gates Y1–Y3 recorded as done; X5a Linux traces published in `reviews/x5a-hardware-telemetry-linux-wayland.md`; X5b–X5e remain open. |
 
 ## What is working well
 

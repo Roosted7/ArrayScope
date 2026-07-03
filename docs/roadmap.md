@@ -146,6 +146,17 @@ gate for tiled surfaces and physical strategy selection, not a general performan
 Xvfb/software GL is intermittently unstable; headless GL runs are not evidence for or against the VisPy
 backend — only real-hardware traces count here.
 
+**X5a done for Linux (2026-07-03):** the first real-hardware pass ran the presented-frame
+micro/stress matrix, the production-window montage workflow, and 60 Hz scroll interaction on a live
+Wayland session across Intel iGPU / NVIDIA dGPU and Wayland / XWayland
+([reference traces](reviews/x5a-hardware-telemetry-linux-wayland.md)). It fixed the broken GPU
+device-limit query (every record silently reported a 4096 fallback), two O(n²) VisPy commit costs
+(per-commit histogram concatenation, resident-key recomputation; 272-tile stress submit
+1180 ms → ~130 ms), and the PyQtGraph level-refinement starvation on large montages (a 272-tile
+level drag never converged; now ~4.3 s). [ADR 0047](decisions/0047-auto-image-backend-selection.md)
+adds the resulting `auto` backend choice: VisPy on Linux with hardware GL, PyQtGraph everywhere
+else. Windows/macOS traces and X5b–X5e remain open.
+
 **Goal:** base GPU, backend-default, singleton/direct fast-path, viewport-residency, and
 multi-resolution decisions on real device behavior.
 
