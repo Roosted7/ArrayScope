@@ -33,7 +33,7 @@ def create_image_view(settings=None, *, notify=None):
         resolved, reason = resolve_auto_backend_choice()
         choice_value = resolved.value
         if callable(notify):
-            notify(f"Image rendering backend: {choice_value} ({reason})")
+            notify(f"Image rendering backend: {choice_value} | {reason}")
     if choice_value == ImageRenderingBackendChoice.VISPY.value:
         try:
             from arrayscope.display.backends.vispy import VisPySurface
@@ -79,9 +79,9 @@ def _probe_auto_backend_choice() -> tuple[ImageRenderingBackendChoice, str]:
     if any(marker in lowered for marker in _SOFTWARE_RENDERER_MARKERS):
         return (
             ImageRenderingBackendChoice.PYQTGRAPH,
-            f"software GL renderer ({renderer})",
+            f"SW OpenGL [{renderer}]",
         )
-    return (ImageRenderingBackendChoice.VISPY, f"hardware GL renderer ({renderer})")
+    return (ImageRenderingBackendChoice.VISPY, f"HW OpenGL [{renderer}]")
 
 
 def _probe_hardware_gl_renderer() -> str | None:

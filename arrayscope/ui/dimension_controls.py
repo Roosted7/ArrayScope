@@ -438,7 +438,7 @@ class DimensionControlMixin:
         if axis is None and self.view_state.line_axis is not None:
             axis = self.view_state.line_axis
         if axis is None or axis >= self.data.ndim or self.data.shape[axis] <= 1:
-            self.statusBar().showMessage("No slice axis available", 2500)
+            show_status_message(self, "No slice axis available", timeout=2500)
             return
         current = self.view_state.slice_indices[axis]
         new_value = max(0, min(self.data.shape[axis] - 1, current + int(delta)))
@@ -450,7 +450,7 @@ class DimensionControlMixin:
             self._set_display_colormap(colormap_name, user_selected=True, request_render=True)
         except Exception as e:
             handle_ui_exception("set colormap", e)
-            self.statusBar().showMessage(f"Failed to set colormap {colormap_name}: {e}", 3000)
+            show_status_message(self, f"Failed to set colormap {colormap_name}: {e}", timeout=3000)
     
     def eventFilter(self, obj, event):
         if (

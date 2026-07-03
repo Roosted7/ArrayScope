@@ -60,6 +60,7 @@ def test_toolbar_fit_and_one_to_one_are_viewport_commands(qtbot):
 
 def test_fit_mode_pan_zoom_reminder_is_transient(qtbot):
     _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtWidgets
     from arrayscope.display.viewport import ViewportMode
     from arrayscope.window import ArrayScopeWindow
 
@@ -73,9 +74,13 @@ def test_fit_mode_pan_zoom_reminder_is_transient(qtbot):
 
         win.img_view._show_fit_mode_interaction_reminder()
 
-        assert "Fit mode is enabled" in win.statusBar().currentMessage()
-        qtbot.wait(1200)
-        assert win.statusBar().currentMessage() == ""
+        label = win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusMessageLabel")
+        assert label is not None
+        assert "Fit mode is enabled" in label.text()
+        qtbot.waitUntil(
+            lambda: win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusMessageLabel") is None,
+            timeout=2000,
+        )
     finally:
         win.close()
 

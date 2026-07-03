@@ -13,6 +13,7 @@ from arrayscope.ui.dimension_strip import DimensionStrip
 from arrayscope.ui.display_toolbar import DisplayToolbar
 from arrayscope.ui.hud import PixelHud
 from arrayscope.ui.icons import set_button_icon
+from arrayscope.ui.toasts import show_status_message
 from arrayscope.ui.state_binding import ViewStateBinder
 from arrayscope.ui.status_label import PixelStatusLabel
 from arrayscope.ui.widgets import configure_tool_button
@@ -417,7 +418,7 @@ class DisplayControlBuildMixin:
         
         self.img_view = create_image_view(
             getattr(self, "app_settings", None),
-            notify=lambda message, timeout=5000: self.statusBar().showMessage(message, int(timeout)),
+            notify=lambda message, timeout=5000: show_status_message(self, message, timeout=timeout),
         )
         governor = getattr(self, "resource_governor", None)
         observer = None if governor is None else getattr(governor, "record_gui_callback_observation", None)
