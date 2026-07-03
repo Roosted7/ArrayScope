@@ -31,6 +31,7 @@ class FFTWorkersChoice(Enum):
 
 
 class ImageRenderingBackendChoice(Enum):
+    AUTO = "auto"
     PYQTGRAPH = "pyqtgraph"
     VISPY = "vispy"
 
@@ -42,7 +43,7 @@ class AppSettingsState:
     panel_resize_behavior: PanelResizeBehavior = PanelResizeBehavior.BEST_EFFORT
     fft_backend: FFTBackendChoice = FFTBackendChoice.AUTO
     fft_workers: FFTWorkersChoice = FFTWorkersChoice.AUTO
-    image_rendering_backend: ImageRenderingBackendChoice = ImageRenderingBackendChoice.PYQTGRAPH
+    image_rendering_backend: ImageRenderingBackendChoice = ImageRenderingBackendChoice.AUTO
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
 
@@ -110,7 +111,7 @@ def normalize_image_rendering_backend_choice(value) -> ImageRenderingBackendChoi
     try:
         return ImageRenderingBackendChoice(str(value))
     except Exception:
-        return ImageRenderingBackendChoice.PYQTGRAPH
+        return ImageRenderingBackendChoice.AUTO
 
 def normalize_render_memory_budget_mb(value) -> int:
     try:

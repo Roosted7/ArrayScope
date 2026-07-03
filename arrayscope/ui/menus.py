@@ -32,7 +32,7 @@ class WindowMenuMixin:
                 "panel_resize_behavior": self._settings.value("panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value),
                 "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
                 "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
-                "image_rendering_backend": self._settings.value("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value),
+                "image_rendering_backend": self._settings.value("image_rendering_backend", ImageRenderingBackendChoice.AUTO.value),
                 "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
             }
@@ -168,6 +168,7 @@ class WindowMenuMixin:
         performance_menu.addMenu(image_backend_menu)
         self._image_rendering_backend_menu = image_backend_menu
         for choice, label in (
+            (ImageRenderingBackendChoice.AUTO, "Auto (hardware GL picks VisPy)"),
             (ImageRenderingBackendChoice.PYQTGRAPH, "PyQtGraph stable"),
             (ImageRenderingBackendChoice.VISPY, "VisPy experimental"),
         ):

@@ -172,6 +172,46 @@ def test_factory_constructs_vispy_backend(qt_app):
         view.close()
 
 
+def test_factory_auto_resolves_from_gl_probe(qt_app, monkeypatch):
+    from arrayscope.app.settings_state import AppSettingsState, ImageRenderingBackendChoice
+    from arrayscope.display import image_view_factory
+
+    monkeypatch.setattr(image_view_factory, "_auto_resolution_cache", None)
+    monkeypatch.setattr(image_view_factory.platform, "system", lambda: "Linux")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setattr(
+        image_view_factory,
+        "_probe_hardware_gl_renderer",
+        lambda: "NVIDIA RTX A2000 Laptop GPU/PCIe/SSE2",
+    )
+    messages = []
+    view = image_view_factory.create_image_view(
+        AppSettingsState(image_rendering_backend=ImageRenderingBackendChoice.AUTO),
+        notify=messages.append,
+    )
+    try:
+        assert type(view).__name__ == "VisPySurface"
+        assert any("vispy" in message for message in messages)
+    finally:
+        view.close()
+
+    monkeypatch.setattr(image_view_factory, "_auto_resolution_cache", None)
+    monkeypatch.setattr(image_view_factory, "_probe_hardware_gl_renderer", lambda: "llvmpipe (LLVM 19.1.0, 256 bits)")
+    view = image_view_factory.create_image_view(
+        AppSettingsState(image_rendering_backend=ImageRenderingBackendChoice.AUTO),
+    )
+    try:
+        assert type(view).__name__ == "PyQtGraphSurface"
+    finally:
+        view.close()
+
+    monkeypatch.setattr(image_view_factory, "_auto_resolution_cache", None)
+    monkeypatch.setattr(image_view_factory.platform, "system", lambda: "Windows")
+    resolved, reason = image_view_factory.resolve_auto_backend_choice()
+    assert resolved == ImageRenderingBackendChoice.PYQTGRAPH
+    assert "no reference performance traces" in reason
+
+
 def test_vispy_surface_exposes_lifecycle_contract(qt_app):
     from arrayscope.display.backends import surface_for_view
     from arrayscope.display.backends.vispy.surface import VisPySurface
