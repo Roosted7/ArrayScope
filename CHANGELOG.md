@@ -21,6 +21,13 @@ This file records user-visible release changes. Detailed development history and
 
 ### Changed
 
+- Reusable operation stages (e.g. a full-dimension FFT chain) are computed
+  once even when several evaluations need them concurrently: the stage cache
+  now deduplicates in-flight computations, so a montage start, a visible
+  re-render, or scrub steps that race the same uncached stage wait for the
+  first computation instead of each running the full transform. New
+  `compute_claims` / `compute_wait_reuses` stage-cache diagnostics make the
+  deduplication observable.
 - Scheduling responsiveness during interaction: resource-governor decisions
   (worker counts, drain batch limits, callback budgets) are now reapplied on
   interaction start/stop edges instead of waiting for the next 250 ms–1 s

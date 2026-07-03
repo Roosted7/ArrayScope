@@ -521,3 +521,60 @@ def test_hypothesis_lazy_slab_matches_materialized_image_line_scalar_and_export(
                 rtol=1e-6,
                 atol=1e-6,
             )
+
+
+def test_concurrent_slab_evaluations_share_one_stage_computation(monkeypatch):
+    # Two evaluations that both miss the stage cache while the first is still
+    # computing must not each run the full-dimension FFT chain: the second
+    # waits on the in-flight computation (or hits the cache) instead.
+    import threading
+    import time
+
+    from arrayscope.operations import dim_ops
+
+    data = np.random.default_rng(0).normal(size=(4, 5, 6)).astype(np.float32)
+    document = ArrayDocument(
+        data,
+        operations=(CenteredFFT(axis=0), CenteredFFT(axis=1), CenteredFFT(axis=2)),
+    )
+    state = ViewState.from_shape(document.current_shape)
+    cache = StageCache(max_bytes=16 * 1024 * 1024, max_entries=8)
+
+    chain_starts = []
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    real_fft = dim_ops.centered_fft
+
+    def gated_fft(array, axis, **kwargs):
+        if tuple(np.shape(array)) == data.shape and int(axis) == 0:
+            chain_starts.append(threading.get_ident())
+            if len(chain_starts) == 1:
+                first_entered.set()
+                assert release_first.wait(timeout=30)
+        return real_fft(array, axis, **kwargs)
+
+    monkeypatch.setattr(dim_ops, "centered_fft", gated_fft)
+
+    results = {}
+
+    def eval_slice(slice_index):
+        request = request_for_image(state.with_slice(2, slice_index))
+        results[slice_index] = evaluate_slab(document, request, stage_cache=cache, document_key=("doc",))
+
+    thread_a = threading.Thread(target=eval_slice, args=(0,))
+    thread_a.start()
+    assert first_entered.wait(timeout=30)
+    thread_b = threading.Thread(target=eval_slice, args=(1,))
+    thread_b.start()
+    time.sleep(0.2)
+    release_first.set()
+    thread_a.join(timeout=30)
+    thread_b.join(timeout=30)
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+
+    shared_chain_starts = len(chain_starts)
+    monkeypatch.setattr(dim_ops, "centered_fft", real_fft)
+    assert shared_chain_starts == 1
+
+    np.testing.assert_allclose(results[0], evaluate_slab(document, request_for_image(state.with_slice(2, 0))))
+    np.testing.assert_allclose(results[1], evaluate_slab(document, request_for_image(state.with_slice(2, 1))))

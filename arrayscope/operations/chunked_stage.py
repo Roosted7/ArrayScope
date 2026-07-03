@@ -17,7 +17,12 @@ from arrayscope.operations.regions import (
     region_shape,
 )
 from arrayscope.operations.regions import StageCacheCandidate
-from arrayscope.operations.slabs import materialize_stage_candidate, stage_key_for_candidate
+from arrayscope.operations.slabs import (
+    _default_stage_document_key,
+    claim_or_reuse_stage,
+    materialize_stage_candidate,
+    stage_key_for_candidate,
+)
 from arrayscope.operations.stage_cache import StageValue
 
 
@@ -139,39 +144,54 @@ def materialize_stage_candidate_chunked(
             evaluation_context=evaluation_context,
         )
     _check_cancelled(cancellation_token)
-    output = np.empty(region_shape(candidate.shape, candidate.region), dtype=np.dtype(candidate.dtype))
-    completed = 0
-    for chunk in plan.chunks:
-        _check_cancelled(cancellation_token)
-        chunk_candidate = _candidate_for_region(candidate, chunk)
-        value = materialize_stage_candidate(
-            document,
-            region_plan,
-            chunk_candidate,
-            stage_cache=None,
-            document_key=document_key,
-            cancellation_token=cancellation_token,
-            evaluation_context=evaluation_context,
+    if document_key is None:
+        document_key = _default_stage_document_key(document)
+    key = None if stage_cache is None else stage_key_for_candidate(document_key, candidate)
+    claimed = False
+    if key is not None:
+        claimed, reused = claim_or_reuse_stage(
+            stage_cache, key, candidate, candidate.shape, cancellation_token=cancellation_token
         )
-        output[_local_index_for_chunk(candidate.region, chunk)] = value.data
-        completed += 1
+        if reused is not None:
+            return reused
+    result = None
+    try:
+        output = np.empty(region_shape(candidate.shape, candidate.region), dtype=np.dtype(candidate.dtype))
+        completed = 0
+        for chunk in plan.chunks:
+            _check_cancelled(cancellation_token)
+            chunk_candidate = _candidate_for_region(candidate, chunk)
+            value = materialize_stage_candidate(
+                document,
+                region_plan,
+                chunk_candidate,
+                stage_cache=None,
+                document_key=document_key,
+                cancellation_token=cancellation_token,
+                evaluation_context=evaluation_context,
+            )
+            output[_local_index_for_chunk(candidate.region, chunk)] = value.data
+            completed += 1
+            _check_cancelled(cancellation_token)
+        nbytes = int(output.nbytes)
+        result = StageValue(
+            data=output,
+            region=candidate.region,
+            stage_index=int(candidate.stage_index),
+            nbytes=nbytes,
+            priority=str(candidate.priority),
+            recompute_cost=float(getattr(candidate, "estimated_recompute_cost", 0.0) or 0.0),
+            visible_reuse=bool(getattr(candidate, "visible_reuse", True)),
+            prefetch_only=bool(getattr(candidate, "prefetch_only", False)),
+        )
         _check_cancelled(cancellation_token)
-    nbytes = int(output.nbytes)
-    result = StageValue(
-        data=output,
-        region=candidate.region,
-        stage_index=int(candidate.stage_index),
-        nbytes=nbytes,
-        priority=str(candidate.priority),
-        recompute_cost=float(getattr(candidate, "estimated_recompute_cost", 0.0) or 0.0),
-        visible_reuse=bool(getattr(candidate, "visible_reuse", True)),
-        prefetch_only=bool(getattr(candidate, "prefetch_only", False)),
-    )
-    _check_cancelled(cancellation_token)
-    if stage_cache is not None:
-        stage_cache.put(stage_key_for_candidate(document_key, candidate), result)
-    del completed
-    return result
+        if stage_cache is not None:
+            stage_cache.put(key, result)
+        del completed
+        return result
+    finally:
+        if claimed:
+            stage_cache.finish_compute(key, result)
 
 
 def _blocking_axes_through_candidate(region_plan, stage_index: int) -> tuple[int, ...]:

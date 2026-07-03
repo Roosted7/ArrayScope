@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from math import log2
 from time import perf_counter
@@ -37,6 +38,8 @@ class StageCacheDiagnostics:
     last_refused: str = ""
     last_lookup_ms: float | None = None
     last_lookup_hit: bool | None = None
+    compute_claims: int = 0
+    compute_wait_reuses: int = 0
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,14 @@ class StageValue:
     last_access_counter: int = 0
     visible_reuse: bool = False
     prefetch_only: bool = False
+
+
+class _InFlightStageCompute:
+    __slots__ = ("event", "value")
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.value = None
 
 
 class StageCache:
@@ -71,6 +82,9 @@ class StageCache:
         self.last_lookup_ms = None
         self.last_lookup_hit = None
         self._access_counter = 0
+        self._in_flight: dict[StageKey, _InFlightStageCompute] = {}
+        self.compute_claims = 0
+        self.compute_wait_reuses = 0
 
     @property
     def max_bytes(self) -> int:
@@ -146,6 +160,66 @@ class StageCache:
             self.last_lookup_ms = (perf_counter() - start) * 1000.0
             return None
 
+    def begin_compute(self, key: StageKey) -> bool:
+        """Claim the in-flight computation for ``key``.
+
+        Returns True when the caller becomes the single computer for this
+        stage; False when another evaluation is already computing it and the
+        caller should wait via :meth:`wait_for_compute` instead of duplicating
+        the work.
+        """
+        with self._lock:
+            if key in self._in_flight:
+                return False
+            self._in_flight[key] = _InFlightStageCompute()
+            self.compute_claims += 1
+            return True
+
+    def finish_compute(self, key: StageKey, value: StageValue | None = None) -> None:
+        """Publish the claimed computation's result (or failure) to waiters.
+
+        Must be called exactly once per successful :meth:`begin_compute`,
+        even on failure (with ``value=None``) so waiters can take over.
+        """
+        with self._lock:
+            entry = self._in_flight.pop(key, None)
+        if entry is not None:
+            entry.value = value
+            entry.event.set()
+
+    def wait_for_compute(
+        self,
+        key: StageKey,
+        *,
+        should_abort=None,
+        poll_s: float = 0.05,
+        timeout_s: float = 60.0,
+    ) -> tuple[bool, StageValue | None]:
+        """Wait for an in-flight computation of ``key`` to finish.
+
+        Returns ``(finished, value)``. ``(True, value)`` when the computer
+        published a result, ``(True, None)`` when nothing is in flight or the
+        computer failed (callers should retry :meth:`begin_compute`), and
+        ``(False, None)`` on abort or timeout (callers may fall back to
+        computing without a claim, which at worst restores the old
+        duplicate-computation behavior).
+        """
+        with self._lock:
+            entry = self._in_flight.get(key)
+        if entry is None:
+            return True, None
+        deadline = perf_counter() + float(timeout_s)
+        while not entry.event.wait(float(poll_s)):
+            if should_abort is not None and should_abort():
+                return False, None
+            if perf_counter() >= deadline:
+                return False, None
+        value = entry.value
+        if value is not None:
+            with self._lock:
+                self.compute_wait_reuses += 1
+        return True, value
+
     def put(self, key: StageKey, value: StageValue) -> bool:
         with self._lock:
             nbytes = max(0, int(value.nbytes))
@@ -178,6 +252,8 @@ class StageCache:
             self.last_refused = ""
             self.last_lookup_ms = None
             self.last_lookup_hit = None
+            self.compute_claims = 0
+            self.compute_wait_reuses = 0
 
     def diagnostics(self) -> StageCacheDiagnostics:
         with self._lock:
@@ -200,6 +276,8 @@ class StageCache:
                 last_refused=self.last_refused,
                 last_lookup_ms=self.last_lookup_ms,
                 last_lookup_hit=self.last_lookup_hit,
+                compute_claims=int(self.compute_claims),
+                compute_wait_reuses=int(self.compute_wait_reuses),
             )
 
     def retention_score(self, key: StageKey, value: StageValue) -> float:

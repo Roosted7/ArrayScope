@@ -130,3 +130,52 @@ def test_stage_cache_retention_score_prefers_hot_visible_expensive_stage():
 
     assert cache.get(_key("prefetch")) is None
     assert cache.get(_key("visible")) is expensive_visible
+
+
+def test_stage_cache_in_flight_claim_and_publish():
+    cache = StageCache(max_bytes=1024, max_entries=4)
+    key = _key("a")
+
+    assert cache.begin_compute(key) is True
+    assert cache.begin_compute(key) is False
+
+    value = _value(np.arange(4))
+    cache.finish_compute(key, value)
+    finished, waited = cache.wait_for_compute(key)
+    # Entry is gone after finish: nothing in flight means the caller may claim.
+    assert finished is True and waited is None
+    assert cache.begin_compute(key) is True
+    cache.finish_compute(key, None)
+
+    diagnostics = cache.diagnostics()
+    assert diagnostics.compute_claims == 2
+
+
+def test_stage_cache_wait_receives_published_value_and_times_out():
+    import threading
+
+    cache = StageCache(max_bytes=1024, max_entries=4)
+    key = _key("a")
+    value = _value(np.arange(4))
+    assert cache.begin_compute(key) is True
+
+    results = []
+    waiter = threading.Thread(target=lambda: results.append(cache.wait_for_compute(key, poll_s=0.01)))
+    waiter.start()
+    cache.finish_compute(key, value)
+    waiter.join(timeout=5)
+    assert results == [(True, value)]
+    assert cache.diagnostics().compute_wait_reuses == 1
+
+    # A failed computer publishes None: waiters see finished-without-value.
+    assert cache.begin_compute(key) is True
+    finisher = threading.Timer(0.05, cache.finish_compute, args=(key, None))
+    finisher.start()
+    finished, waited = cache.wait_for_compute(key, poll_s=0.01)
+    assert finished is True and waited is None
+
+    # Timeout leaves the claim in place and reports not-finished.
+    assert cache.begin_compute(key) is True
+    finished, waited = cache.wait_for_compute(key, poll_s=0.01, timeout_s=0.05)
+    assert finished is False and waited is None
+    cache.finish_compute(key, None)
