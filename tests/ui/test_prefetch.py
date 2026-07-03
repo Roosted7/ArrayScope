@@ -83,6 +83,7 @@ def test_prefetch_dispatch_is_queued_but_not_timer_admitted(qtbot):
 def test_prefetch_limits_to_two_neighbors(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.core.prefetch_policy import SliceScrubMomentum
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(3 * 4 * 8, dtype=float).reshape(3, 4, 8))
@@ -91,11 +92,39 @@ def test_prefetch_limits_to_two_neighbors(qtbot):
         _process_events(qtbot)
         win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
         win._active_slice_axis = 2
-        win.renderer._last_prefetch_slice_index = 2
+        momentum = SliceScrubMomentum()
+        momentum.observe(2, now=0.0)
+        win.renderer._prefetch_momentum = momentum
         win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 4), None)
         _process_events(qtbot, count=40)
 
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled <= 2
+    finally:
+        win.close()
+
+
+def test_prefetch_deepens_with_sustained_directional_scrub(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.core.prefetch_policy import SliceScrubMomentum
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 16, dtype=float).reshape(3, 4, 16))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win._active_slice_axis = 2
+        momentum = SliceScrubMomentum()
+        base = time.monotonic() - 0.3
+        for step, index in enumerate((2, 3, 4, 5)):
+            momentum.observe(index, now=base + 0.1 * step)
+        win.renderer._prefetch_momentum = momentum
+        win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 6), None)
+        _process_events(qtbot, count=40)
+
+        scheduled = win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled
+        assert scheduled > 2, "sustained same-direction scrubbing should warm deeper ahead of the motion"
     finally:
         win.close()
 

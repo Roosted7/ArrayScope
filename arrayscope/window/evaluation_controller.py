@@ -151,10 +151,19 @@ class EvaluationController(Qt.QtCore.QObject):
         # Fallback timer, not the primary drain path. Worker notifications emit
         # `queueEventReady`; this single-shot safety net handles Qt bindings
         # that occasionally miss a cross-thread signal while work is active.
+        # The interval adapts: while the signal path is proven healthy the
+        # net backs off (fewer wakeups and less GIL churn under long compute);
+        # the moment the net catches an event the signal should have
+        # delivered, it snaps back to the fast interval.
+        self._drain_fallback_min_ms = 10
+        self._drain_fallback_max_ms = 100
+        self._drain_fallback_interval_ms = self._drain_fallback_min_ms
+        self._fallback_recovered_events_count = 0
+        self._fallback_idle_polls_count = 0
         self._drain_fallback_timer = Qt.QtCore.QTimer(self)
         self._drain_fallback_timer.setSingleShot(True)
-        self._drain_fallback_timer.setInterval(10)
-        self._drain_fallback_timer.timeout.connect(self._drain_queue)
+        self._drain_fallback_timer.setInterval(self._drain_fallback_interval_ms)
+        self._drain_fallback_timer.timeout.connect(self._on_drain_fallback)
         try:
             self.queueEventReady.connect(self._drain_queue, Qt.QtCore.Qt.ConnectionType.QueuedConnection)
         except Exception:
@@ -514,6 +523,8 @@ class EvaluationController(Qt.QtCore.QObject):
             active_preserved=int(self._active_preserved_count),
             queued_collapsed=int(self._queued_collapsed_count),
             stale_reused=int(self._stale_reused_count),
+            fallback_recovered_events=int(self._fallback_recovered_events_count),
+            fallback_idle_polls=int(self._fallback_idle_polls_count),
             presented_target=progress.presented,
             active_target=progress.active,
             queued_latest_target=progress.queued_latest,
@@ -625,6 +636,22 @@ class EvaluationController(Qt.QtCore.QObject):
             return
         if not self._drain_fallback_timer.isActive():
             self._drain_fallback_timer.start()
+
+    def _on_drain_fallback(self) -> None:
+        # Adapt the safety-net cadence from what this poll actually found.
+        # Events sitting in the queue mean a cross-thread signal was missed
+        # (or the event loop starved the queued connection): poll fast again.
+        # An empty poll means the signal path is doing its job: back off.
+        if self._pending_queue_events or not self._queue.empty():
+            self._fallback_recovered_events_count += 1
+            self._drain_fallback_interval_ms = self._drain_fallback_min_ms
+        else:
+            self._fallback_idle_polls_count += 1
+            self._drain_fallback_interval_ms = min(
+                self._drain_fallback_max_ms, self._drain_fallback_interval_ms * 2
+            )
+        self._drain_fallback_timer.setInterval(self._drain_fallback_interval_ms)
+        self._drain_queue()
 
     def _finish(self, generation, value):
         request = self._requests.get(generation)

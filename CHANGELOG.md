@@ -13,6 +13,39 @@ This file records user-visible release changes. Detailed development history and
   memory-mapped lazy sources (automatic above a memory-based size threshold),
   with region reads planned, budgeted, and cancellable above the source
   adapter. Lazy windows are labeled `[…, lazy]` in the title.
+- Momentum-aware slice prefetch: sustained same-direction scrubbing warms up
+  to four slices ahead of the motion (with a single reversal guard) instead
+  of a fixed one-around neighborhood; a pause or direction change resets the
+  depth immediately. All existing memory/cost/busy admission gates still
+  apply per candidate.
+
+### Changed
+
+- Scheduling responsiveness during interaction: resource-governor decisions
+  (worker counts, drain batch limits, callback budgets) are now reapplied on
+  interaction start/stop edges instead of waiting for the next 250 ms–1 s
+  sampling tick, so interactive budgets apply from the first drag event.
+- Result-drain feedback now measures and controls the same channel
+  (`<lane>_queue_drain`), closing a loop where most controllers' batch
+  limits were decided from channels that never received observations.
+- Latency feedback filters isolated outliers (GC pauses, one-off relayouts)
+  on all channels and regrows drain batches from the measured under-budget
+  rate, preventing a single slow callback from pinning throughput at
+  one-item batches during interaction.
+- Linked-window sync publishes on the leading edge after a quiet period, so
+  a discrete change (slice step, level nudge, ROI drop) reaches peers
+  immediately; bursts still coalesce through the existing 120 ms trailing
+  timer, which now also flushes periodically during continuous drags.
+- Background-work fallback polling backs off (10 → 100 ms) while the
+  cross-thread signal path is healthy, cutting idle wakeups and GIL churn
+  during long computations; it snaps back to 10 ms if a missed signal is
+  ever detected. New `fallback_recovered_events`/`fallback_idle_polls`
+  diagnostics counters make this observable.
+- Worker pools are sized from the CPUs actually available to the process
+  (affinity mask / container limits via `os.process_cpu_count` or
+  `os.sched_getaffinity`) rather than the machine's total CPU count.
+- Live-profile mouse tracking starts at a 16 ms coalesce interval instead of
+  40 ms until governor feedback takes over.
 
 ## 0.8.0 — ArrayScope v28 release candidate
 

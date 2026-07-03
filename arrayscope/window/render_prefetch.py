@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+from time import monotonic
+
 import pyqtgraph.Qt as Qt
 
 from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.core.prefetch_policy import SliceScrubMomentum
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import stage_document_key
 from arrayscope.operations.slabs import plan_slab, request_for_image
 
-
-# Bounded idle prefetch: at most this many neighboring slices are warmed.
-MAX_IDLE_PREFETCH_SLICES = 2
 
 class RenderPrefetchMixin:
     def _schedule_prefetch_nearby_slices(self, view_state, colormap_lut):
@@ -72,14 +72,15 @@ class RenderPrefetchMixin:
         document = self.win.document
         size = view_state.shape[axis]
         current = view_state.slice_indices[axis]
-        last = getattr(self, "_last_prefetch_slice_index", None)
-        direction = 0 if last is None else (1 if current >= last else -1)
-        self._last_prefetch_slice_index = current
-        deltas = self._prefetch_deltas(direction, max_radius=min(2, max(1, size - 1)))
+        momentum = getattr(self, "_prefetch_momentum", None)
+        if momentum is None:
+            momentum = SliceScrubMomentum()
+            self._prefetch_momentum = momentum
+        momentum.observe(current, now=monotonic())
+        plan = momentum.plan(size=size)
         scheduled = 0
-        for delta in deltas:
-            limit = MAX_IDLE_PREFETCH_SLICES if direction != 0 else 1
-            if scheduled >= limit:
+        for delta in plan.deltas:
+            if scheduled >= plan.depth:
                 break
             index = current + delta
             if 0 <= index < size:
@@ -160,14 +161,6 @@ class RenderPrefetchMixin:
         if (cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)) is not None:
             return True
         return key in getattr(self.win.operation_evaluator.stage_materializer, "_in_flight", {})
-
-    def _prefetch_deltas(self, direction, *, max_radius):
-        radii = range(1, int(max_radius) + 1)
-        if direction > 0:
-            return tuple(delta for radius in radii for delta in (radius, -radius))
-        if direction < 0:
-            return tuple(delta for radius in radii for delta in (-radius, radius))
-        return tuple(delta for radius in radii for delta in (-radius, radius))
 
     def _prefetch_profiles_near_marker(self, view_state, image_x, image_y, *, line_axis=None):
         if view_state.image_axes is None or line_axis is None:

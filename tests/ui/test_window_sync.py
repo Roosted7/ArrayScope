@@ -78,6 +78,36 @@ def test_dimension_indexing_syncs_between_windows(qtbot, make_window):
     assert win_b.widgets["spins"]["slice_indices"][2].value() == 3
 
 
+def test_first_change_publishes_on_leading_edge_without_coalesce_wait(qtbot, make_window):
+    win_a = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_b = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_a.sync_dims_button.setChecked(True)
+    win_b.sync_dims_button.setChecked(True)
+
+    # A discrete change after a quiet period must go out immediately, not
+    # sit in the trailing coalesce timer: no publish timer may be pending
+    # for the dims facet right after the change.
+    win_a.widgets["spins"]["slice_indices"][2].setValue(3)
+
+    timer = win_a.sync_controller._publish_timers.get("dims")
+    assert timer is None or not timer.isActive()
+    _settled(qtbot, lambda: win_b.view_state.slice_indices[2] == 3)
+
+
+def test_burst_of_changes_coalesces_through_trailing_timer(qtbot, make_window):
+    win_a = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_b = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_a.sync_dims_button.setChecked(True)
+    win_b.sync_dims_button.setChecked(True)
+
+    # Leading edge for the first step, trailing coalesce for the burst; the
+    # final value must still arrive.
+    for value in (1, 2, 3):
+        win_a.widgets["spins"]["slice_indices"][2].setValue(value)
+
+    _settled(qtbot, lambda: win_b.view_state.slice_indices[2] == 3)
+
+
 def test_dimension_sync_clamps_for_smaller_arrays_and_ignores_extra_dims(qtbot, make_window):
     win_a = make_window(np.arange(9 * 6 * 4, dtype=float).reshape(9, 6, 4))
     win_b = make_window(np.arange(5 * 3, dtype=float).reshape(5, 3))

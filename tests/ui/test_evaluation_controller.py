@@ -47,6 +47,32 @@ def test_evaluation_controller_drains_without_poll_timer(qtbot):
     assert not hasattr(controller, "_poll_timer")
 
 
+def test_drain_fallback_backs_off_while_signal_path_is_healthy(qtbot):
+    from arrayscope.window.evaluation_controller import EvaluationController
+
+    controller = EvaluationController()
+
+    # Empty polls mean the queued-signal path delivered everything: the
+    # safety net must back off instead of waking at 100 Hz for the whole
+    # duration of long background work.
+    intervals = []
+    for _ in range(6):
+        controller._on_drain_fallback()
+        intervals.append(controller._drain_fallback_interval_ms)
+
+    assert intervals[0] > controller._drain_fallback_min_ms
+    assert intervals[-1] == controller._drain_fallback_max_ms
+    assert controller.diagnostics().fallback_idle_polls == 6
+
+    # The net catching a queued event the signal should have delivered means
+    # the signal path is unhealthy: snap back to the fast interval.
+    controller._queue.put(("started", -1, None))
+    controller._on_drain_fallback()
+
+    assert controller._drain_fallback_interval_ms == controller._drain_fallback_min_ms
+    assert controller.diagnostics().fallback_recovered_events == 1
+
+
 def test_evaluation_controller_dedupes_and_limits_prefetch(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 

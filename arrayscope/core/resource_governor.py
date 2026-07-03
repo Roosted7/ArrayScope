@@ -353,6 +353,20 @@ class ResourceGovernor:
             batch = min(int(batch_max), max(3, int(feedback.tuning.min_batch) + 2))
             if snapshot.last_byte_count > 0:
                 byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
+        if (
+            channel not in _PRESENTATION_UPLOAD_CHANNELS
+            and 0.0 < snapshot.last_elapsed_ms < float(control_budget)
+            and snapshot.last_count >= max(1, int(batch))
+        ):
+            # Measured under-budget recovery for result fan-in channels. A
+            # single slow drain (GC pause, incidental relayout) inflates the
+            # per-item EWMA and can pin the batch at the minimum; once real
+            # drains complete under budget while hitting their cap, grow the
+            # cap from the measured rate instead of waiting for the EWMA to
+            # decay back one drain at a time.
+            scale = float(control_budget) / max(0.25, float(snapshot.last_elapsed_ms))
+            measured_batch = int(ceil(float(snapshot.last_count) * scale))
+            batch = max(int(batch), min(int(batch_max), measured_batch))
         interval = int(feedback.commit_interval_ms(channel, interactive=interactive))
         reason = "interactive feedback target" if interactive else "feedback target"
         decision = UiWorkDecision(channel, batch, budget, interval, reason, int(byte_cap))
@@ -427,17 +441,26 @@ class ResourceGovernor:
     def _feedback_elapsed_ms(self, channel: str, elapsed_ms: float) -> float:
         elapsed = max(0.0, float(elapsed_ms))
         channel = str(channel)
-        if channel not in _PRESENTATION_UPLOAD_CHANNELS:
-            return elapsed
         snapshot = self.latency_feedback.channel_snapshot(channel)
         previous = snapshot.elapsed_ewma_ms
         if previous is None or previous <= 0.0:
             self._feedback_outlier_streak[channel] = 0
             return elapsed
-        control_budget = max(
-            float(self.latency_feedback.work_budget_ms(channel, interactive=False)),
-            WARNING_THRESHOLD_MS + float(self.latency_feedback.tuning.target_idle_ms),
-        )
+        # Isolated spikes (GC pauses, one-off relayouts, event-loop stalls)
+        # measure the environment, not the per-item cost of this channel.
+        # Suppress a single outlier for every channel; a repeat is accepted
+        # as a genuine cost change. Presentation uploads keep their wider
+        # control budget so GPU submission bursts are not treated as spikes.
+        if channel in _PRESENTATION_UPLOAD_CHANNELS:
+            control_budget = max(
+                float(self.latency_feedback.work_budget_ms(channel, interactive=False)),
+                WARNING_THRESHOLD_MS + float(self.latency_feedback.tuning.target_idle_ms),
+            )
+        else:
+            control_budget = max(
+                float(self.latency_feedback.work_budget_ms(channel, interactive=False)),
+                float(self.latency_feedback.tuning.target_idle_ms),
+            )
         isolated_spike = elapsed > max(control_budget * 2.0, float(previous) * 3.0)
         if isolated_spike:
             streak = int(self._feedback_outlier_streak.get(channel, 0)) + 1

@@ -74,8 +74,31 @@ class EvaluationContext:
     memory_policy: object
 
 
+def available_cpu_count() -> int:
+    """CPUs actually available to this process, not just present in the box.
+
+    ``os.process_cpu_count`` (Python 3.13+) and ``os.sched_getaffinity``
+    (Linux) both honor affinity masks and container CPU limits, so worker
+    pools are sized for what the process may really use. ``os.cpu_count``
+    remains the portable fallback.
+    """
+
+    process_cpu_count = getattr(os, "process_cpu_count", None)
+    if callable(process_cpu_count):
+        count = process_cpu_count()
+        if count:
+            return max(1, int(count))
+    sched_getaffinity = getattr(os, "sched_getaffinity", None)
+    if callable(sched_getaffinity):
+        try:
+            return max(1, len(sched_getaffinity(0)))
+        except OSError:
+            pass
+    return max(1, int(os.cpu_count() or 1))
+
+
 def compute_policy_from_settings(settings, *, cpu_count: int | None = None) -> ComputePolicy:
-    count = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
+    count = max(1, int(cpu_count if cpu_count is not None else available_cpu_count()))
     choice = normalize_fft_workers_choice(getattr(settings, "fft_workers", FFTWorkersChoice.AUTO))
     profile = normalize_memory_profile_choice(getattr(settings, "memory_profile", MemoryProfileChoice.BALANCED))
     resolved = int(fft_backend.resolve_fft_workers(choice.value, cpu_count=count))

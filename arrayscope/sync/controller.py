@@ -13,12 +13,15 @@ Loop prevention is layered:
   duplicates they have already applied;
 - while a remote payload is being applied the facet is marked in
   ``_applying`` so apply-triggered widget/render callbacks do not republish;
-- publishing is coalesced through a short timer and skipped when the built
-  payload equals the last payload sent or applied for that facet.
+- publishing is leading-edge (a change after a quiet period goes out
+  immediately) with a short trailing coalesce timer for bursts, and skipped
+  when the built payload equals the last payload sent or applied for that
+  facet.
 """
 
 from __future__ import annotations
 
+from time import monotonic
 from uuid import uuid4
 
 from arrayscope.app.qt_binding import prefer_pyside6
@@ -65,6 +68,7 @@ class WindowSyncController(Qt.QtCore.QObject):
         self._last_payload = {}  # facet -> last payload sent or applied
         self._applying = set()
         self._publish_timers: dict[str, Qt.QtCore.QTimer] = {}
+        self._last_publish_monotonic: dict[str, float] = {}
         self._pending_requests = set()
         self._connect_window_signals()
 
@@ -101,9 +105,24 @@ class WindowSyncController(Qt.QtCore.QObject):
     # Publishing
 
     def schedule_publish(self, facet: str) -> None:
-        """Coalesce and publish this window's state for ``facet``."""
+        """Publish this window's state for ``facet``: leading edge + coalesce.
+
+        The first change after a quiet period publishes immediately, so a
+        discrete action (one slice step, a level nudge, an ROI drop) reaches
+        linked windows without waiting out the coalesce window. Further
+        changes inside the window are coalesced through the trailing timer,
+        which also guarantees a final publish once a continuous drag pauses.
+        The leading edge doubles as the periodic flush during sustained
+        drags — a pure trailing debounce would keep re-arming and never
+        publish until the drag ended.
+        """
 
         if not self.facet_enabled(facet) or facet in self._applying:
+            return
+        now = monotonic()
+        last = self._last_publish_monotonic.get(facet)
+        if last is None or (now - last) * 1000.0 >= PUBLISH_COALESCE_MS:
+            self._publish_now(facet)
             return
         timer = self._publish_timers.get(facet)
         if timer is None:
@@ -126,6 +145,7 @@ class WindowSyncController(Qt.QtCore.QObject):
             return
         self._last_payload[facet] = payload
         self._revisions[facet] += 1
+        self._last_publish_monotonic[facet] = monotonic()
         self.bus.publish(state_message(facet, self.window_id, self._revisions[facet], payload))
 
     def _build_payload(self, facet: str):

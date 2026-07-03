@@ -6,6 +6,7 @@ prefer_pyside6()
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 import platform
+from time import monotonic
 from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
@@ -318,35 +319,59 @@ class ArrayScopeWindow(
             stage_ready_or_in_flight=stage_ready,
         )
 
-    def _apply_resource_governor_decisions(self) -> None:
-        governor = getattr(self, "resource_governor", None)
-        if governor is None:
-            return
-        policy = self._refresh_memory_policy(active_render=self._resource_governor_work_active())
-        governor.update_telemetry(sample_resource_snapshot(), policy)
-        interactive = bool(
+    def _interaction_active_now(self) -> bool:
+        return bool(
             getattr(getattr(self, "render_coordinator", None), "interactive_active", False)
             or getattr(self, "_viewport_interaction_active", False)
         )
+
+    def _note_interaction_state_changed(self) -> None:
+        """Reapply governor decisions on interaction edges instead of waiting.
+
+        The sampling timer runs at 250 ms (1 s when idle), so worker counts,
+        batch limits, and budgets decided for the previous regime could stay
+        applied for up to a second after the user starts or stops interacting.
+        Edges are rare, so an immediate lightweight reapplication (no fresh
+        telemetry sample) is cheap; the timer remains the periodic backstop.
+        """
+        if getattr(self, "_closing", False):
+            return
+        active = self._interaction_active_now()
+        if active == bool(getattr(self, "_governor_interactive_applied", None)):
+            return
+        self._governor_interactive_applied = active
+        now = monotonic()
+        last = float(getattr(self, "_governor_edge_applied_monotonic", 0.0))
+        if (now - last) * 1000.0 >= 50.0:
+            self._governor_edge_applied_monotonic = now
+            self._apply_resource_governor_decisions(refresh_telemetry=False)
+        timer = getattr(self, "_resource_governor_timer", None)
+        if timer is not None and active:
+            timer.start(250)
+
+    def _apply_resource_governor_decisions(self, *, refresh_telemetry: bool = True) -> None:
+        governor = getattr(self, "resource_governor", None)
+        if governor is None:
+            return
+        if refresh_telemetry:
+            policy = self._refresh_memory_policy(active_render=self._resource_governor_work_active())
+            governor.update_telemetry(sample_resource_snapshot(), policy)
+        interactive = self._interaction_active_now()
+        self._governor_interactive_applied = interactive
         busy = self._scheduler_busy_state()
         for lane, controller in self._evaluation_controllers_by_lane().items():
             if controller is None:
                 continue
             decision = governor.decide_lane_workers(lane, interactive=interactive, busy_state=busy)
             controller.set_max_workers(decision.target_workers)
-        for channel, controller in (
-            ("visible_callback", getattr(self, "visible_evaluation_controller", None)),
-            ("montage_tile_result", getattr(self, "montage_tile_evaluation_controller", None)),
-            ("stage_callback", getattr(self, "stage_evaluation_controller", None)),
-            ("histogram_refresh", getattr(self, "histogram_evaluation_controller", None)),
-            ("prefetch_callback", getattr(self, "prefetch_evaluation_controller", None)),
-            ("profile_update", getattr(self, "profile_evaluation_controller", None)),
-            ("roi_refresh", getattr(self, "roi_evaluation_controller", None)),
-            ("pixel_hover", getattr(self, "pixel_evaluation_controller", None)),
-        ):
+        for controller in self._evaluation_controllers_by_lane().values():
             if controller is None:
                 continue
-            decision = governor.decide_ui_work(channel, interactive=interactive)
+            # Each controller's drain records its observations under
+            # "<name>_queue_drain"; deciding on the same channel closes the
+            # feedback loop with that drain's own measured latency instead of
+            # a channel nothing ever observes.
+            decision = governor.decide_ui_work(f"{controller.name}_queue_drain", interactive=interactive)
             controller.set_max_callback_dispatch_per_drain(decision.batch_limit)
             if hasattr(controller, "set_callback_budget_ms"):
                 controller.set_callback_budget_ms(decision.budget_ms)
@@ -412,9 +437,11 @@ class ArrayScopeWindow(
             timer.timeout.connect(self._on_viewport_interaction_quiet)
             self._viewport_interaction_quiet_timer = timer
         timer.start(120)
+        self._note_interaction_state_changed()
 
     def _on_viewport_interaction_quiet(self) -> None:
         self._viewport_interaction_active = False
+        self._note_interaction_state_changed()
         if getattr(self, "_montage_viewport_update_pending", False) and getattr(self.view_state, "montage_axis", None) is not None:
             self._montage_viewport_update_pending = False
             self._schedule_montage_viewport_update()

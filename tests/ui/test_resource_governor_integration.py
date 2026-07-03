@@ -40,3 +40,31 @@ def test_histogram_preview_interval_is_governor_controlled(qtbot):
         assert controller.interval_ms >= 1
     finally:
         win.close()
+
+
+def test_interaction_edge_applies_interactive_budgets_immediately(qtbot):
+    clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        process_events(qtbot)
+        qtbot.waitUntil(lambda: not win._interaction_active_now(), timeout=5000)
+        # A known drain cost separates the idle and interactive budgets.
+        for _ in range(6):
+            win.resource_governor.record_ui_observation("visible_queue_drain", 10.0, item_count=2)
+        win._apply_resource_governor_decisions()
+        idle_budget = win.visible_evaluation_controller._callback_budget_ms
+        assert idle_budget is not None
+        win._governor_edge_applied_monotonic = 0.0
+
+        # The sampling timer runs at 250 ms (1 s idle); an interactive
+        # request must not run against idle budgets until the next tick.
+        win.render_coordinator.request(reason="interaction-edge-test", interactive=True)
+
+        interactive_budget = win.visible_evaluation_controller._callback_budget_ms
+        assert win._governor_interactive_applied is True
+        assert interactive_budget < idle_budget
+    finally:
+        win.close()

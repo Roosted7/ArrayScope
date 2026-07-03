@@ -157,10 +157,13 @@ class DisplayControlBuildMixin:
         self._pending_profile_point = None
         # Bounded profile preview coalescer. Mouse motion stores the latest
         # point; final profile work is guarded by request ids and scheduler
-        # supersession in `window.render`.
+        # supersession in `window.render`. The initial interval matches the
+        # governor's healthy-channel commit interval (16 ms); the governor
+        # retunes it from measured profile-update latency once feedback
+        # exists, so the first mouse moves are not gated at 25 Hz.
         self._profile_timer = Qt.QtCore.QTimer(self)
         self._profile_timer.setSingleShot(True)
-        self._profile_timer.setInterval(40)
+        self._profile_timer.setInterval(16)
         self._profile_timer.timeout.connect(self._update_live_profile_from_pending_pos)
 
     def _create_layout_registry(self):

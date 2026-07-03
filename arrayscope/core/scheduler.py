@@ -75,6 +75,8 @@ class SchedulerDiagnostics:
     active_preserved: int = 0
     queued_collapsed: int = 0
     stale_reused: int = 0
+    fallback_recovered_events: int = 0
+    fallback_idle_polls: int = 0
     presented_target: FrameTarget | None = None
     active_target: FrameTarget | None = None
     queued_latest_target: FrameTarget | None = None

@@ -104,7 +104,9 @@ class RenderCoordinator(Qt.QtCore.QObject):
             self.coalesced += 1
         self._pending_request = request
         if interactive:
-            self._interactive_active = True
+            if not self._interactive_active:
+                self._interactive_active = True
+                self._notify_interaction_state_changed()
             cache_hit = self._interactive_cache_hit()
             supersedes_presentation = False if cache_hit else self._interactive_render_supersedes_presentation(reason)
             if self._presentation_draw_pending():
@@ -135,7 +137,17 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self._pending_request = None
         self._render_timer.stop()
         self._quiet_timer.stop()
-        self._interactive_active = False
+        if self._interactive_active:
+            self._interactive_active = False
+            self._notify_interaction_state_changed()
+
+    def _notify_interaction_state_changed(self) -> None:
+        notify = getattr(self._window, "_note_interaction_state_changed", None)
+        if callable(notify):
+            try:
+                notify()
+            except Exception:
+                pass
 
     def _interactive_cache_hit(self) -> bool:
         predicate = getattr(self._window, "_interactive_frame_cache_hit", None)
@@ -204,7 +216,10 @@ class RenderCoordinator(Qt.QtCore.QObject):
         )
 
     def _quiet_timer_elapsed(self) -> None:
+        was_interactive = self._interactive_active
         self._interactive_active = False
+        if was_interactive:
+            self._notify_interaction_state_changed()
         if getattr(self._window, "_closing", False):
             return
         if self.has_pending_render:
