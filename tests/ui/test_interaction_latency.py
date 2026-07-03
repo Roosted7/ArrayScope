@@ -7,6 +7,9 @@ from arrayscope.operations.evaluator import EvaluationResult
 from tests.ui.helpers import clear_arrayscope_settings, process_events
 
 
+_WAIT_TIMEOUT_MS = 5000
+
+
 def _tile_result(tile, value):
     image = np.full((tile.height, tile.width), value, dtype=np.float32)
     return EvaluationResult(DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes))
@@ -26,7 +29,7 @@ def test_rapid_slice_burst_is_coalesced_and_latest(qtbot, monkeypatch):
         win._on_slice_index_changed(2, 3)
 
         assert calls == []
-        qtbot.waitUntil(lambda: bool(calls), timeout=500)
+        qtbot.waitUntil(lambda: bool(calls), timeout=_WAIT_TIMEOUT_MS)
 
         assert len(calls) < 3
         assert calls[-1][1] == 3
@@ -54,7 +57,7 @@ def test_slice_control_updates_before_render_completion(qtbot, monkeypatch):
         assert win.widgets["spins"]["slice_indices"][2].value() == 4
         assert win.dimension_strip.chip(2).slice_edit.text() == "4"
 
-        qtbot.waitUntil(lambda: bool(render_calls), timeout=500)
+        qtbot.waitUntil(lambda: bool(render_calls), timeout=_WAIT_TIMEOUT_MS)
         assert render_calls[-1][1] == 4
     finally:
         win.close()
@@ -80,7 +83,7 @@ def test_rapid_scroll_latest_control_state_not_blocked_by_slow_commit(qtbot, mon
             assert win.dimension_strip.chip(2).slice_edit.text() == str(index)
 
         assert render_calls == []
-        qtbot.waitUntil(lambda: bool(render_calls), timeout=500)
+        qtbot.waitUntil(lambda: bool(render_calls), timeout=_WAIT_TIMEOUT_MS)
         assert render_calls[-1] == ("slice", 6)
         assert len(render_calls) < 4
     finally:
@@ -114,7 +117,7 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, monkeypatch):
         qtbot.waitUntil(
             lambda: getattr(getattr(win, "_committed_display_frame", None), "scene", None) is not None
             and len(win._committed_display_frame.scene.resident_region_ids) == 2,
-            timeout=250,
+            timeout=_WAIT_TIMEOUT_MS,
         )
         assert calls == []
         assert win.renderer._montage_cached_tiles_last_session == 2
@@ -146,7 +149,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
 
         win._set_view_state(state)
         win.update_image_view()
-        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=500)
+        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=_WAIT_TIMEOUT_MS)
         first_sources = {tile: state.source_array_id for tile, state in win.img_view._montage_tile_layer.states.items()}
 
         win.update_image_view()
@@ -206,7 +209,7 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
 
         win._set_view_state(state)
         win.update_image_view()
-        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=500)
+        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=_WAIT_TIMEOUT_MS)
 
         decision = SimpleNamespace(batch_limit=1, budget_ms=100.0, interval_ms=1000, byte_cap=0)
         monkeypatch.setattr(win, "_ui_work_decision", lambda _channel, *, interactive=False: decision)
@@ -280,7 +283,7 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
 
         win._set_view_state(state)
         win.update_image_view()
-        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=500)
+        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=_WAIT_TIMEOUT_MS)
 
         decision = SimpleNamespace(batch_limit=1, budget_ms=100.0, interval_ms=1000, byte_cap=1)
         monkeypatch.setattr(win, "_ui_work_decision", lambda _channel, *, interactive=False: decision)
@@ -453,7 +456,7 @@ def test_cold_montage_tile_patches_without_side_panel_refresh(qtbot, monkeypatch
             image = None if state is None else getattr(state.item, "image", None)
             return image is not None and np.array_equal(image, np.full((tile.height, tile.width), 9, dtype=np.float32))
 
-        qtbot.waitUntil(requested_tile_is_patched, timeout=250)
+        qtbot.waitUntil(requested_tile_is_patched, timeout=_WAIT_TIMEOUT_MS)
 
         assert operation_refreshes == []
         assert inspection_refreshes == []

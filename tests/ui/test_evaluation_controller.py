@@ -6,9 +6,18 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-def test_evaluation_controller_ignores_stale_results(qt_app):
-    from pyqtgraph.Qt import QtTest
+_WAIT_TIMEOUT_MS = 5000
 
+
+def _wait_until(qtbot, predicate, *, timeout_ms=_WAIT_TIMEOUT_MS):
+    qtbot.waitUntil(predicate, timeout=timeout_ms)
+
+
+def _wait_for_started(qtbot, controller):
+    _wait_until(qtbot, lambda: bool(controller._started))
+
+
+def test_evaluation_controller_ignores_stale_results(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController()
@@ -18,16 +27,13 @@ def test_evaluation_controller_ignores_stale_results(qt_app):
     controller.start(lambda: (time.sleep(0.12), "old")[1], on_done=done.append, on_stale=lambda: stale.append("old"))
     controller.start(lambda: "new", on_done=done.append, on_stale=lambda: stale.append("new"))
 
-    QtTest.QTest.qWait(220)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: done == ["new"] and stale == ["old"])
 
     assert done == ["new"]
     assert stale == ["old"]
 
 
-def test_evaluation_controller_drains_without_poll_timer(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_evaluation_controller_drains_without_poll_timer(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController()
@@ -35,14 +41,13 @@ def test_evaluation_controller_drains_without_poll_timer(qt_app):
 
     controller.start(lambda: "done", on_done=done.append)
 
-    QtTest.QTest.qWait(80)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: done == ["done"])
 
     assert done == ["done"]
     assert not hasattr(controller, "_poll_timer")
 
 
-def test_evaluation_controller_dedupes_and_limits_prefetch(qt_app):
+def test_evaluation_controller_dedupes_and_limits_prefetch(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController()
@@ -60,7 +65,7 @@ def test_evaluation_controller_dedupes_and_limits_prefetch(qt_app):
     assert limited.reason == "limited"
 
 
-def test_evaluation_controller_drain_yields_on_elapsed_budget(qt_app):
+def test_evaluation_controller_drain_yields_on_elapsed_budget(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController(max_callback_dispatch_per_drain=99)
@@ -83,7 +88,7 @@ def test_evaluation_controller_drain_yields_on_elapsed_budget(qt_app):
     assert controller._drain_continuation_pending is True
 
 
-def test_evaluation_controller_drain_records_budget_observation(qt_app):
+def test_evaluation_controller_drain_records_budget_observation(qtbot):
     from arrayscope.app.settings_state import AppSettingsState
     from arrayscope.core.compute_policy import compute_policy_from_settings
     from arrayscope.core.resource_governor import ResourceGovernor
@@ -106,9 +111,7 @@ def test_evaluation_controller_drain_records_budget_observation(qt_app):
     assert any(channel.channel == "visible_queue_drain" for channel in callbacks)
 
 
-def test_start_latest_clears_queued_work_and_only_commits_newest(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_start_latest_clears_queued_work_and_only_commits_newest(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -132,16 +135,13 @@ def test_start_latest_clears_queued_work_and_only_commits_newest(qt_app):
         on_stale=lambda: stale.append("new"),
     )
 
-    QtTest.QTest.qWait(240)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: done == ["new"] and "old" in stale)
 
     assert done == ["new"]
     assert "old" in stale
 
 
-def test_active_plus_latest_preserves_started_work_and_collapses_queued(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_active_plus_latest_preserves_started_work_and_collapses_queued(qtbot):
     from arrayscope.core.scheduler import FrameTarget
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
@@ -161,11 +161,7 @@ def test_active_plus_latest_preserves_started_work_and_collapses_queued(qt_app):
         on_done=done.append,
         on_stale=lambda: stale.append("active"),
     )
-    for _ in range(20):
-        QtTest.QTest.qWait(10)
-        qt_app.processEvents()
-        if controller._started:
-            break
+    _wait_for_started(qtbot, controller)
     assert controller._started
     assert controller.frame_progress("visible").active == active_target
 
@@ -191,8 +187,7 @@ def test_active_plus_latest_preserves_started_work_and_collapses_queued(qt_app):
     assert progress.active == active_target
     assert progress.queued_latest == queued_new_target
 
-    QtTest.QTest.qWait(260)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: done == ["queued-new"] and "active" in stale and "queued-old" in stale)
 
     assert done == ["queued-new"]
     assert "active" in stale
@@ -207,7 +202,7 @@ def test_active_plus_latest_preserves_started_work_and_collapses_queued(qt_app):
     assert diagnostics.presented_target == queued_new_target
 
 
-def test_visible_controller_requires_work_item_when_parent_has_work_graph(qt_app):
+def test_visible_controller_requires_work_item_when_parent_has_work_graph(qtbot):
     import pytest
     from pyqtgraph.Qt import QtCore
 
@@ -228,8 +223,8 @@ def test_visible_controller_requires_work_item_when_parent_has_work_graph(qt_app
         )
 
 
-def test_generic_start_is_not_visible_work_when_parent_has_work_graph(qt_app):
-    from pyqtgraph.Qt import QtCore, QtTest
+def test_generic_start_is_not_visible_work_when_parent_has_work_graph(qtbot):
+    from pyqtgraph.Qt import QtCore
 
     from arrayscope.core.work_graph import WorkGraph
     from arrayscope.window.evaluation_controller import EvaluationController
@@ -241,15 +236,14 @@ def test_generic_start_is_not_visible_work_when_parent_has_work_graph(qt_app):
 
     controller.start(lambda: "value", on_done=done.append)
 
-    QtTest.QTest.qWait(80)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: done == ["value"])
 
     assert done == ["value"]
     assert parent.work_graph.diagnostics().lanes == {}
 
 
-def test_controller_reports_work_graph_reusable_stale_completion(qt_app):
-    from pyqtgraph.Qt import QtCore, QtTest
+def test_controller_reports_work_graph_reusable_stale_completion(qtbot):
+    from pyqtgraph.Qt import QtCore
 
     from arrayscope.core.scheduler import FrameTarget
     from arrayscope.core.work_graph import WorkGraph, WorkItem, WorkLane
@@ -280,11 +274,7 @@ def test_controller_reports_work_graph_reusable_stale_completion(qt_app):
         on_done=lambda _value: None,
         on_reuse_stale=lambda _value: None,
     )
-    for _ in range(20):
-        QtTest.QTest.qWait(10)
-        qt_app.processEvents()
-        if controller._started:
-            break
+    _wait_for_started(qtbot, controller)
 
     controller.start_active_plus_latest(
         lambda: "new",
@@ -304,17 +294,18 @@ def test_controller_reports_work_graph_reusable_stale_completion(qt_app):
         on_done=lambda _value: None,
     )
 
-    QtTest.QTest.qWait(220)
-    qt_app.processEvents()
+    _wait_until(
+        qtbot,
+        lambda: parent.work_graph.diagnostics().lanes.get("visible_materialization", {}).get("reusable_finished") == 1
+        and parent.work_graph.diagnostics().lanes.get("visible_materialization", {}).get("completed") == 1,
+    )
 
     counters = parent.work_graph.diagnostics().lanes["visible_materialization"]
     assert counters["reusable_finished"] == 1
     assert counters["completed"] == 1
 
 
-def test_active_plus_latest_reuses_stale_completion_without_on_done(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_active_plus_latest_reuses_stale_completion_without_on_done(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -331,11 +322,7 @@ def test_active_plus_latest_reuses_stale_completion_without_on_done(qt_app):
         on_stale=lambda: stale.append("active"),
         on_reuse_stale=reused.append,
     )
-    for _ in range(20):
-        QtTest.QTest.qWait(10)
-        qt_app.processEvents()
-        if controller._started:
-            break
+    _wait_for_started(qtbot, controller)
 
     controller.start_active_plus_latest(
         lambda: "latest",
@@ -346,8 +333,7 @@ def test_active_plus_latest_reuses_stale_completion_without_on_done(qt_app):
         on_stale=lambda: stale.append("latest"),
     )
 
-    QtTest.QTest.qWait(220)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: done == ["latest"] and reused == ["active"] and stale == ["active"])
 
     assert done == ["latest"]
     assert reused == ["active"]
@@ -355,9 +341,7 @@ def test_active_plus_latest_reuses_stale_completion_without_on_done(qt_app):
     assert controller.diagnostics().stale_reused == 1
 
 
-def test_active_plus_latest_supersedes_by_key_value_without_group_epoch(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_active_plus_latest_supersedes_by_key_value_without_group_epoch(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -377,11 +361,7 @@ def test_active_plus_latest_supersedes_by_key_value_without_group_epoch(qt_app):
         on_stale=lambda: stale.append("active"),
         on_reuse_stale=reused.append,
     )
-    for _ in range(20):
-        QtTest.QTest.qWait(10)
-        qt_app.processEvents()
-        if controller._started:
-            break
+    _wait_for_started(qtbot, controller)
 
     controller.start_active_plus_latest(
         lambda: "latest",
@@ -396,17 +376,14 @@ def test_active_plus_latest_supersedes_by_key_value_without_group_epoch(qt_app):
 
     assert controller.group_generation("visible") == before
 
-    QtTest.QTest.qWait(220)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: done == ["latest"] and reused == ["active"] and stale == ["active"])
 
     assert done == ["latest"]
     assert reused == ["active"]
     assert stale == ["active"]
 
 
-def test_active_plus_latest_keeps_unrelated_supersession_key_queued(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_active_plus_latest_keeps_unrelated_supersession_key_queued(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -423,11 +400,7 @@ def test_active_plus_latest_keeps_unrelated_supersession_key_queued(qt_app):
         on_done=done.append,
         on_stale=lambda: stale.append("active-image"),
     )
-    for _ in range(20):
-        QtTest.QTest.qWait(10)
-        qt_app.processEvents()
-        if controller._started:
-            break
+    _wait_for_started(qtbot, controller)
 
     controller.start_active_plus_latest(
         lambda: "profile",
@@ -460,8 +433,7 @@ def test_active_plus_latest_keeps_unrelated_supersession_key_queued(qt_app):
         on_stale=lambda: stale.append("new-image"),
     )
 
-    QtTest.QTest.qWait(260)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: {"profile", "new-image"}.issubset(done) and "old-image" in stale)
 
     assert "profile" in done
     assert "new-image" in done
@@ -471,7 +443,7 @@ def test_active_plus_latest_keeps_unrelated_supersession_key_queued(qt_app):
     assert controller.diagnostics().queued_collapsed >= 1
 
 
-def test_clear_group_preserves_unrelated_prefetch_bookkeeping(qt_app):
+def test_clear_group_preserves_unrelated_prefetch_bookkeeping(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -497,7 +469,7 @@ def test_clear_group_preserves_unrelated_prefetch_bookkeeping(qt_app):
     controller.shutdown_for_close()
 
 
-def test_clear_group_invalidates_even_without_active_runnable(qt_app):
+def test_clear_group_invalidates_even_without_active_runnable(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -508,9 +480,7 @@ def test_clear_group_invalidates_even_without_active_runnable(qt_app):
     assert controller.group_generation("visible") > before
 
 
-def test_clear_group_prefix_invalidates_child_group(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_clear_group_prefix_invalidates_child_group(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -524,25 +494,20 @@ def test_clear_group_prefix_invalidates_child_group(qt_app):
         on_done=done.append,
         on_stale=lambda: stale.append("tile"),
     )
-    for _ in range(20):
-        QtTest.QTest.qWait(10)
-        qt_app.processEvents()
-        if controller._started:
-            break
+    _wait_for_started(qtbot, controller)
     assert controller._started
     before = controller.group_generation("montage-tile:1:2")
 
     controller.clear_group("montage-tile")
 
     assert controller.group_generation("montage-tile:1:2") > before
-    QtTest.QTest.qWait(180)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: stale == ["tile"])
     assert done == []
     assert stale == ["tile"]
     controller.shutdown_for_close()
 
 
-def test_clear_group_prefix_preserves_unrelated_groups_and_prefetches(qt_app):
+def test_clear_group_prefix_preserves_unrelated_groups_and_prefetches(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -574,9 +539,7 @@ def test_clear_group_prefix_preserves_unrelated_groups_and_prefetches(qt_app):
     controller.shutdown_for_close()
 
 
-def test_completed_tile_group_bookkeeping_is_pruned(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_completed_tile_group_bookkeeping_is_pruned(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -589,8 +552,7 @@ def test_completed_tile_group_bookkeeping_is_pruned(qt_app):
         on_done=done.append,
     )
 
-    QtTest.QTest.qWait(80)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: done == ["tile"])
 
     assert done == ["tile"]
     assert "montage-tile:1:2" not in controller._group_request_generations
@@ -598,7 +560,7 @@ def test_completed_tile_group_bookkeeping_is_pruned(qt_app):
     assert controller._group_child_groups.get("montage-tile") in (None, set())
 
 
-def test_visible_pool_max_thread_count_is_one(qt_app):
+def test_visible_pool_max_thread_count_is_one(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController(max_workers=1, name="visible")
@@ -606,9 +568,7 @@ def test_visible_pool_max_thread_count_is_one(qt_app):
     assert controller.pool.maxThreadCount() == 1
 
 
-def test_shutdown_ignores_late_results(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_shutdown_ignores_late_results(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -623,13 +583,12 @@ def test_shutdown_ignores_late_results(qt_app):
     )
     controller.shutdown_for_close()
 
-    QtTest.QTest.qWait(140)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: controller.pool.activeThreadCount() == 0)
 
     assert done == []
 
 
-def test_shutdown_and_late_runnable_notification_do_not_raise(qt_app):
+def test_shutdown_and_late_runnable_notification_do_not_raise(qtbot):
     from arrayscope.core.scheduler import EvalPriority, EvalRequest
     from arrayscope.window.evaluation_controller import CancellationToken, EvaluationController, _EvaluationRunnable
 
@@ -658,9 +617,7 @@ def test_shutdown_and_late_runnable_notification_do_not_raise(qt_app):
     runnable.run()
 
 
-def test_start_latest_can_pass_cancellation_token(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_start_latest_can_pass_cancellation_token(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -675,15 +632,12 @@ def test_start_latest_can_pass_cancellation_token(qt_app):
         pass_token=True,
     )
 
-    QtTest.QTest.qWait(80)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: seen == [True])
 
     assert seen == [True]
 
 
-def test_cancelled_evaluation_does_not_call_error(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_cancelled_evaluation_does_not_call_error(qtbot):
     from arrayscope.operations.cancellation import EvaluationCancelled
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
@@ -702,16 +656,13 @@ def test_cancelled_evaluation_does_not_call_error(qt_app):
         pass_token=True,
     )
 
-    QtTest.QTest.qWait(80)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: stale == [True])
 
     assert errors == []
     assert stale == [True]
 
 
-def test_controller_diagnostics_counts_completed_cancelled_stale(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_controller_diagnostics_counts_completed_cancelled_stale(qtbot):
     from arrayscope.operations.cancellation import EvaluationCancelled
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
@@ -723,8 +674,7 @@ def test_controller_diagnostics_counts_completed_cancelled_stale(qt_app):
         replace_group="visible",
         on_done=lambda _value: None,
     )
-    QtTest.QTest.qWait(60)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: controller.diagnostics().completed == 1)
     controller.start_latest(
         lambda token: (_ for _ in ()).throw(EvaluationCancelled()),
         key="cancel",
@@ -734,8 +684,7 @@ def test_controller_diagnostics_counts_completed_cancelled_stale(qt_app):
         on_stale=lambda: None,
         pass_token=True,
     )
-    QtTest.QTest.qWait(60)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: controller.diagnostics().cancelled == 1 and controller.diagnostics().stale >= 1)
 
     diagnostics = controller.diagnostics()
     assert diagnostics.completed == 1
@@ -743,7 +692,7 @@ def test_controller_diagnostics_counts_completed_cancelled_stale(qt_app):
     assert diagnostics.stale >= 1
 
 
-def test_prefetch_can_be_cancelled_separately(qt_app):
+def test_prefetch_can_be_cancelled_separately(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -755,7 +704,7 @@ def test_prefetch_can_be_cancelled_separately(qt_app):
     assert not controller._prefetch_keys
 
 
-def test_start_prefetch_idle_elapsed_false_blocks_with_idle_reason(qt_app):
+def test_start_prefetch_idle_elapsed_false_blocks_with_idle_reason(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -766,7 +715,7 @@ def test_start_prefetch_idle_elapsed_false_blocks_with_idle_reason(qt_app):
     assert controller.diagnostics().prefetch_idle_blocked == 1
 
 
-def test_start_prefetch_zero_memory_budget_blocks_with_cost_reason(qt_app):
+def test_start_prefetch_zero_memory_budget_blocks_with_cost_reason(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -777,7 +726,7 @@ def test_start_prefetch_zero_memory_budget_blocks_with_cost_reason(qt_app):
     assert controller.diagnostics().prefetch_cost_blocked == 1
 
 
-def test_prefetch_local_budget_block_does_not_admit_work_graph_item(qt_app):
+def test_prefetch_local_budget_block_does_not_admit_work_graph_item(qtbot):
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.core.scheduler import FrameTarget
@@ -809,7 +758,7 @@ def test_prefetch_local_budget_block_does_not_admit_work_graph_item(qt_app):
     assert diagnostics.lanes == {}
 
 
-def test_prefetch_work_graph_admission_yields_to_visible_backlog(qt_app):
+def test_prefetch_work_graph_admission_yields_to_visible_backlog(qtbot):
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.core.scheduler import FrameTarget
@@ -847,7 +796,7 @@ def test_prefetch_work_graph_admission_yields_to_visible_backlog(qt_app):
     assert diagnostics.lanes["speculative_residency"]["blocked_by_budget"] == 1
 
 
-def test_start_prefetch_no_longer_accepts_idle_deadline_ms(qt_app):
+def test_start_prefetch_no_longer_accepts_idle_deadline_ms(qtbot):
     from arrayscope.window.evaluation_controller import EvaluationController
 
     signature = inspect.signature(EvaluationController.start_prefetch)
@@ -855,9 +804,7 @@ def test_start_prefetch_no_longer_accepts_idle_deadline_ms(qt_app):
     assert "idle_deadline_ms" not in signature.parameters
 
 
-def test_is_busy_reflects_pending_or_running_work(qt_app):
-    from pyqtgraph.Qt import QtTest
-
+def test_is_busy_reflects_pending_or_running_work(qtbot):
     from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
 
     controller = EvaluationController(max_workers=1)
@@ -870,6 +817,5 @@ def test_is_busy_reflects_pending_or_running_work(qt_app):
     )
 
     assert controller.is_busy()
-    QtTest.QTest.qWait(100)
-    qt_app.processEvents()
+    _wait_until(qtbot, lambda: not controller.is_busy())
     assert not controller.is_busy()
