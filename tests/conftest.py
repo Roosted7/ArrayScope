@@ -1,9 +1,40 @@
 import os
+import sys
 
 import pytest
 
 # Keep direct-import test modules from replacing the real package in sys.modules.
 import arrayscope  # noqa: F401
+
+
+def _arrayscope_module_names():
+    return [
+        name
+        for name in sys.modules
+        if name == "arrayscope" or name.startswith("arrayscope.")
+    ]
+
+
+@pytest.fixture(autouse=True)
+def _restore_arrayscope_module_identity():
+    """Keep ``arrayscope`` module (and class) identities stable across tests.
+
+    A few tests purge ``arrayscope.*`` from ``sys.modules`` and re-import to
+    exercise fresh-import behavior (package callability, lazy Qt binding, no
+    eager pyqtgraph import). Without restoration the re-imported modules define
+    brand-new class objects, so a later ``isinstance`` or ``pytest.raises``
+    check in an unrelated test compares against the *old* class identity and
+    fails even though the production code is correct (e.g. ``LazySourceArray``,
+    ``SourceReadRefused``). Snapshot the arrayscope module objects before each
+    test and restore them afterward so module identity cannot leak forward.
+    """
+
+    snapshot = {name: sys.modules[name] for name in _arrayscope_module_names()}
+    yield
+    for name in _arrayscope_module_names():
+        if sys.modules.get(name) is not snapshot.get(name):
+            del sys.modules[name]
+    sys.modules.update(snapshot)
 
 
 @pytest.fixture(autouse=True)
