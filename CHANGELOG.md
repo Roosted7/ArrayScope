@@ -34,6 +34,15 @@ This file records user-visible release changes. Detailed development history and
   The whole montage used to idle behind that one single-threaded transform
   — the "slow start" where tiles only pour in near the end; the stage now
   starts immediately and uses the configured FFT workers.
+- Montage tiles now genuinely fill center/mouse-first. Three paths ignored
+  the priority order: stage fan-in released waiting tiles in the plan's
+  row-major order under budget caps (filling from a corner regardless of the
+  pending queue's priority), tile priorities were computed against the
+  stale pre-montage viewport range until a mouse hover retargeted them, and
+  near-viewport prefetch picked candidates in plan order. Fan-in waiting
+  lists are priority queues now, queue priorities are rebuilt from the live
+  viewport at the first commit and at stage activation, and prefetch
+  candidates are ordered by focus proximity.
 - Scheduling responsiveness during interaction: resource-governor decisions
   (worker counts, drain batch limits, callback budgets) are now reapplied on
   interaction start/stop edges instead of waiting for the next 250 ms–1 s

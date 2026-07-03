@@ -1329,3 +1329,68 @@ def test_resident_retarget_upserts_bypass_cold_priority_cap():
     assert 0 in next_delta.upserts
     assert next_delta.upserts[0].source_index == 3
     assert tuple(next_delta.upserts) == (0,)
+
+
+def _session_with_waiting_tiles():
+    from arrayscope.operations.stage_fanin import StageFanInState
+
+    state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
+    plan = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4)
+    return MontageRenderSession(
+        session_id=1,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        level_expected_indices=(0, 1, 2, 3),
+        plan=plan,
+        view_state=state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(10, 10),
+        view_range=((0.0, 12.0), (0.0, 4.0)),
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+        stage_fan_in=StageFanInState(waiting_tiles={"stage-key": list(plan.tiles)}),
+        priority_focus=(8.0, 1.0),
+    )
+
+
+def test_stage_waiting_tiles_release_in_priority_order_not_plan_order():
+    # Waiting lists arrive from the stage plan in row-major order; released
+    # as-is under a budget cap the montage would fill from the plan corner.
+    from arrayscope.display.model.tile_priority import MontageTilePriorityQueue
+
+    session = _session_with_waiting_tiles()
+    waiting = session.stage_fan_in.waiting_tiles["stage-key"]
+    assert isinstance(waiting, MontageTilePriorityQueue)
+
+    # Tile centers sit at x = 1, 4, 7, 10; the focus at x = 8 is closest to
+    # tile 2, then tile 3 — not the plan's row-major 0, 1.
+    batch = session.stage_fan_in.activate_value("stage-key", object(), max_items=2)
+    released = [int(tile.montage_index) for tile in batch.tiles]
+    assert released == [2, 3]
+    assert not batch.complete
+
+    rest = session.stage_fan_in.activate_value("stage-key", object(), max_items=None)
+    assert [int(tile.montage_index) for tile in rest.tiles] == [1, 0]
+    assert rest.complete
+
+
+def test_montage_prefetch_candidates_prefer_focus_proximity():
+    from arrayscope.window.montage_prefetch import _candidate_tiles
+
+    session = _session_with_waiting_tiles()
+    session.stage_fan_in.waiting_tiles.clear()
+    session.visible_tiles = ()
+    session.visible_tile_numbers = frozenset()
+
+    ordered = [int(tile.montage_index) for tile in _candidate_tiles(session)]
+    assert ordered == [2, 3, 1, 0]

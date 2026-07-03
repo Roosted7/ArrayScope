@@ -9,6 +9,7 @@ import numpy as np
 
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry
+from arrayscope.display.model.tile_priority import MontageTilePriorityQueue
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.work_graph import WorkItem, WorkLane
@@ -173,9 +174,15 @@ def _candidate_tiles(session):
     excluded.update(int(index) for index in getattr(session, "rendered_tiles", ()))
     excluded.update(int(index) for index in getattr(session, "loading_tiles", ()))
     excluded.update(int(index) for index in getattr(session, "skipped_tiles", ()))
-    for tile in tuple(session.plan.tiles):
-        if int(tile.montage_index) not in excluded:
-            yield tile
+    candidates = tuple(tile for tile in tuple(session.plan.tiles) if int(tile.montage_index) not in excluded)
+    if not candidates:
+        return ()
+    # Plan order is row-major, which would prefetch from the plan's corner;
+    # speculate on the tiles nearest the viewport/focus instead.
+    context_builder = getattr(session, "_tile_priority_context", None)
+    if context_builder is None:
+        return candidates
+    return MontageTilePriorityQueue(candidates, context=context_builder()).ordered_tiles()
 
 
 def _stage_for_tile(window, session, tile):

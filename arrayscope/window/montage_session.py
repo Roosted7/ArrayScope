@@ -211,6 +211,7 @@ class MontageRenderSession:
             int(source) for source in (self.pending_refined_level_sources or ())
         } or {int(item.tile.source_index) for item in self.pending_refined_level_tiles}
         self.pending_completed_tiles = deque(self.pending_completed_tiles)
+        self.ensure_stage_waiting_priority_queues()
         self.visible_tile_numbers = frozenset(int(tile.montage_index) for tile in tuple(self.visible_tiles or ()))
         self._selected_lod_factor()
         self.update_level_presentation_scope()
@@ -1018,6 +1019,20 @@ class MontageRenderSession:
         waiting.extend(tuple(tiles or ()))
         return max(0, len(waiting) - before)
 
+    def ensure_stage_waiting_priority_queues(self) -> None:
+        """Order stage fan-in waiting tiles by viewport/focus priority.
+
+        Stage plans collect waiting tiles in plan (row-major) order; released
+        as-is, budget-capped activation batches would fill the montage from a
+        corner no matter what the pending queue's priority says.
+        """
+        if not self.stage_fan_in.waiting_tiles:
+            return
+        context = self._tile_priority_context()
+        for key, waiting in tuple(self.stage_fan_in.waiting_tiles.items()):
+            if not isinstance(waiting, MontageTilePriorityQueue):
+                self.stage_fan_in.waiting_tiles[key] = MontageTilePriorityQueue(tuple(waiting or ()), context=context)
+
     def retarget_tile_priority(
         self,
         *,
@@ -1025,7 +1040,12 @@ class MontageRenderSession:
         max_items: int = 64,
         active_tiles=None,
         near_tiles=None,
+        view_range=None,
     ) -> int:
+        # ``view_range`` overrides the range used for priority scoring only;
+        # ``self.view_range`` is viewport bookkeeping shared with level and
+        # commit scoping and must not be retargeted from priority refreshes.
+        range_for_priority = self.view_range if view_range is None else view_range
         if active_tiles is None:
             active_tiles = tuple(int(tile.montage_index) for tile in self.visible_tiles)
         if near_tiles is None:
@@ -1033,7 +1053,7 @@ class MontageRenderSession:
                 int(tile.montage_index)
                 for tile in _viewport_tiles(
                     self.plan,
-                    view_range=self.view_range,
+                    view_range=range_for_priority,
                     viewport_shape=self.viewport_shape,
                     margin_tiles=2,
                 )
@@ -1044,6 +1064,7 @@ class MontageRenderSession:
             active_tiles=active_tiles,
             near_tiles=near_tiles,
             priority_tiles=self._priority_focus_tile_numbers(),
+            view_range=range_for_priority,
         )
         self._ensure_pending_priority_queue(context=context)
         self.priority_retargeted_tiles = self.pending_tiles.set_context(
@@ -1058,7 +1079,7 @@ class MontageRenderSession:
                 remaining -= int(waiting.set_context(context, max_items=remaining))
         return int(self.priority_retargeted_tiles)
 
-    def _tile_priority_context(self, *, active_tiles=None, near_tiles=None, priority_tiles=None) -> TilePriorityContext:
+    def _tile_priority_context(self, *, active_tiles=None, near_tiles=None, priority_tiles=None, view_range=None) -> TilePriorityContext:
         if active_tiles is None:
             active_tiles = tuple(int(tile.montage_index) for tile in self.visible_tiles)
         if near_tiles is None:
@@ -1067,7 +1088,7 @@ class MontageRenderSession:
             except Exception:
                 near_tiles = ()
         return TilePriorityContext.from_tiles(
-            view_range=self.view_range,
+            view_range=self.view_range if view_range is None else view_range,
             focus=self.priority_focus,
             visible_tiles=active_tiles,
             near_tiles=near_tiles,

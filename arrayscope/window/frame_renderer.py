@@ -673,6 +673,7 @@ class FrameRenderMixin:
 
     def _merge_montage_stage_plan(self, session: MontageRenderSession, stage_plan) -> None:
         session.stage_fan_in.merge_plan(stage_plan)
+        session.ensure_stage_waiting_priority_queues()
         session.tile_compute_waiting_for_stage += len(stage_plan["waiting_indices"])
         session.stage_backed_tiles_pending += len(stage_plan["waiting_indices"])
         session.lead_direct_tiles += int(stage_plan["lead_direct_tiles"])
@@ -1479,6 +1480,9 @@ class FrameRenderMixin:
             return
         if not self._is_current_render_generation(session.render_generation):
             return
+        # Activation batches pop waiting tiles in priority order; make sure
+        # that order reflects the live viewport, not the pre-commit range.
+        self._refresh_montage_priority_targets(session)
         budget = self._montage_callback_budget(
             "montage_stage_wait",
             interactive=_interactive_active(self),
@@ -2435,6 +2439,10 @@ class FrameRenderMixin:
                 montage_tile_states=session.ensure_tile_states(),
             )
             self._sync_committed_montage_geometry(rendered_geometry, semantic_commit=bool(semantic_commit))
+            if first_display_commit:
+                # The first commit rescales the viewport to the montage; the
+                # queues were prioritized against the pre-montage range.
+                self._refresh_montage_priority_targets(session)
             overlay_start = perf_counter()
             rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
             self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
@@ -3204,6 +3212,35 @@ class FrameRenderMixin:
         self._montage_priority_retarget_pending = True
         if not timer.isActive():
             timer.start(_montage_priority_retarget_delay_ms(self))
+
+    def _refresh_montage_priority_targets(self, session) -> int:
+        """Rebuild tile-queue priorities from the live viewport.
+
+        The session's priority context is captured before the first montage
+        commit rescales the viewport, so the distance-from-focus ordering can
+        point at the stale pre-montage view range — one corner of the montage
+        — for the entire fill. Retarget every queued tile against the live
+        range at the moments that decide fill order: the first display commit
+        and a shared-stage activation. The range is passed as a priority-only
+        override; ``session.view_range`` is viewport bookkeeping shared with
+        level/commit scoping and stays untouched.
+        """
+        if not (session.pending_tiles or session.stage_fan_in.waiting_tiles):
+            return 0
+        try:
+            viewport_plan = self._montage_viewport_plan(self.win.view_state)
+        except Exception:
+            return 0
+        if viewport_plan.view_range is None:
+            return 0
+        total = len(session.pending_tiles) + sum(
+            len(waiting) for waiting in session.stage_fan_in.waiting_tiles.values()
+        )
+        return session.retarget_tile_priority(
+            focus=viewport_plan.priority_focus,
+            max_items=max(1, int(total)),
+            view_range=viewport_plan.view_range,
+        )
 
     def _run_montage_priority_retarget(self) -> None:
         self._montage_priority_retarget_pending = False

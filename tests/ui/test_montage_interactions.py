@@ -856,7 +856,11 @@ def test_montage_loading_presentation_preserves_levels_until_first_real_tile(qtb
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (99.0, 202.0)
         assert win._montage_session.applied_level_source.source_count == 2
 
-        tile2 = win._montage_session.plan.tiles[2]
+        # Scheduling order follows tile priority, so the first two callbacks
+        # are not necessarily plan tiles 0 and 1: apply the third value to
+        # whichever tile has not been delivered yet.
+        used = {int(_tile_for_callback(win, call).montage_index) for call in calls[:2]}
+        tile2 = next(tile for tile in win._montage_session.plan.tiles if int(tile.montage_index) not in used)
         win.renderer._apply_montage_tile_result(win._montage_session, tile2, _tile_result(tile2, 300))
         win.renderer._schedule_montage_presentation_commit(win._montage_session, force=True)
         _process_events(qtbot)
