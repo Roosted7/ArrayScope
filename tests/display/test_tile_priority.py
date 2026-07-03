@@ -48,21 +48,29 @@ def test_priority_queue_orders_visible_before_near_and_waiting():
     assert queue.pop().montage_index == 7
 
 
-def test_priority_queue_aging_completes_distant_visible_tiles():
+def test_priority_queue_bulk_drain_stays_in_priority_order():
+    # Regression: a "fairness aging" mechanism used to pop the oldest-inserted
+    # tile after every few priority pops, so any bulk drain (stage fan-in
+    # activation, per-commit upsert admission) degenerated to insertion order
+    # after the first few items — the montage visibly filled from the sides.
     plan = _plan(count=12, columns=12)
+    focus = (126.0, 5.0)
     queue = MontageTilePriorityQueue(
         plan.tiles,
         context=_context(
-            focus=(126.0, 5.0),
+            focus=focus,
             visible=range(12),
             view_range=((0.0, 132.0), (0.0, 10.0)),
         ),
-        aging_after=2,
     )
-    popped = [queue.pop().montage_index for _ in range(3)]
+    popped = [queue.pop().montage_index for _ in range(12)]
 
-    assert 0 in popped
-    assert queue.fairness_pops >= 1
+    def distance(index):
+        tile = plan.tiles[index]
+        center = (float(tile.x0) + float(tile.width) * 0.5, float(tile.y0) + float(tile.height) * 0.5)
+        return (center[0] - focus[0]) ** 2 + (center[1] - focus[1]) ** 2
+
+    assert popped == sorted(popped, key=distance)
 
 
 def test_priority_queue_prunes_stale_entries_lazily():
@@ -79,3 +87,40 @@ def test_priority_queue_prunes_stale_entries_lazily():
     assert len(queue) == 1
     assert queue.pop().montage_index == 8
     assert not queue
+
+
+def test_priority_queue_retarget_takes_full_effect_on_every_pop():
+    # The architectural invariant behind montage fill order: pop() always
+    # returns the best tile under the CURRENT context, regardless of which
+    # context was live when each tile was pushed. An earlier design re-keyed
+    # only a bounded batch per set_context, so with several actors
+    # retargeting (hover, viewport restore, stage activation) the pop order
+    # depended on push timing and the montage visibly filled from stale
+    # anchors.
+    plan = _plan(count=48, columns=12)
+    stale = _context(
+        focus=(6.0, 6.0),
+        visible=range(48),
+        view_range=((0.0, 132.0), (0.0, 44.0)),
+    )
+    queue = MontageTilePriorityQueue(plan.tiles, context=stale)
+
+    focus = (126.0, 38.0)
+    queue.set_context(
+        _context(
+            focus=focus,
+            visible=range(48),
+            view_range=((0.0, 132.0), (0.0, 44.0)),
+        )
+    )
+
+    popped = []
+    while queue:
+        popped.append(queue.pop().montage_index)
+
+    def distance(index):
+        tile = plan.tiles[index]
+        center = (float(tile.x0) + float(tile.width) * 0.5, float(tile.y0) + float(tile.height) * 0.5)
+        return ((center[0] - focus[0]) / 132.0) ** 2 + ((center[1] - focus[1]) / 44.0) ** 2
+
+    assert popped == sorted(popped, key=lambda index: (distance(index), index))

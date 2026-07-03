@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum
 from heapq import heappop, heappush
@@ -48,12 +47,17 @@ class TilePriorityContext:
 
 
 class MontageTilePriorityQueue:
-    """Mutable indexed queue with lazy priority updates.
+    """Mutable indexed queue that always pops under the current context.
 
-    The queue deliberately separates cheap event callbacks from scheduling
-    updates.  Mouse movement can request a retarget, while the timer-driven
-    scheduler updates a bounded number of heap entries and lets stale heap
-    entries fall out lazily.
+    The context can be supplied as a value (``set_context``) or, preferably,
+    as a ``context_provider`` callable owned by whoever decides scheduling
+    (the montage session). With a provider the queue never holds a stale
+    context copy: every pop resolves the provider, and the heap is rebuilt
+    when the resolved context object changed since the keys were computed.
+    An earlier design gave each queue its own context copy and re-keyed a
+    bounded batch per retarget, so with several actors retargeting (hover,
+    viewport restores, stage activation) the pop order depended on which
+    context happened to be current when each tile was pushed.
     """
 
     def __init__(
@@ -61,22 +65,28 @@ class MontageTilePriorityQueue:
         tiles=(),
         *,
         context: TilePriorityContext | None = None,
-        aging_after: int = 8,
+        context_provider=None,
     ) -> None:
         self._tiles: dict[int, object] = {}
         self._versions: dict[int, int] = {}
         self._sequence: dict[int, int] = {}
         self._heap: list[tuple[object, ...]] = []
         self._serial = count()
-        self._retarget_order: deque[int] = deque()
-        self.context = context or TilePriorityContext()
-        self.aging_after = max(1, int(aging_after))
-        self._preferred_pops = 0
+        self._context_provider = context_provider
+        self._context = context or TilePriorityContext()
+        self._keyed_context: TilePriorityContext | None = self.context
         self.retargeted_last = 0
         self.stale_entries_discarded = 0
-        self.fairness_pops = 0
         for tile in tuple(tiles or ()):
             self.append(tile)
+
+    @property
+    def context(self) -> TilePriorityContext:
+        if self._context_provider is not None:
+            provided = self._context_provider()
+            if provided is not None:
+                return provided
+        return self._context
 
     def __bool__(self) -> bool:
         return bool(self._tiles)
@@ -95,8 +105,6 @@ class MontageTilePriorityQueue:
         self._versions.clear()
         self._sequence.clear()
         self._heap.clear()
-        self._retarget_order.clear()
-        self._preferred_pops = 0
 
     def append(self, tile) -> None:
         index = _tile_index(tile)
@@ -105,7 +113,6 @@ class MontageTilePriorityQueue:
         self._tiles[index] = tile
         self._versions[index] = 0
         self._sequence[index] = next(self._serial)
-        self._retarget_order.append(index)
         self._push(index)
 
     def extend(self, tiles) -> None:
@@ -131,62 +138,54 @@ class MontageTilePriorityQueue:
         return int(removed)
 
     def set_context(self, context: TilePriorityContext, *, max_items: int | None = None) -> int:
-        self.context = context
-        limit = len(self._tiles) if max_items is None else max(0, int(max_items))
-        processed = 0
-        for index in tuple(context.priority_tiles):
-            if processed >= limit:
-                break
-            if int(index) not in self._tiles:
-                continue
-            self._push(int(index))
-            processed += 1
-        if processed < limit:
-            processed += self.retarget(max_items=limit - processed)
-        self.retargeted_last = int(processed)
-        return int(processed)
+        """Adopt a new scheduling context; takes effect on every tile.
 
-    def retarget(self, *, max_items: int | None = None) -> int:
-        if not self._tiles:
-            self.retargeted_last = 0
-            return 0
-        limit = len(self._tiles) if max_items is None else max(0, int(max_items))
-        processed = 0
-        while processed < limit and self._retarget_order:
-            index = self._retarget_order.popleft()
-            if index not in self._tiles:
-                continue
-            self._retarget_order.append(index)
-            self._push(index)
-            processed += 1
-        self.retargeted_last = int(processed)
-        return int(processed)
+        Re-keying happens lazily on the next ``pop``, so this is O(1)
+        regardless of queue size. ``max_items`` is accepted for backward
+        compatibility and ignored. When a ``context_provider`` is set it
+        takes precedence over the value stored here.
+        """
+        del max_items
+        self._context = context
+        self.retargeted_last = len(self._tiles)
+        return int(self.retargeted_last)
 
     def pop(self, position=None):
+        # Strictly priority-ordered under the CURRENT context: the heap is
+        # rebuilt on the first pop after the resolved context changed, so a
+        # retarget always takes full effect. (An earlier "fairness aging"
+        # variant popped the oldest-inserted tile after every few priority
+        # pops; any bulk drain therefore degenerated to insertion order,
+        # visibly corrupting the montage fill order. Every queue here is
+        # drained completely, so priority order cannot starve a tile — it
+        # only decides when it completes.)
         self.last_pop_position = position
         if not self._tiles:
             return None
-        fair = self._fair_tile()
-        if fair is not None:
-            return fair
+        if self.context is not self._keyed_context:
+            self._rebuild_heap()
         while self._heap:
             key = heappop(self._heap)
-            index = int(key[-2])
             version = int(key[-1])
+            index = int(key[-2])
             if index not in self._tiles or version != self._versions.get(index):
                 self.stale_entries_discarded += 1
                 continue
             tile = self._tiles.pop(index)
             self._versions.pop(index, None)
             self._sequence.pop(index, None)
-            self._preferred_pops += 1
             return tile
         # Heap entries can all be stale after heavy pruning. Rebuild lazily.
-        for index in tuple(self._tiles):
-            self._push(index)
+        self._rebuild_heap()
         if self._heap:
             return self.pop()
         return None
+
+    def _rebuild_heap(self) -> None:
+        self._keyed_context = self.context
+        self._heap.clear()
+        for index in tuple(self._tiles):
+            self._push(index)
 
     def ordered_tiles(self) -> tuple[object, ...]:
         return tuple(
@@ -222,26 +221,6 @@ class MontageTilePriorityQueue:
             int(self._sequence.get(int(index), 0)),
             int(index),
         )
-
-    def _fair_tile(self):
-        if self._preferred_pops < self.aging_after or len(self._tiles) <= 1:
-            return None
-        candidates = (
-            index
-            for index in self._tiles
-            if _band_for_index(int(index), self.context) in {TilePriorityBand.VISIBLE, TilePriorityBand.NEAR}
-        )
-        try:
-            index = min(candidates, key=lambda value: (self._sequence.get(int(value), 0), int(value)))
-        except ValueError:
-            return None
-        tile = self._tiles.pop(int(index))
-        self._versions.pop(int(index), None)
-        self._sequence.pop(int(index), None)
-        self._preferred_pops = 0
-        self.fairness_pops += 1
-        return tile
-
 
 def tile_numbers(tiles) -> tuple[int, ...]:
     return tuple(int(_tile_index(tile)) for tile in tuple(tiles or ()))

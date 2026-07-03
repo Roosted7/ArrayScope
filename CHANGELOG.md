@@ -45,6 +45,19 @@ This file records user-visible release changes. Detailed development history and
   diagnostics, plus `presented_order_sample` and priority retarget/fairness
   counters in montage diagnostics so fill-order violations are visible in
   diagnostics logs.
+- Montage fill order is now correct by construction instead of by
+  carefully-timed retargets. Three structural fixes, each verified against
+  the actual GPU upload order on a live display: (1) queued tile objects
+  are rebound to the current plan when a layout reflow changes the column
+  count — previously tiles captured under a transitional geometry were
+  scheduled by stale coordinates but drawn at new positions, so reload
+  fills visibly ignored the priority order; (2) tile priority queues read
+  the montage session's single scheduling context through a provider and
+  re-key on change, instead of each queue holding a stale copy that was
+  re-keyed only in bounded batches; (3) the "fairness aging" pop was
+  removed — it degraded any bulk drain (stage fan-in activation, upsert
+  admission) to insertion order after the first few items. Queues are
+  always drained completely, so priority order cannot starve a tile.
 - Reloading a file no longer fills the montage from a corner or wherever
   the pointer last crossed the image: the stale hover focus is cleared on
   reload (the transitional reload viewport let it pass the in-viewport

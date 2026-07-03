@@ -131,7 +131,6 @@ class MontageRuntimeDiagnostics:
     retained_stage_decision: str = ""
     repeated_expensive_stage_per_tile: bool = False
     priority_retargeted_tiles: int = 0
-    priority_fairness_pops: int = 0
     presented_order_sample: tuple[int, ...] = ()
 
 

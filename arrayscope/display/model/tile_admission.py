@@ -21,10 +21,9 @@ class TileAdmissionQueue:
     """Owns ordering and admission caps without semantic rendering meaning."""
 
     context: TilePriorityContext = field(default_factory=TilePriorityContext)
-    aging_after: int = 8
 
     def order(self, candidates) -> tuple[int, ...]:
-        queue = MontageTilePriorityQueue(tuple(candidates or ()), context=self.context, aging_after=self.aging_after)
+        queue = MontageTilePriorityQueue(tuple(candidates or ()), context=self.context)
         ordered = []
         while queue:
             tile = queue.pop()

@@ -169,7 +169,6 @@ class MontageRenderSession:
     tile_state_revision: int = 0
     priority_focus: tuple[float, float] | None = None
     priority_retargeted_tiles: int = 0
-    priority_fairness_pops: int = 0
     # First presented tile numbers in presentation order (capped): makes
     # priority-order violations observable in diagnostics logs.
     presented_order: list[int] = field(default_factory=list)
@@ -183,6 +182,7 @@ class MontageRenderSession:
     _last_near_tiles: tuple[int, ...] = ()
     _last_viewport_identity: tuple[object, ...] | None = None
     _near_tile_numbers_cache_key: tuple[object, ...] | None = None
+    _priority_context: TilePriorityContext | None = None
     _near_tile_numbers_cache: tuple[int, ...] = ()
     _tile_states_cached_revision: int = -1
     _tile_states_cached_tuple: tuple[MontageTileState, ...] = ()
@@ -200,11 +200,10 @@ class MontageRenderSession:
         # visible tile queue is indexed so viewport/hover retargeting updates
         # metadata instead of sorting inside high-frequency callbacks.
         pending = tuple(self.pending_tiles or ())
-        context = self._tile_priority_context()
-        if isinstance(self.pending_tiles, MontageTilePriorityQueue):
-            self.pending_tiles.set_context(context, max_items=len(self.pending_tiles))
-        else:
-            self.pending_tiles = MontageTilePriorityQueue(pending, context=context)
+        self.pending_tiles = MontageTilePriorityQueue(
+            pending,
+            context_provider=self._tile_priority_context,
+        )
         self.pending_level_tiles = deque(self.pending_level_tiles)
         self.pending_level_sources = {
             int(source) for source in (self.pending_level_sources or ())
@@ -252,6 +251,7 @@ class MontageRenderSession:
             self.plan = plan
             if layout_changed:
                 self._layout_geometry_changed_pending = True
+                self._remap_queued_tiles_to_plan()
         self.priority_focus = priority_focus
         self._selected_lod_factor()
         plan_tiles = tuple(getattr(self.plan, "tiles", ()) or ())
@@ -887,7 +887,6 @@ class MontageRenderSession:
             if index not in self.rendered_tiles and index not in self.skipped_tiles:
                 self.mark_loading(tile)
                 self.active_tile_requests.add(index)
-                self.priority_fairness_pops = int(getattr(self.pending_tiles, "fairness_pops", 0) or 0)
                 return tile
         return None
 
@@ -1018,11 +1017,41 @@ class MontageRenderSession:
     def append_stage_waiting_tiles(self, key, tiles) -> int:
         waiting = self.stage_fan_in.waiting_tiles.get(key)
         if not isinstance(waiting, MontageTilePriorityQueue):
-            waiting = MontageTilePriorityQueue(tuple(waiting or ()), context=self._tile_priority_context())
+            waiting = MontageTilePriorityQueue(tuple(waiting or ()), context_provider=self._tile_priority_context)
             self.stage_fan_in.waiting_tiles[key] = waiting
         before = len(waiting)
         waiting.extend(tuple(tiles or ()))
         return max(0, len(waiting) - before)
+
+    def _remap_queued_tiles_to_plan(self) -> None:
+        """Rebind queued tile objects to the current plan's geometry.
+
+        Session invariant: every queued tile belongs to ``self.plan``. A
+        layout reflow (column-count change during window-shape settling)
+        moves each montage index to a new position; tile objects captured
+        under the previous geometry would be *scheduled* by their stale
+        coordinates but *drawn* at the new ones, so the fill visibly ignores
+        the priority order no matter how correct the scheduling context is.
+        """
+        tiles = tuple(getattr(self.plan, "tiles", ()) or ())
+
+        def remap(tile):
+            index = int(getattr(tile, "montage_index", -1))
+            return tiles[index] if 0 <= index < len(tiles) else tile
+
+        if isinstance(self.pending_tiles, MontageTilePriorityQueue):
+            pending = tuple(self.pending_tiles.insertion_tiles())
+        else:
+            pending = tuple(self.pending_tiles or ())
+        self.pending_tiles = MontageTilePriorityQueue(
+            tuple(remap(tile) for tile in pending),
+            context_provider=self._tile_priority_context,
+        )
+        for key, waiting in tuple(self.stage_fan_in.waiting_tiles.items()):
+            self.stage_fan_in.waiting_tiles[key] = MontageTilePriorityQueue(
+                tuple(remap(tile) for tile in tuple(waiting)),
+                context_provider=self._tile_priority_context,
+            )
 
     def ensure_stage_waiting_priority_queues(self) -> None:
         """Order stage fan-in waiting tiles by viewport/focus priority.
@@ -1033,10 +1062,11 @@ class MontageRenderSession:
         """
         if not self.stage_fan_in.waiting_tiles:
             return
-        context = self._tile_priority_context()
         for key, waiting in tuple(self.stage_fan_in.waiting_tiles.items()):
             if not isinstance(waiting, MontageTilePriorityQueue):
-                self.stage_fan_in.waiting_tiles[key] = MontageTilePriorityQueue(tuple(waiting or ()), context=context)
+                self.stage_fan_in.waiting_tiles[key] = MontageTilePriorityQueue(
+                    tuple(waiting or ()), context_provider=self._tile_priority_context
+                )
 
     def retarget_tile_priority(
         self,
@@ -1065,26 +1095,39 @@ class MontageRenderSession:
             )
         if focus is not None:
             self.priority_focus = focus
-        context = self._tile_priority_context(
+        context = self._build_tile_priority_context(
             active_tiles=active_tiles,
             near_tiles=near_tiles,
             priority_tiles=self._priority_focus_tile_numbers(),
             view_range=range_for_priority,
         )
-        self._ensure_pending_priority_queue(context=context)
-        self.priority_retargeted_tiles = self.pending_tiles.set_context(
-            context,
-            max_items=max(1, int(max_items)),
+        # Every ordering consumer (pending queue, stage fan-in waiting queues,
+        # per-commit upsert admission, prefetch candidates) reads this one
+        # context through _tile_priority_context; retargets are the only
+        # writer, and queues resolve it live via their context provider.
+        # Rebuilding the context ad hoc per consumer let different stages of
+        # the pipeline order the same fill around different anchors.
+        del max_items
+        self._priority_context = context
+        self._ensure_pending_priority_queue()
+        self.priority_retargeted_tiles = len(self.pending_tiles) + sum(
+            len(waiting) for waiting in self.stage_fan_in.waiting_tiles.values()
         )
-        remaining = max(0, int(max_items) - int(self.priority_retargeted_tiles))
-        for waiting in tuple(self.stage_fan_in.waiting_tiles.values()):
-            if remaining <= 0:
-                break
-            if hasattr(waiting, "set_context"):
-                remaining -= int(waiting.set_context(context, max_items=remaining))
         return int(self.priority_retargeted_tiles)
 
-    def _tile_priority_context(self, *, active_tiles=None, near_tiles=None, priority_tiles=None, view_range=None) -> TilePriorityContext:
+    def _tile_priority_context(self) -> TilePriorityContext:
+        """The session's single effective ordering context.
+
+        Updated only by :meth:`retarget_tile_priority`; built lazily before
+        the first retarget.
+        """
+        context = getattr(self, "_priority_context", None)
+        if context is None:
+            context = self._build_tile_priority_context()
+            self._priority_context = context
+        return context
+
+    def _build_tile_priority_context(self, *, active_tiles=None, near_tiles=None, priority_tiles=None, view_range=None) -> TilePriorityContext:
         if active_tiles is None:
             active_tiles = tuple(int(tile.montage_index) for tile in self.visible_tiles)
         if near_tiles is None:
@@ -1170,11 +1213,12 @@ class MontageRenderSession:
         return tuple(int(tile) for tile in ordered if int(tile) in set(requested))
 
     def _ensure_pending_priority_queue(self, *, context: TilePriorityContext | None = None) -> None:
+        del context
         if isinstance(self.pending_tiles, MontageTilePriorityQueue):
             return
         self.pending_tiles = MontageTilePriorityQueue(
             tuple(self.pending_tiles or ()),
-            context=context or self._tile_priority_context(),
+            context_provider=self._tile_priority_context,
         )
 
 

@@ -49,4 +49,3 @@ def test_montage_priority_queue_benchmark_reports_scheduler_counters():
     assert result.name == "montage_priority_queue_retarget"
     assert result.retargeted_count > 0
     assert result.pop_count > 0
-    assert result.fairness_count > 0

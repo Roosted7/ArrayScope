@@ -189,6 +189,13 @@ class FrameRenderMixin:
         if view_range is None:
             pending_restore = getattr(self.win, "_pending_viewport_continuity_range", None)
             pending_restore_range = pending_restore() if callable(pending_restore) else None
+            if pending_restore_range is None:
+                # A continuity restore that has been applied but whose window
+                # shape has not settled yet still owns the target range; the
+                # live camera is transitional and would misanchor everything
+                # derived from this plan (priority focus, tile bands).
+                active_restore = getattr(self.win, "_active_viewport_continuity_range", None)
+                pending_restore_range = active_restore() if callable(active_restore) else None
             pending_columns = getattr(self.win, "_pending_viewport_continuity_columns", None)
             pending_restore_columns = pending_columns() if callable(pending_columns) else None
         current_range = view_range if view_range is not None else (

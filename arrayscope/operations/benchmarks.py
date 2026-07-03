@@ -192,7 +192,7 @@ def benchmark_montage_priority_queue_retarget(shape=(8, 8, 1024), dtype=np.float
         visible_tiles=range(shape[2]),
         near_tiles=(),
     )
-    queue = MontageTilePriorityQueue(plan.tiles, context=context, aging_after=8)
+    queue = MontageTilePriorityQueue(plan.tiles, context=context)
     retargeted = 0
     popped = 0
     start = perf_counter()
@@ -215,7 +215,7 @@ def benchmark_montage_priority_queue_retarget(shape=(8, 8, 1024), dtype=np.float
                 break
             popped += 1
     elapsed = _elapsed_ms(start)
-    output = np.asarray([retargeted, popped, queue.fairness_pops], dtype=np.int64)
+    output = np.asarray([retargeted, popped], dtype=np.int64)
     return _result(
         "montage_priority_queue_retarget",
         shape,
@@ -225,7 +225,6 @@ def benchmark_montage_priority_queue_retarget(shape=(8, 8, 1024), dtype=np.float
         None,
         retargeted_count=retargeted,
         pop_count=popped,
-        fairness_count=queue.fairness_pops,
     )
 
 

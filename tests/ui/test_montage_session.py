@@ -1394,3 +1394,29 @@ def test_montage_prefetch_candidates_prefer_focus_proximity():
 
     ordered = [int(tile.montage_index) for tile in _candidate_tiles(session)]
     assert ordered == [2, 3, 1, 0]
+
+
+def test_layout_reflow_rebinds_queued_tiles_to_new_plan_geometry():
+    # Session invariant: every queued tile belongs to session.plan. A column
+    # reflow during window-shape settling used to leave stage-waiting and
+    # pending tiles bound to the superseded geometry — scheduled by stale
+    # coordinates, drawn at new ones, so the fill ignored the priority order.
+    session = _session_with_waiting_tiles()
+
+    state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
+    reflowed = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2)
+    assert reflowed.geometry != session.plan.geometry
+
+    session.retarget_viewport(
+        view_range=((0.0, 6.0), (0.0, 6.0)),
+        viewport_shape=(10, 10),
+        plan=reflowed,
+    )
+
+    for waiting in session.stage_fan_in.waiting_tiles.values():
+        for tile in tuple(waiting):
+            expected = reflowed.tiles[int(tile.montage_index)]
+            assert (tile.x0, tile.y0) == (expected.x0, expected.y0)
+    for tile in tuple(session.pending_tiles):
+        expected = reflowed.tiles[int(tile.montage_index)]
+        assert (tile.x0, tile.y0) == (expected.x0, expected.y0)
