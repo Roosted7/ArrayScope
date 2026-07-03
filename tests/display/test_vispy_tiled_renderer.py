@@ -1063,7 +1063,9 @@ def test_noncontiguous_or_padded_payload_planes_get_safe_staging_arrays():
 
 
 def test_device_limit_query_falls_back_when_gl_is_unavailable():
-    limits = query_gpu_device_limits(SimpleNamespace())
+    # A gloo with an empty ``gl`` keeps the query away from the process-global
+    # VisPy GL module, which can hold a real live context in a full test run.
+    limits = query_gpu_device_limits(SimpleNamespace(gl=SimpleNamespace()))
 
     assert limits.max_texture_size == 4096
     assert limits.source == "fallback"

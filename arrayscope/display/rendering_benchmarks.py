@@ -1199,7 +1199,7 @@ def rendering_benchmark_environment(results=()) -> RenderingBenchmarkEnvironment
         from pyqtgraph.Qt import QT_LIB, QtCore
 
         qt_api = str(QT_LIB)
-        qt_version = str(QtCore.QT_VERSION_STR)
+        qt_version = str(getattr(QtCore, "QT_VERSION_STR", "") or QtCore.qVersion())
     except Exception:
         pass
     limits = _gpu_limits_from_results(results)
@@ -1231,6 +1231,23 @@ def _gpu_limits_from_results(results):
         from vispy import gloo
 
         limits = query_gpu_device_limits(gloo)
+        if str(getattr(limits, "source", "")) != "fallback":
+            return limits
+    except Exception:
+        pass
+    # The device-limit query needs a current GL context; benchmark views are
+    # already closed by the time the environment record is written, so make a
+    # short-lived context for the query.
+    try:
+        from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
+        from vispy import app as vispy_app, gloo
+
+        canvas = vispy_app.Canvas(show=False, size=(4, 4))
+        try:
+            canvas.set_current()
+            limits = query_gpu_device_limits(gloo)
+        finally:
+            canvas.close()
         if str(getattr(limits, "source", "")) != "fallback":
             return limits
     except Exception:

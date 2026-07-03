@@ -1382,12 +1382,19 @@ def query_gpu_device_limits(gloo) -> GpuDeviceLimits:
                 return int(np.asarray(value).ravel()[0])
 
         def get_string(name: str) -> str:
-            value = gl.glGetString(getattr(gl, name))
+            # VisPy's gloo.gl exposes string queries through glGetParameter;
+            # plain glGetString only exists on some older GL wrappers.
+            getter = getattr(gl, "glGetString", None) or gl.glGetParameter
+            value = getter(getattr(gl, name))
             if isinstance(value, bytes):
                 return value.decode("utf-8", errors="replace")
             return str(value or "")
 
         max_texture = get_integer("GL_MAX_TEXTURE_SIZE", 4096)
+        if int(max_texture) <= 0:
+            # GL queries answer 0 without a current context; that is not a
+            # real device limit, so report the conservative fallback instead.
+            raise RuntimeError("OpenGL reported GL_MAX_TEXTURE_SIZE == 0 (no current context)")
         max_units = get_integer("GL_MAX_TEXTURE_IMAGE_UNITS", 0)
         return GpuDeviceLimits(
             max_texture_size=max(1, int(max_texture)),
