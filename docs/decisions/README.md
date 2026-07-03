@@ -75,6 +75,7 @@ Status terminology:
 | [0045](0045-render-orchestrator-composition.md) | Render orchestrator composition | Implemented (v32); render state owned by one composed object instead of window mixins. |
 | [0046](0046-evidence-first-performance-strategy.md) | Evidence-first performance strategy | Accepted; X5 decides physical strategies, backend defaults, and LOD from hardware traces and residency conformance. |
 | [0047](0047-auto-image-backend-selection.md) | Capability-probed automatic image backend selection | Accepted; `auto` resolves to VisPy on Linux with hardware GL (X5a traces), PyQtGraph everywhere else. |
+| [0048](0048-linked-window-sync.md) | Linked-window sync over local sockets | Implemented; per-facet window/level, dimension-indexing, operations, and ROI sync across separately started processes. |
 
 ## Adding or changing a decision
 

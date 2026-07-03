@@ -53,6 +53,7 @@ _FALLBACK_PIXMAPS = {
     "call_split": QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton,
     "drag_indicator": QtWidgets.QStyle.StandardPixmap.SP_ArrowUp,
     "inventory_2": QtWidgets.QStyle.StandardPixmap.SP_DriveHDIcon,
+    "link": QtWidgets.QStyle.StandardPixmap.SP_CommandLink,
 }
 
 

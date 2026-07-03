@@ -8,6 +8,7 @@ This file records user-visible release changes. Detailed development history and
 
 - Julia and MATLAB invocation wrappers (`wrappers/julia`, `wrappers/matlab`) that open the viewer from those languages on Linux, macOS, and Windows with no in-process Python bridge. Arrays are handed off through a raw, uncompressed `.npy` file (single buffer write, native column-major layout) and loaded memory-mapped copy-on-write, so large arrays avoid compression, transposes, and eager second copies. See `docs/invocation.md`.
 - CLI flags supporting that route and general use: `--mmap` (copy-on-write memory-mapped `.npy` loading), `--consume` (delete a temporary handoff file once loaded), and `--title` (window title override).
+- Linked-window sync: per-facet toggle buttons synchronize window/level (display toolbar), dimension indexing (dimension strip), operation recipes (operations dock), and ROIs (inspection dock) across ArrayScope windows — including windows started as separate processes — on Linux, macOS, and Windows via per-user Qt local sockets. Mismatched shapes clamp per dimension; incompatible recipes are skipped with a notice.
 
 ## 0.8.0 — ArrayScope v28 release candidate
 

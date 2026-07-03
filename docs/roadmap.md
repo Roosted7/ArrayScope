@@ -225,6 +225,16 @@ These are candidates after the foundation gates, not parallel commitments.
 
 ### Linked windows and inspection groups
 
+**Status:** First iteration shipped (2026-07-03), [ADR 0048](decisions/0048-linked-window-sync.md).
+Per-facet sync toggles exist for window/level (display toolbar), dimension indexing (dimension
+strip), operation recipes (operations dock), and ROIs (inspection dock). Sync works across
+separately started processes on Linux, macOS, and Windows through per-user Qt local sockets with
+broker-relay topology and re-election (`arrayscope/sync/`). Typed JSON envelopes carry
+origin/revision ids for feedback-loop suppression; dimension indices clamp per axis on shape
+mismatch; incompatible operation recipes are skipped with a status toast. Remaining from the
+original idea: cursor links, viewport links, and named groups beyond the default one (the
+envelope already carries a group field).
+
 Adopt ArrayShow’s useful synchronized-window idea through explicit group objects and typed messages,
 never a global workspace registry. Support selected dimensions, levels, cursor, ROI, or operation
 recipe links independently. Prevent feedback loops with origin/revision IDs.

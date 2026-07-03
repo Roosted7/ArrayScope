@@ -662,6 +662,7 @@ class RenderOrchestrator(
         self.win.widgets['buttons']['display']['window_relative'].setChecked(mode != "absolute")
         self.win.widgets['buttons']['display']['window_absolute'].setChecked(mode == "absolute")
         self.render(reason="window-mode")
+        self.win._notify_sync("levels")
 
     def _set_live_profile_checked(self, enabled):
         self.win.widgets['buttons']['display']['live_profile'].setChecked(bool(enabled))

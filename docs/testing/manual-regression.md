@@ -162,6 +162,18 @@ Run the same scenarios in PyQtGraph and VisPy:
 
 Record differences as contract failures, intentional capability gaps, or visual-library differences.
 
+## Linked-window sync
+
+With two windows from one process and two windows from separately started processes:
+
+- Toggle each sync facet (window/level in the display toolbar, dimension indexing next to the dimension strip, operations in the operations dock, ROIs in the inspection dock) and verify only enabled facets follow.
+- Drag histogram levels, switch relative/absolute, and use auto-window; verify linked windows follow without re-rendering source pixels and without oscillation.
+- Scrub slice spinboxes/strip on arrays of different shapes; verify per-dimension clamping and no errors on smaller arrays.
+- Add/reorder/disable operations; verify linked windows apply the recipe, and a shape-incompatible receiver shows the skip toast and keeps its own stack.
+- Create/move/delete/clear ROIs; verify geometry mirrors and statistics recompute per window.
+- Enable a facet on a late-joining window; verify it adopts the group state instead of overwriting it.
+- Close the first-started window (the broker); verify surviving windows keep syncing after a brief pause.
+
 ## Platform/layout
 
 - Open/close/detach/reattach every managed panel.

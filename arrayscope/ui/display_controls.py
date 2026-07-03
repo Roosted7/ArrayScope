@@ -293,6 +293,15 @@ class DisplayControlBuildMixin:
         for container in self.dim_containers:
             container.hide()
         self.layouts['dims'].addWidget(self.dimension_strip, 0, Qt.QtCore.Qt.AlignmentFlag.AlignHCenter)
+        self.sync_dims_button = QtWidgets.QToolButton()
+        self.sync_dims_button.setCheckable(True)
+        set_button_icon(
+            self.sync_dims_button,
+            "link",
+            tooltip="Sync dimension indexing with other linked ArrayScope windows (also from separately started sessions)",
+        )
+        self.sync_dims_button.toggled.connect(lambda checked: self._on_sync_facet_toggled("dims", checked))
+        self.layouts['dims'].addWidget(self.sync_dims_button, 0, Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
         self.state_binder.bind(
             "dimension-strip",
             read=lambda win: (tuple(win.data.shape), win.view_state, tuple(win.profile_axes)),
@@ -497,6 +506,7 @@ class DisplayControlBuildMixin:
         self.display_toolbar.oneToOneRequested.connect(self.one_to_one_image)
         self.display_toolbar.windowModeChanged.connect(self._on_window_mode_changed)
         self.display_toolbar.autoWindowRequested.connect(self.auto_window_levels)
+        self.display_toolbar.syncWindowToggled.connect(lambda checked: self._on_sync_facet_toggled("levels", checked))
         self.layouts['topUp'].addWidget(self.display_toolbar)
         self.state_binder.bind(
             "display-toolbar",
@@ -556,6 +566,7 @@ class DisplayControlBuildMixin:
             on_delete_roi=self._delete_roi,
             on_clear_rois=self._clear_rois,
             on_select_roi=self._select_roi,
+            on_sync_toggled=lambda checked: self._on_sync_facet_toggled("rois", checked),
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.inspection_dock)
         self.panel_manager.register_panel("inspection", "Inspection", self.inspection_dock, default_area=Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea)
@@ -578,6 +589,7 @@ class DisplayControlBuildMixin:
             on_load_view_recipe=self.load_view_recipe,
             on_enabled_changed=self.set_operation_enabled,
             on_edit_operation=self.edit_operation,
+            on_sync_toggled=lambda checked: self._on_sync_facet_toggled("operations", checked),
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
         self.panel_manager.register_panel("operations", "Operations", self.operation_dock, default_area=Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea)

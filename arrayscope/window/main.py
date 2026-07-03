@@ -143,6 +143,9 @@ class ArrayScopeWindow(
         self.interaction_mode = InteractionMode.CURSOR
                 
         self._build_window_ui(data, filepath)
+        from arrayscope.sync.controller import WindowSyncController
+
+        self.sync_controller = WindowSyncController(self)
         self._apply_channel_colormap()
         try:
             restored_file_view_session = self._restore_file_view_session_if_available()
@@ -422,8 +425,16 @@ class ArrayScopeWindow(
         if hasattr(self, "dimension_strip"):
             self.dimension_strip._schedule_relayout()
 
+    def _on_sync_facet_toggled(self, facet, enabled):
+        controller = getattr(self, "sync_controller", None)
+        if controller is not None:
+            controller.set_facet_enabled(facet, bool(enabled))
+
     def closeEvent(self, event):
         self._closing = True
+        controller = getattr(self, "sync_controller", None)
+        if controller is not None:
+            controller.shutdown()
         layout_manager = getattr(self, "layout_manager", None)
         if layout_manager is not None:
             layout_manager.canvas_preserver.cancel()

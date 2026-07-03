@@ -16,6 +16,7 @@ class DisplayToolbar(QtWidgets.QToolBar):
     oneToOneRequested = Qt.QtCore.Signal()
     windowModeChanged = Qt.QtCore.Signal(str)
     autoWindowRequested = Qt.QtCore.Signal()
+    syncWindowToggled = Qt.QtCore.Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__("Display", parent)
@@ -69,6 +70,17 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.auto_window_action.setToolTip("Auto window levels")
         self.auto_window_action.triggered.connect(self.autoWindowRequested)
         button = self.widgetForAction(self.auto_window_action)
+        if button is not None:
+            configure_tool_button(button)
+
+        self.sync_window_action = self.addAction("Sync")
+        self.sync_window_action.setCheckable(True)
+        set_action_icon(self.sync_window_action, "link")
+        self.sync_window_action.setToolTip(
+            "Sync window/level with other linked ArrayScope windows (also from separately started sessions)"
+        )
+        self.sync_window_action.toggled.connect(lambda checked: self.syncWindowToggled.emit(bool(checked)))
+        button = self.widgetForAction(self.sync_window_action)
         if button is not None:
             configure_tool_button(button)
 

@@ -97,11 +97,13 @@ class InspectionWorkflowMixin:
             self.img_view.clearRois()
         self.roi_store = self.roi_store.clear()
         self._refresh_inspection_dock()
+        self._notify_sync("rois")
 
     def _select_roi(self, roi_id):
         self.roi_store = self.roi_store.select(roi_id)
         if hasattr(self, "img_view"):
             self.img_view.highlightRoi(roi_id)
+        self._notify_sync("rois")
 
     def _show_inspection_dock(self):
         if not hasattr(self, "inspection_dock"):

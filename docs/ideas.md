@@ -52,6 +52,8 @@ Record device limits, attempt representative allocations conservatively, and cac
 
 Typed links for cursor, slice, levels, ROI, or recipe. Default to no link. Explicit group object, origin/revision guard, and per-channel enablement; no global `asObjs`-style registry.
 
+Shipped for slice/levels/ROI/recipe links in the default group ([ADR 0048](decisions/0048-linked-window-sync.md), `arrayscope/sync/`). Still open here: cursor links, viewport links, and user-visible named groups.
+
 ### Compare/difference inspection
 
 A narrow compare workflow with shared viewport/levels, absolute/signed difference, and ROI statistics. Resist turning it into a full registration tool.

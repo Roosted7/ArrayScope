@@ -653,9 +653,9 @@ class DisplayPresentationMixin:
             session.applied_level_source = source
 
         frame = getattr(self.win, "_committed_display_frame", None)
-        if frame is None or not self._is_level_history_frame_usable(frame):
-            return
-        self.win._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range or frame.histogram_range)
+        if frame is not None and self._is_level_history_frame_usable(frame):
+            self.win._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range or frame.histogram_range)
+        self.win._notify_sync("levels")
 
     def _on_level_presentation_changed(self, levels, *, final: bool = False) -> bool:
         levels = normalize_bounds(levels)
@@ -708,6 +708,8 @@ class DisplayPresentationMixin:
         frame = getattr(self.win, "_committed_display_frame", None)
         if frame is not None and self._is_level_history_frame_usable(frame):
             self.win._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range)
+        if source.rank == LevelSourceRank.EXPLICIT_USER:
+            self.win._notify_sync("levels")
 
         if not needs_level_work:
             return True

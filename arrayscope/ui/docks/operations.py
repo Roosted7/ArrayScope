@@ -69,9 +69,11 @@ class OperationStackDock(StandardDockWidget):
         on_load_view_recipe=None,
         on_enabled_changed=None,
         on_edit_operation=None,
+        on_sync_toggled=None,
     ):
         super().__init__("Operations", parent)
         self.setObjectName("OperationsDock")
+        self._on_sync_toggled = on_sync_toggled
         self._on_undo = on_undo
         self._on_clear = on_clear
         self._on_save_recipe = on_save_recipe
@@ -108,6 +110,17 @@ class OperationStackDock(StandardDockWidget):
         header.addWidget(self.add_button)
         header.addWidget(self.palette_button)
         header.addStretch(1)
+        self.sync_button = QtWidgets.QToolButton()
+        self.sync_button.setCheckable(True)
+        set_button_icon(
+            self.sync_button,
+            "link",
+            tooltip="Sync operations with other linked ArrayScope windows (also from separately started sessions)",
+        )
+        self.sync_button.toggled.connect(
+            lambda checked: self._on_sync_toggled(bool(checked)) if self._on_sync_toggled is not None else None
+        )
+        header.addWidget(self.sync_button)
         layout.addLayout(header)
 
         self.operation_list = OperationListWidget()

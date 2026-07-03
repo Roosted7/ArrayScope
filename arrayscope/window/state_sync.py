@@ -10,6 +10,18 @@ from arrayscope.window.domain import Domain
 
 
 class StateSyncMixin:
+    def _notify_sync(self, facet):
+        """Tell the linked-window controller this facet's state changed.
+
+        Safe before the controller exists (startup/session restore); the
+        controller itself drops notifications for disabled facets, echoes of
+        remote applies, and unchanged payloads.
+        """
+
+        controller = getattr(self, "sync_controller", None)
+        if controller is not None:
+            controller.schedule_publish(facet)
+
     def _set_view_state(self, state):
         self.view_state = state.for_shape(self.data.shape)
         self.line_plot_dimension = self.view_state.line_axis if self.view_state.line_axis is not None else 0
@@ -56,6 +68,7 @@ class StateSyncMixin:
             self.update_shift_indicators()
             self._interactive_slice_controls_synced_state = None
         self.request_render(reason=reason, interactive=interactive)
+        self._notify_sync("dims")
 
     def _on_slice_index_changed(self, axis, value):
         axis = int(axis)
@@ -154,6 +167,7 @@ class StateSyncMixin:
         self._force_autolevel = True
         self._update_channel_controls()
         self._update_operation_dock()
+        self._notify_sync("operations")
 
     def _sync_controls_to_current_data(self):
         ndim = self.data.ndim

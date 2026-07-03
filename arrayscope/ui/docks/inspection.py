@@ -18,9 +18,10 @@ from arrayscope.ui.roi_model import RoiTableModel
 
 
 class InspectionDock(StandardDockWidget):
-    def __init__(self, parent, *, on_tool_changed, on_add_roi, on_delete_roi, on_clear_rois, on_select_roi=None):
+    def __init__(self, parent, *, on_tool_changed, on_add_roi, on_delete_roi, on_clear_rois, on_select_roi=None, on_sync_toggled=None):
         super().__init__("Inspection", parent)
         self.setObjectName("InspectionDock")
+        self._on_sync_toggled = on_sync_toggled
         self._on_tool_changed = on_tool_changed
         self._on_add_roi = on_add_roi
         self._on_delete_roi = on_delete_roi
@@ -56,6 +57,17 @@ class InspectionDock(StandardDockWidget):
         set_button_icon(self.clear_button, "delete_sweep", tooltip="Clear all ROIs")
         controls.addWidget(self.clear_button)
         controls.addStretch()
+        self.sync_button = QtWidgets.QToolButton()
+        self.sync_button.setCheckable(True)
+        set_button_icon(
+            self.sync_button,
+            "link",
+            tooltip="Sync ROIs with other linked ArrayScope windows (also from separately started sessions)",
+        )
+        self.sync_button.toggled.connect(
+            lambda checked: self._on_sync_toggled(bool(checked)) if self._on_sync_toggled is not None else None
+        )
+        controls.addWidget(self.sync_button)
         layout.addLayout(controls)
         self.roi_model = RoiTableModel(self)
         self.stats_table = QtWidgets.QTableView()
