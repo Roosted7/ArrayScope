@@ -411,19 +411,27 @@ class MontageRenderSession:
         self.mark_tile_state(rendered.tile, MontageTileState.LOADING)
 
     def mark_presented(self, tile_numbers) -> None:
+        # Collect level-scope additions and apply them once at the end:
+        # extending the frozenset per presented tile makes a full-montage
+        # commit O(n^2) in the tile count.
+        level_scope_additions: list[int] = []
         for tile_number in tuple(tile_numbers or ()):
             index = int(tile_number)
             if index not in self.rendered_tiles:
                 continue
             self.presented_tiles.add(index)
             if index in self.visible_tile_numbers and index in self.display_tile_payloads:
-                self.level_generation.set_active_tiles((*self.level_generation.active_tiles, index))
+                level_scope_additions.append(index)
             self.loading_tiles.discard(index)
             self.skipped_tiles.discard(index)
             self.dirty_payloads.pop(index, None)
             self.pending_removals.discard(index)
             if 0 <= index < len(self.plan.tiles):
                 self.mark_tile_state(self.plan.tiles[index], MontageTileState.LOADED)
+        if level_scope_additions:
+            self.level_generation.set_active_tiles(
+                (*self.level_generation.active_tiles, *level_scope_additions)
+            )
 
     def snapshot_display_tile_payloads(self, source_ids: dict[int, object]) -> dict[int, DisplayTilePayload]:
         """Return immutable-by-convention payload wrappers for loaded tiles.
@@ -638,13 +646,16 @@ class MontageRenderSession:
         active = tuple(int(tile) for tile in planned if int(tile) in current_loaded)
         stale_level_tiles = ()
         if self.has_pending_level_update():
-            stale_level_tiles = tuple(
+            # Filter before prioritizing: ordering every active tile per commit
+            # makes the drain of a large stale backlog O(n^2) in commits.
+            stale_candidates = tuple(
                 int(tile)
-                for tile in self._prioritized_tile_numbers(active)
+                for tile in active
                 if int(tile) in self.display_tile_payloads
                 and int(tile) in previous_payloads
                 and not self._tile_matches_current_level_target(int(tile), self.level_generation.target_levels)
             )
+            stale_level_tiles = self._prioritized_tile_numbers(stale_candidates)
         dirty_payload_tiles = tuple(
             dict.fromkeys(
                 (

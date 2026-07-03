@@ -3787,17 +3787,18 @@ def _tile_layer_upsert_limits(window, session) -> dict[str, int]:
         and session.has_stale_level_presentations()
     ):
         return {}
+    interactive = _interactive_active(window)
     decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
         "tile_layer_commit",
-        interactive=_interactive_active(window),
+        interactive=interactive,
     )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
     if batch_limit <= 0:
         feedback = _latency_feedback(window)
-        batch_limit = 8 if feedback is None else int(feedback.batch_limit("tile_layer_commit", interactive=_interactive_active(window)))
+        batch_limit = 8 if feedback is None else int(feedback.batch_limit("tile_layer_commit", interactive=interactive))
     if byte_cap <= 0:
-        byte_cap = 8 * 1024 * 1024 if _interactive_active(window) else 32 * 1024 * 1024
+        byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
     return {
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),

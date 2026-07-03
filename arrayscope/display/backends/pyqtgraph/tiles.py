@@ -146,6 +146,14 @@ class MontageTileLayer:
         states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
         dirty_set = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
         cold_deadline_ms = None if tile_delta is None else getattr(tile_delta, "cold_deadline_ms", None)
+        # Level-only re-windowing refreshes already-resident pixels.  The cold
+        # budget is a feedback value that collapses to its floor when the
+        # commit pipeline's fixed cost dominates, which throttled level
+        # convergence to ~2 tiles per commit on large montages (measured on a
+        # 272-tile montage: ~45 s to settle after a level drag).  Refinement
+        # gets its own floor so each commit makes real progress while staying
+        # within roughly one frame of UI-thread work.
+        level_rewindow_deadline_ms = None if cold_deadline_ms is None else max(8.0, float(cold_deadline_ms))
         cold_start = perf_counter()
         cold_tiles_committed = 0
         update_start = perf_counter()
@@ -336,11 +344,19 @@ class MontageTileLayer:
                 or missing_display
                 or needs_source_rewindow
             )
+            rewindow_only = bool(
+                existing_item
+                and not source_changed
+                and not dirty
+                and not missing_display
+                and needs_source_rewindow
+            )
+            item_deadline_ms = level_rewindow_deadline_ms if rewindow_only else cold_deadline_ms
             if (
-                cold_deadline_ms is not None
+                item_deadline_ms is not None
                 and cold_candidate
                 and cold_tiles_committed > 0
-                and (perf_counter() - cold_start) * 1000.0 >= float(cold_deadline_ms)
+                and (perf_counter() - cold_start) * 1000.0 >= float(item_deadline_ms)
             ):
                 if item_state is not None and item_state.visible:
                     active.add(int(tile_number))
@@ -409,9 +425,9 @@ class MontageTileLayer:
                     committed_upserts.add(int(tile_number))
             elif levels_changed:
                 if (
-                    cold_deadline_ms is not None
+                    level_rewindow_deadline_ms is not None
                     and level_updates > 0
-                    and (perf_counter() - cold_start) * 1000.0 >= float(cold_deadline_ms)
+                    and (perf_counter() - cold_start) * 1000.0 >= float(level_rewindow_deadline_ms)
                 ):
                     if item_state is not None and item_state.visible:
                         active.add(int(tile_number))

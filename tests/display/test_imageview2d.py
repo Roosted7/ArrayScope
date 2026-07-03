@@ -1465,8 +1465,9 @@ def test_pyqtgraph_clean_typed_tiled_commit_stays_noop(qt_app):
         view.close()
 
 
-def test_pyqtgraph_level_redraw_is_bounded_by_commit_deadline(qt_app):
+def test_pyqtgraph_level_redraw_is_bounded_by_commit_deadline(qt_app, monkeypatch):
     from arrayscope.core.view_state import ViewState
+    from arrayscope.display.backends.pyqtgraph import tiles as pyqtgraph_tiles
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
     from arrayscope.display.montage import MontageTileState
@@ -1509,6 +1510,18 @@ def test_pyqtgraph_level_redraw_is_bounded_by_commit_deadline(qt_app):
             histogramRange=(0.0, 1.0),
             rgb_already_windowed=False,
         )
+
+        # Level re-windowing is bounded by a floored refinement deadline
+        # (max(8 ms, cold budget)), not by the collapsed cold budget itself.
+        # Advance a fake clock 5 ms per call so the floor binds after the
+        # first re-windowed tile regardless of machine speed.
+        fake_now = {"value": 0.0}
+
+        def advancing_perf_counter():
+            fake_now["value"] += 0.005
+            return fake_now["value"]
+
+        monkeypatch.setattr(pyqtgraph_tiles, "perf_counter", advancing_perf_counter)
 
         report = view.setTiledPresentation(
             geometry=geometry,
