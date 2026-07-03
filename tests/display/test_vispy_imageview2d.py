@@ -2417,10 +2417,12 @@ def test_vispy_warm_residency_schedule_is_constant_time_when_busy(qt_app):
         view.close()
 
 
-def test_vispy_warm_residency_schedule_keeps_caller_payload_mapping(qt_app):
+def test_vispy_warm_residency_schedule_queues_payloads_in_order_without_copying(qt_app):
+    from arrayscope.display.backends.vispy.tiles import PayloadBatchQueue
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
-    payloads = {1: object(), 2: object()}
+    first, second = object(), object()
+    payloads = {2: first, 1: second}
     view = VisPyImageView2D()
     try:
         view._schedule_vispy_warm_tile_residency(
@@ -2431,7 +2433,12 @@ def test_vispy_warm_residency_schedule_keeps_caller_payload_mapping(qt_app):
             tile_residency_budget_bytes=0,
         )
 
-        assert view._vispy_pending_warm_tile_payloads is payloads
+        pending = view._vispy_pending_warm_tile_payloads
+        assert isinstance(pending, PayloadBatchQueue)
+        remaining = pending.remaining_payloads()
+        assert tuple(remaining) == (2, 1)
+        assert remaining[2] is first
+        assert remaining[1] is second
     finally:
         view.close()
 
