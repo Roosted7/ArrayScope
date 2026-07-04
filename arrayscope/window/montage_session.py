@@ -219,6 +219,8 @@ class MontageRenderSession:
     lod_floor_presentations: int = 0
     lod_target_revision: int = 0
     parked_dirty_payloads: set = field(default_factory=set)
+    lod_preview_pyramid: object | None = None
+    lod_preview_level: int = 0
     # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but
     # must carry the tile's finest already-computed semantic stats forward
     # unchanged.  `cross_level_reuses` counts swaps that reused the retained
@@ -954,7 +956,22 @@ class MontageRenderSession:
                     best = (rank, key, level)
             if best is not None:
                 break
-        return None if best is None else (best[1], best[2])
+        if best is not None:
+            return (best[1], best[2], pyramid)
+        preview = self.lod_preview_pyramid
+        level = int(self.lod_preview_level)
+        if preview is None or level <= 0:
+            return None
+        for component in self._floor_component_tags():
+            key = PyramidLevelKey(
+                source_id=semantic_id,
+                tile_id=int(source_index),
+                component=component,
+                level_xy=(level, level),
+            )
+            if preview.peek(key) is not None:
+                return (key, level, preview)
+        return None
 
     def _floor_can_progress(self, tile_number: int, tile=None) -> bool:
         """True when the floor pass could present or improve this tile."""
@@ -1017,12 +1034,12 @@ class MontageRenderSession:
             best = self._best_floor_key(source_index)
             if best is None:
                 continue
-            key, level = best
+            key, level, owning_cache = best
             if existing is not None:
                 presented = int(getattr(getattr(existing, "lod", None), "level", 0) or 0)
                 if presented == int(level):
                     continue
-            plane = pyramid.peek(key)
+            plane = owning_cache.peek(key)
             if plane is None:
                 continue
             factor_x = 1 << int(key.level_xy[0])
@@ -1878,6 +1895,57 @@ def pyramid_key_for_rendered(
     )
 
 
+def admit_preview_reduction(
+    preview_pyramid,
+    rendered: RenderedTile,
+    *,
+    semantic_source_id,
+    preview_level: int,
+    reduced: np.ndarray | None = None,
+    reduced_level: int | None = None,
+) -> bool:
+    """Admit the retained preview level for a freshly computed tile.
+
+    Worker-side and opportunistic (ADR 0050 retained preview level): every
+    evaluated tile leaves a coarse copy in the pinned preview cache, so any
+    index ever computed re-presents instantly through the floor forever.
+    When the ingest reduction already produced a finer level whose shape
+    divides evenly, the preview derives from it (relative_factor**2 fewer
+    texels); otherwise it reduces the native plane once.
+    """
+
+    if preview_pyramid is None or int(preview_level) <= 0:
+        return False
+    _source, _histogram, texture_kind = texture_source_for_rendered(rendered)
+    component = "scalar" if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
+    level = int(preview_level)
+    key = PyramidLevelKey(
+        source_id=semantic_source_id,
+        tile_id=int(rendered.tile.source_index),
+        component=component,
+        level_xy=(level, level),
+    )
+    if not preview_pyramid.begin_pending(key):
+        return False
+    try:
+        factor = 1 << level
+        if (
+            reduced is not None
+            and reduced_level is not None
+            and 0 < int(reduced_level) < level
+            and all(int(edge) % (factor >> int(reduced_level)) == 0 for edge in np.shape(reduced)[:2])
+        ):
+            relative = factor >> int(reduced_level)
+            preview_pyramid.admit(key, reduce_box_mean(np.asarray(reduced), (relative, relative)))
+        else:
+            source, _hist, _kind = texture_source_for_rendered(rendered)
+            preview_pyramid.admit(key, reduce_box_mean(source, (factor, factor)))
+    except Exception:
+        preview_pyramid.end_pending(key)
+        return False
+    return True
+
+
 def admit_ingest_reduction(pyramid, demand, rendered: RenderedTile, *, semantic_source_id) -> bool:
     """Reduce a freshly computed tile to the demanded level, worker-side.
 
@@ -1888,26 +1956,26 @@ def admit_ingest_reduction(pyramid, demand, rendered: RenderedTile, *, semantic_
     display texture plane is reduced.  The singleflight claim keeps this from
     duplicating a concurrently scheduled post-hoc materialization.
 
-    Returns True when this call admitted the level into the pyramid cache.
+    Returns the admitted reduced plane (truthy) or None, so the retained
+    preview level can derive from it instead of re-reducing native.
     """
 
     if pyramid is None or demand is None:
-        return False
+        return None
     level = int(demand.desired_level)
     if level <= 0:
-        return False
+        return None
     key = pyramid_key_for_rendered(rendered, demand=demand, level=level, semantic_source_id=semantic_source_id)
     if not pyramid.begin_pending(key):
-        return False
+        return None
     try:
         source, _histogram, _texture_kind = texture_source_for_rendered(rendered)
-        pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
+        return pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
     except Exception:
         # LOD is a display optimization: a failed reduction must not fail the
         # tile result.  Release the claim so a later commit can retry.
         pyramid.end_pending(key)
-        return False
-    return True
+        return None
 
 
 def _view_range_cache_key(view_range) -> tuple[tuple[float, ...], ...] | tuple[object, ...]:

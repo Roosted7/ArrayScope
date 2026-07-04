@@ -232,3 +232,19 @@ class PyramidCache:
 
 
 __all__ = ["ALGO_VERSION", "PyramidLevelKey", "PyramidCache", "reduce_box_mean"]
+
+
+def preview_level_for_tile_shape(tile_shape, *, target_edge: int = 48, min_level: int = 2, max_level: int = 6) -> int:
+    """Retained-preview level for one tile shape (ADR 0050).
+
+    Coarse enough that a whole stack stays a few megabytes, fine enough to
+    scroll through recognizably: the smallest power-of-two level whose
+    reduced edges do not undershoot ``target_edge``.
+    """
+
+    edge = max(int(tile_shape[0]), int(tile_shape[1]), 1)
+    level = 0
+    while (edge >> (level + 1)) >= max(1, int(target_edge)) and level < int(max_level):
+        level += 1
+    return max(int(min_level), level)
+

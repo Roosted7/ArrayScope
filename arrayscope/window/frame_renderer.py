@@ -55,7 +55,7 @@ from arrayscope.display.model.montage_levels import (
     sample_tile_level_stats,
 )
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT
-from arrayscope.display.pyramid import PyramidCache, reduce_box_mean
+from arrayscope.display.pyramid import PyramidCache, preview_level_for_tile_shape, reduce_box_mean
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
     payload_compatible_with_tile as _payload_compatible_with_tile,
@@ -79,6 +79,7 @@ from arrayscope.window.montage_viewport import (
 from arrayscope.window.montage_session import (
     MontageRenderSession,
     admit_ingest_reduction as _admit_ingest_reduction,
+    admit_preview_reduction as _admit_preview_reduction,
 )
 from arrayscope.window.render_contract import (
     montage_work_token as _montage_work_token,
@@ -514,6 +515,9 @@ class FrameRenderMixin:
         session_id = int(getattr(self, "_montage_session_id", 0)) + 1
         self._montage_session_id = session_id
         lod_policy_mode = self._montage_lod_policy_mode()
+        lod_preview_level = (
+            preview_level_for_tile_shape(plan.tile_shape) if lod_policy_mode == LOD_POLICY_RESIDENT else 0
+        )
         session = MontageRenderSession(
             session_id=session_id,
             key=session_key,
@@ -562,6 +566,8 @@ class FrameRenderMixin:
             repeated_expensive_stage_per_tile=stage_plan["repeated_expensive_stage_per_tile"],
             priority_focus=viewport_plan.priority_focus,
             lod_policy_mode=lod_policy_mode,
+            lod_preview_pyramid=(self._montage_lod_preview_pyramid() if lod_preview_level else None),
+            lod_preview_level=lod_preview_level,
             lod_pyramid=(
                 self._montage_lod_pyramid() if lod_policy_mode == LOD_POLICY_RESIDENT else None
             ),
@@ -1778,15 +1784,43 @@ class FrameRenderMixin:
             session.tile_semantic_source_id(tile.source_index) if ingest_pyramid is not None else None
         )
         ingest_state = {"admitted": False}
+        preview_pyramid = getattr(session, "lod_preview_pyramid", None)
+        preview_level = int(getattr(session, "lod_preview_level", 0) or 0)
+        preview_semantic_id = (
+            session.tile_semantic_source_id(tile.source_index)
+            if preview_pyramid is not None and preview_level > 0 and ingest_semantic_id is None
+            else ingest_semantic_id
+        )
 
         def evaluate(token):
             result = self._evaluate_montage_tile_snapshot(session, tile, token)
-            if ingest_pyramid is not None and getattr(result, "value", None) is not None:
-                ingest_state["admitted"] = _admit_ingest_reduction(
+            if getattr(result, "value", None) is None:
+                return result
+            rendered_for_lod = None
+            reduced = None
+            if ingest_pyramid is not None:
+                rendered_for_lod = _rendered_tile_from_evaluation_result(tile, result)
+                reduced = _admit_ingest_reduction(
                     ingest_pyramid,
                     ingest_demand,
-                    _rendered_tile_from_evaluation_result(tile, result),
+                    rendered_for_lod,
                     semantic_source_id=ingest_semantic_id,
+                )
+                ingest_state["admitted"] = reduced is not None
+            if preview_pyramid is not None and preview_level > 0:
+                # Retained preview level (ADR 0050): every evaluated tile
+                # leaves a coarse copy in the pinned preview cache, so any
+                # index ever computed re-presents instantly through the
+                # floor for the lifetime of the dataset view.
+                if rendered_for_lod is None:
+                    rendered_for_lod = _rendered_tile_from_evaluation_result(tile, result)
+                _admit_preview_reduction(
+                    preview_pyramid,
+                    rendered_for_lod,
+                    semantic_source_id=preview_semantic_id,
+                    preview_level=preview_level,
+                    reduced=reduced,
+                    reduced_level=None if ingest_demand is None else int(ingest_demand.desired_level),
                 )
             return result
 
@@ -2313,6 +2347,21 @@ class FrameRenderMixin:
             )
             pyramid = PyramidCache(max_bytes=budget)
             self._montage_lod_pyramid_cache = pyramid
+        return pyramid
+
+    def _montage_lod_preview_pyramid(self) -> PyramidCache:
+        """Pinned whole-stack preview cache (ADR 0050 retained preview level).
+
+        Separate instance = structural eviction exemption: display-churn in
+        the main pyramid can never push preview planes out.  At preview
+        levels a full 272-tile stack is a few megabytes, so the cap is a
+        formality.
+        """
+
+        pyramid = getattr(self, "_montage_lod_preview_cache", None)
+        if not isinstance(pyramid, PyramidCache):
+            pyramid = PyramidCache(max_bytes=64 * 1024 * 1024)
+            self._montage_lod_preview_cache = pyramid
         return pyramid
 
     def _schedule_montage_lod_materializations(self, session) -> None:

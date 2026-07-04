@@ -9,6 +9,7 @@ from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.window.montage_session import (
+    admit_preview_reduction,
     MontageRenderSession,
     admit_ingest_reduction,
     pyramid_key_for_rendered,
@@ -273,11 +274,11 @@ def test_worker_ingest_reduction_presents_demanded_level_first():
     # Worker side: the native tile is computed, then reduced and admitted as
     # part of the same materialization, before the result reaches the GUI.
     rendered = _rendered(session.plan.tiles[0])
-    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index))
+    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index)) is not None
     assert len(pyramid) == 1
     assert pyramid.pending_count == 0
     # Singleflight: the level is resident, a second admission is a no-op.
-    assert not admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index))
+    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index)) is None
 
     # GUI side: the first presentation build selects the reduced level.  No
     # native payload is ever emitted for the tile and nothing is re-requested.
@@ -314,7 +315,7 @@ def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
 
     # The worker still completes against its scheduling-time snapshot.
     rendered = _rendered(session.plan.tiles[0])
-    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=("test-tile", rendered.tile.source_index))
+    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=("test-tile", rendered.tile.source_index)) is not None
 
     # No special cases: presentation never over-reduces with the stale level;
     # it falls back and the ordinary streaming path materializes level 1.
@@ -947,3 +948,65 @@ def test_parked_dirty_tiles_rearm_when_the_viewport_makes_them_active():
     _state, delta3 = session.build_tile_presentation({})
     assert 1 not in session.parked_dirty_payloads
     assert 1 in delta3.upserts
+
+
+def test_preview_reduction_fills_pinned_cache_from_native_and_from_reduced():
+    """ADR 0050 retained preview level: every evaluated tile leaves a coarse
+    copy in the pinned cache; when an ingest reduction exists with evenly
+    dividing shape, the preview derives from it instead of native."""
+
+    preview = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 20))
+    rendered = session.rendered_tiles[0]
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+
+    assert admit_preview_reduction(
+        preview, rendered, semantic_source_id=semantic_id, preview_level=3
+    )
+    key = next(iter(preview.resident_keys_for(semantic_id, rendered.tile.source_index, "scalar")))
+    assert key.level_xy == (3, 3)
+    assert preview.peek(key).shape == (TILE // 8, TILE // 8)
+    expected = np.asarray(rendered.image).reshape(TILE // 8, 8, TILE // 8, 8).mean(axis=(1, 3))
+    assert np.allclose(preview.peek(key), expected, atol=1e-4)
+
+    # Derive-from-reduced: level 1 plane divides evenly into level 3.
+    preview2 = PyramidCache(max_bytes=1 << 20)
+    reduced = reduce_box_mean(np.asarray(rendered.image), (2, 2))
+    assert admit_preview_reduction(
+        preview2, rendered, semantic_source_id=semantic_id, preview_level=3,
+        reduced=reduced, reduced_level=1,
+    )
+    key2 = next(iter(preview2.resident_keys_for(semantic_id, rendered.tile.source_index, "scalar")))
+    assert np.allclose(preview2.peek(key2), expected, atol=1e-4)
+
+    # Singleflight: second admission is a no-op.
+    assert not admit_preview_reduction(
+        preview, rendered, semantic_source_id=semantic_id, preview_level=3
+    )
+
+
+def test_floor_presents_from_pinned_preview_when_main_pyramid_lost_the_level():
+    """Scroll-back contract: main-cache churn can never blank a tile that was
+    ever computed — the pinned preview level floors it."""
+
+    main = PyramidCache(max_bytes=1 << 20)
+    preview = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=main, count=2)
+    session.lod_preview_pyramid = preview
+    session.lod_preview_level = 3
+
+    rendered = session.rendered_tiles[1]
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    assert admit_preview_reduction(
+        preview, rendered, semantic_source_id=semantic_id, preview_level=3
+    )
+    # Tile 1 loses its rendered result and has nothing in the MAIN pyramid.
+    del session.rendered_tiles[1]
+    session.dirty_payloads.pop(1, None)
+
+    _state, delta = session.build_tile_presentation({})
+    payload = delta.upserts.get(1) or session.display_tile_payloads.get(1)
+    assert payload is not None, "preview level must floor the tile"
+    assert payload.quality == "preview"
+    assert payload.lod.level == 3
+    assert payload.texture_data.shape[:2] == (TILE // 8, TILE // 8)
