@@ -54,8 +54,8 @@ from arrayscope.display.model.montage_levels import (
     provisional_tile_level_stats,
     sample_tile_level_stats,
 )
-from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT
-from arrayscope.display.pyramid import PyramidCache, preview_level_for_tile_shape, reduce_box_mean
+from arrayscope.display.lod import LOD_POLICY_RESIDENT
+from arrayscope.display.pyramid import PyramidCache, preview_level_for_tile_shape
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
     payload_compatible_with_tile as _payload_compatible_with_tile,
@@ -76,11 +76,12 @@ from arrayscope.window.montage_viewport import (
     retarget_montage_viewport_plan,
     square_montage_fit_view_range,
 )
-from arrayscope.window.montage_session import (
-    MontageRenderSession,
+from arrayscope.window import montage_lod
+from arrayscope.window.montage_lod import (
     admit_ingest_reduction as _admit_ingest_reduction,
     admit_preview_reduction as _admit_preview_reduction,
 )
+from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.window.render_contract import (
     montage_work_token as _montage_work_token,
     montage_work_token_is_current as _montage_work_token_is_current,
@@ -2314,155 +2315,19 @@ class FrameRenderMixin:
         self._schedule_montage_tiles(session)
 
     def _montage_lod_policy_mode(self) -> str:
-        """Resolve the configured montage LOD policy for the active backend.
-
-        ADR 0050 scopes the first "resident" slice to VisPy tiled scenes;
-        any other backend keeps native-only regardless of the setting.
-        """
-
-        choice = getattr(getattr(self.win, "app_settings", None), "montage_lod_policy", None)
-        value = str(getattr(choice, "value", choice) or LOD_POLICY_NATIVE_ONLY)
-        if value != LOD_POLICY_RESIDENT:
-            return LOD_POLICY_NATIVE_ONLY
-        capabilities = image_view_backend_capabilities(self.win.img_view)
-        if str(getattr(capabilities, "name", "")) != "vispy":
-            return LOD_POLICY_NATIVE_ONLY
-        return LOD_POLICY_RESIDENT
+        return montage_lod.policy_mode_for_renderer(self)
 
     def _montage_lod_pyramid(self) -> PyramidCache:
-        pyramid = getattr(self, "_montage_lod_pyramid_cache", None)
-        if not isinstance(pyramid, PyramidCache):
-            # Zero re-upload zoom cycles (ADR 0050 gate 6) require the CPU
-            # pyramid to actually retain the working set across threshold
-            # recrossings.  Footprint of the reference montage (272 tiles of
-            # 336x336): float32 levels 1+2 are ~38 MiB, complex64 levels 1+2
-            # are ~76 MiB, and the raw and FFT scenes share this one cache
-            # (~114 MiB together).  The previous max(64 MiB, display/4)
-            # budget evicted exactly that set, so each recrossing re-reduced
-            # the level and minted a new texture identity, forcing GPU
-            # re-uploads on nearly every zoom.
-            budget = max(
-                256 * 1024 * 1024,
-                int(self._memory_policy().display_cache_budget_bytes) // 2,
-            )
-            pyramid = PyramidCache(max_bytes=budget)
-            self._montage_lod_pyramid_cache = pyramid
-        return pyramid
+        return montage_lod.shared_pyramid(self)
 
     def _montage_lod_preview_pyramid(self) -> PyramidCache:
-        """Pinned whole-stack preview cache (ADR 0050 retained preview level).
-
-        Separate instance = structural eviction exemption: display-churn in
-        the main pyramid can never push preview planes out.  At preview
-        levels a full 272-tile stack is a few megabytes, so the cap is a
-        formality.
-        """
-
-        pyramid = getattr(self, "_montage_lod_preview_cache", None)
-        if not isinstance(pyramid, PyramidCache):
-            pyramid = PyramidCache(max_bytes=64 * 1024 * 1024)
-            self._montage_lod_preview_cache = pyramid
-        return pyramid
+        return montage_lod.preview_pyramid(self)
 
     def _schedule_montage_lod_materializations(self, session) -> None:
-        """Drain demanded-but-missing pyramid levels into background work.
-
-        Reduction never runs in this GUI path: each request becomes a
-        low-priority worker item on the montage tile controller, superseded
-        per tile by viewport identity.  Completion admits into the pyramid
-        cache from the worker and re-enters presentation through the same
-        dirty-payload commit path a late tile result uses.
-        """
-
-        requests = list(getattr(session, "pending_lod_requests", ()) or ())
-        if not requests:
-            return
-        session.pending_lod_requests.clear()
-        pyramid = getattr(session, "lod_pyramid", None)
-        if pyramid is None:
-            return
-        if not self._montage_session_is_current(session):
-            for request in requests:
-                pyramid.end_pending(request[1])
-            return
-        controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
-        session_id = int(session.session_id)
-        session_key = session.key
-        supersession_value = (session_key, session_id, int(getattr(session, "lod_target_revision", 0) or 0))
-        for request in requests:
-            tile_number = int(request[0])
-            key = request[1]
-            source = request[2]
-            reduce_factor_xy = tuple(int(value) for value in (request[3] if len(request) > 3 else key.factor_xy))
-
-            def evaluate(key=key, source=source, reduce_factor_xy=reduce_factor_xy, pyramid=pyramid):
-                return pyramid.admit(key, reduce_box_mean(source, reduce_factor_xy))
-
-            def done(_result, tile_number=tile_number, session_id=session_id, session_key=session_key):
-                self._on_montage_lod_level_ready(session_id, session_key, tile_number)
-
-            def release(key=key, pyramid=pyramid, tile_number=tile_number, session_id=session_id, session_key=session_key):
-                # Supersession cancels stale *work*, never a completed
-                # result: the worker may have admitted the level before the
-                # item went stale, and dropping the notification leaves the
-                # tile presenting an outdated level until an unrelated event
-                # (user-visible as tiles stuck mid-zoom).  Admitted levels
-                # notify; unstarted ones release the singleflight claim.
-                if pyramid.peek(key) is not None:
-                    self._on_montage_lod_level_ready(session_id, session_key, tile_number)
-                else:
-                    pyramid.end_pending(key)
-
-            started = controller.start_latest(
-                evaluate,
-                key=("montage_lod_level", session_key, tile_number, key.level_xy),
-                priority=EvalPriority.PREFETCH,
-                replace_group=f"montage-lod:{tile_number}",
-                on_done=done,
-                on_error=lambda _exc, key=key, pyramid=pyramid: pyramid.end_pending(key),
-                on_stale=release,
-                supersession_key=("montage-lod", tile_number),
-                supersession_value=supersession_value,
-                work_item=WorkItem(
-                    key=("montage_lod_materialization", session_key, session_id, tile_number, key.level_xy),
-                    lane=WorkLane.SPECULATIVE_RESIDENCY,
-                    quality="preview",
-                    supersession_key=("montage-lod", tile_number),
-                    supersession_value=supersession_value,
-                    estimated_bytes=max(
-                        1,
-                        int(getattr(source, "nbytes", 0) or 0)
-                        // max(1, int(reduce_factor_xy[0]) * int(reduce_factor_xy[1])),
-                    ),
-                ),
-            )
-            if started is None:
-                # Admission blocked (bounded speculative lane yielding to
-                # visible work): release the singleflight claim immediately,
-                # or the next refresh can never re-request this level and the
-                # tile is stuck at its old LOD until the demand changes.
-                pyramid.end_pending(key)
-                self._montage_lod_materializations_blocked = (
-                    int(getattr(self, "_montage_lod_materializations_blocked", 0) or 0) + 1
-                )
-            else:
-                self._montage_lod_materializations_scheduled = (
-                    int(getattr(self, "_montage_lod_materializations_scheduled", 0) or 0) + 1
-                )
+        return montage_lod.schedule_materializations(self, session)
 
     def _on_montage_lod_level_ready(self, session_id, session_key, tile_number) -> None:
-        self._montage_lod_materializations_completed = (
-            int(getattr(self, "_montage_lod_materializations_completed", 0) or 0) + 1
-        )
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session_id, session_key):
-            return
-        if not self._is_current_render_generation(session.render_generation):
-            return
-        session.lod_materializations_completed = int(getattr(session, "lod_materializations_completed", 0) or 0) + 1
-        if int(tile_number) in session.rendered_tiles:
-            session.dirty_payloads[int(tile_number)] = None
-        self._schedule_montage_presentation_commit(session, force=False)
+        return montage_lod.on_level_ready(self, session_id, session_key, tile_number)
 
     def _schedule_montage_presentation_commit(self, session, *, force=False) -> None:
         if not self._montage_session_is_current(session):

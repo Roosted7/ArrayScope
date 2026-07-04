@@ -5,22 +5,16 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
 from time import monotonic
-from typing import NamedTuple
 
 import numpy as np
 
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
-    LOD_POLICY_RESIDENT,
     LodInfo,
     LodPolicyDecision,
-    choose_resident_level,
-    factor_xy_for_level,
     native_lod_policy,
-    resident_lod_policy,
-    select_lod_demand,
 )
-from arrayscope.display.pyramid import PyramidLevelKey, reduce_box_mean
+from arrayscope.display.pyramid import PyramidLevelKey
 from arrayscope.display.montage import (
     MontagePlan,
     MontageTile,
@@ -39,23 +33,15 @@ from arrayscope.display.model.presentation_generation import (
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
-
-
-class LodMaterializationRequest(NamedTuple):
-    """One demanded-but-missing pyramid level for background reduction.
-
-    ``source`` is the array the worker reduces (native texture plane or an
-    already-resident finer pyramid level) and ``reduce_factor_xy`` is the
-    per-axis box-mean factor relative to that source.  ``key.factor_xy``
-    always stays relative to the native plane; the two differ exactly when a
-    cross-level derivation was chosen (ADR 0050).
-    """
-
-    tile_number: int
-    key: PyramidLevelKey
-    source: object
-    reduce_factor_xy: tuple[int, int]
-    cross_level: bool = False
+from arrayscope.window import montage_lod
+from arrayscope.window.montage_lod import (  # noqa: F401  (re-exports; canonical home is montage_lod)
+    LodMaterializationRequest,
+    admit_ingest_reduction,
+    admit_preview_reduction,
+    pyramid_key_for_rendered,
+    texture_source_for_rendered,
+    viewport_identity as _viewport_identity,
+)
 
 
 def _shader_mapping_key(mapping):
@@ -106,22 +92,6 @@ def _resident_retarget_upsert_tiles(
         for tile, payload in upserts.items()
         if any(previous_tile != int(tile) for previous_tile in previous_tiles_by_key.get(_payload_residency_key(payload), set()))
     }
-
-
-def _viewport_identity(view_range, viewport_shape: tuple[int, int]) -> tuple[object, ...]:
-    shape = tuple(max(1, int(value)) for value in tuple(viewport_shape or (1, 1))[:2])
-    if view_range is None:
-        return (shape, None)
-    try:
-        return (
-            shape,
-            (
-                (float(view_range[0][0]), float(view_range[0][1])),
-                (float(view_range[1][0]), float(view_range[1][1])),
-            ),
-        )
-    except Exception:
-        return (shape, repr(view_range))
 
 
 @dataclass
@@ -675,202 +645,28 @@ class MontageRenderSession:
         )
 
     def _selected_lod_factor(self) -> int:
-        previous = self.lod_policy_decision.demand.desired_factor
-        if self._resident_lod_active():
-            self.lod_policy_decision = resident_lod_policy(
-                self.view_range,
-                self.viewport_shape,
-                self.plan.tile_shape,
-                previous_factor=previous,
-                resident_levels=self._session_resident_levels(previous),
-            )
-        else:
-            self.lod_policy_decision = native_lod_policy(
-                self.view_range,
-                self.viewport_shape,
-                self.plan.tile_shape,
-                previous_factor=previous,
-            )
-        return int(self.lod_policy_decision.applied_factor)
+        return montage_lod.selected_lod_factor(self)
 
     def _resident_lod_active(self) -> bool:
-        return str(self.lod_policy_mode) == LOD_POLICY_RESIDENT and self.lod_pyramid is not None
+        return montage_lod.resident_lod_active(self)
 
     def presented_lod_summary(self) -> tuple[int, int, tuple[int, int]]:
-        """(level, factor, (factor_x, factor_y)) shown by the plurality of tiles.
+        """Plurality-presented (level, factor, factor_xy); see :mod:`montage_lod`."""
 
-        The session-wide policy decision only claims a level once every
-        rendered tile can present it, which reads as "native" while any tile
-        is still streaming.  Diagnostics report what the committed
-        presentation actually shows, so the JSONL A/B stays truthful during
-        partial residency (ADR 0050).  Ties prefer the finer level.
-        """
-
-        payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
-        visible = self.visible_tile_numbers
-        if visible:
-            scoped = {tile: payload for tile, payload in payloads.items() if int(tile) in visible}
-            payloads = scoped or payloads
-        if not payloads:
-            decision = self.lod_policy_decision
-            return (
-                int(decision.applied_level),
-                int(decision.applied_factor),
-                tuple(int(value) for value in decision.applied_factor_xy),
-            )
-        counts: dict[int, int] = {}
-        samples: dict[int, object] = {}
-        for payload in payloads.values():
-            lod = getattr(payload, "lod", None)
-            level = int(getattr(lod, "level", 0) or 0)
-            counts[level] = counts.get(level, 0) + 1
-            samples.setdefault(level, lod)
-        level = min(counts, key=lambda candidate: (-counts[candidate], candidate))
-        lod = samples.get(level)
-        if lod is None or level <= 0:
-            return (0, 1, (1, 1))
-        source_shape = tuple(getattr(lod, "source_shape", (1, 1)))
-        texture_shape = tuple(getattr(lod, "texture_shape", (1, 1)))
-        factor_y = max(1, round(int(source_shape[0]) / max(1, int(texture_shape[0]))))
-        factor_x = max(1, round(int(source_shape[1]) / max(1, int(texture_shape[1]))))
-        return (int(level), int(getattr(lod, "factor", 1) or 1), (int(factor_x), int(factor_y)))
+        return montage_lod.presented_lod_summary(self)
 
     def ingest_lod_demand(self) -> object | None:
-        """Demand snapshot for worker-side reduce-at-ingest (ADR 0050).
+        """Demand snapshot for worker-side reduce-at-ingest; see :mod:`montage_lod`."""
 
-        When the resident policy currently wants a reduced level, a cold
-        tile's worker should produce that level together with the native
-        result so the first upload is the reduced payload.  The returned
-        ``LodDemand`` is immutable; a demand change between scheduling and
-        completion is corrected by the ordinary streaming path.
-        """
-
-        if not self._resident_lod_active():
-            return None
-        demand = self.lod_policy_decision.demand
-        if int(demand.desired_level) <= 0:
-            return None
-        return demand
+        return montage_lod.ingest_lod_demand(self)
 
     def refresh_lod_for_viewport(self) -> bool:
-        """Re-evaluate LOD demand after a camera-only retarget (ADR 0050).
+        """Re-evaluate LOD demand after a camera-only retarget; see :mod:`montage_lod`."""
 
-        Camera changes never restart evaluation, but they do change which
-        pyramid level visible tiles should present.  Demand selection is
-        otherwise refreshed only inside presentation builds, so a zoom that
-        leaves the active tile set and payload identities untouched would
-        keep the old level on screen until an unrelated pan or slice change
-        dirtied a payload.  This recomputes the decision from the current
-        ``view_range``/``viewport_shape`` (demand math plus pyramid peeks;
-        never reduction or other bulk work), queues singleflight
-        materializations for the demanded-but-missing level of visible
-        rendered tiles, and dirties tiles whose closest resident level
-        differs from the payload they currently present so the next commit
-        swaps them by payload identity alone.
-
-        Returns True when at least one visible tile can present a different
-        resident level right now, i.e. a presentation commit is worthwhile
-        even though no tile result arrived.
-        """
-
-        if not self._resident_lod_active():
-            return False
-        viewport_identity = _viewport_identity(self.view_range, self.viewport_shape)
-        if viewport_identity != self._lod_refresh_viewport_identity:
-            self._lod_refresh_viewport_identity = viewport_identity
-            # Stale zoom targets must cancel: LOD materializations supersede
-            # on this dedicated counter.  viewport_revision is owned by the
-            # retarget replan — bumping it here changed priority-retarget
-            # work identities without replanning, churning work at idle.
-            self.lod_target_revision += 1
-        self._selected_lod_factor()
-        demand = self.lod_policy_decision.demand
-        pyramid = self.lod_pyramid
-        desired = int(demand.desired_level)
-        commit_needed = False
-        visible_by_number = {int(t.montage_index): t for t in tuple(self.visible_tiles)}
-        # Priority order, not row order: materializations start immediately
-        # for the demanded level, and whatever the workers complete before a
-        # newer viewport supersedes the rest is the work nearest the
-        # focus/pointer — never wasted, never waited for (Thomas's rule:
-        # optimal ordering and cancellation beat debouncing every time).
-        for tile_number in self._prioritized_tile_numbers(tuple(self.visible_tile_numbers)):
-            rendered = self.rendered_tiles.get(int(tile_number))
-            if rendered is None:
-                # Unrendered tiles never enter dirty_payloads: the dirty set
-                # is consumed by acknowledged upserts, and a build cannot
-                # produce an exact upsert without a rendered result — a
-                # permanently dirty tile turns the final-commit check into a
-                # busy timer loop.  Floor progress (a presentable or closer
-                # resident level) only requests a commit; the build's floor
-                # pass does the actual work.
-                if self._floor_can_progress(int(tile_number), tile=visible_by_number.get(int(tile_number))):
-                    commit_needed = True
-                continue
-            payload = self.display_tile_payloads.get(int(tile_number))
-            presented_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-            resident = {
-                int(level)
-                for level in demand.acceptable_levels
-                if int(level) > 0
-                and pyramid.peek(self._pyramid_key_for(rendered, demand=demand, level=int(level))) is not None
-            }
-            if payload is not None and presented_level > 0 and presented_level in demand.acceptable_levels:
-                # The presented texture itself is materialized and resident;
-                # keep it eligible even when the pyramid cache dropped it so a
-                # transient cache miss never forces a native down-swap.
-                resident.add(presented_level)
-            if desired > 0 and desired not in resident:
-                desired_key = self._pyramid_key_for(rendered, demand=demand, level=desired)
-                if pyramid.begin_pending(desired_key):
-                    self.pending_lod_requests.append(
-                        self._lod_materialization_request(rendered, demand=demand, level=desired, key=desired_key)
-                    )
-            if payload is None:
-                continue
-            if str(getattr(payload, "quality", "exact")) != "exact":
-                # A preview payload can sit at an acceptable level and look
-                # converged, but preview never satisfies convergence: the
-                # tile has a rendered result, so the exact rebuild is one
-                # cheap dirty away — without this, a floored tile whose
-                # level matched demand stayed blocky forever next to exact
-                # neighbors.
-                self.dirty_payloads[int(tile_number)] = None
-                commit_needed = True
-                continue
-            applied = int(choose_resident_level(demand, tuple(sorted(resident))))
-            if presented_level != applied:
-                self.dirty_payloads[int(tile_number)] = None
-                commit_needed = True
-        return commit_needed
+        return montage_lod.refresh_lod_for_viewport(self)
 
     def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
-        """Levels resident for every rendered tile (session-wide decision input).
-
-        Per-tile texture selection probes its own resident set; the
-        session-wide decision reports the level that every rendered tile can
-        actually present, keeping diagnostics honest for partial residency.
-        """
-
-        demand = select_lod_demand(
-            self.view_range,
-            self.viewport_shape,
-            self.plan.tile_shape,
-            previous_factor=previous_factor,
-        )
-        rendered = tuple(self.rendered_tiles.values())
-        if not rendered:
-            return ()
-        resident = []
-        for level in demand.acceptable_levels:
-            if int(level) <= 0:
-                continue
-            if all(
-                self.lod_pyramid.peek(self._pyramid_key_for(tile, demand=demand, level=int(level))) is not None
-                for tile in rendered
-            ):
-                resident.append(int(level))
-        return tuple(resident)
+        return montage_lod.session_resident_levels(self, previous_factor)
 
     def tile_semantic_source_id(self, source_index) -> tuple[object, ...]:
         """Semantic content identity of one montage tile (ADR 0050).
@@ -885,12 +681,7 @@ class MontageRenderSession:
         return ("montage-tile", self.key, int(source_index))
 
     def _pyramid_key_for(self, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
-        return pyramid_key_for_rendered(
-            rendered,
-            demand=demand,
-            level=level,
-            semantic_source_id=self.tile_semantic_source_id(rendered.tile.source_index),
-        )
+        return montage_lod.pyramid_key_for(self, rendered, demand=demand, level=level)
 
     def _lod_materialization_request(
         self,
@@ -901,186 +692,21 @@ class MontageRenderSession:
         key: PyramidLevelKey,
         native_source: np.ndarray | None = None,
     ) -> LodMaterializationRequest:
-        """Choose the cheapest deterministic reduction source for one level.
-
-        ADR 0050 materializes level *n+1* from level *n* where possible:
-        deriving from the finest already-resident coarser level touches
-        ``relative_factor**2`` fewer texels than re-reducing the native
-        plane.  Box means compose exactly only when every box is full, so the
-        cross-level path is taken only when the native plane divides evenly
-        by the demanded per-axis factors; partial trailing boxes fall back to
-        the single canonical native reduction to keep level content
-        independent of cache state.
-        """
-
-        if native_source is None:
-            native_source, _histogram, _texture_kind = self._texture_source_for(rendered)
-        tile_number = int(rendered.tile.montage_index)
-        factor_x, factor_y = (int(value) for value in key.factor_xy)
-        native_shape = tuple(int(value) for value in np.shape(native_source)[:2])
-        pyramid = self.lod_pyramid
-        if (
-            pyramid is None
-            or native_shape[0] % factor_y
-            or native_shape[1] % factor_x
-        ):
-            return LodMaterializationRequest(tile_number, key, native_source, (factor_x, factor_y))
-        best = None
-        for candidate in demand.acceptable_levels:
-            candidate = int(candidate)
-            if candidate <= 0 or candidate >= int(level):
-                continue
-            candidate_x, candidate_y = (
-                int(value) for value in factor_xy_for_level(demand, candidate)
-            )
-            if factor_x % candidate_x or factor_y % candidate_y:
-                continue
-            if best is not None and candidate <= best[0]:
-                continue
-            cached = pyramid.peek(self._pyramid_key_for(rendered, demand=demand, level=candidate))
-            if cached is None:
-                continue
-            best = (candidate, cached, (factor_x // candidate_x, factor_y // candidate_y))
-        if best is None:
-            return LodMaterializationRequest(tile_number, key, native_source, (factor_x, factor_y))
-        self.lod_cross_level_reductions += 1
-        return LodMaterializationRequest(tile_number, key, best[1], best[2], cross_level=True)
+        return montage_lod.plan_materialization(
+            self, rendered, demand=demand, level=level, key=key, native_source=native_source
+        )
 
     def _floor_component_tags(self) -> tuple[str, ...]:
-        """Component tags a floor probe may find for this session's tiles."""
-
-        if bool(getattr(self, "shader_display", False)):
-            return (str(TexturePlaneKind.COMPLEX_RG32F.value), "scalar")
-        return ("scalar", str(TexturePlaneKind.COMPLEX_RG32F.value))
+        return montage_lod.floor_component_tags(self)
 
     def _best_floor_key(self, source_index: int):
-        """Best resident pyramid key for one tile: nearest demand, finer ties."""
-
-        pyramid = self.lod_pyramid
-        if pyramid is None:
-            return None
-        demand = self.lod_policy_decision.demand
-        desired = int(demand.desired_level)
-        semantic_id = self.tile_semantic_source_id(int(source_index))
-        best = None
-        for component in self._floor_component_tags():
-            for key in pyramid.resident_keys_for(semantic_id, int(source_index), component):
-                level = max(int(key.level_xy[0]), int(key.level_xy[1]))
-                rank = (abs(level - desired), level)
-                if best is None or rank < best[0]:
-                    best = (rank, key, level)
-            if best is not None:
-                break
-        if best is not None:
-            return (best[1], best[2], pyramid)
-        preview = self.lod_preview_pyramid
-        level = int(self.lod_preview_level)
-        if preview is None or level <= 0:
-            return None
-        for component in self._floor_component_tags():
-            key = PyramidLevelKey(
-                source_id=semantic_id,
-                tile_id=int(source_index),
-                component=component,
-                level_xy=(level, level),
-            )
-            if preview.peek(key) is not None:
-                return (key, level, preview)
-        return None
+        return montage_lod.best_floor_key(self, source_index)
 
     def _floor_can_progress(self, tile_number: int, tile=None) -> bool:
-        """True when the floor pass could present or improve this tile."""
-
-        if not self._resident_lod_active():
-            return False
-        if int(tile_number) in self.active_tile_requests:
-            return False
-        if tile is None:
-            tile = next(
-                (t for t in tuple(self.visible_tiles) if int(t.montage_index) == int(tile_number)),
-                None,
-            )
-        if tile is None:
-            return False
-        payload = self.display_tile_payloads.get(int(tile_number))
-        if payload is not None and str(getattr(payload, "quality", "exact")) != "preview":
-            return False
-        best = self._best_floor_key(int(tile.source_index))
-        if best is None:
-            return False
-        if payload is None:
-            return True
-        presented = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-        return int(best[1]) != presented
+        return montage_lod.floor_can_progress(self, tile_number, tile=tile)
 
     def _ensure_floor_payloads(self, tile_numbers) -> None:
-        """Present the best resident pyramid level for unrendered planned tiles.
-
-        The floor invariant (ADR 0050): a planned tile with any resident
-        level never shows a placeholder.  Floor payloads are quality
-        "preview" — they draw pixels but refuse semantic reads — and the
-        ordinary evaluation path replaces them with exact payloads as tile
-        results arrive.  Dictionary probes only; no reduction, no copies.
-        """
-
-        if not tile_numbers or not self._resident_lod_active():
-            return
-        pyramid = self.lod_pyramid
-        if pyramid is None:
-            return
-        by_number = {
-            int(tile.montage_index): tile
-            for tile in tuple(self.visible_tiles)
-        }
-        for tile_number in sorted(int(number) for number in tile_numbers):
-            if tile_number in self.active_tile_requests:
-                # An exact evaluation is in flight: flooring now would present
-                # a preview one commit before its exact replacement, doubling
-                # payload/identity churn for every tile of a cold fill.
-                continue
-            existing = self.display_tile_payloads.get(tile_number)
-            if existing is not None and str(getattr(existing, "quality", "exact")) != "preview":
-                continue
-            tile = by_number.get(tile_number)
-            if tile is None:
-                continue
-            source_index = int(tile.source_index)
-            semantic_id = self.tile_semantic_source_id(source_index)
-            best = self._best_floor_key(source_index)
-            if best is None:
-                continue
-            key, level, owning_cache = best
-            if existing is not None:
-                presented = int(getattr(getattr(existing, "lod", None), "level", 0) or 0)
-                if presented == int(level):
-                    continue
-            plane = owning_cache.peek(key)
-            if plane is None:
-                continue
-            factor_x = 1 << int(key.level_xy[0])
-            factor_y = 1 << int(key.level_xy[1])
-            tile_shape = tuple(int(value) for value in self.plan.tile_shape)
-            lod = LodInfo(
-                level=level,
-                factor=max(factor_x, factor_y),
-                source_shape=tile_shape,
-                texture_shape=tuple(int(value) for value in np.shape(plane)[:2]),
-                gutter=0,
-            )
-            payload = DisplayTilePayload(
-                tile_number=tile_number,
-                source_index=source_index,
-                image=np.asarray(plane),
-                histogram_data=None,
-                source_id=(*semantic_id, "floor", str(key.component), key.level_xy),
-                texture_data=np.asarray(plane),
-                texture_kind=None if key.component == "scalar" else TexturePlaneKind(key.component),
-                lod=lod,
-                quality="preview",
-            )
-            self.display_tile_payloads[tile_number] = payload
-            self.pending_payload_upserts[tile_number] = None
-            self.lod_floor_presentations = int(getattr(self, "lod_floor_presentations", 0) or 0) + 1
+        return montage_lod.ensure_floor_payloads(self, tile_numbers)
 
     def _texture_source_for(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
         return texture_source_for_rendered(rendered)
@@ -1092,49 +718,7 @@ class MontageRenderSession:
         source: np.ndarray,
         histogram: np.ndarray | None,
     ) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
-        """Cache-lookup-only level application (no reduction in this path).
-
-        A demanded level that is not cached is not resident; the tile falls
-        back to the nearest resident/native level and the missing level is
-        recorded once (singleflight) for the renderer to materialize in the
-        background.
-        """
-
-        source_shape = tuple(int(value) for value in source.shape[:2])
-        native_lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
-        demand = self.lod_policy_decision.demand
-        pyramid = self.lod_pyramid
-        resident_levels = tuple(
-            int(level)
-            for level in demand.acceptable_levels
-            if int(level) > 0
-            and pyramid.peek(self._pyramid_key_for(rendered, demand=demand, level=int(level))) is not None
-        )
-        desired = int(demand.desired_level)
-        if desired > 0 and desired not in resident_levels:
-            desired_key = self._pyramid_key_for(rendered, demand=demand, level=desired)
-            if pyramid.begin_pending(desired_key):
-                self.pending_lod_requests.append(
-                    self._lod_materialization_request(
-                        rendered, demand=demand, level=desired, key=desired_key, native_source=source
-                    )
-                )
-        applied = choose_resident_level(demand, resident_levels)
-        if applied <= 0:
-            return source, histogram, native_lod
-        texture = pyramid.lookup(self._pyramid_key_for(rendered, demand=demand, level=applied))
-        if texture is None:
-            return source, histogram, native_lod
-        texture = np.asarray(texture)
-        factor_xy = factor_xy_for_level(demand, applied)
-        lod = LodInfo(
-            level=applied,
-            factor=max(int(factor_xy[0]), int(factor_xy[1])),
-            source_shape=source_shape,
-            texture_shape=tuple(int(value) for value in texture.shape[:2]),
-            gutter=0,
-        )
-        return texture, histogram, lod
+        return montage_lod.resident_texture_for_rendered_tile(self, rendered, source=source, histogram=histogram)
 
     def _texture_for_rendered_tile(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
         source, histogram, _texture_kind = self._texture_source_for(rendered)
@@ -1870,131 +1454,6 @@ def _array_content_token(array) -> tuple[object, ...]:
     shape = tuple(int(value) for value in values.shape)
     dtype = values.dtype.str
     return shape, dtype, id(values)
-
-
-def texture_source_for_rendered(rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
-    """Return the texture source plane, histogram, and plane kind of a tile."""
-
-    texture_kind = getattr(rendered, "texture_kind", None)
-    if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
-        texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
-    if texture_kind == TexturePlaneKind.COMPLEX_RG32F and getattr(rendered, "semantic_data", None) is not None:
-        source = np.asarray(rendered.semantic_data)
-    else:
-        source = np.asarray(rendered.image)
-    histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
-    return source, histogram, texture_kind
-
-
-def pyramid_key_for_rendered(
-    rendered: RenderedTile, *, demand, level: int, semantic_source_id
-) -> PyramidLevelKey:
-    """Pyramid identity of one level of a rendered tile (ADR 0050 key contract).
-
-    ``semantic_source_id`` is the session-owned semantic identity of the tile
-    content (session key + source index).  Object identity of the source
-    array must never appear in pyramid keys: rendered tiles are rebuilt
-    freely across commits and sessions, and cached levels must stay
-    addressable without a live ``RenderedTile`` so presentation can floor on
-    resident levels for tiles that have not been rendered yet.
-    """
-
-    _source, _histogram, texture_kind = texture_source_for_rendered(rendered)
-    factor_x, factor_y = factor_xy_for_level(demand, int(level))
-    component = "scalar" if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
-    return PyramidLevelKey(
-        source_id=semantic_source_id,
-        tile_id=int(rendered.tile.source_index),
-        component=component,
-        level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
-    )
-
-
-def admit_preview_reduction(
-    preview_pyramid,
-    rendered: RenderedTile,
-    *,
-    semantic_source_id,
-    preview_level: int,
-    reduced: np.ndarray | None = None,
-    reduced_level: int | None = None,
-) -> bool:
-    """Admit the retained preview level for a freshly computed tile.
-
-    Worker-side and opportunistic (ADR 0050 retained preview level): every
-    evaluated tile leaves a coarse copy in the pinned preview cache, so any
-    index ever computed re-presents instantly through the floor forever.
-    When the ingest reduction already produced a finer level whose shape
-    divides evenly, the preview derives from it (relative_factor**2 fewer
-    texels); otherwise it reduces the native plane once.
-    """
-
-    if preview_pyramid is None or int(preview_level) <= 0:
-        return False
-    _source, _histogram, texture_kind = texture_source_for_rendered(rendered)
-    component = "scalar" if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
-    level = int(preview_level)
-    key = PyramidLevelKey(
-        source_id=semantic_source_id,
-        tile_id=int(rendered.tile.source_index),
-        component=component,
-        level_xy=(level, level),
-    )
-    if not preview_pyramid.begin_pending(key):
-        return False
-    try:
-        factor = 1 << level
-        if reduced is not None and reduced_level is not None and int(reduced_level) == level:
-            # The ingest reduction already produced exactly the preview
-            # level: pin the same plane, zero extra reduction or copy.
-            preview_pyramid.admit(key, np.asarray(reduced))
-        elif (
-            reduced is not None
-            and reduced_level is not None
-            and 0 < int(reduced_level) < level
-            and all(int(edge) % (factor >> int(reduced_level)) == 0 for edge in np.shape(reduced)[:2])
-        ):
-            relative = factor >> int(reduced_level)
-            preview_pyramid.admit(key, reduce_box_mean(np.asarray(reduced), (relative, relative)))
-        else:
-            source, _hist, _kind = texture_source_for_rendered(rendered)
-            preview_pyramid.admit(key, reduce_box_mean(source, (factor, factor)))
-    except Exception:
-        preview_pyramid.end_pending(key)
-        return False
-    return True
-
-
-def admit_ingest_reduction(pyramid, demand, rendered: RenderedTile, *, semantic_source_id) -> bool:
-    """Reduce a freshly computed tile to the demanded level, worker-side.
-
-    Runs on the evaluation worker as part of tile materialization (ADR 0041
-    gate 1 forbids commit-callback reduction, not worker reduction), so a cold
-    tile's first presentation can select the reduced level and never upload a
-    native texture.  Exact/semantic/histogram sources stay native; only the
-    display texture plane is reduced.  The singleflight claim keeps this from
-    duplicating a concurrently scheduled post-hoc materialization.
-
-    Returns the admitted reduced plane (truthy) or None, so the retained
-    preview level can derive from it instead of re-reducing native.
-    """
-
-    if pyramid is None or demand is None:
-        return None
-    level = int(demand.desired_level)
-    if level <= 0:
-        return None
-    key = pyramid_key_for_rendered(rendered, demand=demand, level=level, semantic_source_id=semantic_source_id)
-    if not pyramid.begin_pending(key):
-        return None
-    try:
-        source, _histogram, _texture_kind = texture_source_for_rendered(rendered)
-        return pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
-    except Exception:
-        # LOD is a display optimization: a failed reduction must not fail the
-        # tile result.  Release the claim so a later commit can retry.
-        pyramid.end_pending(key)
-        return None
 
 
 def _view_range_cache_key(view_range) -> tuple[tuple[float, ...], ...] | tuple[object, ...]:
