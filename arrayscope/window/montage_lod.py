@@ -85,6 +85,21 @@ def texture_source_for_rendered(rendered: RenderedTile) -> tuple[np.ndarray, np.
     return source, histogram, texture_kind
 
 
+def component_for_rendered(rendered: RenderedTile) -> str:
+    """Pyramid component tag of a rendered tile, without touching its arrays.
+
+    ``texture_source_for_rendered`` normalizes the kind and picks a source
+    plane, but the component tag depends on the kind alone — key derivation
+    is on hot per-commit paths (tens of thousands of calls per scrub burst)
+    and must not pay ``np.asarray`` per call.
+    """
+
+    texture_kind = getattr(rendered, "texture_kind", None)
+    if texture_kind is None:
+        return "scalar"
+    return str(getattr(texture_kind, "value", texture_kind))
+
+
 def pyramid_key_for_rendered(
     rendered: RenderedTile, *, demand, level: int, semantic_source_id
 ) -> PyramidLevelKey:
@@ -98,13 +113,11 @@ def pyramid_key_for_rendered(
     resident levels for tiles that have not been rendered yet.
     """
 
-    _source, _histogram, texture_kind = texture_source_for_rendered(rendered)
     factor_x, factor_y = factor_xy_for_level(demand, int(level))
-    component = "scalar" if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
     return PyramidLevelKey(
         source_id=semantic_source_id,
         tile_id=int(rendered.tile.source_index),
-        component=component,
+        component=component_for_rendered(rendered),
         level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
     )
 
@@ -520,8 +533,7 @@ def admit_preview_reduction(
 
     if preview_pyramid is None or int(preview_level) <= 0:
         return False
-    _source, _histogram, texture_kind = texture_source_for_rendered(rendered)
-    component = "scalar" if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
+    component = component_for_rendered(rendered)
     level = int(preview_level)
     key = PyramidLevelKey(
         source_id=semantic_source_id,
