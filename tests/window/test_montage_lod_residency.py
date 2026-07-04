@@ -915,3 +915,25 @@ def test_orphaned_loading_tiles_are_requeued_for_evaluation():
 
     # Idempotent: a second repair finds nothing.
     assert session.requeue_orphaned_loading_tiles() == 0
+
+
+def test_parked_dirty_tiles_rearm_when_the_viewport_makes_them_active():
+    """Parking non-active dirty tiles must be non-destructive: a build racing
+    a retarget may hold a stale active set, and the tile must still present
+    when it becomes active (user-visible as pan-revealed tiles that rendered
+    but never appeared)."""
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 20), count=2)
+    # Tile 1 rendered and dirty, but currently outside the active scope.
+    session.visible_tiles = (session.plan.tiles[0],)
+    _state, delta = session.build_tile_presentation({})
+    assert 1 in session.parked_dirty_payloads
+    assert 1 not in session.dirty_payloads
+    assert 1 not in delta.upserts
+
+    # The viewport brings tile 1 back: the parked entry re-arms and the
+    # payload presents through the ordinary delta.
+    session.visible_tiles = tuple(session.plan.tiles)
+    _state, delta = session.build_tile_presentation({})
+    assert 1 not in session.parked_dirty_payloads
+    assert 1 in delta.upserts

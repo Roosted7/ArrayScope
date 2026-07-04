@@ -218,6 +218,7 @@ class MontageRenderSession:
     acknowledged_source_ids: set = field(default_factory=set)
     lod_floor_presentations: int = 0
     lod_target_revision: int = 0
+    parked_dirty_payloads: set = field(default_factory=set)
     # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but
     # must carry the tile's finest already-computed semantic stats forward
     # unchanged.  `cross_level_reuses` counts swaps that reused the retained
@@ -1189,13 +1190,21 @@ class MontageRenderSession:
         # near-tile warmth is owned by the speculative-residency queue, not
         # commits).  A dirty non-active tile can therefore never be
         # acknowledged: it would re-emit an unacceptable upsert every build
-        # and hold finalization open forever.  Park it — the payload stays
-        # cached, and the resident-retarget path re-presents it by identity
-        # the moment a viewport change makes it active.
+        # and hold finalization open forever.  Parking must be
+        # NON-destructive: a build racing a viewport retarget can hold a
+        # stale active set, and dropping the entry outright loses the tile's
+        # presentation when it becomes active moments later.  Parked entries
+        # re-arm the moment their tile enters the active scope.
         active_scope = set(active)
+        for tile_number in tuple(self.parked_dirty_payloads):
+            if int(tile_number) in active_scope:
+                self.parked_dirty_payloads.discard(int(tile_number))
+                self.dirty_payloads[int(tile_number)] = None
         for tile_number in tuple(self.dirty_payloads):
             if int(tile_number) not in active_scope:
                 self.dirty_payloads.pop(int(tile_number), None)
+                if int(tile_number) in self.rendered_tiles:
+                    self.parked_dirty_payloads.add(int(tile_number))
         dirty_payload_tiles = tuple(
             dict.fromkeys(
                 (
