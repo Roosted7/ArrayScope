@@ -699,6 +699,12 @@ class FrameRenderMixin:
                 cached_tiles.append(_rendered_tile_from_cached_display(tile, cached))
         self._last_montage_display_cache_lookup_ms = total_lookup_ms
         self._last_montage_display_cache_hit = last_hit if tile_tuple else False
+        if cached_tiles and reuse_any_lod:
+            # Each cached resolve under the resident LOD policy is a pipeline
+            # evaluation a display-LOD-driven rebuild did not have to run.
+            self._montage_lod_pipeline_reruns_avoided = int(
+                getattr(self, "_montage_lod_pipeline_reruns_avoided", 0) or 0
+            ) + len(cached_tiles)
         return cached_tiles, missing_tiles
 
     def _merge_montage_stage_plan(self, session: MontageRenderSession, stage_plan) -> None:
@@ -1772,6 +1778,13 @@ class FrameRenderMixin:
                 self._montage_lod_ingest_reductions = (
                     int(getattr(self, "_montage_lod_ingest_reductions", 0) or 0) + 1
                 )
+                if str(getattr(result, "compute_path", "direct") or "direct") == "stage_backed":
+                    # A cached/shared stage output served this tile's reduced
+                    # display payload: the expensive pipeline stage was not
+                    # re-run for a display-LOD demand (ADR 0050).
+                    self._montage_lod_stage_hits_serving_derivations = (
+                        int(getattr(self, "_montage_lod_stage_hits_serving_derivations", 0) or 0) + 1
+                    )
             self._on_montage_tile_done(
                 session_id,
                 tile,
@@ -2181,16 +2194,22 @@ class FrameRenderMixin:
             return 0
         if not self._is_current_render_generation(session.render_generation):
             return 0
-        if _persistent_tile_layer_fast_drain_enabled(self, session):
-            rendered = _rendered_tile_from_evaluation_result(tile, result)
-        else:
-            rendered = self.win.operation_evaluator.store_montage_tile_result(
-                tile,
-                montage_axis=session.montage_axis,
-                colormap_lut=session.colormap_lut,
-                result=result,
-                shader_display=bool(getattr(session, "shader_display", False)),
-            )
+        # The semantic display cache is the reuse point for every later
+        # demand on this tile (session rebuilds, viewport re-entry, display
+        # LOD changes).  The fast-drain path used to skip this store, so
+        # tiles evaluated during a settled VisPy drain were reachable only as
+        # backend-acknowledged payloads; once those were superseded or
+        # evicted, a display-LOD-driven request re-ran the full pipeline
+        # (observed as occasional per-tile FFT re-runs).  Level stats are
+        # attached worker-side, so the store is a cache put, cheap enough for
+        # every drain mode (ADR 0050).
+        rendered = self.win.operation_evaluator.store_montage_tile_result(
+            tile,
+            montage_axis=session.montage_axis,
+            colormap_lut=session.colormap_lut,
+            result=result,
+            shader_display=bool(getattr(session, "shader_display", False)),
+        )
         compute_path = str(getattr(result, "compute_path", "direct") or "direct")
         eval_ms = max(0.0, float(getattr(result, "eval_ms", 0.0) or 0.0))
         if compute_path == "stage_backed":

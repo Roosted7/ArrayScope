@@ -121,3 +121,50 @@ def test_profile_scalar_export_and_montage_like_requests_reuse_stage(monkeypatch
 
     assert calls["fft"] == 1
     assert evaluator.stage_cache_diagnostics().hits >= 4
+
+
+def test_display_lod_change_never_reruns_the_pipeline_when_the_stage_is_cached(monkeypatch):
+    """ADR 0050: display-LOD changes are presentation-only.
+
+    Stage identity is semantic (StageKey carries no display level) and the
+    montage display key is semantic too, so a coarser display request for a
+    tile whose finer/native stage output is cached must run ZERO pipeline
+    evaluations: the reduced payload derives from the cached stage output by
+    box-mean reduction on a worker.
+    """
+
+    from arrayscope.display.pyramid import reduce_box_mean
+
+    calls = {"fft": 0}
+    original = dim_ops.centered_fft
+
+    def counted(data, axis, **kwargs):
+        calls["fft"] += 1
+        return original(data, axis, **kwargs)
+
+    monkeypatch.setattr(dim_ops, "centered_fft", counted)
+    data = np.arange(4 * 16 * 16, dtype=np.float32).reshape(4, 16, 16)
+    evaluator = OperationEvaluator(ArrayDocument(data, operations=(CenteredFFT(axis=0),)))
+    state = ViewState.from_shape(evaluator.document.current_shape).with_slice(0, 0)
+
+    native = evaluator.image(state)
+    assert calls["fft"] == 1
+
+    # A display-LOD level change re-requests the same semantic tile; the
+    # display cache key carries no level, so it must hit without evaluation.
+    cached = evaluator.cached_display_tile(state)
+    assert cached is not None
+    assert calls["fft"] == 1
+
+    # Even when the display cache entry is gone, the cached stage serves the
+    # request: the expensive transform never re-runs for a level change.
+    evaluator._display_cache.clear()
+    again = evaluator.image(state)
+    assert calls["fft"] == 1
+
+    # The coarser display payload is a pure reduction of the cached output.
+    plane = np.abs(np.asarray(again.data))
+    reduced = reduce_box_mean(plane, (4, 4))
+    assert reduced.shape[-1] == plane.shape[-1] // 4
+    expected = reduce_box_mean(np.abs(np.asarray(native.data)), (4, 4))
+    assert np.allclose(reduced, expected)
