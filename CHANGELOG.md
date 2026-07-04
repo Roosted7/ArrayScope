@@ -11,8 +11,13 @@ This file records user-visible release changes. Detailed development history and
   VisPy tiled scenes only) presents zoomed-out montages from box-mean-reduced
   pyramid levels that are materialized asynchronously in the background and
   stream in per tile, while hover/histogram/profile/ROI values stay exact.
-  New diagnostics report the applied level, per-level resident tile counts,
-  pyramid cache bytes/hits, and pending materializations.
+  Cold tiles are reduced to the demanded level on the evaluation worker as
+  part of tile materialization, so a zoomed-out cold fill uploads only the
+  reduced textures; native atlas slots superseded by an acknowledged reduced
+  level are reclaimed under GPU budget pressure.  New diagnostics report the
+  presented (plurality) applied level and factor, per-level resident tile
+  counts, pyramid cache bytes/hits, pending materializations, and worker-side
+  ingest reductions.
 - Julia and MATLAB invocation wrappers (`wrappers/julia`, `wrappers/matlab`) that open the viewer from those languages on Linux, macOS, and Windows with no in-process Python bridge. Arrays are handed off through a raw, uncompressed `.npy` file (single buffer write, native column-major layout) and loaded memory-mapped copy-on-write, so large arrays avoid compression, transposes, and eager second copies. See `docs/invocation.md`.
 - CLI flags supporting that route and general use: `--mmap` (copy-on-write memory-mapped `.npy` loading), `--consume` (delete a temporary handoff file once loaded), and `--title` (window title override).
 - Linked-window sync: per-facet toggle buttons synchronize window/level (display toolbar), dimension indexing (dimension strip), operation recipes (operations dock), and ROIs (inspection dock) across ArrayScope windows — including windows started as separate processes — on Linux, macOS, and Windows via per-user Qt local sockets. Mismatched shapes clamp per dimension; incompatible recipes are skipped with a notice.
