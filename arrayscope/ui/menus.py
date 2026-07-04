@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
@@ -9,6 +11,7 @@ from arrayscope.app.settings_state import (
     FFTWorkersChoice,
     ImageRenderingBackendChoice,
     MemoryProfileChoice,
+    MontageLodPolicyChoice,
     PanelResizeBehavior,
     settings_from_mapping,
     settings_to_mapping,
@@ -35,6 +38,7 @@ class WindowMenuMixin:
                 "image_rendering_backend": self._settings.value("image_rendering_backend", ImageRenderingBackendChoice.AUTO.value),
                 "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
+                "montage_lod_policy": self._settings.value("montage_lod_policy", MontageLodPolicyChoice.NATIVE_ONLY.value),
             }
         )
 
@@ -340,18 +344,7 @@ class WindowMenuMixin:
 
     def _updated_app_settings(self, **changes):
         current = getattr(self, "app_settings", AppSettingsState())
-        values = {
-            "theme": current.theme,
-            "prefetch_nearby_slices": current.prefetch_nearby_slices,
-            "panel_resize_behavior": current.panel_resize_behavior,
-            "fft_backend": current.fft_backend,
-            "fft_workers": current.fft_workers,
-            "image_rendering_backend": current.image_rendering_backend,
-            "memory_profile": current.memory_profile,
-            "render_memory_budget_mb": current.render_memory_budget_mb,
-        }
-        values.update(changes)
-        return AppSettingsState(**values)
+        return dataclasses.replace(current, **changes)
 
     def _sync_theme_actions(self):
         if not hasattr(self, "_theme_actions"):
@@ -370,32 +363,13 @@ class WindowMenuMixin:
         theme_to_store = result.requested if result.applied == result.requested else result.applied
         self.applied_theme = result.applied
         self.theme_backend = result.backend
-        current = getattr(self, "app_settings", AppSettingsState())
-        self.app_settings = AppSettingsState(
-            theme=theme_to_store,
-            prefetch_nearby_slices=current.prefetch_nearby_slices,
-            panel_resize_behavior=current.panel_resize_behavior,
-            fft_backend=current.fft_backend,
-            fft_workers=current.fft_workers,
-            image_rendering_backend=current.image_rendering_backend,
-            memory_profile=current.memory_profile,
-            render_memory_budget_mb=current.render_memory_budget_mb,
-        )
+        self.app_settings = self._updated_app_settings(theme=theme_to_store)
         if persist:
             self._save_app_settings()
         self._sync_theme_actions()
 
     def _set_prefetch_enabled(self, enabled):
-        self.app_settings = AppSettingsState(
-            theme=self.app_settings.theme,
-            prefetch_nearby_slices=bool(enabled),
-            panel_resize_behavior=self.app_settings.panel_resize_behavior,
-            fft_backend=self.app_settings.fft_backend,
-            fft_workers=self.app_settings.fft_workers,
-            image_rendering_backend=self.app_settings.image_rendering_backend,
-            memory_profile=self.app_settings.memory_profile,
-            render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
-        )
+        self.app_settings = self._updated_app_settings(prefetch_nearby_slices=bool(enabled))
         self._save_app_settings()
 
     def _set_preserve_canvas_enabled(self, enabled):
@@ -403,16 +377,7 @@ class WindowMenuMixin:
         self._set_panel_resize_behavior(behavior)
 
     def _set_panel_resize_behavior(self, behavior):
-        self.app_settings = AppSettingsState(
-            theme=self.app_settings.theme,
-            prefetch_nearby_slices=self.app_settings.prefetch_nearby_slices,
-            panel_resize_behavior=behavior,
-            fft_backend=self.app_settings.fft_backend,
-            fft_workers=self.app_settings.fft_workers,
-            image_rendering_backend=self.app_settings.image_rendering_backend,
-            memory_profile=self.app_settings.memory_profile,
-            render_memory_budget_mb=self.app_settings.render_memory_budget_mb,
-        )
+        self.app_settings = self._updated_app_settings(panel_resize_behavior=behavior)
         self._save_app_settings()
         self._sync_panel_resize_actions()
         show_status_message(self, f"Panel resize: {_panel_resize_behavior_label(behavior)}", timeout=2500)
