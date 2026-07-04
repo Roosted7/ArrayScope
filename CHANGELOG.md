@@ -4,7 +4,29 @@ This file records user-visible release changes. Detailed development history and
 
 ## Unreleased
 
+### Fixed
+
+- Montage display-LOD level swaps no longer trigger redundant semantic work:
+  the histogram stream and window/level statistics are keyed by semantic
+  tile content, so zooming across LOD thresholds performs zero histogram
+  repaints/recomputes and zero level re-sampling (new counters
+  `montage_lod_stats_cross_level_reuses`, `montage_histogram_cross_level_reuses`,
+  and the must-stay-zero `montage_lod_stats_recomputes` /
+  `montage_histogram_lod_swap_recomputes`).
+- Display-LOD changes no longer occasionally re-run expensive pipelines
+  (per-tile FFT re-runs): montage tile results are now always stored in the
+  semantic display cache, including the settled VisPy fast-drain path, and
+  demanded pyramid levels are derived from the finest already-resident level
+  (level-from-level) when shapes divide evenly instead of always re-reducing
+  the native plane (`montage_lod_pipeline_reruns_avoided`,
+  `montage_lod_cross_level_reductions`,
+  `montage_lod_stage_hits_serving_derivations`).
+
 ### Added
+
+- Operation capabilities declare a conservative `lod_commuting` contract
+  (pointwise value maps only; FFT/domain transforms never) that gates ADR
+  0050's future reduce-before-ops display evaluation lane.
 
 - Multi-resolution montage textures (ADR 0050): the `montage_lod_policy`
   setting (`resident` default on VisPy tiled scenes, `native-only`

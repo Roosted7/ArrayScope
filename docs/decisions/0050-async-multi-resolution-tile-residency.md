@@ -1,7 +1,10 @@
 # 0050 — Asynchronous multi-resolution tile residency
 
 **Status:** Accepted (2026-07). Implements the design separated by ADR 0041; first slice targets
-VisPy montage/tiled scenes.
+VisPy montage/tiled scenes. 2026-07-04 update: zero-redundant-work pass landed (semantic
+histogram/level identity across level swaps, level-from-level pyramid derivation, semantic
+display-cache store on every drain mode, `lod-commuting` capability contract); reduce-before-ops
+input reduction is design-noted below and gated on preview-then-refine.
 
 ## Context
 
@@ -119,6 +122,44 @@ still 1; (2) VisPy montage residency + progressive presentation behind the polic
 against the ADR 0041 gates on hardware; (3) PyQtGraph montage adoption where measured; (4)
 `lod-commuting` evaluator input reduction and pointer-anchored speculation; (5) internally tiled
 normal images once X5c/X5d land.
+
+### Zero redundant semantic work across levels (2026-07-04)
+
+Hardware testing surfaced two waste classes after the first resident slice; both are now
+contractual:
+
+- **Level swaps are invisible to the histogram/level system.** The identity that drives
+  histogram and window/level work is the semantic tile content (native exact plane plus its
+  histogram source arrays), never `(content, display level)`. A payload rebuilt for a level swap
+  carries the finest already-computed `histogram_data`/`level_data`/`level_stats` forward as the
+  same objects, and the tiled histogram stream key contains no texture identity. Counters:
+  `tile_lod_stats_cross_level_reuses` / `tile_histogram_cross_level_reuses` (reuse observed),
+  `tile_lod_stats_recomputes` / `tile_histogram_lod_swap_recomputes` (must stay 0).
+- **A display-LOD change never re-runs a pipeline whose output is already known.** Stage identity
+  is semantic (`StageKey` has no display level); the display payload is `(stage identity, level)`
+  and coarser levels derive by box-mean reduction on worker lanes. The observed full FFT re-runs
+  came from the settled fast-drain path skipping the semantic display-cache store, which left
+  evaluated tiles reachable only as acknowledged payloads; every drain mode now stores results
+  under their semantic key. Pyramid levels additionally materialize level-from-level (level *n+1*
+  from the finest resident level *n*) when the native shape divides evenly, touching
+  `relative_factor**2` fewer texels; uneven shapes keep the single canonical native reduction so
+  level content never depends on cache state.
+
+### Reduce-before-ops and preview-then-refine (design note, not yet wired)
+
+`OperationCapabilities.lod_commuting` (default False; True for pointwise value maps such as
+conjugate) and `pipeline_commutes_for_display_lod()` define which pipelines may take box-mean
+reduced input for display evaluation. The evaluator input-reduction lane itself is deliberately
+not wired yet: committed tile payloads carry the native exact/semantic planes that exact
+consumers read directly (`TiledValueSource.value_at`/`tile_region`, refined level sampling), so a
+reduced-input evaluation cannot replace the native one — it can only precede it. Wiring it
+therefore requires preview-then-refine: evaluate the commuting pipeline on reduced input
+(`~1/factor**2` of the op cost), present the result as a `quality="preview"` payload whose exact
+planes are explicitly absent for semantic reads, and stream the native `"exact"` result through
+the ordinary supersession path. Until that payload-quality contract exists, running the reduced
+pipeline alongside the mandatory native one would add work rather than remove it, so commuting
+pipelines still evaluate natively and reduce the output at ingest. Exact consumers always use the
+native pipeline in either world.
 
 ## Consequences
 
