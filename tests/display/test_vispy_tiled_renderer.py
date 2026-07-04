@@ -1103,3 +1103,172 @@ def test_quad_generation_iterates_active_payloads_not_the_complete_plan():
     )
 
     assert vertices.shape == (6, 2)
+
+
+def _lod_payload(tile_number: int, value: float, *, level: int, source_shape=(4, 4)) -> DisplayTilePayload:
+    from arrayscope.display.lod import LodInfo
+
+    factor = 2 ** int(level)
+    texture_shape = (
+        max(1, int(source_shape[0]) // factor),
+        max(1, int(source_shape[1]) // factor),
+    )
+    image = np.full(tuple(source_shape), value, dtype=np.float32)
+    texture = image if level == 0 else np.full(texture_shape, value, dtype=np.float32)
+    return DisplayTilePayload(
+        tile_number=tile_number,
+        source_index=tile_number,
+        image=image,
+        histogram_data=None,
+        source_id=("tile", tile_number, value, "lod", int(level)),
+        texture_data=texture,
+        lod=LodInfo(
+            level=int(level),
+            factor=factor,
+            source_shape=tuple(source_shape),
+            texture_shape=texture.shape[:2],
+        ),
+    )
+
+
+def test_atlas_classes_pages_by_texture_shape_for_mixed_levels():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+
+    payloads = {
+        0: _lod_payload(0, 1.0, level=0),
+        1: _lod_payload(1, 2.0, level=0),
+        2: _lod_payload(2, 3.0, level=1),
+        3: _lod_payload(3, 4.0, level=1),
+    }
+    uvs, stats = pool.update_payloads(
+        payloads,
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=4,
+    )
+
+    assert stats.items_updated == 4
+    assert set(stats.presented_tiles) == {0, 1, 2, 3}
+    page_shapes = {page.tile_shape for page in pool.pages}
+    assert (4, 4) in page_shapes and (2, 2) in page_shapes
+    for tile_number, payload in payloads.items():
+        page_index, _slot = pool.tile_slots[int(tile_number)]
+        texture = np.asarray(payload.texture_data)
+        assert pool.pages[page_index].tile_shape == tuple(texture.shape[:2]), (
+            "a payload must only occupy a slot of its own texture shape class"
+        )
+
+
+def test_reduced_payload_never_lands_in_native_shaped_slot():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
+    native = {0: _lod_payload(0, 1.0, level=0)}
+    pool.update_payloads(
+        native,
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=8,
+    )
+    assert all(page.tile_shape == (4, 4) for page in pool.pages)
+
+    reduced = {0: _lod_payload(0, 1.0, level=1)}
+    _uvs, stats = pool.update_payloads(
+        reduced,
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=8,
+    )
+
+    assert stats.presented_tiles == (0,)
+    page_index, _slot = pool.tile_slots[0]
+    assert pool.pages[page_index].tile_shape == (2, 2)
+    # The native level for the same tile remains resident in its own class.
+    assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
+    assert ("tile", 0, 1.0, "lod", 1) in pool.source_ids.values()
+
+
+def test_level_flip_back_to_native_does_not_reupload_source_pixels():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
+    native = {0: _lod_payload(0, 1.0, level=0)}
+    reduced = {0: _lod_payload(0, 1.0, level=1)}
+
+    _uvs, first = pool.update_payloads(
+        native, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False, reserve_count=4
+    )
+    _uvs, second = pool.update_payloads(
+        reduced, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False, reserve_count=4
+    )
+    _uvs, third = pool.update_payloads(
+        native, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False, reserve_count=4
+    )
+
+    assert first.texture_uploads == 1
+    assert second.texture_uploads == 1
+    assert third.texture_uploads == 0, "an already-resident native level must not re-upload"
+    assert third.items_skipped >= 1
+
+
+def test_mixed_level_commit_keeps_base_class_when_actives_are_all_reduced():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
+    pool.update_payloads(
+        {0: _lod_payload(0, 1.0, level=0)},
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=4,
+    )
+    base_pages = sum(1 for page in pool.pages if page.tile_shape == (4, 4))
+    assert base_pages >= 1
+
+    # The layer derives the base shape from lod.source_shape, so an
+    # all-reduced active set must not rebuild/clear the native class.
+    from arrayscope.display.backends.vispy.tiles import _atlas_base_tile_shape_for_payloads
+
+    reduced_only = {0: _lod_payload(0, 1.0, level=1)}
+    base_shape = _atlas_base_tile_shape_for_payloads(reduced_only, fallback=(2, 2))
+    assert base_shape == (4, 4)
+
+    _uvs, stats = pool.update_payloads(
+        reduced_only,
+        tile_shape=base_shape,
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=4,
+    )
+
+    assert stats.storage_rebuilds == 0
+    assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
+
+
+def test_reduced_class_budget_exhaustion_retains_previous_mapping():
+    tile_bytes = 4 * 4 * 4  # scalar float32 slots
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8, budget_bytes=tile_bytes)
+    native = {0: _lod_payload(0, 1.0, level=0)}
+    pool.update_payloads(
+        native,
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+        budget_bytes=tile_bytes,
+    )
+    native_mapping = dict(pool.tile_slots)
+    assert native_mapping
+
+    reduced = {0: _lod_payload(0, 1.0, level=1)}
+    _uvs, stats = pool.update_payloads(
+        reduced,
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+        budget_bytes=tile_bytes,
+    )
+
+    # No budget headroom for a second shape class: the reduced payload is
+    # skipped and the native mapping stays presented rather than clearing.
+    assert stats.presented_tiles == ()
+    assert dict(pool.tile_slots) == native_mapping
+    assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()

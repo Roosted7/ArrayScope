@@ -266,7 +266,7 @@ class TextureAtlasPool:
         storage_mode = _normalize_storage_mode(storage_mode)
         shape_changed = self.tile_shape != (tile_h, tile_w)
         mode_changed = self.storage_mode != storage_mode
-        if not shape_changed and not mode_changed and requested <= self.capacity:
+        if not shape_changed and not mode_changed and requested <= self._class_capacity((tile_h, tile_w)):
             return False
 
         self.tile_shape = (tile_h, tile_w)
@@ -281,8 +281,8 @@ class TextureAtlasPool:
             self.last_used.clear()
             self.active_resident_keys.clear()
         self.storage_mode = storage_mode
-        while self.capacity < requested:
-            remaining = requested - self.capacity
+        while self._class_capacity((tile_h, tile_w)) < requested:
+            remaining = requested - self._class_capacity((tile_h, tile_w))
             page_capacity = min(max_slots_per_page, remaining)
             self.pages.append(
                 TextureAtlasPage(
@@ -296,6 +296,61 @@ class TextureAtlasPool:
         self.serial += 1
         self.rebuild_count += 1
         return True
+
+    def _class_capacity(self, tile_shape: tuple[int, int]) -> int:
+        """Slot count of the pages whose slot shape matches ``tile_shape``.
+
+        Pages are classed by texture shape (ADR 0050): a reduced-level tile
+        must never occupy a native-shaped slot, so capacity questions are
+        answered per shape class.
+        """
+
+        shape = (int(tile_shape[0]), int(tile_shape[1]))
+        return sum(int(page.capacity) for page in self.pages if page.tile_shape == shape)
+
+    def _ensure_class_capacity(self, tile_shape: tuple[int, int], requested: int) -> int:
+        """Append pages for a non-base shape class within the byte budget.
+
+        Returns the class capacity after growth.  The base class is owned by
+        ``ensure_layout``; this only serves additional coexisting LOD levels,
+        so running out of budget degrades to fewer slots instead of raising.
+        """
+
+        shape = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
+        requested = max(1, int(requested))
+        capacity = self._class_capacity(shape)
+        if capacity >= requested or self.storage_mode is None:
+            return capacity
+        max_columns = max(1, self.max_texture_size // shape[1])
+        max_rows = max(1, self.max_texture_size // shape[0])
+        max_slots_per_page = max(1, int(max_columns * max_rows))
+        bytes_per_slot = max(1, _storage_mode_bytes_per_pixel(self.storage_mode) * shape[0] * shape[1])
+        while capacity < requested:
+            remaining_slots = requested - capacity
+            page_capacity = min(
+                max_slots_per_page,
+                max(
+                    remaining_slots,
+                    min(max_slots_per_page, int(_ATLAS_GROWTH_TARGET_BYTES // bytes_per_slot) or 1),
+                ),
+            )
+            if self.budget_bytes > 0:
+                budget_left = self.budget_bytes - self.estimated_gpu_bytes
+                page_capacity = min(page_capacity, budget_left // bytes_per_slot)
+                if page_capacity < 1:
+                    break
+            self.pages.append(
+                TextureAtlasPage(
+                    self._gloo,
+                    tile_shape=shape,
+                    capacity=int(page_capacity),
+                    storage_mode=self.storage_mode,
+                    max_texture_size=self.max_texture_size,
+                )
+            )
+            self.serial += 1
+            capacity += int(page_capacity)
+        return capacity
 
     def requested_capacity(
         self,
@@ -427,10 +482,35 @@ class TextureAtlasPool:
         evictions_before = self.eviction_count
         evicted_near_before = self.evicted_near_count
         tile_h, tile_w = self.tile_shape or tile_shape
+        base_shape = (int(tile_h), int(tile_w))
+        class_counts: dict[tuple[int, int], int] = {}
+        for _tile_number, payload in payload_items:
+            class_shape = _payload_class_shape(payload)
+            if class_shape != base_shape:
+                class_counts[class_shape] = class_counts.get(class_shape, 0) + 1
+        for class_shape, class_count in class_counts.items():
+            self._ensure_class_capacity(class_shape, class_count)
+        capacity_skipped_tiles: set[int] = set()
 
         for tile_number, payload in payload_items:
             resident_key = _resident_key(payload)
-            page_index, slot, newly_assigned = self._slot_for(resident_key, active_keys=active_keys, near_keys=near_keys)
+            class_shape = _payload_class_shape(payload)
+            try:
+                page_index, slot, newly_assigned = self._slot_for(
+                    resident_key,
+                    active_keys=active_keys,
+                    near_keys=near_keys,
+                    tile_shape=class_shape,
+                )
+            except AtlasCapacityError:
+                if class_shape == base_shape:
+                    raise
+                # Reduced-level slots are additive capacity.  When their class
+                # cannot grow within the budget, retain whatever level the
+                # tile currently presents instead of tearing the mapping down.
+                capacity_skipped_tiles.add(int(tile_number))
+                skipped += 1
+                continue
             active_tile_slots[int(tile_number)] = (int(page_index), int(slot))
             active_tile_keys[int(tile_number)] = resident_key
             page = self.pages[int(page_index)]
@@ -451,7 +531,7 @@ class TextureAtlasPool:
 
             scalar, color, prepare_ms = _prepare_payload_texture_data(
                 payload,
-                tile_shape=(tile_h, tile_w),
+                tile_shape=page.tile_shape,
                 rgb_already_windowed=rgb_already_windowed,
                 need_scalar=self.scalar_is_atlas,
                 need_color=self.color_is_atlas,
@@ -489,7 +569,7 @@ class TextureAtlasPool:
         )
         presented_set = set(presented_tiles)
         for tile in active_set:
-            if int(tile) not in presented_set:
+            if int(tile) not in presented_set and int(tile) not in capacity_skipped_tiles:
                 self._clear_tile_mapping(int(tile))
         for tile in presented_tiles:
             self._set_tile_mapping(
@@ -637,15 +717,25 @@ class TextureAtlasPool:
                 continue
             if resident_key not in self.resident_slots:
                 new_warm_budget -= 1
-            page_index, slot, _newly_assigned = self._slot_for(
-                resident_key,
-                active_keys=set(self.active_resident_keys),
-                near_keys=near_keys,
-            )
+            class_shape = _payload_class_shape(payload)
+            if class_shape != (tile_h, tile_w):
+                self._ensure_class_capacity(class_shape, 1)
+            try:
+                page_index, slot, _newly_assigned = self._slot_for(
+                    resident_key,
+                    active_keys=set(self.active_resident_keys),
+                    near_keys=near_keys,
+                    tile_shape=class_shape,
+                )
+            except AtlasCapacityError:
+                # Warm work is speculative; never let a full shape class stop
+                # the batch or evict active residency of another class.
+                skipped += 1
+                continue
             page = self.pages[int(page_index)]
             scalar, color, prepare_ms = _prepare_payload_texture_data(
                 payload,
-                tile_shape=(tile_h, tile_w),
+                tile_shape=page.tile_shape,
                 rgb_already_windowed=rgb_already_windowed,
                 need_scalar=page.scalar_is_atlas,
                 need_color=page.color_is_atlas,
@@ -711,12 +801,25 @@ class TextureAtlasPool:
             ),
         )
 
-    def _slot_for(self, resident_key: object, *, active_keys: set[object], near_keys: set[object]) -> tuple[int, int, bool]:
+    def _slot_for(
+        self,
+        resident_key: object,
+        *,
+        active_keys: set[object],
+        near_keys: set[object],
+        tile_shape: tuple[int, int] | None = None,
+    ) -> tuple[int, int, bool]:
         current = self.resident_slots.get(resident_key)
         if current is not None:
             return int(current[0]), int(current[1]), False
 
-        for page_index, page in enumerate(self.pages):
+        shape = self.tile_shape if tile_shape is None else (int(tile_shape[0]), int(tile_shape[1]))
+        class_pages = tuple(
+            (page_index, page)
+            for page_index, page in enumerate(self.pages)
+            if shape is None or page.tile_shape == shape
+        )
+        for page_index, page in class_pages:
             slot = page.take_free_slot(resident_key)
             if slot is None:
                 continue
@@ -724,13 +827,14 @@ class TextureAtlasPool:
             return int(page_index), int(slot), True
 
         candidates = []
-        for page_index, page in enumerate(self.pages):
+        for page_index, page in class_pages:
             for slot, owner in enumerate(page.slot_owners):
                 if owner is not None and owner not in active_keys:
                     candidates.append((0 if owner not in near_keys else 1, self.last_used.get(owner, -1), owner, int(page_index), int(slot)))
         if not candidates:
             raise AtlasCapacityError(
-                f"atlas has {self.capacity} slots but {len(active_keys)} active tiles require residency"
+                f"atlas has {self._class_capacity(shape) if shape else self.capacity} slots of shape {shape} "
+                f"but {len(active_keys)} active tiles require residency"
             )
         _priority, _last, victim, page_index, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
         self._discard_tile_mappings_for_resident_key(victim)
@@ -937,7 +1041,7 @@ class GpuMontageLayer:
         near_tile_source_ids = dict(getattr(tile_delta, "near_tile_source_ids", {}) or {})
         uvs, texture_stats = self._pool.update_payloads(
             payloads,
-            tile_shape=_atlas_tile_shape_for_payloads(
+            tile_shape=_atlas_base_tile_shape_for_payloads(
                 payloads,
                 fallback=_layout_tile_shape(layout),
             ),
@@ -1099,7 +1203,7 @@ class GpuMontageLayer:
         try:
             return self._pool.warm_payloads(
                 {int(key): value for key, value in dict(payloads or {}).items()},
-                tile_shape=_atlas_tile_shape_for_payloads(payloads, fallback=(int(montage.tile_height), int(montage.tile_width))),
+                tile_shape=_atlas_base_tile_shape_for_payloads(payloads, fallback=(int(montage.tile_height), int(montage.tile_width))),
                 rgb_already_windowed=rgb_already_windowed,
                 near_tile_source_ids=dict(getattr(tile_delta, "near_tile_source_ids", {}) or {}),
                 budget_bytes=tile_residency_budget_bytes,
@@ -1919,6 +2023,34 @@ def _max_payload_lod_factor(payloads: dict[int, DisplayTilePayload]) -> int:
 
 def _max_payload_gutter(payloads: dict[int, DisplayTilePayload]) -> int:
     return max((_payload_gutter(payload) for payload in dict(payloads or {}).values()), default=0)
+
+
+def _payload_class_shape(payload: DisplayTilePayload) -> tuple[int, int]:
+    """Slot shape class for a payload: its actual texture shape (ADR 0050)."""
+
+    texture = payload.texture_data if payload.texture_data is not None else payload.image
+    shape = np.shape(texture)
+    return (int(shape[0]), int(shape[1]))
+
+
+def _atlas_base_tile_shape_for_payloads(payloads: dict[int, DisplayTilePayload], *, fallback: tuple[int, int]) -> tuple[int, int]:
+    """Native (level 0) slot shape for the atlas base class.
+
+    Reduced-level payloads report their native source shape, so a commit whose
+    active set is entirely reduced does not shrink the base class and thereby
+    discard resident native slots.
+    """
+
+    shapes = []
+    for payload in dict(payloads or {}).values():
+        lod = getattr(payload, "lod", None)
+        if lod is not None and int(getattr(lod, "level", 0) or 0) > 0:
+            shapes.append(tuple(int(value) for value in lod.source_shape))
+        else:
+            shapes.append(_payload_class_shape(payload))
+    if not shapes:
+        return (max(1, int(fallback[0])), max(1, int(fallback[1])))
+    return (max(1, max(shape[0] for shape in shapes)), max(1, max(shape[1] for shape in shapes)))
 
 
 def _atlas_tile_shape_for_payloads(payloads: dict[int, DisplayTilePayload], *, fallback: tuple[int, int]) -> tuple[int, int]:
