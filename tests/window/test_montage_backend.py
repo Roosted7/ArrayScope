@@ -1018,6 +1018,11 @@ def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
             self.retargeted = True
             return (), True
 
+        def refresh_lod_for_viewport(self):
+            return False
+
+        pending_lod_requests = ()
+
     class Window(QtCore.QObject, FrameRenderMixin):
         def __init__(self):
             super().__init__()

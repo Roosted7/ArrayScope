@@ -2322,6 +2322,11 @@ class FrameRenderMixin:
                 ),
             )
             if started is None:
+                # Admission blocked (bounded speculative lane yielding to
+                # visible work): release the singleflight claim immediately,
+                # or the next refresh can never re-request this level and the
+                # tile is stuck at its old LOD until the demand changes.
+                pyramid.end_pending(key)
                 self._montage_lod_materializations_blocked = (
                     int(getattr(self, "_montage_lod_materializations_blocked", 0) or 0) + 1
                 )

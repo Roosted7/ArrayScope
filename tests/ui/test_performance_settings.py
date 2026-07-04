@@ -204,7 +204,7 @@ def test_montage_lod_policy_change_applies_to_next_montage_session(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win._set_view_state(win.view_state.with_montage_axis(0, indices=(0, 1, 2), text=":"))
+        win._set_view_state(win.view_state.with_montage_axis(2, indices=(0, 1, 2), text=":"))
         _process_events(qtbot)
         expected = win.renderer._montage_lod_policy_mode()
         session = getattr(win.renderer, "_montage_session", None)
