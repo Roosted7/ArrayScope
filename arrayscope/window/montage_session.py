@@ -1929,7 +1929,11 @@ def admit_preview_reduction(
         return False
     try:
         factor = 1 << level
-        if (
+        if reduced is not None and reduced_level is not None and int(reduced_level) == level:
+            # The ingest reduction already produced exactly the preview
+            # level: pin the same plane, zero extra reduction or copy.
+            preview_pyramid.admit(key, np.asarray(reduced))
+        elif (
             reduced is not None
             and reduced_level is not None
             and 0 < int(reduced_level) < level
