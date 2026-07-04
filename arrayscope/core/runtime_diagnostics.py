@@ -131,6 +131,16 @@ class MontageRuntimeDiagnostics:
     tile_lod_pending_materializations: int = 0
     tile_lod_materializations_completed: int = 0
     tile_lod_ingest_reductions: int = 0
+    # ADR 0050 zero-redundant-work counters: histogram/level recomputes caused
+    # by display-LOD level swaps must stay 0; the reuse counters make the
+    # avoided work observable in JSONL A/B traces.
+    tile_lod_stats_cross_level_reuses: int = 0
+    tile_lod_stats_recomputes: int = 0
+    tile_lod_cross_level_reductions: int = 0
+    tile_lod_pipeline_reruns_avoided: int = 0
+    tile_lod_stage_hits_serving_derivations: int = 0
+    tile_histogram_lod_swap_recomputes: int = 0
+    tile_histogram_cross_level_reuses: int = 0
     tile_compute_cache_hits: int = 0
     tile_compute_stage_backed: int = 0
     tile_compute_direct: int = 0
@@ -728,6 +738,16 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"pending={snapshot.montage.tile_lod_pending_materializations} "
             f"completed={snapshot.montage.tile_lod_materializations_completed} "
             f"ingest={snapshot.montage.tile_lod_ingest_reductions}"
+        ),
+        (
+            "LOD reuse: "
+            f"stats_reused={snapshot.montage.tile_lod_stats_cross_level_reuses} "
+            f"stats_recomputed={snapshot.montage.tile_lod_stats_recomputes} "
+            f"level_from_level={snapshot.montage.tile_lod_cross_level_reductions} "
+            f"pipeline_reruns_avoided={snapshot.montage.tile_lod_pipeline_reruns_avoided} "
+            f"stage_hits_serving_lod={snapshot.montage.tile_lod_stage_hits_serving_derivations} "
+            f"hist_swap_recomputes={snapshot.montage.tile_histogram_lod_swap_recomputes} "
+            f"hist_cross_level_reuses={snapshot.montage.tile_histogram_cross_level_reuses}"
         ),
         (
             "Reusable stage: "

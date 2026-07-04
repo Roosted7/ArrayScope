@@ -643,6 +643,15 @@ def _phase_record(
         "montage_lod_pending_materializations": int(getattr(montage, "tile_lod_pending_materializations", 0) or 0),
         "montage_lod_materializations_completed": int(getattr(montage, "tile_lod_materializations_completed", 0) or 0),
         "montage_lod_ingest_reductions": int(getattr(montage, "tile_lod_ingest_reductions", 0) or 0),
+        "montage_lod_stats_cross_level_reuses": int(getattr(montage, "tile_lod_stats_cross_level_reuses", 0) or 0),
+        "montage_lod_stats_recomputes": int(getattr(montage, "tile_lod_stats_recomputes", 0) or 0),
+        "montage_lod_cross_level_reductions": int(getattr(montage, "tile_lod_cross_level_reductions", 0) or 0),
+        "montage_lod_pipeline_reruns_avoided": int(getattr(montage, "tile_lod_pipeline_reruns_avoided", 0) or 0),
+        "montage_lod_stage_hits_serving_derivations": int(
+            getattr(montage, "tile_lod_stage_hits_serving_derivations", 0) or 0
+        ),
+        "montage_histogram_lod_swap_recomputes": int(getattr(montage, "tile_histogram_lod_swap_recomputes", 0) or 0),
+        "montage_histogram_cross_level_reuses": int(getattr(montage, "tile_histogram_cross_level_reuses", 0) or 0),
         "montage_loaded_tiles": int(montage.loaded_tiles),
         "montage_loading_tiles": int(montage.loading_tiles),
         "montage_pending_tiles": int(montage.pending_tiles),

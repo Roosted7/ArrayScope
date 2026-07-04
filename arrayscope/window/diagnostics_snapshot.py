@@ -106,6 +106,15 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         ),
         tile_lod_materializations_completed=0 if session is None else int(getattr(session, "lod_materializations_completed", 0) or 0),
         tile_lod_ingest_reductions=int(getattr(window.renderer, "_montage_lod_ingest_reductions", 0) or 0),
+        tile_lod_stats_cross_level_reuses=0 if session is None else int(getattr(session, "lod_stats_cross_level_reuses", 0) or 0),
+        tile_lod_stats_recomputes=0 if session is None else int(getattr(session, "lod_stats_recomputes", 0) or 0),
+        tile_lod_cross_level_reductions=0 if session is None else int(getattr(session, "lod_cross_level_reductions", 0) or 0),
+        tile_lod_pipeline_reruns_avoided=int(getattr(window.renderer, "_montage_lod_pipeline_reruns_avoided", 0) or 0),
+        tile_lod_stage_hits_serving_derivations=int(
+            getattr(window.renderer, "_montage_lod_stage_hits_serving_derivations", 0) or 0
+        ),
+        tile_histogram_lod_swap_recomputes=int(getattr(window.img_view, "tile_histogram_lod_swap_recomputes", 0) or 0),
+        tile_histogram_cross_level_reuses=int(getattr(window.img_view, "tile_histogram_cross_level_reuses", 0) or 0),
         tile_compute_cache_hits=0 if session is None else int(getattr(session, "tile_compute_cache_hits", 0) or 0),
         tile_compute_stage_backed=0 if session is None else int(getattr(session, "tile_compute_stage_backed", 0) or 0),
         tile_compute_direct=0 if session is None else int(getattr(session, "tile_compute_direct", 0) or 0),
