@@ -1512,6 +1512,16 @@ def test_active_tiles_only_resident_presented_class_is_never_evicted():
         pool._slot_for("incoming", active_keys={key, "incoming"}, near_keys=set())
     assert pool.tile_resident_keys[0] == key
 
+def test_atlas_mipmaps_default_off_after_stale_mip_field_regression():
+    # 2026-07-04: whole-atlas regen showed stale mip content (previous atlas
+    # slot occupants) on minified tiles between regens.  Off until a
+    # per-slot mip invalidation exists.
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
+    payloads = {0: _lod_payload(0, 1.0, level=0)}
+    pool.update_payloads(payloads, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False)
+    assert all(page.mipmap_levels == 0 for page in pool.pages)
+
+
 def test_atlas_mipmap_levels_are_the_bleed_free_depth():
     from arrayscope.display.backends.vispy.tiles import _atlas_mipmap_levels
 
@@ -1523,7 +1533,10 @@ def test_atlas_mipmap_levels_are_the_bleed_free_depth():
     assert _atlas_mipmap_levels((84, 84)) == 2
 
 
-def test_uploads_dirty_the_page_for_draw_time_mipmap_regen():
+def test_uploads_dirty_the_page_for_draw_time_mipmap_regen(monkeypatch):
+    import arrayscope.display.backends.vispy.tiles as tiles_module
+
+    monkeypatch.setattr(tiles_module, "_ATLAS_MIPMAPS_ENABLED", True)
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
     payloads = {index: _lod_payload(index, float(index + 1), level=0) for index in range(2)}
     _uvs, stats = pool.update_payloads(
