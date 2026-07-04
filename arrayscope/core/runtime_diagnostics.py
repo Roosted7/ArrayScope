@@ -156,6 +156,14 @@ class MontageRuntimeDiagnostics:
     repeated_expensive_stage_per_tile: bool = False
     priority_retargeted_tiles: int = 0
     presented_order_sample: tuple[int, ...] = ()
+    # ADR 0051: single-owner tile lifecycle machine.
+    lifecycle_parked: int = 0
+    lifecycle_evaluating: int = 0
+    lifecycle_presented: int = 0
+    lifecycle_dangling_claims: int = 0
+    # Migration parity: legacy collections that disagree with the machine's
+    # mirrored semantic axis (must trend to 0 before P2 deletes them).
+    lifecycle_semantic_mismatches: int = 0
 
 
 @dataclass(frozen=True)

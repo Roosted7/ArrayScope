@@ -1,0 +1,279 @@
+"""Exhaustive Qt-free tests for the single-owner tile lifecycle (ADR 0051).
+
+Each structural rule maps to a fixed ADR 0050 defect; the test names say
+which regression they pin.
+"""
+
+import pytest
+
+from arrayscope.presentation import (
+    ClaimOwner,
+    LevelPhase,
+    Presentation,
+    ReleaseClaim,
+    Semantic,
+    TileLifecycle,
+)
+
+
+@pytest.fixture()
+def lc() -> TileLifecycle:
+    return TileLifecycle()
+
+
+def _evaluated(lc: TileLifecycle, tile: int) -> None:
+    lc.plan_applied([tile])
+    lc.evaluation_started(tile)
+    lc.evaluation_completed(tile)
+
+
+# -- semantic axis ----------------------------------------------------------
+
+
+def test_semantic_progression(lc):
+    lc.plan_applied([3])
+    assert lc.record(3).semantic is Semantic.PLANNED
+    lc.evaluation_started(3)
+    assert lc.record(3).semantic is Semantic.EVALUATING
+    assert 3 in lc.evaluating_tiles
+    lc.evaluation_completed(3)
+    assert lc.record(3).semantic is Semantic.EVALUATED
+    assert 3 not in lc.evaluating_tiles
+
+
+def test_declined_evaluation_returns_to_planned_not_loading_forever(lc):
+    """ADR 0050 defect: tile evals lost on declined admission (28 tiles
+    'loading' forever)."""
+
+    lc.plan_applied([7])
+    lc.evaluation_started(7)
+    lc.evaluation_declined(7)
+    assert lc.record(7).semantic is Semantic.PLANNED
+    assert 7 not in lc.evaluating_tiles
+
+
+def test_plan_applied_does_not_regress_states(lc):
+    _evaluated(lc, 1)
+    lc.plan_applied([1])
+    assert lc.record(1).semantic is Semantic.EVALUATED
+    lc.evaluation_started(2)
+    lc.plan_applied([2])
+    assert lc.record(2).semantic is Semantic.EVALUATING
+
+
+def test_skip(lc):
+    lc.plan_applied([4])
+    lc.tile_skipped(4)
+    assert lc.record(4).semantic is Semantic.SKIPPED
+
+
+# -- rule 1: acknowledged presentation only ----------------------------------
+
+
+def test_presented_only_via_acknowledgement(lc):
+    _evaluated(lc, 0)
+    lc.upsert_emitted(0, source_id=("src", 0, 1))
+    assert lc.record(0).presentation is Presentation.EMITTED
+    assert 0 not in lc.presented_tiles
+    lc.commit_acknowledged(emitted_tiles=[0], accepted_tiles=[0], active_scope=[0])
+    rec = lc.record(0)
+    assert rec.presentation is Presentation.PRESENTED
+    assert rec.presented_source_id == ("src", 0, 1)
+    assert 0 in lc.presented_tiles
+
+
+def test_stale_report_confirms_nothing(lc):
+    _evaluated(lc, 0)
+    lc.upsert_emitted(0, source_id="s")
+    lc.commit_acknowledged(
+        emitted_tiles=[0], accepted_tiles=[0], active_scope=[0], stale=True
+    )
+    assert lc.record(0).presentation is Presentation.EMITTED
+    assert 0 not in lc.presented_tiles
+
+
+def test_fresh_evaluation_invalidates_stale_emit_identity(lc):
+    _evaluated(lc, 5)
+    lc.upsert_emitted(5, source_id="old")
+    lc.evaluation_completed(5)  # replacement result
+    rec = lc.record(5)
+    assert rec.presentation is Presentation.UNPRESENTED
+    assert rec.emitted_source_id is None
+
+
+# -- rule 3: emit-once, park, re-arm ------------------------------------------
+
+
+def test_declined_out_of_scope_upsert_parks(lc):
+    """ADR 0050 defect: ~120 commits+draws/s idle loop from re-emitting
+    upserts a viewport-scoped backend never accepts."""
+
+    _evaluated(lc, 9)
+    lc.upsert_emitted(9, source_id="s9")
+    lc.commit_acknowledged(emitted_tiles=[9], accepted_tiles=[], active_scope=[1, 2])
+    rec = lc.record(9)
+    assert rec.presentation is Presentation.PARKED
+    assert rec.parked_reason == "declined-out-of-scope"
+    assert lc.parked_tiles == frozenset({9})
+
+
+def test_declined_in_scope_upsert_does_not_park(lc):
+    _evaluated(lc, 9)
+    lc.upsert_emitted(9, source_id="s9")
+    lc.commit_acknowledged(emitted_tiles=[9], accepted_tiles=[], active_scope=[9])
+    assert lc.record(9).presentation is Presentation.EMITTED
+    assert lc.parked_tiles == frozenset()
+
+
+def test_declined_without_semantic_result_does_not_park(lc):
+    """Nothing to re-present: parking would arm an upsert no build can keep."""
+
+    lc.plan_applied([2])
+    lc.upsert_emitted(2)  # e.g. floor payload whose tile was since pruned
+    lc.commit_acknowledged(emitted_tiles=[2], accepted_tiles=[], active_scope=[])
+    assert lc.record(2).presentation is Presentation.UNPRESENTED
+    assert lc.parked_tiles == frozenset()
+
+
+def test_parkable_override_is_the_migration_truth(lc):
+    """P1→P2: while legacy paths bypass evaluation_completed, the caller's
+    parkable set decides eligibility instead of the mirrored semantic axis."""
+
+    lc.upsert_emitted(2)  # semantic axis never saw this tile
+    lc.commit_acknowledged(
+        emitted_tiles=[2], accepted_tiles=[], active_scope=[], parkable_tiles=[2]
+    )
+    assert lc.parked_tiles == frozenset({2})
+    _evaluated(lc, 3)
+    lc.upsert_emitted(3)
+    lc.commit_acknowledged(
+        emitted_tiles=[3], accepted_tiles=[], active_scope=[], parkable_tiles=[]
+    )
+    assert 3 not in lc.parked_tiles
+
+
+def test_rearm_on_entering_active_scope(lc):
+    _evaluated(lc, 9)
+    lc.upsert_emitted(9)
+    lc.commit_acknowledged(emitted_tiles=[9], accepted_tiles=[], active_scope=[])
+    assert lc.rearm_for_scope([1, 2]) == ()
+    assert lc.rearm_for_scope([9, 1]) == (9,)
+    assert lc.parked_tiles == frozenset()
+    assert lc.record(9).presentation is Presentation.UNPRESENTED
+    # emit-once: re-arming is one-shot until parked again
+    assert lc.rearm_for_scope([9]) == ()
+
+
+def test_acceptance_unparks(lc):
+    _evaluated(lc, 9)
+    lc.upsert_emitted(9)
+    lc.commit_acknowledged(emitted_tiles=[9], accepted_tiles=[], active_scope=[])
+    lc.upsert_emitted(9, source_id="retry")
+    lc.commit_acknowledged(emitted_tiles=[9], accepted_tiles=[9], active_scope=[9])
+    assert lc.record(9).presentation is Presentation.PRESENTED
+    assert lc.parked_tiles == frozenset()
+
+
+def test_removal_clears_presentation_and_park(lc):
+    _evaluated(lc, 9)
+    lc.upsert_emitted(9)
+    lc.commit_acknowledged(emitted_tiles=[9], accepted_tiles=[9], active_scope=[9])
+    lc.commit_acknowledged(
+        emitted_tiles=[], accepted_tiles=[], active_scope=[], removed_tiles=[9]
+    )
+    rec = lc.record(9)
+    assert rec.presentation is Presentation.UNPRESENTED
+    assert rec.presented_source_id is None
+    assert 9 not in lc.presented_tiles
+
+
+# -- rule 2: claim balancing ---------------------------------------------------
+
+
+def test_declined_level_releases_claim(lc):
+    """ADR 0050 defect: pyramid singleflight claims leaked on blocked
+    admission."""
+
+    lc.level_claimed(3, ("lvl", 1), ClaimOwner.CHAIN)
+    effects = lc.level_declined(3, ("lvl", 1))
+    assert effects == (ReleaseClaim(3, ("lvl", 1), ClaimOwner.CHAIN),)
+    assert lc.dangling_claims() == ()
+
+
+def test_resident_level_never_released_by_decline(lc):
+    lc.level_claimed(3, ("lvl", 1), ClaimOwner.WALK)
+    lc.level_resident(3, ("lvl", 1))
+    assert lc.level_declined(3, ("lvl", 1)) == ()
+    assert lc.record(3).levels[("lvl", 1)].phase is LevelPhase.RESIDENT
+
+
+def test_session_replacement_releases_all_inflight_claims(lc):
+    """ADR 0050 defect: walk claims leaked into the shared pyramid on session
+    replacement (wedged wrong LOD on scrub-back)."""
+
+    lc.level_claimed(1, ("lvl", 1), ClaimOwner.WALK)
+    lc.level_claimed(1, ("lvl", 2), ClaimOwner.CHAIN)
+    lc.level_materializing(1, ("lvl", 2))
+    lc.level_claimed(2, ("lvl", 1), ClaimOwner.EVALUATION)
+    lc.level_resident(2, ("lvl", 1))
+    effects = set(lc.session_replaced())
+    assert effects == {
+        ReleaseClaim(1, ("lvl", 1), ClaimOwner.WALK),
+        ReleaseClaim(1, ("lvl", 2), ClaimOwner.CHAIN),
+    }
+    assert lc.dangling_claims() == ()
+    assert lc.record(2).levels[("lvl", 1)].phase is LevelPhase.RESIDENT
+
+
+def test_evaluation_decline_releases_only_its_own_claims(lc):
+    lc.evaluation_started(4)
+    lc.level_claimed(4, ("lvl", 0), ClaimOwner.EVALUATION)
+    lc.level_claimed(4, ("lvl", 1), ClaimOwner.WALK)
+    effects = lc.evaluation_declined(4)
+    assert effects == (ReleaseClaim(4, ("lvl", 0), ClaimOwner.EVALUATION),)
+    assert lc.dangling_claims() == (ReleaseClaim(4, ("lvl", 1), ClaimOwner.WALK),)
+
+
+def test_dangling_claims_is_the_rule2_audit(lc):
+    lc.level_claimed(1, "a", ClaimOwner.INGEST)
+    lc.level_materializing(1, "a")
+    lc.level_resident(1, "a")
+    assert lc.dangling_claims() == ()
+    lc.level_claimed(2, "b", ClaimOwner.PREVIEW)
+    assert lc.dangling_claims() == (ReleaseClaim(2, "b", ClaimOwner.PREVIEW),)
+
+
+# -- lifecycle end-to-end -------------------------------------------------------
+
+
+def test_full_tile_story(lc):
+    """plan → evaluate → emit → ack → scroll away (park via replan decline) →
+    scroll back (re-arm) → re-emit → ack."""
+
+    lc.plan_applied([0, 1])
+    lc.evaluation_started(0)
+    lc.evaluation_completed(0)
+    lc.upsert_emitted(0, source_id="v1")
+    lc.commit_acknowledged(emitted_tiles=[0], accepted_tiles=[0], active_scope=[0, 1])
+    assert lc.presented_tiles == frozenset({0})
+
+    # viewport moves: level swap emits a new payload, backend declines (tile
+    # now outside active scope)
+    lc.upsert_emitted(0, source_id="v2")
+    lc.commit_acknowledged(emitted_tiles=[0], accepted_tiles=[], active_scope=[1])
+    assert lc.parked_tiles == frozenset({0})
+
+    # viewport returns
+    assert lc.rearm_for_scope([0, 1]) == (0,)
+    lc.upsert_emitted(0, source_id="v2")
+    lc.commit_acknowledged(emitted_tiles=[0], accepted_tiles=[0], active_scope=[0, 1])
+    rec = lc.record(0)
+    assert rec.presentation is Presentation.PRESENTED
+    assert rec.presented_source_id == "v2"
+    assert lc.counters() == {
+        "records": 2,
+        "evaluating": 0,
+        "parked": 0,
+        "presented": 1,
+        "dangling_claims": 0,
+    }

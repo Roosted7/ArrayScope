@@ -32,6 +32,7 @@ from arrayscope.display.model.presentation_generation import (
 )
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
 from arrayscope.operations.stage_fanin import StageFanInState
+from arrayscope.presentation import TileLifecycle
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
 from arrayscope.window import montage_lod
 from arrayscope.window.montage_lod import (  # noqa: F401  (re-exports; canonical home is montage_lod)
@@ -188,7 +189,11 @@ class MontageRenderSession:
     acknowledged_source_ids: set = field(default_factory=set)
     lod_floor_presentations: int = 0
     lod_target_revision: int = 0
-    parked_dirty_payloads: set = field(default_factory=set)
+    # ADR 0051: single owner of per-tile lifecycle state.  The presentation
+    # axis (emit-once / park / re-arm and acknowledged presentation) is
+    # authoritative here; the semantic axis is mirrored from the legacy
+    # collections during the migration (parity in diagnostics).
+    lifecycle: TileLifecycle = field(default_factory=TileLifecycle)
     lod_preview_pyramid: object | None = None
     lod_preview_level: int = 0
     # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but
@@ -212,6 +217,12 @@ class MontageRenderSession:
     _near_tile_numbers_cache: tuple[int, ...] = ()
     _tile_states_cached_revision: int = -1
     _tile_states_cached_tuple: tuple[MontageTileState, ...] = ()
+
+    @property
+    def parked_dirty_payloads(self) -> frozenset[int]:
+        """Read-only view; the lifecycle machine owns parking (ADR 0051)."""
+
+        return self.lifecycle.parked_tiles
 
     @property
     def level_revision(self) -> int:
@@ -243,8 +254,14 @@ class MontageRenderSession:
         self.visible_tile_numbers = frozenset(int(tile.montage_index) for tile in tuple(self.visible_tiles or ()))
         self._selected_lod_factor()
         self.update_level_presentation_scope()
+        # ADR 0051: seed the lifecycle machine so its semantic axis matches a
+        # session built from cached results (rendered == evaluated).
+        self.lifecycle.plan_applied(int(tile.montage_index) for tile in tuple(self.visible_tiles or ()))
+        for index in sorted(int(tile) for tile in self.skipped_tiles):
+            self.lifecycle.tile_skipped(int(index))
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)
+            self.lifecycle.evaluation_completed(int(index))
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -443,6 +460,7 @@ class MontageRenderSession:
         self.discard_pending_tile(index)
         self.presented_tiles.discard(index)
         self.loading_tiles.add(index)
+        self.lifecycle.evaluation_completed(index)
         self.mark_tile_state(rendered.tile, MontageTileState.LOADING)
 
     def mark_presented(self, tile_numbers) -> None:
@@ -789,11 +807,11 @@ class MontageRenderSession:
         # scope (see acknowledge_tile_presentation: a non-active upsert the
         # backend declines parks instead of re-arming, or finalization would
         # retry an unacceptable upsert forever).
+        # ADR 0051: the lifecycle machine owns park/re-arm; this is its
+        # rule-3 scope event.
         active_scope = set(active)
-        for tile_number in tuple(self.parked_dirty_payloads):
-            if int(tile_number) in active_scope:
-                self.parked_dirty_payloads.discard(int(tile_number))
-                self.dirty_payloads[int(tile_number)] = None
+        for tile_number in self.lifecycle.rearm_for_scope(active_scope):
+            self.dirty_payloads[int(tile_number)] = None
         dirty_payload_tiles = tuple(
             dict.fromkeys(
                 (
@@ -927,6 +945,10 @@ class MontageRenderSession:
         force_refresh = False
         clear_reason = ""
 
+        # ADR 0051: record the emit (emit-once identity) with the machine.
+        for tile_number, payload in upserts.items():
+            self.lifecycle.upsert_emitted(int(tile_number), payload.source_id)
+
         base_revision = int(getattr(previous_state, "revision", 0))
         target_revision = base_revision + (1 if upserts or removals else 0)
         if upserts or removals:
@@ -1014,21 +1036,31 @@ class MontageRenderSession:
         for tile in accepted_upserts:
             self.dirty_payloads.pop(int(tile), None)
             self.pending_payload_upserts.pop(int(tile), None)
-            self.parked_dirty_payloads.discard(int(tile))
         # Viewport-scoped backends accept only the active set (ADR 0044);
         # non-active upserts they decline are parked, not retried — every
         # payload stays cached and re-arms when the tile becomes active.
         # Without this, each commit re-emitted the same unacceptable upserts
         # and finalization never settled (idle commit/draw loop).
+        # ADR 0051: the lifecycle machine is the single owner of the
+        # presented/parked decision (rules 1 and 3); the legacy queue pops
+        # below stay with the collections they will replace phase by phase.
         active_scope = {int(tile) for tile in tuple(getattr(delta, "active_tiles", ()) or ())}
         accepted = {int(tile) for tile in accepted_upserts}
+        self.lifecycle.commit_acknowledged(
+            emitted_tiles=(int(tile) for tile in tuple(delta.upserts)),
+            accepted_tiles=accepted,
+            active_scope=active_scope,
+            removed_tiles=(int(tile) for tile in report.removed_tiles),
+            # P1->P2 migration: rendered_tiles is still written directly in
+            # places that bypass mark_materialized, so it stays the
+            # park-eligibility truth until the semantic axis is authoritative.
+            parkable_tiles=(int(tile) for tile in self.rendered_tiles),
+        )
         for tile in tuple(delta.upserts):
             index = int(tile)
             if index in accepted or index in active_scope:
                 continue
             self.dirty_payloads.pop(index, None)
-            if index in self.rendered_tiles:
-                self.parked_dirty_payloads.add(index)
             self.pending_payload_upserts.pop(index, None)
         for tile in report.removed_tiles:
             self.pending_removals.discard(int(tile))
@@ -1066,6 +1098,12 @@ class MontageRenderSession:
         requeued = 0
         for index in sorted(orphaned):
             tile = by_number.get(int(index))
+            # P1: no residency claims are routed through the machine yet, so
+            # the decline can have no ReleaseClaim effects to execute (rule 4:
+            # never silently drop effects -- fail loudly if P3 wiring lands
+            # without updating this repair path).
+            if self.lifecycle.evaluation_declined(int(index)):
+                raise AssertionError("unexecuted ReleaseClaim effects in requeue repair")
             if tile is None or int(index) in self.skipped_tiles:
                 self.loading_tiles.discard(int(index))
                 continue
@@ -1078,6 +1116,7 @@ class MontageRenderSession:
         index = int(tile.montage_index)
         if index not in self.rendered_tiles and index not in self.skipped_tiles:
             self.loading_tiles.add(index)
+            self.lifecycle.evaluation_started(index)
             self.mark_tile_state(tile, MontageTileState.LOADING)
 
     def mark_skipped(self, tile: MontageTile) -> None:
@@ -1092,6 +1131,7 @@ class MontageRenderSession:
             self.level_generation.forget_tile(index)
             self.tile_source_ids.pop(index, None)
             self.discard_pending_tile(index)
+            self.lifecycle.tile_skipped(index)
             self.mark_tile_state(tile, MontageTileState.SKIPPED)
 
     def next_tile(self) -> MontageTile | None:

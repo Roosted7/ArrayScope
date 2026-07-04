@@ -129,6 +129,11 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         retained_stage_decision="" if session is None else str(getattr(session, "retained_stage_decision", "") or ""),
         repeated_expensive_stage_per_tile=False if session is None else bool(getattr(session, "repeated_expensive_stage_per_tile", False)),
         priority_retargeted_tiles=0 if session is None else int(getattr(session, "priority_retargeted_tiles", 0) or 0),
+        lifecycle_parked=0 if session is None else len(session.lifecycle.parked_tiles),
+        lifecycle_evaluating=0 if session is None else len(session.lifecycle.evaluating_tiles),
+        lifecycle_presented=0 if session is None else len(session.lifecycle.presented_tiles),
+        lifecycle_dangling_claims=0 if session is None else len(session.lifecycle.dangling_claims()),
+        lifecycle_semantic_mismatches=_lifecycle_semantic_mismatches(session),
         presented_order_sample=() if session is None else tuple(int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]),
     )
 
@@ -364,6 +369,30 @@ def _presentation_diagnostics(window) -> dict[str, object]:
         except Exception:
             return {}
     return {}
+
+
+def _lifecycle_semantic_mismatches(session) -> int:
+    """ADR 0051 migration parity: legacy collections vs the machine's mirror.
+
+    Counts tiles where the machine's semantic axis disagrees with the legacy
+    truth (`rendered_tiles` for evaluated, `loading_tiles` for evaluating).
+    Direct writes that bypass the session's mark_* methods show up here; the
+    count must trend to zero before P2 makes the machine authoritative.
+    """
+
+    if session is None:
+        return 0
+    from arrayscope.presentation import Semantic
+
+    evaluated = {rec.tile_number for rec in session.lifecycle if rec.semantic is Semantic.EVALUATED}
+    rendered = {int(tile) for tile in session.rendered_tiles}
+    loading = {int(tile) for tile in session.loading_tiles}
+    # mark_materialized keeps legacy tiles in loading until presentation
+    # acceptance, while the machine calls them evaluated; treat that overlap
+    # as agreement.
+    return len((evaluated ^ rendered) - loading) + len(
+        session.lifecycle.evaluating_tiles - loading - rendered
+    )
 
 
 def _montage_presented_lod(session, lod_decision) -> tuple[int, int, tuple[int, int]]:
