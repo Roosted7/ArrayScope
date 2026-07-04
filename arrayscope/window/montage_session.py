@@ -779,6 +779,7 @@ class MontageRenderSession:
         pyramid = self.lod_pyramid
         desired = int(demand.desired_level)
         commit_needed = False
+        visible_by_number = {int(t.montage_index): t for t in tuple(self.visible_tiles)}
         for tile_number in sorted(self.visible_tile_numbers):
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is None:
@@ -789,7 +790,7 @@ class MontageRenderSession:
                 # busy timer loop.  Floor progress (a presentable or closer
                 # resident level) only requests a commit; the build's floor
                 # pass does the actual work.
-                if self._floor_can_progress(int(tile_number)):
+                if self._floor_can_progress(int(tile_number), tile=visible_by_number.get(int(tile_number))):
                     commit_needed = True
                 continue
             payload = self.display_tile_payloads.get(int(tile_number))
@@ -948,15 +949,18 @@ class MontageRenderSession:
                 break
         return None if best is None else (best[1], best[2])
 
-    def _floor_can_progress(self, tile_number: int) -> bool:
+    def _floor_can_progress(self, tile_number: int, tile=None) -> bool:
         """True when the floor pass could present or improve this tile."""
 
         if not self._resident_lod_active():
             return False
-        tile = next(
-            (t for t in tuple(self.visible_tiles) if int(t.montage_index) == int(tile_number)),
-            None,
-        )
+        if int(tile_number) in self.active_tile_requests:
+            return False
+        if tile is None:
+            tile = next(
+                (t for t in tuple(self.visible_tiles) if int(t.montage_index) == int(tile_number)),
+                None,
+            )
         if tile is None:
             return False
         payload = self.display_tile_payloads.get(int(tile_number))
@@ -990,6 +994,11 @@ class MontageRenderSession:
             for tile in tuple(self.visible_tiles)
         }
         for tile_number in sorted(int(number) for number in tile_numbers):
+            if tile_number in self.active_tile_requests:
+                # An exact evaluation is in flight: flooring now would present
+                # a preview one commit before its exact replacement, doubling
+                # payload/identity churn for every tile of a cold fill.
+                continue
             existing = self.display_tile_payloads.get(tile_number)
             if existing is not None and str(getattr(existing, "quality", "exact")) != "preview":
                 continue
