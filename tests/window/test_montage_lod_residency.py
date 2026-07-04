@@ -1159,3 +1159,52 @@ def test_preview_payload_at_acceptable_level_still_refines_to_exact():
     assert 1 in session.dirty_payloads
     _state, _delta = session.build_tile_presentation({})
     assert session.display_tile_payloads[1].quality == "exact"
+
+def test_replaced_session_releases_undrained_request_claims():
+    """A dying session's planned-but-undrained requests must free their claims.
+
+    The pyramid is renderer-shared and its keys are semantic: a claim leaked
+    on session replacement blocks the SAME levels when the user scrubs back
+    to that slice, wedging the tile at the wrong LOD forever (the stale-LOD
+    regression of 2026-07-04).
+    """
+
+    from arrayscope.window.montage_lod import release_session_claims
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid)
+    session.build_tile_presentation({})
+    assert len(session.pending_lod_requests) == 2
+    assert pyramid.pending_count > 0
+
+    released = release_session_claims(session)
+
+    assert released == 2
+    assert session.pending_lod_requests == []
+    assert pyramid.pending_count == 0
+    # The same slice revisited (equal session key) can claim its levels again.
+    replacement = _session(pyramid=pyramid)
+    replacement.build_tile_presentation({})
+    assert len(replacement.pending_lod_requests) == 2
+
+
+def test_diagnostics_lod_reason_follows_the_presented_level():
+    """The reason text must describe the screen, not the last policy run."""
+
+    from arrayscope.display.lod import (
+        LOD_REASON_RESIDENT_FINER,
+        LOD_REASON_RESIDENT_MATCH,
+    )
+    from arrayscope.window.diagnostics_snapshot import _presented_lod_reason
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid)
+    session.build_tile_presentation({})
+    decision = session.lod_policy_decision
+    assert decision.demand.desired_level == 2
+
+    # Nothing presented at the demanded level yet: finer-while-materializing.
+    assert _presented_lod_reason(decision, (0, 1, (1, 1))) == LOD_REASON_RESIDENT_FINER
+    # The screen converged (ingest-presented level 2) without a policy rerun:
+    # the stale decision must not keep reporting "materializes".
+    assert _presented_lod_reason(decision, (2, 4, (4, 4))) == LOD_REASON_RESIDENT_MATCH

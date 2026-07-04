@@ -54,6 +54,7 @@ _UNSET = object()
 _GL_TEXTURE_MAX_LEVEL = 0x813D
 _GL_NEAREST_MIPMAP_LINEAR = 0x2702
 _ATLAS_MIPMAP_LEVEL_CAP = 5
+_MIPMAP_REGEN_MIN_INTERVAL_S = 0.15
 
 
 def _atlas_mipmap_levels(tile_shape: tuple[int, int]) -> int:
@@ -136,6 +137,7 @@ class TextureAtlasPage:
         self.mipmap_dirty = bool(self.mipmap_levels)
         self.mipmap_ready = False
         self.mipmap_updates = 0
+        self.mipmap_last_regen = 0.0
 
     def take_free_slot(self, owner: object) -> int | None:
         while self._free_slots:
@@ -1680,6 +1682,14 @@ class GpuWindowedTileVisual(Visual):
             return
         if not getattr(page, "mipmap_dirty", False) and getattr(page, "mipmap_ready", False):
             return
+        # Throttle: rapid scrubbing dirties the page on every commit, and a
+        # full-atlas regen per frame (a 4k float/complex atlas) is real GPU
+        # time inside the draw.  Skip within the window but request another
+        # repaint so the final post-interaction draw always regenerates —
+        # dirtiness is never dropped, only deferred.
+        if getattr(page, "mipmap_ready", False) and (perf_counter() - float(getattr(page, "mipmap_last_regen", 0.0))) < _MIPMAP_REGEN_MIN_INTERVAL_S:
+            self.update()
+            return
         try:
             from vispy.gloo import gl
             from vispy.gloo.context import get_current_canvas
@@ -1733,6 +1743,7 @@ class GpuWindowedTileVisual(Visual):
             page.mipmap_dirty = False
             page.mipmap_ready = True
             page.mipmap_updates = int(getattr(page, "mipmap_updates", 0) or 0) + updates
+            page.mipmap_last_regen = perf_counter()
 
     def _set_lut_texture(self, lut_data, *, key=None, phase_default: bool | None = None) -> bool:
         if phase_default is None:

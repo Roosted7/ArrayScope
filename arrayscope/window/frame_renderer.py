@@ -574,6 +574,11 @@ class FrameRenderMixin:
             ),
         )
         session.shader_display = bool(shader_display)
+        # The dying session's planned-but-undrained LOD requests hold
+        # singleflight claims in the shared pyramid; scrubbing back to the
+        # same slice would find those levels permanently claimed (stale
+        # wrong-LOD tiles).  Balance them before the replacement takes over.
+        montage_lod.release_session_claims(getattr(self, "_montage_session", None))
         self._montage_session = session
         apply_restored_viewport = getattr(self.win, "_apply_viewport_continuity_when_ready", None)
         if callable(apply_restored_viewport):

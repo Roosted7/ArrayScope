@@ -90,7 +90,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         if lod_demand is None
         else tuple(float(value) for value in getattr(lod_demand, "source_texels_per_pixel_xy", (0.0, 0.0))),
         tile_lod_policy="native-only" if lod_decision is None else str(getattr(lod_decision, "policy", "native-only") or "native-only"),
-        tile_lod_reason="" if lod_decision is None else str(getattr(lod_decision, "reason", "") or ""),
+        tile_lod_reason=_presented_lod_reason(lod_decision, presented_lod),
         tile_lod_applied_level=int(presented_lod[0]),
         tile_lod_resident_tile_levels=lod_tile_levels,
         tile_lod_pyramid_bytes=0 if lod_pyramid is None else int(getattr(lod_pyramid, "bytes_used", 0) or 0),
@@ -385,6 +385,42 @@ def _montage_presented_lod(session, lod_decision) -> tuple[int, int, tuple[int, 
         int(getattr(lod_decision, "applied_factor", 1) or 1),
         tuple(int(value) for value in getattr(lod_decision, "applied_factor_xy", (1, 1))),
     )
+
+
+def _presented_lod_reason(lod_decision, presented_lod) -> str:
+    """Reason text consistent with the *presented* LOD fields next to it.
+
+    The decision's reason is a snapshot from the last policy evaluation; the
+    screen can converge afterwards (ingest-presented levels) with no event
+    re-running the policy, leaving "…while the demanded level materializes"
+    hanging in the diagnostics indefinitely.  Diagnostics describe current
+    state, so the residency wording is re-derived from the presented level
+    against the demanded one; non-residency reasons pass through untouched.
+    """
+
+    if lod_decision is None:
+        return ""
+    reason = str(getattr(lod_decision, "reason", "") or "")
+    from arrayscope.display.lod import (
+        LOD_POLICY_RESIDENT,
+        LOD_REASON_NATIVE_SCALE,
+        LOD_REASON_RESIDENT_COARSER,
+        LOD_REASON_RESIDENT_FINER,
+        LOD_REASON_RESIDENT_MATCH,
+    )
+
+    if str(getattr(lod_decision, "policy", "")) != LOD_POLICY_RESIDENT:
+        return reason
+    if reason not in (LOD_REASON_RESIDENT_MATCH, LOD_REASON_RESIDENT_FINER, LOD_REASON_RESIDENT_COARSER, LOD_REASON_NATIVE_SCALE):
+        return reason
+    demand = getattr(lod_decision, "demand", None)
+    desired = int(getattr(demand, "desired_level", 0) or 0)
+    presented_level = int(presented_lod[0])
+    if presented_level == desired:
+        return LOD_REASON_RESIDENT_MATCH if presented_level > 0 else LOD_REASON_NATIVE_SCALE
+    if presented_level < desired:
+        return LOD_REASON_RESIDENT_FINER
+    return LOD_REASON_RESIDENT_COARSER
 
 
 def _montage_payload_level_counts(session) -> tuple[tuple[int, int], ...]:

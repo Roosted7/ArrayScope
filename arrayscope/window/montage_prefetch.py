@@ -29,6 +29,11 @@ class MontagePrefetchDecision:
 
 
 def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int | None = None) -> tuple[MontagePrefetchDecision, ...]:
+    if _interaction_active(window):
+        # User interaction owns the GUI thread and the worker lanes.  The
+        # walk resumes from the next flush/completion invitation; speculation
+        # must never add a millisecond to a scrub or drag.
+        return _record(window, (MontagePrefetchDecision(None, None, "blocked_interaction", "viewport interaction active"),))
     if _busy(window, session):
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_visible_busy", "visible work is busy"),))
     if not window._montage_session_is_current(session):
@@ -160,12 +165,21 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             # Walk continuation (ADR 0050 background preview walk): flush
             # paths only invite prefetch while something is happening, so at
             # true idle the walk stalled after one batch.  Each completion
-            # invites the next batch instead — event-driven, no timers; it
-            # ends itself on blocked_no_tile / governor / busy, and any of
-            # those states is re-broken by the next natural flush invitation.
-            schedule_near_viewport_montage_prefetch(window, session)
+            # invites the next batch — deferred and coalesced, because the
+            # scheduling pass (candidate scan + stage probes) is synchronous
+            # GUI work that must never ride on the completion callback while
+            # the user interacts.  Ends itself on no-candidates / governor /
+            # busy; any natural flush invitation re-breaks those states.
+            _invite_walk_continuation(window)
 
         budget_bytes = int(window._memory_policy().display_cache_budget_bytes)
+        # Admission control needs the tile's actual footprint.  The display
+        # budget (gigabytes) here meant a single walk item filled the whole
+        # SPECULATIVE_RESIDENCY lane, so the visible tiles' demanded-level
+        # materializations were admission-blocked for the entire session —
+        # the stale-LOD symptom (0 materializations completed, 2.6k blocked).
+        tile_h, tile_w = (int(value) for value in tuple(session.plan.tile_shape))
+        estimated_tile_bytes = max(1, tile_h * tile_w * 16)  # complex128 worst case
         started = window.win.prefetch_evaluation_controller.start_prefetch(
             evaluate,
             on_done=done,
@@ -182,7 +196,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                 ),
                 supersession_key=("montage-tile-prefetch", session.key, int(tile.montage_index)),
                 supersession_value=tile_key,
-                estimated_bytes=budget_bytes,
+                estimated_bytes=estimated_tile_bytes,
                 expected_value=1.0,
                 reusable_output=True,
             ),
@@ -243,6 +257,15 @@ def _stage_for_tile(window, session, tile):
     return value, candidate, plan
 
 
+def _interaction_active(window) -> bool:
+    try:
+        from arrayscope.window.frame_renderer import _viewport_interaction_active
+
+        return bool(_viewport_interaction_active(window))
+    except Exception:
+        return False
+
+
 def _busy(window, session=None) -> bool:
     if session is not None and (
         getattr(session, "pending_tiles", None)
@@ -251,6 +274,9 @@ def _busy(window, session=None) -> bool:
         or getattr(session, "pending_completed_tiles", None)
         or getattr(session, "dirty_payloads", None)
         or getattr(session, "pending_removals", None)
+        # Demanded-but-missing LOD levels of *visible* tiles outrank the
+        # walk for lane capacity: speculation waits until they are drained.
+        or getattr(session, "pending_lod_requests", None)
         or session.stage_fan_in.active_requests
         or session.stage_fan_in.waiting_tiles
     ):
@@ -309,6 +335,37 @@ def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -
         )
     except Exception:
         return
+
+
+def _invite_walk_continuation(window, *, delay_ms: int = 80) -> None:
+    """Defer-and-coalesce the next walk batch off the completion callback.
+
+    One pending invitation at a time; it re-resolves the current session at
+    fire time so a scrub that replaced the session never revives a stale
+    walk.  The delay yields the GUI thread to any queued input events first.
+    """
+
+    if getattr(window, "_montage_walk_invite_pending", False):
+        return
+    window._montage_walk_invite_pending = True
+
+    def fire():
+        window._montage_walk_invite_pending = False
+        if _interaction_active(window):
+            return
+        current = getattr(window, "_montage_session", None)
+        if current is None or not window._montage_session_is_current(current):
+            return
+        schedule_near_viewport_montage_prefetch(window, current)
+
+    try:
+        from pyqtgraph.Qt import QtCore
+
+        # Receiver-scoped: the invitation dies with the window instead of
+        # firing into a torn-down renderer (architecture guard).
+        QtCore.QTimer.singleShot(int(delay_ms), window.win, fire)
+    except Exception:
+        window._montage_walk_invite_pending = False
 
 
 def _preview_cache_active(session) -> bool:

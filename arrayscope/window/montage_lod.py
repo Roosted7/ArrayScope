@@ -785,6 +785,34 @@ def _request_chain(request) -> tuple:
     return ((key, reduce_factor_xy),)
 
 
+def release_session_claims(session) -> int:
+    """Release every pyramid claim still held by a session's undrained requests.
+
+    A session can die between planning (claims taken in refresh/build) and
+    scheduling (claims handed to work items) — slice scrubbing replaces
+    sessions faster than the drain runs.  The pyramid is renderer-shared and
+    its keys are semantic, so a claim leaked by a dead session blocks the
+    SAME level when the user scrubs back to that slice: ``begin_pending``
+    never succeeds again and the tile presents the wrong LOD forever.  Call
+    on every session replacement; in-flight scheduled items are not touched
+    (their own release paths balance them).
+    """
+
+    if session is None:
+        return 0
+    requests = list(getattr(session, "pending_lod_requests", ()) or ())
+    if not requests:
+        return 0
+    pyramid = getattr(session, "lod_pyramid", None)
+    released = 0
+    if pyramid is not None:
+        for request in requests:
+            _release_chain_claims(pyramid, _request_chain(request))
+            released += 1
+    session.pending_lod_requests.clear()
+    return released
+
+
 # --------------------------------------------------------------------------
 # Renderer-side: policy resolution, caches, scheduling
 # --------------------------------------------------------------------------
