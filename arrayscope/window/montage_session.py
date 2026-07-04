@@ -19,7 +19,7 @@ from arrayscope.display.lod import (
     resident_lod_policy,
     select_lod_demand,
 )
-from arrayscope.display.pyramid import PyramidLevelKey
+from arrayscope.display.pyramid import PyramidLevelKey, reduce_box_mean
 from arrayscope.display.montage import (
     MontagePlan,
     MontageTile,
@@ -626,6 +626,23 @@ class MontageRenderSession:
     def _resident_lod_active(self) -> bool:
         return str(self.lod_policy_mode) == LOD_POLICY_RESIDENT and self.lod_pyramid is not None
 
+    def ingest_lod_demand(self) -> object | None:
+        """Demand snapshot for worker-side reduce-at-ingest (ADR 0050).
+
+        When the resident policy currently wants a reduced level, a cold
+        tile's worker should produce that level together with the native
+        result so the first upload is the reduced payload.  The returned
+        ``LodDemand`` is immutable; a demand change between scheduling and
+        completion is corrected by the ordinary streaming path.
+        """
+
+        if not self._resident_lod_active():
+            return None
+        demand = self.lod_policy_decision.demand
+        if int(demand.desired_level) <= 0:
+            return None
+        return demand
+
     def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
         """Levels resident for every rendered tile (session-wide decision input).
 
@@ -655,26 +672,10 @@ class MontageRenderSession:
         return tuple(resident)
 
     def _pyramid_key_for(self, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
-        source, _histogram, texture_kind = self._texture_source_for(rendered)
-        factor_x, factor_y = factor_xy_for_level(demand, int(level))
-        component = "scalar" if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
-        return PyramidLevelKey(
-            source_id=("montage-tile", _array_content_token(source)),
-            tile_id=int(rendered.tile.source_index),
-            component=component,
-            level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
-        )
+        return pyramid_key_for_rendered(rendered, demand=demand, level=level)
 
     def _texture_source_for(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
-        texture_kind = getattr(rendered, "texture_kind", None)
-        if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
-            texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
-        if texture_kind == TexturePlaneKind.COMPLEX_RG32F and getattr(rendered, "semantic_data", None) is not None:
-            source = np.asarray(rendered.semantic_data)
-        else:
-            source = np.asarray(rendered.image)
-        histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
-        return source, histogram, texture_kind
+        return texture_source_for_rendered(rendered)
 
     def _resident_texture_for_rendered_tile(
         self,
@@ -1364,6 +1365,66 @@ def _array_content_token(array) -> tuple[object, ...]:
     shape = tuple(int(value) for value in values.shape)
     dtype = values.dtype.str
     return shape, dtype, id(values)
+
+
+def texture_source_for_rendered(rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
+    """Return the texture source plane, histogram, and plane kind of a tile."""
+
+    texture_kind = getattr(rendered, "texture_kind", None)
+    if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
+        texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
+    if texture_kind == TexturePlaneKind.COMPLEX_RG32F and getattr(rendered, "semantic_data", None) is not None:
+        source = np.asarray(rendered.semantic_data)
+    else:
+        source = np.asarray(rendered.image)
+    histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
+    return source, histogram, texture_kind
+
+
+def pyramid_key_for_rendered(rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
+    """Pyramid identity of one level of a rendered tile (ADR 0050 key contract)."""
+
+    source, _histogram, texture_kind = texture_source_for_rendered(rendered)
+    factor_x, factor_y = factor_xy_for_level(demand, int(level))
+    component = "scalar" if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
+    return PyramidLevelKey(
+        source_id=("montage-tile", _array_content_token(source)),
+        tile_id=int(rendered.tile.source_index),
+        component=component,
+        level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
+    )
+
+
+def admit_ingest_reduction(pyramid, demand, rendered: RenderedTile) -> bool:
+    """Reduce a freshly computed tile to the demanded level, worker-side.
+
+    Runs on the evaluation worker as part of tile materialization (ADR 0041
+    gate 1 forbids commit-callback reduction, not worker reduction), so a cold
+    tile's first presentation can select the reduced level and never upload a
+    native texture.  Exact/semantic/histogram sources stay native; only the
+    display texture plane is reduced.  The singleflight claim keeps this from
+    duplicating a concurrently scheduled post-hoc materialization.
+
+    Returns True when this call admitted the level into the pyramid cache.
+    """
+
+    if pyramid is None or demand is None:
+        return False
+    level = int(demand.desired_level)
+    if level <= 0:
+        return False
+    key = pyramid_key_for_rendered(rendered, demand=demand, level=level)
+    if not pyramid.begin_pending(key):
+        return False
+    try:
+        source, _histogram, _texture_kind = texture_source_for_rendered(rendered)
+        pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
+    except Exception:
+        # LOD is a display optimization: a failed reduction must not fail the
+        # tile result.  Release the claim so a later commit can retry.
+        pyramid.end_pending(key)
+        return False
+    return True
 
 
 def _view_range_cache_key(view_range) -> tuple[tuple[float, ...], ...] | tuple[object, ...]:

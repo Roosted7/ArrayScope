@@ -76,7 +76,10 @@ from arrayscope.window.montage_viewport import (
     retarget_montage_viewport_plan,
     square_montage_fit_view_range,
 )
-from arrayscope.window.montage_session import MontageRenderSession
+from arrayscope.window.montage_session import (
+    MontageRenderSession,
+    admit_ingest_reduction as _admit_ingest_reduction,
+)
 from arrayscope.window.render_contract import (
     montage_work_token as _montage_work_token,
     montage_work_token_is_current as _montage_work_token_is_current,
@@ -1719,8 +1722,24 @@ class FrameRenderMixin:
                     self.win._update_operation_dock()
             return False
 
+        # Reduce-at-ingest (ADR 0050): capture the demand as an immutable
+        # snapshot now; the worker reduces the finished tile to that level so
+        # its first presentation never uploads a native texture.  A demand
+        # change while the tile is in flight is corrected by the ordinary
+        # streaming materialization path, not by special cases here.
+        ingest_demand = session.ingest_lod_demand()
+        ingest_pyramid = getattr(session, "lod_pyramid", None) if ingest_demand is not None else None
+        ingest_state = {"admitted": False}
+
         def evaluate(token):
-            return self._evaluate_montage_tile_snapshot(session, tile, token)
+            result = self._evaluate_montage_tile_snapshot(session, tile, token)
+            if ingest_pyramid is not None and getattr(result, "value", None) is not None:
+                ingest_state["admitted"] = _admit_ingest_reduction(
+                    ingest_pyramid,
+                    ingest_demand,
+                    _rendered_tile_from_evaluation_result(tile, result),
+                )
+            return result
 
         session_id = int(session.session_id)
         montage_axis = session.montage_axis
@@ -1729,6 +1748,10 @@ class FrameRenderMixin:
         shader_display = bool(getattr(session, "shader_display", False))
 
         def done(result):
+            if ingest_state["admitted"]:
+                self._montage_lod_ingest_reductions = (
+                    int(getattr(self, "_montage_lod_ingest_reductions", 0) or 0) + 1
+                )
             self._on_montage_tile_done(
                 session_id,
                 tile,

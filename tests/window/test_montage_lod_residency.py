@@ -7,7 +7,7 @@ import numpy as np
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
-from arrayscope.window.montage_session import MontageRenderSession
+from arrayscope.window.montage_session import MontageRenderSession, admit_ingest_reduction
 
 TILE = 64
 # Two 64x64 tiles seen through a viewport that shows four source texels per
@@ -233,3 +233,97 @@ def test_no_reduction_work_happens_inside_presentation_builds(monkeypatch):
 
     session.build_tile_presentation({})
     session.snapshot_display_tile_payloads({})
+
+
+def _cold_session(*, pyramid, count=2):
+    """A resident-mode session whose tiles have not been computed yet."""
+
+    session = _session(pyramid=pyramid, count=count)
+    session.rendered_tiles.clear()
+    session.display_tile_payloads.clear()
+    session.dirty_payloads.clear()
+    return session
+
+
+def _rendered(tile, offset: float = 0.0) -> RenderedTile:
+    image = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE) + offset
+    return RenderedTile(
+        tile=tile,
+        image=image,
+        histogram_data=image,
+        eval_ms=0.0,
+        slab_shape=image.shape,
+        slab_nbytes=image.nbytes,
+    )
+
+
+def test_worker_ingest_reduction_presents_demanded_level_first():
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    demand = session.ingest_lod_demand()
+    assert demand is not None
+    assert demand.desired_level == 2
+
+    # Worker side: the native tile is computed, then reduced and admitted as
+    # part of the same materialization, before the result reaches the GUI.
+    rendered = _rendered(session.plan.tiles[0])
+    assert admit_ingest_reduction(pyramid, demand, rendered)
+    assert len(pyramid) == 1
+    assert pyramid.pending_count == 0
+    # Singleflight: the level is resident, a second admission is a no-op.
+    assert not admit_ingest_reduction(pyramid, demand, rendered)
+
+    # GUI side: the first presentation build selects the reduced level.  No
+    # native payload is ever emitted for the tile and nothing is re-requested.
+    session.mark_loaded(rendered)
+    _state, delta = session.build_tile_presentation({})
+    payload = delta.upserts[0]
+    assert payload.lod.level == 2
+    assert payload.lod.factor == 4
+    assert payload.texture_data.shape[:2] == (TILE // 4, TILE // 4)
+    # Exact/semantic/histogram sources stay native.
+    assert payload.image.shape[:2] == (TILE, TILE)
+    assert payload.histogram_data.shape[:2] == (TILE, TILE)
+    assert session.pending_lod_requests == []
+
+
+def test_native_only_and_native_scale_sessions_have_no_ingest_demand():
+    assert _session(mode=LOD_POLICY_NATIVE_ONLY, pyramid=None).ingest_lod_demand() is None
+    zoomed_in = _session(
+        pyramid=PyramidCache(max_bytes=1 << 20),
+        view_range=((0.0, float(2 * TILE)), (0.0, float(TILE))),
+    )
+    assert zoomed_in.ingest_lod_demand() is None
+
+
+def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    demand = session.ingest_lod_demand()
+    assert demand.desired_level == 2
+
+    # The viewport changes while the tile is in flight: level 1 is now wanted
+    # (three source texels per screen pixel).
+    session.view_range = ((0.0, 3.0 * 2 * TILE), (0.0, 3.0 * TILE))
+
+    # The worker still completes against its scheduling-time snapshot.
+    rendered = _rendered(session.plan.tiles[0])
+    assert admit_ingest_reduction(pyramid, demand, rendered)
+
+    # No special cases: presentation never over-reduces with the stale level;
+    # it falls back and the ordinary streaming path materializes level 1.
+    session.mark_loaded(rendered)
+    _state, delta = session.build_tile_presentation({})
+    assert session.lod_policy_decision.demand.desired_level == 1
+    assert delta.upserts[0].lod.level == 0
+    assert len(session.pending_lod_requests) == 1
+    tile_number, key, _source = session.pending_lod_requests[0]
+    assert tile_number == 0
+    assert key.factor_xy == (2, 2)
+
+    request = session.pending_lod_requests.pop()
+    _materialize(session, request)
+    session.dirty_payloads[0] = None
+    _state, delta = session.build_tile_presentation({})
+    assert delta.upserts[0].lod.level == 1
+    assert delta.upserts[0].texture_data.shape[:2] == (TILE // 2, TILE // 2)
