@@ -780,6 +780,20 @@ class MontageRenderSession:
         for tile_number in sorted(self.visible_tile_numbers):
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is None:
+                if int(tile_number) not in self.display_tile_payloads:
+                    # Unrendered tile revealed by the camera: if any level is
+                    # resident the next build can floor on it — worth a
+                    # commit even though no tile result arrived (ADR 0050).
+                    tile = next(
+                        (t for t in tuple(self.visible_tiles) if int(t.montage_index) == int(tile_number)),
+                        None,
+                    )
+                    if tile is not None:
+                        semantic_id = self.tile_semantic_source_id(int(tile.source_index))
+                        for component in self._floor_component_tags():
+                            if pyramid.resident_keys_for(semantic_id, int(tile.source_index), component):
+                                commit_needed = True
+                                break
                 continue
             payload = self.display_tile_payloads.get(int(tile_number))
             presented_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
@@ -910,6 +924,82 @@ class MontageRenderSession:
         self.lod_cross_level_reductions += 1
         return LodMaterializationRequest(tile_number, key, best[1], best[2], cross_level=True)
 
+    def _floor_component_tags(self) -> tuple[str, ...]:
+        """Component tags a floor probe may find for this session's tiles."""
+
+        if bool(getattr(self, "shader_display", False)):
+            return (str(TexturePlaneKind.COMPLEX_RG32F.value), "scalar")
+        return ("scalar", str(TexturePlaneKind.COMPLEX_RG32F.value))
+
+    def _ensure_floor_payloads(self, tile_numbers) -> None:
+        """Present the best resident pyramid level for unrendered planned tiles.
+
+        The floor invariant (ADR 0050): a planned tile with any resident
+        level never shows a placeholder.  Floor payloads are quality
+        "preview" — they draw pixels but refuse semantic reads — and the
+        ordinary evaluation path replaces them with exact payloads as tile
+        results arrive.  Dictionary probes only; no reduction, no copies.
+        """
+
+        if not tile_numbers or not self._resident_lod_active():
+            return
+        pyramid = self.lod_pyramid
+        if pyramid is None:
+            return
+        demand = self.lod_policy_decision.demand
+        desired = int(demand.desired_level)
+        by_number = {
+            int(tile.montage_index): tile
+            for tile in tuple(self.visible_tiles)
+        }
+        for tile_number in sorted(int(number) for number in tile_numbers):
+            if tile_number in self.display_tile_payloads:
+                continue
+            tile = by_number.get(tile_number)
+            if tile is None:
+                continue
+            source_index = int(tile.source_index)
+            semantic_id = self.tile_semantic_source_id(source_index)
+            best = None
+            for component in self._floor_component_tags():
+                for key in pyramid.resident_keys_for(semantic_id, source_index, component):
+                    level = max(int(key.level_xy[0]), int(key.level_xy[1]))
+                    rank = (abs(level - desired), level)
+                    if best is None or rank < best[0]:
+                        best = (rank, key, level)
+                if best is not None:
+                    break
+            if best is None:
+                continue
+            _rank, key, level = best
+            plane = pyramid.peek(key)
+            if plane is None:
+                continue
+            factor_x = 1 << int(key.level_xy[0])
+            factor_y = 1 << int(key.level_xy[1])
+            tile_shape = tuple(int(value) for value in self.plan.tile_shape)
+            lod = LodInfo(
+                level=level,
+                factor=max(factor_x, factor_y),
+                source_shape=tile_shape,
+                texture_shape=tuple(int(value) for value in np.shape(plane)[:2]),
+                gutter=0,
+            )
+            payload = DisplayTilePayload(
+                tile_number=tile_number,
+                source_index=source_index,
+                image=np.asarray(plane),
+                histogram_data=None,
+                source_id=(*semantic_id, "floor", str(key.component), key.level_xy),
+                texture_data=np.asarray(plane),
+                texture_kind=None if key.component == "scalar" else TexturePlaneKind(key.component),
+                lod=lod,
+                quality="preview",
+            )
+            self.display_tile_payloads[tile_number] = payload
+            self.pending_payload_upserts.setdefault(tile_number, None)
+            self.lod_floor_presentations = int(getattr(self, "lod_floor_presentations", 0) or 0) + 1
+
     def _texture_source_for(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
         return texture_source_for_rendered(rendered)
 
@@ -1000,8 +1090,24 @@ class MontageRenderSession:
         previous_state = self.tile_presentation_state
         previous_payloads = dict(previous_state.payloads)
         loaded = {int(index) for index in self.rendered_tiles}
+        planned_numbers = {
+            int(tile.montage_index)
+            for tile in tuple(self.visible_tiles)
+            if int(tile.montage_index) not in self.skipped_tiles
+        }
         for stale in tuple(self.display_tile_payloads):
             if int(stale) not in loaded:
+                payload = self.display_tile_payloads.get(int(stale))
+                if (
+                    payload is not None
+                    and str(getattr(payload, "quality", "exact")) == "preview"
+                    and int(stale) in planned_numbers
+                ):
+                    # Presentation floor (ADR 0050): a planned tile presenting
+                    # a resident coarser level keeps it until its exact
+                    # replacement is acknowledged; only leaving the plan
+                    # removes it.
+                    continue
                 self.display_tile_payloads.pop(int(stale), None)
                 self.pending_removals.add(int(stale))
                 self.dirty_payloads.pop(int(stale), None)
@@ -1042,6 +1148,7 @@ class MontageRenderSession:
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is not None:
                 self._ensure_display_tile_payload(int(tile_number), rendered, source_ids, lod_factor=lod_factor)
+        self._ensure_floor_payloads(planned_numbers - set(current_loaded))
         current_payloads = self.display_tile_payloads
         valid_tile_count = len(tuple(getattr(self.plan, "tiles", ()) or ()))
         removals = tuple(

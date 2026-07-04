@@ -712,3 +712,63 @@ def test_uneven_tiles_fall_back_to_native_reduction_source():
         assert request.cross_level is False
         assert request.source.shape[:2] == (tile, tile)
         assert request.reduce_factor_xy == request.key.factor_xy
+
+
+def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholder():
+    """ADR 0050 floor invariant: any resident level beats a placeholder."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+
+    # Tile 1 was materialized at level 2 in an earlier pass (semantic key),
+    # then its rendered object was dropped — e.g. a pan re-entered the tile.
+    rendered = session.rendered_tiles[1]
+    key = pyramid_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+    del session.rendered_tiles[1]
+    session.dirty_payloads.pop(1, None)
+
+    _state, delta = session.build_tile_presentation({})
+
+    payload = delta.upserts.get(1) or session.display_tile_payloads.get(1)
+    assert payload is not None, "unrendered tile with a resident level must present it"
+    assert payload.quality == "preview"
+    assert payload.lod.level == 2
+    assert payload.texture_data.shape[:2] == (TILE // 4, TILE // 4)
+
+    # Preview payloads never provide semantic values.
+    from arrayscope.display.model.frame import TiledValueSource
+
+    source = TiledValueSource(payloads={1: payload})
+    class _Mapping:
+        tile_number = 1
+        local_y = 0
+        local_x = 0
+    assert source.value_at(_Mapping()) is None
+
+    # The floor payload survives subsequent builds while the tile stays
+    # planned-but-unrendered (no flicker back to placeholder).
+    _state, delta2 = session.build_tile_presentation({})
+    assert 1 in session.display_tile_payloads
+    assert 1 not in delta2.removals if hasattr(delta2, "removals") else True
+
+    # When the exact result arrives, it replaces the preview.
+    image = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE) + 1
+    session.rendered_tiles[1] = RenderedTile(
+        tile=session.plan.tiles[1],
+        image=image,
+        histogram_data=image,
+        eval_ms=0.0,
+        slab_shape=image.shape,
+        slab_nbytes=image.nbytes,
+    )
+    session.dirty_payloads[1] = None
+    _state, delta3 = session.build_tile_presentation({})
+    replaced = session.display_tile_payloads[1]
+    assert replaced.quality == "exact"

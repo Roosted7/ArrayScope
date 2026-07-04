@@ -114,6 +114,7 @@ class PyramidCache:
     def __init__(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
         self._cache = BoundedCache(max_bytes=max_bytes, max_entries=max_entries)
         self._pending: set[PyramidLevelKey] = set()
+        self._by_source: dict[tuple[object, int, str], set[PyramidLevelKey]] = {}
         self._lock = RLock()
 
     def lookup(self, key: PyramidLevelKey):
@@ -133,8 +134,34 @@ class PyramidCache:
         with self._lock:
             if self._cache.would_fit(int(values.nbytes)):
                 self._cache.put(key, values, nbytes=int(values.nbytes))
+                self._by_source.setdefault(self._source_group(key), set()).add(key)
             self._pending.discard(key)
         return values
+
+    @staticmethod
+    def _source_group(key: PyramidLevelKey) -> tuple[object, int, str]:
+        return (key.source_id, int(key.tile_id), str(key.component))
+
+    def resident_keys_for(self, source_id, tile_id, component) -> tuple[PyramidLevelKey, ...]:
+        """All currently cached level keys for one semantic tile.
+
+        The index is pruned lazily against the bounded cache, so evicted
+        levels disappear on the next enumeration; no eviction hook is
+        required and the GUI-thread cost stays a few dictionary probes.
+        """
+
+        group = (source_id, int(tile_id), str(component))
+        with self._lock:
+            keys = self._by_source.get(group)
+            if not keys:
+                return ()
+            live = tuple(key for key in keys if self._cache.peek(key) is not None)
+            if len(live) != len(keys):
+                if live:
+                    self._by_source[group] = set(live)
+                else:
+                    self._by_source.pop(group, None)
+            return live
 
     def begin_pending(self, key: PyramidLevelKey) -> bool:
         """Claim a materialization request; False when already cached/claimed."""
