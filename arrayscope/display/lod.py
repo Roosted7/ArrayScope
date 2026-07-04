@@ -164,6 +164,108 @@ def native_lod_policy(
     )
 
 
+LOD_POLICY_RESIDENT = "resident"
+LOD_REASON_RESIDENT_MATCH = "demanded LOD level is resident and presented"
+LOD_REASON_RESIDENT_FINER = "finer resident level presented while the demanded level materializes"
+LOD_REASON_RESIDENT_COARSER = "coarser resident level presented while the demanded level materializes"
+
+
+def factor_xy_for_level(demand: LodDemand, level: int) -> tuple[int, int]:
+    """Return per-axis reduction factors for applying ``level`` to ``demand``.
+
+    Anisotropy from the demand is preserved and shifted with the level so a
+    coarser or finer applied level keeps the demanded aspect treatment.  Each
+    axis is clamped to ``[1, 2**level]`` and the dominant axis always equals
+    ``2**level``.
+    """
+
+    level = max(0, int(level))
+    if level == 0:
+        return (1, 1)
+    if level == int(demand.desired_level):
+        return demand.desired_factor_xy
+    factor_cap = 2 ** level
+    shift = level - int(demand.desired_level)
+    factors = []
+    for axis_factor in demand.desired_factor_xy:
+        axis_factor = max(1, int(axis_factor))
+        if shift >= 0:
+            scaled = axis_factor << shift
+        else:
+            scaled = max(1, axis_factor >> (-shift))
+        factors.append(max(1, min(factor_cap, int(scaled))))
+    factor_x, factor_y = factors
+    if max(factor_x, factor_y) != factor_cap:
+        if factor_x >= factor_y:
+            factor_x = factor_cap
+        else:
+            factor_y = factor_cap
+    return (factor_x, factor_y)
+
+
+def choose_resident_level(demand: LodDemand, resident_levels) -> int:
+    """Return the resident level closest to the demand, never over-reducing.
+
+    Level 0 (native) is implicitly resident.  Candidates are resident levels
+    no coarser than the coarsest acceptable level; among them the level
+    closest to the desired level wins, preferring finer on ties.
+    """
+
+    resident = {0}
+    resident.update(int(level) for level in tuple(resident_levels or ()) if int(level) >= 0)
+    coarsest_acceptable = max(demand.acceptable_levels)
+    candidates = [level for level in resident if level <= coarsest_acceptable]
+    desired = int(demand.desired_level)
+    return min(candidates, key=lambda level: (abs(level - desired), level))
+
+
+def resident_lod_policy(
+    view_range,
+    viewport_shape: tuple[int, int],
+    tile_shape: tuple[int, int],
+    *,
+    previous_factor: int | None = None,
+    resident_levels=(),
+) -> LodPolicyDecision:
+    """Apply the closest resident level to the demand without blocking.
+
+    The applied level is always materialized-and-resident (level 0 counts as
+    implicitly resident), never coarser than the coarsest acceptable level,
+    and prefers finer over coarser when equidistant from the demand.
+    """
+
+    demand = select_lod_demand(
+        view_range,
+        viewport_shape,
+        tile_shape,
+        previous_factor=previous_factor,
+    )
+    if demand.reason == LOD_REASON_INVALID_VIEW:
+        return LodPolicyDecision(
+            demand=demand,
+            applied_level=0,
+            applied_factor=1,
+            applied_factor_xy=(1, 1),
+            policy=LOD_POLICY_RESIDENT,
+            reason=LOD_REASON_INVALID_VIEW,
+        )
+    applied_level = choose_resident_level(demand, resident_levels)
+    if applied_level == demand.desired_level:
+        reason = LOD_REASON_RESIDENT_MATCH if applied_level > 0 else LOD_REASON_NATIVE_SCALE
+    elif applied_level < demand.desired_level:
+        reason = LOD_REASON_RESIDENT_FINER
+    else:
+        reason = LOD_REASON_RESIDENT_COARSER
+    return LodPolicyDecision(
+        demand=demand,
+        applied_level=applied_level,
+        applied_factor=2 ** applied_level,
+        applied_factor_xy=factor_xy_for_level(demand, applied_level),
+        policy=LOD_POLICY_RESIDENT,
+        reason=reason,
+    )
+
+
 def inner_uv_for_gutter(texture_shape: tuple[int, int], gutter: int = 1) -> tuple[float, float, float, float]:
     height, width = _shape2(texture_shape)
     gutter = max(0, int(gutter))
@@ -265,7 +367,14 @@ __all__ = [
     "LOD_REASON_NATIVE_SCALE",
     "LOD_REASON_ASYNC_RESIDENCY_REQUIRED",
     "LOD_REASON_INVALID_VIEW",
+    "LOD_POLICY_RESIDENT",
+    "LOD_REASON_RESIDENT_MATCH",
+    "LOD_REASON_RESIDENT_FINER",
+    "LOD_REASON_RESIDENT_COARSER",
     "select_lod_demand",
     "native_lod_policy",
+    "resident_lod_policy",
+    "choose_resident_level",
+    "factor_xy_for_level",
     "inner_uv_for_gutter",
 ]
