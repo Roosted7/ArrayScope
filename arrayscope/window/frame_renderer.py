@@ -379,7 +379,10 @@ class FrameRenderMixin:
             memory_policy=self._memory_policy() if hasattr(self, "_memory_policy") else None,
             montage_plan=viewport_plan.plan,
         )
-        if presentation_changed:
+        lod_swap_ready = session.refresh_lod_for_viewport()
+        if getattr(session, "pending_lod_requests", None):
+            self._schedule_montage_lod_materializations(session)
+        if presentation_changed or lod_swap_ready:
             self._commit_montage_resize_presentation_retarget(session)
         return True
 
@@ -767,10 +770,17 @@ class FrameRenderMixin:
             memory_policy=memory_policy,
             montage_plan=viewport_plan.plan,
         )
+        # Camera-only changes must retarget the LOD decision immediately:
+        # already-resident levels swap on the next commit and missing levels
+        # are scheduled now, superseded by the new viewport revision (ADR
+        # 0050).  Demand math only; reduction stays on worker lanes.
+        lod_swap_ready = session.refresh_lod_for_viewport()
+        if getattr(session, "pending_lod_requests", None):
+            self._schedule_montage_lod_materializations(session)
         additions = viewport_plan.prioritize_tiles(additions)
         self._prune_stale_montage_tile_work(session)
         if not additions:
-            if presentation_changed:
+            if presentation_changed or lod_swap_ready:
                 self._schedule_montage_presentation_commit(session, force=False)
             if session.pending_tiles and not _viewport_interaction_active(self):
                 self._schedule_montage_tiles(session)
@@ -819,7 +829,7 @@ class FrameRenderMixin:
 
         self._montage_cached_tiles_last_session = len(cached_tiles)
         self._montage_missing_tiles_last_session = len(missing_tiles)
-        if presentation_changed or cached_tiles:
+        if presentation_changed or cached_tiles or lod_swap_ready:
             self._schedule_montage_presentation_commit(session, force=False)
         if cached_tiles:
             self._schedule_montage_cached_level_stats(session)

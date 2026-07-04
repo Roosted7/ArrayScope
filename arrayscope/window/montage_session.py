@@ -201,6 +201,7 @@ class MontageRenderSession:
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
     _last_viewport_identity: tuple[object, ...] | None = None
+    _lod_refresh_viewport_identity: tuple[object, ...] | None = None
     _near_tile_numbers_cache_key: tuple[object, ...] | None = None
     _priority_context: TilePriorityContext | None = None
     _near_tile_numbers_cache: tuple[int, ...] = ()
@@ -681,6 +682,66 @@ class MontageRenderSession:
         if int(demand.desired_level) <= 0:
             return None
         return demand
+
+    def refresh_lod_for_viewport(self) -> bool:
+        """Re-evaluate LOD demand after a camera-only retarget (ADR 0050).
+
+        Camera changes never restart evaluation, but they do change which
+        pyramid level visible tiles should present.  Demand selection is
+        otherwise refreshed only inside presentation builds, so a zoom that
+        leaves the active tile set and payload identities untouched would
+        keep the old level on screen until an unrelated pan or slice change
+        dirtied a payload.  This recomputes the decision from the current
+        ``view_range``/``viewport_shape`` (demand math plus pyramid peeks;
+        never reduction or other bulk work), queues singleflight
+        materializations for the demanded-but-missing level of visible
+        rendered tiles, and dirties tiles whose closest resident level
+        differs from the payload they currently present so the next commit
+        swaps them by payload identity alone.
+
+        Returns True when at least one visible tile can present a different
+        resident level right now, i.e. a presentation commit is worthwhile
+        even though no tile result arrived.
+        """
+
+        if not self._resident_lod_active():
+            return False
+        viewport_identity = _viewport_identity(self.view_range, self.viewport_shape)
+        if viewport_identity != self._lod_refresh_viewport_identity:
+            self._lod_refresh_viewport_identity = viewport_identity
+            # Stale zoom targets must cancel: scheduled materializations are
+            # superseded per tile by (session, viewport revision), so a new
+            # viewport advances the revision before the next build does.
+            self.viewport_revision += 1
+        self._selected_lod_factor()
+        demand = self.lod_policy_decision.demand
+        pyramid = self.lod_pyramid
+        desired = int(demand.desired_level)
+        commit_needed = False
+        for tile_number in sorted(self.visible_tile_numbers):
+            rendered = self.rendered_tiles.get(int(tile_number))
+            if rendered is None:
+                continue
+            resident_levels = tuple(
+                int(level)
+                for level in demand.acceptable_levels
+                if int(level) > 0
+                and pyramid.peek(self._pyramid_key_for(rendered, demand=demand, level=int(level))) is not None
+            )
+            if desired > 0 and desired not in resident_levels:
+                desired_key = self._pyramid_key_for(rendered, demand=demand, level=desired)
+                if pyramid.begin_pending(desired_key):
+                    source, _histogram, _texture_kind = self._texture_source_for(rendered)
+                    self.pending_lod_requests.append((int(tile_number), desired_key, source))
+            payload = self.display_tile_payloads.get(int(tile_number))
+            if payload is None:
+                continue
+            applied = int(choose_resident_level(demand, resident_levels))
+            presented_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+            if presented_level != applied:
+                self.dirty_payloads[int(tile_number)] = None
+                commit_needed = True
+        return commit_needed
 
     def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
         """Levels resident for every rendered tile (session-wide decision input).

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT
+from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, select_lod_demand
 from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
-from arrayscope.window.montage_session import MontageRenderSession, admit_ingest_reduction
+from arrayscope.window.montage_session import (
+    MontageRenderSession,
+    admit_ingest_reduction,
+    pyramid_key_for_rendered,
+)
 
 TILE = 64
 # Two 64x64 tiles seen through a viewport that shows four source texels per
@@ -379,3 +383,94 @@ def test_presented_lod_summary_tie_prefers_the_finer_level():
     _acknowledge(session, delta)
 
     assert session.presented_lod_summary() == (0, 1, (1, 1))
+
+
+ZOOMED_IN_RANGE = ((0.0, float(2 * TILE)), (0.0, float(TILE)))
+
+
+def _present_native(session):
+    """Build, acknowledge, and mark presented so tiles own native payloads."""
+
+    _state, delta = session.build_tile_presentation({})
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    session.pending_lod_requests.clear()
+    return delta
+
+
+def _admit_zoomed_out_levels(session, level=2):
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    for rendered in session.rendered_tiles.values():
+        key = pyramid_key_for_rendered(rendered, demand=demand, level=level)
+        session.lod_pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+
+
+def test_camera_only_retarget_swaps_to_cached_level_without_pan_or_slice_change():
+    """ADR 0050 defect: zoom must retarget LOD without any payload dirtying."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
+    _present_native(session)
+    assert all(payload.lod.level == 0 for payload in session.tile_presentation_state.payloads.values())
+    _admit_zoomed_out_levels(session)
+
+    # Camera-only zoom out: retarget alone, no pan, no dimension scroll, no
+    # tile results.  The demanded level is already resident, so the refresh
+    # must request a presentation commit that swaps payload identities.
+    session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
+    revision_before = int(session.viewport_revision)
+    swap_ready = session.refresh_lod_for_viewport()
+
+    assert swap_ready is True
+    assert session.pending_lod_requests == [], "cached levels must not be re-requested"
+    assert sorted(session.dirty_payloads) == [0, 1]
+
+    hits_before = pyramid.hits
+    _state, delta = session.build_tile_presentation({})
+    assert set(delta.upserts) == {0, 1}
+    for payload in delta.upserts.values():
+        assert payload.lod.level == 2
+        assert payload.texture_data.shape[:2] == (TILE // 4, TILE // 4)
+    assert pyramid.hits > hits_before
+    # No removals: the swap replaces mappings, it never un-presents a tile.
+    assert delta.removals == ()
+
+    # A second refresh with the same viewport is a no-op (no revision creep,
+    # no commit request, no dirty tiles).
+    assert session.refresh_lod_for_viewport() is False
+    assert int(session.viewport_revision) >= revision_before
+
+
+def test_camera_only_retarget_requests_missing_levels_with_new_viewport_revision():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
+    _present_native(session)
+    revision_before = int(session.viewport_revision)
+
+    session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
+    swap_ready = session.refresh_lod_for_viewport()
+
+    # Nothing resident yet: no swap commit, but materializations are queued
+    # under a fresh viewport revision so stale zoom targets supersede.
+    assert swap_ready is False
+    assert sorted(request[0] for request in session.pending_lod_requests) == [0, 1]
+    for _tile, key, source in session.pending_lod_requests:
+        assert key.factor_xy == (4, 4)
+        assert source.shape == (TILE, TILE)
+    assert int(session.viewport_revision) > revision_before
+    # Native payloads stay presented untouched while levels materialize.
+    assert not session.dirty_payloads
+    assert all(payload.lod.level == 0 for payload in session.tile_presentation_state.payloads.values())
+
+    # Requests are singleflighted across refreshes during a zoom gesture.
+    assert session.refresh_lod_for_viewport() is False
+    assert sorted(request[0] for request in session.pending_lod_requests) == [0, 1]
+
+
+def test_refresh_is_native_only_noop():
+    session = _session(mode=LOD_POLICY_NATIVE_ONLY, pyramid=None, view_range=ZOOMED_IN_RANGE)
+    _present_native(session)
+    session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
+    assert session.refresh_lod_for_viewport() is False
+    assert session.pending_lod_requests == []
+    assert not session.dirty_payloads
