@@ -1184,6 +1184,18 @@ class MontageRenderSession:
                 and not self._tile_matches_current_level_target(int(tile), self.level_generation.target_levels)
             )
             stale_level_tiles = self._prioritized_tile_numbers(stale_candidates)
+        # Dirty entries are commitments to present through THIS delta, and
+        # the backend only accepts payloads for the active set (ADR 0044:
+        # near-tile warmth is owned by the speculative-residency queue, not
+        # commits).  A dirty non-active tile can therefore never be
+        # acknowledged: it would re-emit an unacceptable upsert every build
+        # and hold finalization open forever.  Park it — the payload stays
+        # cached, and the resident-retarget path re-presents it by identity
+        # the moment a viewport change makes it active.
+        active_scope = set(active)
+        for tile_number in tuple(self.dirty_payloads):
+            if int(tile_number) not in active_scope:
+                self.dirty_payloads.pop(int(tile_number), None)
         dirty_payload_tiles = tuple(
             dict.fromkeys(
                 (
