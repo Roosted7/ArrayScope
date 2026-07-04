@@ -41,8 +41,13 @@ class DisplayTilePayload:
     shader_mapping: ShaderMapping | None = None
     level_data: np.ndarray | None = None
     level_stats: object | None = None
+    quality: str = "exact"
 
     def __post_init__(self) -> None:
+        quality = str(self.quality or "exact")
+        if quality not in ("exact", "preview"):
+            raise ValueError(f"display tile payload quality must be 'exact' or 'preview', got {quality!r}")
+        object.__setattr__(self, "quality", quality)
         image = np.asarray(self.image)
         if image.ndim < 2:
             raise ValueError("display tile payload image must be at least 2D")
@@ -308,6 +313,10 @@ class TiledValueSource(FrameValueSource):
         payload = self.payloads.get(int(tile_number))
         if payload is None:
             return None
+        if payload.quality != "exact":
+            # Preview payloads (coarser-LOD floor while the exact plane
+            # computes) draw pixels but never provide semantic values.
+            return None
         source = (
             payload.semantic_histogram_data
             if payload.semantic_histogram_data is not None
@@ -332,6 +341,8 @@ class TiledValueSource(FrameValueSource):
             return None
         payload = self.payloads.get(int(tile_number))
         if payload is None:
+            return None
+        if payload.quality != "exact":
             return None
         y_slice, x_slice = region
         semantic = payload.semantic_data if payload.semantic_data is not None else payload.image

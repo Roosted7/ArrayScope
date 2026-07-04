@@ -1755,6 +1755,11 @@ class FrameRenderMixin:
         # streaming materialization path, not by special cases here.
         ingest_demand = session.ingest_lod_demand()
         ingest_pyramid = getattr(session, "lod_pyramid", None) if ingest_demand is not None else None
+        # Semantic identity captured at schedule time: the worker must key the
+        # pyramid without touching the live session (ADR 0050 key contract).
+        ingest_semantic_id = (
+            session.tile_semantic_source_id(tile.source_index) if ingest_pyramid is not None else None
+        )
         ingest_state = {"admitted": False}
 
         def evaluate(token):
@@ -1764,6 +1769,7 @@ class FrameRenderMixin:
                     ingest_pyramid,
                     ingest_demand,
                     _rendered_tile_from_evaluation_result(tile, result),
+                    semantic_source_id=ingest_semantic_id,
                 )
             return result
 

@@ -273,11 +273,11 @@ def test_worker_ingest_reduction_presents_demanded_level_first():
     # Worker side: the native tile is computed, then reduced and admitted as
     # part of the same materialization, before the result reaches the GUI.
     rendered = _rendered(session.plan.tiles[0])
-    assert admit_ingest_reduction(pyramid, demand, rendered)
+    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index))
     assert len(pyramid) == 1
     assert pyramid.pending_count == 0
     # Singleflight: the level is resident, a second admission is a no-op.
-    assert not admit_ingest_reduction(pyramid, demand, rendered)
+    assert not admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index))
 
     # GUI side: the first presentation build selects the reduced level.  No
     # native payload is ever emitted for the tile and nothing is re-requested.
@@ -314,7 +314,7 @@ def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
 
     # The worker still completes against its scheduling-time snapshot.
     rendered = _rendered(session.plan.tiles[0])
-    assert admit_ingest_reduction(pyramid, demand, rendered)
+    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=("test-tile", rendered.tile.source_index))
 
     # No special cases: presentation never over-reduces with the stale level;
     # it falls back and the ordinary streaming path materializes level 1.
@@ -402,7 +402,7 @@ def _present_native(session):
 def _admit_zoomed_out_levels(session, level=2):
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
     for rendered in session.rendered_tiles.values():
-        key = pyramid_key_for_rendered(rendered, demand=demand, level=level)
+        key = pyramid_key_for_rendered(rendered, demand=demand, level=level, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index))
         session.lod_pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
 
 

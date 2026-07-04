@@ -836,8 +836,25 @@ class MontageRenderSession:
                 resident.append(int(level))
         return tuple(resident)
 
+    def tile_semantic_source_id(self, source_index) -> tuple[object, ...]:
+        """Semantic content identity of one montage tile (ADR 0050).
+
+        Owned by the session: ``self.key`` already carries the document key
+        (base identity, revision, steps), scoped view state, montage axis,
+        and presentation-affecting inputs, so equal keys mean equal source
+        texels for a given source index — across rendered-tile rebuilds and
+        session recreations alike.
+        """
+
+        return ("montage-tile", self.key, int(source_index))
+
     def _pyramid_key_for(self, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
-        return pyramid_key_for_rendered(rendered, demand=demand, level=level)
+        return pyramid_key_for_rendered(
+            rendered,
+            demand=demand,
+            level=level,
+            semantic_source_id=self.tile_semantic_source_id(rendered.tile.source_index),
+        )
 
     def _lod_materialization_request(
         self,
@@ -1603,21 +1620,31 @@ def texture_source_for_rendered(rendered: RenderedTile) -> tuple[np.ndarray, np.
     return source, histogram, texture_kind
 
 
-def pyramid_key_for_rendered(rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
-    """Pyramid identity of one level of a rendered tile (ADR 0050 key contract)."""
+def pyramid_key_for_rendered(
+    rendered: RenderedTile, *, demand, level: int, semantic_source_id
+) -> PyramidLevelKey:
+    """Pyramid identity of one level of a rendered tile (ADR 0050 key contract).
 
-    source, _histogram, texture_kind = texture_source_for_rendered(rendered)
+    ``semantic_source_id`` is the session-owned semantic identity of the tile
+    content (session key + source index).  Object identity of the source
+    array must never appear in pyramid keys: rendered tiles are rebuilt
+    freely across commits and sessions, and cached levels must stay
+    addressable without a live ``RenderedTile`` so presentation can floor on
+    resident levels for tiles that have not been rendered yet.
+    """
+
+    _source, _histogram, texture_kind = texture_source_for_rendered(rendered)
     factor_x, factor_y = factor_xy_for_level(demand, int(level))
     component = "scalar" if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
     return PyramidLevelKey(
-        source_id=("montage-tile", _array_content_token(source)),
+        source_id=semantic_source_id,
         tile_id=int(rendered.tile.source_index),
         component=component,
         level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
     )
 
 
-def admit_ingest_reduction(pyramid, demand, rendered: RenderedTile) -> bool:
+def admit_ingest_reduction(pyramid, demand, rendered: RenderedTile, *, semantic_source_id) -> bool:
     """Reduce a freshly computed tile to the demanded level, worker-side.
 
     Runs on the evaluation worker as part of tile materialization (ADR 0041
@@ -1635,7 +1662,7 @@ def admit_ingest_reduction(pyramid, demand, rendered: RenderedTile) -> bool:
     level = int(demand.desired_level)
     if level <= 0:
         return False
-    key = pyramid_key_for_rendered(rendered, demand=demand, level=level)
+    key = pyramid_key_for_rendered(rendered, demand=demand, level=level, semantic_source_id=semantic_source_id)
     if not pyramid.begin_pending(key):
         return False
     try:
