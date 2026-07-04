@@ -1227,6 +1227,15 @@ class MontageRenderSession:
             upserts[int(tile_number)] = payload
 
         resident_retarget_tiles = _resident_retarget_upsert_tiles(upserts, previous_payloads)
+        # Level swaps re-presenting a backend-acknowledged identity are
+        # residency remaps, not uploads: they bypass cold admission like
+        # other resident retargets, so a burst of swaps converges in one
+        # commit while governed upload limits stay untouched (ADR 0050).
+        resident_retarget_tiles |= {
+            int(tile)
+            for tile, payload in upserts.items()
+            if payload.source_id in self.acknowledged_source_ids
+        }
         resident_retarget_tiles.difference_update(int(tile) for tile in stale_level_tiles)
         resident_retarget_tiles.update(
             int(tile)

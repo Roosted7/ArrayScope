@@ -3990,24 +3990,10 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
         batch_limit = 4 if feedback is None else int(feedback.batch_limit("montage_present_total", interactive=interactive))
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
-    acknowledged = getattr(session, "acknowledged_source_ids", None)
-
-    def upsert_cost(payload, _acknowledged=acknowledged):
-        # A payload identity the backend already acknowledged re-presents as
-        # a residency remap (zero texture upload), so batching charges it a
-        # token byte; fresh identities pay their real upload bytes.
-        if _acknowledged and getattr(payload, "source_id", None) in _acknowledged:
-            return 1
-        return _vispy_payload_upload_nbytes(payload)
-
     limits = {
-        # The byte cap is the real upload governor; the count cap only
-        # bounds per-commit bookkeeping.  Keeping it generous lets a burst
-        # of acknowledged-identity level swaps (cost 1 each) converge in one
-        # or two commits instead of trickling at native-upload batch sizes.
-        "max_upserts": min(128, max(1, int(batch_limit)) * 16),
+        "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
-        "upsert_cost_fn": upsert_cost,
+        "upsert_cost_fn": _vispy_payload_upload_nbytes,
     }
     return limits
 
