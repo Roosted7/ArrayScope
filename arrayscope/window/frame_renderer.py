@@ -2277,18 +2277,21 @@ class FrameRenderMixin:
         if pyramid is None:
             return
         if not self._montage_session_is_current(session):
-            for _tile_number, key, _source in requests:
-                pyramid.end_pending(key)
+            for request in requests:
+                pyramid.end_pending(request[1])
             return
         controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
         session_id = int(session.session_id)
         session_key = session.key
         supersession_value = (session_key, session_id, int(getattr(session, "viewport_revision", 0) or 0))
-        for tile_number, key, source in requests:
-            tile_number = int(tile_number)
+        for request in requests:
+            tile_number = int(request[0])
+            key = request[1]
+            source = request[2]
+            reduce_factor_xy = tuple(int(value) for value in (request[3] if len(request) > 3 else key.factor_xy))
 
-            def evaluate(key=key, source=source, pyramid=pyramid):
-                return pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
+            def evaluate(key=key, source=source, reduce_factor_xy=reduce_factor_xy, pyramid=pyramid):
+                return pyramid.admit(key, reduce_box_mean(source, reduce_factor_xy))
 
             def done(_result, tile_number=tile_number, session_id=session_id, session_key=session_key):
                 self._on_montage_lod_level_ready(session_id, session_key, tile_number)
@@ -2317,7 +2320,7 @@ class FrameRenderMixin:
                     estimated_bytes=max(
                         1,
                         int(getattr(source, "nbytes", 0) or 0)
-                        // max(1, int(key.factor_xy[0]) * int(key.factor_xy[1])),
+                        // max(1, int(reduce_factor_xy[0]) * int(reduce_factor_xy[1])),
                     ),
                 ),
             )

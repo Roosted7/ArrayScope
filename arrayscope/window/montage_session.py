@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
 from time import monotonic
+from typing import NamedTuple
 
 import numpy as np
 
@@ -38,6 +39,23 @@ from arrayscope.display.model.presentation_generation import (
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
+
+
+class LodMaterializationRequest(NamedTuple):
+    """One demanded-but-missing pyramid level for background reduction.
+
+    ``source`` is the array the worker reduces (native texture plane or an
+    already-resident finer pyramid level) and ``reduce_factor_xy`` is the
+    per-axis box-mean factor relative to that source.  ``key.factor_xy``
+    always stays relative to the native plane; the two differ exactly when a
+    cross-level derivation was chosen (ADR 0050).
+    """
+
+    tile_number: int
+    key: PyramidLevelKey
+    source: object
+    reduce_factor_xy: tuple[int, int]
+    cross_level: bool = False
 
 
 def _shader_mapping_key(mapping):
@@ -197,6 +215,17 @@ class MontageRenderSession:
     # "resident" policy after a singleflight claim on the pyramid cache.
     pending_lod_requests: list = field(default_factory=list)
     lod_materializations_completed: int = 0
+    # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but
+    # must carry the tile's finest already-computed semantic stats forward
+    # unchanged.  `cross_level_reuses` counts swaps that reused the retained
+    # native histogram/level objects; `recomputes` counts swaps that minted
+    # new stat objects for unchanged native content (must stay 0).
+    lod_stats_cross_level_reuses: int = 0
+    lod_stats_recomputes: int = 0
+    # ADR 0050 WP2: demanded pyramid levels are derived from the finest
+    # already-resident coarser level when factors divide evenly, instead of
+    # re-reducing from the native plane.
+    lod_cross_level_reductions: int = 0
     _last_active_tiles: tuple[int, ...] = ()
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
@@ -515,6 +544,22 @@ class MontageRenderSession:
             and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
         ):
             return previous
+        if (
+            previous is not None
+            and _base_source_id(previous.source_id) == base_source_id
+            and previous.image is exact_image
+            and int(getattr(getattr(previous, "lod", None), "level", 0) or 0) != int(lod.level)
+        ):
+            # Same native content presented at a different display-LOD level:
+            # the level swap must be invisible to the histogram/level system.
+            if (
+                previous.histogram_data is exact_histogram
+                and previous.level_data is exact_level_data
+                and previous.level_stats is level_stats
+            ):
+                self.lod_stats_cross_level_reuses += 1
+            else:
+                self.lod_stats_recomputes += 1
         payload = DisplayTilePayload(
             tile_number=tile_number,
             source_index=int(rendered.tile.source_index),
@@ -752,8 +797,9 @@ class MontageRenderSession:
             if desired > 0 and desired not in resident:
                 desired_key = self._pyramid_key_for(rendered, demand=demand, level=desired)
                 if pyramid.begin_pending(desired_key):
-                    source, _histogram, _texture_kind = self._texture_source_for(rendered)
-                    self.pending_lod_requests.append((int(tile_number), desired_key, source))
+                    self.pending_lod_requests.append(
+                        self._lod_materialization_request(rendered, demand=demand, level=desired, key=desired_key)
+                    )
             if payload is None:
                 continue
             applied = int(choose_resident_level(demand, tuple(sorted(resident))))
@@ -793,6 +839,60 @@ class MontageRenderSession:
     def _pyramid_key_for(self, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
         return pyramid_key_for_rendered(rendered, demand=demand, level=level)
 
+    def _lod_materialization_request(
+        self,
+        rendered: RenderedTile,
+        *,
+        demand,
+        level: int,
+        key: PyramidLevelKey,
+        native_source: np.ndarray | None = None,
+    ) -> LodMaterializationRequest:
+        """Choose the cheapest deterministic reduction source for one level.
+
+        ADR 0050 materializes level *n+1* from level *n* where possible:
+        deriving from the finest already-resident coarser level touches
+        ``relative_factor**2`` fewer texels than re-reducing the native
+        plane.  Box means compose exactly only when every box is full, so the
+        cross-level path is taken only when the native plane divides evenly
+        by the demanded per-axis factors; partial trailing boxes fall back to
+        the single canonical native reduction to keep level content
+        independent of cache state.
+        """
+
+        if native_source is None:
+            native_source, _histogram, _texture_kind = self._texture_source_for(rendered)
+        tile_number = int(rendered.tile.montage_index)
+        factor_x, factor_y = (int(value) for value in key.factor_xy)
+        native_shape = tuple(int(value) for value in np.shape(native_source)[:2])
+        pyramid = self.lod_pyramid
+        if (
+            pyramid is None
+            or native_shape[0] % factor_y
+            or native_shape[1] % factor_x
+        ):
+            return LodMaterializationRequest(tile_number, key, native_source, (factor_x, factor_y))
+        best = None
+        for candidate in demand.acceptable_levels:
+            candidate = int(candidate)
+            if candidate <= 0 or candidate >= int(level):
+                continue
+            candidate_x, candidate_y = (
+                int(value) for value in factor_xy_for_level(demand, candidate)
+            )
+            if factor_x % candidate_x or factor_y % candidate_y:
+                continue
+            if best is not None and candidate <= best[0]:
+                continue
+            cached = pyramid.peek(self._pyramid_key_for(rendered, demand=demand, level=candidate))
+            if cached is None:
+                continue
+            best = (candidate, cached, (factor_x // candidate_x, factor_y // candidate_y))
+        if best is None:
+            return LodMaterializationRequest(tile_number, key, native_source, (factor_x, factor_y))
+        self.lod_cross_level_reductions += 1
+        return LodMaterializationRequest(tile_number, key, best[1], best[2], cross_level=True)
+
     def _texture_source_for(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
         return texture_source_for_rendered(rendered)
 
@@ -815,7 +915,6 @@ class MontageRenderSession:
         native_lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
         demand = self.lod_policy_decision.demand
         pyramid = self.lod_pyramid
-        tile_number = int(rendered.tile.montage_index)
         resident_levels = tuple(
             int(level)
             for level in demand.acceptable_levels
@@ -826,7 +925,11 @@ class MontageRenderSession:
         if desired > 0 and desired not in resident_levels:
             desired_key = self._pyramid_key_for(rendered, demand=demand, level=desired)
             if pyramid.begin_pending(desired_key):
-                self.pending_lod_requests.append((tile_number, desired_key, source))
+                self.pending_lod_requests.append(
+                    self._lod_materialization_request(
+                        rendered, demand=demand, level=desired, key=desired_key, native_source=source
+                    )
+                )
         applied = choose_resident_level(demand, resident_levels)
         if applied <= 0:
             return source, histogram, native_lod

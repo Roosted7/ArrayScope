@@ -88,8 +88,8 @@ def _session(*, mode=LOD_POLICY_RESIDENT, pyramid=None, view_range=ZOOMED_OUT_RA
 
 
 def _materialize(session, request):
-    _tile_number, key, source = request
-    return key, session.lod_pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
+    key = request.key
+    return key, session.lod_pyramid.admit(key, reduce_box_mean(request.source, request.reduce_factor_xy))
 
 
 def test_native_only_mode_is_unchanged_by_default():
@@ -121,10 +121,11 @@ def test_resident_mode_falls_back_to_native_and_records_missing_levels():
     assert len(session.pending_lod_requests) == 2
     tiles = sorted(request[0] for request in session.pending_lod_requests)
     assert tiles == [0, 1]
-    for _tile, key, source in session.pending_lod_requests:
-        assert isinstance(key, PyramidLevelKey)
-        assert key.factor_xy == (4, 4)
-        assert source.shape == (TILE, TILE)
+    for request in session.pending_lod_requests:
+        assert isinstance(request.key, PyramidLevelKey)
+        assert request.key.factor_xy == (4, 4)
+        assert request.reduce_factor_xy == (4, 4)
+        assert request.source.shape == (TILE, TILE)
 
 
 def test_duplicate_materialization_requests_coalesce():
@@ -322,9 +323,9 @@ def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
     assert session.lod_policy_decision.demand.desired_level == 1
     assert delta.upserts[0].lod.level == 0
     assert len(session.pending_lod_requests) == 1
-    tile_number, key, _source = session.pending_lod_requests[0]
-    assert tile_number == 0
-    assert key.factor_xy == (2, 2)
+    request = session.pending_lod_requests[0]
+    assert request.tile_number == 0
+    assert request.key.factor_xy == (2, 2)
 
     request = session.pending_lod_requests.pop()
     _materialize(session, request)
@@ -454,9 +455,9 @@ def test_camera_only_retarget_requests_missing_levels_with_new_viewport_revision
     # under a fresh viewport revision so stale zoom targets supersede.
     assert swap_ready is False
     assert sorted(request[0] for request in session.pending_lod_requests) == [0, 1]
-    for _tile, key, source in session.pending_lod_requests:
-        assert key.factor_xy == (4, 4)
-        assert source.shape == (TILE, TILE)
+    for request in session.pending_lod_requests:
+        assert request.key.factor_xy == (4, 4)
+        assert request.source.shape == (TILE, TILE)
     assert int(session.viewport_revision) > revision_before
     # Native payloads stay presented untouched while levels materialize.
     assert not session.dirty_payloads
@@ -556,3 +557,158 @@ def test_seeding_new_session_keeps_stale_level_payload_presented():
     # down-swap churn to native while the demanded level rematerializes.
     assert replacement.refresh_lod_for_viewport() is False
     assert not replacement.dirty_payloads or set(replacement.dirty_payloads) == {0, 1}
+
+# --- Zero redundant histogram/level work across LOD levels (ADR 0050) ---
+
+LEVEL1_RANGE = ((0.0, 3.0 * 2 * TILE), (0.0, 3.0 * TILE))
+# From a presented factor-2 demand, promotion hysteresis needs > 4.6 source
+# texels per screen pixel before level 2 becomes desired.
+FAR_OUT_RANGE = ((0.0, 6.0 * 2 * TILE), (0.0, 6.0 * TILE))
+
+
+def _attach_native_stats(session):
+    from arrayscope.display.model.montage_levels import sample_tile_level_stats
+    from dataclasses import replace as dc_replace
+
+    for index, rendered in dict(session.rendered_tiles).items():
+        stats = sample_tile_level_stats(rendered.image, int(rendered.tile.source_index), refined=True)
+        session.rendered_tiles[index] = dc_replace(rendered, level_data=rendered.image, level_stats=stats)
+
+
+def test_level_swap_carries_native_stats_and_recomputes_nothing():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
+    _attach_native_stats(session)
+    _present_native(session)
+    assert session.lod_stats_recomputes == 0
+
+    session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
+    session.refresh_lod_for_viewport()
+    for request in list(session.pending_lod_requests):
+        _materialize(session, request)
+    session.pending_lod_requests.clear()
+    assert session.refresh_lod_for_viewport() is True
+    _state, delta = session.build_tile_presentation({})
+
+    for tile_number, payload in delta.upserts.items():
+        rendered = session.rendered_tiles[int(tile_number)]
+        assert payload.lod.level == 2
+        # The finest already-computed semantic stats ride along unchanged:
+        # a display-LOD swap is invisible to the histogram/level system.
+        assert payload.histogram_data is np.asarray(rendered.histogram_data)
+        assert payload.level_data is np.asarray(rendered.level_data)
+        assert payload.level_stats is rendered.level_stats
+        assert payload.image is np.asarray(rendered.image)
+    assert session.lod_stats_cross_level_reuses == len(delta.upserts) > 0
+    assert session.lod_stats_recomputes == 0
+
+    # Moving finer (level 2 -> native) reuses the same stats objects too.
+    session.retarget_viewport(view_range=ZOOMED_IN_RANGE, viewport_shape=VIEWPORT)
+    session.refresh_lod_for_viewport()
+    _state, delta = session.build_tile_presentation({})
+    for tile_number, payload in delta.upserts.items():
+        rendered = session.rendered_tiles[int(tile_number)]
+        assert payload.lod.level == 0
+        assert payload.level_stats is rendered.level_stats
+        assert payload.histogram_data is np.asarray(rendered.histogram_data)
+    assert session.lod_stats_recomputes == 0
+
+
+def test_level_swap_keeps_semantic_histogram_identity():
+    from arrayscope.display.model.tiled_histogram_identity import (
+        tiled_histogram_key as _tiled_histogram_key,
+        tiled_semantic_histogram_identity as _tiled_semantic_histogram_identity,
+    )
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
+    _present_native(session)
+    native_payloads = dict(session.tile_presentation_state.payloads)
+
+    session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
+    session.refresh_lod_for_viewport()
+    for request in list(session.pending_lod_requests):
+        _materialize(session, request)
+    session.pending_lod_requests.clear()
+    session.refresh_lod_for_viewport()
+    _state, delta = session.build_tile_presentation({})
+    swapped_payloads = {**native_payloads, **dict(delta.upserts)}
+    assert any(payload.lod.level == 2 for payload in swapped_payloads.values())
+
+    # Texture identity changed for every swapped tile...
+    assert {payload.source_id for payload in swapped_payloads.values()} != {
+        payload.source_id for payload in native_payloads.values()
+    }
+    # ...but the semantic histogram identity, and therefore the histogram
+    # stream key, is unchanged: a level swap produces ZERO histogram work.
+    assert _tiled_semantic_histogram_identity(swapped_payloads) == _tiled_semantic_histogram_identity(native_payloads)
+    key_before = _tiled_histogram_key(
+        (0.0, 1.0),
+        histogram_plot_data=None,
+        tile_delta=delta,
+        semantic_identity=_tiled_semantic_histogram_identity(native_payloads),
+    )
+    key_after = _tiled_histogram_key(
+        (0.0, 1.0),
+        histogram_plot_data=None,
+        tile_delta=delta,
+        semantic_identity=_tiled_semantic_histogram_identity(swapped_payloads),
+    )
+    assert key_before == key_after
+
+
+def test_coarser_level_derives_from_finest_resident_level():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=LEVEL1_RANGE)
+    session.build_tile_presentation({})
+    level1_requests = list(session.pending_lod_requests)
+    session.pending_lod_requests.clear()
+    assert {request.key.level for request in level1_requests} == {1}
+    for request in level1_requests:
+        assert request.cross_level is False
+        _materialize(session, request)
+
+    session.retarget_viewport(view_range=FAR_OUT_RANGE, viewport_shape=VIEWPORT)
+    session.refresh_lod_for_viewport()
+    level2_requests = list(session.pending_lod_requests)
+    session.pending_lod_requests.clear()
+    assert {request.key.level for request in level2_requests} == {2}
+    for request in level2_requests:
+        # Derived level-from-level: the reduction source is the resident
+        # level-1 array and only its texels are touched, not the native plane.
+        assert request.cross_level is True
+        assert request.source.shape[:2] == (TILE // 2, TILE // 2)
+        assert request.reduce_factor_xy == (2, 2)
+        assert request.key.factor_xy == (4, 4)
+        derived = reduce_box_mean(request.source, request.reduce_factor_xy)
+        rendered = session.rendered_tiles[int(request.tile_number)]
+        native = reduce_box_mean(np.asarray(rendered.image), (4, 4))
+        assert np.allclose(derived, native, rtol=1e-6, atol=1e-6)
+    assert session.lod_cross_level_reductions == len(level2_requests) > 0
+
+
+def test_uneven_tiles_fall_back_to_native_reduction_source():
+    # 63 is not divisible by 4: partial trailing boxes must always reduce
+    # from the single canonical native plane so level content never depends
+    # on which levels happened to be resident.
+    tile = 63
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=LEVEL1_RANGE)
+    for index, rendered in dict(session.rendered_tiles).items():
+        from dataclasses import replace as dc_replace
+
+        image = np.asarray(rendered.image)[:tile, :tile].copy()
+        session.rendered_tiles[index] = dc_replace(rendered, image=image, histogram_data=image)
+    session.build_tile_presentation({})
+    for request in list(session.pending_lod_requests):
+        _materialize(session, request)
+    session.pending_lod_requests.clear()
+
+    session.retarget_viewport(view_range=FAR_OUT_RANGE, viewport_shape=VIEWPORT)
+    session.refresh_lod_for_viewport()
+    requests = list(session.pending_lod_requests)
+    assert requests, "the coarser level must still be requested"
+    for request in requests:
+        assert request.cross_level is False
+        assert request.source.shape[:2] == (tile, tile)
+        assert request.reduce_factor_xy == request.key.factor_xy
