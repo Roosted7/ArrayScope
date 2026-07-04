@@ -71,6 +71,7 @@ dev = [
 addopts = "-n auto --dist loadfile"
 markers = [
     "real_system_memory: opt out of the pinned deterministic system-memory snapshot",
+    "gpu_interaction: onscreen real-hardware interaction tests (ARRAYSCOPE_GPU_TESTS=1, run with -n 0; see tests/gpu_interaction/conftest.py)",
 ]
 
 [tool.coverage.run]
