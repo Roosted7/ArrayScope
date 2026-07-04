@@ -35,8 +35,18 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
     if not session.document.enabled_operations:
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_no_stage", "raw montage tiles rely on visible-level commit ordering"),))
+    preview_walk_only = False
     if window.win.operation_evaluator._display_cache.bytes_used > int(window.win.operation_evaluator._display_cache.max_bytes * 0.8):
-        return _record(window, (MontagePrefetchDecision(None, None, "blocked_budget", "display cache is near capacity"),))
+        # Background preview walk (ADR 0050): a full display cache used to
+        # stop speculation for the rest of the stack.  When the retained
+        # preview level is active, keep walking never-visited indices in
+        # preview-only mode — evaluate, pin the tiny preview plane, discard
+        # the native result — so every index floors instantly forever while
+        # the display cache stays untouched.
+        if _preview_cache_active(session):
+            preview_walk_only = True
+        else:
+            return _record(window, (MontagePrefetchDecision(None, None, "blocked_budget", "display cache is near capacity"),))
     governor = getattr(window.win, "resource_governor", None)
     if governor is not None:
         decision = governor.decide_montage_prefetch(stage_ready_or_in_flight=True, visible_busy=False)
@@ -52,6 +62,10 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
     for tile in _candidate_tiles(session):
         if scheduled >= int(max_tiles):
             break
+        if preview_walk_only and _preview_resident(session, tile):
+            # The walk's only purpose here is the pinned preview; skip
+            # indices that already have one instead of re-evaluating them.
+            continue
         tile_key = window.win.operation_evaluator.montage_tile_key(
             tile.view_state,
             montage_axis=session.montage_axis,
@@ -100,37 +114,56 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                     )
                 else:
                     display_image = make_image_from_slab(slab, request, colormap_lut=session.colormap_lut)
-                return EvaluationResult(
+                result = EvaluationResult(
                     value=display_image,
                     eval_ms=(perf_counter() - start) * 1000.0,
                     slab_shape=tuple(np.shape(slab)),
                     slab_nbytes=int(getattr(slab, "nbytes", 0)),
                     region_plan=plan.region_plan,
                 )
-            return evaluate_image_snapshot(
-                session.document,
-                tile.view_state,
-                colormap_lut=session.colormap_lut,
-                stage_cache=window.win.operation_evaluator.stage_cache,
-                stage_document_key=stage_document_key(session.document),
-                evaluation_context=context,
-                shader_display=shader_display,
-                provisional_histogram=bool(shader_display),
-            )
+            else:
+                result = evaluate_image_snapshot(
+                    session.document,
+                    tile.view_state,
+                    colormap_lut=session.colormap_lut,
+                    stage_cache=window.win.operation_evaluator.stage_cache,
+                    stage_document_key=stage_document_key(session.document),
+                    evaluation_context=context,
+                    shader_display=shader_display,
+                    provisional_histogram=bool(shader_display),
+                )
+            # Worker-side, like the visible-path ingest admissions (ADR 0041
+            # gate 1 forbids commit-callback reduction): every walked index
+            # leaves its pinned preview plane behind, so it re-presents
+            # instantly through the floor forever — even if the native
+            # result below is discarded or evicted.
+            _admit_walk_preview(session, tile, result)
+            return result
 
-        def done(result, tile=tile, session_id=session.session_id, session_key=session.key):
+        def done(result, tile=tile, session_id=session.session_id, session_key=session.key, preview_walk_only=preview_walk_only):
             if not window._is_current_montage_session(session_id, session_key):
                 window.win.operation_evaluator.note_prefetch_stale()
                 return
-            rendered = window.win.operation_evaluator.store_montage_tile_result(
-                tile,
-                montage_axis=session.montage_axis,
-                colormap_lut=session.colormap_lut,
-                result=result,
-                shader_display=shader_display,
-            )
-            window.win.operation_evaluator.prefetch_stored += 1
-            _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key)
+            if not preview_walk_only:
+                rendered = window.win.operation_evaluator.store_montage_tile_result(
+                    tile,
+                    montage_axis=session.montage_axis,
+                    colormap_lut=session.colormap_lut,
+                    result=result,
+                    shader_display=shader_display,
+                )
+                # In preview-only mode the admission already happened
+                # worker-side; storing the native result would churn the
+                # display cache this mode exists to protect.
+                window.win.operation_evaluator.prefetch_stored += 1
+                _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key)
+            # Walk continuation (ADR 0050 background preview walk): flush
+            # paths only invite prefetch while something is happening, so at
+            # true idle the walk stalled after one batch.  Each completion
+            # invites the next batch instead — event-driven, no timers; it
+            # ends itself on blocked_no_tile / governor / busy, and any of
+            # those states is re-broken by the next natural flush invitation.
+            schedule_near_viewport_montage_prefetch(window, session)
 
         budget_bytes = int(window._memory_policy().display_cache_budget_bytes)
         started = window.win.prefetch_evaluation_controller.start_prefetch(
@@ -157,7 +190,14 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
         if started.scheduled:
             scheduled += 1
             window.win.operation_evaluator.note_prefetch_scheduled()
-            decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "scheduled", tile_key=tile_key))
+            decisions.append(
+                MontagePrefetchDecision(
+                    int(tile.montage_index),
+                    int(tile.source_index),
+                    "scheduled_preview_walk" if preview_walk_only else "scheduled",
+                    tile_key=tile_key,
+                )
+            )
         elif started.reason == "deduped":
             window.win.operation_evaluator.note_prefetch_deduped()
             decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "deduped", tile_key=tile_key))
@@ -269,6 +309,67 @@ def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -
         )
     except Exception:
         return
+
+
+def _preview_cache_active(session) -> bool:
+    return (
+        getattr(session, "lod_preview_pyramid", None) is not None
+        and int(getattr(session, "lod_preview_level", 0) or 0) > 0
+    )
+
+
+def _preview_resident(session, tile) -> bool:
+    """True when the pinned preview cache already holds this tile's plane."""
+
+    preview = getattr(session, "lod_preview_pyramid", None)
+    level = int(getattr(session, "lod_preview_level", 0) or 0)
+    if preview is None or level <= 0:
+        return False
+    from arrayscope.display.pyramid import PyramidLevelKey
+    from arrayscope.window.montage_lod import floor_component_tags
+
+    semantic_id = session.tile_semantic_source_id(int(tile.source_index))
+    for component in floor_component_tags(session):
+        key = PyramidLevelKey(
+            source_id=semantic_id,
+            tile_id=int(tile.source_index),
+            component=component,
+            level_xy=(level, level),
+        )
+        if preview.peek(key) is not None:
+            return True
+    return False
+
+
+def _admit_walk_preview(session, tile, result) -> bool:
+    """Pin the retained preview level for a prefetched tile, worker-side.
+
+    ADR 0050 background preview walk: prefetch used to warm only the display
+    cache, which evicts; the pinned preview cache does not.  Admission is
+    singleflight-guarded, so a concurrent visible evaluation of the same
+    index never duplicates the reduction.
+    """
+
+    preview = getattr(session, "lod_preview_pyramid", None)
+    level = int(getattr(session, "lod_preview_level", 0) or 0)
+    if preview is None or level <= 0:
+        return False
+    try:
+        from arrayscope.window.frame_renderer import _rendered_tile_from_evaluation_result
+        from arrayscope.window.montage_lod import admit_preview_reduction
+
+        rendered = _rendered_tile_from_evaluation_result(tile, result)
+        return bool(
+            admit_preview_reduction(
+                preview,
+                rendered,
+                semantic_source_id=session.tile_semantic_source_id(int(tile.source_index)),
+                preview_level=level,
+            )
+        )
+    except Exception:
+        # Speculative polish must never fail the prefetch result.
+        return False
 
 
 def _record(window, decisions: tuple[MontagePrefetchDecision, ...]) -> tuple[MontagePrefetchDecision, ...]:
