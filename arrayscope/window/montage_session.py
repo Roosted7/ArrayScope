@@ -1185,26 +1185,15 @@ class MontageRenderSession:
                 and not self._tile_matches_current_level_target(int(tile), self.level_generation.target_levels)
             )
             stale_level_tiles = self._prioritized_tile_numbers(stale_candidates)
-        # Dirty entries are commitments to present through THIS delta, and
-        # the backend only accepts payloads for the active set (ADR 0044:
-        # near-tile warmth is owned by the speculative-residency queue, not
-        # commits).  A dirty non-active tile can therefore never be
-        # acknowledged: it would re-emit an unacceptable upsert every build
-        # and hold finalization open forever.  Parking must be
-        # NON-destructive: a build racing a viewport retarget can hold a
-        # stale active set, and dropping the entry outright loses the tile's
-        # presentation when it becomes active moments later.  Parked entries
-        # re-arm the moment their tile enters the active scope.
+        # Parked dirty entries re-arm when their tile enters the active
+        # scope (see acknowledge_tile_presentation: a non-active upsert the
+        # backend declines parks instead of re-arming, or finalization would
+        # retry an unacceptable upsert forever).
         active_scope = set(active)
         for tile_number in tuple(self.parked_dirty_payloads):
             if int(tile_number) in active_scope:
                 self.parked_dirty_payloads.discard(int(tile_number))
                 self.dirty_payloads[int(tile_number)] = None
-        for tile_number in tuple(self.dirty_payloads):
-            if int(tile_number) not in active_scope:
-                self.dirty_payloads.pop(int(tile_number), None)
-                if int(tile_number) in self.rendered_tiles:
-                    self.parked_dirty_payloads.add(int(tile_number))
         dirty_payload_tiles = tuple(
             dict.fromkeys(
                 (
@@ -1425,6 +1414,22 @@ class MontageRenderSession:
         for tile in accepted_upserts:
             self.dirty_payloads.pop(int(tile), None)
             self.pending_payload_upserts.pop(int(tile), None)
+            self.parked_dirty_payloads.discard(int(tile))
+        # Viewport-scoped backends accept only the active set (ADR 0044);
+        # non-active upserts they decline are parked, not retried — every
+        # payload stays cached and re-arms when the tile becomes active.
+        # Without this, each commit re-emitted the same unacceptable upserts
+        # and finalization never settled (idle commit/draw loop).
+        active_scope = {int(tile) for tile in tuple(getattr(delta, "active_tiles", ()) or ())}
+        accepted = {int(tile) for tile in accepted_upserts}
+        for tile in tuple(delta.upserts):
+            index = int(tile)
+            if index in accepted or index in active_scope:
+                continue
+            self.dirty_payloads.pop(index, None)
+            if index in self.rendered_tiles:
+                self.parked_dirty_payloads.add(index)
+            self.pending_payload_upserts.pop(index, None)
         for tile in report.removed_tiles:
             self.pending_removals.discard(int(tile))
             self.dirty_payloads.pop(int(tile), None)

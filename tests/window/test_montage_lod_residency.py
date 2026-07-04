@@ -927,13 +927,23 @@ def test_parked_dirty_tiles_rearm_when_the_viewport_makes_them_active():
     # Tile 1 rendered and dirty, but currently outside the active scope.
     session.visible_tiles = (session.plan.tiles[0],)
     _state, delta = session.build_tile_presentation({})
+    # Contract: the upsert is still emitted once (persistent backends
+    # accept it), but if a viewport-scoped backend declines it, the tile
+    # parks at acknowledgement instead of retrying forever.
+    assert 1 in delta.upserts
+    report = TileCommitReport(presented_tiles=(0,))
+    session.acknowledge_tile_presentation(delta, report)
     assert 1 in session.parked_dirty_payloads
     assert 1 not in session.dirty_payloads
-    assert 1 not in delta.upserts
+
+    # Idle stays settled: further builds re-emit nothing for the parked tile.
+    _state, delta2 = session.build_tile_presentation({})
+    assert 1 not in delta2.upserts
+    assert 1 not in session.dirty_payloads
 
     # The viewport brings tile 1 back: the parked entry re-arms and the
     # payload presents through the ordinary delta.
     session.visible_tiles = tuple(session.plan.tiles)
-    _state, delta = session.build_tile_presentation({})
+    _state, delta3 = session.build_tile_presentation({})
     assert 1 not in session.parked_dirty_payloads
-    assert 1 in delta.upserts
+    assert 1 in delta3.upserts
