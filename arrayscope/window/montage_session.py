@@ -215,6 +215,8 @@ class MontageRenderSession:
     # "resident" policy after a singleflight claim on the pyramid cache.
     pending_lod_requests: list = field(default_factory=list)
     lod_materializations_completed: int = 0
+    acknowledged_source_ids: set = field(default_factory=set)
+    lod_floor_presentations: int = 0
     # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but
     # must carry the tile's finest already-computed semantic stats forward
     # unchanged.  `cross_level_reuses` counts swaps that reused the retained
@@ -1312,6 +1314,15 @@ class MontageRenderSession:
         acknowledged = self.tile_presentation_state.acknowledge_delta(delta, report)
         self.tile_presentation_state = acknowledged
         accepted_upserts = report.accepted_upserts(delta)
+        # Remember acknowledged payload identities: re-presenting one is a
+        # residency remap for the backend, so commit batching may treat it as
+        # nearly free instead of charging full texture bytes (ADR 0050 —
+        # prompt level-swap convergence). Bounded: identities are small
+        # tuples and the set resets with the session.
+        for tile_number in accepted_upserts:
+            payload = acknowledged.payloads.get(int(tile_number))
+            if payload is not None:
+                self.acknowledged_source_ids.add(payload.source_id)
         committed_levels = None if levels is None else (float(levels[0]), float(levels[1]))
         if committed_levels is not None:
             ProgressiveTileLevelConvergence().acknowledge(

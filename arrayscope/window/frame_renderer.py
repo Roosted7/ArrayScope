@@ -2321,10 +2321,17 @@ class FrameRenderMixin:
             def done(_result, tile_number=tile_number, session_id=session_id, session_key=session_key):
                 self._on_montage_lod_level_ready(session_id, session_key, tile_number)
 
-            def release(key=key, pyramid=pyramid):
-                # Superseded/failed before admission: give the singleflight
-                # claim back so a later commit can re-request the level.
-                pyramid.end_pending(key)
+            def release(key=key, pyramid=pyramid, tile_number=tile_number, session_id=session_id, session_key=session_key):
+                # Supersession cancels stale *work*, never a completed
+                # result: the worker may have admitted the level before the
+                # item went stale, and dropping the notification leaves the
+                # tile presenting an outdated level until an unrelated event
+                # (user-visible as tiles stuck mid-zoom).  Admitted levels
+                # notify; unstarted ones release the singleflight claim.
+                if pyramid.peek(key) is not None:
+                    self._on_montage_lod_level_ready(session_id, session_key, tile_number)
+                else:
+                    pyramid.end_pending(key)
 
             started = controller.start_latest(
                 evaluate,
@@ -3983,10 +3990,24 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
         batch_limit = 4 if feedback is None else int(feedback.batch_limit("montage_present_total", interactive=interactive))
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
+    acknowledged = getattr(session, "acknowledged_source_ids", None)
+
+    def upsert_cost(payload, _acknowledged=acknowledged):
+        # A payload identity the backend already acknowledged re-presents as
+        # a residency remap (zero texture upload), so batching charges it a
+        # token byte; fresh identities pay their real upload bytes.
+        if _acknowledged and getattr(payload, "source_id", None) in _acknowledged:
+            return 1
+        return _vispy_payload_upload_nbytes(payload)
+
     limits = {
-        "max_upserts": max(1, int(batch_limit)),
+        # The byte cap is the real upload governor; the count cap only
+        # bounds per-commit bookkeeping.  Keeping it generous lets a burst
+        # of acknowledged-identity level swaps (cost 1 each) converge in one
+        # or two commits instead of trickling at native-upload batch sizes.
+        "max_upserts": min(128, max(1, int(batch_limit)) * 16),
         "max_upsert_bytes": max(1024, int(byte_cap)),
-        "upsert_cost_fn": _vispy_payload_upload_nbytes,
+        "upsert_cost_fn": upsert_cost,
     }
     return limits
 
