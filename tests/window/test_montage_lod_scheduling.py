@@ -17,7 +17,7 @@ from arrayscope.display.lod import LOD_POLICY_RESIDENT
 from arrayscope.display.pyramid import PyramidCache
 from arrayscope.window.frame_renderer import FrameRenderMixin
 
-from tests.window.test_montage_lod_residency import _session
+from tests.window.test_montage_lod_residency import TILE, _cold_session, _session
 
 
 class FakeController:
@@ -32,7 +32,7 @@ class FakeController:
             if on_stale is not None:
                 on_stale()
             return None
-        result = fn()
+        result = fn(None) if kwargs.get("pass_token") else fn()
         on_done = kwargs.get("on_done")
         if on_done is not None:
             on_done(result)
@@ -120,3 +120,97 @@ def test_stale_session_releases_claims_without_scheduling():
     assert renderer.montage_tile_evaluation_controller.calls == []
     assert pyramid.pending_count == 0
     assert session.pending_lod_requests == []
+
+
+def _tile_worker_renderer(session, *, evaluated):
+    """Fake window/renderer composition around the real tile scheduling method."""
+
+    from arrayscope.operations.evaluator import EvaluationResult
+
+    fake = SimpleNamespace()
+    fake.win = fake
+    fake.montage_tile_evaluation_controller = FakeController()
+    fake.visible_evaluation_controller = fake.montage_tile_evaluation_controller
+    fake._montage_session = session
+    fake._montage_session_is_current = lambda candidate: True
+    fake.completed = []
+    fake._on_montage_tile_done = lambda session_id, tile, result, **kwargs: fake.completed.append(
+        (int(tile.montage_index), result)
+    )
+    fake._on_montage_tile_error = lambda session_id, tile, exc: None
+    fake._on_montage_tile_slow = lambda session_id: None
+
+    def _evaluate(session_arg, tile, token=None):
+        image = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE)
+        value = SimpleNamespace(
+            data=image,
+            histogram_data=image,
+            semantic_data=None,
+            shader_mapping=None,
+            texture_kind=None,
+            lod=None,
+            level_data=None,
+            level_stats=None,
+        )
+        result = EvaluationResult(
+            value=value,
+            eval_ms=0.0,
+            slab_shape=image.shape,
+            slab_nbytes=int(image.nbytes),
+        )
+        evaluated.append(result)
+        return result
+
+    fake._evaluate_montage_tile_snapshot = _evaluate
+    fake._schedule_next_montage_tile = FrameRenderMixin._schedule_next_montage_tile.__get__(fake)
+    return fake
+
+
+def test_cold_tile_worker_reduces_at_ingest_before_first_presentation():
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    session.frame_plan = SimpleNamespace(
+        target=SimpleNamespace(quality="final"), tile_shape=(TILE, TILE)
+    )
+    session.pending_tiles.append(session.plan.tiles[0])
+    evaluated = []
+    renderer = _tile_worker_renderer(session, evaluated=evaluated)
+
+    assert renderer._schedule_next_montage_tile(session) is True
+
+    # The reduction ran on the worker as part of tile materialization: the
+    # demanded level was admitted before the done fan-in saw the result.
+    assert len(evaluated) == 1
+    assert len(pyramid) == 1
+    assert pyramid.pending_count == 0
+    assert renderer._montage_lod_ingest_reductions == 1
+    assert len(renderer.completed) == 1
+
+    # First presentation selects the reduced level; the tile never emits a
+    # native payload and no post-hoc materialization is requested for it.
+    tile_number, result = renderer.completed[0]
+    from arrayscope.window.frame_renderer import _rendered_tile_from_evaluation_result
+
+    session.mark_loaded(_rendered_tile_from_evaluation_result(session.plan.tiles[0], result))
+    _state, delta = session.build_tile_presentation({})
+    assert delta.upserts[tile_number].lod.level == 2
+    assert delta.upserts[tile_number].texture_data.shape[:2] == (TILE // 4, TILE // 4)
+    assert session.pending_lod_requests == []
+
+
+def test_native_scale_scheduling_performs_no_ingest_reduction():
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    session.view_range = ((0.0, float(2 * TILE)), (0.0, float(TILE)))
+    session.build_tile_presentation({})
+    assert session.ingest_lod_demand() is None
+    session.frame_plan = SimpleNamespace(
+        target=SimpleNamespace(quality="final"), tile_shape=(TILE, TILE)
+    )
+    session.pending_tiles.append(session.plan.tiles[0])
+    renderer = _tile_worker_renderer(session, evaluated=[])
+
+    assert renderer._schedule_next_montage_tile(session) is True
+
+    assert len(pyramid) == 0
+    assert int(getattr(renderer, "_montage_lod_ingest_reductions", 0)) == 0
