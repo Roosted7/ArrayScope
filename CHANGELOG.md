@@ -6,11 +6,18 @@ This file records user-visible release changes. Detailed development history and
 
 ### Added
 
-- Opt-in multi-resolution montage textures (ADR 0050, first slice): the
-  `montage_lod_policy` setting (`native-only` default, `resident` opt-in,
-  VisPy tiled scenes only) presents zoomed-out montages from box-mean-reduced
+- Multi-resolution montage textures (ADR 0050): the `montage_lod_policy`
+  setting (`resident` default on VisPy tiled scenes, `native-only`
+  fallback, selectable from Performance > Montage LOD without a restart)
+  presents zoomed-out montages from box-mean-reduced
   pyramid levels that are materialized asynchronously in the background and
   stream in per tile, while hover/histogram/profile/ROI values stay exact.
+  Zooming retargets the applied level immediately (including during camera
+  gestures); level transitions replace tile textures atomically with no
+  black or placeholder frames; and repeated zoom in/out cycles over
+  already-materialized levels are pure GPU identity swaps with zero texture
+  re-uploads (new counters: `lod_level_swaps_zero_upload`,
+  `lod_level_swaps_with_upload`, `superseded_reclaimed_under_pressure`).
   Cold tiles are reduced to the demanded level on the evaluation worker as
   part of tile materialization, so a zoomed-out cold fill uploads only the
   reduced textures; native atlas slots superseded by an acknowledged reduced
