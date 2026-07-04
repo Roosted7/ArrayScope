@@ -181,10 +181,15 @@ class TextureAtlasPool:
         self.source_ids: dict[object, object] = {}
         self.last_used: dict[object, int] = {}
         self.active_resident_keys: set[object] = set()
+        # Keys whose tile(s) now present a different residency class (ADR
+        # 0050): the acknowledged replacement makes these slots reclaimable.
+        self.superseded_keys: set[object] = set()
         self.serial = 0
         self.rebuild_count = 0
         self.eviction_count = 0
         self.evicted_near_count = 0
+        self.superseded_reclaimed_count = 0
+        self.pages_dropped_count = 0
         self._clock = 0
 
     @property
@@ -280,6 +285,7 @@ class TextureAtlasPool:
             self.source_ids.clear()
             self.last_used.clear()
             self.active_resident_keys.clear()
+            self.superseded_keys.clear()
         self.storage_mode = storage_mode
         while self._class_capacity((tile_h, tile_w)) < requested:
             remaining = requested - self._class_capacity((tile_h, tile_w))
@@ -338,6 +344,11 @@ class TextureAtlasPool:
                 budget_left = self.budget_bytes - self.estimated_gpu_bytes
                 page_capacity = min(page_capacity, budget_left // bytes_per_slot)
                 if page_capacity < 1:
+                    # Before budget-limiting the class, reclaim slots whose
+                    # tiles now present a different class and drop pages that
+                    # become empty; retry only when bytes were recovered.
+                    if self._release_superseded_capacity(protect_shape=shape):
+                        continue
                     break
             self.pages.append(
                 TextureAtlasPage(
@@ -351,6 +362,74 @@ class TextureAtlasPool:
             self.serial += 1
             capacity += int(page_capacity)
         return capacity
+
+    def _release_superseded_capacity(self, *, protect_shape: tuple[int, int] | None = None) -> bool:
+        """Free superseded slots and drop emptied pages to recover budget bytes.
+
+        A slot is superseded when its tile presents an acknowledged payload of
+        a different residency class (e.g. the native slot of a tile whose
+        reduced level is now on screen).  A slot that is the currently
+        presented payload for any tile is never freed (ADR 0041 gate 5).
+        Only pages that this call itself emptied are dropped, so capacity
+        guaranteed to the current commit by ``ensure_layout`` or class growth
+        is never torn down.  Returns True when at least one page was dropped,
+        i.e. GPU budget bytes were actually recovered.
+        """
+
+        protect = None if protect_shape is None else (int(protect_shape[0]), int(protect_shape[1]))
+        touched_pages: set[int] = set()
+        for key in tuple(self.superseded_keys):
+            if key in self.active_resident_keys or self.resident_tiles.get(key):
+                continue
+            slot_ref = self.resident_slots.get(key)
+            if slot_ref is None:
+                self.superseded_keys.discard(key)
+                continue
+            page_index, slot = (int(slot_ref[0]), int(slot_ref[1]))
+            page = self.pages[page_index]
+            if protect is not None and page.tile_shape == protect:
+                # Same-class slots are useful as-is: ordinary eviction reuses
+                # them without any byte recovery, so keep them allocated.
+                continue
+            page.slot_owners[slot] = None
+            page._free_slots.append(slot)
+            self.resident_slots.pop(key, None)
+            self.source_ids.pop(key, None)
+            self.last_used.pop(key, None)
+            self.superseded_keys.discard(key)
+            self.eviction_count += 1
+            self.superseded_reclaimed_count += 1
+            touched_pages.add(page_index)
+        empties = [
+            index
+            for index in sorted(touched_pages)
+            if all(owner is None for owner in self.pages[index].slot_owners)
+        ]
+        if not empties:
+            return False
+        self._drop_pages(empties)
+        return True
+
+    def _drop_pages(self, page_indices) -> None:
+        dropped = {int(index) for index in page_indices}
+        remap: dict[int, int] = {}
+        kept: list[TextureAtlasPage] = []
+        for old_index, page in enumerate(self.pages):
+            if old_index in dropped:
+                continue
+            remap[old_index] = len(kept)
+            kept.append(page)
+        self.pages = kept
+        self.resident_slots = {
+            key: (remap[int(page_index)], int(slot))
+            for key, (page_index, slot) in self.resident_slots.items()
+        }
+        self.tile_slots = {
+            tile: (remap[int(page_index)], int(slot))
+            for tile, (page_index, slot) in self.tile_slots.items()
+        }
+        self.pages_dropped_count += len(dropped)
+        self.serial += 1
 
     def requested_capacity(
         self,
@@ -443,9 +522,24 @@ class TextureAtlasPool:
             if _payload_supported_by_storage_mode(payload, storage_mode, rgb_already_windowed=rgb_already_windowed)
         )
         unsupported_items = len(raw_payload_items) - len(payload_items)
+        base_class_items = sum(
+            1
+            for _tile_number, item_payload in payload_items
+            if _payload_class_shape(item_payload) == (tile_h, tile_w)
+        )
+        if base_class_items == len(payload_items):
+            base_active_count = max(1, len(payload_items))
+            base_reserve_count = max(len(active_tiles), int(reserve_count or 0))
+        else:
+            # Reduced levels occupy their own shape classes (ADR 0050).  The
+            # base class is sized by the payloads that actually need native
+            # slots, so an ingest-reduced cold fill does not allocate a full
+            # native atlas it never uploads to.
+            base_active_count = max(1, base_class_items)
+            base_reserve_count = base_active_count
         requested_capacity = self.requested_capacity(
-            active_count=max(1, len(payload_items)),
-            reserve_count=max(len(active_tiles), int(reserve_count or 0)),
+            active_count=base_active_count,
+            reserve_count=base_reserve_count,
             storage_mode=storage_mode,
             tile_shape=tile_shape,
             budget_bytes=budget_bytes,
@@ -830,7 +924,15 @@ class TextureAtlasPool:
         for page_index, page in class_pages:
             for slot, owner in enumerate(page.slot_owners):
                 if owner is not None and owner not in active_keys:
-                    candidates.append((0 if owner not in near_keys else 1, self.last_used.get(owner, -1), owner, int(page_index), int(slot)))
+                    # Superseded slots go first: their tile already presents a
+                    # different class, so nothing on screen depends on them.
+                    if owner in self.superseded_keys and not self.resident_tiles.get(owner):
+                        rank = 0
+                    elif owner not in near_keys:
+                        rank = 1
+                    else:
+                        rank = 2
+                    candidates.append((rank, self.last_used.get(owner, -1), owner, int(page_index), int(slot)))
         if not candidates:
             raise AtlasCapacityError(
                 f"atlas has {self._class_capacity(shape) if shape else self.capacity} slots of shape {shape} "
@@ -841,6 +943,7 @@ class TextureAtlasPool:
         self.resident_slots.pop(victim, None)
         self.source_ids.pop(victim, None)
         self.last_used.pop(victim, None)
+        self.superseded_keys.discard(victim)
         self.eviction_count += 1
         if victim in near_keys:
             self.evicted_near_count += 1
@@ -877,6 +980,12 @@ class TextureAtlasPool:
                 tiles.discard(tile_number)
                 if not tiles:
                     self.resident_tiles.pop(old_key, None)
+            # The replacement is backend-acknowledged and presented for this
+            # tile: the displaced key's slot becomes reclaimable once no tile
+            # presents it anymore (ADR 0041 gate 5 holds until here).
+            if not self.resident_tiles.get(old_key) and old_key in self.resident_slots:
+                self.superseded_keys.add(old_key)
+        self.superseded_keys.discard(resident_key)
         self.tile_slots[tile_number] = (int(page_index), int(slot))
         self.tile_resident_keys[tile_number] = resident_key
         self.resident_tiles.setdefault(resident_key, set()).add(tile_number)

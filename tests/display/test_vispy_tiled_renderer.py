@@ -1272,3 +1272,145 @@ def test_reduced_class_budget_exhaustion_retains_previous_mapping():
     assert stats.presented_tiles == ()
     assert dict(pool.tile_slots) == native_mapping
     assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
+
+
+def test_cold_fill_at_reduced_level_performs_zero_native_uploads():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
+    reduced = {index: _lod_payload(index, float(index + 1), level=1) for index in range(3)}
+
+    _uvs, stats = pool.update_payloads(
+        reduced,
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=8,
+    )
+
+    assert set(stats.presented_tiles) == {0, 1, 2}
+    assert stats.texture_uploads == 3
+    assert stats.texture_upload_bytes == 3 * (2 * 2 * 4)
+    # The native class is never uploaded to, and it is not pre-allocated for
+    # the whole montage when the active set needs no native slots.
+    native_pages = [page for page in pool.pages if page.tile_shape == (4, 4)]
+    assert all(owner is None for page in native_pages for owner in page.slot_owners)
+    assert all(not page.scalar_texture.updates for page in native_pages)
+    assert sum(page.capacity for page in native_pages) <= 1
+
+
+def test_superseded_native_slots_are_reclaimed_under_reduced_class_pressure():
+    native_slot = 4 * 4 * 4
+    reduced_slot = 2 * 2 * 4
+    budget = native_slot + reduced_slot
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16, budget_bytes=budget)
+
+    pool.update_payloads(
+        {0: _lod_payload(0, 1.0, level=0)},
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+        budget_bytes=budget,
+    )
+    _uvs, flipped = pool.update_payloads(
+        {0: _lod_payload(0, 1.0, level=1)},
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+        budget_bytes=budget,
+    )
+    assert flipped.presented_tiles == (0,)
+    # The reduced payload is acknowledged and presented: the native slot for
+    # the same tile is now superseded but still allocated.
+    assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
+    assert pool.superseded_keys
+
+    _uvs, stats = pool.update_payloads(
+        {0: _lod_payload(0, 1.0, level=1), 1: _lod_payload(1, 2.0, level=1)},
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=2,
+        budget_bytes=budget,
+    )
+
+    # Instead of budget-limiting the reduced class, the superseded native
+    # slot was freed and its emptied page dropped to recover the bytes.
+    assert set(stats.presented_tiles) == {0, 1}
+    assert pool.superseded_reclaimed_count == 1
+    assert pool.pages_dropped_count == 1
+    assert ("tile", 0, 1.0, "lod", 0) not in pool.source_ids.values()
+    assert pool.tile_slots[0] != pool.tile_slots[1]
+
+
+def test_presented_native_slot_is_never_reclaimed_for_reduced_capacity():
+    native_slot = 4 * 4 * 4
+    reduced_slot = 2 * 2 * 4
+    budget = 2 * native_slot + reduced_slot
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16, budget_bytes=budget)
+
+    shared_native = _lod_payload(0, 1.0, level=0)
+    other_native = DisplayTilePayload(
+        tile_number=1,
+        source_index=1,
+        image=np.asarray(shared_native.image),
+        histogram_data=None,
+        source_id=shared_native.source_id,
+        texture_data=shared_native.texture_data,
+        lod=shared_native.lod,
+    )
+    pool.update_payloads(
+        {0: shared_native, 1: other_native},
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=2,
+        budget_bytes=budget,
+    )
+
+    # Tile 0 flips to its reduced level while tile 1 keeps presenting the
+    # shared native slot.
+    _uvs, stats = pool.update_payloads(
+        {0: _lod_payload(0, 1.0, level=1), 1: other_native},
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=2,
+        budget_bytes=budget,
+    )
+    assert set(stats.presented_tiles) == {0, 1}
+    native_key = pool.tile_resident_keys[1]
+    assert pool.resident_tiles[native_key] == {1}
+
+    # Reduced-class pressure must not free the slot tile 1 still presents
+    # (ADR 0041 gate 5: presented stays usable until its replacement lands).
+    assert pool._ensure_class_capacity((2, 2), 5) == 1
+    assert pool.superseded_reclaimed_count == 0
+    assert native_key in pool.resident_slots
+    assert pool.tile_resident_keys[1] == native_key
+    assert pool.source_ids[native_key] == other_native.source_id
+
+
+def test_eviction_prefers_superseded_slots_over_lru_and_near_keys():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    pool.ensure_layout(tile_shape=(4, 4), count=2, storage_mode="scalar")
+
+    assert pool._slot_for("superseded", active_keys=set(), near_keys=set())[2]
+    assert pool._slot_for("plain-old", active_keys=set(), near_keys=set())[2]
+    pool.source_ids["superseded"] = ("source", "superseded")
+    pool.source_ids["plain-old"] = ("source", "plain-old")
+    # LRU alone would evict "plain-old"; the superseded key must go first
+    # even though it was touched more recently and is protected as near.
+    pool._touch("plain-old")
+    pool._touch("superseded")
+    pool.superseded_keys.add("superseded")
+
+    _page, _slot, newly = pool._slot_for(
+        "incoming", active_keys={"incoming"}, near_keys={"superseded", "plain-old"}
+    )
+
+    assert newly
+    assert "superseded" not in pool.resident_slots
+    assert "plain-old" in pool.resident_slots
+    assert "superseded" not in pool.superseded_keys
+    assert pool.eviction_count == 1
