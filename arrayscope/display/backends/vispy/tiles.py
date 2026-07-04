@@ -49,6 +49,30 @@ class AtlasCapacityError(RuntimeError):
 _ATLAS_GROWTH_TARGET_BYTES = 32 * 1024 * 1024
 _UNSET = object()
 
+# Raw-GL constants for atlas mipmaps (gloo has no mipmap support; the visual
+# generates them itself with the context current, see _refresh_mipmaps).
+_GL_TEXTURE_MAX_LEVEL = 0x813D
+_GL_NEAREST_MIPMAP_LINEAR = 0x2702
+_ATLAS_MIPMAP_LEVEL_CAP = 5
+
+
+def _atlas_mipmap_levels(tile_shape: tuple[int, int]) -> int:
+    """Bleed-free mipmap depth for an atlas of contiguous tiles.
+
+    Mip level *k* averages 2^k x 2^k native blocks; a block never spans two
+    tiles as long as both tile edges divide by 2^k, so the usable depth is
+    the smaller power-of-two factor of the tile edges (capped: deeper mips
+    add nothing at montage scales).  Zero for odd tile edges = no mipmaps.
+    """
+
+    def _trailing(value: int) -> int:
+        value = int(value)
+        if value <= 0:
+            return 0
+        return (value & -value).bit_length() - 1
+
+    return min(_trailing(tile_shape[0]), _trailing(tile_shape[1]), _ATLAS_MIPMAP_LEVEL_CAP)
+
 
 class TextureAtlasPage:
     def __init__(self, gloo, *, tile_shape: tuple[int, int], capacity: int, storage_mode: str, max_texture_size: int):
@@ -105,6 +129,13 @@ class TextureAtlasPage:
         # hundreds or thousands of slots, and visible commits can allocate many
         # tiles in one UI callback.
         self._free_slots: list[int] = list(range(self.capacity - 1, -1, -1))
+        # Atlas mipmaps (ADR 0050): regenerated GPU-side by the visual after
+        # uploads, sampled NEAREST within a mip (no cross-tile bleed) and
+        # LINEAR between mips (smooth minification between CPU levels).
+        self.mipmap_levels = _atlas_mipmap_levels(self.tile_shape) if self.scalar_is_atlas or self.color_is_atlas else 0
+        self.mipmap_dirty = bool(self.mipmap_levels)
+        self.mipmap_ready = False
+        self.mipmap_updates = 0
 
     def take_free_slot(self, owner: object) -> int | None:
         while self._free_slots:
@@ -195,6 +226,8 @@ class TextureAtlasPool:
         # make that observable in diagnostics and the profile JSONL.
         self.lod_level_swaps_zero_upload = 0
         self.lod_level_swaps_with_upload = 0
+        # Atlas mipmap regenerations already reported through update stats.
+        self._mipmap_updates_reported = 0
         # Base (LOD-invariant) source identities of the active payload set:
         # a superseded key whose base is active is the retained adjacent
         # level of a visible tile and is reclaimed only as a last resort.
@@ -683,6 +716,8 @@ class TextureAtlasPool:
                 )
                 uploads += 1
                 upload_bytes += int(color.nbytes)
+            if (scalar is not None or color is not None) and page.mipmap_levels:
+                page.mipmap_dirty = True
             self.source_ids[resident_key] = payload.source_id
             updated += 1
 
@@ -720,6 +755,12 @@ class TextureAtlasPool:
         self.lod_level_swaps_zero_upload += level_swaps_zero_upload
         self.lod_level_swaps_with_upload += level_swaps_with_upload
         uvs = self.tile_uvs
+        # Mipmap regens run at draw time (visual-side); stats report the
+        # regens completed since the previous update, one commit behind.
+        mipmap_updates_total = sum(int(getattr(page, "mipmap_updates", 0) or 0) for page in self.pages)
+        mipmap_updates_delta = max(0, mipmap_updates_total - self._mipmap_updates_reported)
+        self._mipmap_updates_reported = mipmap_updates_total
+        mipmap_available = any(bool(getattr(page, "mipmap_ready", False)) for page in self.pages)
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
         return uvs, TileLayerUpdateStats(
             visible_items=len(presented_tiles),
@@ -753,8 +794,8 @@ class TextureAtlasPool:
             lod_factor=_max_payload_lod_factor(payload_map),
             source_texels_per_pixel=float(_max_payload_lod_factor(payload_map)),
             gutter_pixels=_max_payload_gutter(payload_map),
-            mipmap_updates=0,
-            mipmap_available=False,
+            mipmap_updates=mipmap_updates_delta,
+            mipmap_available=mipmap_available,
             complex_texture_uploads=complex_uploads,
             lod_level_swaps_zero_upload=level_swaps_zero_upload,
             lod_level_swaps_with_upload=level_swaps_with_upload,
@@ -907,6 +948,8 @@ class TextureAtlasPool:
                 )
                 uploads += 1
                 upload_bytes += int(color.nbytes)
+            if (scalar is not None or color is not None) and page.mipmap_levels:
+                page.mipmap_dirty = True
             self.source_ids[resident_key] = payload.source_id
             self._touch(resident_key)
             updated += 1
@@ -1276,6 +1319,9 @@ class GpuMontageLayer:
         for page_index, page in enumerate(self._pool.pages):
             visual = self._visuals_by_page[page_index]
             visual.set_textures(page.scalar_texture, page.color_texture)
+            set_mipmap_page = getattr(visual, "set_mipmap_page", None)
+            if set_mipmap_page is not None:
+                set_mipmap_page(page)
             if mapping_changed:
                 mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
             visual.visible = page_index in active_pages
@@ -1533,6 +1579,7 @@ class GpuWindowedTileVisual(Visual):
         self._scale_mode = 0.0
         self._symlog_constant = 0.0
         self._component_mode = 0.0
+        self._mipmap_page = None
         self.set_gl_state(depth_test=False, cull_face=False, blend=False)
         self._draw_mode = "triangles"
         self.freeze()
@@ -1564,6 +1611,11 @@ class GpuWindowedTileVisual(Visual):
         self._scalar_texture = scalar_texture
         self._color_texture = color_texture
         self.update()
+
+    def set_mipmap_page(self, page) -> None:
+        """Atlas page whose textures this visual keeps mipmapped at draw time."""
+
+        self._mipmap_page = page
 
     def set_levels(self, levels) -> bool:
         levels = _normalize_levels(levels, self._levels)
@@ -1607,7 +1659,80 @@ class GpuWindowedTileVisual(Visual):
         program["u_scale_mode"] = float(self._scale_mode)
         program["u_symlog_constant"] = float(self._symlog_constant)
         program["u_component_mode"] = float(self._component_mode)
+        self._refresh_mipmaps()
         return True
+
+    def _refresh_mipmaps(self) -> None:
+        """Regenerate atlas mipmaps GPU-side when uploads dirtied the page.
+
+        gloo has no mipmap support, so this runs raw GL with the context
+        current (ADR 0050 atlas mipmaps): flush pending GLIR commands so the
+        regen sees this commit's uploads, generate the clamped mip chain, and
+        switch minification to NEAREST_MIPMAP_LINEAR — nearest within a mip
+        (atlas neighbors never bleed), linear between mips (level transitions
+        stay smooth).  Magnification stays nearest.  Zero CPU: the driver
+        reduces on the GPU.  Any GL error disables mipmaps for the page
+        rather than risking the draw.
+        """
+
+        page = self._mipmap_page
+        if page is None or int(getattr(page, "mipmap_levels", 0) or 0) <= 0:
+            return
+        if not getattr(page, "mipmap_dirty", False) and getattr(page, "mipmap_ready", False):
+            return
+        try:
+            from vispy.gloo import gl
+            from vispy.gloo.context import get_current_canvas
+
+            canvas = get_current_canvas()
+            if canvas is None:
+                return
+            context = canvas.context
+            # Make this commit's queued texture uploads visible to the regen.
+            context.flush_commands()
+            parser = context.shared.parser
+            updates = 0
+            for texture, is_atlas in (
+                (self._scalar_texture, bool(page.scalar_is_atlas)),
+                (self._color_texture, bool(page.color_is_atlas)),
+            ):
+                if not is_atlas or texture is None:
+                    continue
+                try:
+                    handle = int(parser.get_object(texture.id).handle)
+                except Exception:
+                    handle = 0
+                if handle <= 0:
+                    # Texture not realized yet (first frame): stays dirty and
+                    # is retried on the next draw.
+                    return
+                gl.glBindTexture(gl.GL_TEXTURE_2D, handle)
+                gl.glGetError()  # clear stale error state
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, _GL_TEXTURE_MAX_LEVEL, int(page.mipmap_levels))
+                gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
+                if gl.glGetError():
+                    # Incomplete mip chain with a mipmap filter would draw
+                    # black: keep plain nearest and disable for this page.
+                    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                    page.mipmap_levels = 0
+                    page.mipmap_ready = False
+                    page.mipmap_dirty = False
+                    return
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, _GL_NEAREST_MIPMAP_LINEAR)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                updates += 1
+        except Exception:
+            # Mipmaps are a display polish; a failure must never break the
+            # draw.  Disable for this page and carry on.
+            page.mipmap_levels = 0
+            page.mipmap_ready = False
+            page.mipmap_dirty = False
+            return
+        if updates:
+            page.mipmap_dirty = False
+            page.mipmap_ready = True
+            page.mipmap_updates = int(getattr(page, "mipmap_updates", 0) or 0) + updates
 
     def _set_lut_texture(self, lut_data, *, key=None, phase_default: bool | None = None) -> bool:
         if phase_default is None:

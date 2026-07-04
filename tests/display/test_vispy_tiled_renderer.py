@@ -1511,3 +1511,43 @@ def test_active_tiles_only_resident_presented_class_is_never_evicted():
     with pytest.raises(AtlasCapacityError):
         pool._slot_for("incoming", active_keys={key, "incoming"}, near_keys=set())
     assert pool.tile_resident_keys[0] == key
+
+def test_atlas_mipmap_levels_are_the_bleed_free_depth():
+    from arrayscope.display.backends.vispy.tiles import _atlas_mipmap_levels
+
+    # Mip k averages 2^k x 2^k blocks; blocks stay inside one tile only
+    # while both tile edges divide by 2^k.
+    assert _atlas_mipmap_levels((336, 336)) == 4
+    assert _atlas_mipmap_levels((64, 64)) == 5  # capped
+    assert _atlas_mipmap_levels((63, 64)) == 0  # odd edge: no safe mips
+    assert _atlas_mipmap_levels((84, 84)) == 2
+
+
+def test_uploads_dirty_the_page_for_draw_time_mipmap_regen():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
+    payloads = {index: _lod_payload(index, float(index + 1), level=0) for index in range(2)}
+    _uvs, stats = pool.update_payloads(
+        payloads, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False
+    )
+    page = pool.pages[0]
+    assert page.mipmap_levels == 2
+    assert page.mipmap_dirty is True
+    # Regeneration is draw-time work; the upload commit reports none yet.
+    assert stats.mipmap_available is False
+    assert stats.mipmap_updates == 0
+
+    # Simulate the visual's draw-time regen: the next update reports the
+    # regens exactly once (delta reporting), and availability follows the
+    # page state.
+    page.mipmap_dirty = False
+    page.mipmap_ready = True
+    page.mipmap_updates = 3
+    _uvs, stats = pool.update_payloads(
+        payloads, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False
+    )
+    assert stats.mipmap_available is True
+    assert stats.mipmap_updates == 3
+    _uvs, stats = pool.update_payloads(
+        payloads, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False
+    )
+    assert stats.mipmap_updates == 0
