@@ -1,10 +1,8 @@
 # 0050 — Asynchronous multi-resolution tile residency
 
-**Status:** Accepted (2026-07). Implements the design separated by ADR 0041; first slice targets
-VisPy montage/tiled scenes. 2026-07-04 update: zero-redundant-work pass landed (semantic
-histogram/level identity across level swaps, level-from-level pyramid derivation, semantic
-display-cache store on every drain mode, `lod-commuting` capability contract); reduce-before-ops
-input reduction is design-noted below and gated on preview-then-refine.
+**Status:** Accepted and implemented for VisPy montage/tiled scenes (2026-07-04); default
+policy is `resident` on VisPy (Performance → Montage LOD), `native-only` elsewhere. The
+retained preview level below is accepted design, not yet implemented.
 
 ## Context
 
@@ -160,6 +158,29 @@ the ordinary supersession path. Until that payload-quality contract exists, runn
 pipeline alongside the mandatory native one would add work rather than remove it, so commuting
 pipelines still evaluate natively and reduce the output at ingest. Exact consumers always use the
 native pipeline in either world.
+
+## Implemented contracts (2026-07-04)
+
+The first production slice hardened into these invariants, each pinned by tests:
+
+- **Semantic identity.** Pyramid levels are keyed by session-owned semantic tile identity
+  (session key + source index); array object identity never appears in LOD keys, so cached
+  levels survive rendered-tile rebuilds and session recreation, and are addressable without
+  a live rendered object.
+- **Presentation floor.** A planned tile with any resident level presents it (payload
+  `quality="preview"`) instead of a placeholder. Preview payloads draw pixels but refuse
+  semantic reads and are invisible to histogram/level convergence.
+- **No silent work loss.** Every scheduling site checks admission: declines roll back their
+  bookkeeping (tile queues, pyramid singleflight claims, stage dedup keys) and the flush
+  path repairs any loading-without-work or waiting-without-stage state. Supersession
+  cancels stale work, never a completed result's notification.
+- **Settled idle.** Non-active upserts are emitted once; when a viewport-scoped backend
+  declines them they park (`parked_dirty_payloads`) and re-arm on entering the active
+  scope. An idle session performs zero commits, draws, or reductions.
+- **Zero redundant derived work.** Level swaps trigger no histogram/level recomputation
+  (semantic identity), coarser display levels derive from cached finer stages worker-side
+  (never re-running pipelines), and the stage cache holds only the finest stage per
+  pipeline while display derivations live in the bounded pyramid cache.
 
 ## Consequences
 

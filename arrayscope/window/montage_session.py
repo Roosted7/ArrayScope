@@ -533,8 +533,7 @@ class MontageRenderSession:
         level_stats = getattr(rendered, "level_stats", None)
         semantic = getattr(rendered, "semantic_data", None)
         semantic = exact_image if semantic is None else np.asarray(semantic)
-        lod = self._planned_lod_info(rendered, factor=lod_factor)
-        texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
+        texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered)
         source_id = self._payload_source_id(
             base_source_id,
             texture_kind=texture_kind,
@@ -622,7 +621,7 @@ class MontageRenderSession:
             owns_committed_presentation = tile_number in self.presented_tiles
             if previous is None:
                 base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
-                texture_data, _texture_histogram, lod = self._texture_for_rendered_tile(rendered, factor=lod_factor)
+                texture_data, _texture_histogram, lod = self._texture_for_rendered_tile(rendered)
                 source_id = self._payload_source_id(
                     base_source_id,
                     texture_kind=getattr(rendered, "texture_kind", None),
@@ -1105,22 +1104,7 @@ class MontageRenderSession:
         )
         return texture, histogram, lod
 
-    def _planned_lod_info(self, rendered: RenderedTile, *, factor: int) -> LodInfo:
-        if int(factor) < 1:
-            raise ValueError("LOD factor must be positive")
-        texture_kind = getattr(rendered, "texture_kind", None)
-        if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
-            texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
-        if texture_kind == TexturePlaneKind.COMPLEX_RG32F and getattr(rendered, "semantic_data", None) is not None:
-            source = np.asarray(rendered.semantic_data)
-        else:
-            source = np.asarray(rendered.image)
-        source_shape = tuple(int(value) for value in source.shape[:2])
-        return LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
-
-    def _texture_for_rendered_tile(self, rendered: RenderedTile, *, factor: int | None = None) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
-        if factor is not None and int(factor) < 1:
-            raise ValueError("LOD factor must be positive")
+    def _texture_for_rendered_tile(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
         source, histogram, _texture_kind = self._texture_source_for(rendered)
         if self._resident_lod_active():
             return self._resident_texture_for_rendered_tile(rendered, source=source, histogram=histogram)
