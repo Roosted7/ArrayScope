@@ -1490,7 +1490,7 @@ class FrameRenderMixin:
                     allowed_chunk_axes=stage_materialization_allowed_chunk_axes(request.candidate.shape),
                 )
 
-            controller.start_latest(
+            started = controller.start_latest(
                 evaluate,
                 key=("stage", request.key),
                 priority=EvalPriority.VISIBLE_IMAGE,
@@ -1510,11 +1510,28 @@ class FrameRenderMixin:
                 ),
                 on_done=lambda value, session_id=session.session_id, key=request.key: self._on_montage_stage_done(session_id, key, value),
                 on_error=lambda exc, session_id=session.session_id, key=request.key: self._on_montage_stage_error(session_id, key, exc),
-                on_stale=lambda key=request.key: self.win.operation_evaluator.stage_materializer.cancel(key),
+                on_stale=lambda key=request.key: self._on_montage_stage_stale(key),
                 on_slow=lambda: self._on_montage_tile_slow(session.session_id),
                 slow_ms=100,
                 pass_token=True,
             )
+            if started is None:
+                # Admission declined: the key was optimistically marked
+                # active, and leaving it there makes the planner's dedup
+                # skip this stage forever while every stage-backed tile
+                # waits on it (observed: 64 tiles wedged behind one lost
+                # ~490 MB stage after a session-restore burst). Roll back
+                # so the next planning pass re-requests it.
+                session.stage_fan_in.active_requests.discard(request.key)
+                self._montage_stage_admission_declined = (
+                    int(getattr(self, "_montage_stage_admission_declined", 0) or 0) + 1
+                )
+
+    def _on_montage_stage_stale(self, key) -> None:
+        self.win.operation_evaluator.stage_materializer.cancel(key)
+        session = getattr(self, "_montage_session", None)
+        if session is not None:
+            session.stage_fan_in.active_requests.discard(key)
 
     def _on_montage_stage_done(self, session_id, key, value) -> None:
         session = getattr(self, "_montage_session", None)
@@ -2468,6 +2485,21 @@ class FrameRenderMixin:
                 int(getattr(self, "_montage_orphaned_tiles_repaired", 0) or 0) + int(repaired)
             )
             self._schedule_montage_tiles(session)
+        if session.stage_fan_in.waiting_tiles and not session.stage_fan_in.active_requests:
+            # Tiles are waiting on a stage no scheduler knows about (lost to
+            # declined admission or supersession): replan and reschedule the
+            # stage work, mirroring the orphaned-tile repair.
+            waiting_tiles = [
+                tile
+                for tiles in session.stage_fan_in.waiting_tiles.values()
+                for tile in tuple(tiles)
+            ]
+            if waiting_tiles:
+                stage_plan = self._plan_montage_stages(session.document, waiting_tiles)
+                self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
+                self._montage_orphaned_stages_repaired = (
+                    int(getattr(self, "_montage_orphaned_stages_repaired", 0) or 0) + 1
+                )
         if (
             getattr(session, "show_loading_overlays", False)
             and not session.visible_plan_complete()
