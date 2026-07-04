@@ -1010,3 +1010,39 @@ def test_floor_presents_from_pinned_preview_when_main_pyramid_lost_the_level():
     assert payload.quality == "preview"
     assert payload.lod.level == 3
     assert payload.texture_data.shape[:2] == (TILE // 8, TILE // 8)
+
+
+def test_preview_payload_at_acceptable_level_still_refines_to_exact():
+    """Regression (screenshot: blocky tiles among exact neighbors): a
+    preview payload whose level falls inside acceptable_levels looked
+    converged to refresh and never refined, though the rendered result
+    was available for a cheap exact rebuild."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    rendered = session.rendered_tiles[1]
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    key = pyramid_key_for_rendered(rendered, demand=demand, level=2, semantic_source_id=semantic_id)
+    pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+
+    # Floor the tile while unrendered, then the rendered result returns
+    # (e.g. session reseed) without any dirty mark.
+    del session.rendered_tiles[1]
+    session.dirty_payloads.pop(1, None)
+    _state, delta = session.build_tile_presentation({})
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    assert session.display_tile_payloads[1].quality == "preview"
+    image = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE)
+    session.rendered_tiles[1] = RenderedTile(
+        tile=session.plan.tiles[1], image=image, histogram_data=image,
+        eval_ms=0.0, slab_shape=image.shape, slab_nbytes=image.nbytes,
+    )
+
+    # Camera refresh must dirty the preview tile even though its level (2)
+    # is inside acceptable_levels, and the next build must go exact.
+    session.refresh_lod_for_viewport()
+    assert 1 in session.dirty_payloads
+    _state, _delta = session.build_tile_presentation({})
+    assert session.display_tile_payloads[1].quality == "exact"

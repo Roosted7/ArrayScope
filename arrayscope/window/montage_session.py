@@ -828,6 +828,16 @@ class MontageRenderSession:
                     )
             if payload is None:
                 continue
+            if str(getattr(payload, "quality", "exact")) != "exact":
+                # A preview payload can sit at an acceptable level and look
+                # converged, but preview never satisfies convergence: the
+                # tile has a rendered result, so the exact rebuild is one
+                # cheap dirty away — without this, a floored tile whose
+                # level matched demand stayed blocky forever next to exact
+                # neighbors.
+                self.dirty_payloads[int(tile_number)] = None
+                commit_needed = True
+                continue
             applied = int(choose_resident_level(demand, tuple(sorted(resident))))
             if presented_level != applied:
                 self.dirty_payloads[int(tile_number)] = None
