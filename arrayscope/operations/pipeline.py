@@ -112,7 +112,10 @@ class Conjugate:
         return _same_dtype(input_dtype)
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
-        return _capabilities(OperationKind.ELEMENTWISE, ndim=len(input_shape), can_fuse=True)
+        # Pointwise value map: box-mean reduction of the display axes
+        # commutes exactly (conjugation is linear), so display payloads may
+        # evaluate it on reduced input (ADR 0050).
+        return _capabilities(OperationKind.ELEMENTWISE, ndim=len(input_shape), can_fuse=True, lod_commuting=True)
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
         del input_shape
@@ -703,6 +706,7 @@ def _capabilities(
     cache_stage: bool = False,
     can_fuse: bool = False,
     notes=(),
+    lod_commuting: bool = False,
 ) -> OperationCapabilities:
     chunkable_axes = default_chunkable_axes(kind, ndim=ndim, blocking_axes=blocking_axes)
     return OperationCapabilities(
@@ -714,4 +718,5 @@ def _capabilities(
         temp_multiplier=float(temp_multiplier),
         can_fuse=bool(can_fuse),
         notes=tuple(notes),
+        lod_commuting=bool(lod_commuting),
     )

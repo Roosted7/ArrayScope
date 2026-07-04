@@ -24,6 +24,14 @@ class OperationCapabilities:
     temp_multiplier: float = 1.0
     can_fuse: bool = False
     notes: tuple[str, ...] = ()
+    # ADR 0050 display-LOD contract: True only when box-mean downsampling of
+    # the display axes commutes acceptably with this operation FOR DISPLAY
+    # (pointwise value maps such as conjugate/abs/phase/component select and
+    # scalar arithmetic).  Domain transforms (FFT) and anything that moves or
+    # mixes samples across the display axes must stay False.  Only display
+    # payload derivations may consult this flag; exact consumers always use
+    # the native pipeline.
+    lod_commuting: bool = False
 
 
 def normalize_capabilities(capabilities: OperationCapabilities, *, ndim: int) -> OperationCapabilities:
@@ -37,6 +45,7 @@ def normalize_capabilities(capabilities: OperationCapabilities, *, ndim: int) ->
         temp_multiplier=float(capabilities.temp_multiplier),
         can_fuse=bool(capabilities.can_fuse),
         notes=tuple(str(note) for note in capabilities.notes),
+        lod_commuting=bool(capabilities.lod_commuting),
     )
 
 
@@ -49,6 +58,33 @@ def default_chunkable_axes(kind: OperationKind, *, ndim: int, blocking_axes=()) 
     if kind in {OperationKind.VIEW, OperationKind.ELEMENTWISE, OperationKind.RESHAPE, OperationKind.REDUCTION}:
         return tuple(axis for axis in range(ndim) if axis not in blocked)
     return ()
+
+
+def pipeline_commutes_for_display_lod(operations, base_shape, base_dtype=None) -> bool:
+    """True when every operation may take box-mean-reduced display input.
+
+    The reduce-before-ops path (ADR 0050) is valid only when the ENTIRE
+    pipeline commutes: one non-commuting stage makes reduced input change
+    the result.  Shape-changing steps are additionally rejected because the
+    display-axis identification below the reduction would no longer match
+    the native region plan.  Conservative by construction: unknown or
+    capability-less operations return False.
+    """
+
+    shape = tuple(int(size) for size in base_shape)
+    dtype = base_dtype
+    for operation in tuple(operations or ()):
+        capabilities = getattr(operation, "capabilities", None)
+        if not callable(capabilities):
+            return False
+        if tuple(operation.output_shape(shape)) != shape:
+            return False
+        if not bool(getattr(capabilities(shape, dtype), "lod_commuting", False)):
+            return False
+        output_dtype = getattr(operation, "output_dtype", None)
+        if callable(output_dtype):
+            dtype = output_dtype(dtype)
+    return True
 
 
 def _normalize_kind(kind) -> OperationKind:
