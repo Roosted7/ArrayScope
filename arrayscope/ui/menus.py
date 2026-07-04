@@ -38,7 +38,7 @@ class WindowMenuMixin:
                 "image_rendering_backend": self._settings.value("image_rendering_backend", ImageRenderingBackendChoice.AUTO.value),
                 "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
-                "montage_lod_policy": self._settings.value("montage_lod_policy", MontageLodPolicyChoice.NATIVE_ONLY.value),
+                "montage_lod_policy": self._settings.value("montage_lod_policy", MontageLodPolicyChoice.RESIDENT.value),
             }
         )
 
@@ -182,6 +182,27 @@ class WindowMenuMixin:
             image_backend_menu.addAction(action)
             self._image_rendering_backend_actions[choice] = action
 
+        self._montage_lod_actions = {}
+        self._montage_lod_action_group = QtGui.QActionGroup(self)
+        self._montage_lod_action_group.setExclusive(True)
+        montage_lod_menu = QtWidgets.QMenu("Montage LOD", self)
+        montage_lod_menu.setToolTipsVisible(True)
+        performance_menu.addMenu(montage_lod_menu)
+        self._montage_lod_menu = montage_lod_menu
+        for choice, label in (
+            (MontageLodPolicyChoice.RESIDENT, "Resident (multi-resolution)"),
+            (MontageLodPolicyChoice.NATIVE_ONLY, "Native only"),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            action.setToolTip(
+                "Resident presents the closest materialized pyramid level for zoomed-out montages (VisPy tiled scenes); "
+                "Native only always presents full-resolution textures."
+            )
+            self._montage_lod_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, choice=choice: self._set_montage_lod_policy_choice(choice))
+            montage_lod_menu.addAction(action)
+            self._montage_lod_actions[choice] = action
+
         self._render_budget_actions = {}
         self._render_budget_action_group = QtGui.QActionGroup(self)
         self._render_budget_action_group.setExclusive(True)
@@ -264,6 +285,10 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(self.app_settings.image_rendering_backend == choice)
             action.blockSignals(False)
+        for choice, action in getattr(self, "_montage_lod_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.montage_lod_policy == choice)
+            action.blockSignals(False)
         for choice, action in self._memory_profile_actions.items():
             action.blockSignals(True)
             action.setChecked(self.app_settings.memory_profile == choice)
@@ -314,6 +339,29 @@ class WindowMenuMixin:
         self.app_settings = self._updated_app_settings(image_rendering_backend=choice)
         self._apply_performance_settings(persist=True)
         show_status_message(self, "Image rendering backend changes apply to newly opened windows.")
+
+    def _set_montage_lod_policy_choice(self, choice):
+        if self.app_settings.montage_lod_policy == choice:
+            self._sync_performance_actions()
+            return
+        self.app_settings = self._updated_app_settings(montage_lod_policy=choice)
+        self._save_app_settings()
+        self._sync_performance_actions()
+        self._rerender_montage_for_lod_policy_change()
+
+    def _rerender_montage_for_lod_policy_change(self):
+        """Apply the LOD policy on the next montage render without a restart.
+
+        The policy is captured per ``MontageRenderSession``, so a settings
+        change must replace the active session.  Scheduling a full montage
+        render does that; tile evaluation resolves from the display caches,
+        making this a presentation-level refresh rather than a recompute.
+        """
+
+        renderer = getattr(self, "renderer", None)
+        update = getattr(renderer, "update_image_view", None)
+        if callable(update):
+            update()
 
     def _set_memory_profile_choice(self, choice):
         self.app_settings = self._updated_app_settings(memory_profile=choice)

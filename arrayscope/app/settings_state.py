@@ -49,7 +49,7 @@ class AppSettingsState:
     fft_backend: FFTBackendChoice = FFTBackendChoice.AUTO
     fft_workers: FFTWorkersChoice = FFTWorkersChoice.AUTO
     image_rendering_backend: ImageRenderingBackendChoice = ImageRenderingBackendChoice.AUTO
-    montage_lod_policy: MontageLodPolicyChoice = MontageLodPolicyChoice.NATIVE_ONLY
+    montage_lod_policy: MontageLodPolicyChoice = MontageLodPolicyChoice.RESIDENT
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
 
@@ -128,7 +128,10 @@ def normalize_montage_lod_policy_choice(value) -> MontageLodPolicyChoice:
     try:
         return MontageLodPolicyChoice(str(value))
     except Exception:
-        return MontageLodPolicyChoice.NATIVE_ONLY
+        # ADR 0050: resident is the montage default; native-only remains the
+        # explicit fallback policy (and the effective one on non-VisPy
+        # backends via the frame renderer capability gate).
+        return MontageLodPolicyChoice.RESIDENT
 
 
 def normalize_render_memory_budget_mb(value) -> int:

@@ -110,8 +110,12 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.image_rendering_backend == settings_state.ImageRenderingBackendChoice.AUTO
     assert defaults.memory_profile == settings_state.MemoryProfileChoice.BALANCED
     assert defaults.render_memory_budget_mb == 512
+    # ADR 0050: resident LOD is the montage default once validated on hardware.
+    assert defaults.montage_lod_policy == settings_state.MontageLodPolicyChoice.RESIDENT
     unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})
     assert unknown.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
+    unknown_lod = settings_state.settings_from_mapping({"montage_lod_policy": "unknown"})
+    assert unknown_lod.montage_lod_policy == settings_state.MontageLodPolicyChoice.RESIDENT
 
 
 def test_performance_settings_normalize_unknowns_and_clamp_budget():
