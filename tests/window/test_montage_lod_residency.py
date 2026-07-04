@@ -442,23 +442,23 @@ def test_camera_only_retarget_swaps_to_cached_level_without_pan_or_slice_change(
     assert int(session.viewport_revision) >= revision_before
 
 
-def test_camera_only_retarget_requests_missing_levels_with_new_viewport_revision():
+def test_camera_only_retarget_requests_missing_levels_with_new_lod_revision():
     pyramid = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
     _present_native(session)
-    revision_before = int(session.viewport_revision)
+    revision_before = int(session.lod_target_revision)
 
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     swap_ready = session.refresh_lod_for_viewport()
 
     # Nothing resident yet: no swap commit, but materializations are queued
-    # under a fresh viewport revision so stale zoom targets supersede.
+    # under a fresh LOD target revision so stale zoom targets supersede.
     assert swap_ready is False
     assert sorted(request[0] for request in session.pending_lod_requests) == [0, 1]
     for request in session.pending_lod_requests:
         assert request.key.factor_xy == (4, 4)
         assert request.source.shape == (TILE, TILE)
-    assert int(session.viewport_revision) > revision_before
+    assert int(session.lod_target_revision) > revision_before
     # Native payloads stay presented untouched while levels materialize.
     assert not session.dirty_payloads
     assert all(payload.lod.level == 0 for payload in session.tile_presentation_state.payloads.values())
@@ -845,3 +845,73 @@ def test_floor_payload_upgrades_when_closer_level_becomes_resident():
     upgraded = session.display_tile_payloads[1]
     assert upgraded.quality == "preview"
     assert upgraded.lod.level == 2
+
+
+def test_lod_refresh_owns_its_supersession_counter_not_viewport_revision():
+    """Regression: refresh bumped viewport_revision without replanning,
+    churning priority-retarget work identities at idle."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid)
+    before_viewport = int(session.viewport_revision)
+    before_lod = int(getattr(session, "lod_target_revision", 0))
+    session.refresh_lod_for_viewport()
+    assert int(session.viewport_revision) == before_viewport
+    assert int(session.lod_target_revision) == before_lod + 1
+    # Unchanged viewport: no further bumps.
+    session.refresh_lod_for_viewport()
+    assert int(session.lod_target_revision) == before_lod + 1
+
+
+def test_floor_payloads_never_stall_level_convergence():
+    """Regression: preview payloads in the level scope kept the target
+    permanently stale, spinning full commits at idle (60-75% CPU)."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    rendered = session.rendered_tiles[1]
+    key = pyramid_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+    del session.rendered_tiles[1]
+    session.dirty_payloads.pop(1, None)
+
+    _state, delta = session.build_tile_presentation({})
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    assert session.display_tile_payloads[1].quality == "preview"
+
+    # A level target arrives; the floored tile must not count as stale
+    # (it carries no semantic level evidence), so convergence can settle
+    # on the exact tiles alone.
+    session.begin_level_presentation_update((0.0, 1.0))
+    session.update_level_presentation_scope()
+    active = session.level_generation.active_tiles
+    assert 1 not in active, "preview payloads must stay outside the level scope"
+
+
+def test_orphaned_loading_tiles_are_requeued_for_evaluation():
+    """Regression: declined admission left tiles loading forever with no
+    pending work, so the visible plan never completed and finalization
+    retried commits in a timer loop at idle."""
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 20))
+    # Simulate a lost evaluation: dequeued, marked loading, work vanished.
+    lost = session.plan.tiles[1]
+    del session.rendered_tiles[1]
+    session.dirty_payloads.pop(1, None)
+    session.loading_tiles.add(1)
+    assert not session.pending_tiles
+
+    requeued = session.requeue_orphaned_loading_tiles()
+    assert requeued == 1
+    assert 1 not in session.loading_tiles
+    assert [int(t.montage_index) for t in session.pending_tiles] == [1]
+
+    # Idempotent: a second repair finds nothing.
+    assert session.requeue_orphaned_loading_tiles() == 0

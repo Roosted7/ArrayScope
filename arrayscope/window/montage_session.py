@@ -217,6 +217,7 @@ class MontageRenderSession:
     lod_materializations_completed: int = 0
     acknowledged_source_ids: set = field(default_factory=set)
     lod_floor_presentations: int = 0
+    lod_target_revision: int = 0
     # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but
     # must carry the tile's finest already-computed semantic stats forward
     # unchanged.  `cross_level_reuses` counts swaps that reused the retained
@@ -362,6 +363,11 @@ class MontageRenderSession:
             for tile in tuple(self.visible_tiles)
             if int(tile.montage_index) in self.display_tile_payloads
             and int(tile.montage_index) in self.presented_tiles
+            # Preview (floor) payloads carry no semantic level evidence and
+            # can never converge; letting them into the scope kept the level
+            # target permanently stale, which forced every commit through
+            # the full rebuild path in a timer loop at idle.
+            and str(getattr(self.display_tile_payloads[int(tile.montage_index)], "quality", "exact")) == "exact"
         )
         self.level_generation.set_active_tiles(active)
         if self.level_generation.target_levels is not None:
@@ -770,10 +776,11 @@ class MontageRenderSession:
         viewport_identity = _viewport_identity(self.view_range, self.viewport_shape)
         if viewport_identity != self._lod_refresh_viewport_identity:
             self._lod_refresh_viewport_identity = viewport_identity
-            # Stale zoom targets must cancel: scheduled materializations are
-            # superseded per tile by (session, viewport revision), so a new
-            # viewport advances the revision before the next build does.
-            self.viewport_revision += 1
+            # Stale zoom targets must cancel: LOD materializations supersede
+            # on this dedicated counter.  viewport_revision is owned by the
+            # retarget replan — bumping it here changed priority-retarget
+            # work identities without replanning, churning work at idle.
+            self.lod_target_revision += 1
         self._selected_lod_factor()
         demand = self.lod_policy_decision.demand
         pyramid = self.lod_pyramid
@@ -1173,6 +1180,7 @@ class MontageRenderSession:
                 for tile in active
                 if int(tile) in self.display_tile_payloads
                 and int(tile) in previous_payloads
+                and str(getattr(self.display_tile_payloads[int(tile)], "quality", "exact")) == "exact"
                 and not self._tile_matches_current_level_target(int(tile), self.level_generation.target_levels)
             )
             stale_level_tiles = self._prioritized_tile_numbers(stale_candidates)
@@ -1403,6 +1411,42 @@ class MontageRenderSession:
             self.level_generation.forget_tile(int(tile))
             self.display_tile_payloads.pop(int(tile), None)
         return acknowledged
+
+    def requeue_orphaned_loading_tiles(self) -> int:
+        """Re-enqueue planned tiles stuck in loading with no work attached.
+
+        A tile can be dequeued, marked loading, and then lose its evaluation
+        (declined admission, crashed worker path).  Loading with no pending,
+        active, or completed-pending work is unservable state: the visible
+        plan can never complete and finalization retries forever.  Repair by
+        returning such tiles to the pending queue; scheduling stays bounded
+        by the ordinary drain.  Idempotent and cheap — set arithmetic plus
+        one enqueue per orphan.
+        """
+
+        orphaned = (
+            set(int(t) for t in self.loading_tiles)
+            - set(int(t) for t in self.active_tile_requests)
+            - set(int(t) for t in self.rendered_tiles)
+            - {
+                int(getattr(entry[0] if isinstance(entry, tuple) else entry, "montage_index", -1))
+                for entry in tuple(self.pending_completed_tiles)
+            }
+            - {int(t.montage_index) for t in self.pending_tiles}
+        )
+        if not orphaned:
+            return 0
+        by_number = {int(t.montage_index): t for t in tuple(self.plan.tiles)}
+        requeued = 0
+        for index in sorted(orphaned):
+            tile = by_number.get(int(index))
+            if tile is None or int(index) in self.skipped_tiles:
+                self.loading_tiles.discard(int(index))
+                continue
+            self.loading_tiles.discard(int(index))
+            if self.enqueue_pending_tile(tile):
+                requeued += 1
+        return requeued
 
     def mark_loading(self, tile: MontageTile) -> None:
         index = int(tile.montage_index)

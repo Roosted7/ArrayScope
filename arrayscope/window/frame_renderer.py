@@ -1805,7 +1805,7 @@ class FrameRenderMixin:
             self._on_montage_tile_error(session_id, tile, exc)
 
         controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
-        controller.start_latest(
+        started = controller.start_latest(
             evaluate,
             key=("montage_tile", session.key, int(tile.montage_index)),
             priority=EvalPriority.VISIBLE_IMAGE,
@@ -1830,6 +1830,20 @@ class FrameRenderMixin:
             slow_ms=100,
             pass_token=True,
         )
+        if started is None:
+            # Admission declined (visible-lane backpressure): the tile was
+            # already dequeued and marked loading, and dropping it here left
+            # it "loading" forever with no pending work — the visible plan
+            # could then never complete and auto-levels retried commits in a
+            # timer loop at idle.  Revert the bookkeeping, requeue, and stop
+            # the drain until backpressure clears.
+            session.active_tile_requests.discard(int(tile.montage_index))
+            session.loading_tiles.discard(int(tile.montage_index))
+            _enqueue_session_pending_tile(session, tile)
+            self._montage_tile_admission_declined = (
+                int(getattr(self, "_montage_tile_admission_declined", 0) or 0) + 1
+            )
+            return False
         return True
 
     def _retargeted_montage_viewport_plan(
@@ -2308,7 +2322,7 @@ class FrameRenderMixin:
         controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
         session_id = int(session.session_id)
         session_key = session.key
-        supersession_value = (session_key, session_id, int(getattr(session, "viewport_revision", 0) or 0))
+        supersession_value = (session_key, session_id, int(getattr(session, "lod_target_revision", 0) or 0))
         for request in requests:
             tile_number = int(request[0])
             key = request[1]
@@ -2448,6 +2462,12 @@ class FrameRenderMixin:
         if not _montage_work_token_is_current(session, token, "commit"):
             return
         self._commit_montage_session_presentation(session, force=False)
+        repaired = session.requeue_orphaned_loading_tiles()
+        if repaired:
+            self._montage_orphaned_tiles_repaired = (
+                int(getattr(self, "_montage_orphaned_tiles_repaired", 0) or 0) + int(repaired)
+            )
+            self._schedule_montage_tiles(session)
         if (
             getattr(session, "show_loading_overlays", False)
             and not session.visible_plan_complete()
