@@ -474,3 +474,85 @@ def test_refresh_is_native_only_noop():
     assert session.refresh_lod_for_viewport() is False
     assert session.pending_lod_requests == []
     assert not session.dirty_payloads
+
+
+def test_level_only_change_replaces_payload_atomically_and_deferral_keeps_old():
+    """ADR 0050 contract: a LOD swap never blanks or placeholders a tile.
+
+    A commit that changes only the presented level of an acknowledged tile
+    must emit an upsert (never a removal), and when the budget defers the
+    upsert the previously presented payload stays committed unchanged.
+    """
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
+    _present_native(session)
+    native_payloads = dict(session.tile_presentation_state.payloads)
+    assert set(native_payloads) == {0, 1}
+    _admit_zoomed_out_levels(session)
+    session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
+    assert session.refresh_lod_for_viewport() is True
+
+    # Budget admits only one swap this commit.
+    state, delta = session.build_tile_presentation({}, max_upserts=1)
+    assert delta.removals == ()
+    assert len(delta.upserts) == 1
+    swapped = next(iter(delta.upserts))
+    deferred = ({0, 1} - {swapped}).pop()
+    # At the commit boundary both tiles are mapped: one at the new level, the
+    # deferred one still at its old (acknowledged) payload.
+    assert state.payloads[swapped].lod.level == 2
+    assert state.payloads[deferred] is native_payloads[deferred]
+    # Neither tile regressed to a loading/placeholder presentation state.
+    states = session.ensure_tile_states()
+    assert str(states[0].value) == "loaded"
+    assert str(states[1].value) == "loaded"
+
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    # The deferred tile stays dirty and swaps on the next commit, again with
+    # no removal and no gap.
+    state, delta = session.build_tile_presentation({})
+    assert delta.removals == ()
+    assert set(delta.upserts) == {deferred}
+    assert state.payloads[deferred].lod.level == 2
+    assert state.payloads[swapped].lod.level == 2
+
+
+def test_seeding_new_session_keeps_stale_level_payload_presented():
+    """Session replacement must reuse a resident payload at the *old* level.
+
+    When the pyramid no longer holds the seeded level, the tile keeps
+    presenting the stale-level payload (its texture is materialized by
+    construction) instead of flashing through unpresented/native.
+    """
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=ZOOMED_OUT_RANGE)
+    _admit_zoomed_out_levels(session)
+    _state, delta = session.build_tile_presentation({})
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    previous_payloads = dict(session.tile_presentation_state.payloads)
+    assert {payload.lod.level for payload in previous_payloads.values()} == {2}
+
+    # Fresh session for the same content and viewport; the pyramid cache was
+    # dropped in between (worst case for seeding).
+    replacement = _session(pyramid=PyramidCache(max_bytes=1 << 24), view_range=ZOOMED_OUT_RANGE)
+    for index, rendered in tuple(session.rendered_tiles.items()):
+        replacement.rendered_tiles[int(index)] = rendered
+        replacement.dirty_payloads[int(index)] = None
+    replacement.seed_display_tile_payloads(previous_payloads, {})
+
+    # Both tiles are presented immediately, still at level 2, with no
+    # placeholder window (they own committed presentation state).
+    assert set(replacement.tile_presentation_state.payloads) == {0, 1}
+    assert {
+        payload.lod.level for payload in replacement.tile_presentation_state.payloads.values()
+    } == {2}
+    assert replacement.presented_tiles == {0, 1}
+
+    # The refresh accepts the presented level as resident evidence: no
+    # down-swap churn to native while the demanded level rematerializes.
+    assert replacement.refresh_lod_for_viewport() is False
+    assert not replacement.dirty_payloads or set(replacement.dirty_payloads) == {0, 1}

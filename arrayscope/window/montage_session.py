@@ -548,6 +548,18 @@ class MontageRenderSession:
             return
         lod_factor = self._selected_lod_factor()
         by_source = {payload.source_id: payload for payload in dict(previous_payloads).values()}
+        # ADR 0050: a payload whose base (semantic) identity matches but whose
+        # LOD level differs is still this tile's content, resident on the
+        # backend.  Seeding it keeps the tile presented at the old level; the
+        # LOD refresh then converges it through an ordinary identity swap.
+        # Without this, a level change across sessions read as a black or
+        # placeholder tile until fresh payload work committed.
+        by_base: dict[object, DisplayTilePayload] = {}
+        if self._resident_lod_active():
+            for payload in dict(previous_payloads).values():
+                base = _base_source_id(payload.source_id)
+                if base is not None:
+                    by_base.setdefault(base, payload)
         seeded_state = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
         changed_state = False
         for tile_number, rendered in self.rendered_tiles.items():
@@ -564,6 +576,8 @@ class MontageRenderSession:
                     texture_data=texture_data,
                 )
                 previous = by_source.get(source_id)
+                if previous is None:
+                    previous = by_base.get(base_source_id)
                 owns_committed_presentation = previous is not None
             if previous is None:
                 continue
@@ -722,22 +736,27 @@ class MontageRenderSession:
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is None:
                 continue
-            resident_levels = tuple(
+            payload = self.display_tile_payloads.get(int(tile_number))
+            presented_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+            resident = {
                 int(level)
                 for level in demand.acceptable_levels
                 if int(level) > 0
                 and pyramid.peek(self._pyramid_key_for(rendered, demand=demand, level=int(level))) is not None
-            )
-            if desired > 0 and desired not in resident_levels:
+            }
+            if payload is not None and presented_level > 0 and presented_level in demand.acceptable_levels:
+                # The presented texture itself is materialized and resident;
+                # keep it eligible even when the pyramid cache dropped it so a
+                # transient cache miss never forces a native down-swap.
+                resident.add(presented_level)
+            if desired > 0 and desired not in resident:
                 desired_key = self._pyramid_key_for(rendered, demand=demand, level=desired)
                 if pyramid.begin_pending(desired_key):
                     source, _histogram, _texture_kind = self._texture_source_for(rendered)
                     self.pending_lod_requests.append((int(tile_number), desired_key, source))
-            payload = self.display_tile_payloads.get(int(tile_number))
             if payload is None:
                 continue
-            applied = int(choose_resident_level(demand, resident_levels))
-            presented_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+            applied = int(choose_resident_level(demand, tuple(sorted(resident))))
             if presented_level != applied:
                 self.dirty_payloads[int(tile_number)] = None
                 commit_needed = True

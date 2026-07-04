@@ -633,15 +633,25 @@ class FrameRenderMixin:
         """Resolve only the supplied tiles from semantic CPU caches."""
 
         selected_lod_factor = 1
+        # ADR 0050: under the resident policy a retained payload at any LOD
+        # level is reusable evidence of the tile's native content (its exact
+        # image/semantic planes are always native).  Rejecting reduced-level
+        # payloads here forced pan/scroll re-evaluation of tiles that were
+        # already on screen, which is what read as black/placeholder flashes
+        # during LOD transitions.  The session re-selects the presented level
+        # from live demand and streams the swap.
+        reuse_any_lod = self._montage_lod_policy_mode() == LOD_POLICY_RESIDENT
         retained_store = self._retained_tiled_payload_store()
-        previous_payloads = retained_store.payloads_by_base_source(lod_factor=selected_lod_factor)
+        previous_payloads = retained_store.payloads_by_base_source(
+            lod_factor=None if reuse_any_lod else selected_lod_factor
+        )
         previous_payloads.update(
             {
                 key: payload
                 for key, payload in _previous_tiled_payloads_by_base_source(
                     getattr(self.win, "_committed_display_frame", None)
                 ).items()
-                if _payload_lod_matches(payload, selected_lod_factor)
+                if reuse_any_lod or _payload_lod_matches(payload, selected_lod_factor)
             }
         )
         cached_tiles: list[RenderedTile] = []
@@ -673,7 +683,7 @@ class FrameRenderMixin:
                 if previous_payload is None:
                     previous_payload = retained_store.resolve(
                         tile_key,
-                        selected_lod_factor,
+                        None if reuse_any_lod else selected_lod_factor,
                         tile.view_state,
                         shader_display=shader_display,
                     )
@@ -2435,13 +2445,17 @@ class FrameRenderMixin:
         try:
             payload_start = perf_counter()
             selected_lod_factor = int(session._selected_lod_factor())
+            # ADR 0050: seeding a fresh session must keep whatever level the
+            # previous session presented on screen; the resident policy swaps
+            # levels afterwards through ordinary payload-identity commits.
+            reuse_any_lod = bool(getattr(session, "_resident_lod_active", lambda: False)())
             previous_payloads = {
                 int(tile): payload
                 for tile, payload in _previous_tiled_payloads(getattr(self.win, "_committed_display_frame", None)).items()
-                if _payload_lod_matches(payload, selected_lod_factor)
+                if reuse_any_lod or _payload_lod_matches(payload, selected_lod_factor)
             }
             retained_payloads = self._retained_tiled_payload_store().payloads_by_base_source(
-                lod_factor=selected_lod_factor
+                lod_factor=None if reuse_any_lod else selected_lod_factor
             )
             if retained_payloads:
                 previous_payloads.update(
@@ -2452,6 +2466,11 @@ class FrameRenderMixin:
                 )
             if previous_payloads and not getattr(session, "presented_tiles", None):
                 session.seed_display_tile_payloads(previous_payloads, tile_source_ids)
+                if reuse_any_lod:
+                    # Converge seeded stale-level payloads to the live demand:
+                    # mismatched tiles become dirty and rebuild below; missing
+                    # levels are queued and drained after this commit.
+                    session.refresh_lod_for_viewport()
             base_tile_state = session.tile_presentation_state
             fast_drain = _persistent_tile_layer_fast_drain_enabled(self, session)
             self._persistent_tile_layer_fast_drain_last_enabled = bool(fast_drain)

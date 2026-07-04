@@ -68,11 +68,20 @@ class RetainedTiledPayloadStore:
                 continue
             self._payloads.put(key, payload)
 
-    def resolve(self, tile_key, lod_factor: int, tile_state, *, shader_display: bool):
+    def resolve(self, tile_key, lod_factor: int | None, tile_state, *, shader_display: bool):
+        """Return a retained payload for ``tile_key`` or None.
+
+        ``lod_factor=None`` accepts any retained level (ADR 0050 resident
+        policy): the payload carries native exact/semantic planes, so the
+        session re-selects the presented level from the live demand and a
+        stale-level texture is presented until its replacement is resident,
+        never a placeholder.
+        """
+
         payload = self._payloads.peek(tile_key)
         if payload is None:
             return None
-        if not payload_lod_matches(payload, lod_factor):
+        if lod_factor is not None and not payload_lod_matches(payload, lod_factor):
             return None
         if not payload_compatible_with_tile(payload, tile_state, shader_display=shader_display):
             return None
