@@ -76,6 +76,9 @@ class ImageUploadTiming:
     tile_layer_mipmap_available: bool = False
     tile_layer_complex_texture_uploads: int = 0
     tile_layer_shader_uniform_updates: int = 0
+    tile_layer_lod_level_swaps_zero_upload: int = 0
+    tile_layer_lod_level_swaps_with_upload: int = 0
+    tile_layer_superseded_reclaimed_under_pressure: int = 0
     cpu_complex_prep_ms: float | None = None
 
 
@@ -247,6 +250,9 @@ class MontageTimingDiagnostics:
     tile_layer_mipmap_available: bool = False
     tile_layer_complex_texture_uploads: int = 0
     tile_layer_shader_uniform_updates: int = 0
+    tile_layer_lod_level_swaps_zero_upload: int = 0
+    tile_layer_lod_level_swaps_with_upload: int = 0
+    tile_layer_superseded_reclaimed_under_pressure: int = 0
     cpu_complex_prep_ms: float | None = None
     coalesced_commits: int = 0
 
@@ -807,6 +813,12 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"gutter={snapshot.montage_timing.tile_layer_gutter_pixels} "
             f"mipmap={snapshot.montage_timing.tile_layer_mipmap_available} "
             f"mipmap_updates={snapshot.montage_timing.tile_layer_mipmap_updates}"
+        ),
+        (
+            "Tile layer LOD swaps: "
+            f"zero_upload={snapshot.montage_timing.tile_layer_lod_level_swaps_zero_upload} "
+            f"with_upload={snapshot.montage_timing.tile_layer_lod_level_swaps_with_upload} "
+            f"superseded_reclaimed={snapshot.montage_timing.tile_layer_superseded_reclaimed_under_pressure}"
         ),
         _montage_prefetch_line("Montage prefetch", snapshot.montage_prefetch),
         f"Coalesced montage commits: {snapshot.montage_timing.coalesced_commits}",

@@ -161,6 +161,10 @@ class PyramidCache:
             return len(self._pending)
 
     @property
+    def max_bytes(self) -> int | None:
+        return self._cache.max_bytes
+
+    @property
     def bytes_used(self) -> int:
         return int(self._cache.bytes_used)
 

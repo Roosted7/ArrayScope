@@ -190,6 +190,15 @@ class TextureAtlasPool:
         self.evicted_near_count = 0
         self.superseded_reclaimed_count = 0
         self.pages_dropped_count = 0
+        # ADR 0050 zero-upload zoom cycles: a level flip between two
+        # already-resident classes must be an identity swap.  These counters
+        # make that observable in diagnostics and the profile JSONL.
+        self.lod_level_swaps_zero_upload = 0
+        self.lod_level_swaps_with_upload = 0
+        # Base (LOD-invariant) source identities of the active payload set:
+        # a superseded key whose base is active is the retained adjacent
+        # level of a visible tile and is reclaimed only as a last resort.
+        self.active_base_source_ids: set[object] = set()
         self._clock = 0
 
     @property
@@ -377,38 +386,54 @@ class TextureAtlasPool:
         """
 
         protect = None if protect_shape is None else (int(protect_shape[0]), int(protect_shape[1]))
-        touched_pages: set[int] = set()
-        for key in tuple(self.superseded_keys):
-            if key in self.active_resident_keys or self.resident_tiles.get(key):
-                continue
-            slot_ref = self.resident_slots.get(key)
-            if slot_ref is None:
+        active_bases = self.active_base_source_ids
+        # Reclaim in LRU order among superseded slots, keeping the retained
+        # adjacent level of active tiles for a second pass: losing it costs a
+        # re-upload on the next level flip, so it goes only when reclaiming
+        # everything else recovered no bytes (ADR 0050).
+        ordered = sorted(
+            tuple(self.superseded_keys),
+            key=lambda key: (
+                _lod_invariant_source_id(self.source_ids.get(key)) in active_bases,
+                self.last_used.get(key, -1),
+            ),
+        )
+        for adjacent_pass in (False, True):
+            touched_pages: set[int] = set()
+            for key in ordered:
+                adjacent = _lod_invariant_source_id(self.source_ids.get(key)) in active_bases
+                if adjacent != adjacent_pass:
+                    continue
+                if key in self.active_resident_keys or self.resident_tiles.get(key):
+                    continue
+                slot_ref = self.resident_slots.get(key)
+                if slot_ref is None:
+                    self.superseded_keys.discard(key)
+                    continue
+                page_index, slot = (int(slot_ref[0]), int(slot_ref[1]))
+                page = self.pages[page_index]
+                if protect is not None and page.tile_shape == protect:
+                    # Same-class slots are useful as-is: ordinary eviction
+                    # reuses them without any byte recovery, so keep them.
+                    continue
+                page.slot_owners[slot] = None
+                page._free_slots.append(slot)
+                self.resident_slots.pop(key, None)
+                self.source_ids.pop(key, None)
+                self.last_used.pop(key, None)
                 self.superseded_keys.discard(key)
-                continue
-            page_index, slot = (int(slot_ref[0]), int(slot_ref[1]))
-            page = self.pages[page_index]
-            if protect is not None and page.tile_shape == protect:
-                # Same-class slots are useful as-is: ordinary eviction reuses
-                # them without any byte recovery, so keep them allocated.
-                continue
-            page.slot_owners[slot] = None
-            page._free_slots.append(slot)
-            self.resident_slots.pop(key, None)
-            self.source_ids.pop(key, None)
-            self.last_used.pop(key, None)
-            self.superseded_keys.discard(key)
-            self.eviction_count += 1
-            self.superseded_reclaimed_count += 1
-            touched_pages.add(page_index)
-        empties = [
-            index
-            for index in sorted(touched_pages)
-            if all(owner is None for owner in self.pages[index].slot_owners)
-        ]
-        if not empties:
-            return False
-        self._drop_pages(empties)
-        return True
+                self.eviction_count += 1
+                self.superseded_reclaimed_count += 1
+                touched_pages.add(page_index)
+            empties = [
+                index
+                for index in sorted(touched_pages)
+                if all(owner is None for owner in self.pages[index].slot_owners)
+            ]
+            if empties:
+                self._drop_pages(empties)
+                return True
+        return False
 
     def _drop_pages(self, page_indices) -> None:
         dropped = {int(index) for index in page_indices}
@@ -557,6 +582,9 @@ class TextureAtlasPool:
         active = {int(tile_number) for tile_number, _payload in payload_items}
         active_keys = {_resident_key(payload) for _tile_number, payload in payload_items}
         self.active_resident_keys = set(active_keys)
+        self.active_base_source_ids = {
+            _lod_invariant_source_id(payload.source_id) for _tile_number, payload in payload_items
+        }
         for tile_number in tuple(getattr(tile_delta, "removals", ()) or ()):
             self._clear_tile_mapping(int(tile_number))
         near = {int(tile) for tile in tuple(near_tiles or ())}
@@ -575,6 +603,8 @@ class TextureAtlasPool:
         skipped = int(unsupported_items)
         evictions_before = self.eviction_count
         evicted_near_before = self.evicted_near_count
+        superseded_reclaimed_before = self.superseded_reclaimed_count
+        uploaded_keys: set[object] = set()
         tile_h, tile_w = self.tile_shape or tile_shape
         base_shape = (int(tile_h), int(tile_w))
         class_counts: dict[tuple[int, int], int] = {}
@@ -622,6 +652,7 @@ class TextureAtlasPool:
             if not should_upload:
                 skipped += 1
                 continue
+            uploaded_keys.add(resident_key)
 
             scalar, color, prepare_ms = _prepare_payload_texture_data(
                 payload,
@@ -665,14 +696,29 @@ class TextureAtlasPool:
         for tile in active_set:
             if int(tile) not in presented_set and int(tile) not in capacity_skipped_tiles:
                 self._clear_tile_mapping(int(tile))
+        level_swaps_zero_upload = 0
+        level_swaps_with_upload = 0
         for tile in presented_tiles:
+            new_key = active_tile_keys[int(tile)]
+            previous_key = self.tile_resident_keys.get(int(tile))
+            if (
+                previous_key is not None
+                and previous_key != new_key
+                and _resident_key_lod(previous_key) != _resident_key_lod(new_key)
+            ):
+                if new_key in uploaded_keys:
+                    level_swaps_with_upload += 1
+                else:
+                    level_swaps_zero_upload += 1
             self._set_tile_mapping(
                 int(tile),
-                active_tile_keys[int(tile)],
+                new_key,
                 active_tile_slots[int(tile)][0],
                 active_tile_slots[int(tile)][1],
                 active_tile_uvs[int(tile)],
             )
+        self.lod_level_swaps_zero_upload += level_swaps_zero_upload
+        self.lod_level_swaps_with_upload += level_swaps_with_upload
         uvs = self.tile_uvs
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
         return uvs, TileLayerUpdateStats(
@@ -710,6 +756,11 @@ class TextureAtlasPool:
             mipmap_updates=0,
             mipmap_available=False,
             complex_texture_uploads=complex_uploads,
+            lod_level_swaps_zero_upload=level_swaps_zero_upload,
+            lod_level_swaps_with_upload=level_swaps_with_upload,
+            superseded_reclaimed_under_pressure=(
+                self.superseded_reclaimed_count - superseded_reclaimed_before
+            ),
         )
 
     def warm_payloads(
@@ -921,17 +972,29 @@ class TextureAtlasPool:
             return int(page_index), int(slot), True
 
         candidates = []
+        active_bases = self.active_base_source_ids
         for page_index, page in class_pages:
             for slot, owner in enumerate(page.slot_owners):
                 if owner is not None and owner not in active_keys:
-                    # Superseded slots go first: their tile already presents a
-                    # different class, so nothing on screen depends on them.
-                    if owner in self.superseded_keys and not self.resident_tiles.get(owner):
+                    # Eviction preference under pressure (ADR 0050): first
+                    # superseded classes of tiles that are neither active nor
+                    # near, then presented classes of non-active tiles, and
+                    # only as a last resort the superseded (retained
+                    # adjacent-level) classes of active tiles, whose loss
+                    # forces a re-upload on the next level flip.  A presented
+                    # class of an active tile is never a candidate at all.
+                    superseded = owner in self.superseded_keys and not self.resident_tiles.get(owner)
+                    adjacent = superseded and _lod_invariant_source_id(self.source_ids.get(owner)) in active_bases
+                    if superseded and not adjacent and owner not in near_keys:
                         rank = 0
-                    elif owner not in near_keys:
+                    elif superseded and not adjacent:
                         rank = 1
-                    else:
+                    elif not superseded and owner not in near_keys:
                         rank = 2
+                    elif not superseded:
+                        rank = 3
+                    else:
+                        rank = 4
                     candidates.append((rank, self.last_used.get(owner, -1), owner, int(page_index), int(slot)))
         if not candidates:
             raise AtlasCapacityError(
@@ -943,6 +1006,8 @@ class TextureAtlasPool:
         self.resident_slots.pop(victim, None)
         self.source_ids.pop(victim, None)
         self.last_used.pop(victim, None)
+        if victim in self.superseded_keys:
+            self.superseded_reclaimed_count += 1
         self.superseded_keys.discard(victim)
         self.eviction_count += 1
         if victim in near_keys:
@@ -1256,6 +1321,9 @@ class GpuMontageLayer:
             mipmap_available=texture_stats.mipmap_available,
             complex_texture_uploads=texture_stats.complex_texture_uploads,
             shader_uniform_updates=level_updates + mapping_updates,
+            lod_level_swaps_zero_upload=texture_stats.lod_level_swaps_zero_upload,
+            lod_level_swaps_with_upload=texture_stats.lod_level_swaps_with_upload,
+            superseded_reclaimed_under_pressure=texture_stats.superseded_reclaimed_under_pressure,
         )
         return self._last_stats
 
@@ -2207,6 +2275,28 @@ def _resident_key(payload: DisplayTilePayload) -> object:
     except Exception:
         pass
     return key
+
+
+def _resident_key_lod(resident_key: object) -> object:
+    """Return the LOD component of a residency key (None for foreign keys)."""
+
+    if isinstance(resident_key, tuple) and resident_key and resident_key[-2] == "lod":
+        return resident_key[-1]
+    return None
+
+
+def _lod_invariant_source_id(source_id: object) -> object:
+    """Strip texture-kind/LOD/content decorations from a payload source id.
+
+    Levels of the same tile content share this identity, so it links a
+    superseded residency class back to the active tile that retains it as an
+    adjacent level.
+    """
+
+    base = _base_texture_source_id(source_id)
+    if isinstance(base, tuple) and "lod" in base:
+        return base[: base.index("lod")]
+    return base
 
 
 def _source_resident_key(source_id: object) -> object:

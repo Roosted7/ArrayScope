@@ -378,6 +378,9 @@ class ImageViewShell(QtWidgets.QWidget):
             "tile_layer_mipmap_available": False,
             "tile_layer_complex_texture_uploads": 0,
             "tile_layer_shader_uniform_updates": 0,
+            "tile_layer_lod_level_swaps_zero_upload": 0,
+            "tile_layer_lod_level_swaps_with_upload": 0,
+            "tile_layer_superseded_reclaimed_under_pressure": 0,
             "cpu_complex_prep_ms": 0.0,
         }
 
@@ -451,6 +454,11 @@ class ImageViewShell(QtWidgets.QWidget):
             tile_layer_mipmap_available=bool(timing["tile_layer_mipmap_available"]),
             tile_layer_complex_texture_uploads=int(timing["tile_layer_complex_texture_uploads"]),
             tile_layer_shader_uniform_updates=int(timing["tile_layer_shader_uniform_updates"]),
+            tile_layer_lod_level_swaps_zero_upload=int(timing["tile_layer_lod_level_swaps_zero_upload"]),
+            tile_layer_lod_level_swaps_with_upload=int(timing["tile_layer_lod_level_swaps_with_upload"]),
+            tile_layer_superseded_reclaimed_under_pressure=int(
+                timing["tile_layer_superseded_reclaimed_under_pressure"]
+            ),
             cpu_complex_prep_ms=float(timing["cpu_complex_prep_ms"]),
         )
         self._last_upload_timing = (
@@ -492,6 +500,9 @@ class ImageViewShell(QtWidgets.QWidget):
             "tile_layer_mipmap_updates",
             "tile_layer_complex_texture_uploads",
             "tile_layer_shader_uniform_updates",
+            "tile_layer_lod_level_swaps_zero_upload",
+            "tile_layer_lod_level_swaps_with_upload",
+            "tile_layer_superseded_reclaimed_under_pressure",
             "cpu_complex_prep_ms",
         )
         values = {}
@@ -909,6 +920,11 @@ class ImageViewShell(QtWidgets.QWidget):
         timing["tile_layer_mipmap_available"] = bool(stats.mipmap_available)
         timing["tile_layer_complex_texture_uploads"] = int(stats.complex_texture_uploads)
         timing["tile_layer_shader_uniform_updates"] = int(stats.shader_uniform_updates)
+        timing["tile_layer_lod_level_swaps_zero_upload"] = int(getattr(stats, "lod_level_swaps_zero_upload", 0))
+        timing["tile_layer_lod_level_swaps_with_upload"] = int(getattr(stats, "lod_level_swaps_with_upload", 0))
+        timing["tile_layer_superseded_reclaimed_under_pressure"] = int(
+            getattr(stats, "superseded_reclaimed_under_pressure", 0)
+        )
         elapsed_ms = float(getattr(stats, "upload_ms", 0.0) or 0.0)
         observed_items = (
             int(getattr(stats, "items_created", 0))

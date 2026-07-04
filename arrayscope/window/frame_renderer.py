@@ -2242,9 +2242,18 @@ class FrameRenderMixin:
     def _montage_lod_pyramid(self) -> PyramidCache:
         pyramid = getattr(self, "_montage_lod_pyramid_cache", None)
         if not isinstance(pyramid, PyramidCache):
+            # Zero re-upload zoom cycles (ADR 0050 gate 6) require the CPU
+            # pyramid to actually retain the working set across threshold
+            # recrossings.  Footprint of the reference montage (272 tiles of
+            # 336x336): float32 levels 1+2 are ~38 MiB, complex64 levels 1+2
+            # are ~76 MiB, and the raw and FFT scenes share this one cache
+            # (~114 MiB together).  The previous max(64 MiB, display/4)
+            # budget evicted exactly that set, so each recrossing re-reduced
+            # the level and minted a new texture identity, forcing GPU
+            # re-uploads on nearly every zoom.
             budget = max(
-                64 * 1024 * 1024,
-                int(self._memory_policy().display_cache_budget_bytes) // 4,
+                256 * 1024 * 1024,
+                int(self._memory_policy().display_cache_budget_bytes) // 2,
             )
             pyramid = PyramidCache(max_bytes=budget)
             self._montage_lod_pyramid_cache = pyramid

@@ -214,3 +214,29 @@ def test_native_scale_scheduling_performs_no_ingest_reduction():
 
     assert len(pyramid) == 0
     assert int(getattr(renderer, "_montage_lod_ingest_reductions", 0)) == 0
+
+
+def test_pyramid_budget_retains_the_reference_montage_working_set():
+    """ADR 0050 gate 6 needs the CPU cache to survive threshold recrossings.
+
+    Reference montage: 272 tiles of 336x336.  Both the float32 scene and the
+    complex64 (FFT) scene share one renderer-level pyramid cache, and each
+    needs levels 1 and 2 resident for hysteresis crossings to be cache hits.
+    """
+
+    fake = SimpleNamespace()
+    fake.win = fake
+    fake._memory_policy = lambda: SimpleNamespace(display_cache_budget_bytes=256 * 1024 * 1024)
+    pyramid = FrameRenderMixin._montage_lod_pyramid.__get__(fake)()
+
+    level_texels = 168 * 168 + 84 * 84
+    float_scene = 272 * level_texels * 4
+    complex_scene = 272 * level_texels * 8
+    footprint = float_scene + complex_scene
+    assert pyramid.max_bytes is not None
+    assert pyramid.max_bytes >= 2 * footprint, (
+        "pyramid budget must hold the reference working set with headroom, "
+        f"got {pyramid.max_bytes} for footprint {footprint}"
+    )
+    # The same cache object is reused across sessions.
+    assert FrameRenderMixin._montage_lod_pyramid.__get__(fake)() is pyramid

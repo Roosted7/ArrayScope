@@ -1414,3 +1414,100 @@ def test_eviction_prefers_superseded_slots_over_lru_and_near_keys():
     assert "plain-old" in pool.resident_slots
     assert "superseded" not in pool.superseded_keys
     assert pool.eviction_count == 1
+
+
+def _cycle_update(pool, payloads, budget=None):
+    return pool.update_payloads(
+        payloads,
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=2,
+        budget_bytes=budget,
+    )
+
+
+def test_zoom_cycle_over_resident_classes_is_zero_upload_after_first_materialization():
+    """ADR 0050 gate 6: level flips between resident classes are identity swaps."""
+
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
+    native = {0: _lod_payload(0, 1.0, level=0), 1: _lod_payload(1, 2.0, level=0)}
+    reduced = {0: _lod_payload(0, 1.0, level=1), 1: _lod_payload(1, 2.0, level=1)}
+
+    _uvs, first = _cycle_update(pool, native)
+    assert first.texture_uploads == 2
+
+    # Zoom out: reduced class materializes once, counted as swaps-with-upload.
+    _uvs, out = _cycle_update(pool, reduced)
+    assert out.texture_uploads == 2
+    assert out.lod_level_swaps_with_upload == 2
+    assert out.lod_level_swaps_zero_upload == 0
+
+    # Zoom back in and back out: both classes resident, zero uploads, pure
+    # identity swaps, and no superseded slot was reclaimed merely because a
+    # swap happened.
+    _uvs, back_in = _cycle_update(pool, native)
+    assert back_in.texture_uploads == 0
+    assert back_in.lod_level_swaps_zero_upload == 2
+    assert back_in.lod_level_swaps_with_upload == 0
+    assert back_in.superseded_reclaimed_under_pressure == 0
+
+    _uvs, back_out = _cycle_update(pool, reduced)
+    assert back_out.texture_uploads == 0
+    assert back_out.lod_level_swaps_zero_upload == 2
+    assert back_out.lod_level_swaps_with_upload == 0
+    assert back_out.superseded_reclaimed_under_pressure == 0
+
+    assert pool.lod_level_swaps_zero_upload == 4
+    assert pool.lod_level_swaps_with_upload == 2
+    assert pool.superseded_reclaimed_count == 0
+
+
+def test_eviction_reclaims_active_tiles_adjacent_level_only_as_last_resort():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    pool.ensure_layout(tile_shape=(4, 4), count=3, storage_mode="scalar")
+
+    # Slot 1: the superseded native level of an ACTIVE tile (it presents its
+    # reduced level right now).  Slot 2: a warm presented class of a
+    # non-active tile.  Slot 3: a superseded class of a non-active tile.
+    assert pool._slot_for("active-adjacent", active_keys=set(), near_keys=set())[2]
+    assert pool._slot_for("warm-presented", active_keys=set(), near_keys=set())[2]
+    assert pool._slot_for("stale-superseded", active_keys=set(), near_keys=set())[2]
+    pool.source_ids["active-adjacent"] = ("tile", 0, 1.0, "lod", 0)
+    pool.source_ids["warm-presented"] = ("tile", 7, 7.0, "lod", 0)
+    pool.source_ids["stale-superseded"] = ("tile", 9, 9.0, "lod", 0)
+    pool.superseded_keys.update({"active-adjacent", "stale-superseded"})
+    pool.active_base_source_ids = {("tile", 0, 1.0)}
+    # LRU says the adjacent level is oldest; preference order must still
+    # protect it behind the other candidates.
+    pool._touch("stale-superseded")
+    pool._touch("warm-presented")
+
+    pool._slot_for("incoming-1", active_keys={"incoming-1"}, near_keys=set())
+    assert "stale-superseded" not in pool.resident_slots
+    assert "active-adjacent" in pool.resident_slots
+    assert "warm-presented" in pool.resident_slots
+
+    pool._slot_for("incoming-2", active_keys={"incoming-1", "incoming-2"}, near_keys=set())
+    assert "warm-presented" not in pool.resident_slots
+    assert "active-adjacent" in pool.resident_slots, (
+        "the retained adjacent level of an active tile goes last"
+    )
+
+    pool._slot_for("incoming-3", active_keys={"incoming-1", "incoming-2", "incoming-3"}, near_keys=set())
+    assert "active-adjacent" not in pool.resident_slots
+    # Both superseded victims counted as pressure reclaims.
+    assert pool.superseded_reclaimed_count == 2
+
+
+def test_active_tiles_only_resident_presented_class_is_never_evicted():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    pool.ensure_layout(tile_shape=(4, 4), count=1, storage_mode="scalar")
+    payload = _lod_payload(0, 1.0, level=0)
+    key = _resident_key(payload)
+    assert pool._slot_for(key, active_keys={key}, near_keys=set())[2]
+    pool._set_tile_mapping(0, key, 0, 0, (0.0, 0.0, 1.0, 1.0))
+
+    with pytest.raises(AtlasCapacityError):
+        pool._slot_for("incoming", active_keys={key, "incoming"}, near_keys=set())
+    assert pool.tile_resident_keys[0] == key

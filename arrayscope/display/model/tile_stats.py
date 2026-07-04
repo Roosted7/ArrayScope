@@ -49,6 +49,12 @@ class TileLayerUpdateStats:
     mipmap_updates: int = 0
     mipmap_available: bool = False
     complex_texture_uploads: int = 0
+    # ADR 0050 zero-upload zoom cycles: level flips between already-resident
+    # classes must be identity swaps.  Per-commit counts; GPU backends fill
+    # them, CPU tile layers leave them at zero.
+    lod_level_swaps_zero_upload: int = 0
+    lod_level_swaps_with_upload: int = 0
+    superseded_reclaimed_under_pressure: int = 0
     shader_uniform_updates: int = 0
     upload_ms: float = 0.0
     level_update_processed_items: int = 0
