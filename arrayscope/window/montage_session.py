@@ -626,6 +626,45 @@ class MontageRenderSession:
     def _resident_lod_active(self) -> bool:
         return str(self.lod_policy_mode) == LOD_POLICY_RESIDENT and self.lod_pyramid is not None
 
+    def presented_lod_summary(self) -> tuple[int, int, tuple[int, int]]:
+        """(level, factor, (factor_x, factor_y)) shown by the plurality of tiles.
+
+        The session-wide policy decision only claims a level once every
+        rendered tile can present it, which reads as "native" while any tile
+        is still streaming.  Diagnostics report what the committed
+        presentation actually shows, so the JSONL A/B stays truthful during
+        partial residency (ADR 0050).  Ties prefer the finer level.
+        """
+
+        payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
+        visible = self.visible_tile_numbers
+        if visible:
+            scoped = {tile: payload for tile, payload in payloads.items() if int(tile) in visible}
+            payloads = scoped or payloads
+        if not payloads:
+            decision = self.lod_policy_decision
+            return (
+                int(decision.applied_level),
+                int(decision.applied_factor),
+                tuple(int(value) for value in decision.applied_factor_xy),
+            )
+        counts: dict[int, int] = {}
+        samples: dict[int, object] = {}
+        for payload in payloads.values():
+            lod = getattr(payload, "lod", None)
+            level = int(getattr(lod, "level", 0) or 0)
+            counts[level] = counts.get(level, 0) + 1
+            samples.setdefault(level, lod)
+        level = min(counts, key=lambda candidate: (-counts[candidate], candidate))
+        lod = samples.get(level)
+        if lod is None or level <= 0:
+            return (0, 1, (1, 1))
+        source_shape = tuple(getattr(lod, "source_shape", (1, 1)))
+        texture_shape = tuple(getattr(lod, "texture_shape", (1, 1)))
+        factor_y = max(1, round(int(source_shape[0]) / max(1, int(texture_shape[0]))))
+        factor_x = max(1, round(int(source_shape[1]) / max(1, int(texture_shape[1]))))
+        return (int(level), int(getattr(lod, "factor", 1) or 1), (int(factor_x), int(factor_y)))
+
     def ingest_lod_demand(self) -> object | None:
         """Demand snapshot for worker-side reduce-at-ingest (ADR 0050).
 

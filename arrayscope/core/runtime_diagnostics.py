@@ -127,6 +127,7 @@ class MontageRuntimeDiagnostics:
     tile_lod_pyramid_evictions: int = 0
     tile_lod_pending_materializations: int = 0
     tile_lod_materializations_completed: int = 0
+    tile_lod_ingest_reductions: int = 0
     tile_compute_cache_hits: int = 0
     tile_compute_stage_backed: int = 0
     tile_compute_direct: int = 0
@@ -719,7 +720,8 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"misses={snapshot.montage.tile_lod_pyramid_misses} "
             f"evictions={snapshot.montage.tile_lod_pyramid_evictions} "
             f"pending={snapshot.montage.tile_lod_pending_materializations} "
-            f"completed={snapshot.montage.tile_lod_materializations_completed}"
+            f"completed={snapshot.montage.tile_lod_materializations_completed} "
+            f"ingest={snapshot.montage.tile_lod_ingest_reductions}"
         ),
         (
             "Reusable stage: "

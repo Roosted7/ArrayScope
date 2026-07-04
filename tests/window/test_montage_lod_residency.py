@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT
+from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.window.montage_session import MontageRenderSession, admit_ingest_reduction
@@ -327,3 +328,54 @@ def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
     _state, delta = session.build_tile_presentation({})
     assert delta.upserts[0].lod.level == 1
     assert delta.upserts[0].texture_data.shape[:2] == (TILE // 2, TILE // 2)
+
+
+def _acknowledge(session, delta):
+    session.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(presented_tiles=frozenset(int(tile) for tile in delta.upserts)),
+    )
+
+
+def test_presented_lod_summary_reports_plurality_of_presented_payloads():
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=3)
+
+    # Nothing committed yet: fall back to the session-wide decision (native).
+    assert session.presented_lod_summary() == (0, 1, (1, 1))
+
+    session.build_tile_presentation({})
+    requests = list(session.pending_lod_requests)
+    session.pending_lod_requests.clear()
+    for request in requests:
+        if request[0] in (0, 1):
+            _materialize(session, request)
+        else:
+            session.lod_pyramid.end_pending(request[1])
+    session.dirty_payloads.update({0: None, 1: None, 2: None})
+    _state, delta = session.build_tile_presentation({})
+    _acknowledge(session, delta)
+
+    # Two of three tiles present level 2; the session-wide decision still
+    # reads native because tile 2 is not resident yet.  Diagnostics must
+    # describe the screen, not the consensus.
+    assert session.lod_policy_decision.applied_level == 0
+    assert session.presented_lod_summary() == (2, 4, (4, 4))
+
+
+def test_presented_lod_summary_tie_prefers_the_finer_level():
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=2)
+    session.build_tile_presentation({})
+    requests = list(session.pending_lod_requests)
+    session.pending_lod_requests.clear()
+    for request in requests:
+        if request[0] == 0:
+            _materialize(session, request)
+        else:
+            session.lod_pyramid.end_pending(request[1])
+    session.dirty_payloads.update({0: None, 1: None})
+    _state, delta = session.build_tile_presentation({})
+    _acknowledge(session, delta)
+
+    assert session.presented_lod_summary() == (0, 1, (1, 1))

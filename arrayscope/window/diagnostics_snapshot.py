@@ -49,6 +49,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     lod_demand = None if lod_decision is None else getattr(lod_decision, "demand", None)
     lod_pyramid = None if session is None else getattr(session, "lod_pyramid", None)
     lod_tile_levels = _montage_payload_level_counts(session)
+    presented_lod = _montage_presented_lod(session, lod_decision)
     montage = MontageRuntimeDiagnostics(
         active=session is not None,
         session_id=None if session is None else int(session.session_id),
@@ -80,19 +81,17 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         backend_warning=str(getattr(window.renderer, "_last_montage_backend_warning", "") or ""),
         show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
         tile_lod_desired_factor=1 if lod_demand is None else int(getattr(lod_demand, "desired_factor", 1) or 1),
-        tile_lod_applied_factor=1 if lod_decision is None else int(getattr(lod_decision, "applied_factor", 1) or 1),
+        tile_lod_applied_factor=int(presented_lod[1]),
         tile_lod_desired_factor_xy=(1, 1)
         if lod_demand is None
         else tuple(int(value) for value in getattr(lod_demand, "desired_factor_xy", (1, 1))),
-        tile_lod_applied_factor_xy=(1, 1)
-        if lod_decision is None
-        else tuple(int(value) for value in getattr(lod_decision, "applied_factor_xy", (1, 1))),
+        tile_lod_applied_factor_xy=tuple(int(value) for value in presented_lod[2]),
         tile_lod_source_texels_per_pixel_xy=(0.0, 0.0)
         if lod_demand is None
         else tuple(float(value) for value in getattr(lod_demand, "source_texels_per_pixel_xy", (0.0, 0.0))),
         tile_lod_policy="native-only" if lod_decision is None else str(getattr(lod_decision, "policy", "native-only") or "native-only"),
         tile_lod_reason="" if lod_decision is None else str(getattr(lod_decision, "reason", "") or ""),
-        tile_lod_applied_level=0 if lod_decision is None else int(getattr(lod_decision, "applied_level", 0) or 0),
+        tile_lod_applied_level=int(presented_lod[0]),
         tile_lod_resident_tile_levels=lod_tile_levels,
         tile_lod_pyramid_bytes=0 if lod_pyramid is None else int(getattr(lod_pyramid, "bytes_used", 0) or 0),
         tile_lod_pyramid_entries=0 if lod_pyramid is None else len(lod_pyramid),
@@ -106,6 +105,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             + (0 if lod_pyramid is None else int(getattr(lod_pyramid, "pending_count", 0) or 0))
         ),
         tile_lod_materializations_completed=0 if session is None else int(getattr(session, "lod_materializations_completed", 0) or 0),
+        tile_lod_ingest_reductions=int(getattr(window.renderer, "_montage_lod_ingest_reductions", 0) or 0),
         tile_compute_cache_hits=0 if session is None else int(getattr(session, "tile_compute_cache_hits", 0) or 0),
         tile_compute_stage_backed=0 if session is None else int(getattr(session, "tile_compute_stage_backed", 0) or 0),
         tile_compute_direct=0 if session is None else int(getattr(session, "tile_compute_direct", 0) or 0),
@@ -352,6 +352,27 @@ def _presentation_diagnostics(window) -> dict[str, object]:
         except Exception:
             return {}
     return {}
+
+
+def _montage_presented_lod(session, lod_decision) -> tuple[int, int, tuple[int, int]]:
+    """Applied LOD as presented on screen, not as session-wide consensus.
+
+    ``montage_lod_applied_factor`` must describe the payloads the committed
+    presentation actually shows; the session-wide decision reads as native
+    while any tile is still streaming its level.
+    """
+
+    summary = getattr(session, "presented_lod_summary", None)
+    if callable(summary):
+        level, factor, factor_xy = summary()
+        return (int(level), int(factor), tuple(int(value) for value in factor_xy))
+    if lod_decision is None:
+        return (0, 1, (1, 1))
+    return (
+        int(getattr(lod_decision, "applied_level", 0) or 0),
+        int(getattr(lod_decision, "applied_factor", 1) or 1),
+        tuple(int(value) for value in getattr(lod_decision, "applied_factor_xy", (1, 1))),
+    )
 
 
 def _montage_payload_level_counts(session) -> tuple[tuple[int, int], ...]:

@@ -642,6 +642,7 @@ def _phase_record(
         "montage_lod_pyramid_evictions": int(getattr(montage, "tile_lod_pyramid_evictions", 0) or 0),
         "montage_lod_pending_materializations": int(getattr(montage, "tile_lod_pending_materializations", 0) or 0),
         "montage_lod_materializations_completed": int(getattr(montage, "tile_lod_materializations_completed", 0) or 0),
+        "montage_lod_ingest_reductions": int(getattr(montage, "tile_lod_ingest_reductions", 0) or 0),
         "montage_loaded_tiles": int(montage.loaded_tiles),
         "montage_loading_tiles": int(montage.loading_tiles),
         "montage_pending_tiles": int(montage.pending_tiles),
