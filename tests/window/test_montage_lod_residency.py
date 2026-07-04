@@ -89,8 +89,26 @@ def _session(*, mode=LOD_POLICY_RESIDENT, pyramid=None, view_range=ZOOMED_OUT_RA
 
 
 def _materialize(session, request):
-    key = request.key
-    return key, session.lod_pyramid.admit(key, reduce_box_mean(request.source, request.reduce_factor_xy))
+    """Run one request the way the worker does: walk the chain, admit each step."""
+
+    plane = request.source
+    admitted = None
+    steps = tuple(getattr(request, "chain", ()) or ()) or ((request.key, request.reduce_factor_xy),)
+    for step_key, rel in steps:
+        plane = reduce_box_mean(plane, rel)
+        if step_key is not None:
+            plane = session.lod_pyramid.admit(step_key, plane)
+            if step_key == request.key:
+                admitted = plane
+    return request.key, admitted
+
+
+def _release(session, request):
+    """Drop one request the way every non-run scheduling path must: all claims."""
+
+    from arrayscope.window.montage_lod import _release_chain_claims, _request_chain
+
+    _release_chain_claims(session.lod_pyramid, _request_chain(request))
 
 
 def test_native_only_mode_is_unchanged_by_default():
@@ -141,6 +159,101 @@ def test_duplicate_materialization_requests_coalesce():
     assert list(session.pending_lod_requests) == first
 
 
+def test_materialization_chains_through_the_missing_finer_level():
+    """ADR 0050 level-chaining: one request materializes the whole ladder.
+
+    Desired level 2 with nothing resident plans a chain that admits the
+    acceptable finer level 1 on the way — each step reduces the previous
+    plane (¼ of its source texels per doubling) — so the hysteresis
+    fallback is already resident when the zoom crosses it later.
+    """
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid)
+    session.build_tile_presentation({})
+    requests = list(session.pending_lod_requests)
+    session.pending_lod_requests.clear()
+    assert len(requests) == 2
+    for request in requests:
+        chain = tuple(request.chain)
+        assert [step_key.level_xy for step_key, _rel in chain] == [(1, 1), (2, 2)]
+        assert [rel for _key, rel in chain] == [(2, 2), (2, 2)]
+        assert chain[-1][0] == request.key
+        assert request.cross_level is False
+        _materialize(session, request)
+
+    # Both levels are resident per tile and every claim is balanced.
+    assert len(pyramid) == 4
+    assert pyramid.pending_count == 0
+    assert session.lod_chain_planned == 2
+
+    # Zoom in one hysteresis step: level 1 is a cache hit, no new work.
+    session.view_range = ((0.0, 3.0 * 2 * TILE), (0.0, 3.0 * TILE))
+    session.dirty_payloads.update({0: None, 1: None})
+    session.build_tile_presentation({})
+    assert session.lod_policy_decision.applied_level == 1
+    assert session.pending_lod_requests == []
+
+
+def test_chain_derives_from_the_resident_finer_level_source():
+    """A resident finer level becomes the chain source, not the native plane."""
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, view_range=((0.0, 3.0 * 2 * TILE), (0.0, 3.0 * TILE)))
+    session.build_tile_presentation({})
+    requests = list(session.pending_lod_requests)
+    session.pending_lod_requests.clear()
+    for request in requests:
+        assert tuple(step_key.level_xy for step_key, _rel in request.chain) == ((1, 1),)
+        _materialize(session, request)
+    assert len(pyramid) == 2
+
+    # Zoom out to level-2 demand (past the hysteresis band of the applied
+    # level-1 factor): the request derives from resident level 1.
+    session.view_range = ((0.0, 5.0 * 2 * TILE), (0.0, 5.0 * TILE))
+    session.dirty_payloads.update({0: None, 1: None})
+    session.build_tile_presentation({})
+    requests = list(session.pending_lod_requests)
+    session.pending_lod_requests.clear()
+    assert len(requests) == 2
+    for request in requests:
+        assert request.cross_level is True
+        assert request.source.shape[:2] == (TILE // 2, TILE // 2)
+        assert request.reduce_factor_xy == (2, 2)
+        assert tuple(step_key.level_xy for step_key, _rel in request.chain) == ((2, 2),)
+        _materialize(session, request)
+    assert session.lod_cross_level_reductions == 2
+    assert len(pyramid) == 4
+    assert pyramid.pending_count == 0
+
+
+def test_chain_passes_through_an_intermediate_claimed_elsewhere():
+    """A level claimed by another producer is reduced through, never admitted."""
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=1)
+    rendered = session.rendered_tiles[0]
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE), previous_factor=1)
+    foreign = pyramid_key_for_rendered(
+        rendered, demand=demand, level=1, semantic_source_id=session.tile_semantic_source_id(0)
+    )
+    assert pyramid.begin_pending(foreign)
+
+    session.build_tile_presentation({})
+    requests = list(session.pending_lod_requests)
+    session.pending_lod_requests.clear()
+    assert len(requests) == 1
+    chain = tuple(requests[0].chain)
+    # Pass-through step: reduce through level 1 without admitting it.
+    assert [(None if step_key is None else step_key.level_xy) for step_key, _rel in chain] == [None, (2, 2)]
+    _materialize(session, requests[0])
+
+    assert len(pyramid) == 1
+    # The foreign claim is untouched: it belongs to its producer.
+    assert pyramid.pending_count == 1
+    pyramid.end_pending(foreign)
+
+
 def test_admitted_level_streams_in_with_distinct_identity_and_shape():
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
@@ -182,7 +295,7 @@ def test_mixed_residency_applies_per_tile_and_reports_common_level():
         if request[0] == 0:
             _materialize(session, request)
         else:
-            session.lod_pyramid.end_pending(request[1])
+            _release(session, request)
 
     session.dirty_payloads.update({0: None, 1: None})
     state, delta = session.build_tile_presentation({})
@@ -357,7 +470,7 @@ def test_presented_lod_summary_reports_plurality_of_presented_payloads():
         if request[0] in (0, 1):
             _materialize(session, request)
         else:
-            session.lod_pyramid.end_pending(request[1])
+            _release(session, request)
     session.dirty_payloads.update({0: None, 1: None, 2: None})
     _state, delta = session.build_tile_presentation({})
     _acknowledge(session, delta)
@@ -379,7 +492,7 @@ def test_presented_lod_summary_tie_prefers_the_finer_level():
         if request[0] == 0:
             _materialize(session, request)
         else:
-            session.lod_pyramid.end_pending(request[1])
+            _release(session, request)
     session.dirty_payloads.update({0: None, 1: None})
     _state, delta = session.build_tile_presentation({})
     _acknowledge(session, delta)

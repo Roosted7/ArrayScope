@@ -77,9 +77,11 @@ def test_drain_schedules_low_priority_supersedable_reductions_and_streams_result
         assert work_item.lane == WorkLane.SPECULATIVE_RESIDENCY
         assert call["supersession_key"][0] == "montage-lod"
         assert call["supersession_value"][:2] == (session.key, int(session.session_id))
-    # The fake controller ran the workers inline: levels were admitted and
-    # each completion marked its tile dirty and asked for an ordinary commit.
-    assert len(pyramid) == 2
+    # The fake controller ran the workers inline: each tile's chain admitted
+    # the demanded level 2 plus the acceptable level 1 on the way (ADR 0050
+    # level-chaining), and each completion marked its tile dirty and asked
+    # for an ordinary commit.
+    assert len(pyramid) == 4
     assert pyramid.pending_count == 0
     assert sorted(session.dirty_payloads) == [0, 1]
     assert renderer.commit_requests == [False, False]

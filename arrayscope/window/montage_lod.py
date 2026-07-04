@@ -247,6 +247,15 @@ class LodMaterializationRequest(NamedTuple):
     per-axis box-mean factor relative to that source.  ``key.factor_xy``
     always stays relative to the native plane; the two differ exactly when a
     cross-level derivation was chosen (ADR 0050).
+
+    ``chain`` is the level ladder the worker walks: ``(step_key, rel_xy)``
+    pairs applied in order, each reducing the previous plane by ``rel_xy``
+    (~¼ the texels of its source per doubling) and admitting under
+    ``step_key`` when it is not None (``None`` = pass-through: the level is
+    resident or claimed elsewhere).  The final step's key is always
+    ``key``.  Empty chain = single direct reduction (legacy shape).  Every
+    non-None step key holds a singleflight claim taken at plan time; all of
+    them are balanced on every scheduling path.
     """
 
     tile_number: int
@@ -254,6 +263,7 @@ class LodMaterializationRequest(NamedTuple):
     source: object
     reduce_factor_xy: tuple[int, int]
     cross_level: bool = False
+    chain: tuple = ()
 
 
 def plan_materialization(
@@ -265,16 +275,24 @@ def plan_materialization(
     key: PyramidLevelKey,
     native_source: np.ndarray | None = None,
 ) -> LodMaterializationRequest:
-    """Choose the cheapest deterministic reduction source for one level.
+    """Plan the cheapest deterministic level ladder ending at ``level``.
 
-    ADR 0050 materializes level *n+1* from level *n* where possible:
-    deriving from the finest already-resident coarser level touches
-    ``relative_factor**2`` fewer texels than re-reducing the native
-    plane.  Box means compose exactly only when every box is full, so the
-    cross-level path is taken only when the native plane divides evenly
-    by the demanded per-axis factors; partial trailing boxes fall back to
-    the single canonical native reduction to keep level content
-    independent of cache state.
+    ADR 0050 level-chaining: the worker starts from the finest
+    already-resident coarser level (or native) and walks the missing
+    acceptable levels in order, reducing each new plane from the previous
+    one — every step touches ``relative_factor**2`` fewer texels than
+    re-reducing the native plane — and admitting each produced level on
+    the way, so the demanded level's neighbors (the hysteresis fallbacks)
+    become resident for ~⅓ extra cost instead of one full native
+    reduction each when the zoom crosses them later.
+
+    Box means compose exactly only when every box is full, so a level
+    joins the chain only when the native plane divides evenly by its
+    per-axis factors; non-composing intermediates are left out and the
+    target falls back to the single canonical native reduction when it
+    cannot compose, keeping level content independent of cache state.
+    Intermediate claims are taken here (GUI side, dictionary probes only)
+    and balanced by every scheduling path.
     """
 
     if native_source is None:
@@ -304,11 +322,51 @@ def plan_materialization(
         cached = pyramid.peek(pyramid_key_for(session, rendered, demand=demand, level=candidate))
         if cached is None:
             continue
-        best = (candidate, cached, (factor_x // candidate_x, factor_y // candidate_y))
+        best = (candidate, cached, (candidate_x, candidate_y))
     if best is None:
+        start_level, source, start_x, start_y = 0, native_source, 1, 1
+    else:
+        start_level, source = best[0], best[1]
+        start_x, start_y = (int(value) for value in best[2])
+    steps: list[tuple[PyramidLevelKey | None, tuple[int, int]]] = []
+    prev_x, prev_y = start_x, start_y
+    for lvl in sorted({int(candidate) for candidate in demand.acceptable_levels if start_level < int(candidate) <= int(level)}):
+        if lvl == int(level):
+            lvl_x, lvl_y = factor_x, factor_y
+        else:
+            lvl_x, lvl_y = (int(value) for value in factor_xy_for_level(demand, lvl))
+        if native_shape[0] % lvl_y or native_shape[1] % lvl_x or lvl_x % prev_x or lvl_y % prev_y:
+            if lvl == int(level):
+                # Target does not compose through the chain: canonical
+                # native reduction (never reachable when the top guard
+                # passed and factors are power-of-two monotone; defensive).
+                steps = []
+                break
+            continue
+        rel = (lvl_x // prev_x, lvl_y // prev_y)
+        if rel == (1, 1):
+            continue
+        if lvl == int(level):
+            steps.append((key, rel))
+        else:
+            step_key = pyramid_key_for(session, rendered, demand=demand, level=lvl)
+            steps.append((step_key if pyramid.begin_pending(step_key) else None, rel))
+        prev_x, prev_y = lvl_x, lvl_y
+    if not steps:
         return LodMaterializationRequest(tile_number, key, native_source, (factor_x, factor_y))
-    session.lod_cross_level_reductions += 1
-    return LodMaterializationRequest(tile_number, key, best[1], best[2], cross_level=True)
+    claimed_intermediates = sum(1 for step_key, _rel in steps[:-1] if step_key is not None)
+    if claimed_intermediates:
+        session.lod_chain_planned = int(getattr(session, "lod_chain_planned", 0) or 0) + claimed_intermediates
+    if best is not None:
+        session.lod_cross_level_reductions += 1
+    return LodMaterializationRequest(
+        tile_number,
+        key,
+        source,
+        (factor_x // start_x, factor_y // start_y),
+        cross_level=best is not None,
+        chain=tuple(steps),
+    )
 
 
 def refresh_lod_for_viewport(session) -> bool:
@@ -698,6 +756,35 @@ def resident_texture_for_rendered_tile(
     return texture, histogram, lod
 
 
+def _release_chain_claims(pyramid, chain) -> bool:
+    """End every unadmitted claim in a chain; True when any step is resident.
+
+    The single place claim balancing happens for scheduling paths that did
+    not run (blocked admission, stale session, supersession) or failed:
+    admitted levels are results and stay; everything else releases its
+    singleflight claim so the next refresh can re-request it.
+    """
+
+    admitted = False
+    for step_key, _rel in chain:
+        if step_key is None:
+            continue
+        if pyramid.peek(step_key) is not None:
+            admitted = True
+        else:
+            pyramid.end_pending(step_key)
+    return admitted
+
+
+def _request_chain(request) -> tuple:
+    chain = tuple(getattr(request, "chain", ()) or ())
+    if chain:
+        return chain
+    key = request[1]
+    reduce_factor_xy = tuple(int(value) for value in (request[3] if len(request) > 3 else key.factor_xy))
+    return ((key, reduce_factor_xy),)
+
+
 # --------------------------------------------------------------------------
 # Renderer-side: policy resolution, caches, scheduling
 # --------------------------------------------------------------------------
@@ -776,7 +863,7 @@ def schedule_materializations(renderer, session) -> None:
         return
     if not renderer._montage_session_is_current(session):
         for request in requests:
-            pyramid.end_pending(request[1])
+            _release_chain_claims(pyramid, _request_chain(request))
         return
     controller = getattr(renderer.win, "montage_tile_evaluation_controller", renderer.win.visible_evaluation_controller)
     session_id = int(session.session_id)
@@ -787,24 +874,35 @@ def schedule_materializations(renderer, session) -> None:
         key = request[1]
         source = request[2]
         reduce_factor_xy = tuple(int(value) for value in (request[3] if len(request) > 3 else key.factor_xy))
+        chain = _request_chain(request)
 
-        def evaluate(key=key, source=source, reduce_factor_xy=reduce_factor_xy, pyramid=pyramid):
-            return pyramid.admit(key, reduce_box_mean(source, reduce_factor_xy))
+        def evaluate(chain=chain, source=source, pyramid=pyramid):
+            # Level-chaining (ADR 0050): each step reduces the previous
+            # plane, so producing the target's neighbors costs a fraction
+            # of one native reduction instead of one native read each.
+            plane = source
+            try:
+                for step_key, rel in chain:
+                    plane = reduce_box_mean(plane, rel)
+                    if step_key is not None:
+                        plane = pyramid.admit(step_key, plane)
+                return plane
+            except BaseException:
+                _release_chain_claims(pyramid, chain)
+                raise
 
         def done(_result, tile_number=tile_number, session_id=session_id, session_key=session_key):
             on_level_ready(renderer, session_id, session_key, tile_number)
 
-        def release(key=key, pyramid=pyramid, tile_number=tile_number, session_id=session_id, session_key=session_key):
+        def release(chain=chain, pyramid=pyramid, tile_number=tile_number, session_id=session_id, session_key=session_key):
             # Supersession cancels stale *work*, never a completed
-            # result: the worker may have admitted the level before the
+            # result: the worker may have admitted levels before the
             # item went stale, and dropping the notification leaves the
             # tile presenting an outdated level until an unrelated event
             # (user-visible as tiles stuck mid-zoom).  Admitted levels
-            # notify; unstarted ones release the singleflight claim.
-            if pyramid.peek(key) is not None:
+            # notify; unstarted ones release their singleflight claims.
+            if _release_chain_claims(pyramid, chain):
                 on_level_ready(renderer, session_id, session_key, tile_number)
-            else:
-                pyramid.end_pending(key)
 
         started = controller.start_latest(
             evaluate,
@@ -812,7 +910,7 @@ def schedule_materializations(renderer, session) -> None:
             priority=EvalPriority.PREFETCH,
             replace_group=f"montage-lod:{tile_number}",
             on_done=done,
-            on_error=lambda _exc, key=key, pyramid=pyramid: pyramid.end_pending(key),
+            on_error=lambda _exc, chain=chain, pyramid=pyramid: _release_chain_claims(pyramid, chain),
             on_stale=release,
             supersession_key=("montage-lod", tile_number),
             supersession_value=supersession_value,
@@ -831,10 +929,10 @@ def schedule_materializations(renderer, session) -> None:
         )
         if started is None:
             # Admission blocked (bounded speculative lane yielding to
-            # visible work): release the singleflight claim immediately,
-            # or the next refresh can never re-request this level and the
+            # visible work): release every singleflight claim immediately,
+            # or the next refresh can never re-request these levels and the
             # tile is stuck at its old LOD until the demand changes.
-            pyramid.end_pending(key)
+            _release_chain_claims(pyramid, chain)
             renderer._montage_lod_materializations_blocked = (
                 int(getattr(renderer, "_montage_lod_materializations_blocked", 0) or 0) + 1
             )
