@@ -43,6 +43,7 @@ def _renderer(session, *, blocked=False, current=True):
     fake = SimpleNamespace()
     fake.win = fake
     fake.montage_tile_evaluation_controller = FakeController(blocked=blocked)
+    fake.visible_evaluation_controller = fake.montage_tile_evaluation_controller
     fake._montage_session = session if current else None
     fake._montage_session_is_current = lambda candidate: bool(current)
     fake._is_current_montage_session = lambda session_id, key: bool(current)
