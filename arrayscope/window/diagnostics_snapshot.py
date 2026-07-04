@@ -47,6 +47,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     presentation = _presentation_diagnostics(window)
     lod_decision = None if session is None else getattr(session, "lod_policy_decision", None)
     lod_demand = None if lod_decision is None else getattr(lod_decision, "demand", None)
+    lod_pyramid = None if session is None else getattr(session, "lod_pyramid", None)
+    lod_tile_levels = _montage_payload_level_counts(session)
     montage = MontageRuntimeDiagnostics(
         active=session is not None,
         session_id=None if session is None else int(session.session_id),
@@ -90,6 +92,20 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         else tuple(float(value) for value in getattr(lod_demand, "source_texels_per_pixel_xy", (0.0, 0.0))),
         tile_lod_policy="native-only" if lod_decision is None else str(getattr(lod_decision, "policy", "native-only") or "native-only"),
         tile_lod_reason="" if lod_decision is None else str(getattr(lod_decision, "reason", "") or ""),
+        tile_lod_applied_level=0 if lod_decision is None else int(getattr(lod_decision, "applied_level", 0) or 0),
+        tile_lod_resident_tile_levels=lod_tile_levels,
+        tile_lod_pyramid_bytes=0 if lod_pyramid is None else int(getattr(lod_pyramid, "bytes_used", 0) or 0),
+        tile_lod_pyramid_entries=0 if lod_pyramid is None else len(lod_pyramid),
+        tile_lod_pyramid_hits=0 if lod_pyramid is None else int(getattr(lod_pyramid, "hits", 0) or 0),
+        tile_lod_pyramid_misses=0 if lod_pyramid is None else int(getattr(lod_pyramid, "misses", 0) or 0),
+        tile_lod_pyramid_evictions=0 if lod_pyramid is None else int(getattr(lod_pyramid, "evictions", 0) or 0),
+        tile_lod_pending_materializations=(
+            0
+            if session is None
+            else len(getattr(session, "pending_lod_requests", ()) or ())
+            + (0 if lod_pyramid is None else int(getattr(lod_pyramid, "pending_count", 0) or 0))
+        ),
+        tile_lod_materializations_completed=0 if session is None else int(getattr(session, "lod_materializations_completed", 0) or 0),
         tile_compute_cache_hits=0 if session is None else int(getattr(session, "tile_compute_cache_hits", 0) or 0),
         tile_compute_stage_backed=0 if session is None else int(getattr(session, "tile_compute_stage_backed", 0) or 0),
         tile_compute_direct=0 if session is None else int(getattr(session, "tile_compute_direct", 0) or 0),
@@ -336,6 +352,16 @@ def _presentation_diagnostics(window) -> dict[str, object]:
         except Exception:
             return {}
     return {}
+
+
+def _montage_payload_level_counts(session) -> tuple[tuple[int, int], ...]:
+    if session is None:
+        return ()
+    counts: dict[int, int] = {}
+    for payload in dict(getattr(session, "display_tile_payloads", {}) or {}).values():
+        level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+        counts[level] = counts.get(level, 0) + 1
+    return tuple(sorted(counts.items()))
 
 
 def _montage_overlay_count(window) -> int:

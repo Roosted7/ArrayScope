@@ -84,6 +84,7 @@ def test_settings_round_trip_defaults_and_values():
             "fft_backend": "pyfftw",
             "fft_workers": "2",
             "image_rendering_backend": "vispy",
+            "montage_lod_policy": "resident",
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
         }
@@ -97,6 +98,7 @@ def test_settings_round_trip_defaults_and_values():
         "fft_backend": "pyfftw",
         "fft_workers": "2",
         "image_rendering_backend": "vispy",
+        "montage_lod_policy": "resident",
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
     }

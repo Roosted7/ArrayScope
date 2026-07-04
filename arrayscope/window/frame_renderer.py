@@ -54,6 +54,8 @@ from arrayscope.display.model.montage_levels import (
     provisional_tile_level_stats,
     sample_tile_level_stats,
 )
+from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT
+from arrayscope.display.pyramid import PyramidCache, reduce_box_mean
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
     payload_compatible_with_tile as _payload_compatible_with_tile,
@@ -505,6 +507,7 @@ class FrameRenderMixin:
         )
         session_id = int(getattr(self, "_montage_session_id", 0)) + 1
         self._montage_session_id = session_id
+        lod_policy_mode = self._montage_lod_policy_mode()
         session = MontageRenderSession(
             session_id=session_id,
             key=session_key,
@@ -552,6 +555,10 @@ class FrameRenderMixin:
             retained_stage_decision=stage_plan["retained_stage_decision"],
             repeated_expensive_stage_per_tile=stage_plan["repeated_expensive_stage_per_tile"],
             priority_focus=viewport_plan.priority_focus,
+            lod_policy_mode=lod_policy_mode,
+            lod_pyramid=(
+                self._montage_lod_pyramid() if lod_policy_mode == LOD_POLICY_RESIDENT else None
+            ),
         )
         session.shader_display = bool(shader_display)
         self._montage_session = session
@@ -2173,6 +2180,118 @@ class FrameRenderMixin:
         self._schedule_montage_presentation_commit(session, force=True)
         self._schedule_montage_tiles(session)
 
+    def _montage_lod_policy_mode(self) -> str:
+        """Resolve the configured montage LOD policy for the active backend.
+
+        ADR 0050 scopes the first "resident" slice to VisPy tiled scenes;
+        any other backend keeps native-only regardless of the setting.
+        """
+
+        choice = getattr(getattr(self.win, "app_settings", None), "montage_lod_policy", None)
+        value = str(getattr(choice, "value", choice) or LOD_POLICY_NATIVE_ONLY)
+        if value != LOD_POLICY_RESIDENT:
+            return LOD_POLICY_NATIVE_ONLY
+        capabilities = image_view_backend_capabilities(self.win.img_view)
+        if str(getattr(capabilities, "name", "")) != "vispy":
+            return LOD_POLICY_NATIVE_ONLY
+        return LOD_POLICY_RESIDENT
+
+    def _montage_lod_pyramid(self) -> PyramidCache:
+        pyramid = getattr(self, "_montage_lod_pyramid_cache", None)
+        if not isinstance(pyramid, PyramidCache):
+            budget = max(
+                64 * 1024 * 1024,
+                int(self._memory_policy().display_cache_budget_bytes) // 4,
+            )
+            pyramid = PyramidCache(max_bytes=budget)
+            self._montage_lod_pyramid_cache = pyramid
+        return pyramid
+
+    def _schedule_montage_lod_materializations(self, session) -> None:
+        """Drain demanded-but-missing pyramid levels into background work.
+
+        Reduction never runs in this GUI path: each request becomes a
+        low-priority worker item on the montage tile controller, superseded
+        per tile by viewport identity.  Completion admits into the pyramid
+        cache from the worker and re-enters presentation through the same
+        dirty-payload commit path a late tile result uses.
+        """
+
+        requests = list(getattr(session, "pending_lod_requests", ()) or ())
+        if not requests:
+            return
+        session.pending_lod_requests.clear()
+        pyramid = getattr(session, "lod_pyramid", None)
+        if pyramid is None:
+            return
+        if not self._montage_session_is_current(session):
+            for _tile_number, key, _source in requests:
+                pyramid.end_pending(key)
+            return
+        controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
+        session_id = int(session.session_id)
+        session_key = session.key
+        supersession_value = (session_key, session_id, int(getattr(session, "viewport_revision", 0) or 0))
+        for tile_number, key, source in requests:
+            tile_number = int(tile_number)
+
+            def evaluate(key=key, source=source, pyramid=pyramid):
+                return pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
+
+            def done(_result, tile_number=tile_number, session_id=session_id, session_key=session_key):
+                self._on_montage_lod_level_ready(session_id, session_key, tile_number)
+
+            def release(key=key, pyramid=pyramid):
+                # Superseded/failed before admission: give the singleflight
+                # claim back so a later commit can re-request the level.
+                pyramid.end_pending(key)
+
+            started = controller.start_latest(
+                evaluate,
+                key=("montage_lod_level", session_key, tile_number, key.level_xy),
+                priority=EvalPriority.PREFETCH,
+                replace_group=f"montage-lod:{tile_number}",
+                on_done=done,
+                on_error=lambda _exc, key=key, pyramid=pyramid: pyramid.end_pending(key),
+                on_stale=release,
+                supersession_key=("montage-lod", tile_number),
+                supersession_value=supersession_value,
+                work_item=WorkItem(
+                    key=("montage_lod_materialization", session_key, session_id, tile_number, key.level_xy),
+                    lane=WorkLane.SPECULATIVE_RESIDENCY,
+                    quality="preview",
+                    supersession_key=("montage-lod", tile_number),
+                    supersession_value=supersession_value,
+                    estimated_bytes=max(
+                        1,
+                        int(getattr(source, "nbytes", 0) or 0)
+                        // max(1, int(key.factor_xy[0]) * int(key.factor_xy[1])),
+                    ),
+                ),
+            )
+            if started is None:
+                self._montage_lod_materializations_blocked = (
+                    int(getattr(self, "_montage_lod_materializations_blocked", 0) or 0) + 1
+                )
+            else:
+                self._montage_lod_materializations_scheduled = (
+                    int(getattr(self, "_montage_lod_materializations_scheduled", 0) or 0) + 1
+                )
+
+    def _on_montage_lod_level_ready(self, session_id, session_key, tile_number) -> None:
+        self._montage_lod_materializations_completed = (
+            int(getattr(self, "_montage_lod_materializations_completed", 0) or 0) + 1
+        )
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session_id, session_key):
+            return
+        if not self._is_current_render_generation(session.render_generation):
+            return
+        session.lod_materializations_completed = int(getattr(session, "lod_materializations_completed", 0) or 0) + 1
+        if int(tile_number) in session.rendered_tiles:
+            session.dirty_payloads[int(tile_number)] = None
+        self._schedule_montage_presentation_commit(session, force=False)
+
     def _schedule_montage_presentation_commit(self, session, *, force=False) -> None:
         if not self._montage_session_is_current(session):
             return
@@ -2339,6 +2458,7 @@ class FrameRenderMixin:
                 self._finish_montage_session_if_complete(session)
                 if not (getattr(session, "dirty_payloads", None) or getattr(session, "pending_removals", None)):
                     schedule_near_viewport_montage_prefetch(self, session)
+                self._schedule_montage_lod_materializations(session)
                 self._retry_live_profile_after_montage_tile()
                 return
             level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
@@ -2456,6 +2576,7 @@ class FrameRenderMixin:
             self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
         finally:
             self._montage_presentation_commit_active = False
+        self._schedule_montage_lod_materializations(session)
         self._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
         report = getattr(self._display_committer(), "last_tile_commit_report", None)
         _complete_inline_work(

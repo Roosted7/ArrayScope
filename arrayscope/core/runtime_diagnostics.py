@@ -117,6 +117,16 @@ class MontageRuntimeDiagnostics:
     tile_lod_source_texels_per_pixel_xy: tuple[float, float] = (0.0, 0.0)
     tile_lod_policy: str = "native-only"
     tile_lod_reason: str = ""
+    tile_lod_applied_level: int = 0
+    # ((level, tile count), ...) over currently built display payloads.
+    tile_lod_resident_tile_levels: tuple[tuple[int, int], ...] = ()
+    tile_lod_pyramid_bytes: int = 0
+    tile_lod_pyramid_entries: int = 0
+    tile_lod_pyramid_hits: int = 0
+    tile_lod_pyramid_misses: int = 0
+    tile_lod_pyramid_evictions: int = 0
+    tile_lod_pending_materializations: int = 0
+    tile_lod_materializations_completed: int = 0
     tile_compute_cache_hits: int = 0
     tile_compute_stage_backed: int = 0
     tile_compute_direct: int = 0
@@ -699,6 +709,18 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"{snapshot.montage.tile_lod_source_texels_per_pixel_xy[1]:.2f})"
         ),
         f"LOD policy reason: {snapshot.montage.tile_lod_reason or 'n/a'}",
+        (
+            "LOD residency: "
+            f"applied_level={snapshot.montage.tile_lod_applied_level} "
+            f"tile_levels={snapshot.montage.tile_lod_resident_tile_levels} "
+            f"pyramid_bytes={snapshot.montage.tile_lod_pyramid_bytes} "
+            f"pyramid_entries={snapshot.montage.tile_lod_pyramid_entries} "
+            f"hits={snapshot.montage.tile_lod_pyramid_hits} "
+            f"misses={snapshot.montage.tile_lod_pyramid_misses} "
+            f"evictions={snapshot.montage.tile_lod_pyramid_evictions} "
+            f"pending={snapshot.montage.tile_lod_pending_materializations} "
+            f"completed={snapshot.montage.tile_lod_materializations_completed}"
+        ),
         (
             "Reusable stage: "
             f"stage={snapshot.montage.retained_stage_index if snapshot.montage.retained_stage_index is not None else 'n/a'} "
