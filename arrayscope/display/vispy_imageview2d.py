@@ -29,6 +29,11 @@ from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
 from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.imageview2d import _tile_commit_report
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
+from arrayscope.display.model.tiled_histogram_identity import (
+    payload_histogram_source,
+    tiled_histogram_key,
+    tiled_semantic_histogram_identity,
+)
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import DisplayInteractionState
 from arrayscope.display.overlay_hit_test import roi_handle_points
@@ -141,6 +146,14 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_tiled_source_shader_mapping = None
         self._last_vispy_tiled_shader_mapping = None
         self._last_vispy_tiled_histogram_key = None
+        # ADR 0050 WP: histogram work is keyed by semantic tile content, so a
+        # display-LOD level swap must never repaint or recompute the
+        # histogram.  `lod_swap` counts key changes whose semantic inputs were
+        # unchanged (must stay 0); `cross_level_reuse` counts texture-identity
+        # changes (level swaps) that correctly left the histogram untouched.
+        self.tile_histogram_lod_swap_recomputes = 0
+        self.tile_histogram_cross_level_reuses = 0
+        self._last_vispy_tiled_histogram_inputs = None
         self._last_vispy_frame_viewport_key = None
         self._vispy_main_data_id: int | None = None
         self._vispy_main_color_source_id: int | None = None
@@ -312,6 +325,7 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_tiled_source_shader_mapping = None
         self._last_vispy_tiled_shader_mapping = None
         self._last_vispy_tiled_histogram_key = None
+        self._last_vispy_tiled_histogram_inputs = None
         self._last_vispy_frame_viewport_key = None
         self._last_vispy_tiled_reset_reason = str(reason)
         self._montage_display_mode = "none"
@@ -550,12 +564,17 @@ class VisPyImageView2D(ImageViewShell):
                 rgb_already_windowed=rgb_already_windowed,
                 frame_plan=frame_plan,
             )
+            histogram_semantic_identity = _tiled_semantic_histogram_identity(montage_tile_payloads)
             histogram_key = _tiled_histogram_key(
                 histogramRange,
                 histogramPlotData=histogramPlotData,
-                source_key=source_key,
                 tile_delta=tile_delta,
-                tile_payloads=montage_tile_payloads,
+                semantic_identity=histogram_semantic_identity,
+            )
+            histogram_inputs = (
+                histogram_semantic_identity,
+                id(histogramPlotData),
+                (float(histogramRange[0]), float(histogramRange[1])),
             )
             viewport_key = (
                 structure_key,
@@ -670,6 +689,17 @@ class VisPyImageView2D(ImageViewShell):
             # keeps VisPy pixel commits from inheriting PyQtGraph LUT repaint
             # cost on every scroll step.
             histogram_changed = histogram_key != previous_histogram_key
+            previous_histogram_inputs = getattr(self, "_last_vispy_tiled_histogram_inputs", None)
+            if montage_tile_payloads and previous_histogram_key is not None:
+                if histogram_changed and previous_histogram_inputs == histogram_inputs:
+                    # A histogram refresh whose semantic inputs did not change
+                    # can only be caused by presentation identity churn (for
+                    # example a display-LOD level swap).  ADR 0050 requires
+                    # this to be structurally impossible; the counter is the
+                    # regression alarm.
+                    self.tile_histogram_lod_swap_recomputes += 1
+                elif not histogram_changed and source_key != previous_source_key:
+                    self.tile_histogram_cross_level_reuses += 1
             if histogram_changed and not loading_only:
                 if histogramPlotData is None and montage_tile_payloads:
                     # Defer the tile-payload histogram fallback to the coalescing
@@ -719,6 +749,7 @@ class VisPyImageView2D(ImageViewShell):
                 self._last_vispy_tiled_source_shader_mapping = source_shader_mapping
                 self._last_vispy_tiled_shader_mapping = shader_mapping
                 self._last_vispy_tiled_histogram_key = histogram_key
+                self._last_vispy_tiled_histogram_inputs = histogram_inputs
                 self._last_vispy_frame_viewport_key = viewport_key
             return stats
         finally:
@@ -1854,37 +1885,17 @@ def _tiled_structure_key(geometry, *, rgb_already_windowed, frame_plan=None):
     )
 
 
-def _tiled_histogram_key(histogram_range, *, histogramPlotData, source_key, tile_delta, tile_payloads=None):
-    if tile_delta is None:
-        raise ValueError("VisPy tiled histogram identity requires a TilePresentationDelta")
-    source = None if histogramPlotData is None else np.asarray(histogramPlotData)
-    fallback_identity = None
-    if histogramPlotData is None and tile_payloads:
-        # Without explicit plot data the histogram stream falls back to the
-        # tile payload histograms, so replaced histogram arrays must change the
-        # identity even when revisions and source ids stay the same.
-        fallback_identity = tuple(
-            (int(tile), id(_payload_histogram_source(payload)))
-            for tile, payload in sorted(dict(tile_payloads).items())
-        )
-    return (
-        "revision",
-        int(getattr(tile_delta, "histogram_revision")),
-        id(histogramPlotData),
-        fallback_identity,
-        source_key,
-        None if source is None else tuple(int(value) for value in source.shape),
-        None if source is None else str(source.dtype),
-        None if source is None else tuple(int(value) for value in source.strides),
-        (float(histogram_range[0]), float(histogram_range[1])),
+def _tiled_histogram_key(histogram_range, *, histogramPlotData, tile_delta, semantic_identity):
+    return tiled_histogram_key(
+        histogram_range,
+        histogram_plot_data=histogramPlotData,
+        tile_delta=tile_delta,
+        semantic_identity=semantic_identity,
     )
 
 
-def _payload_histogram_source(payload):
-    source = getattr(payload, "semantic_histogram_data", None)
-    if source is None:
-        source = getattr(payload, "histogram_data", None)
-    return source
+_tiled_semantic_histogram_identity = tiled_semantic_histogram_identity
+_payload_histogram_source = payload_histogram_source
 
 
 def _set_visual_visible(visual, visible: bool) -> None:
