@@ -782,20 +782,15 @@ class MontageRenderSession:
         for tile_number in sorted(self.visible_tile_numbers):
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is None:
-                if int(tile_number) not in self.display_tile_payloads:
-                    # Unrendered tile revealed by the camera: if any level is
-                    # resident the next build can floor on it — worth a
-                    # commit even though no tile result arrived (ADR 0050).
-                    tile = next(
-                        (t for t in tuple(self.visible_tiles) if int(t.montage_index) == int(tile_number)),
-                        None,
-                    )
-                    if tile is not None:
-                        semantic_id = self.tile_semantic_source_id(int(tile.source_index))
-                        for component in self._floor_component_tags():
-                            if pyramid.resident_keys_for(semantic_id, int(tile.source_index), component):
-                                commit_needed = True
-                                break
+                # Unrendered tiles never enter dirty_payloads: the dirty set
+                # is consumed by acknowledged upserts, and a build cannot
+                # produce an exact upsert without a rendered result — a
+                # permanently dirty tile turns the final-commit check into a
+                # busy timer loop.  Floor progress (a presentable or closer
+                # resident level) only requests a commit; the build's floor
+                # pass does the actual work.
+                if self._floor_can_progress(int(tile_number)):
+                    commit_needed = True
                 continue
             payload = self.display_tile_payloads.get(int(tile_number))
             presented_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
@@ -933,6 +928,48 @@ class MontageRenderSession:
             return (str(TexturePlaneKind.COMPLEX_RG32F.value), "scalar")
         return ("scalar", str(TexturePlaneKind.COMPLEX_RG32F.value))
 
+    def _best_floor_key(self, source_index: int):
+        """Best resident pyramid key for one tile: nearest demand, finer ties."""
+
+        pyramid = self.lod_pyramid
+        if pyramid is None:
+            return None
+        demand = self.lod_policy_decision.demand
+        desired = int(demand.desired_level)
+        semantic_id = self.tile_semantic_source_id(int(source_index))
+        best = None
+        for component in self._floor_component_tags():
+            for key in pyramid.resident_keys_for(semantic_id, int(source_index), component):
+                level = max(int(key.level_xy[0]), int(key.level_xy[1]))
+                rank = (abs(level - desired), level)
+                if best is None or rank < best[0]:
+                    best = (rank, key, level)
+            if best is not None:
+                break
+        return None if best is None else (best[1], best[2])
+
+    def _floor_can_progress(self, tile_number: int) -> bool:
+        """True when the floor pass could present or improve this tile."""
+
+        if not self._resident_lod_active():
+            return False
+        tile = next(
+            (t for t in tuple(self.visible_tiles) if int(t.montage_index) == int(tile_number)),
+            None,
+        )
+        if tile is None:
+            return False
+        payload = self.display_tile_payloads.get(int(tile_number))
+        if payload is not None and str(getattr(payload, "quality", "exact")) != "preview":
+            return False
+        best = self._best_floor_key(int(tile.source_index))
+        if best is None:
+            return False
+        if payload is None:
+            return True
+        presented = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+        return int(best[1]) != presented
+
     def _ensure_floor_payloads(self, tile_numbers) -> None:
         """Present the best resident pyramid level for unrendered planned tiles.
 
@@ -948,32 +985,27 @@ class MontageRenderSession:
         pyramid = self.lod_pyramid
         if pyramid is None:
             return
-        demand = self.lod_policy_decision.demand
-        desired = int(demand.desired_level)
         by_number = {
             int(tile.montage_index): tile
             for tile in tuple(self.visible_tiles)
         }
         for tile_number in sorted(int(number) for number in tile_numbers):
-            if tile_number in self.display_tile_payloads:
+            existing = self.display_tile_payloads.get(tile_number)
+            if existing is not None and str(getattr(existing, "quality", "exact")) != "preview":
                 continue
             tile = by_number.get(tile_number)
             if tile is None:
                 continue
             source_index = int(tile.source_index)
             semantic_id = self.tile_semantic_source_id(source_index)
-            best = None
-            for component in self._floor_component_tags():
-                for key in pyramid.resident_keys_for(semantic_id, source_index, component):
-                    level = max(int(key.level_xy[0]), int(key.level_xy[1]))
-                    rank = (abs(level - desired), level)
-                    if best is None or rank < best[0]:
-                        best = (rank, key, level)
-                if best is not None:
-                    break
+            best = self._best_floor_key(source_index)
             if best is None:
                 continue
-            _rank, key, level = best
+            key, level = best
+            if existing is not None:
+                presented = int(getattr(getattr(existing, "lod", None), "level", 0) or 0)
+                if presented == int(level):
+                    continue
             plane = pyramid.peek(key)
             if plane is None:
                 continue
@@ -999,7 +1031,7 @@ class MontageRenderSession:
                 quality="preview",
             )
             self.display_tile_payloads[tile_number] = payload
-            self.pending_payload_upserts.setdefault(tile_number, None)
+            self.pending_payload_upserts[tile_number] = None
             self.lod_floor_presentations = int(getattr(self, "lod_floor_presentations", 0) or 0) + 1
 
     def _texture_source_for(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
@@ -1151,6 +1183,18 @@ class MontageRenderSession:
             if rendered is not None:
                 self._ensure_display_tile_payload(int(tile_number), rendered, source_ids, lod_factor=lod_factor)
         self._ensure_floor_payloads(planned_numbers - set(current_loaded))
+        # Progress guarantee: a dirty entry is a promise that a build can
+        # produce an upsert for the tile.  Without a rendered result and
+        # without a pending upsert (floor included), no build can keep that
+        # promise — dropping the entry lets the commit loop settle instead
+        # of rescheduling forever (100% single-core spin).  A later rendered
+        # result re-dirties the tile through mark_loaded/mark_materialized.
+        for tile_number in tuple(self.dirty_payloads):
+            if (
+                int(tile_number) not in self.rendered_tiles
+                and int(tile_number) not in self.pending_payload_upserts
+            ):
+                self.dirty_payloads.pop(int(tile_number), None)
         current_payloads = self.display_tile_payloads
         valid_tile_count = len(tuple(getattr(self.plan, "tiles", ()) or ()))
         removals = tuple(

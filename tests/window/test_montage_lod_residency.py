@@ -772,3 +772,76 @@ def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholde
     _state, delta3 = session.build_tile_presentation({})
     replaced = session.display_tile_payloads[1]
     assert replaced.quality == "exact"
+
+
+def test_floor_tile_with_native_demand_settles_instead_of_spinning():
+    """Regression: a preview-floored tile under native demand must not keep
+    the dirty set non-empty forever (100% single-core commit-loop spin)."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2, view_range=((0.0, 2 * TILE), (0.0, TILE)))
+    zoomed_out = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    rendered = session.rendered_tiles[1]
+    key = pyramid_key_for_rendered(
+        rendered,
+        demand=zoomed_out,
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+    del session.rendered_tiles[1]
+    session.dirty_payloads.pop(1, None)
+
+    # Demand is native (zoomed in); the tile floors at level 2.
+    _state, delta = session.build_tile_presentation({})
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    floored = session.display_tile_payloads.get(1)
+    assert floored is not None and floored.quality == "preview"
+
+    # A camera-only refresh may request commits but must never mark the
+    # unrendered tile dirty...
+    session.refresh_lod_for_viewport()
+    assert 1 not in session.dirty_payloads
+
+    # ...and repeated builds settle: nothing dirty, nothing pending, the
+    # floor payload keeps presenting.
+    for _ in range(3):
+        _state, delta = session.build_tile_presentation({})
+        _acknowledge(session, delta)
+        session.mark_presented(tuple(delta.upserts))
+    assert 1 not in session.dirty_payloads
+    assert not session.pending_payload_upserts
+    assert session.display_tile_payloads[1].quality == "preview"
+
+
+def test_floor_payload_upgrades_when_closer_level_becomes_resident():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    rendered = session.rendered_tiles[1]
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    coarse = pyramid_key_for_rendered(rendered, demand=demand, level=4, semantic_source_id=semantic_id)
+    pyramid.admit(coarse, reduce_box_mean(np.asarray(rendered.image), coarse.factor_xy))
+    del session.rendered_tiles[1]
+    session.dirty_payloads.pop(1, None)
+
+    _state, delta = session.build_tile_presentation({})
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    assert session.display_tile_payloads[1].lod.level == 4
+
+    # The demanded level 2 materializes later; the floor upgrades to it.
+    better = PyramidLevelKey(
+        source_id=semantic_id,
+        tile_id=coarse.tile_id,
+        component=coarse.component,
+        level_xy=(2, 2),
+    )
+    image = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE) + 1
+    pyramid.admit(better, reduce_box_mean(image, better.factor_xy))
+    assert session._floor_can_progress(1)
+    _state, delta = session.build_tile_presentation({})
+    upgraded = session.display_tile_payloads[1]
+    assert upgraded.quality == "preview"
+    assert upgraded.lod.level == 2
