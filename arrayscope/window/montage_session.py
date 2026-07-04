@@ -8,7 +8,18 @@ from time import monotonic
 
 import numpy as np
 
-from arrayscope.display.lod import LodInfo, LodPolicyDecision, native_lod_policy
+from arrayscope.display.lod import (
+    LOD_POLICY_NATIVE_ONLY,
+    LOD_POLICY_RESIDENT,
+    LodInfo,
+    LodPolicyDecision,
+    choose_resident_level,
+    factor_xy_for_level,
+    native_lod_policy,
+    resident_lod_policy,
+    select_lod_demand,
+)
+from arrayscope.display.pyramid import PyramidLevelKey
 from arrayscope.display.montage import (
     MontagePlan,
     MontageTile,
@@ -177,6 +188,15 @@ class MontageRenderSession:
     lod_policy_decision: LodPolicyDecision = field(
         default_factory=lambda: native_lod_policy(None, (1, 1), (1, 1))
     )
+    # ADR 0050: "native-only" keeps production behavior; "resident" presents
+    # the closest pyramid level that is actually materialized and resident.
+    lod_policy_mode: str = LOD_POLICY_NATIVE_ONLY
+    lod_pyramid: object | None = None
+    # (tile_number, PyramidLevelKey, source array) triples for the renderer to
+    # schedule as background materializations.  Filled only under the
+    # "resident" policy after a singleflight claim on the pyramid cache.
+    pending_lod_requests: list = field(default_factory=list)
+    lod_materializations_completed: int = 0
     _last_active_tiles: tuple[int, ...] = ()
     _last_planned_tiles: tuple[int, ...] = ()
     _last_near_tiles: tuple[int, ...] = ()
@@ -586,13 +606,123 @@ class MontageRenderSession:
 
     def _selected_lod_factor(self) -> int:
         previous = self.lod_policy_decision.demand.desired_factor
-        self.lod_policy_decision = native_lod_policy(
+        if self._resident_lod_active():
+            self.lod_policy_decision = resident_lod_policy(
+                self.view_range,
+                self.viewport_shape,
+                self.plan.tile_shape,
+                previous_factor=previous,
+                resident_levels=self._session_resident_levels(previous),
+            )
+        else:
+            self.lod_policy_decision = native_lod_policy(
+                self.view_range,
+                self.viewport_shape,
+                self.plan.tile_shape,
+                previous_factor=previous,
+            )
+        return int(self.lod_policy_decision.applied_factor)
+
+    def _resident_lod_active(self) -> bool:
+        return str(self.lod_policy_mode) == LOD_POLICY_RESIDENT and self.lod_pyramid is not None
+
+    def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
+        """Levels resident for every rendered tile (session-wide decision input).
+
+        Per-tile texture selection probes its own resident set; the
+        session-wide decision reports the level that every rendered tile can
+        actually present, keeping diagnostics honest for partial residency.
+        """
+
+        demand = select_lod_demand(
             self.view_range,
             self.viewport_shape,
             self.plan.tile_shape,
-            previous_factor=previous,
+            previous_factor=previous_factor,
         )
-        return int(self.lod_policy_decision.applied_factor)
+        rendered = tuple(self.rendered_tiles.values())
+        if not rendered:
+            return ()
+        resident = []
+        for level in demand.acceptable_levels:
+            if int(level) <= 0:
+                continue
+            if all(
+                self.lod_pyramid.peek(self._pyramid_key_for(tile, demand=demand, level=int(level))) is not None
+                for tile in rendered
+            ):
+                resident.append(int(level))
+        return tuple(resident)
+
+    def _pyramid_key_for(self, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
+        source, _histogram, texture_kind = self._texture_source_for(rendered)
+        factor_x, factor_y = factor_xy_for_level(demand, int(level))
+        component = "scalar" if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
+        return PyramidLevelKey(
+            source_id=("montage-tile", _array_content_token(source)),
+            tile_id=int(rendered.tile.source_index),
+            component=component,
+            level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
+        )
+
+    def _texture_source_for(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
+        texture_kind = getattr(rendered, "texture_kind", None)
+        if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
+            texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
+        if texture_kind == TexturePlaneKind.COMPLEX_RG32F and getattr(rendered, "semantic_data", None) is not None:
+            source = np.asarray(rendered.semantic_data)
+        else:
+            source = np.asarray(rendered.image)
+        histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
+        return source, histogram, texture_kind
+
+    def _resident_texture_for_rendered_tile(
+        self,
+        rendered: RenderedTile,
+        *,
+        source: np.ndarray,
+        histogram: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
+        """Cache-lookup-only level application (no reduction in this path).
+
+        A demanded level that is not cached is not resident; the tile falls
+        back to the nearest resident/native level and the missing level is
+        recorded once (singleflight) for the renderer to materialize in the
+        background.
+        """
+
+        source_shape = tuple(int(value) for value in source.shape[:2])
+        native_lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
+        demand = self.lod_policy_decision.demand
+        pyramid = self.lod_pyramid
+        tile_number = int(rendered.tile.montage_index)
+        resident_levels = tuple(
+            int(level)
+            for level in demand.acceptable_levels
+            if int(level) > 0
+            and pyramid.peek(self._pyramid_key_for(rendered, demand=demand, level=int(level))) is not None
+        )
+        desired = int(demand.desired_level)
+        if desired > 0 and desired not in resident_levels:
+            desired_key = self._pyramid_key_for(rendered, demand=demand, level=desired)
+            if pyramid.begin_pending(desired_key):
+                self.pending_lod_requests.append((tile_number, desired_key, source))
+        applied = choose_resident_level(demand, resident_levels)
+        if applied <= 0:
+            return source, histogram, native_lod
+        texture = pyramid.lookup(self._pyramid_key_for(rendered, demand=demand, level=applied))
+        if texture is None:
+            return source, histogram, native_lod
+        texture = np.asarray(texture)
+        factor_xy = factor_xy_for_level(demand, applied)
+        lod = LodInfo(
+            level=applied,
+            factor=max(int(factor_xy[0]), int(factor_xy[1])),
+            source_shape=source_shape,
+            texture_shape=tuple(int(value) for value in texture.shape[:2]),
+            gutter=0,
+        )
+        return texture, histogram, lod
 
     def _planned_lod_info(self, rendered: RenderedTile, *, factor: int) -> LodInfo:
         if int(factor) < 1:
@@ -610,14 +740,9 @@ class MontageRenderSession:
     def _texture_for_rendered_tile(self, rendered: RenderedTile, *, factor: int | None = None) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
         if factor is not None and int(factor) < 1:
             raise ValueError("LOD factor must be positive")
-        texture_kind = getattr(rendered, "texture_kind", None)
-        if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
-            texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
-        if texture_kind == TexturePlaneKind.COMPLEX_RG32F and getattr(rendered, "semantic_data", None) is not None:
-            source = np.asarray(rendered.semantic_data)
-        else:
-            source = np.asarray(rendered.image)
-        histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
+        source, histogram, _texture_kind = self._texture_source_for(rendered)
+        if self._resident_lod_active():
+            return self._resident_texture_for_rendered_tile(rendered, source=source, histogram=histogram)
         source_shape = tuple(int(value) for value in source.shape[:2])
         lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
         return source, histogram, lod
