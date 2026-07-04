@@ -37,3 +37,26 @@ Reading:
 
 Not yet evidence for: PyQtGraph reduced-image adoption (phase 3), ops-input LOD
 (`lod-commuting`, phase 4), zoom-in refinement latency, Windows/macOS.
+
+
+## Update — zero-redundant-work pass (ba57500c, same day)
+
+After the retarget/no-flash/zero-upload fixes (wave 1), the singleflight-release fix
+(5e018c13), and the histogram/stage reuse pass (wave 2), the same A/B shows the settle
+regression eliminated:
+
+| Metric | native-only | resident |
+|---|---:|---:|
+| Raw montage settle | 1202 ms | **1139 ms** |
+| FFT montage settle | 1794 ms | 1782 ms |
+| Est. tile GPU bytes (raw / FFT) | 135.5 / 280.0 MB | 70.6 / **34.8 MB** |
+| Upload bytes (raw fill) | 2.71 MB | 0.06 MB |
+| Histogram recomputes from LOD swaps | n/a | **0** |
+| Level-stat recomputes from LOD swaps | n/a | **0** |
+| Stage hits serving LOD derivations (FFT) | n/a | 272 |
+| Pipeline re-runs avoided | n/a | 3 |
+
+Event-loop gap p95 during the FFT fill is higher under resident (136 vs 85 ms) —
+worker contention during ingest reduction remains the known cost; revisit with the
+retained preview level. Interactive zoom-cycle evidence (zero-upload swap counters)
+requires manual/gesture traces, not this workflow.

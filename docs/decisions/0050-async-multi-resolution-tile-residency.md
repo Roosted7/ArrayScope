@@ -194,3 +194,29 @@ Costs:
 ADR 0021 (scheduler v2), 0025/0026 (operation capabilities), 0027 (stage cache), 0039 (deadline
 scheduler), 0041 (LOD separation), 0044 (acknowledged residency), 0046 (evidence-first strategy),
 0049 (out-of-core sources).
+
+## Retained preview level (accepted design, not yet implemented)
+
+A fixed coarse "preview" level per dataset (chosen from data size and the memory budget,
+typically the level whose full-dataset footprint fits comfortably in the spare display
+budget) is materialized speculatively for the whole montage/stack — not just the
+viewport — on the speculative lane, and is exempt from normal eviction while the
+dataset is open. Consequences it must deliver:
+
+- dimension scrolling and viewport jumps present instantly from the preview level while
+  finer levels stream in (the preview is the floor: no placeholder, black, or
+  coarser-than-preview presentation once warm);
+- the preview level doubles as the rough initial window/levels source for VisPy, so
+  first-draw levels never require a fresh collection pass;
+- preview residency may live CPU-side (pyramid cache) with GPU residency governed by
+  the normal class budgets; a GPU-resident preview atlas is a measured decision;
+- budget policy: the preview layer takes the *remaining* display budget after visible
+  and near work is charged — it grows into spare memory and shrinks first under
+  pressure, but never below the currently visible tile set;
+- preview-then-refine for expensive commuting pipelines presents the preview-input
+  result tagged `quality="preview"` while the exact native pipeline computes; exact
+  consumers refuse preview payloads (see reduce-before-ops note above).
+
+Implementation is gated on the reduce-before-ops consumer contract (quality-tagged
+payloads whose exact planes are not yet semantic-readable) so preview data can never
+leak into hover/ROI/profile/histogram reads.
