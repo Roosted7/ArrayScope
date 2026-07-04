@@ -789,7 +789,12 @@ class MontageRenderSession:
         desired = int(demand.desired_level)
         commit_needed = False
         visible_by_number = {int(t.montage_index): t for t in tuple(self.visible_tiles)}
-        for tile_number in sorted(self.visible_tile_numbers):
+        # Priority order, not row order: materializations start immediately
+        # for the demanded level, and whatever the workers complete before a
+        # newer viewport supersedes the rest is the work nearest the
+        # focus/pointer — never wasted, never waited for (Thomas's rule:
+        # optimal ordering and cancellation beat debouncing every time).
+        for tile_number in self._prioritized_tile_numbers(tuple(self.visible_tile_numbers)):
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is None:
                 # Unrendered tiles never enter dirty_payloads: the dirty set
