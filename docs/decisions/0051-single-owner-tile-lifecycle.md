@@ -205,18 +205,34 @@ The Lifecycle diagnostics line classifies any stale-presentation report; check i
   counters `_montage_session_reuses` / `_montage_session_retargets` / retarget-reject reasons.
   Warm scrub step: ~50 → ~36 ms measured; the remaining cost is the delta-commit walk itself
   (vispy layer update, overlays, full-image apply) — queued with dispatch below.
-  **P2 remaining, in priority order:** (1) dispatch derived from machine state (records in
-  PLANNED/dirty imply scheduled work) so lost wakeups are impossible by construction and the
-  1 Hz stall watchdog becomes an assertion, not a repair; (2) `loading_tiles` /
-  `active_tile_requests` / `skipped_tiles` become views and stage fan-in reports through
-  events (also moves level convergence into the machine, removing the retarget's
-  level-pending rebirth fallback); (3) the per-commit delta walk cost.
-  **Gate:** field verification of the landed stack on real slider scrubs precedes all three
-  (watch `lifecycle_identity_rejections`, `backend_stale_identities`,
-  `stall_repairs`/`last_stall_signature`, `dirty_payload_tiles`, and
-  `_montage_session_reuses`/`_montage_session_retargets` + retarget-reject reasons).
-  Dispatch and sets-as-views were deliberately left unstarted rather than half-landed
-  (2026-07-05).
+  **Field-verify gate: passed (2026-07-05, manual).** Verdict "good enough for now" with
+  known short-lived inconsistencies attributed to the split ownership this rework is
+  removing; the counters above stay the triage vocabulary for regression reports.
+  **Machine-derived dispatch (landed 2026-07-05 #4):** `presentation/dispatch.py` is the one
+  Qt-free decision site — `derive_montage_dispatch` reads the session/machine records and
+  returns every pump they imply; `_dispatch_montage_work` executes it and every montage event
+  edge ends there (tile done/error, stage done/stale/error, LOD level ready, result flush,
+  deferred planning, viewport retarget, interaction-quiet).  A declined admission always
+  leaves a wakeup armed (`EvaluationController.notify_when_capacity`, fired by the next drain
+  that processes any completion) — this closed the dead-pump field freeze, whose four root
+  causes were: the tile-admission decline stopping the drain with no re-arm; gesture-deferred
+  pending records racing the update-pending flag; already-presented dirty payloads never
+  clearing (endless no-op commits at idle); and blocked LOD materializations releasing claims
+  with no consumer (tiles stuck on a coarse level until an unrelated pan).  Orphaned loading
+  records are requeued by the derivation itself (never when stage records exist — waiting
+  tiles belong to their stage).  The 1 Hz watchdog is an ASSERTION now: a zero-progress tick
+  logs loudly, counts `stall_repairs` (asserted 0 in the GPU harness), and rescues via the
+  ordinary dispatch, never a bespoke repair.
+  **P2 remaining, in priority order:** (1) `loading_tiles` / `active_tile_requests` /
+  `skipped_tiles` become views and stage fan-in reports through events (also moves level
+  convergence into the machine, removing the retarget's level-pending rebirth fallback);
+  (2) the per-commit delta walk cost.
+  **Known dispatch-construction violation (open):** the tile-layer auto-levels wait path
+  (`_tile_layer_auto_levels_wait_for_complete_source`) parks the commit with
+  `flush_pending`/`final_commit_pending` set and relies on the level-stats continuation to
+  re-commit; under PyQtGraph resident LOD (opt-in) that continuation does not fire and the
+  watchdog assertion reports the wedge (signature: presented==rendered, all queues zero,
+  flush+final true).  Fix alongside sets-as-views.
 - **P2-adjacent (landed 2026-07-05, the few-Hz-scroll cure):** rule 4 applied at the
   architecture level — the interaction path is cheap by construction.  Dimension scrubbing
   notes viewport interaction (it was invisible to every gate); during a burst, stage planning

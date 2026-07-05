@@ -89,6 +89,18 @@ PyQtGraph: same planner and materializer; reduced `payload.image` is applied onl
 scene savings exceed replacement cost. The first measured target is montage level re-window,
 whose cost scales with presented pixels (8.36 s baseline above).
 
+**Adoption status (2026-07-05):** implemented behind `ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1`.
+Reduced images map onto native texels through a per-item scale transform
+(`_payload_direct_dims`/`_apply_item_lod_scale` in `backends/pyqtgraph/tiles.py`); world
+footprints, ROI/viewport math, and histogram/level planes stay native. The first hardware A/B
+(Wayland, 272-tile montage) applies factor 4 / level 2 with full ingest reduction, but timing
+regresses (raw settle 1263→1441 ms, FFT settle 2590→4367 ms, level drag 9019→9686 ms), so the
+default stays native-only per the "where measured" rule. Known costs to remove before
+re-measuring: the auto-levels wait wedge (ADR 0051 known issue — inflates FFT settle by ~2 s of
+watchdog rescue) and worker-side ingest-reduction contention (the same class the zero-redundant-
+work pass erased on VisPy). The expected level-drag win has not materialized yet — the phase is
+dominated by the histogram/full-stats loop, not per-tile re-window; measure that split first.
+
 ### Operations integration
 
 Operations already declare capabilities and region behavior (ADR 0025/0026). Capabilities gain a

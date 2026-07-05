@@ -174,9 +174,11 @@ Ordered gates:
    by the backend. Delivered by ADR 0051 P1+P2 for montage tiled scenes: identity-aware,
    causally-bound acknowledgement is the machine invariant, with conformance coverage for partial
    acceptance, declines, parking, stale reports, and session replacement. Normal-image tiled
-   scenes inherit this when X5c routes them through the same machine. Remaining P2 work
-   (machine-derived dispatch, legacy sets as views, delta-commit walk cost) is tracked in
-   ADR 0051's phases and gated on field verification of the landed stack.
+   scenes inherit this when X5c routes them through the same machine. Field verification
+   passed and machine-derived dispatch landed (2026-07-05): every event edge re-derives all
+   pumps from the records, declined admissions arm capacity waiters, and the stall watchdog
+   is an assertion. Remaining P2 work (legacy sets as views + stage fan-in events,
+   delta-commit walk cost) is tracked in ADR 0051's phases.
 3. **X5c — Viewport-scoped tiled scenes.** Change viewport retarget scheduling from montage-mode
    checks to tiled-scene/storage checks before enabling visible-only active regions for internally
    tiled normal images.

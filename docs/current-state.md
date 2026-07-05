@@ -86,11 +86,14 @@ X5: base GPU, backend-default, singleton/direct fast-path, viewport-residency,
 and multi-resolution decisions on measured device behavior, not headless runs.
 Ordered gates and exit criteria are in the [roadmap](roadmap.md).
 
-Inside X5, the active thread is ADR 0051's remaining P2, in this order: field-verify
-the landed stack on real interaction first (watch `lifecycle_identity_rejections`,
-`backend_stale_identities`, `stall_repairs`, `dirty_payload_tiles`, and the session
-reuse/retarget counters); then machine-derived dispatch (lost wakeups impossible by
-construction, the stall watchdog demoted to an assertion); then legacy per-tile sets as
-views over the machine plus stage fan-in through events; then the delta-commit walk
-cost; then P3 (residency axis authoritative). Dispatch and sets-as-views are
-deliberately unstarted rather than half-landed.
+Inside X5, the active thread is ADR 0051's remaining P2. Field verification passed
+(2026-07-05, manual — "good enough", residual short-lived inconsistencies attributed to
+the split ownership being removed) and machine-derived dispatch landed the same day:
+one Qt-free derivation (`presentation/dispatch.py`) that every montage event edge ends
+with, declined admissions always arm a controller capacity waiter, and the stall
+watchdog is an assertion (`stall_repairs` asserted 0 in the GPU harness). PyQtGraph
+resident LOD is implemented behind `ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1` but stays
+off-by-default: the first A/B regresses settle times (ADR 0050 adoption status).
+Next, in order: legacy per-tile sets as views over the machine plus stage fan-in
+through events (also fixes the auto-levels wait wedge and machine-owns level
+convergence); the delta-commit walk cost; then P3 (residency axis authoritative).
