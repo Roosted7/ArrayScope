@@ -1111,6 +1111,13 @@ class MontageRenderSession:
             previous = previous_payloads.get(int(tile_number))
             force_upsert = int(tile_number) in self.pending_payload_upserts or int(tile_number) in stale_level_tiles
             if previous is payload and not force_upsert:
+                # The dirty record's promise is already kept: the presented
+                # payload IS this payload.  Popping the record here is what
+                # lets the commit loop settle — leaving it made every commit
+                # a no-op that never cleared it (2026-07-05 probe stall:
+                # 19 dirty tiles at idle re-armed each build, watchdog
+                # firing every second; ADR 0051 rule 3).
+                self.dirty_payloads.pop(int(tile_number), None)
                 continue
             if (
                 not force_upsert
@@ -1120,6 +1127,7 @@ class MontageRenderSession:
                 and previous.histogram_data is payload.histogram_data
                 and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(payload.shader_mapping)
             ):
+                self.dirty_payloads.pop(int(tile_number), None)
                 continue
             upserts[int(tile_number)] = payload
 

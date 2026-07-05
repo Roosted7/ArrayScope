@@ -145,6 +145,7 @@ class EvaluationController(Qt.QtCore.QObject):
         self._max_callback_dispatch_per_drain = max(1, int(max_callback_dispatch_per_drain))
         self._max_queue_events_per_drain = max(1, int(max_queue_events_per_drain))
         self._callback_budget_ms: float | None = None
+        self._capacity_waiters: dict[object, object] = {}
         self._pending_queue_events = deque()
         self._drain_continuation_pending = False
         self._queue = SimpleQueue()
@@ -168,6 +169,30 @@ class EvaluationController(Qt.QtCore.QObject):
             self.queueEventReady.connect(self._drain_queue, Qt.QtCore.Qt.ConnectionType.QueuedConnection)
         except Exception:
             self.queueEventReady.connect(self._drain_queue)
+
+    def notify_when_capacity(self, key, fn) -> None:
+        """Arm a one-shot wakeup for when any tracked work finishes.
+
+        A declined admission (WorkGraph/lane backpressure) leaves the caller
+        with queued records but no future completion of its own to advance
+        them — the ADR 0051 lost-wakeup class.  Callers arm a waiter keyed by
+        their pump identity (idempotent re-arms replace the callable) and the
+        next drain that processes any completion fires and clears it; the
+        callable re-derives its work from authoritative state.
+        """
+
+        self._capacity_waiters[key] = fn
+
+    def _fire_capacity_waiters(self) -> None:
+        if not self._capacity_waiters:
+            return
+        waiters = tuple(self._capacity_waiters.values())
+        self._capacity_waiters.clear()
+        for fn in waiters:
+            try:
+                fn()
+            except Exception as exc:
+                handle_ui_exception("capacity waiter", exc)
 
     def cancel_pending(self):
         self.generation += 1
@@ -624,6 +649,11 @@ class EvaluationController(Qt.QtCore.QObject):
             self._schedule_drain_fallback()
         elif self._queue.empty() and not self._pending_queue_events:
             self._drain_fallback_timer.stop()
+        if processed_events:
+            # Any processed completion/cancellation freed pool or lane
+            # capacity: wake pumps whose admission was declined (ADR 0051 —
+            # a decline must always leave a wakeup armed).
+            self._fire_capacity_waiters()
 
     def _schedule_drain_continuation(self) -> None:
         if self._drain_continuation_pending:

@@ -8,6 +8,7 @@ region payloads; backends differ only in physical presentation mechanics.
 from __future__ import annotations
 
 import os
+import sys
 
 from collections import deque
 from dataclasses import replace
@@ -57,6 +58,7 @@ from arrayscope.display.model.montage_levels import (
     sample_tile_level_stats,
 )
 from arrayscope.display.lod import LOD_POLICY_RESIDENT
+from arrayscope.presentation.dispatch import derive_montage_dispatch
 from arrayscope.display.pyramid import PyramidCache, preview_level_for_tile_shape
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
@@ -1261,8 +1263,7 @@ class FrameRenderMixin:
         )
         self._schedule_montage_session_slow_overlay(session)
         self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-        self._schedule_montage_attached_stage_waits(session)
-        self._schedule_montage_tiles(session)
+        self._dispatch_montage_work(session)
         return True
 
     def _prune_stale_montage_tile_work(self, session: MontageRenderSession) -> None:
@@ -1898,8 +1899,7 @@ class FrameRenderMixin:
         session.retained_stage_decision = stage_plan["retained_stage_decision"]
         session.repeated_expensive_stage_per_tile = stage_plan["repeated_expensive_stage_per_tile"]
         self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-        self._schedule_montage_attached_stage_waits(session)
-        self._schedule_montage_tiles(session)
+        self._dispatch_montage_work(session)
 
     def _schedule_montage_stage_jobs(self, session, stage_requests) -> None:
         if not self._montage_session_is_current(session):
@@ -1966,6 +1966,9 @@ class FrameRenderMixin:
         session = getattr(self, "_montage_session", None)
         if session is not None:
             session.stage_fan_in.active_requests.discard(key)
+            # A superseded stage can strand its waiting tiles: re-derive
+            # (the stage-waits pump releases them to direct evaluation).
+            self._dispatch_montage_work(session)
 
     def _on_montage_stage_done(self, session_id, key, value) -> None:
         session = getattr(self, "_montage_session", None)
@@ -1984,9 +1987,7 @@ class FrameRenderMixin:
         )
         self._activate_montage_stage_value(session, key, value, budget=budget)
         self._record_gui_budget(budget)
-        self._schedule_montage_tiles(session)
-        if session.stage_fan_in.waiting_tiles:
-            self._schedule_montage_attached_stage_waits(session)
+        self._dispatch_montage_work(session)
 
     def _activate_montage_stage_value(self, session, key, value, *, budget: GuiCallbackBudget | None = None) -> None:
         max_items = None if budget is None else max(0, int(budget.item_cap) - int(budget.processed_items))
@@ -2074,10 +2075,7 @@ class FrameRenderMixin:
                 ),
             )
         self._record_gui_budget(budget)
-        if session.pending_tiles:
-            self._schedule_montage_tiles(session)
-        if self._stage_wait_has_actionable_work(session, release_missing=True):
-            self._schedule_montage_attached_stage_waits(session)
+        self._dispatch_montage_work(session)
 
     def _activate_cached_waiting_stages(self, session, *, release_missing: bool = False) -> None:
         if not self._stage_wait_has_actionable_work(session, release_missing=release_missing):
@@ -2148,8 +2146,7 @@ class FrameRenderMixin:
         for tile in waiting:
             session.mark_skipped(tile)
         show_status_message(self.win, f"Montage stage update failed: {exc}", timeout=4000)
-        self._schedule_montage_presentation_commit(session, force=True)
-        self._schedule_montage_tiles(session)
+        self._dispatch_montage_work(session, force=True)
 
     def _warn_montage_tiles_skipped(self, *, skipped_count: int, tile_bytes: int, budget_bytes: int, tile_shape) -> None:
         message = (
@@ -2315,12 +2312,20 @@ class FrameRenderMixin:
             # it "loading" forever with no pending work — the visible plan
             # could then never complete and auto-levels retried commits in a
             # timer loop at idle.  Revert the bookkeeping, requeue, and stop
-            # the drain until backpressure clears.
+            # the drain — but NEVER without a wakeup: if this was the last
+            # in-flight work for the session, no completion of ours will
+            # ever call the pump again (the 2026-07-05 dead-pump field
+            # freeze: pending=35, loading=60, active=0).  The capacity
+            # waiter re-derives dispatch when any tracked work finishes.
             session.active_tile_requests.discard(int(tile.montage_index))
             session.loading_tiles.discard(int(tile.montage_index))
             _enqueue_session_pending_tile(session, tile)
             self._montage_tile_admission_declined = (
                 int(getattr(self, "_montage_tile_admission_declined", 0) or 0) + 1
+            )
+            controller.notify_when_capacity(
+                ("montage-tiles", session.key),
+                lambda: self._dispatch_montage_work(getattr(self, "_montage_session", None)),
             )
             return False
         return True
@@ -2687,6 +2692,10 @@ class FrameRenderMixin:
                 self._schedule_montage_ready_display_commit(session)
         if session.pending_completed_tiles:
             self._schedule_montage_tile_result_flush(session)
+        # Machine-derived dispatch (ADR 0051 P2): re-derive everything the
+        # records imply after this fan-in edge — nothing above may be the
+        # only holder of a pending record.
+        self._dispatch_montage_work(session)
 
     def _apply_montage_tile_result(self, session, tile, result, *, expected_indices=None) -> int:
         if not self._montage_session_is_current(session):
@@ -2738,8 +2747,7 @@ class FrameRenderMixin:
             return
         session.mark_skipped(tile)
         show_status_message(self.win, f"Montage tile update failed: {exc}", timeout=4000)
-        self._schedule_montage_presentation_commit(session, force=True)
-        self._schedule_montage_tiles(session)
+        self._dispatch_montage_work(session, force=True)
 
     def _montage_lod_policy_mode(self) -> str:
         return montage_lod.policy_mode_for_renderer(self)
@@ -2753,16 +2761,55 @@ class FrameRenderMixin:
     def _schedule_montage_lod_materializations(self, session) -> None:
         return montage_lod.schedule_materializations(self, session)
 
-    # -- stall watchdog (ADR 0051) -------------------------------------------
-    # Every montage pump is completion-driven: tile scheduling advances on
-    # eval completions, repairs run on the commit flush, the settle repair
-    # runs as the last work drains.  When the final in-flight work dies
-    # during an interaction (supersession, declined admission), no event is
-    # left to drive anything and the session freezes mid-fill (field defect
-    # 2026-07-05: 35 pending tiles frozen for 45 s, blank tiles on screen).
-    # The watchdog runs ONLY while a session is unsettled, costs a few dict
-    # length reads per second, re-kicks every pump after one tick with zero
-    # progress, and stops the moment the session settles (idle stays 0%).
+    # -- machine-derived dispatch (ADR 0051 P2) -------------------------------
+
+    def _dispatch_montage_work(self, session, *, force: bool = False) -> None:
+        """The single montage pump: schedule everything the records imply.
+
+        Every montage event edge (tile done/error, stage done/stale/error,
+        LOD level ready, result flush, admission-decline wakeup, watchdog
+        assertion) ends here.  `derive_montage_dispatch` is the one decision
+        site; the schedulers below are idempotent and coalesced, so redundant
+        dispatch is cheap.  A state mutation that does NOT end in dispatch is
+        the ADR 0051 lost-wakeup defect — the watchdog assertion reports it.
+        """
+
+        if session is None or not self._montage_session_is_current(session):
+            return
+        plan = derive_montage_dispatch(session)
+        if plan.requeue_orphans:
+            requeued = session.requeue_orphaned_loading_tiles()
+            if requeued:
+                self._montage_orphaned_tiles_repaired = (
+                    int(getattr(self, "_montage_orphaned_tiles_repaired", 0) or 0) + int(requeued)
+                )
+                plan = derive_montage_dispatch(session)
+        if plan.deferred_planning:
+            self._schedule_deferred_montage_planning(session)
+        if plan.schedule_tiles:
+            self._schedule_montage_tiles(session)
+        if plan.flush_results:
+            self._schedule_montage_tile_result_flush(session)
+        if plan.stage_waits:
+            self._schedule_montage_attached_stage_waits(session)
+        if plan.lod_materializations:
+            self._schedule_montage_lod_materializations(session)
+        if plan.commit or force:
+            self._schedule_montage_presentation_commit(
+                session, force=bool(plan.force_commit or force)
+            )
+        if plan.unsettled:
+            self._ensure_montage_watchdog()
+
+    # -- stall watchdog (ADR 0051): an ASSERTION, not a repair -----------------
+    # Machine-derived dispatch above makes a dead pump impossible by
+    # construction: every event edge re-derives all scheduled work from the
+    # session records, and a declined admission arms a capacity waiter on the
+    # controller.  The watchdog remains armed while a session is unsettled
+    # purely to catch violations of that construction: a zero-progress tick
+    # increments `_montage_stall_repairs` (JSONL: stall_repairs — every count
+    # is a lost-wakeup bug report, asserted zero in the GPU harness) and then
+    # rescues via the ordinary dispatch, never a bespoke repair path.
 
     def _ensure_montage_watchdog(self) -> None:
         timer = getattr(self, "_montage_watchdog_timer", None)
@@ -2832,20 +2879,25 @@ class FrameRenderMixin:
         if previous != signature:
             return  # work is progressing; stay armed.
         self._montage_stall_repairs = int(getattr(self, "_montage_stall_repairs", 0) or 0) + 1
-        # Every rescue is a lost-wakeup bug report: keep the frozen state
-        # visible in diagnostics/JSONL for root-causing (the watchdog is a
-        # safety net, not the fix).
+        # ASSERTION FIRED: a state mutation escaped the dispatch construction.
+        # Keep the frozen signature visible for root-causing and rescue via
+        # the ordinary dispatch — if dispatch cannot rescue it, the defect is
+        # in the derivation, which is the bug report we want.
         self._montage_watchdog_last_stall = signature
-        repaired = session.requeue_orphaned_loading_tiles()
-        if repaired:
-            self._montage_orphaned_tiles_repaired = (
-                int(getattr(self, "_montage_orphaned_tiles_repaired", 0) or 0) + int(repaired)
-            )
-        self._schedule_montage_tiles(session)
-        if session.refresh_lod_for_viewport() or dirty or upserts:
+        print(
+            "[arrayscope] STALL WATCHDOG FIRED (lost wakeup, ADR 0051): "
+            f"signature={signature} "
+            f"stage_active={len(session.stage_fan_in.active_requests)} "
+            f"stage_attached={len(session.stage_fan_in.attached_requests)} "
+            f"stage_waiting={len(session.stage_fan_in.waiting_tiles)} "
+            f"loading={len(session.loading_tiles)} "
+            f"flush_pending={session.flush_pending} final={session.final_commit_pending}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if session.refresh_lod_for_viewport():
             self._schedule_montage_presentation_commit(session, force=False)
-        if getattr(session, "pending_lod_requests", None):
-            self._schedule_montage_lod_materializations(session)
+        self._dispatch_montage_work(session, force=bool(dirty or upserts))
 
     def _on_montage_lod_level_ready(self, session_id, session_key, tile_number) -> None:
         return montage_lod.on_level_ready(self, session_id, session_key, tile_number)

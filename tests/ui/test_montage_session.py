@@ -490,7 +490,7 @@ def test_zoomed_out_scalar_payload_keeps_exact_texture_on_ui_commit_path():
     assert decision.applied_factor_xy == (1, 1)
     assert decision.demand.source_texels_per_pixel_xy == (32.0, 32.0)
     assert decision.policy == "native-only"
-    assert "asynchronous multi-resolution residency" in decision.reason
+    assert "native-only montage LOD policy" in decision.reason
     assert payload.lod.factor == 1
     assert payload.texture_data is image
     assert payload.texture_data.shape[:2] == payload.image.shape[:2]

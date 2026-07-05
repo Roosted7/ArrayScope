@@ -24,6 +24,11 @@ class FakeController:
     def __init__(self, *, blocked=False):
         self.blocked = blocked
         self.calls = []
+        self.capacity_waiters = {}
+
+    def notify_when_capacity(self, key, fn):
+        # ADR 0051 P2: blocked admissions arm a one-shot wakeup.
+        self.capacity_waiters[key] = fn
 
     def start_latest(self, fn, **kwargs):
         self.calls.append(kwargs)
@@ -52,6 +57,14 @@ def _renderer(session, *, blocked=False, current=True):
     fake._schedule_montage_presentation_commit = (
         lambda session, force=False: fake.commit_requests.append(bool(force))
     )
+    # Machine-derived dispatch (ADR 0051 P2): level-ready re-derives all
+    # pumps; the commit pump is what this fixture observes.
+    fake._dispatch_montage_work = FrameRenderMixin._dispatch_montage_work.__get__(fake)
+    fake._schedule_montage_tiles = lambda session: None
+    fake._schedule_montage_tile_result_flush = lambda session: None
+    fake._schedule_montage_attached_stage_waits = lambda session: None
+    fake._schedule_deferred_montage_planning = lambda session, delay_ms=0: None
+    fake._ensure_montage_watchdog = lambda: None
     fake._schedule_montage_lod_materializations = (
         FrameRenderMixin._schedule_montage_lod_materializations.__get__(fake)
     )
@@ -79,12 +92,14 @@ def test_drain_schedules_low_priority_supersedable_reductions_and_streams_result
         assert call["supersession_value"][:2] == (session.key, int(session.session_id))
     # The fake controller ran the workers inline: each tile's chain admitted
     # the demanded level 2 plus the acceptable level 1 on the way (ADR 0050
-    # level-chaining), and each completion marked its tile dirty and asked
-    # for an ordinary commit.
+    # level-chaining), and each completion re-derived dispatch (ADR 0051 P2).
+    # With evaluation fully drained, the derived commit is forced — streamed
+    # levels present immediately; the interaction gate inside the commit
+    # scheduler still defers during a gesture.
     assert len(pyramid) == 4
     assert pyramid.pending_count == 0
     assert sorted(session.dirty_payloads) == [0, 1]
-    assert renderer.commit_requests == [False, False]
+    assert renderer.commit_requests == [True, True]
     assert session.lod_materializations_completed == 2
     assert renderer._montage_lod_materializations_scheduled == 2
     assert renderer._montage_lod_materializations_completed == 2
@@ -105,6 +120,11 @@ def test_blocked_admission_releases_singleflight_claims_for_retry():
     assert len(pyramid) == 0
     assert pyramid.pending_count == 0, "blocked work must release its claim"
     assert renderer._montage_lod_materializations_blocked == 2
+    # ADR 0051 P2: a blocked admission must leave a wakeup armed — without
+    # it, released levels waited for an unrelated pan/zoom (field report
+    # 2026-07-05: tiles stuck on a coarser LOD at idle).
+    controller = renderer.montage_tile_evaluation_controller
+    assert ("montage-lod", session.key) in controller.capacity_waiters
     # The next presentation build can re-claim and re-queue the levels.
     session.dirty_payloads.update({0: None, 1: None})
     session.build_tile_presentation({})

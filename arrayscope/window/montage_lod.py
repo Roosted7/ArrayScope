@@ -976,6 +976,7 @@ def schedule_materializations(renderer, session) -> None:
     session_id = int(session.session_id)
     session_key = session.key
     supersession_value = (session_key, session_id, int(getattr(session, "lod_target_revision", 0) or 0))
+    blocked_any = False
     for request in requests:
         tile_number = int(request[0])
         key = request[1]
@@ -1043,10 +1044,39 @@ def schedule_materializations(renderer, session) -> None:
             renderer._montage_lod_materializations_blocked = (
                 int(getattr(renderer, "_montage_lod_materializations_blocked", 0) or 0) + 1
             )
+            blocked_any = True
         else:
             renderer._montage_lod_materializations_scheduled = (
                 int(getattr(renderer, "_montage_lod_materializations_scheduled", 0) or 0) + 1
             )
+    if blocked_any:
+        # A blocked admission must leave a wakeup armed (ADR 0051 P2 —
+        # before this, released levels waited for an unrelated pan/zoom to
+        # trigger the next presentation build; field report 2026-07-05:
+        # tiles stuck on a coarser LOD at idle, healed only by panning).
+        # When any tracked work finishes, re-derive the demand: the refresh
+        # re-claims the released levels and dispatch drains them.
+        controller.notify_when_capacity(
+            ("montage-lod", session_key),
+            lambda: retry_blocked_materializations(renderer),
+        )
+
+
+def retry_blocked_materializations(renderer) -> None:
+    """Capacity-waiter wakeup for blocked LOD admissions (ADR 0051 P2).
+
+    Re-evaluates the live demand (re-claiming any released levels into
+    ``pending_lod_requests``) and re-derives dispatch.  Cheap and safe to
+    run spuriously: demand math plus pyramid peeks, then idempotent
+    scheduling.
+    """
+
+    session = getattr(renderer, "_montage_session", None)
+    if session is None or not renderer._montage_session_is_current(session):
+        return
+    if session.refresh_lod_for_viewport():
+        renderer._schedule_montage_presentation_commit(session, force=False)
+    renderer._dispatch_montage_work(session)
 
 
 def on_level_ready(renderer, session_id, session_key, tile_number) -> None:
@@ -1061,4 +1091,6 @@ def on_level_ready(renderer, session_id, session_key, tile_number) -> None:
     session.lod_materializations_completed = int(getattr(session, "lod_materializations_completed", 0) or 0) + 1
     if int(tile_number) in session.rendered_tiles:
         session.dirty_payloads[int(tile_number)] = None
-    renderer._schedule_montage_presentation_commit(session, force=False)
+    # Machine-derived dispatch (ADR 0051 P2): a completed level is backend
+    # evidence with its own consumer — re-derive instead of hand-picking.
+    renderer._dispatch_montage_work(session)
