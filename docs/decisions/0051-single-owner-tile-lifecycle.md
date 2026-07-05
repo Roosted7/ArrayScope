@@ -223,16 +223,40 @@ The Lifecycle diagnostics line classifies any stale-presentation report; check i
   tiles belong to their stage).  The 1 Hz watchdog is an ASSERTION now: a zero-progress tick
   logs loudly, counts `stall_repairs` (asserted 0 in the GPU harness), and rescues via the
   ordinary dispatch, never a bespoke repair.
-  **P2 remaining, in priority order:** (1) `loading_tiles` / `active_tile_requests` /
-  `skipped_tiles` become views and stage fan-in reports through events (also moves level
-  convergence into the machine, removing the retarget's level-pending rebirth fallback);
-  (2) the per-commit delta walk cost.
-  **Known dispatch-construction violation (open):** the tile-layer auto-levels wait path
-  (`_tile_layer_auto_levels_wait_for_complete_source`) parks the commit with
-  `flush_pending`/`final_commit_pending` set and relies on the level-stats continuation to
-  re-commit; under PyQtGraph resident LOD (opt-in) that continuation does not fire and the
-  watchdog assertion reports the wedge (signature: presented==rendered, all queues zero,
-  flush+final true).  Fix alongside sets-as-views.
+  **Sets-as-views + stage fan-in events (landed 2026-07-05 #6):** `loading_tiles`,
+  `active_tile_requests`, and `skipped_tiles` are machine views — `TileRecord` carries
+  `load_intent` / `request_active` / `stage_key`, the session attributes are set-like view
+  objects whose mutations are events, and the machine clears load intent mechanically when a
+  backend confirms an EVALUATED tile's payload (rule 1), when a tile parks out of scope
+  (rule 3), or when it is skipped.  A preview/floor acceptance while the tile is still
+  EVALUATING keeps it loading (exact content is still owed).  Stage fan-in stays the queue
+  implementation, but every mutation (merge/activate/release/fail) reconciles the machine's
+  per-record tile↔stage binding (`stage_bindings_replaced`; replacement sites route through
+  `attach_stage_fan_in`), so "loading without a request because a stage owns it" is a record
+  fact.
+  **Auto-levels wedge (fixed 2026-07-05, same landing):** the tile-layer auto-levels wait
+  path was a triple rule violation, reproduced at `stall_repairs` 8–10 per
+  pyqtgraph+resident workflow run and now 0 across repeated runs:
+  (a) the legacy `loading_tiles` entry of a confirmed-presented tile had no owner, holding
+  the wait open forever (the machine view dissolves this class); (b) the parked flush's
+  evidence producer was not always armed — parking now marks the session level scan, the
+  dispatch derivation gained `level_evidence` and pumps the cached-stats continuation, the
+  scan restarts a full pass on new arrivals (a tile materializing behind the cursor fell
+  through a completed pass permanently), and a source with no finite values records
+  *vacuous refined evidence* (`record_vacuous_source`) instead of being re-queued forever;
+  (c) the watchdog signature could not see level-evidence or stale-level-drain progress and
+  reported healthy budgeted drains as stalls (both are in the signature now, and an armed
+  level-stats timer counts as scheduled work).  The evidence drain also no longer schedules
+  a full presentation commit per budget slice while a flush is parked (~68 no-op commits
+  per 272-tile drain).
+  **Retarget level-pending fallback removed (same landing):** sessions with pending level
+  refinement no longer rebirth on an index-window scrub.  The old reject guarded against a
+  blind re-upsert loop that machine-gated emission (emit-once + identity-aware ack with
+  bounded resignation) has made impossible; stale-level drains are budgeted, prioritized,
+  and watchdog-visible, and the retarget resets the per-window evidence scan counters.
+  Level convergence values themselves still live in `PresentationGenerationTracker` — the
+  machine owns visibility and pumping, not yet the per-tile level axis.
+  **P2 remaining:** the per-commit delta walk cost.
 - **P2-adjacent (landed 2026-07-05, the few-Hz-scroll cure):** rule 4 applied at the
   architecture level — the interaction path is cheap by construction.  Dimension scrubbing
   notes viewport interaction (it was invisible to every gate); during a burst, stage planning

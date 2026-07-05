@@ -94,6 +94,11 @@ with, declined admissions always arm a controller capacity waiter, and the stall
 watchdog is an assertion (`stall_repairs` asserted 0 in the GPU harness). PyQtGraph
 resident LOD is implemented behind `ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1` but stays
 off-by-default: the first A/B regresses settle times (ADR 0050 adoption status).
-Next, in order: legacy per-tile sets as views over the machine plus stage fan-in
-through events (also fixes the auto-levels wait wedge and machine-owns level
-convergence); the delta-commit walk cost; then P3 (residency axis authoritative).
+Sets-as-views landed the same day: `loading_tiles`/`active_tile_requests`/`skipped_tiles`
+are machine views (mutations are events; confirmed presentation clears load intent
+mechanically), stage fan-in reports its tile↔stage bindings through machine events, and
+the pyqtgraph+resident auto-levels wait wedge is fixed (stall_repairs 8–10 → 0 per
+workflow run: evidence producer always armed, vacuous evidence for non-finite sources,
+level evidence and stale-level drain visible to dispatch and the watchdog).  The
+retarget's level-pending rebirth fallback is removed.
+Next, in order: the delta-commit walk cost; then P3 (residency axis authoritative).
