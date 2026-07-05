@@ -126,6 +126,24 @@ class Harness:
         assert not parked_active, (
             f"parked tiles inside active scope: {sorted(parked_active)}"
         )
+        # Semantic-vs-backend agreement (field defect 2026-07-05): the layer's
+        # last payload map must present the same LOD the session believes is
+        # presented — a levels-only commit that falsely acknowledged level
+        # swaps left the GPU on the old level until an unrelated pan.
+        layer = getattr(self.win.img_view, "_vispy_gpu_montage_layer", None)
+        stats = getattr(layer, "last_stats", None)
+        active_levels = [
+            int(getattr(getattr(p, "lod", None), "level", 0) or 0)
+            for number, p in s.display_tile_payloads.items()
+            if int(number) in active
+        ]
+        if stats is not None and active_levels:
+            session_level = max(active_levels)
+            layer_level = int(getattr(stats, "lod_level", 0) or 0)
+            assert layer_level == session_level, (
+                f"backend presents level {layer_level} while the session "
+                f"believes level {session_level} is presented (stale-LOD desync)"
+            )
 
     # -- event loop ----------------------------------------------------------
 

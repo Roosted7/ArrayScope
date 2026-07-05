@@ -148,6 +148,34 @@ def test_surface_contract_commits_tiled_semantics():
     assert report.committed_upserts == frozenset({0})
 
 
+def test_uniforms_only_stats_can_never_acknowledge_upserts():
+    """Field defect 2026-07-05 (stale wrong-LOD): a levels-only fast path
+    reported presented pool slots with committed_upserts=None, and the
+    commit report fell back to acknowledging pending level-swap upserts by
+    tile-number intersection — payload identities that were never uploaded.
+    The GPU stayed on the old level until an unrelated pan.  Rule 1
+    (ADR 0051): a path that cannot apply upserts must report an EMPTY
+    committed set, so acknowledgement never invents acceptance."""
+
+    from arrayscope.display.imageview2d import _tile_commit_report
+    from arrayscope.display.model.tile_stats import TileLayerUpdateStats
+
+    tiled = _tiled_presentation()
+    # What set_presentation_uniforms reports: pool still presents tile 0
+    # (with its OLD payload identity), no upserts applied.
+    uniforms_stats = TileLayerUpdateStats(
+        visible_items=1,
+        presented_tiles=(0,),
+        committed_upserts=(),
+        level_updates=1,
+    )
+    report = _tile_commit_report(dict(tiled.tile_state.payloads), tiled.tile_delta, uniforms_stats)
+    assert report.accepted_upserts(tiled.tile_delta) == set()
+    # The pending upsert stays armed for the next real commit.
+    state = tiled.base_tile_state.acknowledge_delta(tiled.tile_delta, report)
+    assert 0 not in state.payloads
+
+
 def test_pyqtgraph_surface_exposes_lifecycle_contract(qt_app):
     from arrayscope.display.backends.pyqtgraph.surface import PyQtGraphSurface
 

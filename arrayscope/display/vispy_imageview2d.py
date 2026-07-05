@@ -26,7 +26,6 @@ from arrayscope.display.imageview2d import ImageViewShell
 from arrayscope.display.imageview2d import ArrayScopeGraphicsView
 from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
-from arrayscope.display.imageview2d import _tiled_montage_placeholder
 from arrayscope.display.imageview2d import _tile_commit_report
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.model.tiled_histogram_identity import (
@@ -1689,8 +1688,21 @@ class VisPyImageView2D(ImageViewShell):
             previous_presented is None
             or set(int(tile) for tile in tuple(previous_presented or ())) == active_set
         )
+        # Field defect 2026-07-05 (stale wrong-LOD): the uniforms-only fast
+        # path compares presented tile NUMBERS, but a zoom-driven level swap
+        # changes payload IDENTITIES under the same numbers while also
+        # changing levels (force_levels).  Taking the fast path then skips
+        # the swap uploads entirely while the commit report acknowledges
+        # them, wedging the layer on the old level until the next real
+        # update (user-visible as coarse tiles a pan magically fixes).
+        # Any payload work in the delta demands the full update path.
+        delta_payload_work = tile_delta is not None and (
+            bool(dict(getattr(tile_delta, "upserts", {}) or {}))
+            or bool(tuple(getattr(tile_delta, "removals", ()) or ()))
+        )
         if (
             (force_levels or force_mapping)
+            and not delta_payload_work
             and getattr(layer, "last_stats", None).visible_items
             and presentation_complete
         ):

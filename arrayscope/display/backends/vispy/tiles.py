@@ -1216,6 +1216,12 @@ class GpuMontageLayer:
         self._last_stats = TileLayerUpdateStats(
             visible_items=self._visible_items,
             presented_tiles=tuple(int(tile) for tile in sorted(self._pool.tile_slots)),
+            # Rule 1 (ADR 0051): this path can never apply payload upserts, so
+            # it must say so explicitly.  ``None`` would make the commit
+            # report fall back to acknowledging upserts by tile-number
+            # intersection with the pool slots — falsely accepting payload
+            # identities that were never uploaded (field defect 2026-07-05).
+            committed_upserts=(),
             resident_items=self._pool.resident_count,
             storage_capacity=self._pool.capacity,
             level_updates=int(bool(level_updates)),
