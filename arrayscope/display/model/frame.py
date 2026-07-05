@@ -151,11 +151,23 @@ class TileCommitReport:
     # (ADR 0051 rule 1; field defect 2026-07-05, JSONL 112841).  None means
     # unbound (legacy constructions/tests): the causality check is skipped.
     delta_key: tuple[int, int] | None = None
+    # Ground truth from the backend: the payload identity each drawn tile
+    # ACTUALLY holds after this commit (tile -> source_id).  The session
+    # converges its presentation against this map (ADR 0051 rule 1); its own
+    # acknowledgement records repeatedly proved capable of lying.  None =
+    # backend does not report identities.
+    presented_identities: Mapping[int, object] | None = None
 
     def __post_init__(self) -> None:
         if self.delta_key is not None:
             object.__setattr__(
                 self, "delta_key", (int(self.delta_key[0]), int(self.delta_key[1]))
+            )
+        if self.presented_identities is not None:
+            object.__setattr__(
+                self,
+                "presented_identities",
+                {int(tile): identity for tile, identity in dict(self.presented_identities).items()},
             )
         object.__setattr__(self, "presented_tiles", frozenset(int(tile) for tile in self.presented_tiles))
         if self.committed_upserts is not None:

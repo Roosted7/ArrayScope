@@ -194,6 +194,13 @@ class MontageRenderSession:
     # authoritative here; the semantic axis is mirrored from the legacy
     # collections during the migration (parity in diagnostics).
     lifecycle: TileLifecycle = field(default_factory=TileLifecycle)
+    # Ground truth from the last backend report: tile -> the payload identity
+    # its drawn slot ACTUALLY holds (ADR 0051 rule 1).  Presentation
+    # convergence compares against this, never against session bookkeeping.
+    last_presented_identities: dict = field(default_factory=dict)
+    # Bounded retry state for identity reconciliation:
+    # tile -> ((shown_identity, wanted_identity), attempts).
+    _reconcile_attempts: dict = field(default_factory=dict)
     lod_preview_pyramid: object | None = None
     lod_preview_level: int = 0
     # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but
@@ -814,24 +821,47 @@ class MontageRenderSession:
         # scope (see acknowledge_tile_presentation: a non-active upsert the
         # backend declines parks instead of re-arming, or finalization would
         # retry an unacceptable upsert forever).
-        # Drawn-identity reconciliation (ADR 0051; field defect 2026-07-05,
-        # JSONL 110937 sid=81): the viewport-scoped backend keeps DRAWING
-        # acknowledged near-scope slots, so a drawn tile whose acknowledged
-        # identity differs from the payload the session now holds is visibly
-        # stale on screen no matter what the viewport-derived active set
-        # says.  Such tiles re-present and join the active scope so the
-        # backend accepts them (one converging commit; once acknowledged ==
-        # current the set is empty and the session settles).
+        # Drawn-identity reconciliation (ADR 0051 rule 1; field defects
+        # 2026-07-05): a drawn tile whose ON-SCREEN identity differs from the
+        # payload the session now holds is visibly stale no matter what any
+        # bookkeeping says.  The backend's reported slot identities are the
+        # ground truth (session acknowledgement records were the liar in
+        # every wedge so far); the acknowledged state is the fallback for
+        # backends that do not report identities.  Stale tiles re-present
+        # and join the active scope so the viewport-scoped backend accepts
+        # them; retries are bounded per (shown, wanted) identity pair so a
+        # backend that cannot converge (e.g. atlas capacity) never turns
+        # this into an idle commit loop.
         stale_drawn: list[int] = []
-        for tile_number, acknowledged in previous_payloads.items():
-            current = self.display_tile_payloads.get(int(tile_number))
-            if current is None or current is acknowledged:
-                continue
-            if current.source_id != acknowledged.source_id:
+        backend_identities = dict(getattr(self, "last_presented_identities", None) or {})
+        if backend_identities:
+            for tile_number, shown_identity in backend_identities.items():
+                current = self.display_tile_payloads.get(int(tile_number))
+                if current is None or current.source_id == shown_identity:
+                    self._reconcile_attempts.pop(int(tile_number), None)
+                    continue
+                pair = (shown_identity, current.source_id)
+                prior_pair, attempts = self._reconcile_attempts.get(int(tile_number), (None, 0))
+                if prior_pair != pair:
+                    attempts = 0
+                if attempts >= 3:
+                    continue
+                self._reconcile_attempts[int(tile_number)] = (pair, attempts + 1)
                 stale_drawn.append(int(tile_number))
+        else:
+            for tile_number, acknowledged in previous_payloads.items():
+                current = self.display_tile_payloads.get(int(tile_number))
+                if current is None or current is acknowledged:
+                    continue
+                if current.source_id != acknowledged.source_id:
+                    stale_drawn.append(int(tile_number))
         if stale_drawn:
             for tile_number in sorted(stale_drawn):
                 self.dirty_payloads[int(tile_number)] = None
+                # Force the upsert: session bookkeeping may consider this
+                # identity already presented (that bookkeeping is exactly
+                # what the backend truth contradicts).
+                self.pending_payload_upserts[int(tile_number)] = None
             active = tuple(dict.fromkeys((*active, *sorted(stale_drawn))))
         # ADR 0051: the lifecycle machine owns park/re-arm; this is its
         # rule-3 scope event.
@@ -1032,6 +1062,10 @@ class MontageRenderSession:
     ) -> TilePresentationState:
         if not isinstance(report, TileCommitReport):
             raise TypeError("tile presentation acknowledgement requires a TileCommitReport")
+        if getattr(report, "presented_identities", None) is not None:
+            # The pool's slot identities are the newest known truth about the
+            # screen regardless of which delta the report was built for.
+            self.last_presented_identities = dict(report.presented_identities)
         if not report.acknowledges(delta):
             # ADR 0051 rule 1 (field defect 2026-07-05, JSONL 112841): the
             # committer's last report belongs to an OLDER delta — this delta

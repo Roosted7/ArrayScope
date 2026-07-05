@@ -888,6 +888,75 @@ def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholde
     assert replaced.quality == "exact"
 
 
+def test_backend_reported_identities_drive_convergence():
+    """ADR 0051 rule 1, ground-truth edition (field defects 2026-07-05): the
+    session's own acknowledgement records lied in every stale-LOD wedge, so
+    convergence now compares against the identities the backend reports its
+    drawn slots ACTUALLY hold.  A mismatch re-presents the tile inside the
+    active scope; agreement settles; retries are bounded."""
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
+    _state, delta = session.build_tile_presentation({})
+    current_identity = {
+        int(tile): payload.source_id for tile, payload in dict(delta.upserts).items()
+    }
+    # Backend says tile 1's slot still shows some OLD identity.
+    report = TileCommitReport(
+        presented_tiles=(0, 1),
+        committed_upserts=(0, 1),
+        delta_key=(int(delta.base_revision), int(delta.target_revision)),
+        presented_identities={0: current_identity[0], 1: ("stale", 6)},
+    )
+    session.acknowledge_tile_presentation(delta, report)
+    session.mark_presented((0, 1))
+
+    _state2, delta2 = session.build_tile_presentation({})
+    assert 1 in delta2.upserts, "backend-stale tile must re-present"
+    assert 1 in tuple(delta2.active_tiles)
+    assert 0 not in delta2.upserts, "agreeing tile stays settled"
+
+    # Backend now confirms the wanted identity: converged, no more work.
+    report2 = TileCommitReport(
+        presented_tiles=(0, 1),
+        committed_upserts=(1,),
+        delta_key=(int(delta2.base_revision), int(delta2.target_revision)),
+        presented_identities=dict(current_identity),
+    )
+    session.acknowledge_tile_presentation(delta2, report2)
+    _state3, delta3 = session.build_tile_presentation({})
+    assert 1 not in delta3.upserts
+    assert not session._reconcile_attempts
+
+
+def test_backend_identity_reconciliation_retries_are_bounded():
+    """A backend that CANNOT converge (e.g. atlas capacity) must not turn
+    reconciliation into an idle commit loop: 3 attempts per identity pair."""
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
+    _state, delta = session.build_tile_presentation({})
+    report = TileCommitReport(
+        presented_tiles=(0, 1),
+        committed_upserts=(0, 1),
+        delta_key=(int(delta.base_revision), int(delta.target_revision)),
+        presented_identities={1: ("stuck", 6)},
+    )
+    session.acknowledge_tile_presentation(delta, report)
+    emitted = 0
+    last_delta = delta
+    for _round in range(6):
+        _state, last_delta = session.build_tile_presentation({})
+        if 1 in last_delta.upserts:
+            emitted += 1
+            # Backend keeps reporting the same stuck identity.
+            stuck = TileCommitReport(
+                presented_tiles=(0, 1),
+                delta_key=(int(last_delta.base_revision), int(last_delta.target_revision)),
+                presented_identities={1: ("stuck", 6)},
+            )
+            session.acknowledge_tile_presentation(last_delta, stuck)
+    assert emitted <= 3, f"unbounded reconciliation retries: {emitted}"
+
+
 def test_report_bound_to_an_older_delta_acknowledges_nothing():
     """Field defect 2026-07-05 (JSONL 112841): a skipped/superseded commit
     leaves the committer's last report pointing at an OLDER delta; every ack

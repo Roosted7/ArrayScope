@@ -249,6 +249,20 @@ class TextureAtlasPool:
         self.active_base_source_ids: set[object] = set()
         self._clock = 0
 
+    def presented_identities(self) -> dict[int, object]:
+        """Ground truth: the payload identity each drawn tile slot holds NOW.
+
+        ADR 0051 rule 1: session bookkeeping converges against this map —
+        the 2026-07-05 field defects all came from the session believing its
+        own acknowledgement records over what the pool actually presents.
+        """
+
+        return {
+            int(tile): self.source_ids.get(key)
+            for tile, key in self.tile_resident_keys.items()
+            if key in self.source_ids
+        }
+
     @property
     def resident_count(self) -> int:
         return len(self.source_ids)
@@ -780,6 +794,7 @@ class TextureAtlasPool:
         return uvs, TileLayerUpdateStats(
             visible_items=len(presented_tiles),
             presented_tiles=presented_tiles,
+            presented_identities=self.presented_identities(),
             committed_upserts=tuple(
                 int(tile)
                 for tile in sorted(explicit_upserts)
@@ -1216,6 +1231,7 @@ class GpuMontageLayer:
         self._last_stats = TileLayerUpdateStats(
             visible_items=self._visible_items,
             presented_tiles=tuple(int(tile) for tile in sorted(self._pool.tile_slots)),
+            presented_identities=self._pool.presented_identities(),
             # Rule 1 (ADR 0051): this path can never apply payload upserts, so
             # it must say so explicitly.  ``None`` would make the commit
             # report fall back to acknowledging upserts by tile-number
@@ -1356,6 +1372,7 @@ class GpuMontageLayer:
         self._last_stats = TileLayerUpdateStats(
             visible_items=len(effective_presented_tiles),
             presented_tiles=effective_presented_tiles,
+            presented_identities=texture_stats.presented_identities,
             committed_upserts=tuple(texture_stats.committed_upserts or ()),
             resident_items=texture_stats.resident_items,
             storage_capacity=texture_stats.storage_capacity,

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Mapping
 
 
 @dataclass(frozen=True)
@@ -10,6 +11,11 @@ class TileLayerUpdateStats:
     visible_items: int = 0
     presented_tiles: tuple[int, ...] | None = None
     committed_upserts: tuple[int, ...] | None = None
+    # Ground truth for ADR 0051 rule 1: the payload identity each drawn tile
+    # slot ACTUALLY holds after this update (tile -> source_id).  Session
+    # bookkeeping converges against this map, never the other way around.
+    # None = backend does not report identities (legacy/CPU layers).
+    presented_identities: Mapping[int, object] | None = field(default=None)
     updated_tiles: tuple[int, ...] = ()
     items_created: int = 0
     items_updated: int = 0

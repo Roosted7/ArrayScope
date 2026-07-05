@@ -134,6 +134,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         lifecycle_presented=0 if session is None else len(session.lifecycle.presented_tiles),
         lifecycle_dangling_claims=0 if session is None else len(session.lifecycle.dangling_claims()),
         lifecycle_semantic_mismatches=_lifecycle_semantic_mismatches(session),
+        dirty_payload_tiles=0 if session is None else len(getattr(session, "dirty_payloads", ()) or ()),
+        backend_stale_identities=_backend_stale_identities(session),
         presented_order_sample=() if session is None else tuple(int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]),
     )
 
@@ -393,6 +395,24 @@ def _lifecycle_semantic_mismatches(session) -> int:
     return len((evaluated ^ rendered) - loading) + len(
         session.lifecycle.evaluating_tiles - loading - rendered
     )
+
+
+def _backend_stale_identities(session) -> int:
+    """ADR 0051 rule 1: drawn tiles whose backend slot identity differs from
+    the session's current payload.  Nonzero at idle = visibly stale tiles."""
+
+    if session is None:
+        return 0
+    identities = dict(getattr(session, "last_presented_identities", None) or {})
+    if not identities:
+        return 0
+    payloads = getattr(session, "display_tile_payloads", {}) or {}
+    stale = 0
+    for tile_number, shown_identity in identities.items():
+        current = payloads.get(int(tile_number))
+        if current is not None and current.source_id != shown_identity:
+            stale += 1
+    return stale
 
 
 def _montage_presented_lod(session, lod_decision) -> tuple[int, int, tuple[int, int]]:

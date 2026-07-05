@@ -165,6 +165,12 @@ class MontageRuntimeDiagnostics:
     # Migration parity: legacy collections that disagree with the machine's
     # mirrored semantic axis (must trend to 0 before P2 deletes them).
     lifecycle_semantic_mismatches: int = 0
+    # Tiles whose payload is dirty (queued for re-presentation).
+    dirty_payload_tiles: int = 0
+    # ADR 0051 rule 1 ground truth: drawn tiles whose backend-reported slot
+    # identity differs from the session's current payload — nonzero at idle
+    # means visibly stale tiles (the entire 2026-07-05 defect family).
+    backend_stale_identities: int = 0
 
 
 @dataclass(frozen=True)
@@ -852,6 +858,8 @@ _MONTAGE_COVERED = frozenset(
         "lifecycle_evaluating",
         "lifecycle_dangling_claims",
         "lifecycle_semantic_mismatches",
+        "dirty_payload_tiles",
+        "backend_stale_identities",
         "pending_completed_tiles",
         "pending_payload_upserts",
         "pending_removals",
@@ -1000,7 +1008,9 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"presented={montage.lifecycle_presented} parked={montage.lifecycle_parked} "
             f"evaluating={montage.lifecycle_evaluating} "
             f"dangling_claims={montage.lifecycle_dangling_claims} "
-            f"mismatches={montage.lifecycle_semantic_mismatches}"
+            f"mismatches={montage.lifecycle_semantic_mismatches} "
+            f"dirty={montage.dirty_payload_tiles} "
+            f"BACKEND_STALE={montage.backend_stale_identities}"
         ),
         (
             "LOD: "
