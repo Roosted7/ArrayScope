@@ -669,6 +669,11 @@ class MontageRenderSession:
         self.pending_level_sources.clear()
         self.pending_refined_level_tiles.clear()
         self.pending_refined_level_sources.clear()
+        # The evidence scan indexed the OLD window's level key; restart the
+        # counters so the new key's evidence is armed from scratch (the
+        # renderer re-marks the scan whenever a commit parks on evidence).
+        self.level_scan_cursor = 0
+        self.level_scan_remaining_tiles = 0
         self.pending_tiles.prune(frozenset())
         hits = misses = unchanged = 0
         for tile in tuple(getattr(plan, "tiles", ()) or ()):

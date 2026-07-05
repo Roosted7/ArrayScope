@@ -805,12 +805,15 @@ class FrameRenderMixin:
             return _reject("dtype")
         if bool(session.rgb) != bool(view_state.channel == ChannelMode.COMPLEX):
             return _reject("rgb")
-        if session.has_pending_level_update() and session.has_stale_level_presentations():
-            # A pending level refinement keeps re-upserting stale tiles; the
-            # rebirth path resets that bookkeeping (pinned behavior).  Reuse
-            # only settled sessions until level convergence is owned by the
-            # machine (ADR 0051 P2 remaining).
-            return _reject("level-pending")
+        # Level convergence no longer forces a rebirth (ADR 0051 P2, landed
+        # 2026-07-05): upserts are machine-gated (emit-once + identity-aware
+        # acknowledgement with bounded resignation), stale-level tiles drain
+        # through prioritized budgeted commits, and the dispatch derivation +
+        # watchdog signature track level evidence and stale-count progress —
+        # the blind re-upsert loop the old "level-pending" reject guarded
+        # against cannot form.  retarget_index_window resets the per-window
+        # evidence queues and forgets demoted tiles; kept tiles keep their
+        # applied values and keep converging through the standing machinery.
         previous_geometry = getattr(session.plan, "geometry", None)
         geometry = getattr(plan, "geometry", None)
         if previous_geometry is None or geometry is None:
