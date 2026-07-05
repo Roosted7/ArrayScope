@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 from time import perf_counter
 from typing import Callable
 
 import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
+from pyqtgraph.Qt import QtGui
 
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.model.presentation_generation import levels_match
@@ -18,6 +20,52 @@ from arrayscope.display.image_upload import rgb_display_for_levels
 
 
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
+
+
+def _payload_direct_dims(region, tile_data, payload):
+    """World footprint + image crop for a possibly LOD-reduced payload.
+
+    Returns ``(world_w, world_h, crop_w, crop_h, scale_x, scale_y)``:
+    ``world_*`` are native texels (the item's on-screen footprint),
+    ``crop_*`` are image pixels to keep, and ``scale_*`` map image pixels
+    to world units (ADR 0050 phase 3 — PyQtGraph adoption).  Native
+    payloads return the historical min(region, image) behavior with an
+    identity scale.
+    """
+
+    img_h = int(tile_data.shape[0])
+    img_w = int(tile_data.shape[1])
+    lod = getattr(payload, "lod", None)
+    factor = int(getattr(lod, "factor", 1) or 1) if lod is not None else 1
+    if factor <= 1 or img_w <= 0 or img_h <= 0:
+        width = min(int(region.width), img_w)
+        height = min(int(region.height), img_h)
+        return width, height, width, height, 1.0, 1.0
+    src_h, src_w = (int(value) for value in lod.source_shape)
+    scale_x = float(src_w) / float(img_w)
+    scale_y = float(src_h) / float(img_h)
+    world_w = min(int(region.width), src_w)
+    world_h = min(int(region.height), src_h)
+    crop_w = min(img_w, int(ceil(world_w / scale_x)))
+    crop_h = min(img_h, int(ceil(world_h / scale_y)))
+    return world_w, world_h, crop_w, crop_h, scale_x, scale_y
+
+
+def _apply_item_lod_scale(state: "TileLayerItemState", scale_x: float, scale_y: float) -> None:
+    """Set the item transform mapping image pixels onto native texels.
+
+    Idempotent: only touches the QGraphicsItem transform when the scale
+    actually changes (transform churn invalidates the paint cache).
+    """
+
+    scale = (float(scale_x), float(scale_y))
+    if tuple(getattr(state, "lod_scale", (1.0, 1.0))) == scale:
+        return
+    state.lod_scale = scale
+    transform = QtGui.QTransform()
+    if scale != (1.0, 1.0):
+        transform.scale(scale[0], scale[1])
+    state.item.setTransform(transform)
 
 
 @dataclass
@@ -39,6 +87,9 @@ class TileLayerItemState:
     source_cache_nbytes: int = 0
     resident_serial: int = 0
     resident_nbytes: int = 0
+    # Image-pixel → world-texel scale for LOD-reduced payloads (ADR 0050
+    # phase 3): (1.0, 1.0) means native and an identity item transform.
+    lod_scale: tuple[float, float] = (1.0, 1.0)
 
 
 class MontageTileLayer:
@@ -259,13 +310,14 @@ class MontageTileLayer:
             if tile_data.ndim < 2:
                 self._hide_tile(tile_number)
                 continue
-            width = min(int(region.width), int(tile_data.shape[1]))
-            height = min(int(region.height), int(tile_data.shape[0]))
+            width, height, crop_w, crop_h, scale_x, scale_y = _payload_direct_dims(region, tile_data, payload)
             if width <= 0 or height <= 0:
                 self._hide_tile(tile_number)
                 continue
-            if width != int(tile_data.shape[1]) or height != int(tile_data.shape[0]):
-                tile_data = tile_data[:height, :width, ...]
+            if crop_w != int(tile_data.shape[1]) or crop_h != int(tile_data.shape[0]):
+                tile_data = tile_data[:crop_h, :crop_w, ...]
+            # Histogram/level planes stay native-resolution regardless of the
+            # display LOD (ADR 0050 semantic identity): crop in world texels.
             tile_hist = None if payload.histogram_data is None else np.asarray(payload.histogram_data)[:height, :width]
 
             world_x = int(region.x)
@@ -278,7 +330,7 @@ class MontageTileLayer:
             )
             source_id = _direct_payload_source_id(base_source_id, payload)
             hist_id = ("tile-source", source_id) if tile_hist is not None else None
-            local_rect = (0, 0, int(width), int(height))
+            local_rect = (0, 0, int(crop_w), int(crop_h))
             item_state = self._states.get(tile_number)
             reused_source = False
             resident_current = _direct_state_matches(
@@ -398,6 +450,7 @@ class MontageTileLayer:
             item_state.item.setVisible(True)
             self._touch_resident_state(item_state)
             item_state.item.setPos(float(world_x), float(world_y))
+            _apply_item_lod_scale(item_state, scale_x, scale_y)
             if int(tile_number) not in active:
                 visible_items += 1
             active.add(int(tile_number))
@@ -583,18 +636,17 @@ class MontageTileLayer:
             if tile_data.ndim < 2:
                 items_skipped += 1
                 continue
-            width = min(int(region.width), int(tile_data.shape[1]))
-            height = min(int(region.height), int(tile_data.shape[0]))
+            width, height, crop_w, crop_h, scale_x, scale_y = _payload_direct_dims(region, tile_data, payload)
             if width <= 0 or height <= 0:
                 items_skipped += 1
                 continue
-            if width != int(tile_data.shape[1]) or height != int(tile_data.shape[0]):
-                tile_data = tile_data[:height, :width, ...]
+            if crop_w != int(tile_data.shape[1]) or crop_h != int(tile_data.shape[0]):
+                tile_data = tile_data[:crop_h, :crop_w, ...]
             tile_hist = None if payload.histogram_data is None else np.asarray(payload.histogram_data)[:height, :width]
             base_source_id = near_source_ids.get(int(tile_number), payload.source_id)
             source_id = _direct_payload_source_id(base_source_id, payload)
             hist_id = ("tile-source", source_id) if tile_hist is not None else None
-            local_rect = (0, 0, int(width), int(height))
+            local_rect = (0, 0, int(crop_w), int(crop_h))
             item_state = self._states.get(int(tile_number))
             if not _direct_state_matches(
                 item_state,
@@ -669,6 +721,7 @@ class MontageTileLayer:
                 items_skipped += 1
             item_state.item.setVisible(False)
             item_state.visible = False
+            _apply_item_lod_scale(item_state, scale_x, scale_y)
             item_state.world_rect = (
                 int(region.x),
                 int(region.y),
@@ -1252,8 +1305,7 @@ def _direct_preclaim_specs(
         tile_data = np.asarray(payload.image)
         if tile_data.ndim < 2:
             continue
-        width = min(int(region.width), int(tile_data.shape[1]))
-        height = min(int(region.height), int(tile_data.shape[0]))
+        width, height, crop_w, crop_h, _scale_x, _scale_y = _payload_direct_dims(region, tile_data, payload)
         if width <= 0 or height <= 0:
             continue
         base_source_id = (
@@ -1266,7 +1318,7 @@ def _direct_preclaim_specs(
         specs[tile_number] = (
             source_id,
             histogram_id,
-            (0, 0, int(width), int(height)),
+            (0, 0, int(crop_w), int(crop_h)),
         )
     return specs
 
@@ -1297,12 +1349,11 @@ def _direct_tile_geometry_changed(state: TileLayerItemState, layout: dict[int, o
     region = layout.get(int(tile_number))
     if region is None:
         return False
-    width = min(int(region.width), int(data.shape[1]))
-    height = min(int(region.height), int(data.shape[0]))
+    width, height, crop_w, crop_h, _scale_x, _scale_y = _payload_direct_dims(region, data, payload)
     if width <= 0 or height <= 0:
         return False
     expected_world = (int(region.x), int(region.y), int(width), int(height))
-    expected_local = (0, 0, int(width), int(height))
+    expected_local = (0, 0, int(crop_w), int(crop_h))
     return (
         tuple(getattr(state, "local_rect", (-1, -1, -1, -1))) != expected_local
         or tuple(getattr(state, "world_rect", (-1, -1, -1, -1))) != expected_world

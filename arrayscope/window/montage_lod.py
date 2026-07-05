@@ -27,6 +27,7 @@ optimistic bookkeeping — these rules are load-bearing):
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple
 
 import numpy as np
@@ -891,9 +892,20 @@ def policy_mode_for_renderer(renderer) -> str:
     if value != LOD_POLICY_RESIDENT:
         return LOD_POLICY_NATIVE_ONLY
     capabilities = image_view_backend_capabilities(renderer.win.img_view)
-    if str(getattr(capabilities, "name", "")) != "vispy":
-        return LOD_POLICY_NATIVE_ONLY
-    return LOD_POLICY_RESIDENT
+    name = str(getattr(capabilities, "name", ""))
+    if name == "vispy":
+        return LOD_POLICY_RESIDENT
+    if name == "pyqtgraph" and _pyqtgraph_resident_lod_enabled():
+        # ADR 0050 phase 3: the shared planner/materializer feed reduced
+        # payload.image to per-tile ImageItems (scale transform maps image
+        # pixels onto native texels).  Opt-in until the A/B evidence gate
+        # ("where measured") flips the default.
+        return LOD_POLICY_RESIDENT
+    return LOD_POLICY_NATIVE_ONLY
+
+
+def _pyqtgraph_resident_lod_enabled() -> bool:
+    return str(os.environ.get("ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD", "") or "").strip() == "1"
 
 
 def native_policy_reason_for_renderer(renderer) -> str:
@@ -909,7 +921,8 @@ def native_policy_reason_for_renderer(renderer) -> str:
     if value != LOD_POLICY_RESIDENT:
         return LOD_REASON_NATIVE_POLICY
     capabilities = image_view_backend_capabilities(renderer.win.img_view)
-    if str(getattr(capabilities, "name", "")) != "vispy":
+    name = str(getattr(capabilities, "name", ""))
+    if name != "vispy" and not (name == "pyqtgraph" and _pyqtgraph_resident_lod_enabled()):
         return LOD_REASON_BACKEND_ADOPTION_PENDING
     return LOD_REASON_NATIVE_POLICY
 
