@@ -103,6 +103,23 @@ class TileLifecycle:
         self._parked: set[int] = set()
         self._evaluating: set[int] = set()
         self._presented: set[int] = set()
+        self._identity_rejections = 0
+        #: (tile, emitted_id, backend_id) -> consecutive rejection count; a
+        #: pair rejected IDENTITY_RESIGN_AFTER times is resigned (see below).
+        self._identity_rejection_counts: dict[tuple[int, object, object], int] = {}
+
+    #: After this many identical rejections the machine records the backend's
+    #: identity as the presented truth and stops the re-emit loop: a backend
+    #: that keeps a slot on the same wrong identity is not converging, and an
+    #: unbounded upload loop is worse than a diagnosed stale tile
+    #: (backend_stale_identities stays nonzero — the wedge stays visible).
+    IDENTITY_RESIGN_AFTER = 3
+
+    @property
+    def identity_rejections(self) -> int:
+        """Acks refused because the backend slot held a different identity."""
+
+        return int(self._identity_rejections)
 
     # -- record access -----------------------------------------------------
 
@@ -157,6 +174,19 @@ class TileLifecycle:
             rec.semantic = Semantic.PLANNED
         self._evaluating.discard(rec.tile_number)
         return self._release_owned(rec, ClaimOwner.EVALUATION)
+
+    def evaluation_dropped(self, tile_number: int) -> None:
+        """A computed result was discarded (eviction/rebuild): back to planned.
+
+        P2: ``rendered_tiles`` routes every write through the machine, so a
+        result leaving the session must demote the semantic axis — park
+        eligibility (rule 3) reads ``EVALUATED`` as "a re-presentable result
+        exists", which is no longer true.
+        """
+
+        rec = self._records.get(int(tile_number))
+        if rec is not None and rec.semantic is Semantic.EVALUATED:
+            rec.semantic = Semantic.PLANNED
 
     def tile_skipped(self, tile_number: int) -> None:
         rec = self.record(tile_number)
@@ -231,8 +261,8 @@ class TileLifecycle:
         active_scope: Iterable[int],
         removed_tiles: Iterable[int] = (),
         stale: bool = False,
-        parkable_tiles: Iterable[int] | None = None,
-    ) -> None:
+        presented_identities=None,
+    ) -> frozenset[int]:
         """The single entry into ``PRESENTED`` (rule 1) and ``PARKED`` (rule 3).
 
         ``emitted_tiles`` are the delta's upserts; ``accepted_tiles`` the
@@ -240,39 +270,69 @@ class TileLifecycle:
         the active scope (in scope the commit loop legitimately retries).
         A stale report confirms nothing.
 
-        ``parkable_tiles`` is a migration parameter (ADR 0051 P1→P2): while
-        legacy collections still bypass ``evaluation_completed`` (sessions
-        seeded by direct ``rendered_tiles`` writes), the caller supplies which
-        tiles hold a re-presentable result.  Once the semantic axis is
-        authoritative (P2), omit it and the machine's own ``EVALUATED`` state
-        decides.
+        **Identity-aware acknowledgement (P2, the machine invariant that
+        subsumes the 2026-07-05 false-ack family):** when the backend supplies
+        ``presented_identities`` (tile → source_id its slot actually holds),
+        an emitted tile is confirmed only if the slot holds the identity the
+        machine emitted.  Tile-number intersection alone opened three doors —
+        the uniforms-only path, parked-but-drawn, and stale report reuse —
+        each patched per-site before this invariant existed.
+
+        Returns the identity-confirmed accepted set; callers must use it (not
+        their own intersection) to clear dirty/pending bookkeeping, so the
+        decision lives in exactly one place.  Park eligibility is the
+        machine's own semantic axis (``EVALUATED`` = a re-presentable result
+        exists); the P1 ``parkable_tiles`` crutch is gone.
         """
 
         if stale:
-            return
+            return frozenset()
         accepted = {int(tile) for tile in accepted_tiles}
         active = {int(tile) for tile in active_scope}
-        parkable = (
-            None if parkable_tiles is None else {int(tile) for tile in parkable_tiles}
+        identities = (
+            None
+            if presented_identities is None
+            else {int(tile): identity for tile, identity in dict(presented_identities).items()}
         )
+        confirmed: set[int] = set()
         for tile_number in emitted_tiles:
             index = int(tile_number)
             rec = self.record(index)
-            if index in accepted:
+            accept = index in accepted
+            presented_identity = rec.emitted_source_id
+            if (
+                accept
+                and identities is not None
+                and rec.emitted_source_id is not None
+                and index in identities
+                and identities[index] != rec.emitted_source_id
+            ):
+                # Rule 1: a slot that does not hold what we emitted did not
+                # present it, whatever the report's tile numbers say.
+                pair = (index, rec.emitted_source_id, identities[index])
+                count = self._identity_rejection_counts.get(pair, 0) + 1
+                self._identity_rejections += 1
+                if count >= self.IDENTITY_RESIGN_AFTER:
+                    # Resigned acceptance: record the backend's identity as
+                    # the presented truth (never pretend our emit landed) and
+                    # let the caller clear dirty — bounded retries, wedge
+                    # stays visible in backend_stale_identities.
+                    self._identity_rejection_counts.pop(pair, None)
+                    presented_identity = identities[index]
+                else:
+                    self._identity_rejection_counts[pair] = count
+                    accept = False
+            if accept:
                 self._unpark(rec)
                 rec.presentation = Presentation.PRESENTED
-                rec.presented_source_id = rec.emitted_source_id
+                rec.presented_source_id = presented_identity
                 self._presented.add(index)
+                confirmed.add(index)
             elif index not in active:
                 # Rule 3: never blind-retry an upsert a viewport-scoped
                 # backend will keep declining. Park only if a semantic result
                 # exists to re-present; otherwise there is nothing to arm.
-                can_park = (
-                    rec.semantic is Semantic.EVALUATED
-                    if parkable is None
-                    else index in parkable
-                )
-                if can_park:
+                if rec.semantic is Semantic.EVALUATED:
                     rec.presentation = Presentation.PARKED
                     rec.parked_reason = "declined-out-of-scope"
                     self._parked.add(index)
@@ -288,6 +348,7 @@ class TileLifecycle:
             rec.presentation = Presentation.UNPRESENTED
             rec.presented_source_id = None
             rec.emitted_source_id = None
+        return frozenset(confirmed)
 
     def presentation_confirmed(self, tile_numbers: Iterable[int]) -> None:
         """Backend confirmed these tiles as presented (rule 1, second source).
@@ -344,6 +405,7 @@ class TileLifecycle:
             "parked": len(self._parked),
             "presented": len(self._presented),
             "dangling_claims": len(self.dangling_claims()),
+            "identity_rejections": int(self._identity_rejections),
         }
 
     # -- internal ------------------------------------------------------------

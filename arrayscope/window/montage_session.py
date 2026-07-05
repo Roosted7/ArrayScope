@@ -95,6 +95,59 @@ def _resident_retarget_upsert_tiles(
     }
 
 
+class LifecycleRenderedTiles(dict):
+    """``rendered_tiles`` with the machine's semantic axis kept authoritative.
+
+    ADR 0051 P2: every write is an event.  Production code routes through
+    ``mark_materialized`` (which fires ``evaluation_completed`` itself), but
+    fixtures and repair paths that assign ``session.rendered_tiles[i]``
+    directly stay correct because the collection *is* the event source —
+    a result arriving marks the tile ``EVALUATED``, a result leaving demotes
+    it.  This is what lets park eligibility read the semantic axis instead
+    of the ``parkable_tiles`` crutch.
+    """
+
+    def __init__(self, lifecycle, initial=None):
+        super().__init__()
+        self._lifecycle = lifecycle
+        if initial:
+            self.update(initial)
+
+    def __setitem__(self, key, value):
+        index = int(key)
+        super().__setitem__(index, value)
+        self._lifecycle.evaluation_completed(index)
+
+    def __delitem__(self, key):
+        index = int(key)
+        super().__delitem__(index)
+        self._lifecycle.evaluation_dropped(index)
+
+    def pop(self, key, *default):
+        index = int(key)
+        present = index in self
+        result = super().pop(index, *default)
+        if present:
+            self._lifecycle.evaluation_dropped(index)
+        return result
+
+    def clear(self):
+        indices = tuple(self.keys())
+        super().clear()
+        for index in indices:
+            self._lifecycle.evaluation_dropped(index)
+
+    def update(self, *args, **kwargs):
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def setdefault(self, key, default=None):
+        index = int(key)
+        if index not in self:
+            self[index] = default
+        return self[index]
+
+
 @dataclass
 class MontageRenderSession:
     session_id: int
@@ -265,13 +318,16 @@ class MontageRenderSession:
         self._selected_lod_factor()
         self.update_level_presentation_scope()
         # ADR 0051: seed the lifecycle machine so its semantic axis matches a
-        # session built from cached results (rendered == evaluated).
+        # session built from cached results (rendered == evaluated).  P2:
+        # rendered_tiles becomes the event-routing collection, so every later
+        # write (including direct fixture assignment) keeps the semantic axis
+        # authoritative.
         self.lifecycle.plan_applied(int(tile.montage_index) for tile in tuple(self.visible_tiles or ()))
         for index in sorted(int(tile) for tile in self.skipped_tiles):
             self.lifecycle.tile_skipped(int(index))
+        self.rendered_tiles = LifecycleRenderedTiles(self.lifecycle, self.rendered_tiles)
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)
-            self.lifecycle.evaluation_completed(int(index))
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -845,6 +901,15 @@ class MontageRenderSession:
                 if current is None or current.source_id == shown_identity:
                     self._reconcile_attempts.pop(int(tile_number), None)
                     continue
+                rec = self.lifecycle.peek(int(tile_number))
+                if rec is not None and rec.presented_source_id == shown_identity:
+                    # P2: the machine has acknowledged this slot's identity as
+                    # the presented truth — including resigned acceptance of a
+                    # backend that would not converge after bounded retries.
+                    # Forcing a re-present here would reopen the exact loop
+                    # the machine bounded (single-place convergence, rule 1).
+                    self._reconcile_attempts.pop(int(tile_number), None)
+                    continue
                 pair = (shown_identity, current.source_id)
                 prior_pair, attempts = self._reconcile_attempts.get(int(tile_number), (None, 0))
                 if prior_pair != pair:
@@ -1085,6 +1150,23 @@ class MontageRenderSession:
         )
         if level_delta_stale:
             report = replace(report, stale=True, committed_upserts=())
+        # ADR 0051 P2: the machine makes the acceptance decision in ONE place
+        # — identity-aware (backend slot identities vs emitted identities),
+        # rule-1/rule-3 park logic from its own semantic axis.  Legacy state
+        # below consumes the machine's verdict via the filtered report; it
+        # never re-derives acceptance from tile numbers.
+        active_scope = {int(tile) for tile in tuple(getattr(delta, "active_tiles", ()) or ())}
+        report_accepted = report.accepted_upserts(delta)
+        machine_accepted = self.lifecycle.commit_acknowledged(
+            emitted_tiles=(int(tile) for tile in tuple(delta.upserts)),
+            accepted_tiles=report_accepted,
+            active_scope=active_scope,
+            removed_tiles=(int(tile) for tile in report.removed_tiles),
+            stale=bool(getattr(report, "stale", False)),
+            presented_identities=getattr(report, "presented_identities", None),
+        )
+        if set(machine_accepted) != set(report_accepted):
+            report = replace(report, committed_upserts=frozenset(machine_accepted))
         acknowledged = self.tile_presentation_state.acknowledge_delta(delta, report)
         self.tile_presentation_state = acknowledged
         accepted_upserts = report.accepted_upserts(delta)
@@ -1113,21 +1195,9 @@ class MontageRenderSession:
         # payload stays cached and re-arms when the tile becomes active.
         # Without this, each commit re-emitted the same unacceptable upserts
         # and finalization never settled (idle commit/draw loop).
-        # ADR 0051: the lifecycle machine is the single owner of the
-        # presented/parked decision (rules 1 and 3); the legacy queue pops
-        # below stay with the collections they will replace phase by phase.
-        active_scope = {int(tile) for tile in tuple(getattr(delta, "active_tiles", ()) or ())}
+        # P2: the machine already made the presented/parked decision above;
+        # these pops consume its verdict (accepted = machine-confirmed set).
         accepted = {int(tile) for tile in accepted_upserts}
-        self.lifecycle.commit_acknowledged(
-            emitted_tiles=(int(tile) for tile in tuple(delta.upserts)),
-            accepted_tiles=accepted,
-            active_scope=active_scope,
-            removed_tiles=(int(tile) for tile in report.removed_tiles),
-            # P1->P2 migration: rendered_tiles is still written directly in
-            # places that bypass mark_materialized, so it stays the
-            # park-eligibility truth until the semantic axis is authoritative.
-            parkable_tiles=(int(tile) for tile in self.rendered_tiles),
-        )
         for tile in tuple(delta.upserts):
             index = int(tile)
             if index in accepted or index in active_scope:

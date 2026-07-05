@@ -134,6 +134,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         lifecycle_presented=0 if session is None else len(session.lifecycle.presented_tiles),
         lifecycle_dangling_claims=0 if session is None else len(session.lifecycle.dangling_claims()),
         lifecycle_semantic_mismatches=_lifecycle_semantic_mismatches(session),
+        lifecycle_identity_rejections=0 if session is None else int(session.lifecycle.identity_rejections),
         dirty_payload_tiles=0 if session is None else len(getattr(session, "dirty_payloads", ()) or ()),
         backend_stale_identities=_backend_stale_identities(session),
         stall_repairs=int(getattr(window.renderer, "_montage_stall_repairs", 0) or 0),

@@ -144,14 +144,36 @@ elsewhere — Xvfb/software-GL is not evidence, per X5) extends the heartbeat pr
 
 ## Phases
 
-- **P1 (this change):** `arrayscope/presentation/tile_lifecycle.py` machine + exhaustive
+- **P1 (landed 2026-07-04):** `arrayscope/presentation/tile_lifecycle.py` machine + exhaustive
   Qt-free unit tests; wired as shadow (events mirrored from existing paths, parity asserted in
   diagnostics); presentation axis becomes authoritative (emit-once/park/re-arm and
   acknowledgement move in; `parked_dirty_payloads` deleted).
-- **P2:** semantic axis authoritative — `loading_tiles`, `active_tile_requests`,
-  `skipped_tiles` become views; stage fan-in bookkeeping reports through events.
+- **P2 (core landed 2026-07-05):** identity-aware acknowledgement is the machine invariant —
+  `commit_acknowledged` compares backend slot identities (`presented_identities`) against the
+  machine's emitted identities and RETURNS the confirmed set; every legacy pop consumes that
+  verdict (one decision site; subsumes the three false-ack doors patched per-site on
+  2026-07-04/05).  A pair rejected `IDENTITY_RESIGN_AFTER` times is resigned: the machine
+  records the backend's identity as the presented truth (never our emit), bounding retries
+  against a non-converging backend while `backend_stale_identities` keeps the wedge visible.
+  Semantic axis authoritative for results: `rendered_tiles` is `LifecycleRenderedTiles`, a
+  collection that IS the event source (set → `evaluation_completed`, remove →
+  `evaluation_dropped`), so direct fixture writes stay correct and park eligibility reads
+  `EVALUATED` — the `parkable_tiles` crutch is gone.  Build-side drawn-identity reconciliation
+  defers to the machine's presented identity (no duplicate convergence loops).
+  **P2 remaining:** `loading_tiles` / `active_tile_requests` / `skipped_tiles` become views;
+  stage fan-in reports through events; dispatch derived from machine state (records in
+  PLANNED/dirty imply scheduled work) so lost wakeups are impossible by construction and the
+  1 Hz stall watchdog becomes an assertion, not a repair.
+- **P2-adjacent (landed 2026-07-05, the few-Hz-scroll cure):** rule 4 applied at the
+  architecture level — the interaction path is cheap by construction.  Dimension scrubbing
+  notes viewport interaction (it was invisible to every gate); during a burst, stage planning
+  is deferred, superseded work (mid-burst steps present floors/cached payloads only; only the
+  landing step plans, so superseded steps take no claims at all); evaluator keys and pyramid
+  resident-level scans are memoized behind semantic identity + a pyramid revision counter.
+  Scrub steps: ~216 → ~23 ms (uncached burst) / ~50 ms (cached rebuild — remaining P2 target).
 - **P3:** residency axis authoritative — pyramid claims/chains/walk admissions carry owners;
-  `release_session_claims` becomes a machine scan; delete `pending_lod_requests`.
+  `release_session_claims` becomes a machine scan; delete `pending_lod_requests`; the settle
+  repair becomes machine-driven convergence instead of a flush-path patch.
 - **P4:** per-slot derived-state tracking in backends; re-enable atlas mipmaps by default.
 - **P5:** PyQtGraph tiled backend consumes the same effects; X5e benchmark matrix on both.
 

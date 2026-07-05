@@ -135,21 +135,84 @@ def test_declined_without_semantic_result_does_not_park(lc):
     assert lc.parked_tiles == frozenset()
 
 
-def test_parkable_override_is_the_migration_truth(lc):
-    """P1→P2: while legacy paths bypass evaluation_completed, the caller's
-    parkable set decides eligibility instead of the mirrored semantic axis."""
+def test_semantic_axis_decides_park_eligibility(lc):
+    """P2: the machine's own EVALUATED state is park eligibility — the P1
+    ``parkable_tiles`` crutch is gone."""
 
     lc.upsert_emitted(2)  # semantic axis never saw this tile
-    lc.commit_acknowledged(
-        emitted_tiles=[2], accepted_tiles=[], active_scope=[], parkable_tiles=[2]
-    )
-    assert lc.parked_tiles == frozenset({2})
+    lc.commit_acknowledged(emitted_tiles=[2], accepted_tiles=[], active_scope=[])
+    assert 2 not in lc.parked_tiles
     _evaluated(lc, 3)
     lc.upsert_emitted(3)
-    lc.commit_acknowledged(
-        emitted_tiles=[3], accepted_tiles=[], active_scope=[], parkable_tiles=[]
+    lc.commit_acknowledged(emitted_tiles=[3], accepted_tiles=[], active_scope=[])
+    assert 3 in lc.parked_tiles
+
+
+def test_evaluation_dropped_demotes_semantic_axis(lc):
+    _evaluated(lc, 7)
+    lc.evaluation_dropped(7)
+    lc.upsert_emitted(7)
+    lc.commit_acknowledged(emitted_tiles=[7], accepted_tiles=[], active_scope=[])
+    # No re-presentable result: nothing to park (rule 3).
+    assert 7 not in lc.parked_tiles
+
+
+def test_identity_mismatch_refuses_acknowledgement(lc):
+    """Rule 1, ground-truth edition: a slot holding a different identity did
+    not present our upsert, whatever the report's tile numbers claim."""
+
+    _evaluated(lc, 4)
+    lc.upsert_emitted(4, source_id="new-level-1")
+    confirmed = lc.commit_acknowledged(
+        emitted_tiles=[4],
+        accepted_tiles=[4],
+        active_scope=[4],
+        presented_identities={4: "old-level-5"},
     )
-    assert 3 not in lc.parked_tiles
+    assert confirmed == frozenset()
+    assert lc.record(4).presentation is not Presentation.PRESENTED
+    assert lc.identity_rejections == 1
+    # Matching identity confirms.
+    confirmed = lc.commit_acknowledged(
+        emitted_tiles=[4],
+        accepted_tiles=[4],
+        active_scope=[4],
+        presented_identities={4: "new-level-1"},
+    )
+    assert confirmed == frozenset({4})
+    assert lc.record(4).presentation is Presentation.PRESENTED
+
+
+def test_identity_gate_falls_back_without_evidence(lc):
+    """No identity map, no emitted identity, or slot absent from the map:
+    the accepted set decides, as before."""
+
+    _evaluated(lc, 1)
+    lc.upsert_emitted(1)  # no source_id recorded
+    assert lc.commit_acknowledged(
+        emitted_tiles=[1],
+        accepted_tiles=[1],
+        active_scope=[1],
+        presented_identities={1: "anything"},
+    ) == frozenset({1})
+    _evaluated(lc, 2)
+    lc.upsert_emitted(2, source_id="x")
+    assert lc.commit_acknowledged(
+        emitted_tiles=[2],
+        accepted_tiles=[2],
+        active_scope=[2],
+        presented_identities={9: "unrelated"},
+    ) == frozenset({2})
+
+
+def test_stale_report_confirms_and_parks_nothing(lc):
+    _evaluated(lc, 6)
+    lc.upsert_emitted(6)
+    assert lc.commit_acknowledged(
+        emitted_tiles=[6], accepted_tiles=[6], active_scope=[], stale=True
+    ) == frozenset()
+    assert lc.record(6).presentation is not Presentation.PRESENTED
+    assert 6 not in lc.parked_tiles
 
 
 def test_rearm_on_entering_active_scope(lc):
@@ -294,4 +357,5 @@ def test_full_tile_story(lc):
         "parked": 0,
         "presented": 1,
         "dangling_claims": 0,
+        "identity_rejections": 0,
     }

@@ -165,6 +165,10 @@ class MontageRuntimeDiagnostics:
     # Migration parity: legacy collections that disagree with the machine's
     # mirrored semantic axis (must trend to 0 before P2 deletes them).
     lifecycle_semantic_mismatches: int = 0
+    # P2 identity-aware acknowledgement: acks the machine refused because the
+    # backend slot held a different payload identity than emitted.  Nonzero =
+    # a false-ack door tried to open and was closed structurally.
+    lifecycle_identity_rejections: int = 0
     # Tiles whose payload is dirty (queued for re-presentation).
     dirty_payload_tiles: int = 0
     # Stall-watchdog rescues (ADR 0051): each one means every montage pump
@@ -864,6 +868,7 @@ _MONTAGE_COVERED = frozenset(
         "lifecycle_evaluating",
         "lifecycle_dangling_claims",
         "lifecycle_semantic_mismatches",
+        "lifecycle_identity_rejections",
         "dirty_payload_tiles",
         "backend_stale_identities",
         "pending_completed_tiles",
@@ -1015,6 +1020,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"evaluating={montage.lifecycle_evaluating} "
             f"dangling_claims={montage.lifecycle_dangling_claims} "
             f"mismatches={montage.lifecycle_semantic_mismatches} "
+            f"identity_rejections={montage.lifecycle_identity_rejections} "
             f"dirty={montage.dirty_payload_tiles} "
             f"BACKEND_STALE={montage.backend_stale_identities}"
         ),
