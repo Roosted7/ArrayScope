@@ -416,6 +416,41 @@ def montage_session_key(document_key, view_state, viewport_plan: MontageViewport
     )
 
 
+def montage_tile_semantic_key(document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut) -> tuple[object, ...]:
+    """Identity of one montage tile's TEXELS, shared across index windows.
+
+    ``montage_session_key`` includes the sibling-index selection
+    (``all_indices``) and layout gap — correct for session identity, but
+    they change WHICH tiles exist, never what a given source index contains.
+    Keying pyramid floors/previews by the session key made every index-window
+    change rename identical texels, so previously computed tiles refilled
+    cold from black (field defect 2026-07-05: missing corner tiles that
+    "were there in other views").
+    """
+
+    if viewport_plan.axis is None:
+        scope_state = view_state.with_montage_axis(None, columns=None, indices=None, text=None)
+        axis_key = None
+    else:
+        scope_state = view_state.with_montage_axis(
+            viewport_plan.axis,
+            columns=None,
+            indices=None,
+            text=None,
+        )
+        axis_key = int(viewport_plan.axis)
+    lut_key = None if colormap_lut is None else np.asarray(colormap_lut).tobytes()
+    return (
+        "montage_tile_semantics",
+        document_key,
+        scope_state,
+        axis_key,
+        tuple(int(value) for value in viewport_plan.tile_shape),
+        lut_key,
+        bool(viewport_plan.shader_display),
+    )
+
+
 def montage_viewport_retarget_policy(capabilities, display_mode: str) -> MontageViewportRetargetPolicy:
     """Return viewport-retarget behaviour for the current presentation surface.
 

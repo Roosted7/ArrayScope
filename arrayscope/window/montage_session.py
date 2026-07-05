@@ -198,6 +198,9 @@ class MontageRenderSession:
     # its drawn slot ACTUALLY holds (ADR 0051 rule 1).  Presentation
     # convergence compares against this, never against session bookkeeping.
     last_presented_identities: dict = field(default_factory=dict)
+    # Window-agnostic texel identity base for pyramid floors/previews
+    # (montage_tile_semantic_key); falls back to session key when unset.
+    semantic_key: object = None
     # Bounded retry state for identity reconciliation:
     # tile -> ((shown_identity, wanted_identity), attempts).
     _reconcile_attempts: dict = field(default_factory=dict)
@@ -703,14 +706,16 @@ class MontageRenderSession:
     def tile_semantic_source_id(self, source_index) -> tuple[object, ...]:
         """Semantic content identity of one montage tile (ADR 0050).
 
-        Owned by the session: ``self.key`` already carries the document key
-        (base identity, revision, steps), scoped view state, montage axis,
-        and presentation-affecting inputs, so equal keys mean equal source
-        texels for a given source index — across rendered-tile rebuilds and
-        session recreations alike.
+        Keyed by ``semantic_key`` (montage_tile_semantic_key), which is
+        window-agnostic: equal keys mean equal source texels for a given
+        source index across rendered-tile rebuilds, session recreations, AND
+        index-window changes — floors/previews computed under one window
+        present instantly under another (field defect 2026-07-05).  Falls
+        back to the session key for sessions built without one (tests).
         """
 
-        return ("montage-tile", self.key, int(source_index))
+        base = self.semantic_key if self.semantic_key is not None else self.key
+        return ("montage-tile", base, int(source_index))
 
     def _pyramid_key_for(self, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
         return montage_lod.pyramid_key_for(self, rendered, demand=demand, level=level)

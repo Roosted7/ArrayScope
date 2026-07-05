@@ -888,6 +888,46 @@ def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholde
     assert replaced.quality == "exact"
 
 
+def test_floors_survive_index_window_changes_via_semantic_key():
+    """Field defect 2026-07-05 (missing corner tiles 'there in other views'):
+    the pyramid identity was keyed by the session key, which includes the
+    sibling-index selection — every index-window change renamed identical
+    texels and refilled previously computed tiles cold from black.  Sessions
+    sharing a window-agnostic ``semantic_key`` must share floors."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    semantic = ("texels", "doc", 2)
+
+    session_a = _session(pyramid=pyramid, count=2)
+    session_a.semantic_key = semantic
+    session_a.key = ("window", "4:104")
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    rendered = session_a.rendered_tiles[1]
+    key = pyramid_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=session_a.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+
+    session_b = _session(pyramid=pyramid, count=2)
+    session_b.semantic_key = semantic
+    session_b.key = ("window", "100:200")
+    del session_b.rendered_tiles[1]
+    session_b.dirty_payloads.pop(1, None)
+
+    from arrayscope.window import montage_lod
+
+    best = montage_lod.best_floor_key(session_b, 1)
+    assert best is not None, "floor computed under window A must be resident under window B"
+    assert best[1] == 2
+
+    _state, delta = session_b.build_tile_presentation({})
+    payload = delta.upserts.get(1) or session_b.display_tile_payloads.get(1)
+    assert payload is not None and payload.quality == "preview"
+
+
 def test_backend_reported_identities_drive_convergence():
     """ADR 0051 rule 1, ground-truth edition (field defects 2026-07-05): the
     session's own acknowledgement records lied in every stale-LOD wedge, so

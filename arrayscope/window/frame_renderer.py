@@ -68,6 +68,7 @@ from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     effective_montage_columns,
     montage_session_key,
+    montage_tile_semantic_key,
     montage_viewport_intent,
     montage_viewport_retarget_policy,
     montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
@@ -522,6 +523,9 @@ class FrameRenderMixin:
         session = MontageRenderSession(
             session_id=session_id,
             key=session_key,
+            semantic_key=montage_tile_semantic_key(
+                _document_key(document), view_state, viewport_plan, colormap_lut
+            ),
             render_generation=render_generation,
             level_key=level_key,
             level_expected_indices=tuple(int(index) for index in all_indices),
@@ -580,6 +584,7 @@ class FrameRenderMixin:
         # wrong-LOD tiles).  Balance them before the replacement takes over.
         montage_lod.release_session_claims(getattr(self, "_montage_session", None))
         self._montage_session = session
+        self._ensure_montage_watchdog()
         apply_restored_viewport = getattr(self.win, "_apply_viewport_continuity_when_ready", None)
         if callable(apply_restored_viewport):
             apply_restored_viewport()
@@ -2330,6 +2335,87 @@ class FrameRenderMixin:
 
     def _schedule_montage_lod_materializations(self, session) -> None:
         return montage_lod.schedule_materializations(self, session)
+
+    # -- stall watchdog (ADR 0051) -------------------------------------------
+    # Every montage pump is completion-driven: tile scheduling advances on
+    # eval completions, repairs run on the commit flush, the settle repair
+    # runs as the last work drains.  When the final in-flight work dies
+    # during an interaction (supersession, declined admission), no event is
+    # left to drive anything and the session freezes mid-fill (field defect
+    # 2026-07-05: 35 pending tiles frozen for 45 s, blank tiles on screen).
+    # The watchdog runs ONLY while a session is unsettled, costs a few dict
+    # length reads per second, re-kicks every pump after one tick with zero
+    # progress, and stops the moment the session settles (idle stays 0%).
+
+    def _ensure_montage_watchdog(self) -> None:
+        timer = getattr(self, "_montage_watchdog_timer", None)
+        if timer is None:
+            timer = Qt.QtCore.QTimer(self)
+            timer.setInterval(1000)
+            timer.timeout.connect(self._montage_watchdog_tick)
+            self._montage_watchdog_timer = timer
+            self._montage_watchdog_state = None
+        if not timer.isActive():
+            self._montage_watchdog_state = None
+            timer.start()
+
+    def _montage_watchdog_stop(self) -> None:
+        timer = getattr(self, "_montage_watchdog_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._montage_watchdog_state = None
+
+    @Qt.QtCore.Slot()
+    def _montage_watchdog_tick(self) -> None:
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._montage_session_is_current(session):
+            self._montage_watchdog_stop()
+            return
+        pending = len(session.pending_tiles)
+        evaluating = len(session.lifecycle.evaluating_tiles)
+        active = len(session.active_tile_requests)
+        dirty = len(session.dirty_payloads)
+        upserts = len(session.pending_payload_upserts)
+        lod_pending = len(getattr(session, "pending_lod_requests", ()) or ())
+        unsettled = bool(
+            pending
+            or evaluating
+            or active
+            or dirty
+            or upserts
+            or lod_pending
+            or session.flush_pending
+            or session.final_commit_pending
+        )
+        if not unsettled:
+            self._montage_watchdog_stop()
+            return
+        signature = (
+            int(session.session_id),
+            pending,
+            evaluating,
+            active,
+            dirty,
+            upserts,
+            lod_pending,
+            len(session.presented_tiles),
+            len(session.rendered_tiles),
+        )
+        previous = getattr(self, "_montage_watchdog_state", None)
+        self._montage_watchdog_state = signature
+        if previous != signature:
+            return  # work is progressing; stay armed.
+        self._montage_stall_repairs = int(getattr(self, "_montage_stall_repairs", 0) or 0) + 1
+        repaired = session.requeue_orphaned_loading_tiles()
+        if repaired:
+            self._montage_orphaned_tiles_repaired = (
+                int(getattr(self, "_montage_orphaned_tiles_repaired", 0) or 0) + int(repaired)
+            )
+        self._schedule_montage_tiles(session)
+        if session.refresh_lod_for_viewport() or dirty or upserts:
+            self._schedule_montage_presentation_commit(session, force=False)
+        if getattr(session, "pending_lod_requests", None):
+            self._schedule_montage_lod_materializations(session)
 
     def _on_montage_lod_level_ready(self, session_id, session_key, tile_number) -> None:
         return montage_lod.on_level_ready(self, session_id, session_key, tile_number)
