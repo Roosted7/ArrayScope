@@ -191,13 +191,25 @@ The Lifecycle diagnostics line classifies any stale-presentation report; check i
   replacement inherits the backend identity map; the machine records explicit
   `TileRecord.resigned` `(wanted, shown)` pairs, cleared by fresh evaluation — the build-side
   skip and the repair query match only those.
-  **P2 remaining, in priority order:** (1) the session-rebirth cost — cached-scrub rebuild is
-  still ~50 ms/step (resolve + initial commit of ~100 cached payloads per new session; the
-  epoch/persistent-session restructure or budgeted initial commits are the candidate cures);
-  (2) dispatch derived from machine state (records in PLANNED/dirty imply scheduled work) so
-  lost wakeups are impossible by construction and the 1 Hz stall watchdog becomes an
-  assertion, not a repair; (3) `loading_tiles` / `active_tile_requests` / `skipped_tiles`
-  become views and stage fan-in reports through events.
+  **Session-rebirth cost (landed 2026-07-05 #3):** both candidate cures shipped.  A same-key
+  re-render reuses the live session outright (no rebirth, no flush; a converged re-render is a
+  pinned no-op), and an index-window scrub step with identical layout geometry retargets the
+  session in place — new `session_id`/`key` (so stale completions park exactly as on a
+  rebirth) while the lifecycle machine, backend acknowledgement state, and drawn payloads
+  survive; source changes route through the ordinary `mark_materialized`/demotion seams and
+  the budgeted flush converges them.  Payload wrapper construction is bounded by the same
+  admission budget that caps uploads (unbuilt tiles stay dirty; the backlog continuation is
+  the consumer, per rule 6), and the seed-only previous-frame/retained-store scans are skipped
+  once a session has presented.  Sessions with pending level refinement still rebirth until
+  the machine owns level convergence.  Kill switch `ARRAYSCOPE_DISABLE_SESSION_RETARGET`;
+  counters `_montage_session_reuses` / `_montage_session_retargets` / retarget-reject reasons.
+  Warm scrub step: ~50 → ~36 ms measured; the remaining cost is the delta-commit walk itself
+  (vispy layer update, overlays, full-image apply) — queued with dispatch below.
+  **P2 remaining, in priority order:** (1) dispatch derived from machine state (records in
+  PLANNED/dirty imply scheduled work) so lost wakeups are impossible by construction and the
+  1 Hz stall watchdog becomes an assertion, not a repair; (2) `loading_tiles` /
+  `active_tile_requests` / `skipped_tiles` become views and stage fan-in reports through
+  events; (3) the per-commit delta walk cost.
 - **P2-adjacent (landed 2026-07-05, the few-Hz-scroll cure):** rule 4 applied at the
   architecture level — the interaction path is cheap by construction.  Dimension scrubbing
   notes viewport interaction (it was invisible to every gate); during a burst, stage planning

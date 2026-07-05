@@ -58,3 +58,7 @@ tests/artifacts/
 
 # In-folder worktrees
 .worktrees/
+# Local diagnostics/profiling artifacts (probe runs, JSONL captures)
+arrayscope-diagnostics-*.jsonl
+*.perf
+tmp_probes/*.log
