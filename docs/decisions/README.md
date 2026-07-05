@@ -77,6 +77,8 @@ Status terminology:
 | [0046](0046-evidence-first-performance-strategy.md) | Evidence-first performance strategy | Accepted; X5 decides physical strategies, backend defaults, and LOD from hardware traces and residency conformance. |
 | [0047](0047-auto-image-backend-selection.md) | Capability-probed automatic image backend selection | Accepted; `auto` resolves to VisPy on Linux with hardware GL (X5a traces), PyQtGraph everywhere else. |
 | [0048](0048-linked-window-sync.md) | Linked-window sync over local sockets | Implemented; per-facet window/level, dimension-indexing, operations, and ROI sync across separately started processes. |
+| [0050](0050-async-multi-resolution-tile-residency.md) | Async multi-resolution tile residency | Implemented for VisPy tiled scenes (`resident` default on VisPy); retained preview level implemented; reduce-before-ops consumer, PyQtGraph adoption, and ops-input LOD remain roadmap work. |
+| [0051](0051-single-owner-tile-lifecycle.md) | Single-owner tile lifecycle | Accepted; P1 + P2 core implemented (presentation/semantic axes authoritative, identity-aware acknowledgement, event-driven convergence); P3–P5 phased. |
 
 ## Adding or changing a decision
 

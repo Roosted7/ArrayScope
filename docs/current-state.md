@@ -31,10 +31,11 @@ Y1–Y3/X5 entries in the [roadmap](roadmap.md).
 | Out-of-core/lazy sources | Initial (ADR 0049) | Source protocol + budgeted read seam under slab/stage evaluation; memmap `.npy`/`.cfl` adapters; `load_path(lazy="auto")` maps large files. Chunked (Zarr/HDF5-like) adapters not started. |
 | PyQtGraph backend | Fallback default (ADR 0047) | Bounded CPU/item convergence; large item counts and level re-window drains remain costly (X5a fixed starvation: 272-tile level drag never converged, now ~4.3 s). Selected by `auto` wherever hardware GL is absent or traces are missing. |
 | VisPy backend | Auto-selected on Linux hardware GL (ADR 0047) | X5a Linux traces: first frame faster in every scenario (1.4–13×); level changes are uniform-only (272-tile level drag ~0.26 s vs ~8 s). Still unstable under software GL (Xvfb/llvmpipe) — do not treat CI GL runs as evidence. |
-| LOD | Resident default on VisPy (ADR 0050) | Async pyramid + per-class atlas residency; ingest reduction, presentation floor, semantic identity, settled idle (0% CPU verified live). Exact inspection stays native. PyQtGraph adoption, retained preview level, and ops-input LOD remain roadmap work. |
+| LOD | Resident default on VisPy (ADR 0050) | Async pyramid + per-class atlas residency; ingest reduction, presentation floor, retained preview level, semantic identity, settled idle (0% CPU verified live). Exact inspection stays native. PyQtGraph adoption, reduce-before-ops, and ops-input LOD remain roadmap work. |
+| Tile lifecycle | Single owner, machine-driven (ADR 0051, P1+P2 core) | Qt-free three-axis state machine in `presentation/tile_lifecycle.py`; presentation + semantic axes authoritative; identity-aware acknowledgement against backend slot identities; event-driven convergence. Residency axis (P3), per-slot mips (P4), PyQtGraph effects (P5) phased. |
 | Diagnostics/benchmarks | Good | Work-graph counters, JSONL, benchmark records; profilers drive the production window composition. |
 | Test suite | Repaired (v32) + contract coverage (Y2) | Host-independent, no `sys.modules` replacement; `test_imagesurface_contract.py` pins cross-backend semantics; architecture guards pin the Y1/Y3 invariants. |
-| Documentation/ADRs | Updated through ADR 0047 | Roadmap gates Y1–Y3 recorded as done; X5a Linux traces published in `reviews/x5a-hardware-telemetry-linux-wayland.md`; X5b–X5e remain open. |
+| Documentation/ADRs | Updated through ADR 0051 | Roadmap gates Y1–Y3 recorded as done; X5a Linux traces published in `reviews/x5a-hardware-telemetry-linux-wayland.md`; X5b delivered for montage tiled scenes by ADR 0051; X5c–X5e remain open. |
 
 ## What is working well
 
@@ -57,10 +58,10 @@ Y1–Y3/X5 entries in the [roadmap](roadmap.md).
 
 ## Material risks
 
-1. **Hardware evidence is still absent (X5).** Nothing measured in this
-   repository under Xvfb/software GL says anything about real GPU latency,
-   texture limits, Wayland, or interaction feel. VisPy claims remain
-   unproven either way.
+1. **Hardware evidence exists only for Linux (X5).** X5a produced real
+   Wayland/XWayland traces on Intel iGPU and NVIDIA dGPU; Windows and macOS
+   remain unmeasured, and Xvfb/software-GL runs still say nothing about real
+   GPU behavior. Backend-default claims beyond Linux remain unproven.
 2. **Histogram adapter remains version-sensitive** to private PyQtGraph API.
 3. **Physical upload paths are still per-backend** (`setImage`,
    `setTiledPresentation`, `setupUI`, the two `tiles.py`). That is by design

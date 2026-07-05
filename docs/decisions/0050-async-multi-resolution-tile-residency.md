@@ -2,7 +2,10 @@
 
 **Status:** Accepted and implemented for VisPy montage/tiled scenes (2026-07-04); default
 policy is `resident` on VisPy (Performance → Montage LOD), `native-only` elsewhere. The
-retained preview level below is accepted design, not yet implemented.
+retained preview level below is implemented (pinned preview pyramid cache, worker-side
+opportunistic fill, background preview walk); its preview-then-refine consumer
+(reduce-before-ops) remains open. The defect inventory from these landings motivated
+[ADR 0051](0051-single-owner-tile-lifecycle.md), which now owns the tile lifecycle.
 
 ## Context
 
@@ -216,7 +219,7 @@ ADR 0021 (scheduler v2), 0025/0026 (operation capabilities), 0027 (stage cache),
 scheduler), 0041 (LOD separation), 0044 (acknowledged residency), 0046 (evidence-first strategy),
 0049 (out-of-core sources).
 
-## Retained preview level (accepted design, not yet implemented)
+## Retained preview level (implemented 2026-07-04; reduce-before-ops consumer open)
 
 A fixed coarse "preview" level per dataset (chosen from data size and the memory budget,
 typically the level whose full-dataset footprint fits comfortably in the spare display
@@ -238,6 +241,8 @@ dataset is open. Consequences it must deliver:
   result tagged `quality="preview"` while the exact native pipeline computes; exact
   consumers refuse preview payloads (see reduce-before-ops note above).
 
-Implementation is gated on the reduce-before-ops consumer contract (quality-tagged
-payloads whose exact planes are not yet semantic-readable) so preview data can never
-leak into hover/ROI/profile/histogram reads.
+The landed implementation keeps preview payloads presentation-only (`quality="preview"`,
+invisible to hover/ROI/profile/histogram reads), so no preview data leaks into semantic
+consumers. The preview-then-refine bullet — running the op pipeline on reduced data first so
+first-ever evaluations show an instant coarse result instead of black until their stage
+computes — is the remaining open piece (the reduce-before-ops consumer contract).

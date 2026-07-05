@@ -1,7 +1,8 @@
 # 0051 — Single-owner tile lifecycle (presentation-pipeline rework)
 
-**Status:** Accepted (2026-07-04). Phase 1 (lifecycle core + presentation-axis ownership +
-shadow parity) implemented on `feature/lod-residency`; later phases tracked below.
+**Status:** Accepted (2026-07-04). P1 and the P2 core (presentation + semantic axes
+authoritative, identity-aware acknowledgement, event-driven convergence) implemented on
+`feature/lod-residency` as of 2026-07-05; later phases tracked below.
 
 ## Context
 
@@ -95,6 +96,14 @@ Rules the machine enforces structurally (each maps to a fixed defect):
 5. **Derived GPU state is invalidated at upload granularity.** The presentation axis records
    per-slot derived-state (mip) validity; a slot reuse or upsert marks exactly that slot
    dirty. Whole-atlas regeneration is forbidden (this is what re-enables mipmaps by default).
+6. **Convergence is event-driven.** Every piece of backend evidence — a commit report, an
+   inherited atlas state — has a consumer scheduled at the moment it arrives, never "the next
+   commit that happens to run". An acknowledgement that reveals a backend/machine identity
+   mismatch schedules its own bounded follow-up commit; a rebuilt session inherits the
+   backend's identity map instead of starting blind. A repair that only runs on event X while
+   the wedge forms after the last X is the defect, not bad luck. (Added 2026-07-05 after the
+   settled-wedge field defect: `backend_stale_identities` steady at idle with zero dirty
+   tiles, healed only by a lucky pan.)
 
 ### What the four writers become
 
@@ -133,7 +142,7 @@ elsewhere — Xvfb/software-GL is not evidence, per X5) extends the heartbeat pr
 ## Consequences
 
 - The corner-case stream stops being whack-a-mole: new features add events/effects, and the
-  five structural rules apply to them automatically.
+  six structural rules apply to them automatically.
 - `MontageRenderSession` shrinks toward plan + caches + revisions; diagnostics read one record
   per tile instead of correlating 15 collections.
 - X5c/X5d/X5e and PyQtGraph adoption land as machine extensions (scope events, region-refined
@@ -141,6 +150,21 @@ elsewhere — Xvfb/software-GL is not evidence, per X5) extends the heartbeat pr
 - Cost: a migration period where the machine shadows legacy state with parity assertions
   before each collection is deleted; honest about the roadmap rule — this is incremental
   conformance, not a big-bang rewrite.
+
+### Wedge triage (diagnostics contract)
+
+The Lifecycle diagnostics line classifies any stale-presentation report; check in this order:
+
+1. `lifecycle_identity_rejections > 0` — a false-acknowledgement door exists and the machine
+   caught it (working as designed; find and close the door). Persistent identical rejections
+   end in resignation, so a non-converging backend stays bounded and visible.
+2. `backend_stale_identities > 0` at idle with `dirty_payload_tiles == 0` — evidence arrived
+   but nothing consumed it: a missing convergence trigger (rule 6 violation).
+3. `backend_stale_identities > 0` with dirty tiles churning — the backend cannot converge;
+   check resignations before suspecting the machine.
+4. `stall_repairs > 0` / `last_stall_signature` — the watchdog rescued a dead pump. Every
+   rescue is a bug report (a completion path exited without rescheduling), not a fix;
+   machine-derived dispatch (P2) deletes the class and demotes the watchdog to an assertion.
 
 ## Phases
 
@@ -160,10 +184,20 @@ elsewhere — Xvfb/software-GL is not evidence, per X5) extends the heartbeat pr
   `evaluation_dropped`), so direct fixture writes stay correct and park eligibility reads
   `EVALUATED` — the `parkable_tiles` crutch is gone.  Build-side drawn-identity reconciliation
   defers to the machine's presented identity (no duplicate convergence loops).
-  **P2 remaining:** `loading_tiles` / `active_tile_requests` / `skipped_tiles` become views;
-  stage fan-in reports through events; dispatch derived from machine state (records in
-  PLANNED/dirty imply scheduled work) so lost wakeups are impossible by construction and the
-  1 Hz stall watchdog becomes an assertion, not a repair.
+  Rule 6 wired the same day (settled-wedge field defect): every acknowledgement queries
+  `backend_identity_mismatch_tiles()` and schedules a coalesced follow-up commit when
+  non-empty (`_montage_identity_repair_commits` counts them; bounded by resignation and
+  per-pair attempt limits, terminated when a no-op commit yields no report); session
+  replacement inherits the backend identity map; the machine records explicit
+  `TileRecord.resigned` `(wanted, shown)` pairs, cleared by fresh evaluation — the build-side
+  skip and the repair query match only those.
+  **P2 remaining, in priority order:** (1) the session-rebirth cost — cached-scrub rebuild is
+  still ~50 ms/step (resolve + initial commit of ~100 cached payloads per new session; the
+  epoch/persistent-session restructure or budgeted initial commits are the candidate cures);
+  (2) dispatch derived from machine state (records in PLANNED/dirty imply scheduled work) so
+  lost wakeups are impossible by construction and the 1 Hz stall watchdog becomes an
+  assertion, not a repair; (3) `loading_tiles` / `active_tile_requests` / `skipped_tiles`
+  become views and stage fan-in reports through events.
 - **P2-adjacent (landed 2026-07-05, the few-Hz-scroll cure):** rule 4 applied at the
   architecture level — the interaction path is cheap by construction.  Dimension scrubbing
   notes viewport interaction (it was invisible to every gate); during a burst, stage planning

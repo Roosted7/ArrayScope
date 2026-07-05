@@ -155,7 +155,11 @@ device-limit query (every record silently reported a 4096 fallback), two O(n²) 
 1180 ms → ~130 ms), and the PyQtGraph level-refinement starvation on large montages (a 272-tile
 level drag never converged; now ~4.3 s). [ADR 0047](decisions/0047-auto-image-backend-selection.md)
 adds the resulting `auto` backend choice: VisPy on Linux with hardware GL, PyQtGraph everywhere
-else. Windows/macOS traces and X5b–X5e remain open.
+else. **X5b done for montage tiled scenes (2026-07-05)** via
+[ADR 0051](decisions/0051-single-owner-tile-lifecycle.md): presentation state is a machine whose
+only path to `presented` is a backend-acknowledged commit, and acknowledgement is identity-aware
+(backend slot identities vs. emitted payload identities, causally bound reports). Windows/macOS
+traces and X5c–X5e remain open.
 
 **Goal:** base GPU, backend-default, singleton/direct fast-path, viewport-residency, and
 multi-resolution decisions on real device behavior.
@@ -165,10 +169,12 @@ Ordered gates:
 1. **X5a — Telemetry baseline.** Record queried texture/format limits, proven allocation outcomes,
    upload timings, accepted/rejected tile counts, event-loop gaps, RSS, and context-loss/fallback
    behavior.
-2. **X5b — Acknowledged residency.** Treat committed tiled-scene residency as backend-acknowledged
-   state only; requested upserts are not resident until accepted by the backend. Add conformance
-   coverage for partially accepted, deferred, rejected, evicted, and context-lost tiled commits so
-   `DisplayScene.resident_region_ids` follows acknowledged payloads.
+2. **X5b — Acknowledged residency (done for montage, 2026-07-05).** Treat committed tiled-scene
+   residency as backend-acknowledged state only; requested upserts are not resident until accepted
+   by the backend. Delivered by ADR 0051 P1+P2 for montage tiled scenes: identity-aware,
+   causally-bound acknowledgement is the machine invariant, with conformance coverage for partial
+   acceptance, declines, parking, stale reports, and session replacement. Normal-image tiled
+   scenes inherit this when X5c routes them through the same machine.
 3. **X5c — Viewport-scoped tiled scenes.** Change viewport retarget scheduling from montage-mode
    checks to tiled-scene/storage checks before enabling visible-only active regions for internally
    tiled normal images.
