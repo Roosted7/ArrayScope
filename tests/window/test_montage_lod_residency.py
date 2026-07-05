@@ -888,6 +888,38 @@ def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholde
     assert replaced.quality == "exact"
 
 
+def test_report_bound_to_an_older_delta_acknowledges_nothing():
+    """Field defect 2026-07-05 (JSONL 112841): a skipped/superseded commit
+    leaves the committer's last report pointing at an OLDER delta; every ack
+    site fetches that attribute, so the new delta's upserts were falsely
+    accepted by tile-number intersection — 100 level-swap payloads
+    acknowledged with zero layer uploads, stale LOD until the next real
+    commit.  A report causally bound to a different delta must change
+    nothing: dirty entries stay armed for the next flush."""
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
+    _state, delta = session.build_tile_presentation({})
+    assert 0 in session.dirty_payloads and 1 in session.dirty_payloads
+
+    stale_report = TileCommitReport(
+        presented_tiles=(0, 1),
+        delta_key=(int(delta.base_revision) + 5, int(delta.target_revision) + 5),
+    )
+    acknowledged = session.acknowledge_tile_presentation(delta, stale_report)
+    assert dict(acknowledged.payloads) == {}, "mismatched report must acknowledge nothing"
+    assert 0 in session.dirty_payloads and 1 in session.dirty_payloads, "dirty stays armed"
+    assert session.parked_dirty_payloads == frozenset(), "and nothing parks"
+
+    bound = TileCommitReport(
+        presented_tiles=(0, 1),
+        committed_upserts=(0, 1),
+        delta_key=(int(delta.base_revision), int(delta.target_revision)),
+    )
+    acknowledged2 = session.acknowledge_tile_presentation(delta, bound)
+    assert set(acknowledged2.payloads) == {0, 1}
+    assert not session.dirty_payloads
+
+
 def test_drawn_tile_with_outdated_acknowledged_identity_represents_and_rejoins_active():
     """Field defect 2026-07-05 (JSONL 110937, sid=81): level-2 swap upserts
     for near-scope tiles were declined and parked while the backend kept

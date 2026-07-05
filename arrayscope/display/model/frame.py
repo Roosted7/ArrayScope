@@ -144,8 +144,19 @@ class TileCommitReport:
     total_ms: float = 0.0
     stale: bool = False
     clear_reason: str = ""
+    # Causal binding to the delta this report acknowledges: (base_revision,
+    # target_revision) of the committed TilePresentationDelta.  Skipped or
+    # superseded commits leave the committer's last report pointing at an
+    # OLDER delta; acknowledging a new delta against it invents acceptance
+    # (ADR 0051 rule 1; field defect 2026-07-05, JSONL 112841).  None means
+    # unbound (legacy constructions/tests): the causality check is skipped.
+    delta_key: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
+        if self.delta_key is not None:
+            object.__setattr__(
+                self, "delta_key", (int(self.delta_key[0]), int(self.delta_key[1]))
+            )
         object.__setattr__(self, "presented_tiles", frozenset(int(tile) for tile in self.presented_tiles))
         if self.committed_upserts is not None:
             object.__setattr__(
@@ -174,7 +185,16 @@ class TileCommitReport:
     def cold_count(self) -> int:
         return int(self.texture_uploads + self.pyqtgraph_items_created + self.cpu_windowed_tiles)
 
+    def acknowledges(self, delta: "TilePresentationDelta") -> bool:
+        """Whether this report was produced by committing exactly ``delta``."""
+
+        if self.delta_key is None:
+            return True
+        return self.delta_key == (int(delta.base_revision), int(delta.target_revision))
+
     def accepted_upserts(self, delta: "TilePresentationDelta") -> set[int]:
+        if not self.acknowledges(delta):
+            return set()
         if self.committed_upserts is not None:
             return set(self.committed_upserts.intersection(delta.upserts))
         return set(self.presented_tiles.intersection(delta.upserts))
@@ -262,7 +282,7 @@ class TilePresentationState:
 
         if not isinstance(report, TileCommitReport):
             raise TypeError("tile presentation acknowledgement requires a TileCommitReport")
-        if bool(report.stale) or int(delta.base_revision) != int(self.revision):
+        if bool(report.stale) or not report.acknowledges(delta) or int(delta.base_revision) != int(self.revision):
             return self
         accepted_upserts = {
             int(tile): payload

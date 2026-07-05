@@ -1032,6 +1032,13 @@ class MontageRenderSession:
     ) -> TilePresentationState:
         if not isinstance(report, TileCommitReport):
             raise TypeError("tile presentation acknowledgement requires a TileCommitReport")
+        if not report.acknowledges(delta):
+            # ADR 0051 rule 1 (field defect 2026-07-05, JSONL 112841): the
+            # committer's last report belongs to an OLDER delta — this delta
+            # never reached the backend (skipped/superseded commit).
+            # Acknowledge nothing and park nothing: every dirty entry stays
+            # armed, so the next flush re-presents through a real commit.
+            return self.tile_presentation_state
         level_delta_stale = bool(
             self.has_pending_level_update()
             and dict(delta.upserts)

@@ -2664,8 +2664,14 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     if report_upload_bytes <= 0 and updated_tiles:
         report_upload_bytes = sum(int(getattr(payloads.get(int(tile)), "nbytes", 0) or 0) for tile in updated_tiles)
     resident = max(0, max(existing_items, relocated))
+    delta_key = (
+        None
+        if tile_delta is None
+        else (int(getattr(tile_delta, "base_revision", 0)), int(getattr(tile_delta, "target_revision", 0)))
+    )
     return TileCommitReport(
         presented_tiles=presented,
+        delta_key=delta_key,
         committed_upserts=committed_upserts,
         removed_tiles=frozenset(getattr(tile_delta, "removals", ()) or ()),
         texture_uploads=report_uploads,
