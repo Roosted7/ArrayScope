@@ -493,6 +493,29 @@ class FrameRenderMixin:
         self._last_montage_cache_resolve_ms = (perf_counter() - cache_start) * 1000.0
         self._montage_cached_tiles_last_session = len(cached_tiles)
         self._montage_missing_tiles_last_session = len(missing_tiles)
+        if self._maybe_retarget_montage_session(
+            getattr(self, "_montage_session", None),
+            document=document,
+            axis=axis,
+            view_state=view_state,
+            viewport_plan=viewport_plan,
+            plan=plan,
+            policy=policy,
+            colormap_lut=colormap_lut,
+            window_mode=window_mode,
+            force_auto=force_auto,
+            user_levels=user_levels,
+            output_dtype=output_dtype,
+            shader_display=shader_display,
+            cached_tiles=cached_tiles,
+            missing_tiles=missing_tiles,
+            skipped_tiles=skipped_tiles,
+            all_indices=all_indices,
+            display_tiles=display_tiles,
+            current_range=current_range,
+            viewport_shape=viewport_shape,
+        ):
+            return
         render_generation = self._capture_render_generation()
         stage_plan_start = perf_counter()
         # Interaction fast path (ADR 0051 rule 4 at the architecture level):
@@ -697,6 +720,289 @@ class FrameRenderMixin:
             self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
             self._schedule_montage_attached_stage_waits(session)
             self._schedule_montage_tiles(session)
+
+    def _maybe_retarget_montage_session(
+        self,
+        previous_session,
+        *,
+        document,
+        axis,
+        view_state,
+        viewport_plan,
+        plan,
+        policy,
+        colormap_lut,
+        window_mode,
+        force_auto,
+        user_levels,
+        output_dtype,
+        shader_display,
+        cached_tiles,
+        missing_tiles,
+        skipped_tiles,
+        all_indices,
+        display_tiles,
+        current_range,
+        viewport_shape,
+    ) -> bool:
+        """Retarget the live session to a new index window instead of a rebirth.
+
+        ADR 0051 P2 (session-rebirth cost): an index-window scrub step with
+        identical layout geometry, viewport, and presentation inputs reuses
+        the session object — the backend acknowledgement state and drawn
+        payloads survive, and the budgeted flush machinery converges the
+        content.  Stage planning for missing tiles always goes through the
+        deferred-planning continuation (it runs on the next event-loop turn
+        outside a burst).  Returns True when the retarget handled the step.
+
+        Kill switch: ``ARRAYSCOPE_DISABLE_SESSION_RETARGET``.
+        """
+
+        def _reject(reason: str) -> bool:
+            self._montage_session_retarget_last_reject = reason
+            rejects = getattr(self, "_montage_session_retarget_rejects", None)
+            if rejects is None:
+                rejects = {}
+                self._montage_session_retarget_rejects = rejects
+            rejects[reason] = int(rejects.get(reason, 0)) + 1
+            return False
+
+        session = previous_session
+        if session is None or session is not getattr(self, "_montage_session", None):
+            return _reject("no-session")
+        if axis is None or getattr(session, "montage_axis", None) is None:
+            # Normal sliced images share this tiled path with axis=None; a
+            # slice change is new semantic content behind an unchanged
+            # layout, not an index-window move.  Only true montage sessions
+            # retarget.
+            return _reject("no-axis")
+        if os.environ.get("ARRAYSCOPE_DISABLE_SESSION_RETARGET"):
+            return _reject("kill-switch")
+        if not bool(getattr(session, "display_committed", False)):
+            return _reject("uncommitted")
+        if getattr(session, "montage_axis", None) != axis:
+            return _reject("axis")
+        if bool(force_auto):
+            return _reject("force-auto")
+        if bool(skipped_tiles) or bool(getattr(session, "skipped_tiles", None)):
+            return _reject("skipped-tiles")
+        if _document_key(session.document) != _document_key(document):
+            return _reject("document")
+        if session.lod_policy_mode != self._montage_lod_policy_mode():
+            return _reject("lod-policy")
+        if session.window_mode != window_mode:
+            return _reject("window-mode")
+        if session.user_levels_override != user_levels:
+            return _reject("user-levels")
+        if session.colormap_lut is not colormap_lut:
+            return _reject("colormap")
+        if bool(getattr(session, "shader_display", False)) != bool(shader_display):
+            return _reject("shader-display")
+        if session.output_dtype != np.dtype(output_dtype):
+            return _reject("dtype")
+        if bool(session.rgb) != bool(view_state.channel == ChannelMode.COMPLEX):
+            return _reject("rgb")
+        if session.has_pending_level_update() and session.has_stale_level_presentations():
+            # A pending level refinement keeps re-upserting stale tiles; the
+            # rebirth path resets that bookkeeping (pinned behavior).  Reuse
+            # only settled sessions until level convergence is owned by the
+            # machine (ADR 0051 P2 remaining).
+            return _reject("level-pending")
+        previous_geometry = getattr(session.plan, "geometry", None)
+        geometry = getattr(plan, "geometry", None)
+        if previous_geometry is None or geometry is None:
+            return _reject("geometry-missing")
+        if (
+            tuple(previous_geometry.tile_shape) != tuple(geometry.tile_shape)
+            or int(previous_geometry.columns) != int(geometry.columns)
+            or int(previous_geometry.rows) != int(geometry.rows)
+            or int(previous_geometry.gap) != int(geometry.gap)
+            or len(previous_geometry.indices) != len(geometry.indices)
+        ):
+            return _reject("geometry")
+        if tuple(session.viewport_shape) != tuple(viewport_shape):
+            return _reject("viewport-shape")
+        if session.view_range != current_range:
+            return _reject("view-range")
+        session_key = montage_session_key(
+            _document_key(document), view_state, viewport_plan, colormap_lut
+        )
+        if session_key == session.key:
+            # Same montage identity with every presentation input equal: the
+            # live session already represents this render request.  A rebirth
+            # here re-resolves caches, re-seeds payloads, and force-commits
+            # the whole scene for nothing — this same-key rebirth on every
+            # re-render of a converged montage was the dominant share of the
+            # "cached scrub ~50 ms/step" cost (session-rebirth class, ADR
+            # 0051 P2).  Refresh the generation stamp so in-flight
+            # completions stay current, commit anything dirty, and let the
+            # standing machinery converge.
+            self._montage_session_reuses = (
+                int(getattr(self, "_montage_session_reuses", 0) or 0) + 1
+            )
+            session.render_generation = self._capture_render_generation()
+            self._montage_viewport_update_token = None
+            self._ensure_montage_watchdog()
+            reuse_commit_start = perf_counter()
+            try:
+                # Only genuinely pending presentation work commits here; the
+                # flush/level continuations own their own pacing, and a
+                # settled re-render must stay a true no-op (zero item
+                # updates) exactly like a rebirth that reseeds identical
+                # payloads.
+                # Only genuinely pending presentation work commits here; the
+                # flush/level continuations own their own pacing, and a
+                # settled re-render must stay a true no-op.
+                if (
+                    session.dirty_payloads
+                    or session.pending_removals
+                    or session.pending_payload_upserts
+                    or not session.display_committed
+                ):
+                    self._commit_montage_session_presentation(session, force=True)
+            finally:
+                self._last_montage_initial_commit_ms = (
+                    perf_counter() - reuse_commit_start
+                ) * 1000.0
+            self._last_montage_stage_plan_ms = 0.0
+            self._last_montage_session_setup_ms = 0.0
+            if session.defer_side_panels or _viewport_interaction_active(self):
+                self.win._deferred_side_panel_refresh_pending = True
+            else:
+                self.win._update_operation_dock()
+            return True
+        # Change detection uses the same memoized semantic key batch that the
+        # lazy tile_source_ids fill uses, so unchanged tiles are exact hits.
+        try:
+            tile_key_for = self.win.operation_evaluator.montage_tile_key_batch(
+                colormap_lut=colormap_lut,
+                document=document,
+                shader_display=bool(shader_display),
+            )
+            new_source_ids = {
+                int(tile.montage_index): tile_key_for(tile.view_state)
+                for tile in tuple(getattr(plan, "tiles", ()) or ())
+            }
+        except Exception:
+            return False
+        semantic_key = montage_tile_semantic_key(
+            _document_key(document), view_state, viewport_plan, colormap_lut
+        )
+        level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
+        frame_plan = self._montage_frame_planner().plan(
+            target=FrameTarget(
+                semantic_key=session_key,
+                viewport_key=current_range,
+                presentation_key=(str(window_mode), normalize_bounds(user_levels), bool(force_auto)),
+                quality="exact-visible",
+            ),
+            view_state=view_state,
+            display_shape=plan.display_shape,
+            backend_capabilities=image_view_backend_capabilities(self.win.img_view),
+            viewport_shape=viewport_shape,
+            view_range=current_range,
+            memory_policy=policy,
+            montage_plan=plan,
+        )
+        render_generation = self._capture_render_generation()
+        # Undrained pyramid claims from the old window are balanced exactly as
+        # on a rebirth; source identities are window-agnostic, so re-plans
+        # re-claim cheaply.
+        montage_lod.release_session_claims(session)
+        session_id = int(getattr(self, "_montage_session_id", 0)) + 1
+        self._montage_session_id = session_id
+        setup_start = perf_counter()
+        stats = session.retarget_index_window(
+            session_id=session_id,
+            key=session_key,
+            semantic_key=semantic_key,
+            level_key=level_key,
+            render_generation=render_generation,
+            view_state=view_state,
+            plan=plan,
+            frame_plan=frame_plan,
+            all_indices=all_indices,
+            new_source_ids=new_source_ids,
+            cached_tiles={
+                int(rendered.tile.montage_index): rendered for rendered in cached_tiles
+            },
+            visible_tiles=tuple(display_tiles),
+        )
+        for tile, result in stats["stale_completions"]:
+            self._store_reusable_montage_tile_result(
+                tile,
+                result,
+                document=document,
+                montage_axis=axis,
+                colormap_lut=colormap_lut,
+                shader_display=shader_display,
+            )
+        session.force_auto = bool(force_auto)
+        session.user_levels_override = user_levels
+        session.stage_fan_in = StageFanInState()
+        session.stage_planning_deferred = bool(missing_tiles)
+        session.deferred_missing_tiles = tuple(missing_tiles)
+        session.tile_compute_cache_hits = int(stats["hits"])
+        session.tile_compute_waiting_for_stage = 0
+        session.stage_backed_tiles_pending = 0
+        session.lead_direct_tiles = 0
+        session.retained_stage_index = None
+        session.retained_stage_decision = "deferred-retarget"
+        session.repeated_expensive_stage_per_tile = False
+        if missing_tiles:
+            self._montage_stage_plans_deferred = (
+                int(getattr(self, "_montage_stage_plans_deferred", 0) or 0) + 1
+            )
+        self._montage_session_retargets = (
+            int(getattr(self, "_montage_session_retargets", 0) or 0) + 1
+        )
+        self._montage_cached_tiles_last_session = int(stats["hits"])
+        self._montage_missing_tiles_last_session = len(missing_tiles)
+        self._montage_viewport_update_token = None
+        self._ensure_montage_watchdog()
+        self._ensure_montage_level_stats(level_key, expected_indices=all_indices)
+        self._queue_montage_cached_level_stats(session, tuple(cached_tiles), seed_if_empty=True)
+        self._last_montage_stage_plan_ms = 0.0
+        self._last_montage_session_setup_ms = (perf_counter() - setup_start) * 1000.0
+        _complete_inline_work(
+            self,
+            WorkItem(
+                key=("montage_visible_planning", session.key, int(session.session_id)),
+                lane=WorkLane.VISIBLE_PLANNING,
+                frame_target=session.frame_plan.target,
+                supersession_key=("montage-visible", session.key),
+                supersession_value=int(session.session_id),
+                estimated_cpu_ms=float(self._last_montage_viewport_plan_ms or 0.0)
+                + float(self._last_montage_cache_resolve_ms or 0.0)
+                + float(self._last_montage_session_setup_ms or 0.0),
+                estimated_bytes=0,
+            ),
+        )
+        initial_commit_start = perf_counter()
+        try:
+            self._commit_montage_session_presentation(session, force=True)
+        finally:
+            self._last_montage_initial_commit_ms = (
+                perf_counter() - initial_commit_start
+            ) * 1000.0
+        if session.defer_side_panels or _viewport_interaction_active(self):
+            self.win._deferred_side_panel_refresh_pending = True
+        else:
+            self.win._update_operation_dock()
+        if session.stage_planning_deferred:
+            if (
+                _viewport_interaction_active(self)
+                and self._montage_lod_policy_mode() == LOD_POLICY_RESIDENT
+                and not os.environ.get("ARRAYSCOPE_DISABLE_SCRUB_FASTPATH")
+            ):
+                # Mid-burst under the resident policy: floors carry the
+                # screen; the landing step plans (deferred continuation).
+                self._schedule_deferred_montage_planning(session)
+            else:
+                # Single step, or a policy without floors: plan inline so
+                # evaluations start within this call, like a rebirth.
+                self._plan_deferred_montage_stages_now(session)
+        return True
 
     def _resolve_montage_tiles_from_cache(
         self,
@@ -1561,6 +1867,11 @@ class FrameRenderMixin:
             # the next scrub step supersede this session instead.
             self._schedule_deferred_montage_planning(session, delay_ms=80)
             return
+        self._plan_deferred_montage_stages_now(session)
+
+    def _plan_deferred_montage_stages_now(self, session) -> None:
+        """Run the deferred stage planning immediately (no interaction gate)."""
+
         missing_tiles = tuple(getattr(session, "deferred_missing_tiles", ()) or ())
         session.stage_planning_deferred = False
         session.deferred_missing_tiles = ()
@@ -2691,28 +3002,35 @@ class FrameRenderMixin:
             # previous session presented on screen; the resident policy swaps
             # levels afterwards through ordinary payload-identity commits.
             reuse_any_lod = bool(getattr(session, "_resident_lod_active", lambda: False)())
-            previous_payloads = {
-                int(tile): payload
-                for tile, payload in _previous_tiled_payloads(getattr(self.win, "_committed_display_frame", None)).items()
-                if reuse_any_lod or _payload_lod_matches(payload, selected_lod_factor)
-            }
-            retained_payloads = self._retained_tiled_payload_store().payloads_by_base_source(
-                lod_factor=None if reuse_any_lod else selected_lod_factor
-            )
-            if retained_payloads:
-                previous_payloads.update(
-                    {
-                        int(tile): payload
-                        for tile, payload in enumerate(retained_payloads.values())
-                    }
+            # The previous-frame and retained-store scans exist only to seed
+            # a session that has never presented; for every later flush (and
+            # for retargeted sessions, whose payloads persist in-session)
+            # they were O(committed frame + retained store) per commit for
+            # nothing.
+            if not getattr(session, "presented_tiles", None):
+                previous_payloads = {
+                    int(tile): payload
+                    for tile, payload in _previous_tiled_payloads(getattr(self.win, "_committed_display_frame", None)).items()
+                    if reuse_any_lod or _payload_lod_matches(payload, selected_lod_factor)
+                }
+                retained_payloads = self._retained_tiled_payload_store().payloads_by_base_source(
+                    lod_factor=None if reuse_any_lod else selected_lod_factor
                 )
-            if previous_payloads and not getattr(session, "presented_tiles", None):
-                session.seed_display_tile_payloads(previous_payloads, tile_source_ids)
-                if reuse_any_lod:
-                    # Converge seeded stale-level payloads to the live demand:
-                    # mismatched tiles become dirty and rebuild below; missing
-                    # levels are queued and drained after this commit.
-                    session.refresh_lod_for_viewport()
+                if retained_payloads:
+                    previous_payloads.update(
+                        {
+                            int(tile): payload
+                            for tile, payload in enumerate(retained_payloads.values())
+                        }
+                    )
+                if previous_payloads:
+                    session.seed_display_tile_payloads(previous_payloads, tile_source_ids)
+                    if reuse_any_lod:
+                        # Converge seeded stale-level payloads to the live
+                        # demand: mismatched tiles become dirty and rebuild
+                        # below; missing levels are queued and drained after
+                        # this commit.
+                        session.refresh_lod_for_viewport()
             base_tile_state = session.tile_presentation_state
             fast_drain = _persistent_tile_layer_fast_drain_enabled(self, session)
             self._persistent_tile_layer_fast_drain_last_enabled = bool(fast_drain)

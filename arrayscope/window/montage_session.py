@@ -411,6 +411,114 @@ class MontageRenderSession:
         )
         return additions, bool(presentation_changed)
 
+    def retarget_index_window(
+        self,
+        *,
+        session_id: int,
+        key,
+        semantic_key,
+        level_key,
+        render_generation: int,
+        view_state,
+        plan: MontagePlan,
+        frame_plan,
+        all_indices,
+        new_source_ids: dict[int, object],
+        cached_tiles: dict[int, RenderedTile],
+        visible_tiles: tuple[MontageTile, ...],
+    ) -> dict:
+        """Re-key this session to a new index window without a rebirth.
+
+        ADR 0051 P2 (session-rebirth cost): when only the montage index
+        window changes — layout geometry, viewport, document, and every
+        presentation input identical — the session object survives.  The
+        lifecycle machine, the backend acknowledgement state
+        (``tile_presentation_state``, ``last_presented_identities``), and the
+        currently drawn payloads all stay; only the semantic mapping
+        tile -> source index moves.  Every tile whose source changed goes
+        through the ordinary per-tile seams (``mark_materialized`` for cache
+        hits, demotion for misses), so the standing budgeted commit/flush
+        machinery converges the screen exactly as it does for evaluation
+        results — floors first, exact content as it lands.
+
+        Identity semantics match a rebirth: ``session_id`` and ``key`` are
+        new, so in-flight completions for the old window are parked into the
+        reusable cache by the existing current-session gates, and stale
+        commit reports acknowledge nothing (delta_key binding).
+
+        The caller has already verified eligibility and released undrained
+        pyramid claims; stage planning state is reset by the caller
+        (deferred-planning path).  Returns remap statistics plus the drained
+        ``stale_completions`` for the caller to store.
+        """
+
+        old_source_ids = dict(self.tile_source_ids)
+        self.session_id = int(session_id)
+        self.key = key
+        self.semantic_key = semantic_key
+        self.level_key = level_key
+        self.render_generation = int(render_generation)
+        self.view_state = view_state
+        self.plan = plan
+        self.frame_plan = frame_plan
+        self.level_expected_indices = tuple(int(index) for index in all_indices)
+        # In-flight work for the old window is superseded wholesale (same
+        # semantics as a rebirth): completions route to the reusable cache
+        # via the session_id gate, and the deferred-planning pass reschedules
+        # everything still missing.
+        self.active_tile_requests.clear()
+        stale_completions = tuple(self.pending_completed_tiles)
+        self.pending_completed_tiles.clear()
+        self.pending_level_tiles.clear()
+        self.pending_level_sources.clear()
+        self.pending_refined_level_tiles.clear()
+        self.pending_refined_level_sources.clear()
+        self.pending_tiles.prune(frozenset())
+        hits = misses = unchanged = 0
+        for tile in tuple(getattr(plan, "tiles", ()) or ()):
+            index = int(tile.montage_index)
+            new_source = new_source_ids.get(index)
+            if (
+                new_source is not None
+                and new_source == old_source_ids.get(index)
+                and index in self.rendered_tiles
+            ):
+                unchanged += 1
+                continue
+            rendered = cached_tiles.get(index)
+            if rendered is not None:
+                self.mark_materialized(rendered)
+                hits += 1
+            else:
+                # Demote: the drawn slot keeps its (now stale) content until
+                # the floor or a fresh evaluation replaces it — never blank.
+                self.rendered_tiles.pop(index, None)
+                self.tile_source_ids.pop(index, None)
+                self.display_tile_payloads.pop(index, None)
+                self.level_generation.forget_tile(index)
+                self.presented_tiles.discard(index)
+                self.skipped_tiles.discard(index)
+                self.dirty_payloads[index] = None
+                self.loading_tiles.add(index)
+                if 0 <= index < len(plan.tiles):
+                    self.mark_tile_state(plan.tiles[index], MontageTileState.LOADING)
+                misses += 1
+        self.visible_tiles = tuple(visible_tiles)
+        self.visible_tile_numbers = frozenset(
+            int(tile.montage_index) for tile in self.visible_tiles
+        )
+        self._selected_lod_factor()
+        self.update_level_presentation_scope()
+        # Re-decide LOD demands for the new sources; resident floors from the
+        # window-agnostic pyramid identity re-present immediately.
+        self.refresh_lod_for_viewport()
+        return {
+            "hits": int(hits),
+            "misses": int(misses),
+            "unchanged": int(unchanged),
+            "stale_completions": stale_completions,
+        }
+
     def update_level_presentation_scope(self) -> None:
         if not self.display_tile_payloads and not self.presented_tiles:
             return
@@ -950,10 +1058,24 @@ class MontageRenderSession:
         )
         if max_upserts is not None or max_upsert_bytes is not None or stale_level_tiles:
             dirty_payload_tiles = self._prioritized_tile_numbers(dirty_payload_tiles)
+        # Payload construction is bounded by the same admission budget that
+        # caps uploads: a retarget/scrub step marks every tile dirty, and
+        # building all N wrappers synchronously before admitting 4 of them
+        # made the budgeted commit O(N) anyway (session-rebirth cost, ADR
+        # 0051 P2).  Unbuilt tiles keep their dirty entry — the next commit
+        # continues in priority order.  Slightly over-build so byte-capped
+        # admission still has choices.
+        build_limit = None
+        if max_upserts is not None:
+            build_limit = max(int(max_upserts) * 2, 8)
+        built = 0
         for tile_number in dirty_payload_tiles:
+            if build_limit is not None and built >= build_limit:
+                break
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is not None:
                 self._ensure_display_tile_payload(int(tile_number), rendered, source_ids, lod_factor=lod_factor)
+                built += 1
         self._ensure_floor_payloads(planned_numbers - set(current_loaded))
         # Progress guarantee: a dirty entry is a promise that a build can
         # produce an upsert for the tile.  Without a rendered result and

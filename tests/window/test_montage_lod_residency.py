@@ -1530,3 +1530,153 @@ def test_diagnostics_lod_reason_follows_the_presented_level():
     # The screen converged (ingest-presented level 2) without a policy rerun:
     # the stale decision must not keep reporting "materializes".
     assert _presented_lod_reason(decision, (2, 4, (4, 4))) == LOD_REASON_RESIDENT_MATCH
+
+
+def _shifted_plan(count=2, offset=1):
+    tiles = tuple(
+        MontageTile(
+            montage_index=index,
+            source_index=index + offset,
+            row=0,
+            col=index,
+            x0=index * TILE,
+            y0=0,
+            width=TILE,
+            height=TILE,
+            view_state=None,
+        )
+        for index in range(count)
+    )
+    return MontagePlan(
+        axis=0,
+        tile_shape=(TILE, TILE),
+        grid_shape=(1, count),
+        columns=count,
+        rows=1,
+        gap=0,
+        tiles=tiles,
+    )
+
+
+def _retarget(session, plan, new_source_ids, cached_tiles=None):
+    return session.retarget_index_window(
+        session_id=session.session_id + 1,
+        key=("test", "retargeted"),
+        semantic_key=("semantic", "retargeted"),
+        level_key=("level", "retargeted"),
+        render_generation=session.render_generation + 1,
+        view_state=None,
+        plan=plan,
+        frame_plan=session.frame_plan,
+        all_indices=tuple(int(t.source_index) for t in plan.tiles),
+        new_source_ids=new_source_ids,
+        cached_tiles=dict(cached_tiles or {}),
+        visible_tiles=tuple(plan.tiles),
+    )
+
+
+def test_retarget_index_window_remaps_hits_misses_and_unchanged():
+    """ADR 0051 P2: an index-window scrub reuses the session object.
+
+    Tile 0's source is unchanged (stays presented, no dirty mark), tile 1's
+    source changed with a cache hit (mark_materialized seam), and the plan is
+    re-keyed without touching backend acknowledgement state.
+    """
+
+    session = _session(count=2)
+    plan = _shifted_plan(count=2, offset=0)
+    # Tile 0 keeps source 0; tile 1 moves to source 9.
+    plan_tiles = list(plan.tiles)
+    plan_tiles[1] = MontageTile(
+        montage_index=1, source_index=9, row=0, col=1,
+        x0=TILE, y0=0, width=TILE, height=TILE, view_state=None,
+    )
+    plan = MontagePlan(
+        axis=0, tile_shape=(TILE, TILE), grid_shape=(1, 2),
+        columns=2, rows=1, gap=0, tiles=tuple(plan_tiles),
+    )
+    session.tile_source_ids = {0: ("src", 0), 1: ("src", 1)}
+    session.presented_tiles.update({0, 1})
+    session.loading_tiles.clear()
+    session.dirty_payloads.clear()
+    backend_truth = {0: ("shown", 0), 1: ("shown", 1)}
+    session.last_presented_identities = dict(backend_truth)
+
+    hit = RenderedTile(
+        tile=plan.tiles[1],
+        image=np.ones((TILE, TILE), dtype=np.float32),
+        histogram_data=None,
+        eval_ms=0.0,
+        slab_shape=(TILE, TILE),
+        slab_nbytes=TILE * TILE * 4,
+    )
+    stats = _retarget(
+        session,
+        plan,
+        new_source_ids={0: ("src", 0), 1: ("src", 9)},
+        cached_tiles={1: hit},
+    )
+
+    assert stats["hits"] == 1 and stats["misses"] == 0 and stats["unchanged"] == 1
+    assert session.key == ("test", "retargeted")
+    assert session.session_id == 2
+    # Unchanged tile: still presented, not re-marked dirty.
+    assert 0 in session.presented_tiles
+    assert 0 not in session.dirty_payloads
+    assert 0 in session.rendered_tiles
+    # Changed tile went through the ordinary materialization seam.
+    assert session.rendered_tiles[1] is hit
+    assert 1 in session.dirty_payloads
+    assert 1 not in session.presented_tiles
+    assert 1 in session.loading_tiles
+    # Backend acknowledgement ground truth survives the retarget.
+    assert session.last_presented_identities == backend_truth
+
+
+def test_retarget_index_window_demotes_misses_without_blanking():
+    """A miss keeps the drawn slot's payload until floor/eval replaces it."""
+
+    session = _session(count=2)
+    plan = _shifted_plan(count=2, offset=5)
+    session.tile_source_ids = {0: ("src", 0), 1: ("src", 1)}
+    session.presented_tiles.update({0, 1})
+    payload_sentinel = object()
+    session.display_tile_payloads = {0: payload_sentinel, 1: payload_sentinel}
+
+    stats = _retarget(
+        session,
+        plan,
+        new_source_ids={0: ("src", 5), 1: ("src", 6)},
+        cached_tiles={},
+    )
+
+    assert stats["misses"] == 2 and stats["hits"] == 0
+    for index in (0, 1):
+        assert index not in session.rendered_tiles
+        assert index in session.loading_tiles
+        assert index in session.dirty_payloads
+        assert index not in session.tile_source_ids
+    # Lifecycle semantic axis demoted (no longer evaluated).
+    assert not session.lifecycle.evaluating_tiles
+
+
+def test_retarget_index_window_drains_stale_completions():
+    """In-flight completions for the old window are returned, not applied."""
+
+    session = _session(count=2)
+    session.tile_source_ids = {0: ("src", 0), 1: ("src", 1)}
+    marker = (object(), object())
+    session.pending_completed_tiles.append(marker)
+    session.active_tile_requests.update({0, 1})
+    plan = _shifted_plan(count=2, offset=3)
+
+    stats = _retarget(
+        session,
+        plan,
+        new_source_ids={0: ("src", 3), 1: ("src", 4)},
+        cached_tiles={},
+    )
+
+    assert stats["stale_completions"] == (marker,)
+    assert not session.pending_completed_tiles
+    assert not session.active_tile_requests
