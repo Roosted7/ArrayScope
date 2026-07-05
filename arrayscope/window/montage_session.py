@@ -254,6 +254,68 @@ class LifecycleSkippedTiles(_LifecycleTileSetView):
         self._lifecycle.tile_unskipped(index)
 
 
+def _stage_tile_index(tile_or_index) -> int:
+    try:
+        return int(tile_or_index.montage_index)
+    except AttributeError:
+        return int(tile_or_index)
+
+
+class LifecycleStageFanIn(StageFanInState):
+    """Stage fan-in whose tile↔stage bindings report through machine events.
+
+    ADR 0051 P2: the fan-in dataclass stays the queue implementation, but
+    every mutation (plan merge, activation batch, missing-value release,
+    failure) reconciles the lifecycle machine's per-record stage binding, so
+    "loading without an evaluation request because a stage owns it" is a
+    queryable record fact instead of a correlation across parallel sets.
+    """
+
+    def __init__(self, lifecycle, state: StageFanInState | None = None):
+        state = state if state is not None else StageFanInState()
+        super().__init__()
+        # Adopt the source containers as-is: the state is already normalized
+        # by its own __post_init__, and re-normalizing here would flatten
+        # MontageTilePriorityQueue waiting lists back into plain lists.
+        self.waiting_tiles = state.waiting_tiles
+        self.active_requests = state.active_requests
+        self.attached_requests = state.attached_requests
+        self.values = state.values
+        self.tile_stage_keys = state.tile_stage_keys
+        self.tile_stage_plans = state.tile_stage_plans
+        self.tile_stage_candidates = state.tile_stage_candidates
+        self.lead_warmups = state.lead_warmups
+        self._lifecycle = lifecycle
+        self._report_bindings()
+
+    def _report_bindings(self) -> None:
+        self._lifecycle.stage_bindings_replaced(
+            {
+                key: tuple(_stage_tile_index(tile) for tile in tuple(waiting or ()))
+                for key, waiting in self.waiting_tiles.items()
+            }
+        )
+
+    def merge_plan(self, plan: dict) -> None:
+        super().merge_plan(plan)
+        self._report_bindings()
+
+    def activate_value(self, key, value, *, max_items: int | None = None):
+        batch = super().activate_value(key, value, max_items=max_items)
+        self._report_bindings()
+        return batch
+
+    def release_missing(self, key, *, max_items: int | None = None):
+        batch = super().release_missing(key, max_items=max_items)
+        self._report_bindings()
+        return batch
+
+    def fail(self, key):
+        waiting = super().fail(key)
+        self._report_bindings()
+        return waiting
+
+
 @dataclass
 class MontageRenderSession:
     session_id: int
@@ -446,8 +508,22 @@ class MontageRenderSession:
             self.lifecycle, sorted(int(tile) for tile in tuple(self.active_tile_requests or ()))
         )
         self.rendered_tiles = LifecycleRenderedTiles(self.lifecycle, self.rendered_tiles)
+        self.attach_stage_fan_in(self.stage_fan_in)
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)
+
+    def attach_stage_fan_in(self, state: StageFanInState) -> None:
+        """Install (or replace) the stage fan-in, machine bindings included.
+
+        Every replacement site must come through here: assigning a bare
+        ``StageFanInState`` would silently stop reporting stage events
+        (ADR 0051 P2 — stages report through events).
+        """
+
+        if isinstance(state, LifecycleStageFanIn) and state._lifecycle is self.lifecycle:
+            self.stage_fan_in = state
+            return
+        self.stage_fan_in = LifecycleStageFanIn(self.lifecycle, state)
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles

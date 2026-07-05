@@ -363,3 +363,85 @@ def test_full_tile_story(lc):
         "dangling_claims": 0,
         "identity_rejections": 0,
     }
+
+
+# -- sets-as-views (P2): load intent, requests, skip, stage bindings ----------
+
+
+def test_confirmed_evaluated_tile_leaves_loading(lc):
+    """The 2026-07-05 auto-levels wedge: presented==rendered with the legacy
+    loading set stuck at tile_count.  A confirmed EVALUATED tile must leave
+    the loading view mechanically."""
+
+    lc.plan_applied([0])
+    lc.load_marked(0)
+    lc.evaluation_started(0)
+    lc.evaluation_completed(0)
+    assert lc.loading_tiles == frozenset({0})
+    lc.upsert_emitted(0, source_id="v1")
+    lc.commit_acknowledged(emitted_tiles=[0], accepted_tiles=[0], active_scope=[0])
+    assert lc.loading_tiles == frozenset()
+
+
+def test_preview_confirmation_keeps_evaluating_tile_loading(lc):
+    """A floor/preview acceptance while the exact result is still computing
+    must NOT clear the load intent — exact content is still owed."""
+
+    lc.plan_applied([3])
+    lc.load_marked(3)
+    lc.evaluation_started(3)
+    lc.upsert_emitted(3, source_id="floor")
+    lc.commit_acknowledged(emitted_tiles=[3], accepted_tiles=[3], active_scope=[3])
+    assert lc.loading_tiles == frozenset({3})
+
+
+def test_parked_tile_is_not_loading(lc):
+    lc.plan_applied([5])
+    lc.load_marked(5)
+    lc.evaluation_started(5)
+    lc.evaluation_completed(5)
+    lc.upsert_emitted(5, source_id="v1")
+    lc.commit_acknowledged(emitted_tiles=[5], accepted_tiles=[], active_scope=[9])
+    assert lc.parked_tiles == frozenset({5})
+    assert lc.loading_tiles == frozenset()
+
+
+def test_skip_clears_loading_and_requests(lc):
+    lc.load_marked(2)
+    lc.evaluation_requested(2)
+    lc.tile_skipped(2)
+    assert lc.skipped_tiles == frozenset({2})
+    assert lc.loading_tiles == frozenset()
+    assert lc.active_request_tiles == frozenset()
+    lc.tile_unskipped(2)
+    assert lc.skipped_tiles == frozenset()
+    from arrayscope.presentation import Semantic as _Semantic
+
+    assert lc.record(2).semantic is _Semantic.PLANNED
+
+
+def test_request_views_follow_semantic_events(lc):
+    lc.evaluation_started(7)
+    lc.evaluation_requested(7)
+    assert lc.active_request_tiles == frozenset({7})
+    lc.evaluation_completed(7)
+    assert lc.active_request_tiles == frozenset()
+    lc.evaluation_started(8)
+    lc.evaluation_requested(8)
+    lc.evaluation_declined(8)
+    assert lc.active_request_tiles == frozenset()
+
+
+def test_stage_bindings_reconcile(lc):
+    lc.stage_bindings_replaced({"stage-a": (1, 2), "stage-b": (3,)})
+    assert lc.stage_waiting_tiles == frozenset({1, 2, 3})
+    assert lc.record(2).stage_key == "stage-a"
+    # Activation batch consumed tile 2; fail dropped stage-b entirely.
+    lc.stage_bindings_replaced({"stage-a": (1,)})
+    assert lc.stage_waiting_tiles == frozenset({1})
+    assert lc.record(2).stage_key is None
+    assert lc.record(3).stage_key is None
+    # A completed evaluation unbinds mechanically.
+    lc.evaluation_started(1)
+    lc.evaluation_completed(1)
+    assert lc.stage_waiting_tiles == frozenset()

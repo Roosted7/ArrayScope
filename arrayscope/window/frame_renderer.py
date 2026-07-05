@@ -942,7 +942,7 @@ class FrameRenderMixin:
             )
         session.force_auto = bool(force_auto)
         session.user_levels_override = user_levels
-        session.stage_fan_in = StageFanInState()
+        session.attach_stage_fan_in(StageFanInState())
         session.stage_planning_deferred = bool(missing_tiles)
         session.deferred_missing_tiles = tuple(missing_tiles)
         session.tile_compute_cache_hits = int(stats["hits"])
@@ -1903,7 +1903,7 @@ class FrameRenderMixin:
         stage_plan_start = perf_counter()
         stage_plan = self._plan_montage_stages(session.document, missing_tiles)
         self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
-        session.stage_fan_in = StageFanInState(
+        session.attach_stage_fan_in(StageFanInState(
             tile_stage_keys=stage_plan["tile_stage_keys"],
             tile_stage_plans=stage_plan["tile_stage_plans"],
             tile_stage_candidates=stage_plan["tile_stage_candidates"],
@@ -1911,7 +1911,7 @@ class FrameRenderMixin:
             attached_requests=stage_plan["attached_stage_keys"],
             values=stage_plan["stage_values"],
             lead_warmups=stage_plan["lead_stage_warmups"],
-        )
+        ))
         for tile in missing_tiles:
             if int(tile.montage_index) not in stage_plan["waiting_indices"]:
                 session.enqueue_pending_tile(tile)

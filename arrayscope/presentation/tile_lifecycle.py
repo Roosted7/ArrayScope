@@ -303,6 +303,38 @@ class TileLifecycle:
                 rec.stage_key = None
         return waiting
 
+    def stage_bindings_replaced(self, bindings) -> None:
+        """Reconcile every tile↔stage binding against the fan-in queues.
+
+        The fan-in state remains the queue implementation; this event keeps
+        the machine's per-record binding equal to it after every fan-in
+        mutation (merge/activate/release/fail), so "waiting on stage X" is a
+        record fact and never set correlation.  Idempotent by construction.
+        """
+
+        desired: dict[object, set[int]] = {
+            key: {int(tile) for tile in tuple(tiles or ())}
+            for key, tiles in dict(bindings or {}).items()
+        }
+        for key in tuple(self._stage_waiting):
+            want = desired.get(key, set())
+            waiting = self._stage_waiting.get(key, set())
+            for index in tuple(waiting):
+                if index not in want:
+                    rec = self._records.get(index)
+                    if rec is not None and rec.stage_key == key:
+                        rec.stage_key = None
+                    waiting.discard(index)
+            if not waiting:
+                self._stage_waiting.pop(key, None)
+        for key, want in desired.items():
+            for index in want:
+                rec = self.record(index)
+                if rec.stage_key != key:
+                    self._stage_unbound(rec)
+                    rec.stage_key = key
+                    self._stage_waiting.setdefault(key, set()).add(rec.tile_number)
+
     @property
     def stage_waiting_tiles(self) -> frozenset[int]:
         return frozenset(
