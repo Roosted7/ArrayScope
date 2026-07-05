@@ -620,7 +620,11 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
 
     if not resident_lod_active(session):
         return False
-    if int(tile_number) in session.active_tile_requests:
+    payload = session.display_tile_payloads.get(int(tile_number))
+    if payload is not None and int(tile_number) in session.active_tile_requests:
+        # Something is on screen and the exact result is in flight: improving
+        # the preview now would churn payload identities for no visible win.
+        # A BLANK tile is different — see ensure_floor_payloads.
         return False
     if tile is None:
         tile = next(
@@ -629,7 +633,6 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
         )
     if tile is None:
         return False
-    payload = session.display_tile_payloads.get(int(tile_number))
     if payload is not None and str(getattr(payload, "quality", "exact")) != "preview":
         return False
     best = best_floor_key(session, int(tile.source_index))
@@ -661,12 +664,16 @@ def ensure_floor_payloads(session, tile_numbers) -> None:
         for tile in tuple(session.visible_tiles)
     }
     for tile_number in sorted(int(number) for number in tile_numbers):
-        if tile_number in session.active_tile_requests:
-            # An exact evaluation is in flight: flooring now would present
-            # a preview one commit before its exact replacement, doubling
-            # payload/identity churn for every tile of a cold fill.
-            continue
         existing = session.display_tile_payloads.get(tile_number)
+        if existing is not None and tile_number in session.active_tile_requests:
+            # An exact evaluation is in flight and SOMETHING is on screen:
+            # improving the preview now would double payload/identity churn
+            # for every tile of a cold fill.  A blank tile is the opposite
+            # case — the GUI bar (show something immediately, refine later)
+            # outranks churn, and field evidence (2026-07-05) showed slow
+            # stage-backed fills leaving black tiles for seconds while their
+            # level-2 floor planes sat resident in the pinned cache.
+            continue
         if existing is not None and str(getattr(existing, "quality", "exact")) != "preview":
             continue
         tile = by_number.get(tile_number)

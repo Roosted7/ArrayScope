@@ -468,10 +468,12 @@ class MontageRenderSession:
         # extending the frozenset per presented tile makes a full-montage
         # commit O(n^2) in the tile count.
         level_scope_additions: list[int] = []
+        confirmed: list[int] = []
         for tile_number in tuple(tile_numbers or ()):
             index = int(tile_number)
             if index not in self.rendered_tiles:
                 continue
+            confirmed.append(index)
             if index not in self.presented_tiles and len(self.presented_order) < 64:
                 self.presented_order.append(index)
             self.presented_tiles.add(index)
@@ -483,6 +485,11 @@ class MontageRenderSession:
             self.pending_removals.discard(index)
             if 0 <= index < len(self.plan.tiles):
                 self.mark_tile_state(self.plan.tiles[index], MontageTileState.LOADED)
+        if confirmed:
+            # ADR 0051 rule 1: the report's presented set is backend
+            # acknowledgement, so resident-retarget commits (no upserts)
+            # still reach the machine's PRESENTED state.
+            self.lifecycle.presentation_confirmed(confirmed)
         if level_scope_additions:
             self.level_generation.set_active_tiles(
                 (*self.level_generation.active_tiles, *level_scope_additions)

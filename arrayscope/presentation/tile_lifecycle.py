@@ -289,6 +289,23 @@ class TileLifecycle:
             rec.presented_source_id = None
             rec.emitted_source_id = None
 
+    def presentation_confirmed(self, tile_numbers: Iterable[int]) -> None:
+        """Backend confirmed these tiles as presented (rule 1, second source).
+
+        Resident-retarget commits re-show acknowledged payloads without new
+        upserts, so ``commit_acknowledged`` sees no accepted upserts for
+        them; the commit report's ``presented_tiles`` is still backend
+        acknowledgement and is the only caller of this event.
+        """
+
+        for tile_number in tile_numbers:
+            rec = self.record(int(tile_number))
+            self._unpark(rec)
+            rec.presentation = Presentation.PRESENTED
+            if rec.emitted_source_id is not None:
+                rec.presented_source_id = rec.emitted_source_id
+            self._presented.add(rec.tile_number)
+
     def rearm_for_scope(self, active_scope: Iterable[int]) -> tuple[int, ...]:
         """Rule 3 re-arm: parked tiles entering the active scope want an upsert.
 

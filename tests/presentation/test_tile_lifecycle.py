@@ -187,6 +187,24 @@ def test_removal_clears_presentation_and_park(lc):
     assert 9 not in lc.presented_tiles
 
 
+def test_presentation_confirmed_is_the_resident_retarget_ack(lc):
+    """Resident-retarget commits re-show acknowledged payloads without
+    upserts; the report's presented set still confirms them (rule 1)."""
+
+    _evaluated(lc, 4)
+    lc.presentation_confirmed([4])
+    assert lc.record(4).presentation is Presentation.PRESENTED
+    assert 4 in lc.presented_tiles
+    # A parked tile confirmed presented leaves parked.
+    _evaluated(lc, 5)
+    lc.upsert_emitted(5)
+    lc.commit_acknowledged(emitted_tiles=[5], accepted_tiles=[], active_scope=[])
+    assert 5 in lc.parked_tiles
+    lc.presentation_confirmed([5])
+    assert 5 not in lc.parked_tiles
+    assert 5 in lc.presented_tiles
+
+
 # -- rule 2: claim balancing ---------------------------------------------------
 
 

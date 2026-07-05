@@ -888,6 +888,42 @@ def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholde
     assert replaced.quality == "exact"
 
 
+def test_floor_presents_blank_tile_even_while_exact_evaluation_is_in_flight():
+    """Field report 2026-07-05: slow stage-backed fills left tiles BLACK for
+    seconds while their floor planes sat resident — because the floor pass
+    skipped every tile with an active exact request.  A blank tile floors
+    regardless of in-flight work; only an existing preview defers to the
+    imminent exact replacement (anti-churn)."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+
+    rendered = session.rendered_tiles[1]
+    key = pyramid_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+    del session.rendered_tiles[1]
+    session.dirty_payloads.pop(1, None)
+    # The exact evaluation is in flight (slow stage compute).
+    session.active_tile_requests.add(1)
+
+    assert session._floor_can_progress(1)
+    _state, delta = session.build_tile_presentation({})
+    payload = delta.upserts.get(1) or session.display_tile_payloads.get(1)
+    assert payload is not None, "blank tile with resident floor must present it despite in-flight eval"
+    assert payload.quality == "preview"
+    assert payload.lod.level == 2
+
+    # Anti-churn: once the preview is on screen, the in-flight exact request
+    # suppresses further floor improvements for this tile.
+    assert not session._floor_can_progress(1)
+
+
 def test_floor_tile_with_native_demand_settles_instead_of_spinning():
     """Regression: a preview-floored tile under native demand must not keep
     the dirty set non-empty forever (100% single-core commit-loop spin)."""
