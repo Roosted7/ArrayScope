@@ -356,6 +356,10 @@ def test_full_tile_story(lc):
         "evaluating": 0,
         "parked": 0,
         "presented": 1,
+        "loading": 0,
+        "active_requests": 0,
+        "skipped": 0,
+        "stage_waiting": 0,
         "dangling_claims": 0,
         "identity_rejections": 0,
     }

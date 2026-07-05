@@ -139,6 +139,28 @@ class MontageLevelTracker:
                 self._sample_accumulators.pop(key, None)
         return self.stats_for(key) if aggregate else None
 
+    def record_vacuous_source(self, key: object, source_index: int) -> None:
+        """Record refined evidence for a source with no finite values.
+
+        An all-NaN/empty tile (e.g. a log-scaled constant plane) can never
+        produce bounds; without an explicit record, level convergence waits
+        on it forever (2026-07-05: pyqtgraph+resident auto-levels flush
+        parked on one such source with rank stuck below SAMPLED_FULL).
+        Vacuous evidence contributes no bounds and no sample — it only says
+        "sampled; nothing to contribute", which is what completion means.
+        """
+
+        by_source = self._tiles.setdefault(key, {})
+        previous = by_source.get(int(source_index))
+        if previous is None or not previous.refined:
+            by_source[int(source_index)] = TileLevelStats(
+                source_index=int(source_index),
+                bounds=None,
+                sample=np.asarray((), dtype=np.float32),
+                refined=True,
+            )
+            self._invalidate(key)
+
     def has_source(self, key: object, source_index: int, *, refined: bool = False) -> bool:
         """Return whether reusable statistics already exist for one source."""
 

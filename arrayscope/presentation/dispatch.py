@@ -25,6 +25,7 @@ class MontageDispatchPlan:
     flush_results: bool = False
     lod_materializations: bool = False
     stage_waits: bool = False
+    level_evidence: bool = False
     commit: bool = False
     force_commit: bool = False
     unsettled: bool = False
@@ -38,6 +39,7 @@ class MontageDispatchPlan:
             or self.flush_results
             or self.lod_materializations
             or self.stage_waits
+            or self.level_evidence
             or self.commit
         )
 
@@ -75,6 +77,13 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
     lod_pending = bool(getattr(session, "pending_lod_requests", None))
     deferred = bool(getattr(session, "stage_planning_deferred", False))
     flushish = bool(getattr(session, "flush_pending", False) or getattr(session, "final_commit_pending", False))
+    # Level evidence work (cached level stats / session scan) is scheduled
+    # state like any other: a parked explicit-auto flush waits on it, so the
+    # derivation must pump it (rule 6 — the pyqtgraph+resident auto-levels
+    # wedge was a parked flush whose evidence producer nothing re-armed).
+    level_evidence = bool(getattr(session, "pending_level_tiles", None)) or (
+        int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+    )
 
     # Stage-waiting tiles are `loading` with no active evaluation request by
     # design; requeueing them would bypass their attached stage into direct
@@ -102,6 +111,7 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
         or commit
         or lod_pending
         or deferred
+        or level_evidence
     )
     return MontageDispatchPlan(
         requeue_orphans=requeue_orphans,
@@ -110,6 +120,7 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
         flush_results=completed,
         lod_materializations=lod_pending,
         stage_waits=bool(stage_waiting or stage_attached),
+        level_evidence=level_evidence,
         commit=commit,
         force_commit=bool(commit and evaluation_drained),
         unsettled=unsettled,

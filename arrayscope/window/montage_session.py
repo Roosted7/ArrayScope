@@ -148,6 +148,112 @@ class LifecycleRenderedTiles(dict):
         return self[index]
 
 
+class _LifecycleTileSetView:
+    """Set-like view over one machine index (ADR 0051 P2 sets-as-views).
+
+    The machine owns the state; this object holds none.  Reads come from the
+    lifecycle index; mutations are events.  The legacy per-tile sets on
+    ``MontageRenderSession`` (``loading_tiles``, ``active_tile_requests``,
+    ``skipped_tiles``) are instances of this class, so a tile that reaches a
+    machine state which implies "not loading" (confirmed presented, parked,
+    skipped) leaves the view mechanically — no call site can forget the
+    matching ``discard`` again (2026-07-05 auto-levels wedge).
+    """
+
+    __slots__ = ("_lifecycle",)
+
+    #: name of the lifecycle property this view reads.
+    _view = ""
+
+    def __init__(self, lifecycle, seed=()):
+        self._lifecycle = lifecycle
+        for index in tuple(seed or ()):
+            self.add(int(index))
+
+    def _snapshot(self) -> frozenset[int]:
+        return getattr(self._lifecycle, self._view)
+
+    def _event_add(self, index: int) -> None:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def _event_discard(self, index: int) -> None:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def add(self, index) -> None:
+        self._event_add(int(index))
+
+    def discard(self, index) -> None:
+        self._event_discard(int(index))
+
+    def remove(self, index) -> None:
+        if int(index) not in self._snapshot():
+            raise KeyError(index)
+        self._event_discard(int(index))
+
+    def clear(self) -> None:
+        for index in tuple(self._snapshot()):
+            self._event_discard(int(index))
+
+    def update(self, indices) -> None:
+        for index in tuple(indices or ()):
+            self._event_add(int(index))
+
+    def __contains__(self, index) -> bool:
+        try:
+            return int(index) in self._snapshot()
+        except (TypeError, ValueError):
+            return False
+
+    def __iter__(self):
+        return iter(sorted(self._snapshot()))
+
+    def __len__(self) -> int:
+        return len(self._snapshot())
+
+    def __bool__(self) -> bool:
+        return bool(self._snapshot())
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, _LifecycleTileSetView):
+            return self._snapshot() == other._snapshot()
+        if isinstance(other, (set, frozenset)):
+            return set(self._snapshot()) == other
+        return NotImplemented
+
+    def __repr__(self) -> str:  # diagnostics/debugging only
+        return f"{type(self).__name__}({sorted(self._snapshot())})"
+
+
+class LifecycleLoadingTiles(_LifecycleTileSetView):
+    _view = "loading_tiles"
+
+    def _event_add(self, index: int) -> None:
+        self._lifecycle.load_marked(index)
+
+    def _event_discard(self, index: int) -> None:
+        self._lifecycle.load_cleared(index)
+
+
+class LifecycleActiveRequests(_LifecycleTileSetView):
+    _view = "active_request_tiles"
+
+    def _event_add(self, index: int) -> None:
+        self._lifecycle.evaluation_requested(index)
+
+    def _event_discard(self, index: int) -> None:
+        self._lifecycle.evaluation_request_cleared(index)
+
+
+class LifecycleSkippedTiles(_LifecycleTileSetView):
+    _view = "skipped_tiles"
+
+    def _event_add(self, index: int) -> None:
+        self._lifecycle.tile_skipped(index)
+
+    def _event_discard(self, index: int) -> None:
+        self._lifecycle.tile_unskipped(index)
+
+
 @dataclass
 class MontageRenderSession:
     session_id: int
@@ -326,8 +432,19 @@ class MontageRenderSession:
         # write (including direct fixture assignment) keeps the semantic axis
         # authoritative.
         self.lifecycle.plan_applied(int(tile.montage_index) for tile in tuple(self.visible_tiles or ()))
-        for index in sorted(int(tile) for tile in self.skipped_tiles):
-            self.lifecycle.tile_skipped(int(index))
+        # P2 sets-as-views: the constructor arguments seed the machine, then
+        # the attributes BECOME views over it — the machine is the only owner
+        # and every later mutation is an event.
+        self.lifecycle.plan_applied(int(tile) for tile in tuple(self.loading_tiles or ()))
+        self.loading_tiles = LifecycleLoadingTiles(
+            self.lifecycle, sorted(int(tile) for tile in tuple(self.loading_tiles or ()))
+        )
+        self.skipped_tiles = LifecycleSkippedTiles(
+            self.lifecycle, sorted(int(tile) for tile in tuple(self.skipped_tiles or ()))
+        )
+        self.active_tile_requests = LifecycleActiveRequests(
+            self.lifecycle, sorted(int(tile) for tile in tuple(self.active_tile_requests or ()))
+        )
         self.rendered_tiles = LifecycleRenderedTiles(self.lifecycle, self.rendered_tiles)
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)

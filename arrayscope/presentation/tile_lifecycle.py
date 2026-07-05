@@ -98,6 +98,22 @@ class TileRecord:
     #: convergence passes must not reopen the loop for exactly these pairs.
     #: Cleared by a fresh semantic result.
     resigned: set = field(default_factory=set)
+    #: P2 sets-as-views: this tile still owes exact content to the screen.
+    #: Set at plan/demote/dequeue time; cleared mechanically when the
+    #: backend confirms an EVALUATED tile's payload (rule 1), when the tile
+    #: parks out of scope (rule 3), when it is skipped, or when the caller
+    #: explicitly descopes it.  The legacy ``loading_tiles`` set is a view
+    #: over this flag — the 2026-07-05 auto-levels wedge was exactly a
+    #: confirmed-presented tile whose parallel ``loading_tiles`` entry no
+    #: code path owned.
+    load_intent: bool = False
+    #: P2 sets-as-views: an evaluation request for this tile is in flight
+    #: (the legacy ``active_tile_requests`` set is a view over this flag).
+    request_active: bool = False
+    #: P2 stage fan-in: the reusable-stage key this tile waits on, or None.
+    #: Recorded by ``stage_attached`` so "loading without an evaluation
+    #: request" is a queryable machine fact instead of set correlation.
+    stage_key: object = None
 
 
 class TileLifecycle:
@@ -108,6 +124,10 @@ class TileLifecycle:
         self._parked: set[int] = set()
         self._evaluating: set[int] = set()
         self._presented: set[int] = set()
+        self._loading: set[int] = set()
+        self._active_requests: set[int] = set()
+        self._skipped: set[int] = set()
+        self._stage_waiting: dict[object, set[int]] = {}
         self._identity_rejections = 0
         #: (tile, emitted_id, backend_id) -> consecutive rejection count; a
         #: pair rejected IDENTITY_RESIGN_AFTER times is resigned (see below).
@@ -157,6 +177,7 @@ class TileLifecycle:
         rec = self.record(tile_number)
         rec.semantic = Semantic.EVALUATING
         self._evaluating.add(rec.tile_number)
+        self._skipped.discard(rec.tile_number)
 
     def evaluation_completed(self, tile_number: int) -> None:
         """A fresh semantic result exists; any prior presentation identity is stale."""
@@ -164,6 +185,9 @@ class TileLifecycle:
         rec = self.record(tile_number)
         rec.semantic = Semantic.EVALUATED
         self._evaluating.discard(rec.tile_number)
+        self._skipped.discard(rec.tile_number)
+        self._request_cleared(rec)
+        self._stage_unbound(rec)
         # Fresh identity: the previous emit/park no longer refers to what the
         # next commit will carry, and the backend has not seen the new one.
         # Resignations are per stale pair — a new result gets fresh chances.
@@ -180,6 +204,7 @@ class TileLifecycle:
         if rec.semantic is Semantic.EVALUATING:
             rec.semantic = Semantic.PLANNED
         self._evaluating.discard(rec.tile_number)
+        self._request_cleared(rec)
         return self._release_owned(rec, ClaimOwner.EVALUATION)
 
     def evaluation_dropped(self, tile_number: int) -> None:
@@ -199,6 +224,90 @@ class TileLifecycle:
         rec = self.record(tile_number)
         rec.semantic = Semantic.SKIPPED
         self._evaluating.discard(rec.tile_number)
+        self._skipped.add(rec.tile_number)
+        self._load_cleared(rec)
+        self._request_cleared(rec)
+        self._stage_unbound(rec)
+
+    def tile_unskipped(self, tile_number: int) -> None:
+        """A skipped tile re-enters the plan (index-window demote path)."""
+
+        rec = self._records.get(int(tile_number))
+        if rec is not None and rec.semantic is Semantic.SKIPPED:
+            rec.semantic = Semantic.PLANNED
+            self._skipped.discard(rec.tile_number)
+
+    # -- load intent / evaluation requests (P2 sets-as-views) ---------------
+
+    def load_marked(self, tile_number: int) -> None:
+        """This tile owes exact content to the screen (legacy ``loading_tiles``)."""
+
+        rec = self.record(tile_number)
+        rec.load_intent = True
+        self._loading.add(rec.tile_number)
+
+    def load_cleared(self, tile_number: int) -> None:
+        rec = self._records.get(int(tile_number))
+        if rec is not None:
+            self._load_cleared(rec)
+
+    def evaluation_requested(self, tile_number: int) -> None:
+        """An evaluation request is in flight (legacy ``active_tile_requests``)."""
+
+        rec = self.record(tile_number)
+        rec.request_active = True
+        self._active_requests.add(rec.tile_number)
+
+    def evaluation_request_cleared(self, tile_number: int) -> None:
+        rec = self._records.get(int(tile_number))
+        if rec is not None:
+            self._request_cleared(rec)
+
+    def evaluation_requests_cleared(self) -> None:
+        """Session retarget: every in-flight request is superseded wholesale."""
+
+        for index in tuple(self._active_requests):
+            self._request_cleared(self._records[index])
+
+    # -- stage fan-in (P2: stages report through events) ---------------------
+
+    def stage_attached(self, tile_number: int, stage_key: object) -> None:
+        """This tile's evaluation waits on a reusable stage materialization.
+
+        A stage-waiting tile is loading WITHOUT an evaluation request BY
+        DESIGN; recording the binding makes that a per-record fact the
+        dispatch derivation can read instead of correlating parallel sets.
+        """
+
+        rec = self.record(tile_number)
+        self._stage_unbound(rec)
+        rec.stage_key = stage_key
+        self._stage_waiting.setdefault(stage_key, set()).add(rec.tile_number)
+
+    def stage_detached(self, tile_number: int) -> None:
+        rec = self._records.get(int(tile_number))
+        if rec is not None:
+            self._stage_unbound(rec)
+
+    def stage_resolved(self, stage_key: object) -> tuple[int, ...]:
+        """A stage completed/failed/released: unbind every waiting tile.
+
+        Returns the tiles that were waiting so the caller can route them to
+        evaluation (value arrived) or requeue/decline (stage lost).
+        """
+
+        waiting = tuple(sorted(self._stage_waiting.pop(stage_key, ())))
+        for index in waiting:
+            rec = self._records.get(index)
+            if rec is not None and rec.stage_key == stage_key:
+                rec.stage_key = None
+        return waiting
+
+    @property
+    def stage_waiting_tiles(self) -> frozenset[int]:
+        return frozenset(
+            index for waiting in self._stage_waiting.values() for index in waiting
+        )
 
     # -- residency axis ----------------------------------------------------
 
@@ -338,6 +447,12 @@ class TileLifecycle:
                 rec.presented_source_id = presented_identity
                 self._presented.add(index)
                 confirmed.add(index)
+                if rec.semantic is Semantic.EVALUATED:
+                    # Sets-as-views: a confirmed EVALUATED tile owes the
+                    # screen nothing — it is not "loading", whatever the
+                    # backend report's presented set says (the 2026-07-05
+                    # auto-levels wedge was this flag surviving here).
+                    self._load_cleared(rec)
             elif index not in active:
                 # Rule 3: never blind-retry an upsert a viewport-scoped
                 # backend will keep declining. Park only if a semantic result
@@ -346,6 +461,9 @@ class TileLifecycle:
                     rec.presentation = Presentation.PARKED
                     rec.parked_reason = "declined-out-of-scope"
                     self._parked.add(index)
+                    # Parked = descoped, not loading; the scope re-arm
+                    # re-dirties it through ordinary bookkeeping.
+                    self._load_cleared(rec)
                 elif rec.presentation is not Presentation.PRESENTED:
                     rec.presentation = Presentation.UNPRESENTED
         for tile_number in removed_tiles:
@@ -376,6 +494,8 @@ class TileLifecycle:
             if rec.emitted_source_id is not None:
                 rec.presented_source_id = rec.emitted_source_id
             self._presented.add(rec.tile_number)
+            if rec.semantic is Semantic.EVALUATED:
+                self._load_cleared(rec)
 
     def rearm_for_scope(self, active_scope: Iterable[int]) -> tuple[int, ...]:
         """Rule 3 re-arm: parked tiles entering the active scope want an upsert.
@@ -406,6 +526,25 @@ class TileLifecycle:
     def presented_tiles(self) -> frozenset[int]:
         return frozenset(self._presented)
 
+    @property
+    def loading_tiles(self) -> frozenset[int]:
+        """Tiles that still owe exact content (view behind ``loading_tiles``)."""
+
+        return frozenset(self._loading)
+
+    @property
+    def active_request_tiles(self) -> frozenset[int]:
+        """Tiles with an evaluation request in flight (view behind
+        ``active_tile_requests``)."""
+
+        return frozenset(self._active_requests)
+
+    @property
+    def skipped_tiles(self) -> frozenset[int]:
+        """Tiles the plan skipped (view behind ``skipped_tiles``)."""
+
+        return frozenset(self._skipped)
+
     def counters(self) -> dict[str, int]:
         """Cheap diagnostics summary (rendered into diagnostics snapshots)."""
 
@@ -414,6 +553,10 @@ class TileLifecycle:
             "evaluating": len(self._evaluating),
             "parked": len(self._parked),
             "presented": len(self._presented),
+            "loading": len(self._loading),
+            "active_requests": len(self._active_requests),
+            "skipped": len(self._skipped),
+            "stage_waiting": sum(len(w) for w in self._stage_waiting.values()),
             "dangling_claims": len(self.dangling_claims()),
             "identity_rejections": int(self._identity_rejections),
         }
@@ -425,6 +568,24 @@ class TileLifecycle:
         if rec.presentation is Presentation.PARKED:
             rec.presentation = Presentation.UNPRESENTED
         rec.parked_reason = ""
+
+    def _load_cleared(self, rec: TileRecord) -> None:
+        rec.load_intent = False
+        self._loading.discard(rec.tile_number)
+
+    def _request_cleared(self, rec: TileRecord) -> None:
+        rec.request_active = False
+        self._active_requests.discard(rec.tile_number)
+
+    def _stage_unbound(self, rec: TileRecord) -> None:
+        key = rec.stage_key
+        rec.stage_key = None
+        if key is not None:
+            waiting = self._stage_waiting.get(key)
+            if waiting is not None:
+                waiting.discard(rec.tile_number)
+                if not waiting:
+                    self._stage_waiting.pop(key, None)
 
     def _release_owned(
         self, rec: TileRecord, owner: ClaimOwner

@@ -1362,6 +1362,11 @@ class FrameRenderMixin:
         )
         if stats is not None:
             tracker.update_from_stats(level_key, stats, aggregate=False)
+        elif refined:
+            # Nothing finite to sample: record that as refined evidence, or
+            # level convergence re-queues this source forever and an
+            # explicit-auto flush parked on the rank can never re-commit.
+            tracker.record_vacuous_source(level_key, source_index)
 
     def _update_montage_level_bounds_from_prepared(self, level_key, rendered, *, expected_indices=None, require_refined: bool = False) -> bool:
         """Merge already-prepared level evidence without sampling source pixels."""
@@ -1480,11 +1485,16 @@ class FrameRenderMixin:
         return pending, queued_sources
 
     def _mark_montage_level_scan_pending(self, session) -> None:
+        # Restart a FULL pass even mid-scan: a tile that materializes after
+        # the cursor already passed its position would otherwise fall through
+        # a completed pass and no continuation would ever sample it (level
+        # rank then never completes for exactly that source).  Passes are
+        # cheap — already-merged sources are skip-checked — and arrivals are
+        # bounded by the plan, so restarts terminate.
         tile_count = len(getattr(getattr(session, "plan", None), "tiles", ()) or ())
         if tile_count <= 0:
             return
-        if int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0:
-            session.level_scan_remaining_tiles = tile_count
+        session.level_scan_remaining_tiles = tile_count
 
     def _queue_montage_cached_level_stats(self, session, rendered_tiles, *, seed_if_empty: bool) -> None:
         """Admit cached-payload level work without making commit latency scale with tile count.
@@ -1675,8 +1685,21 @@ class FrameRenderMixin:
         # viewport change.  Normal display commits will publish richer sources;
         # when there is no visible upload backlog, a non-forced commit can
         # update uniforms/histogram without invalidating residency.
-        if processed and not getattr(session, "dirty_payloads", ()) and not getattr(session, "pending_removals", ()):
-            self._schedule_montage_presentation_commit(session, force=False)
+        # Evidence-drain pacing (wedge cost fix 2026-07-05): while a parked
+        # explicit-auto flush waits on level evidence, committing after EVERY
+        # budget slice re-runs the full payload build per handful of tiles
+        # (~68 no-op commits for a 272-tile scene).  Commit when the evidence
+        # queue actually drained — the parked flush re-checks the rank then —
+        # or when nothing is parked (metadata refresh for a settled session).
+        evidence_remaining = bool(pending) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+        flush_parked = bool(getattr(session, "flush_pending", False) or getattr(session, "final_commit_pending", False))
+        if (
+            processed
+            and not (evidence_remaining and flush_parked)
+            and not getattr(session, "dirty_payloads", ())
+            and not getattr(session, "pending_removals", ())
+        ):
+            self._schedule_montage_presentation_commit(session, force=flush_parked)
         self._schedule_montage_cached_level_stats(session)
 
     def _schedule_montage_refined_level_stats(self, session) -> None:
@@ -2794,6 +2817,8 @@ class FrameRenderMixin:
             self._schedule_montage_attached_stage_waits(session)
         if plan.lod_materializations:
             self._schedule_montage_lod_materializations(session)
+        if plan.level_evidence:
+            self._schedule_montage_cached_level_stats(session)
         if plan.commit or force:
             self._schedule_montage_presentation_commit(
                 session, force=bool(plan.force_commit or force)
@@ -2842,6 +2867,17 @@ class FrameRenderMixin:
         upserts = len(session.pending_payload_upserts)
         lod_pending = len(getattr(session, "pending_lod_requests", ()) or ())
         planning_deferred = bool(getattr(session, "stage_planning_deferred", False))
+        level_evidence = len(getattr(session, "pending_level_tiles", ()) or ()) + int(
+            getattr(session, "level_scan_remaining_tiles", 0) or 0
+        )
+        # Level-value convergence drains stale tiles through budgeted commits
+        # without touching dirty/upsert queues; its progress must be part of
+        # the stall signature or a long drain reads as a frozen session.
+        level_stale = (
+            int(session.level_presentation_snapshot().stale_count)
+            if session.has_pending_level_update()
+            else 0
+        )
         unsettled = bool(
             pending
             or evaluating
@@ -2850,6 +2886,8 @@ class FrameRenderMixin:
             or upserts
             or lod_pending
             or planning_deferred
+            or level_evidence
+            or level_stale
             or session.flush_pending
             or session.final_commit_pending
         )
@@ -2863,6 +2901,14 @@ class FrameRenderMixin:
             # clears) instead of counting a repair.
             self._schedule_deferred_montage_planning(session)
             return
+        level_timer = getattr(self, "_montage_level_stats_timer", None)
+        if level_evidence and level_timer is not None and level_timer.isActive():
+            # Level evidence with its continuation timer armed is scheduled
+            # work; a busy event loop can hold the drain across watchdog
+            # ticks (pyqtgraph fft commits block for hundreds of ms).  A
+            # lost wakeup is the timer NOT being armed while records imply
+            # level work — that still fires below.
+            return
         signature = (
             int(session.session_id),
             pending,
@@ -2871,6 +2917,8 @@ class FrameRenderMixin:
             dirty,
             upserts,
             lod_pending,
+            level_evidence,
+            level_stale,
             len(session.presented_tiles),
             len(session.rendered_tiles),
         )
@@ -3139,6 +3187,17 @@ class FrameRenderMixin:
             if _tile_layer_auto_levels_wait_for_complete_source(self, session, decision_force_auto, level_stats):
                 session.final_commit_pending = True
                 session.flush_pending = True
+                # Rule 6: this park waits on level evidence, so ARM the
+                # producer.  When no level work is queued (stats absent for a
+                # fresh level key whose upserts were all consumed already),
+                # mark the session scan pending — otherwise the continuation
+                # below is a no-op and the parked flush can never re-commit
+                # (the pyqtgraph+resident auto-levels wedge).
+                if (
+                    not getattr(session, "pending_level_tiles", None)
+                    and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0
+                ):
+                    self._mark_montage_level_scan_pending(session)
                 self._schedule_montage_cached_level_stats(session)
                 return
             publish_histogram_plot = _should_publish_montage_histogram_plot(
@@ -4737,6 +4796,19 @@ def _should_defer_montage_side_panels(window, session) -> bool:
 
 
 def _tile_layer_auto_levels_wait_for_complete_source(window, session, decision_force_auto: bool, level_stats) -> bool:
+    """Should this explicit-auto commit park until better level evidence exists?
+
+    ADR 0051 rule 6 (wedge fixed 2026-07-05): a True here parks the commit
+    with ``flush_pending``/``final_commit_pending`` set, so the CALLER must
+    guarantee an evidence producer is armed (level scan / pending level
+    tiles); parking on evidence that nothing is scheduled to produce is the
+    dispatch-construction violation the watchdog assertion reports.  The
+    ``loading_tiles`` read is a machine view now, so a tile whose payload the
+    backend confirmed cannot hold this wait open (the pyqtgraph+resident
+    auto-levels wedge signature: presented==rendered, queues 0, flush+final
+    true, loading==tile_count).
+    """
+
     if not bool(decision_force_auto):
         return False
     if bool(image_view_backend_capabilities(window.win.img_view).shader_windowing):
