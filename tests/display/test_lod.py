@@ -1,6 +1,8 @@
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
-    LOD_REASON_ASYNC_RESIDENCY_REQUIRED,
+    LOD_REASON_BACKEND_ADOPTION_PENDING,
+    LOD_REASON_NATIVE_POLICY,
+    LOD_REASON_NATIVE_SCALE,
     LOD_REASON_INVALID_VIEW,
     inner_uv_for_gutter,
     native_lod_policy,
@@ -108,7 +110,31 @@ def test_native_policy_reports_desired_and_applied_separately():
     assert decision.applied_factor_xy == (1, 1)
     assert decision.applied_level == 0
     assert decision.policy == LOD_POLICY_NATIVE_ONLY
-    assert decision.reason == LOD_REASON_ASYNC_RESIDENCY_REQUIRED
+    assert decision.reason == LOD_REASON_NATIVE_POLICY
+
+
+def test_native_policy_reports_backend_adoption_reason_when_given():
+    decision = native_lod_policy(
+        ((0.0, 1024.0), (0.0, 1024.0)),
+        (128, 128),
+        (64, 64),
+        deferred_reason=LOD_REASON_BACKEND_ADOPTION_PENDING,
+    )
+
+    assert decision.applied_factor == 1
+    assert decision.reason == LOD_REASON_BACKEND_ADOPTION_PENDING
+
+
+def test_native_policy_deferred_reason_ignored_at_native_scale():
+    decision = native_lod_policy(
+        ((0.0, 64.0), (0.0, 64.0)),
+        (128, 128),
+        (64, 64),
+        deferred_reason=LOD_REASON_BACKEND_ADOPTION_PENDING,
+    )
+
+    assert decision.demand.desired_factor == 1
+    assert decision.reason == LOD_REASON_NATIVE_SCALE
 
 
 def test_inner_uv_for_gutter_excludes_border_pixels():

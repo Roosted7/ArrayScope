@@ -9,8 +9,11 @@ import numpy as np
 
 LOD_POLICY_NATIVE_ONLY = "native-only"
 LOD_REASON_NATIVE_SCALE = "native-resolution texture is appropriate at the current scale"
-LOD_REASON_ASYNC_RESIDENCY_REQUIRED = (
-    "desired LOD is deferred until asynchronous multi-resolution residency can retain adjacent levels"
+LOD_REASON_NATIVE_POLICY = (
+    "desired LOD is not applied: the native-only montage LOD policy is selected"
+)
+LOD_REASON_BACKEND_ADOPTION_PENDING = (
+    "desired LOD awaits resident-LOD adoption on this backend (resident is VisPy-only, ADR 0050)"
 )
 LOD_REASON_INVALID_VIEW = "native resolution selected because viewport LOD demand could not be measured"
 
@@ -139,8 +142,14 @@ def native_lod_policy(
     tile_shape: tuple[int, int],
     *,
     previous_factor: int | None = None,
+    deferred_reason: str | None = None,
 ) -> LodPolicyDecision:
-    """Return the production policy: demand may exceed native; applied never does."""
+    """Return the native-only policy: demand may exceed native; applied never does.
+
+    ``deferred_reason`` states *why* a desired factor > 1 is not applied
+    (user-selected native-only policy vs. resident LOD not yet adopted on the
+    active backend); it defaults to the policy-selected wording.
+    """
 
     demand = select_lod_demand(
         view_range,
@@ -151,7 +160,7 @@ def native_lod_policy(
     if demand.reason == LOD_REASON_INVALID_VIEW:
         reason = LOD_REASON_INVALID_VIEW
     elif demand.desired_factor > 1:
-        reason = LOD_REASON_ASYNC_RESIDENCY_REQUIRED
+        reason = str(deferred_reason or LOD_REASON_NATIVE_POLICY)
     else:
         reason = LOD_REASON_NATIVE_SCALE
     return LodPolicyDecision(
@@ -365,7 +374,8 @@ __all__ = [
     "LodPolicyDecision",
     "LOD_POLICY_NATIVE_ONLY",
     "LOD_REASON_NATIVE_SCALE",
-    "LOD_REASON_ASYNC_RESIDENCY_REQUIRED",
+    "LOD_REASON_NATIVE_POLICY",
+    "LOD_REASON_BACKEND_ADOPTION_PENDING",
     "LOD_REASON_INVALID_VIEW",
     "LOD_POLICY_RESIDENT",
     "LOD_REASON_RESIDENT_MATCH",

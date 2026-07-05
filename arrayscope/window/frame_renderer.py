@@ -630,6 +630,7 @@ class FrameRenderMixin:
             repeated_expensive_stage_per_tile=stage_plan["repeated_expensive_stage_per_tile"],
             priority_focus=viewport_plan.priority_focus,
             lod_policy_mode=lod_policy_mode,
+            lod_native_reason=montage_lod.native_policy_reason_for_renderer(self),
             lod_preview_pyramid=(self._montage_lod_preview_pyramid() if lod_preview_level else None),
             lod_preview_level=lod_preview_level,
             lod_pyramid=(

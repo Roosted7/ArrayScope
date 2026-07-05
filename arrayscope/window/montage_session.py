@@ -233,6 +233,9 @@ class MontageRenderSession:
     # ADR 0050: "native-only" keeps production behavior; "resident" presents
     # the closest pyramid level that is actually materialized and resident.
     lod_policy_mode: str = LOD_POLICY_NATIVE_ONLY
+    # Why native-only applies when the desired factor exceeds 1 (user policy
+    # choice vs. resident LOD not yet adopted on the active backend).
+    lod_native_reason: str | None = None
     lod_pyramid: object | None = None
     # (tile_number, PyramidLevelKey, source array) triples for the renderer to
     # schedule as background materializations.  Filled only under the

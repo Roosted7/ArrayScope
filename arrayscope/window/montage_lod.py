@@ -36,6 +36,8 @@ from arrayscope.core.work_graph import WorkItem, WorkLane
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
+    LOD_REASON_BACKEND_ADOPTION_PENDING,
+    LOD_REASON_NATIVE_POLICY,
     LOD_POLICY_RESIDENT,
     LodInfo,
     choose_resident_level,
@@ -156,6 +158,7 @@ def selected_lod_factor(session) -> int:
             session.viewport_shape,
             session.plan.tile_shape,
             previous_factor=previous,
+            deferred_reason=session.lod_native_reason,
         )
     return int(session.lod_policy_decision.applied_factor)
 
@@ -891,6 +894,24 @@ def policy_mode_for_renderer(renderer) -> str:
     if str(getattr(capabilities, "name", "")) != "vispy":
         return LOD_POLICY_NATIVE_ONLY
     return LOD_POLICY_RESIDENT
+
+
+def native_policy_reason_for_renderer(renderer) -> str:
+    """Explain *why* native-only applies (honest diagnostics, ADR 0050).
+
+    Distinguishes the user-selected native-only policy from a backend that
+    resident LOD has not been adopted on yet; `tile_lod_reason` surfaces this
+    verbatim when a desired factor > 1 goes unapplied.
+    """
+
+    choice = getattr(getattr(renderer.win, "app_settings", None), "montage_lod_policy", None)
+    value = str(getattr(choice, "value", choice) or LOD_POLICY_NATIVE_ONLY)
+    if value != LOD_POLICY_RESIDENT:
+        return LOD_REASON_NATIVE_POLICY
+    capabilities = image_view_backend_capabilities(renderer.win.img_view)
+    if str(getattr(capabilities, "name", "")) != "vispy":
+        return LOD_REASON_BACKEND_ADOPTION_PENDING
+    return LOD_REASON_NATIVE_POLICY
 
 
 def shared_pyramid(renderer) -> PyramidCache:
