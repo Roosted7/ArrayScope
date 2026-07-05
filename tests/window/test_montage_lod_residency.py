@@ -997,6 +997,89 @@ def test_backend_identity_reconciliation_retries_are_bounded():
     assert emitted <= 3, f"unbounded reconciliation retries: {emitted}"
 
 
+def test_settled_mismatch_is_queryable_for_followup_commit():
+    """Field defect 2026-07-05 #3: the report that reveals drawn-slot
+    staleness arrives at the END of a commit, and the reconciliation that
+    consumes it runs inside the NEXT commit — a settled session (dirty and
+    upserts drained) froze with backend_stale_identities nonzero until a pan
+    happened to schedule a commit.  The renderer now asks
+    backend_identity_mismatch_tiles() after every acknowledgement; it must
+    report actionable mismatches, exclude resigned pairs and exhausted
+    attempts, and empty out on convergence."""
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
+    _state, delta = session.build_tile_presentation({})
+    current_identity = {
+        int(tile): payload.source_id for tile, payload in dict(delta.upserts).items()
+    }
+    report = TileCommitReport(
+        presented_tiles=(0, 1),
+        committed_upserts=(0, 1),
+        delta_key=(int(delta.base_revision), int(delta.target_revision)),
+        presented_identities={0: current_identity[0], 1: ("stale", 6)},
+    )
+    session.acknowledge_tile_presentation(delta, report)
+    assert session.backend_identity_mismatch_tiles() == (1,), (
+        "the ack itself must expose the settled wedge for a follow-up commit"
+    )
+    # Convergence empties the query.
+    _state2, delta2 = session.build_tile_presentation({})
+    session.acknowledge_tile_presentation(
+        delta2,
+        TileCommitReport(
+            presented_tiles=(0, 1),
+            committed_upserts=tuple(delta2.upserts),
+            delta_key=(int(delta2.base_revision), int(delta2.target_revision)),
+            presented_identities=dict(current_identity),
+        ),
+    )
+    assert session.backend_identity_mismatch_tiles() == ()
+
+
+def test_inherited_identities_heal_on_a_rebuilt_session():
+    """A rebuilt session (scrub step) inherits backend slots — and now also
+    the identity ground truth (renderer seeds last_presented_identities from
+    the dying session).  Its first build must repair inherited stale slots
+    instead of settling blind on top of them (sid-68 wedge, JSONL 131233)."""
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
+    _state, delta = session.build_tile_presentation({})
+    # Fresh session, fresh machine: only the inherited map knows slot 1 is
+    # stale.  (The renderer copies this dict across replacement.)
+    session.last_presented_identities = {
+        int(tile): payload.source_id for tile, payload in dict(delta.upserts).items()
+    }
+    session.last_presented_identities[1] = ("previous-session-level", 5)
+    session.dirty_payloads.clear()
+    session.pending_payload_upserts.clear()
+    assert session.backend_identity_mismatch_tiles() == (1,)
+    _state2, delta2 = session.build_tile_presentation({})
+    assert 1 in delta2.upserts, "inherited stale slot must re-present"
+    assert 1 in tuple(delta2.active_tiles)
+
+
+def test_resigned_pair_stops_convergence_but_new_result_rearms():
+    """The machine's resignation (bounded identity rejections) must silence
+    exactly the resigned (wanted, shown) pair — the mismatch query and the
+    build reconciliation skip it — while a fresh evaluation clears the
+    resignation and gets new chances."""
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
+    _state, delta = session.build_tile_presentation({})
+    wanted = dict(delta.upserts)[1].source_id
+    rec = session.lifecycle.record(1)
+    rec.resigned.add((wanted, ("stuck", 6)))
+    session.last_presented_identities = {1: ("stuck", 6)}
+    session.dirty_payloads.clear()
+    session.pending_payload_upserts.clear()
+    assert session.backend_identity_mismatch_tiles() == ()
+    _state2, delta2 = session.build_tile_presentation({})
+    assert 1 not in delta2.upserts, "resigned pair must not re-present"
+    # A fresh semantic result clears the resignation.
+    session.lifecycle.evaluation_completed(1)
+    assert rec.resigned == set()
+
+
 def test_report_bound_to_an_older_delta_acknowledges_nothing():
     """Field defect 2026-07-05 (JSONL 112841): a skipped/superseded commit
     leaves the committer's last report pointing at an OLDER delta; every ack

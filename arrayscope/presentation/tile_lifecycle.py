@@ -93,6 +93,11 @@ class TileRecord:
     presented_source_id: object = None
     parked_reason: str = ""
     levels: dict = field(default_factory=dict)  # level_key -> _LevelEntry
+    #: (wanted_identity, backend_identity) pairs the machine gave up on after
+    #: bounded identity rejections: the backend would not converge, so
+    #: convergence passes must not reopen the loop for exactly these pairs.
+    #: Cleared by a fresh semantic result.
+    resigned: set = field(default_factory=set)
 
 
 class TileLifecycle:
@@ -161,10 +166,12 @@ class TileLifecycle:
         self._evaluating.discard(rec.tile_number)
         # Fresh identity: the previous emit/park no longer refers to what the
         # next commit will carry, and the backend has not seen the new one.
+        # Resignations are per stale pair — a new result gets fresh chances.
         self._unpark(rec)
         if rec.presentation is not Presentation.PRESENTED:
             rec.presentation = Presentation.UNPRESENTED
         rec.emitted_source_id = None
+        rec.resigned.clear()
 
     def evaluation_declined(self, tile_number: int) -> tuple[ReleaseClaim, ...]:
         """Admission declined or work dropped: back to planned, claims released."""
@@ -316,8 +323,11 @@ class TileLifecycle:
                     # Resigned acceptance: record the backend's identity as
                     # the presented truth (never pretend our emit landed) and
                     # let the caller clear dirty — bounded retries, wedge
-                    # stays visible in backend_stale_identities.
+                    # stays visible in backend_stale_identities.  The pair is
+                    # remembered so convergence passes skip exactly it (and
+                    # nothing else).
                     self._identity_rejection_counts.pop(pair, None)
+                    rec.resigned.add((rec.emitted_source_id, identities[index]))
                     presented_identity = identities[index]
                 else:
                     self._identity_rejection_counts[pair] = count

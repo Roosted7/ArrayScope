@@ -902,12 +902,13 @@ class MontageRenderSession:
                     self._reconcile_attempts.pop(int(tile_number), None)
                     continue
                 rec = self.lifecycle.peek(int(tile_number))
-                if rec is not None and rec.presented_source_id == shown_identity:
-                    # P2: the machine has acknowledged this slot's identity as
-                    # the presented truth — including resigned acceptance of a
-                    # backend that would not converge after bounded retries.
-                    # Forcing a re-present here would reopen the exact loop
-                    # the machine bounded (single-place convergence, rule 1).
+                if rec is not None and (current.source_id, shown_identity) in rec.resigned:
+                    # P2: the machine resigned exactly this (wanted, shown)
+                    # pair after bounded identity rejections — the backend
+                    # would not converge; re-presenting would reopen the loop
+                    # it bounded.  Any OTHER mismatch (e.g. payload moved on
+                    # without an emit, or a rebuilt session inheriting stale
+                    # slots) is a legitimate repair and proceeds below.
                     self._reconcile_attempts.pop(int(tile_number), None)
                     continue
                 pair = (shown_identity, current.source_id)
@@ -1211,6 +1212,38 @@ class MontageRenderSession:
             self.level_generation.forget_tile(int(tile))
             self.display_tile_payloads.pop(int(tile), None)
         return acknowledged
+
+    def backend_identity_mismatch_tiles(self) -> tuple[int, ...]:
+        """Drawn slots whose backend identity differs from the current payload
+        and that convergence has not exhausted (field defect 2026-07-05 #3).
+
+        The drawn-identity reconciliation runs inside ``build_tile_presentation``
+        — i.e. only during a commit — but the report that REVEALS staleness
+        arrives at the END of a commit.  A settled session (dirty and upserts
+        empty) therefore froze with ``backend_stale_identities`` nonzero until
+        an unrelated event happened to schedule a commit.  The renderer calls
+        this after every acknowledgement and schedules a follow-up commit when
+        it is non-empty; bounded by the same resigned-pair and attempt limits
+        as the reconciliation itself, so a non-converging backend cannot loop.
+        """
+
+        shown_map = getattr(self, "last_presented_identities", None) or {}
+        if not shown_map:
+            return ()
+        mismatched: list[int] = []
+        for tile_number, shown_identity in shown_map.items():
+            current = self.display_tile_payloads.get(int(tile_number))
+            if current is None or current.source_id == shown_identity:
+                continue
+            rec = self.lifecycle.peek(int(tile_number))
+            if rec is not None and (current.source_id, shown_identity) in rec.resigned:
+                continue
+            pair = (shown_identity, current.source_id)
+            prior_pair, attempts = self._reconcile_attempts.get(int(tile_number), (None, 0))
+            if prior_pair == pair and attempts >= 3:
+                continue
+            mismatched.append(int(tile_number))
+        return tuple(sorted(mismatched))
 
     def requeue_orphaned_loading_tiles(self) -> int:
         """Re-enqueue planned tiles stuck in loading with no work attached.

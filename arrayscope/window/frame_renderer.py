@@ -621,6 +621,19 @@ class FrameRenderMixin:
         # same slice would find those levels permanently claimed (stale
         # wrong-LOD tiles).  Balance them before the replacement takes over.
         montage_lod.release_session_claims(getattr(self, "_montage_session", None))
+        # Backend slots outlive sessions (persistent tile residency), so the
+        # identity ground truth from the last report stays valid — but a fresh
+        # session started with last_presented_identities EMPTY, blind to
+        # inherited stale slots until its own first report, whose repairs only
+        # ran on the commit AFTER that (field defect 2026-07-05 #3: sid 68
+        # rebuilt on top of 29 stale slots and settled without healing them).
+        # Inherit the map; tiles absent from the new plan fall out naturally
+        # (no current payload → mismatch scan skips them).
+        dying_session = getattr(self, "_montage_session", None)
+        if dying_session is not None:
+            inherited = getattr(dying_session, "last_presented_identities", None)
+            if inherited:
+                session.last_presented_identities = dict(inherited)
         self._montage_session = session
         # A viewport-update token armed for the dying session would make every
         # later _run_montage_viewport_update bail as stale — a dead
@@ -2858,6 +2871,19 @@ class FrameRenderMixin:
         finally:
             self._montage_presentation_commit_active = False
         self._schedule_montage_lod_materializations(session)
+        # Convergence must be event-driven, not luck-driven (field defect
+        # 2026-07-05 #3): the report acknowledged above is the FIRST evidence
+        # of drawn-slot identities, and the reconciliation that consumes it
+        # runs inside the NEXT commit.  A settled session (dirty/upserts
+        # empty) got no next commit, freezing backend_stale_identities
+        # nonzero until a pan happened to schedule one.  Bounded by the
+        # resigned-pair and attempt limits inside the query, so a backend
+        # that cannot converge stops re-scheduling after the retry budget.
+        if session.backend_identity_mismatch_tiles():
+            self._montage_identity_repair_commits = (
+                int(getattr(self, "_montage_identity_repair_commits", 0) or 0) + 1
+            )
+            self._schedule_montage_presentation_commit(session, force=False)
         self._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
         report = getattr(self._display_committer(), "last_tile_commit_report", None)
         _complete_inline_work(
