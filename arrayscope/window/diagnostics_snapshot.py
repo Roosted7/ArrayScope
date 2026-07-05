@@ -136,6 +136,10 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         lifecycle_semantic_mismatches=_lifecycle_semantic_mismatches(session),
         dirty_payload_tiles=0 if session is None else len(getattr(session, "dirty_payloads", ()) or ()),
         backend_stale_identities=_backend_stale_identities(session),
+        stall_repairs=int(getattr(window.renderer, "_montage_stall_repairs", 0) or 0),
+        last_stall_signature=tuple(
+            int(value) for value in (getattr(window.renderer, "_montage_watchdog_last_stall", ()) or ())
+        ),
         presented_order_sample=() if session is None else tuple(int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]),
     )
 

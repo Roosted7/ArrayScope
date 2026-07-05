@@ -2406,6 +2406,10 @@ class FrameRenderMixin:
         if previous != signature:
             return  # work is progressing; stay armed.
         self._montage_stall_repairs = int(getattr(self, "_montage_stall_repairs", 0) or 0) + 1
+        # Every rescue is a lost-wakeup bug report: keep the frozen state
+        # visible in diagnostics/JSONL for root-causing (the watchdog is a
+        # safety net, not the fix).
+        self._montage_watchdog_last_stall = signature
         repaired = session.requeue_orphaned_loading_tiles()
         if repaired:
             self._montage_orphaned_tiles_repaired = (
