@@ -888,6 +888,68 @@ def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholde
     assert replaced.quality == "exact"
 
 
+def test_drawn_tile_with_outdated_acknowledged_identity_represents_and_rejoins_active():
+    """Field defect 2026-07-05 (JSONL 110937, sid=81): level-2 swap upserts
+    for near-scope tiles were declined and parked while the backend kept
+    DRAWING their acknowledged level-6 slots — visibly stale rows no
+    viewport-derived scope would ever repair.  A drawn tile whose
+    acknowledged identity differs from the session's current payload must
+    re-present and join the delta's active scope so the backend accepts it."""
+
+    from dataclasses import replace as dc_replace
+
+    from arrayscope.display.model.frame import TilePresentationState
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
+    _state, delta = session.build_tile_presentation({})
+    report = TileCommitReport(presented_tiles=(0, 1), committed_upserts=(0, 1))
+    session.acknowledge_tile_presentation(delta, report)
+    session.mark_presented((0, 1))
+
+    # Tile 1 leaves the viewport-derived scope but its slot stays drawn.
+    session.visible_tiles = (session.plan.tiles[0],)
+    # The backend still shows an OLDER identity than the session now holds.
+    stale = dc_replace(session.tile_presentation_state.payloads[1], source_id=("stale", 6))
+    session.tile_presentation_state = TilePresentationState(
+        {**dict(session.tile_presentation_state.payloads), 1: stale},
+        revision=session.tile_presentation_state.revision,
+    )
+
+    _state2, delta2 = session.build_tile_presentation({})
+    assert 1 in delta2.upserts, "drawn tile with outdated acknowledged identity must re-present"
+    assert 1 in tuple(delta2.active_tiles), "and must be acceptable to the viewport-scoped backend"
+
+    report2 = TileCommitReport(presented_tiles=(0, 1), committed_upserts=(1,))
+    session.acknowledge_tile_presentation(delta2, report2)
+    _state3, delta3 = session.build_tile_presentation({})
+    assert 1 not in delta3.upserts, "reconciliation converges and the session settles"
+
+
+def test_refresh_replans_missing_desired_level_at_unchanged_viewport():
+    """Settle-repair contract (field defect 2026-07-05, JSONL 110937,
+    sid=80): supersession can kill planned materializations after the last
+    camera-driven refresh; a later refresh with an UNCHANGED viewport
+    identity must still re-request the missing demanded level, or tiles
+    wedge on a coarser resident level until the next pan."""
+
+    from arrayscope.window import montage_lod
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
+    assert session.refresh_lod_for_viewport() is not None
+    first = list(session.pending_lod_requests)
+    assert first, "zoomed-out demand plans materializations for the missing level"
+
+    # Simulate supersession/session churn dropping the planned work.
+    released = montage_lod.release_session_claims(session)
+    assert released == len(first)
+    assert not session.pending_lod_requests
+
+    session.refresh_lod_for_viewport()
+    assert session.pending_lod_requests, (
+        "idle refresh must re-plan the demanded level after its claims were released"
+    )
+
+
 def test_floor_presents_blank_tile_even_while_exact_evaluation_is_in_flight():
     """Field report 2026-07-05: slow stage-backed fills left tiles BLACK for
     seconds while their floor planes sat resident — because the floor pass

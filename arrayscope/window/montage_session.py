@@ -814,6 +814,25 @@ class MontageRenderSession:
         # scope (see acknowledge_tile_presentation: a non-active upsert the
         # backend declines parks instead of re-arming, or finalization would
         # retry an unacceptable upsert forever).
+        # Drawn-identity reconciliation (ADR 0051; field defect 2026-07-05,
+        # JSONL 110937 sid=81): the viewport-scoped backend keeps DRAWING
+        # acknowledged near-scope slots, so a drawn tile whose acknowledged
+        # identity differs from the payload the session now holds is visibly
+        # stale on screen no matter what the viewport-derived active set
+        # says.  Such tiles re-present and join the active scope so the
+        # backend accepts them (one converging commit; once acknowledged ==
+        # current the set is empty and the session settles).
+        stale_drawn: list[int] = []
+        for tile_number, acknowledged in previous_payloads.items():
+            current = self.display_tile_payloads.get(int(tile_number))
+            if current is None or current is acknowledged:
+                continue
+            if current.source_id != acknowledged.source_id:
+                stale_drawn.append(int(tile_number))
+        if stale_drawn:
+            for tile_number in sorted(stale_drawn):
+                self.dirty_payloads[int(tile_number)] = None
+            active = tuple(dict.fromkeys((*active, *sorted(stale_drawn))))
         # ADR 0051: the lifecycle machine owns park/re-arm; this is its
         # rule-3 scope event.
         active_scope = set(active)
