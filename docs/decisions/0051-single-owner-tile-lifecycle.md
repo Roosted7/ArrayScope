@@ -209,7 +209,14 @@ The Lifecycle diagnostics line classifies any stale-presentation report; check i
   PLANNED/dirty imply scheduled work) so lost wakeups are impossible by construction and the
   1 Hz stall watchdog becomes an assertion, not a repair; (2) `loading_tiles` /
   `active_tile_requests` / `skipped_tiles` become views and stage fan-in reports through
-  events; (3) the per-commit delta walk cost.
+  events (also moves level convergence into the machine, removing the retarget's
+  level-pending rebirth fallback); (3) the per-commit delta walk cost.
+  **Gate:** field verification of the landed stack on real slider scrubs precedes all three
+  (watch `lifecycle_identity_rejections`, `backend_stale_identities`,
+  `stall_repairs`/`last_stall_signature`, `dirty_payload_tiles`, and
+  `_montage_session_reuses`/`_montage_session_retargets` + retarget-reject reasons).
+  Dispatch and sets-as-views were deliberately left unstarted rather than half-landed
+  (2026-07-05).
 - **P2-adjacent (landed 2026-07-05, the few-Hz-scroll cure):** rule 4 applied at the
   architecture level — the interaction path is cheap by construction.  Dimension scrubbing
   notes viewport interaction (it was invisible to every gate); during a burst, stage planning

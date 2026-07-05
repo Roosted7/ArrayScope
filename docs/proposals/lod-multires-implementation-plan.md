@@ -2,8 +2,12 @@
 
 ## Status
 
-Blocked behind the native-only production policy. Demand selection is implemented and diagnostics
-report desired quality, but production presentation applies native-resolution payloads only.
+Historical — implemented (2026-07-04/05). [ADR 0050](../decisions/0050-async-multi-resolution-tile-residency.md)
+delivered asynchronous materialization, compatible residency classes, and the resident
+presentation policy (default on VisPy tiled scenes);
+[ADR 0051](../decisions/0051-single-owner-tile-lifecycle.md) owns the tile lifecycle. This plan
+is retained for its cache-key and storage-class rationale; where it disagrees with the ADRs, the
+ADRs win.
 
 ## Problem
 

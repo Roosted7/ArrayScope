@@ -95,7 +95,16 @@ new content. ROI geometry follows the same source-local rule through canonical
 
 ### Multi-resolution
 
-Production residency currently favors native-resolution tiles. Arbitrary CPU-reduced sizes must not be placed into fixed atlas slots whose sampling assumes one tile shape. Future multi-resolution storage requires compatible classes: separate pages per LOD/shape, arrays grouped by dimensions, or a virtual texture/page table.
+Resident multi-resolution LOD is the default for VisPy tiled scenes
+([ADR 0050](../decisions/0050-async-multi-resolution-tile-residency.md)): asynchronous worker-side
+pyramid materialization keyed by semantic tile identity; atlas pages classed by
+`(level, texture shape, format, gutter)` so a reduced tile never enters a native-shaped slot; a
+presentation floor that presents any resident level instead of a placeholder; and a retained,
+pinned preview level. Tile lifecycle state (what is evaluated, resident, presented) is owned by
+the Qt-free `TileLifecycle` machine
+([ADR 0051](../decisions/0051-single-owner-tile-lifecycle.md)); backends acknowledge commits with
+slot identities and never own semantic bookkeeping. Exact inspection stays native-resolution;
+PyQtGraph adoption and ops-input LOD remain roadmap work.
 
 ## Backend contract
 

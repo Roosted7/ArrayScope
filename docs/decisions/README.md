@@ -70,7 +70,7 @@ Status terminology:
 | [0038](0038-render-backend-composition.md) | Backend composition | Implemented; surfaces own presentation/lifecycle and mirror shared interaction state. |
 | [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Implemented (frame planner, typed tiled surface, work graph, backend composition, shared pointer capture); residual residency work moved to 0044/X5. |
 | [0040](0040-backend-aware-presentation-convergence.md) | Backend-aware presentation convergence | Implemented for tiled presentation. |
-| [0041](0041-lod-selection-materialization-and-residency.md) | LOD selection/materialization/residency | Accepted design; production remains native-only. |
+| [0041](0041-lod-selection-materialization-and-residency.md) | LOD selection/materialization/residency | Implemented via ADR 0050 (async materialization + compatible residency; `resident` default on VisPy tiled scenes). The three-way split remains the governing contract. |
 | [0042](0042-montage-viewport-reflow-and-roi-ownership.md) | Montage viewport reflow and ROI ownership | Implemented for tiled montage. |
 | [0044](0044-viewport-scoped-tiled-residency.md) | Viewport-scoped tiled residency | Accepted; acknowledgement repair implemented, normal-image retarget remains roadmap work. |
 | [0045](0045-render-orchestrator-composition.md) | Render orchestrator composition | Implemented (v32); render state owned by one composed object instead of window mixins. |
@@ -78,7 +78,7 @@ Status terminology:
 | [0047](0047-auto-image-backend-selection.md) | Capability-probed automatic image backend selection | Accepted; `auto` resolves to VisPy on Linux with hardware GL (X5a traces), PyQtGraph everywhere else. |
 | [0048](0048-linked-window-sync.md) | Linked-window sync over local sockets | Implemented; per-facet window/level, dimension-indexing, operations, and ROI sync across separately started processes. |
 | [0050](0050-async-multi-resolution-tile-residency.md) | Async multi-resolution tile residency | Implemented for VisPy tiled scenes (`resident` default on VisPy); retained preview level implemented; reduce-before-ops consumer, PyQtGraph adoption, and ops-input LOD remain roadmap work. |
-| [0051](0051-single-owner-tile-lifecycle.md) | Single-owner tile lifecycle | Accepted; P1 + P2 core implemented (presentation/semantic axes authoritative, identity-aware acknowledgement, event-driven convergence); P3–P5 phased. |
+| [0051](0051-single-owner-tile-lifecycle.md) | Single-owner tile lifecycle | Accepted; P1 + P2 core implemented (presentation/semantic axes authoritative, identity-aware acknowledgement, event-driven convergence, session reuse/retarget on scrubs). Remaining P2 (machine-derived dispatch, sets as views, delta-walk cost) gated on field verification; P3–P5 phased. |
 
 ## Adding or changing a decision
 

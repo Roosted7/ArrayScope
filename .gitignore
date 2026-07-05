@@ -44,6 +44,7 @@ Thumbs.db
 coverage.xml
 htmlcov/
 data/
+/data
 bin/
 
 # Distribution

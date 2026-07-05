@@ -76,6 +76,10 @@ meaning, and backend adapters own concrete textures/items/visuals only.
   window exposes only a thin rendering API and read-only presentation
   properties. See [ADR 0045](decisions/0045-render-orchestrator-composition.md).
 - `window.montage_session`, payload cache, viewport planning, tile provider, and extracted control-plane models separate parts of montage lifecycle from the orchestrator.
+- `presentation.tile_lifecycle` (Qt-free) is the single owner of every tile's lifecycle across
+  three axes (semantic, residency, presentation). All other components are event sources or
+  effect executors; nothing enters `presented` without a backend-acknowledged, identity-checked
+  commit. See [ADR 0051](decisions/0051-single-owner-tile-lifecycle.md).
 - `window.render_contract` defines the one staleness/ordering vocabulary: the render generation,
   montage-session currency, and per-kind work tokens. Orchestrator predicates delegate to it;
   no orchestration site defines a local staleness comparison (roadmap Y1).
@@ -185,7 +189,7 @@ state/viewport change
   -> acknowledgement and committed frame
 ```
 
-Pan/zoom retarget the session rather than recreating document work. Native-resolution persistent tiles are the production baseline. The LOD selector may report a desired factor, but the applied factor remains one until asynchronous materialization and compatible residency satisfy [ADR 0041](decisions/0041-lod-selection-materialization-and-residency.md).
+Pan/zoom retarget the session rather than recreating document work; same-key re-renders reuse the live session and index-window scrub steps with identical layout geometry retarget it in place ([ADR 0051](decisions/0051-single-owner-tile-lifecycle.md)). Display LOD is resident by default on VisPy tiled scenes: asynchronous pyramid materialization, per-class atlas residency, a presentation floor, and a retained preview level ([ADR 0050](decisions/0050-async-multi-resolution-tile-residency.md) implements the [ADR 0041](decisions/0041-lod-selection-materialization-and-residency.md) split). Exact inspection values remain native; normal (non-tiled) images stay native-only until X5c/X5d.
 
 Montage resize and layout reflow are viewport retargets, not semantic scope changes. Manual resize
 preserves screen zoom through `ViewportController`; same-source column reflow may translate the range

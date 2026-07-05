@@ -174,7 +174,9 @@ Ordered gates:
    by the backend. Delivered by ADR 0051 P1+P2 for montage tiled scenes: identity-aware,
    causally-bound acknowledgement is the machine invariant, with conformance coverage for partial
    acceptance, declines, parking, stale reports, and session replacement. Normal-image tiled
-   scenes inherit this when X5c routes them through the same machine.
+   scenes inherit this when X5c routes them through the same machine. Remaining P2 work
+   (machine-derived dispatch, legacy sets as views, delta-commit walk cost) is tracked in
+   ADR 0051's phases and gated on field verification of the landed stack.
 3. **X5c — Viewport-scoped tiled scenes.** Change viewport retarget scheduling from montage-mode
    checks to tiled-scene/storage checks before enabling visible-only active regions for internally
    tiled normal images.
@@ -188,9 +190,10 @@ Ordered gates:
    pan across warm/resident tiles, level-only changes, backend reset/context loss, and allocation
    fallback on both PyQtGraph and VisPy paths. Build Linux X11/Wayland, Windows, and macOS reference
    traces on integrated and discrete GPUs. Decide whether/where VisPy becomes default from measured
-   latency, stability, memory, and parity — not theoretical throughput. Implement asynchronous or
-   source-provided LOD only after the acknowledged-residency, viewport-retarget, region-first
-   materialization, and compatible-residency contracts are proven.
+   latency, stability, memory, and parity — not theoretical throughput. Montage/tiled scenes
+   already run resident asynchronous LOD (ADR 0050); this gate governs internally tiled normal
+   images and source-provided pyramids, which land only after the acknowledged-residency,
+   viewport-retarget, region-first materialization, and compatible-residency contracts are proven.
 
 Policy constraints:
 

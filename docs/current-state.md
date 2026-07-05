@@ -1,6 +1,7 @@
 # Current state
 
-**Snapshot:** ArrayScope v33/Y1–Y3 plus v34 review adjustments, 2026-07-02.
+**Snapshot:** ArrayScope v33/Y1–Y3, v34 review adjustments, and the LOD/tile-lifecycle
+landings (ADR 0050/0051), 2026-07-05.
 The v30/X1–X4 control-plane work is preserved; v32 moved render orchestration
 off the window into a composed `RenderOrchestrator` and fixed the crash class
 that motivated it; Y1–Y3 then unified the staleness vocabulary, the shared
@@ -32,7 +33,7 @@ Y1–Y3/X5 entries in the [roadmap](roadmap.md).
 | PyQtGraph backend | Fallback default (ADR 0047) | Bounded CPU/item convergence; large item counts and level re-window drains remain costly (X5a fixed starvation: 272-tile level drag never converged, now ~4.3 s). Selected by `auto` wherever hardware GL is absent or traces are missing. |
 | VisPy backend | Auto-selected on Linux hardware GL (ADR 0047) | X5a Linux traces: first frame faster in every scenario (1.4–13×); level changes are uniform-only (272-tile level drag ~0.26 s vs ~8 s). Still unstable under software GL (Xvfb/llvmpipe) — do not treat CI GL runs as evidence. |
 | LOD | Resident default on VisPy (ADR 0050) | Async pyramid + per-class atlas residency; ingest reduction, presentation floor, retained preview level, semantic identity, settled idle (0% CPU verified live). Exact inspection stays native. PyQtGraph adoption, reduce-before-ops, and ops-input LOD remain roadmap work. |
-| Tile lifecycle | Single owner, machine-driven (ADR 0051, P1+P2 core) | Qt-free three-axis state machine in `presentation/tile_lifecycle.py`; presentation + semantic axes authoritative; identity-aware acknowledgement against backend slot identities; event-driven convergence. Residency axis (P3), per-slot mips (P4), PyQtGraph effects (P5) phased. |
+| Tile lifecycle | Single owner, machine-driven (ADR 0051, P1+P2 core) | Qt-free three-axis state machine in `presentation/tile_lifecycle.py`; presentation + semantic axes authoritative; identity-aware acknowledgement against backend slot identities; event-driven convergence; sessions survive same-key re-renders and index-window scrubs (reuse/retarget). Residency axis (P3), per-slot mips (P4), PyQtGraph effects (P5) phased. |
 | Diagnostics/benchmarks | Good | Work-graph counters, JSONL, benchmark records; profilers drive the production window composition. |
 | Test suite | Repaired (v32) + contract coverage (Y2) | Host-independent, no `sys.modules` replacement; `test_imagesurface_contract.py` pins cross-backend semantics; architecture guards pin the Y1/Y3 invariants. |
 | Documentation/ADRs | Updated through ADR 0051 | Roadmap gates Y1–Y3 recorded as done; X5a Linux traces published in `reviews/x5a-hardware-telemetry-linux-wayland.md`; X5b delivered for montage tiled scenes by ADR 0051; X5c–X5e remain open. |
@@ -84,3 +85,12 @@ The structural gates are done enough to stop broad refactoring. Current work is
 X5: base GPU, backend-default, singleton/direct fast-path, viewport-residency,
 and multi-resolution decisions on measured device behavior, not headless runs.
 Ordered gates and exit criteria are in the [roadmap](roadmap.md).
+
+Inside X5, the active thread is ADR 0051's remaining P2, in this order: field-verify
+the landed stack on real interaction first (watch `lifecycle_identity_rejections`,
+`backend_stale_identities`, `stall_repairs`, `dirty_payload_tiles`, and the session
+reuse/retarget counters); then machine-derived dispatch (lost wakeups impossible by
+construction, the stall watchdog demoted to an assertion); then legacy per-tile sets as
+views over the machine plus stage fan-in through events; then the delta-commit walk
+cost; then P3 (residency axis authoritative). Dispatch and sets-as-views are
+deliberately unstarted rather than half-landed.
