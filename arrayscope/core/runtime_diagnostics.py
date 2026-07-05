@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 
 from arrayscope.core.cache_status import CacheDiagnosticsSnapshot
@@ -351,9 +352,9 @@ def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
 def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> dict[str, str]:
     sections = {
         "Realtime": "\n".join(_realtime_lines(snapshot)),
-        "Feedback": "\n".join(_feedback_lines(snapshot.resource_governor)),
         "Montage": "\n".join(_montage_lines(snapshot)),
         "Render": "\n".join(_render_lines(snapshot)),
+        "Feedback": "\n".join(_feedback_lines(snapshot.resource_governor)),
         "Work Graph": "\n".join(_work_graph_lines(snapshot.work_graph)),
         "Schedulers": "\n".join(_scheduler_lines(snapshot.schedulers)),
         "Caches": "\n".join(
@@ -645,219 +646,529 @@ def runtime_has_live_work(snapshot: WindowRuntimeDiagnostics) -> bool:
     )
 
 
+def _field_default(field_obj):
+    if field_obj.default is not dataclasses.MISSING:
+        return field_obj.default
+    if field_obj.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+        return field_obj.default_factory()  # type: ignore[misc]
+    return dataclasses.MISSING
+
+
+def _compact_field_value(name: str, value) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    if isinstance(value, int) and "bytes" in name:
+        return format_bytes(value)
+    if isinstance(value, (tuple, list)):
+        inner = ",".join(_short_debug_text(item, limit=24) for item in tuple(value)[:6])
+        suffix = ",..." if len(tuple(value)) > 6 else ""
+        return f"({inner}{suffix})"
+    return _short_debug_text(value, limit=48)
+
+
+def _auto_extra_lines(obj, covered: frozenset[str], *, heading: str = "More", width: int = 104) -> tuple[str, ...]:
+    """Compact ``name=value`` dump of every dataclass field not curated above.
+
+    Guarantee behind the diagnostics dialog contract: a field added to a
+    diagnostics dataclass is visible in its tab (and the All tab) without
+    touching the formatter — curated lines show the important values at the
+    top, this block catches everything else.  Fields still at their default
+    are hidden to keep the dump compact.
+    """
+
+    pairs: list[str] = []
+    for field_obj in dataclasses.fields(obj):
+        if field_obj.name in covered:
+            continue
+        value = getattr(obj, field_obj.name)
+        default = _field_default(field_obj)
+        if default is not dataclasses.MISSING and value == default:
+            continue
+        pairs.append(f"{field_obj.name}={_compact_field_value(field_obj.name, value)}")
+    if not pairs:
+        return ()
+    lines: list[str] = []
+    current = "  "
+    for pair in pairs:
+        if len(current) + len(pair) > width and current.strip():
+            lines.append(current.rstrip())
+            current = "  "
+        current += pair + " "
+    if current.strip():
+        lines.append(current.rstrip())
+    return (f"{heading} (non-default):", *lines)
+
+
+def _ms_group(label: str, items) -> str:
+    """One compact timing line; ``None`` entries are hidden (no n/a noise)."""
+
+    parts = [f"{name}={float(value):.1f}" for name, value in items if value is not None]
+    return f"{label} (ms): " + (" ".join(parts) if parts else "n/a")
+
+
+# Fields rendered by the curated lines below.  Everything else in the
+# dataclass is emitted by _auto_extra_lines, so nothing can be invisible;
+# tests/core/test_runtime_diagnostics.py pins both properties.
+_RENDER_COVERED = frozenset(
+    {
+        "last_decision_kind",
+        "last_decision_reason",
+        "last_context_summary",
+        "last_request_key",
+        "last_error",
+    }
+)
+_RENDER_TIMING_COVERED = frozenset(
+    {
+        "last_render_sync_ms",
+        "last_control_sync_ms",
+        "last_planning_ms",
+        "last_worker_queue_wait_ms",
+        "last_evaluation_ms",
+        "last_display_commit_ms",
+        "last_set_image_ms",
+        "last_levels_histogram_ms",
+        "last_operation_dock_ms",
+        "last_inspection_refresh_ms",
+    }
+)
+_COALESCER_COVERED = frozenset(
+    {
+        "pending",
+        "interactive_active",
+        "requested",
+        "flushed",
+        "coalesced",
+        "deferred_side_panel_refreshes",
+    }
+)
+
+
 def _render_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
+    timing = snapshot.render_timing
+    error_line = (f"Error: {snapshot.render.last_error}",) if snapshot.render.last_error else ()
     return (
-        f"Decision: {snapshot.render.last_decision_kind or 'n/a'}",
-        f"Reason: {snapshot.render.last_decision_reason or 'n/a'}",
-        f"Context:\n{_wrapped_debug_text(snapshot.render.last_context_summary or 'n/a', indent='  ')}",
-        f"Request: {_request_text(snapshot.render.last_request_key)}",
-        f"Error: {snapshot.render.last_error or 'n/a'}",
+        f"Decision: {snapshot.render.last_decision_kind or 'n/a'} | {snapshot.render.last_decision_reason or 'n/a'}",
+        _ms_group(
+            "Timing",
+            (
+                ("sync", timing.last_render_sync_ms),
+                ("control", timing.last_control_sync_ms),
+                ("plan", timing.last_planning_ms),
+                ("queue_wait", timing.last_worker_queue_wait_ms),
+                ("eval", timing.last_evaluation_ms),
+                ("commit", timing.last_display_commit_ms),
+                ("set_image", timing.last_set_image_ms),
+                ("levels_hist", timing.last_levels_histogram_ms),
+                ("dock", timing.last_operation_dock_ms),
+                ("inspect", timing.last_inspection_refresh_ms),
+            ),
+        ),
         (
             "Coalescer: "
-            f"pending={snapshot.render_coalescer.pending}, "
-            f"interactive={snapshot.render_coalescer.interactive_active}, "
-            f"requested={snapshot.render_coalescer.requested}, "
-            f"flushed={snapshot.render_coalescer.flushed}, "
-            f"coalesced={snapshot.render_coalescer.coalesced}, "
-            f"deferred refreshes={snapshot.render_coalescer.deferred_side_panel_refreshes}"
+            f"pending={_bool_text(snapshot.render_coalescer.pending)} "
+            f"interactive={_bool_text(snapshot.render_coalescer.interactive_active)} "
+            f"requested={snapshot.render_coalescer.requested} "
+            f"flushed={snapshot.render_coalescer.flushed} "
+            f"coalesced={snapshot.render_coalescer.coalesced} "
+            f"deferred_refreshes={snapshot.render_coalescer.deferred_side_panel_refreshes}"
         ),
-        f"Timing render sync: {_ms_text(snapshot.render_timing.last_render_sync_ms)}",
-        f"Timing control sync: {_ms_text(snapshot.render_timing.last_control_sync_ms)}",
-        f"Timing planning: {_ms_text(snapshot.render_timing.last_planning_ms)}",
-        f"Timing worker queue wait: {_ms_text(snapshot.render_timing.last_worker_queue_wait_ms)}",
-        f"Timing evaluation: {_ms_text(snapshot.render_timing.last_evaluation_ms)}",
-        f"Timing display commit: {_ms_text(snapshot.render_timing.last_display_commit_ms)}",
-        f"Timing set image: {_ms_text(snapshot.render_timing.last_set_image_ms)}",
-        f"Timing levels/histogram: {_ms_text(snapshot.render_timing.last_levels_histogram_ms)}",
-        f"Timing operation dock: {_ms_text(snapshot.render_timing.last_operation_dock_ms)}",
-        f"Timing inspection refresh: {_ms_text(snapshot.render_timing.last_inspection_refresh_ms)}",
+        *error_line,
+        f"Request: {_request_text(snapshot.render.last_request_key)}",
+        f"Context:\n{_wrapped_debug_text(snapshot.render.last_context_summary or 'n/a', indent='  ')}",
+        *_auto_extra_lines(snapshot.render, _RENDER_COVERED, heading="More render"),
+        *_auto_extra_lines(snapshot.render_timing, _RENDER_TIMING_COVERED, heading="More timing"),
+        *_auto_extra_lines(snapshot.render_coalescer, _COALESCER_COVERED, heading="More coalescer"),
     )
+
+
+_CANVAS_PRESERVE_COVERED = frozenset(
+    {
+        "mode",
+        "platform",
+        "active",
+        "generation",
+        "last_transition",
+        "last_result",
+        "target_canvas_size",
+        "final_canvas_size",
+        "final_window_size",
+        "last_delta",
+        "attempts_used",
+        "strong_used",
+        "strong_available",
+        "constraints_active",
+        "events",
+    }
+)
 
 
 def _canvas_preserve_lines(canvas_preserve: CanvasPreserveRuntimeDiagnostics) -> tuple[str, ...]:
     events = tuple(canvas_preserve.events)
     recent_events = ("Recent events:", *(f"  {event}" for event in events)) if events else ("Recent events: n/a",)
     return (
-        f"Mode: {canvas_preserve.mode}",
-        f"Platform: {canvas_preserve.platform or 'n/a'}",
-        f"Active: {canvas_preserve.active}",
-        f"Last transition: {canvas_preserve.last_transition or 'n/a'}",
-        f"Last result: {canvas_preserve.last_result or 'n/a'}",
-        f"Target canvas: {_size_text(canvas_preserve.target_canvas_size)}",
-        f"Final canvas: {_size_text(canvas_preserve.final_canvas_size)}",
-        f"Final window: {_size_text(canvas_preserve.final_window_size)}",
-        f"Last delta: {_size_text(canvas_preserve.last_delta)}",
-        f"Attempts used: {canvas_preserve.attempts_used}",
-        f"Strong used: {canvas_preserve.strong_used}",
-        f"Strong available: {canvas_preserve.strong_available}",
-        f"Constraints active: {canvas_preserve.constraints_active}",
+        (
+            f"Mode: {canvas_preserve.mode} platform={canvas_preserve.platform or 'n/a'} "
+            f"active={_bool_text(canvas_preserve.active)} generation={canvas_preserve.generation}"
+        ),
+        f"Last: transition={canvas_preserve.last_transition or 'n/a'} result={canvas_preserve.last_result or 'n/a'}",
+        (
+            f"Canvas: target={_size_text(canvas_preserve.target_canvas_size)} "
+            f"final={_size_text(canvas_preserve.final_canvas_size)} "
+            f"window={_size_text(canvas_preserve.final_window_size)} "
+            f"delta={_size_text(canvas_preserve.last_delta)}"
+        ),
+        (
+            f"Attempts: {canvas_preserve.attempts_used} "
+            f"strong={_bool_text(canvas_preserve.strong_used)}"
+            f"/{_bool_text(canvas_preserve.strong_available)} "
+            f"constraints={_bool_text(canvas_preserve.constraints_active)}"
+        ),
         *recent_events,
+        *_auto_extra_lines(canvas_preserve, _CANVAS_PRESERVE_COVERED, heading="More canvas"),
     )
 
 
+_MONTAGE_COVERED = frozenset(
+    {
+        "active",
+        "session_id",
+        "display_mode",
+        "backend_chosen",
+        "backend_reason",
+        "backend_warning",
+        "show_loading_overlays",
+        "visible_tiles",
+        "loaded_tiles",
+        "presented_tiles",
+        "loading_tiles",
+        "pending_tiles",
+        "pending_level_tiles",
+        "skipped_tiles",
+        "lifecycle_presented",
+        "lifecycle_parked",
+        "lifecycle_evaluating",
+        "lifecycle_dangling_claims",
+        "lifecycle_semantic_mismatches",
+        "pending_completed_tiles",
+        "pending_payload_upserts",
+        "pending_removals",
+        "level_scan_remaining_tiles",
+        "flush_pending",
+        "final_commit_pending",
+        "tile_lod_policy",
+        "tile_lod_desired_factor",
+        "tile_lod_desired_factor_xy",
+        "tile_lod_applied_factor",
+        "tile_lod_applied_factor_xy",
+        "tile_lod_applied_level",
+        "tile_lod_source_texels_per_pixel_xy",
+        "tile_lod_reason",
+        "tile_lod_resident_tile_levels",
+        "tile_lod_pyramid_bytes",
+        "tile_lod_pyramid_entries",
+        "tile_lod_pyramid_hits",
+        "tile_lod_pyramid_misses",
+        "tile_lod_pyramid_evictions",
+        "tile_lod_pending_materializations",
+        "tile_lod_materializations_completed",
+        "tile_lod_ingest_reductions",
+        "tile_lod_stats_cross_level_reuses",
+        "tile_lod_stats_recomputes",
+        "tile_lod_cross_level_reductions",
+        "tile_lod_pipeline_reruns_avoided",
+        "tile_lod_stage_hits_serving_derivations",
+        "tile_histogram_lod_swap_recomputes",
+        "tile_histogram_cross_level_reuses",
+        "overlay_count",
+        "presentation_draw_count",
+        "tile_presentation_draw_count",
+        "tile_presentation_request_count",
+        "tile_presentation_draw_pending",
+        "tile_visual_visible_pages",
+        "overlays_above_tiles",
+        "attached_stage_requests",
+        "waiting_stage_requests",
+        "retained_stage_index",
+        "retained_stage_decision",
+        "repeated_expensive_stage_per_tile",
+        "tile_compute_cache_hits",
+        "tile_compute_stage_backed",
+        "tile_compute_direct",
+        "tile_compute_waiting_for_stage",
+        "tile_compute_stage_backed_ms",
+        "tile_compute_direct_ms",
+        "tile_compute_stage_backed_max_ms",
+        "tile_compute_direct_max_ms",
+        "lead_direct_tiles",
+        "stage_backed_tiles_pending",
+    }
+)
+_MONTAGE_TIMING_COVERED = frozenset(
+    {
+        "last_viewport_plan_ms",
+        "last_cache_resolve_ms",
+        "last_stage_plan_ms",
+        "last_session_setup_ms",
+        "last_initial_commit_ms",
+        "last_tile_eval_ms",
+        "last_display_cache_lookup_ms",
+        "last_display_cache_hit",
+        "last_stage_cache_lookup_ms",
+        "last_stage_cache_hit",
+        "last_stage_attach_wait_ms",
+        "last_level_stats_ms",
+        "last_tile_payload_build_ms",
+        "last_visible_upload_ms",
+        "last_histogram_upload_ms",
+        "last_histogram_recompute_ms",
+        "last_rgb_window_ms",
+        "last_tile_layer_upload_ms",
+        "last_tile_layer_rgb_window_ms",
+        "last_level_sync_ms",
+        "last_tile_commit_ms",
+        "last_set_image_ms",
+        "last_overlay_update_ms",
+        "cached_tiles_last_session",
+        "missing_tiles_last_session",
+        "committed_tile_upserts_last_flush",
+        "coalesced_commits",
+        "upload_visible_bytes",
+        "upload_histogram_bytes",
+        "upload_fast_same_object",
+        "tile_layer_visible_items",
+        "tile_layer_items_created",
+        "tile_layer_items_updated",
+        "tile_layer_items_skipped",
+        "tile_layer_rgb_window_tiles",
+        "tile_layer_existing_items_shown",
+        "tile_layer_relocated_tiles",
+        "tile_layer_resident_items",
+        "tile_layer_storage_capacity",
+        "tile_layer_storage_rebuilds",
+        "tile_layer_storage_evictions",
+        "tile_layer_texture_uploads",
+        "tile_layer_texture_upload_bytes",
+        "tile_layer_vertex_uploads",
+        "tile_layer_level_updates",
+        "tile_layer_shader_uniform_updates",
+        "tile_layer_complex_texture_uploads",
+        "tile_layer_estimated_gpu_bytes",
+        "tile_layer_budget_bytes",
+        "tile_layer_cpu_shadow_bytes",
+        "tile_layer_page_count",
+        "tile_layer_active_pages",
+        "tile_layer_device_max_texture_size",
+        "tile_layer_near_resident_items",
+        "tile_layer_warm_resident_items",
+        "tile_layer_capacity_warning",
+        "tile_layer_lod_level",
+        "tile_layer_lod_factor",
+        "tile_layer_source_texels_per_pixel",
+        "tile_layer_gutter_pixels",
+        "tile_layer_mipmap_available",
+        "tile_layer_mipmap_updates",
+        "tile_layer_lod_level_swaps_zero_upload",
+        "tile_layer_lod_level_swaps_with_upload",
+        "tile_layer_superseded_reclaimed_under_pressure",
+    }
+)
+
+
 def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
+    montage = snapshot.montage
+    timing = snapshot.montage_timing
+    session_text = montage.session_id if montage.session_id is not None else "n/a"
+    warning_lines = tuple(
+        f"WARNING: {text}"
+        for text in (montage.backend_warning, timing.tile_layer_capacity_warning)
+        if text
+    )
     return (
-        f"Active: {snapshot.montage.active}",
-        f"Session: {snapshot.montage.session_id if snapshot.montage.session_id is not None else 'n/a'}",
+        # -- state that explains what the user sees, most important first --
         (
             "Tiles: "
-            f"visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
-            f"presented={snapshot.montage.presented_tiles} "
-            f"loading={snapshot.montage.loading_tiles} pending={snapshot.montage.pending_tiles} "
-            f"pending levels={snapshot.montage.pending_level_tiles} "
-            f"skipped={snapshot.montage.skipped_tiles}"
+            f"visible={montage.visible_tiles} loaded={montage.loaded_tiles} "
+            f"presented={montage.presented_tiles} loading={montage.loading_tiles} "
+            f"pending={montage.pending_tiles} pending_lvls={montage.pending_level_tiles} "
+            f"skipped={montage.skipped_tiles}"
         ),
         (
-            "Presentation: "
-            f"overlays={snapshot.montage.overlay_count} "
-            f"draws={snapshot.montage.presentation_draw_count} "
-            f"tile_draw={snapshot.montage.tile_presentation_draw_count}/"
-            f"{snapshot.montage.tile_presentation_request_count} "
-            f"pending={snapshot.montage.tile_presentation_draw_pending} "
-            f"tile_pages={snapshot.montage.tile_visual_visible_pages} "
-            f"overlays_above_tiles={snapshot.montage.overlays_above_tiles}"
+            "Lifecycle: "
+            f"presented={montage.lifecycle_presented} parked={montage.lifecycle_parked} "
+            f"evaluating={montage.lifecycle_evaluating} "
+            f"dangling_claims={montage.lifecycle_dangling_claims} "
+            f"mismatches={montage.lifecycle_semantic_mismatches}"
         ),
-        f"Attached stage waits: {snapshot.montage.attached_stage_requests}",
-        f"Display mode: {snapshot.montage.display_mode}",
-        f"Display backend: {snapshot.montage.backend_chosen}",
-        f"Display backend reason: {snapshot.montage.backend_reason or 'n/a'}",
-        f"Warning: {snapshot.montage.backend_warning}" if snapshot.montage.backend_warning else "Warning: n/a",
-        f"Loading overlays: {snapshot.montage.show_loading_overlays}",
         (
-            "LOD policy: "
-            f"{snapshot.montage.tile_lod_policy} "
-            f"desired={snapshot.montage.tile_lod_desired_factor} "
-            f"desired_xy={snapshot.montage.tile_lod_desired_factor_xy} "
-            f"applied={snapshot.montage.tile_lod_applied_factor} "
-            f"applied_xy={snapshot.montage.tile_lod_applied_factor_xy} "
-            f"source_texels_per_pixel_xy=({snapshot.montage.tile_lod_source_texels_per_pixel_xy[0]:.2f}, "
-            f"{snapshot.montage.tile_lod_source_texels_per_pixel_xy[1]:.2f})"
+            "LOD: "
+            f"{montage.tile_lod_policy} level={montage.tile_lod_applied_level} "
+            f"desired={montage.tile_lod_desired_factor}{montage.tile_lod_desired_factor_xy} "
+            f"applied={montage.tile_lod_applied_factor}{montage.tile_lod_applied_factor_xy} "
+            f"texpp=({montage.tile_lod_source_texels_per_pixel_xy[0]:.2f},"
+            f"{montage.tile_lod_source_texels_per_pixel_xy[1]:.2f})"
         ),
-        f"LOD policy reason: {snapshot.montage.tile_lod_reason or 'n/a'}",
+        f"LOD reason: {montage.tile_lod_reason or 'n/a'}",
         (
             "LOD residency: "
-            f"applied_level={snapshot.montage.tile_lod_applied_level} "
-            f"tile_levels={snapshot.montage.tile_lod_resident_tile_levels} "
-            f"pyramid_bytes={snapshot.montage.tile_lod_pyramid_bytes} "
-            f"pyramid_entries={snapshot.montage.tile_lod_pyramid_entries} "
-            f"hits={snapshot.montage.tile_lod_pyramid_hits} "
-            f"misses={snapshot.montage.tile_lod_pyramid_misses} "
-            f"evictions={snapshot.montage.tile_lod_pyramid_evictions} "
-            f"pending={snapshot.montage.tile_lod_pending_materializations} "
-            f"completed={snapshot.montage.tile_lod_materializations_completed} "
-            f"ingest={snapshot.montage.tile_lod_ingest_reductions}"
+            f"tile_levels={montage.tile_lod_resident_tile_levels} "
+            f"pyramid={format_bytes(montage.tile_lod_pyramid_bytes)}/{montage.tile_lod_pyramid_entries}e "
+            f"hit/miss/evict={montage.tile_lod_pyramid_hits}/{montage.tile_lod_pyramid_misses}/"
+            f"{montage.tile_lod_pyramid_evictions} "
+            f"pending={montage.tile_lod_pending_materializations} "
+            f"completed={montage.tile_lod_materializations_completed} "
+            f"ingest={montage.tile_lod_ingest_reductions}"
+        ),
+        *warning_lines,
+        (
+            "Queues: "
+            f"completed={montage.pending_completed_tiles} upserts={montage.pending_payload_upserts} "
+            f"removals={montage.pending_removals} level_scan={montage.level_scan_remaining_tiles} "
+            f"flush={_bool_text(montage.flush_pending)} final={_bool_text(montage.final_commit_pending)}"
         ),
         (
-            "LOD reuse: "
-            f"stats_reused={snapshot.montage.tile_lod_stats_cross_level_reuses} "
-            f"stats_recomputed={snapshot.montage.tile_lod_stats_recomputes} "
-            f"level_from_level={snapshot.montage.tile_lod_cross_level_reductions} "
-            f"pipeline_reruns_avoided={snapshot.montage.tile_lod_pipeline_reruns_avoided} "
-            f"stage_hits_serving_lod={snapshot.montage.tile_lod_stage_hits_serving_derivations} "
-            f"hist_swap_recomputes={snapshot.montage.tile_histogram_lod_swap_recomputes} "
-            f"hist_cross_level_reuses={snapshot.montage.tile_histogram_cross_level_reuses}"
+            "Session: "
+            f"{session_text} active={_bool_text(montage.active)} mode={montage.display_mode} "
+            f"backend={montage.backend_chosen} loading_overlays={_bool_text(montage.show_loading_overlays)}"
+        ),
+        f"Backend reason: {montage.backend_reason or 'n/a'}",
+        (
+            "Presentation: "
+            f"draws={montage.presentation_draw_count} "
+            f"tile_draw={montage.tile_presentation_draw_count}/{montage.tile_presentation_request_count} "
+            f"pending={_bool_text(montage.tile_presentation_draw_pending)} "
+            f"pages={montage.tile_visual_visible_pages} overlays={montage.overlay_count} "
+            f"above_tiles={_bool_text(montage.overlays_above_tiles)}"
+        ),
+        (
+            "Compute: "
+            f"cache_hit={montage.tile_compute_cache_hits} stage_backed={montage.tile_compute_stage_backed} "
+            f"direct={montage.tile_compute_direct} waiting_stage={montage.tile_compute_waiting_for_stage} "
+            f"lead_direct={montage.lead_direct_tiles} stage_pending={montage.stage_backed_tiles_pending} "
+            f"stage_waits={montage.attached_stage_requests}/{montage.waiting_stage_requests}"
+        ),
+        (
+            "Compute time (ms): "
+            f"stage_backed={montage.tile_compute_stage_backed_ms:.1f}"
+            f"/max {montage.tile_compute_stage_backed_max_ms:.1f} "
+            f"direct={montage.tile_compute_direct_ms:.1f}/max {montage.tile_compute_direct_max_ms:.1f}"
         ),
         (
             "Reusable stage: "
-            f"stage={snapshot.montage.retained_stage_index if snapshot.montage.retained_stage_index is not None else 'n/a'} "
-            f"{snapshot.montage.retained_stage_decision or 'n/a'}, "
-            f"repeated per tile={'yes' if snapshot.montage.repeated_expensive_stage_per_tile else 'no'}"
+            f"stage={montage.retained_stage_index if montage.retained_stage_index is not None else 'n/a'} "
+            f"{montage.retained_stage_decision or 'n/a'} "
+            f"repeated_per_tile={_bool_text(montage.repeated_expensive_stage_per_tile)}"
         ),
         (
-            "Tile compute: "
-            f"cache_hit={snapshot.montage.tile_compute_cache_hits} "
-            f"stage_backed={snapshot.montage.tile_compute_stage_backed} "
-            f"direct={snapshot.montage.tile_compute_direct} "
-            f"waiting_stage={snapshot.montage.tile_compute_waiting_for_stage}"
+            "LOD reuse: "
+            f"stats_reused={montage.tile_lod_stats_cross_level_reuses} "
+            f"stats_recomputed={montage.tile_lod_stats_recomputes} "
+            f"level_from_level={montage.tile_lod_cross_level_reductions} "
+            f"reruns_avoided={montage.tile_lod_pipeline_reruns_avoided} "
+            f"stage_hits={montage.tile_lod_stage_hits_serving_derivations} "
+            f"hist_recomputes={montage.tile_histogram_lod_swap_recomputes} "
+            f"hist_reuses={montage.tile_histogram_cross_level_reuses}"
         ),
-        f"Lead direct tiles: {snapshot.montage.lead_direct_tiles}",
-        f"Timing viewport plan: {_ms_text(snapshot.montage_timing.last_viewport_plan_ms)}",
-        f"Timing cache resolve: {_ms_text(snapshot.montage_timing.last_cache_resolve_ms)}",
-        f"Timing stage plan: {_ms_text(snapshot.montage_timing.last_stage_plan_ms)}",
-        f"Timing session setup: {_ms_text(snapshot.montage_timing.last_session_setup_ms)}",
-        f"Timing initial commit: {_ms_text(snapshot.montage_timing.last_initial_commit_ms)}",
-        f"Timing tile eval: {_ms_text(snapshot.montage_timing.last_tile_eval_ms)}",
-        f"Timing display cache lookup: {_ms_text(snapshot.montage_timing.last_display_cache_lookup_ms)}",
-        f"Display cache hit: {_bool_text(snapshot.montage_timing.last_display_cache_hit)}",
-        f"Timing stage cache lookup: {_ms_text(snapshot.montage_timing.last_stage_cache_lookup_ms)}",
-        f"Stage cache hit: {_bool_text(snapshot.montage_timing.last_stage_cache_hit)}",
-        f"Timing attached stage wait: {_ms_text(snapshot.montage_timing.last_stage_attach_wait_ms)}",
-        f"Timing level stats: {_ms_text(snapshot.montage_timing.last_level_stats_ms)}",
-        f"Timing tile payload build: {_ms_text(snapshot.montage_timing.last_tile_payload_build_ms)}",
-        f"Timing visible upload: {_ms_text(snapshot.montage_timing.last_visible_upload_ms)}",
-        f"Timing histogram upload: {_ms_text(snapshot.montage_timing.last_histogram_upload_ms)}",
-        f"Timing histogram recompute: {_ms_text(snapshot.montage_timing.last_histogram_recompute_ms)}",
-        f"Timing RGB window: {_ms_text(snapshot.montage_timing.last_rgb_window_ms)}",
-        f"Timing tile layer upload: {_ms_text(snapshot.montage_timing.last_tile_layer_upload_ms)}",
-        f"Timing tile layer RGB window: {_ms_text(snapshot.montage_timing.last_tile_layer_rgb_window_ms)}",
-        f"Timing level sync: {_ms_text(snapshot.montage_timing.last_level_sync_ms)}",
-        f"Timing tile commit: {_ms_text(snapshot.montage_timing.last_tile_commit_ms)}",
-        f"Timing montage set image: {_ms_text(snapshot.montage_timing.last_set_image_ms)}",
-        f"Timing overlay update: {_ms_text(snapshot.montage_timing.last_overlay_update_ms)}",
-        f"Display cache last session: cached={snapshot.montage_timing.cached_tiles_last_session} missing={snapshot.montage_timing.missing_tiles_last_session}",
-        f"Committed tile upserts last flush: {snapshot.montage_timing.committed_tile_upserts_last_flush}",
-        (
-            "Tile layer items: "
-            f"visible={snapshot.montage_timing.tile_layer_visible_items} "
-            f"resident={snapshot.montage_timing.tile_layer_resident_items}/"
-            f"{snapshot.montage_timing.tile_layer_storage_capacity} "
-            f"({_ratio_percent_text(snapshot.montage_timing.tile_layer_resident_items, snapshot.montage_timing.tile_layer_storage_capacity)}) "
-            f"created={snapshot.montage_timing.tile_layer_items_created} "
-            f"updated={snapshot.montage_timing.tile_layer_items_updated} "
-            f"shown={snapshot.montage_timing.tile_layer_existing_items_shown} "
-            f"moved={snapshot.montage_timing.tile_layer_relocated_tiles} "
-            f"skipped={snapshot.montage_timing.tile_layer_items_skipped}"
+        # -- timings, grouped; n/a entries hidden --
+        _ms_group(
+            "Plan",
+            (
+                ("viewport", timing.last_viewport_plan_ms),
+                ("cache_resolve", timing.last_cache_resolve_ms),
+                ("stage_plan", timing.last_stage_plan_ms),
+                ("setup", timing.last_session_setup_ms),
+                ("first_commit", timing.last_initial_commit_ms),
+            ),
         ),
-        f"Tile layer RGB window tiles: {snapshot.montage_timing.tile_layer_rgb_window_tiles}",
-        (
-            "Tile layer storage: "
-            f"rebuilds={snapshot.montage_timing.tile_layer_storage_rebuilds} "
-            f"evictions={snapshot.montage_timing.tile_layer_storage_evictions} "
-            f"pages={snapshot.montage_timing.tile_layer_active_pages}/"
-            f"{snapshot.montage_timing.tile_layer_page_count} "
-            f"near={snapshot.montage_timing.tile_layer_near_resident_items} "
-            f"warm={snapshot.montage_timing.tile_layer_warm_resident_items} "
-            f"gpu={format_bytes(snapshot.montage_timing.tile_layer_estimated_gpu_bytes)} "
-            f"budget={format_bytes(snapshot.montage_timing.tile_layer_budget_bytes)} "
-            f"budget_used={_ratio_percent_text(snapshot.montage_timing.tile_layer_estimated_gpu_bytes, snapshot.montage_timing.tile_layer_budget_bytes)} "
-            f"max_texture={snapshot.montage_timing.tile_layer_device_max_texture_size or 'n/a'} "
-            f"cpu_shadow={format_bytes(snapshot.montage_timing.tile_layer_cpu_shadow_bytes)}"
+        _ms_group(
+            "Evaluate",
+            (
+                ("tile", timing.last_tile_eval_ms),
+                ("cache_lookup", timing.last_display_cache_lookup_ms),
+                ("stage_lookup", timing.last_stage_cache_lookup_ms),
+                ("attach_wait", timing.last_stage_attach_wait_ms),
+                ("levels", timing.last_level_stats_ms),
+                ("payload", timing.last_tile_payload_build_ms),
+            ),
+        )
+        + (
+            f" | cache_hit={_bool_text(timing.last_display_cache_hit)}"
+            f" stage_hit={_bool_text(timing.last_stage_cache_hit)}"
         ),
-        f"Tile layer warning: {snapshot.montage_timing.tile_layer_capacity_warning or 'n/a'}",
-        (
-            "Tile layer submissions: "
-            f"textures={snapshot.montage_timing.tile_layer_texture_uploads} "
-            f"bytes={format_bytes(snapshot.montage_timing.tile_layer_texture_upload_bytes)} "
-            f"vertices={snapshot.montage_timing.tile_layer_vertex_uploads} "
-            f"levels={snapshot.montage_timing.tile_layer_level_updates} "
-            f"uniforms={snapshot.montage_timing.tile_layer_shader_uniform_updates} "
-            f"complex={snapshot.montage_timing.tile_layer_complex_texture_uploads}"
+        _ms_group(
+            "Present",
+            (
+                ("visible", timing.last_visible_upload_ms),
+                ("hist", timing.last_histogram_upload_ms),
+                ("hist_recompute", timing.last_histogram_recompute_ms),
+                ("rgb", timing.last_rgb_window_ms),
+                ("tile_upload", timing.last_tile_layer_upload_ms),
+                ("tile_rgb", timing.last_tile_layer_rgb_window_ms),
+                ("level_sync", timing.last_level_sync_ms),
+                ("commit", timing.last_tile_commit_ms),
+                ("set_image", timing.last_set_image_ms),
+                ("overlay", timing.last_overlay_update_ms),
+            ),
         ),
         (
-            "Tile layer LOD/filtering: "
-            f"level={snapshot.montage_timing.tile_layer_lod_level} "
-            f"factor={snapshot.montage_timing.tile_layer_lod_factor} "
-            f"texels_per_pixel={snapshot.montage_timing.tile_layer_source_texels_per_pixel:.2f} "
-            f"gutter={snapshot.montage_timing.tile_layer_gutter_pixels} "
-            f"mipmap={snapshot.montage_timing.tile_layer_mipmap_available} "
-            f"mipmap_updates={snapshot.montage_timing.tile_layer_mipmap_updates}"
+            "Flush: "
+            f"upserts_last={timing.committed_tile_upserts_last_flush} "
+            f"coalesced={timing.coalesced_commits} "
+            f"cache_session={timing.cached_tiles_last_session}/{timing.missing_tiles_last_session} (hit/miss)"
+        ),
+        # -- tile layer (GPU backend) --
+        (
+            "Layer items: "
+            f"visible={timing.tile_layer_visible_items} "
+            f"resident={timing.tile_layer_resident_items}/{timing.tile_layer_storage_capacity} "
+            f"({_ratio_percent_text(timing.tile_layer_resident_items, timing.tile_layer_storage_capacity)}) "
+            f"created={timing.tile_layer_items_created} updated={timing.tile_layer_items_updated} "
+            f"shown={timing.tile_layer_existing_items_shown} moved={timing.tile_layer_relocated_tiles} "
+            f"skipped={timing.tile_layer_items_skipped} rgb={timing.tile_layer_rgb_window_tiles}"
         ),
         (
-            "Tile layer LOD swaps: "
-            f"zero_upload={snapshot.montage_timing.tile_layer_lod_level_swaps_zero_upload} "
-            f"with_upload={snapshot.montage_timing.tile_layer_lod_level_swaps_with_upload} "
-            f"superseded_reclaimed={snapshot.montage_timing.tile_layer_superseded_reclaimed_under_pressure}"
+            "Layer storage: "
+            f"gpu={format_bytes(timing.tile_layer_estimated_gpu_bytes)}/"
+            f"{format_bytes(timing.tile_layer_budget_bytes)} "
+            f"({_ratio_percent_text(timing.tile_layer_estimated_gpu_bytes, timing.tile_layer_budget_bytes)}) "
+            f"pages={timing.tile_layer_active_pages}/{timing.tile_layer_page_count} "
+            f"near={timing.tile_layer_near_resident_items} warm={timing.tile_layer_warm_resident_items} "
+            f"rebuilds={timing.tile_layer_storage_rebuilds} evictions={timing.tile_layer_storage_evictions} "
+            f"max_tex={timing.tile_layer_device_max_texture_size or 'n/a'} "
+            f"shadow={format_bytes(timing.tile_layer_cpu_shadow_bytes)}"
         ),
-        _montage_prefetch_line("Montage prefetch", snapshot.montage_prefetch),
-        f"Coalesced montage commits: {snapshot.montage_timing.coalesced_commits}",
+        (
+            "Layer submissions: "
+            f"textures={timing.tile_layer_texture_uploads} "
+            f"bytes={format_bytes(timing.tile_layer_texture_upload_bytes)} "
+            f"vertices={timing.tile_layer_vertex_uploads} levels={timing.tile_layer_level_updates} "
+            f"uniforms={timing.tile_layer_shader_uniform_updates} "
+            f"complex={timing.tile_layer_complex_texture_uploads}"
+        ),
+        (
+            "Layer LOD: "
+            f"level={timing.tile_layer_lod_level} factor={timing.tile_layer_lod_factor} "
+            f"texpp={timing.tile_layer_source_texels_per_pixel:.2f} "
+            f"gutter={timing.tile_layer_gutter_pixels} "
+            f"mipmap={_bool_text(timing.tile_layer_mipmap_available)}"
+            f"/{timing.tile_layer_mipmap_updates} "
+            f"swaps={timing.tile_layer_lod_level_swaps_zero_upload}z/"
+            f"{timing.tile_layer_lod_level_swaps_with_upload}u "
+            f"reclaimed={timing.tile_layer_superseded_reclaimed_under_pressure}"
+        ),
         (
             "Upload: "
-            f"total={format_bytes(snapshot.montage_timing.upload_total_bytes)} "
-            f"visible={format_bytes(snapshot.montage_timing.upload_visible_bytes)} "
-            f"histogram={format_bytes(snapshot.montage_timing.upload_histogram_bytes)} "
-            f"tile_texture={format_bytes(snapshot.montage_timing.tile_layer_texture_upload_bytes)} "
-            f"same object={snapshot.montage_timing.upload_fast_same_object}"
+            f"total={format_bytes(timing.upload_total_bytes)} "
+            f"visible={format_bytes(timing.upload_visible_bytes)} "
+            f"hist={format_bytes(timing.upload_histogram_bytes)} "
+            f"tile_tex={format_bytes(timing.tile_layer_texture_upload_bytes)} "
+            f"same_object={_bool_text(timing.upload_fast_same_object)}"
         ),
+        _montage_prefetch_line("Prefetch", snapshot.montage_prefetch),
+        *_auto_extra_lines(montage, _MONTAGE_COVERED, heading="More montage"),
+        *_auto_extra_lines(timing, _MONTAGE_TIMING_COVERED, heading="More layer/timing"),
     )
 
 

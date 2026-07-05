@@ -210,42 +210,29 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Stage cache:" in text
     assert "Stage cache last miss: stage=1" in text
     assert "Stage cache last store: stage=1" in text
-    assert "Montage prefetch: tile=12 source=12 decision=skipped_stage_missing reason=would recompute expensive stage per tile" in text
+    assert "Prefetch: tile=12 source=12 decision=skipped_stage_missing reason=would recompute expensive stage per tile" in text
     assert "Request: captured" in text
     assert "\\xf9" not in text
-    assert "Coalescer: pending=False, interactive=False" in text
-    assert "Timing render sync: 1.25 ms" in text
-    assert "Timing worker queue wait: n/a" in text
-    assert "Timing tile payload build: 2.50 ms" in text
-    assert "Display mode: tile_layer" in text
-    assert "Display backend: tile_layer" in text
-    assert "Display backend reason: pyqtgraph supports direct tiled montage payloads" in text
-    assert "LOD policy: native-only desired=4 desired_xy=(4, 2) applied=1 applied_xy=(1, 1)" in text
-    assert "source_texels_per_pixel_xy=(8.00, 3.00)" in text
-    assert "LOD policy reason: desired LOD is deferred until asynchronous multi-resolution residency exists" in text
-    assert "Reusable stage: stage=3 hit, repeated per tile=no" in text
-    assert "Tile compute: cache_hit=3 stage_backed=4 direct=1 waiting_stage=2" in text
-    assert "Lead direct tiles: 1" in text
-    assert "Timing viewport plan: 0.50 ms" in text
-    assert "Timing cache resolve: 1.50 ms" in text
-    assert "Timing stage plan: 0.75 ms" in text
-    assert "Timing session setup: 2.25 ms" in text
-    assert "Timing initial commit: 3.50 ms" in text
-    assert "Tile layer:\n  visible=50 resident=80/128 (62.5%) created=0 updated=1 shown=0 moved=0 skipped=49 rgb_tiles=1" in text
-    assert "Timing visible upload: 10.00 ms" in text
-    assert "Timing histogram upload: 5.00 ms" in text
-    assert "Timing histogram recompute: 3.00 ms" in text
-    assert "Timing RGB window: 2.00 ms" in text
-    assert "Timing tile layer upload: 0.25 ms" in text
-    assert "Timing tile layer RGB window: 1.50 ms" in text
-    assert "Timing level sync: 1.00 ms" in text
-    assert "Coalesced montage commits: 7" in text
-    assert "Tile layer items: visible=50 resident=80/128 (62.5%) created=0 updated=1 shown=0 moved=0 skipped=49" in text
-    assert "Tile layer RGB window tiles: 1" in text
-    assert "Tile layer storage: rebuilds=1 evictions=2 pages=0/0 near=0 warm=0 gpu=8.0 KiB budget=16.0 KiB budget_used=50.0% max_texture=n/a cpu_shadow=0 B" in text
-    assert "Tile layer submissions: textures=3 bytes=4.0 KiB vertices=1 levels=1" in text
-    assert "Upload: total=5.5 KiB visible=1.0 KiB histogram=512 B tile_texture=4.0 KiB same object=True" in text
-    assert "Display cache last session: cached=3 missing=4" in text
+    assert "Coalescer: pending=no interactive=no" in text
+    assert "sync=1.2" in text  # render timing group, n/a entries hidden
+    assert "queue_wait" not in text  # None timing is hidden, not rendered as n/a
+    assert "payload=2.5" in text
+    assert "mode=tile_layer" in text
+    assert "backend=tile_layer" in text
+    assert "Backend reason: pyqtgraph supports direct tiled montage payloads" in text
+    assert "LOD: native-only level=0 desired=4(4, 2) applied=1(1, 1) texpp=(8.00,3.00)" in text
+    assert "LOD reason: desired LOD is deferred until asynchronous multi-resolution residency exists" in text
+    assert "Lifecycle: presented=0 parked=0 evaluating=0 dangling_claims=0 mismatches=0" in text
+    assert "Queues: completed=0 upserts=0 removals=0" in text
+    assert "Reusable stage: stage=3 hit repeated_per_tile=no" in text
+    assert "Compute: cache_hit=3 stage_backed=4 direct=1 waiting_stage=2 lead_direct=1" in text
+    assert "Plan (ms): viewport=0.5 cache_resolve=1.5 stage_plan=0.8 setup=2.2 first_commit=3.5" in text
+    assert "Present (ms): visible=10.0 hist=5.0 hist_recompute=3.0 rgb=2.0 tile_upload=0.2 tile_rgb=1.5 level_sync=1.0" in text
+    assert "Flush: upserts_last=0 coalesced=7 cache_session=3/4" in text
+    assert "Layer items: visible=50 resident=80/128 (62.5%) created=0 updated=1 shown=0 moved=0 skipped=49 rgb=1" in text
+    assert "Layer storage: gpu=8.0 KiB/16.0 KiB (50.0%) pages=0/0 near=0 warm=0 rebuilds=1 evictions=2" in text
+    assert "Layer submissions: textures=3 bytes=4.0 KiB vertices=1 levels=1" in text
+    assert "Upload: total=5.5 KiB visible=1.0 KiB hist=512 B tile_tex=4.0 KiB same_object=yes" in text
     assert "Workers: visible=1, montage_tile=2" in text
     assert "FFT workers: visible=4, montage_tile=1" in text
     assert "active_preserved=2" in text
@@ -255,8 +242,94 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Context:\n" in text
 
 
+def _nondefault_probe_value(current):
+    if isinstance(current, bool):
+        return not current
+    if isinstance(current, int):
+        return int(current) + 7
+    if isinstance(current, float):
+        return float(current) + 7.5
+    if current is None:
+        return 7.5
+    if isinstance(current, str):
+        return current + "-probe"
+    if isinstance(current, tuple):
+        return (*current, "probe")
+    return "probe"
+
+
+def _assert_every_field_visible(dataclass_type, covered, format_section):
+    """ADR 0051 diagnostics contract: a field is either curated (covered set)
+    or appears in the auto 'More (non-default)' block — nothing invisible."""
+    import dataclasses as _dc
+
+    names = {field.name for field in _dc.fields(dataclass_type)}
+    unknown = set(covered) - names
+    assert not unknown, f"covered set names unknown fields: {sorted(unknown)}"
+    instance = dataclass_type() if dataclass_type is not MontageRuntimeDiagnostics else dataclass_type(active=True)
+    for name in sorted(names - set(covered)):
+        probe = replace(instance, **{name: _nondefault_probe_value(getattr(instance, name))})
+        text = "\n".join(format_section(probe))
+        assert f"{name}=" in text, f"field {name} invisible in diagnostics"
+
+
+def test_every_montage_field_is_visible_in_its_tab():
+    from arrayscope.core import runtime_diagnostics as rd
+
+    _assert_every_field_visible(
+        MontageRuntimeDiagnostics,
+        rd._MONTAGE_COVERED,
+        lambda obj: rd._auto_extra_lines(obj, rd._MONTAGE_COVERED),
+    )
+    _assert_every_field_visible(
+        MontageTimingDiagnostics,
+        rd._MONTAGE_TIMING_COVERED,
+        lambda obj: rd._auto_extra_lines(obj, rd._MONTAGE_TIMING_COVERED),
+    )
+
+
+def test_every_render_field_is_visible_in_its_tab():
+    from arrayscope.core import runtime_diagnostics as rd
+    from arrayscope.core.runtime_diagnostics import RenderCoalescerDiagnostics
+
+    _assert_every_field_visible(
+        RenderRuntimeDiagnostics,
+        rd._RENDER_COVERED,
+        lambda obj: rd._auto_extra_lines(obj, rd._RENDER_COVERED),
+    )
+    _assert_every_field_visible(
+        RenderTimingDiagnostics,
+        rd._RENDER_TIMING_COVERED,
+        lambda obj: rd._auto_extra_lines(obj, rd._RENDER_TIMING_COVERED),
+    )
+    _assert_every_field_visible(
+        RenderCoalescerDiagnostics,
+        rd._COALESCER_COVERED,
+        lambda obj: rd._auto_extra_lines(obj, rd._COALESCER_COVERED),
+    )
+
+
+def test_every_canvas_preserve_field_is_visible_in_its_tab():
+    from arrayscope.core import runtime_diagnostics as rd
+
+    _assert_every_field_visible(
+        CanvasPreserveRuntimeDiagnostics,
+        rd._CANVAS_PRESERVE_COVERED,
+        lambda obj: rd._auto_extra_lines(obj, rd._CANVAS_PRESERVE_COVERED),
+    )
+
+
+def test_all_tab_concatenates_every_section():
+    snapshot = _snapshot()
+    sections = format_runtime_diagnostics_sections(snapshot)
+    all_text = format_runtime_diagnostics(snapshot)
+    for title, body in sections.items():
+        assert f"{title}\n" in all_text
+        assert body in all_text
+
+
 def test_runtime_diagnostics_avoids_long_feedback_worker_lines():
-    from arrayscope.core.compute_policy import ComputeLane, ComputePolicy
+    from arrayscope.core.compute_policy import ComputeLane
     from arrayscope.core.resource_governor import (
         FeedbackChannelDiagnostics,
         LaneWorkerDecision,
