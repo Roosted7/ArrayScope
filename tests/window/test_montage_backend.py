@@ -1459,6 +1459,12 @@ def test_montage_cache_resolver_accepts_single_display_image_cache_hit():
         def cached_montage_tile(self, *_args, **_kwargs):
             return cached
 
+        def montage_tile_key_batch(self, **_kwargs):
+            return lambda _tile_state: ("stub-key",)
+
+        def cached_montage_tile_by_key(self, _key):
+            return cached
+
     class _Window(FrameRenderMixin):
         def __init__(self):
             self.win = self
@@ -1511,6 +1517,12 @@ def test_montage_cache_resolver_uses_retained_payloads_when_current_frame_is_sin
 
         def montage_tile_key(self, *_args, **_kwargs):
             return tile_key
+
+        def montage_tile_key_batch(self, **_kwargs):
+            return lambda _tile_state: tile_key
+
+        def cached_montage_tile_by_key(self, _key):
+            return None
 
     class _Window(FrameRenderMixin):
         def __init__(self):

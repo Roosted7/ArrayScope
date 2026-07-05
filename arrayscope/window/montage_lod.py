@@ -160,6 +160,58 @@ def selected_lod_factor(session) -> int:
     return int(session.lod_policy_decision.applied_factor)
 
 
+def _demand_key_sig(demand) -> tuple:
+    """The demand fields that pyramid keys depend on (via factor_xy_for_level)."""
+
+    return (
+        int(demand.desired_level),
+        tuple(int(value) for value in demand.desired_factor_xy),
+        tuple(int(value) for value in demand.acceptable_levels),
+    )
+
+
+def tile_resident_levels(session, rendered: RenderedTile, *, demand) -> tuple[int, ...]:
+    """Resident acceptable levels (>0) for one rendered tile, memoized.
+
+    During a scrub step the same scan runs from the session-wide decision,
+    per-tile texture selection, and the presentation commit — several times
+    per tile — and every probe rebuilds a ``PyramidLevelKey``.  The memo
+    lives on the session keyed by (source index, component), guarded by the
+    pyramid ``revision`` and the demand signature: a hit costs two dict
+    probes and is exact because the revision bumps on every admission,
+    eviction, resize, and clear.
+    """
+
+    pyramid = session.lod_pyramid
+    memo = getattr(session, "_lod_resident_levels_memo", None)
+    if memo is None:
+        memo = {}
+        session._lod_resident_levels_memo = memo
+    # The demand tuple-signature itself is per-call cost at ~1.4k calls per
+    # scrub step; demand objects are immutable (frozen dataclass), so one
+    # id()-keyed slot amortizes it.  Safe: the cached entry keeps a strong
+    # reference to the demand, so its id cannot be reused while cached.
+    sig_cache = getattr(session, "_lod_demand_sig_cache", None)
+    if sig_cache is not None and sig_cache[0] is demand:
+        demand_sig = sig_cache[1]
+    else:
+        demand_sig = _demand_key_sig(demand)
+        session._lod_demand_sig_cache = (demand, demand_sig)
+    guard = (int(pyramid.revision), demand_sig)
+    memo_key = (int(rendered.tile.source_index), component_for_rendered(rendered))
+    hit = memo.get(memo_key)
+    if hit is not None and hit[0] == guard:
+        return hit[1]
+    levels = tuple(
+        int(level)
+        for level in demand.acceptable_levels
+        if int(level) > 0
+        and pyramid.peek(pyramid_key_for(session, rendered, demand=demand, level=int(level))) is not None
+    )
+    memo[memo_key] = (guard, levels)
+    return levels
+
+
 def session_resident_levels(session, previous_factor: int) -> tuple[int, ...]:
     """Levels resident for every rendered tile (session-wide decision input).
 
@@ -177,16 +229,13 @@ def session_resident_levels(session, previous_factor: int) -> tuple[int, ...]:
     rendered = tuple(session.rendered_tiles.values())
     if not rendered:
         return ()
-    resident = []
-    for level in demand.acceptable_levels:
-        if int(level) <= 0:
-            continue
-        if all(
-            session.lod_pyramid.peek(pyramid_key_for(session, tile, demand=demand, level=int(level))) is not None
-            for tile in rendered
-        ):
-            resident.append(int(level))
-    return tuple(resident)
+    common: set[int] | None = None
+    for tile in rendered:
+        levels = set(tile_resident_levels(session, tile, demand=demand))
+        common = levels if common is None else (common & levels)
+        if not common:
+            return ()
+    return tuple(sorted(common or ()))
 
 
 def presented_lod_summary(session) -> tuple[int, int, tuple[int, int]]:
@@ -439,12 +488,7 @@ def refresh_lod_for_viewport(session) -> bool:
             continue
         payload = session.display_tile_payloads.get(int(tile_number))
         presented_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-        resident = {
-            int(level)
-            for level in demand.acceptable_levels
-            if int(level) > 0
-            and pyramid.peek(pyramid_key_for(session, rendered, demand=demand, level=int(level))) is not None
-        }
+        resident = set(tile_resident_levels(session, rendered, demand=demand))
         if payload is not None and presented_level > 0 and presented_level in demand.acceptable_levels:
             # The presented texture itself is materialized and resident;
             # keep it eligible even when the pyramid cache dropped it so a
@@ -742,12 +786,7 @@ def resident_texture_for_rendered_tile(
     native_lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
     demand = session.lod_policy_decision.demand
     pyramid = session.lod_pyramid
-    resident_levels = tuple(
-        int(level)
-        for level in demand.acceptable_levels
-        if int(level) > 0
-        and pyramid.peek(pyramid_key_for(session, rendered, demand=demand, level=int(level))) is not None
-    )
+    resident_levels = tile_resident_levels(session, rendered, demand=demand)
     desired = int(demand.desired_level)
     if desired > 0 and desired not in resident_levels:
         desired_key = pyramid_key_for(session, rendered, demand=demand, level=desired)

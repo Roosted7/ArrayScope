@@ -1154,6 +1154,12 @@ class MontageRenderSession:
         one enqueue per orphan.
         """
 
+        if bool(getattr(self, "stage_planning_deferred", False)):
+            # Interaction-burst session: missing tiles intentionally have no
+            # work attached until the deferred stage planning runs.  Requeuing
+            # them here would start direct per-tile evaluations without the
+            # stage fan-in (each tile computing the expensive stage alone).
+            return 0
         orphaned = (
             set(int(t) for t in self.loading_tiles)
             - set(int(t) for t in self.active_tile_requests)

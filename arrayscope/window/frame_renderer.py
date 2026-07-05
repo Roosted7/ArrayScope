@@ -7,6 +7,8 @@ region payloads; backends differ only in physical presentation mechanics.
 
 from __future__ import annotations
 
+import os
+
 from collections import deque
 from dataclasses import replace
 from time import monotonic, perf_counter
@@ -493,10 +495,44 @@ class FrameRenderMixin:
         self._montage_missing_tiles_last_session = len(missing_tiles)
         render_generation = self._capture_render_generation()
         stage_plan_start = perf_counter()
-        stage_plan = self._plan_montage_stages(document, missing_tiles)
+        # Interaction fast path (ADR 0051 rule 4 at the architecture level):
+        # during a scrub/pan burst, stage planning is *deferred, superseded
+        # work* — mid-burst steps present pyramid floors and cached tiles
+        # only, and the full plan (plan_slab per tile + stage materializer
+        # claims, ~30 ms synchronous) runs once, for the step the user lands
+        # on.  Superseded steps never touch the stage materializer at all,
+        # so there are no claims to repair.  Native policy has no floors to
+        # carry the screen, and the first session of a document has a user
+        # actively waiting: both plan inline.
+        previous_session = getattr(self, "_montage_session", None)
+        defer_stage_planning = bool(
+            missing_tiles
+            and _viewport_interaction_active(self)
+            and self._montage_lod_policy_mode() == LOD_POLICY_RESIDENT
+            and previous_session is not None
+            # Only a predecessor that actually committed montage content can
+            # carry the screen through the burst (floors/retained payloads).
+            # A first-ever montage build has a user staring at nothing —
+            # plan inline.  Same axis: an axis change is a new montage, not a
+            # scrub step.
+            and bool(getattr(previous_session, "display_committed", False))
+            and getattr(previous_session, "montage_axis", None) == axis
+            and not os.environ.get("ARRAYSCOPE_DISABLE_SCRUB_FASTPATH")
+        )
+        if defer_stage_planning:
+            stage_plan = _deferred_stage_plan_stub()
+            self._montage_stage_plans_deferred = (
+                int(getattr(self, "_montage_stage_plans_deferred", 0) or 0) + 1
+            )
+        else:
+            stage_plan = self._plan_montage_stages(document, missing_tiles)
         self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
         session_setup_start = perf_counter()
-        pending_tiles = [tile for tile in missing_tiles if int(tile.montage_index) not in stage_plan["waiting_indices"]]
+        pending_tiles = (
+            []
+            if defer_stage_planning
+            else [tile for tile in missing_tiles if int(tile.montage_index) not in stage_plan["waiting_indices"]]
+        )
         session_key = montage_session_key(_document_key(document), view_state, viewport_plan, colormap_lut)
         level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
         frame_plan = self._montage_frame_planner().plan(
@@ -578,12 +614,20 @@ class FrameRenderMixin:
             ),
         )
         session.shader_display = bool(shader_display)
+        session.stage_planning_deferred = bool(defer_stage_planning)
+        session.deferred_missing_tiles = tuple(missing_tiles) if defer_stage_planning else ()
         # The dying session's planned-but-undrained LOD requests hold
         # singleflight claims in the shared pyramid; scrubbing back to the
         # same slice would find those levels permanently claimed (stale
         # wrong-LOD tiles).  Balance them before the replacement takes over.
         montage_lod.release_session_claims(getattr(self, "_montage_session", None))
         self._montage_session = session
+        # A viewport-update token armed for the dying session would make every
+        # later _run_montage_viewport_update bail as stale — a dead
+        # continuation (lost-wakeup class).  The new session's construction
+        # subsumes any pending retarget; clear the token so future runs (timer
+        # or explicit) act on the current session.
+        self._montage_viewport_update_token = None
         self._ensure_montage_watchdog()
         apply_restored_viewport = getattr(self.win, "_apply_viewport_continuity_when_ready", None)
         if callable(apply_restored_viewport):
@@ -634,9 +678,12 @@ class FrameRenderMixin:
         if not visible_complete:
             self._schedule_montage_session_slow_overlay(session)
         self._schedule_montage_cached_level_stats(session)
-        self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-        self._schedule_montage_attached_stage_waits(session)
-        self._schedule_montage_tiles(session)
+        if defer_stage_planning:
+            self._schedule_deferred_montage_planning(session)
+        else:
+            self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
+            self._schedule_montage_attached_stage_waits(session)
+            self._schedule_montage_tiles(session)
 
     def _resolve_montage_tiles_from_cache(
         self,
@@ -676,26 +723,18 @@ class FrameRenderMixin:
         total_lookup_ms = 0.0
         last_hit = False
         tile_tuple = tuple(tiles)
+        tile_key_for = self.win.operation_evaluator.montage_tile_key_batch(
+            colormap_lut=colormap_lut,
+            document=document,
+            shader_display=shader_display,
+        )
         for tile in tile_tuple:
             display_cache_start = perf_counter()
-            cached = self.win.operation_evaluator.cached_montage_tile(
-                tile.view_state,
-                montage_axis=axis,
-                source_index=tile.source_index,
-                colormap_lut=colormap_lut,
-                shader_display=shader_display,
-            )
+            tile_key = tile_key_for(tile.view_state)
+            cached = self.win.operation_evaluator.cached_montage_tile_by_key(tile_key)
             total_lookup_ms += (perf_counter() - display_cache_start) * 1000.0
             last_hit = cached is not None
             if cached is None:
-                tile_key = self.win.operation_evaluator.montage_tile_key(
-                    tile.view_state,
-                    montage_axis=axis,
-                    source_index=tile.source_index,
-                    colormap_lut=colormap_lut,
-                    document=document,
-                    shader_display=shader_display,
-                )
                 previous_payload = previous_payloads.get(tile_key)
                 if previous_payload is None:
                     previous_payload = retained_store.resolve(
@@ -1483,6 +1522,59 @@ class FrameRenderMixin:
             "retained_stage_decision": retained_stage_decision,
             "repeated_expensive_stage_per_tile": bool(repeated_expensive_stage_per_tile),
         }
+
+    def _schedule_deferred_montage_planning(self, session, *, delay_ms: int = 0) -> None:
+        """Arm the deferred planning continuation for an interaction-burst session.
+
+        Receiver-scoped single shot (architecture guard: 3-arg form) so a
+        closed window cancels the chain; supersession is checked in the
+        completion, and a superseded session simply never plans — it took no
+        stage claims, so there is nothing to balance.
+        """
+
+        Qt.QtCore.QTimer.singleShot(
+            int(delay_ms),
+            self.win,
+            lambda session=session: self._complete_deferred_montage_planning(session),
+        )
+
+    def _complete_deferred_montage_planning(self, session) -> None:
+        if not self._montage_session_is_current(session):
+            return
+        if not bool(getattr(session, "stage_planning_deferred", False)):
+            return
+        if _viewport_interaction_active(self):
+            # Still mid-burst: floors are carrying the screen; re-arm and let
+            # the next scrub step supersede this session instead.
+            self._schedule_deferred_montage_planning(session, delay_ms=80)
+            return
+        missing_tiles = tuple(getattr(session, "deferred_missing_tiles", ()) or ())
+        session.stage_planning_deferred = False
+        session.deferred_missing_tiles = ()
+        stage_plan_start = perf_counter()
+        stage_plan = self._plan_montage_stages(session.document, missing_tiles)
+        self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
+        session.stage_fan_in = StageFanInState(
+            tile_stage_keys=stage_plan["tile_stage_keys"],
+            tile_stage_plans=stage_plan["tile_stage_plans"],
+            tile_stage_candidates=stage_plan["tile_stage_candidates"],
+            waiting_tiles=stage_plan["stage_waiting_tiles"],
+            attached_requests=stage_plan["attached_stage_keys"],
+            values=stage_plan["stage_values"],
+            lead_warmups=stage_plan["lead_stage_warmups"],
+        )
+        for tile in missing_tiles:
+            if int(tile.montage_index) not in stage_plan["waiting_indices"]:
+                session.enqueue_pending_tile(tile)
+        session.tile_compute_waiting_for_stage = len(stage_plan["waiting_indices"])
+        session.stage_backed_tiles_pending = len(stage_plan["waiting_indices"])
+        session.lead_direct_tiles = stage_plan["lead_direct_tiles"]
+        session.retained_stage_index = stage_plan["retained_stage_index"]
+        session.retained_stage_decision = stage_plan["retained_stage_decision"]
+        session.repeated_expensive_stage_per_tile = stage_plan["repeated_expensive_stage_per_tile"]
+        self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
+        self._schedule_montage_attached_stage_waits(session)
+        self._schedule_montage_tiles(session)
 
     def _schedule_montage_stage_jobs(self, session, stage_requests) -> None:
         if not self._montage_session_is_current(session):
@@ -2377,6 +2469,7 @@ class FrameRenderMixin:
         dirty = len(session.dirty_payloads)
         upserts = len(session.pending_payload_upserts)
         lod_pending = len(getattr(session, "pending_lod_requests", ()) or ())
+        planning_deferred = bool(getattr(session, "stage_planning_deferred", False))
         unsettled = bool(
             pending
             or evaluating
@@ -2384,11 +2477,19 @@ class FrameRenderMixin:
             or dirty
             or upserts
             or lod_pending
+            or planning_deferred
             or session.flush_pending
             or session.final_commit_pending
         )
         if not unsettled:
             self._montage_watchdog_stop()
+            return
+        if planning_deferred:
+            # Deferred planning is scheduled work, not a stall: its
+            # continuation chain re-arms itself while interaction lasts.
+            # Re-kick it (idempotent — the completion no-ops once the flag
+            # clears) instead of counting a repair.
+            self._schedule_deferred_montage_planning(session)
             return
         signature = (
             int(session.session_id),
@@ -3224,18 +3325,16 @@ class FrameRenderMixin:
         for stale in tuple(source_ids):
             if int(stale) not in plan_tiles:
                 source_ids.pop(int(stale), None)
+        tile_key_for = self.win.operation_evaluator.montage_tile_key_batch(
+            colormap_lut=session.colormap_lut,
+            document=session.document,
+            shader_display=bool(getattr(session, "shader_display", False)),
+        )
         for tile_number, tile in sorted(plan_tiles.items()):
             if int(tile_number) in source_ids:
                 continue
             try:
-                source_ids[tile_number] = self.win.operation_evaluator.montage_tile_key(
-                    tile.view_state,
-                    montage_axis=session.montage_axis,
-                    source_index=tile.source_index,
-                    colormap_lut=session.colormap_lut,
-                    document=session.document,
-                    shader_display=bool(getattr(session, "shader_display", False)),
-                )
+                source_ids[tile_number] = tile_key_for(tile.view_state)
             except Exception:
                 rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
                 if rendered is None:
@@ -4274,3 +4373,28 @@ def _montage_level_evidence_requires_refined(window, session) -> bool:
 
 def _viewport_interaction_active(window) -> bool:
     return bool(getattr(window.win, "_viewport_interaction_active", False))
+
+
+def _deferred_stage_plan_stub() -> dict:
+    """Empty stage plan for interaction-burst sessions (planning deferred).
+
+    Shape-compatible with ``_plan_montage_stages`` so session construction is
+    identical; ``retained_stage_decision`` documents the deferral in
+    diagnostics.
+    """
+
+    return {
+        "tile_stage_keys": {},
+        "tile_stage_plans": {},
+        "tile_stage_candidates": {},
+        "stage_waiting_tiles": {},
+        "stage_values": {},
+        "lead_stage_warmups": {},
+        "stage_requests": [],
+        "attached_stage_keys": set(),
+        "waiting_indices": set(),
+        "lead_direct_tiles": 0,
+        "retained_stage_index": None,
+        "retained_stage_decision": "deferred-interaction",
+        "repeated_expensive_stage_per_tile": False,
+    }

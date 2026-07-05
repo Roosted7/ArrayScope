@@ -58,6 +58,15 @@ class StateSyncMixin:
     def _apply_slice_state(self, axis: int, state, *, reason: str, interactive: bool, immediate_axis_only: bool) -> None:
         axis = int(axis)
         self._active_slice_axis = axis
+        if interactive:
+            # Dimension scrubbing IS user interaction: without this note the
+            # interaction gates (commit coalescing, speculation yielding,
+            # deferred stage planning) are blind to index-window bursts, and
+            # every scrub step pays the full synchronous planning pipeline —
+            # the few-Hz-scroll field report of 2026-07-05.  The quiet timer
+            # releases the flag ~120 ms after the last step, exactly like
+            # pan/zoom.
+            self._note_viewport_interaction("dimension-scrub")
         self._set_view_state(state)
         if immediate_axis_only:
             self._sync_slice_controls_immediately(axis)

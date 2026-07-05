@@ -270,6 +270,78 @@ class OperationEvaluator:
             shader_display=shader_display,
         )
 
+    def montage_tile_key_batch(self, *, colormap_lut=None, document=None, shader_display: bool = False):
+        """Return ``key_for(tile_state)`` with tile-invariant key work hoisted.
+
+        A montage step derives keys for every plan tile several times (cache
+        resolve, source-id table), and profiling shows the per-tile rebuild
+        of the document key, LUT bytes, and view-state tuple dominating
+        scrub steps (~50k genexpr calls per 21 steps).  Across one plan's
+        tile states everything except ``slice_indices`` is identical
+        (montage_viewport strips montage fields and varies only the montage
+        axis index), so the batch computes the invariants once and swaps the
+        slice tuple per tile.
+
+        Correctness is self-checked at runtime: the first tile whose slices
+        differ from the template is also keyed through the unbatched path,
+        and any mismatch flips the batch into permanent slow-path fallback
+        (counted in ``montage_key_batch_fallbacks``) — key-format drift
+        degrades to the old cost, never to wrong keys.
+        """
+
+        document = self.document if document is None else document
+        doc_key = _document_key(document)
+        lut_key = _lut_key(colormap_lut)
+        shader = bool(shader_display)
+        state: dict[str, object] = {"template": None, "validated": False}
+
+        def _slow(tile_state):
+            return (
+                "display_tile",
+                doc_key,
+                None,
+                None,
+                0,
+                _request_key(request_for_image(tile_state)),
+                lut_key,
+                shader,
+            )
+
+        def key_for(tile_state):
+            template = state["template"]
+            if template is None:
+                base_key = _view_state_key(tile_state)
+                keep_axes = tuple(tile_state.image_axes or ())
+                base_slices = tuple(int(index) for index in tile_state.slice_indices)
+                state["template"] = (base_key, keep_axes, base_slices)
+                return _slow(tile_state)
+            if state.get("fallback"):
+                return _slow(tile_state)
+            base_key, keep_axes, base_slices = template
+            slices = tuple(int(index) for index in tile_state.slice_indices)
+            vs_key = base_key[:4] + (slices,) + base_key[5:]
+            fast = (
+                "display_tile",
+                doc_key,
+                None,
+                None,
+                0,
+                ("image", vs_key, keep_axes, slices, None, None),
+                lut_key,
+                shader,
+            )
+            if not state["validated"] and slices != base_slices:
+                state["validated"] = True
+                if fast != _slow(tile_state):
+                    state["fallback"] = True
+                    self.montage_key_batch_fallbacks = (
+                        int(getattr(self, "montage_key_batch_fallbacks", 0)) + 1
+                    )
+                    return _slow(tile_state)
+            return fast
+
+        return key_for
+
     def cached_display_tile(self, view_state, colormap_lut=None, *, document=None, shader_display: bool = False):
         cached = self._display_cache.get(
             self.display_tile_key(
@@ -279,6 +351,15 @@ class OperationEvaluator:
                 shader_display=shader_display,
             )
         )
+        if cached is not None:
+            self.last_status = cache_status_for_hit(True)
+            self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.CACHED, "Using cached display tile")
+        return cached
+
+    def cached_montage_tile_by_key(self, tile_key):
+        """Display-cache lookup for a key produced by ``montage_tile_key_batch``."""
+
+        cached = self._display_cache.get(tile_key)
         if cached is not None:
             self.last_status = cache_status_for_hit(True)
             self.last_diagnostics = self._display_cache.diagnostics(CacheStatus.CACHED, "Using cached display tile")

@@ -116,6 +116,19 @@ class PyramidCache:
         self._pending: set[PyramidLevelKey] = set()
         self._by_source: dict[tuple[object, int, str], set[PyramidLevelKey]] = {}
         self._lock = RLock()
+        self._revision = 0
+
+    @property
+    def revision(self) -> int:
+        """Monotonic counter bumped whenever residency can change.
+
+        GUI-side callers memoize per-tile resident-level scans against this:
+        a memo guarded by ``revision`` is exact because admissions (and the
+        evictions they trigger inside the same ``put``), explicit clears, and
+        resizes bump it, while lookups/peeks/claims leave it unchanged.
+        """
+
+        return self._revision
 
     def lookup(self, key: PyramidLevelKey):
         """Return the cached level array, counting hit/miss."""
@@ -135,6 +148,7 @@ class PyramidCache:
             if self._cache.would_fit(int(values.nbytes)):
                 self._cache.put(key, values, nbytes=int(values.nbytes))
                 self._by_source.setdefault(self._source_group(key), set()).add(key)
+                self._revision += 1
             self._pending.discard(key)
         return values
 
@@ -215,6 +229,8 @@ class PyramidCache:
 
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
         self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
+        with self._lock:
+            self._revision += 1
 
     def resident_level_counts(self) -> dict[int, int]:
         """Return {scalar level: cached entry count} for diagnostics."""
@@ -229,6 +245,7 @@ class PyramidCache:
         with self._lock:
             self._cache.clear()
             self._pending.clear()
+            self._revision += 1
 
 
 __all__ = ["ALGO_VERSION", "PyramidLevelKey", "PyramidCache", "reduce_box_mean"]
