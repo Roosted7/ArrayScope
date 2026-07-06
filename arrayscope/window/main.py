@@ -391,6 +391,7 @@ class ArrayScopeWindow(
         byte_count: int = 0,
         work_class: str = "",
         backend: str = "",
+        details: tuple[str, ...] = (),
     ) -> None:
         governor = getattr(self, "resource_governor", None)
         if governor is not None:
@@ -401,6 +402,7 @@ class ArrayScopeWindow(
                 byte_count=byte_count,
                 work_class=work_class,
                 backend=backend,
+                details=tuple(details),
             )
             return
         feedback = getattr(self, "latency_feedback", None)

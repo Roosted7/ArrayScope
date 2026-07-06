@@ -59,6 +59,9 @@ class UiWorkDecision:
     interval_ms: int
     reason: str
     byte_cap: int = 0
+    control_budget_ms: float = 0.0
+    model: str = ""
+    details: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -153,7 +156,8 @@ class ResourceGovernor:
     _lane_decisions: dict[ComputeLane, LaneWorkerDecision] = field(default_factory=dict)
     _ui_decisions: dict[str, UiWorkDecision] = field(default_factory=dict)
     _feedback_outlier_streak: dict[str, int] = field(default_factory=dict)
-    _recent_ui_work_observations: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=512))
+    _conservative_cold_start_channels: dict[str, int] = field(default_factory=dict)
+    _recent_ui_work_observations: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=4096))
     _recent_over_warning_callbacks: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=32))
 
     def __post_init__(self) -> None:
@@ -197,7 +201,16 @@ class ResourceGovernor:
         byte_count: int = 0,
         work_class: str = "",
         backend: str = "",
+        details: tuple[str, ...] = (),
     ) -> None:
+        if _diagnostics_only_ui_work(channel, work_class=work_class, byte_count=byte_count):
+            return
+        self._note_ui_work_observation_for_cold_start(
+            str(channel),
+            item_count=item_count,
+            byte_count=byte_count,
+            work_class=work_class,
+        )
         count = max(1, int(item_count))
         byte_count = max(0, int(byte_count))
         feedback_elapsed_ms = self._feedback_elapsed_ms(channel, elapsed_ms)
@@ -213,6 +226,7 @@ class ResourceGovernor:
             elapsed_ms=max(0.0, float(elapsed_ms)),
             processed_items=count,
             processed_bytes=byte_count,
+            details=tuple(str(detail) for detail in details),
         )
         self._recent_ui_work_observations.append(observation)
         if float(elapsed_ms) >= WARNING_THRESHOLD_MS:
@@ -220,13 +234,22 @@ class ResourceGovernor:
         self._pressure = self._pressure_with_ui(channel)
 
     def record_gui_callback_observation(self, observation: GuiCallbackObservation) -> None:
+        diagnostics_only = _diagnostics_only_ui_observation(observation)
+        self._note_ui_work_observation_for_cold_start(
+            str(observation.channel),
+            item_count=observation.processed_items,
+            byte_count=observation.processed_bytes,
+            work_class=observation.work_class,
+        )
+        self._recent_ui_work_observations.append(observation)
+        if observation.over_warning:
+            self._recent_over_warning_callbacks.append(observation)
+        if diagnostics_only:
+            return
         count = max(1, int(observation.processed_items))
         byte_count = max(0, int(observation.processed_bytes))
         feedback_elapsed_ms = self._feedback_elapsed_ms(observation.channel, observation.elapsed_ms)
         self.latency_feedback.observe(observation.channel, feedback_elapsed_ms, count=count, byte_count=byte_count)
-        self._recent_ui_work_observations.append(observation)
-        if observation.over_warning:
-            self._recent_over_warning_callbacks.append(observation)
         self._pressure = self._pressure_with_ui(observation.channel)
 
     def decide_lane_workers(self, lane: ComputeLane, *, interactive: bool, busy_state: SchedulerBusyState) -> LaneWorkerDecision:
@@ -275,18 +298,28 @@ class ResourceGovernor:
         snapshot = feedback.channel_snapshot(channel)
         batch = int(feedback.batch_limit(channel, interactive=interactive))
         batch_max = int(feedback.tuning.max_batch)
+        details: list[str] = [
+            f"snapshot last={snapshot.last_elapsed_ms:.2f}ms/{snapshot.last_count} items/{snapshot.last_byte_count} bytes",
+            f"ewma={_optional_ms(snapshot.elapsed_ewma_ms)} per-item={_optional_ms(snapshot.per_item_ewma_ms)}",
+            f"budget={budget:.2f}ms control={control_budget:.2f}ms interactive={bool(interactive)}",
+            f"initial batch={batch} max={batch_max}",
+        ]
         if channel in _PRESENTATION_UPLOAD_CHANNELS and not interactive:
             batch_max = max(batch_max, min(32, int(ceil(batch_max * 1.5))))
+            details.append(f"presentation idle max widened to {batch_max}")
         if snapshot.per_item_ewma_ms is not None and snapshot.per_item_ewma_ms > 0.0:
+            prior = int(batch)
             batch = max(
                 int(feedback.tuning.min_batch),
                 min(int(batch_max), int(control_budget // max(0.25, snapshot.per_item_ewma_ms))),
             )
+            details.append(f"per-item EWMA sized batch {prior}->{batch}")
         presentation_model = (
             feedback.overhead_and_marginal_ms(channel)
             if channel in _PRESENTATION_UPLOAD_CHANNELS
             else None
         )
+        model_name = "none"
         if presentation_model is not None:
             # Per-item EWMAs misattribute fixed per-commit overhead (level
             # sync, histogram, presentation build) to the items: small commits
@@ -296,6 +329,7 @@ class ResourceGovernor:
             # when the overhead alone exceeds the budget, batching wide
             # minimizes total GUI occupancy rather than per-commit time.
             overhead_ms, marginal_ms = presentation_model
+            model_name = "overhead+marginal"
             headroom_ms = float(control_budget) - float(overhead_ms)
             # Batch large enough to fill the budget headroom, but never so
             # small that the fixed overhead dominates. Idle fills may
@@ -306,17 +340,29 @@ class ResourceGovernor:
             # around the budget.
             amortize = 1.0 if interactive else 2.0
             model_batch = int(max(headroom_ms, amortize * float(overhead_ms)) // max(0.05, float(marginal_ms)))
+            prior = int(batch)
             batch = max(int(feedback.tuning.min_batch), min(int(batch_max), model_batch))
+            details.append(
+                f"model batch {prior}->{batch} overhead={overhead_ms:.2f}ms marginal={marginal_ms:.2f}ms raw={model_batch}"
+            )
+        elif channel in _PRESENTATION_UPLOAD_CHANNELS:
+            model_name = "fallback"
+            details.append("presentation model unavailable; using EWMA/measured fallback")
         default_byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
         byte_cap = default_byte_cap
         if snapshot.per_byte_ewma_ms is not None and snapshot.per_byte_ewma_ms > 0.0:
+            prior = int(byte_cap)
             byte_cap = max(
                 1024,
                 int(control_budget // max(1e-9, snapshot.per_byte_ewma_ms)),
             )
+            details.append(f"per-byte EWMA byte-cap {prior}->{byte_cap}")
         if channel in _PRESENTATION_UPLOAD_CHANNELS and snapshot.last_count > 0 and snapshot.last_byte_count > 0:
             bytes_per_item = int(ceil(float(snapshot.last_byte_count) / max(1.0, float(snapshot.last_count))))
+            prior = int(byte_cap)
             byte_cap = max(int(byte_cap), int(bytes_per_item * max(1, batch)))
+            if byte_cap != prior:
+                details.append(f"last bytes/item floor byte-cap {prior}->{byte_cap}")
         if presentation_model is not None:
             byte_model = feedback.overhead_and_marginal_per_byte_ms(channel)
             if byte_model is not None:
@@ -327,10 +373,17 @@ class ResourceGovernor:
                 amortize = 1.0 if interactive else 2.0
                 byte_overhead_ms, marginal_per_byte_ms = byte_model
                 byte_headroom_ms = float(control_budget) - float(byte_overhead_ms)
+                prior = int(byte_cap)
                 byte_cap = max(
                     int(byte_cap),
                     int(max(byte_headroom_ms, amortize * float(byte_overhead_ms)) / max(1e-12, float(marginal_per_byte_ms))),
                 )
+                if byte_cap != prior:
+                    details.append(
+                        f"byte model cap {prior}->{byte_cap} overhead={byte_overhead_ms:.2f}ms marginal={marginal_per_byte_ms:.3g}ms/B"
+                    )
+            else:
+                details.append("byte model unavailable")
         if (
             channel in _PRESENTATION_UPLOAD_CHANNELS
             and presentation_model is None
@@ -341,8 +394,13 @@ class ResourceGovernor:
         ):
             scale = float(control_budget) / max(0.25, float(snapshot.last_elapsed_ms))
             measured_batch = max(int(feedback.tuning.min_batch) + 1, int(ceil(float(snapshot.last_count) * scale)))
+            prior_batch = int(batch)
+            prior_bytes = int(byte_cap)
             batch = max(int(batch), min(int(batch_max), measured_batch))
             byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
+            details.append(
+                f"single-item under-budget recovery scale={scale:.2f} batch {prior_batch}->{batch} byte-cap {prior_bytes}->{byte_cap}"
+            )
         elif (
             channel in _PRESENTATION_UPLOAD_CHANNELS
             and presentation_model is None
@@ -352,10 +410,15 @@ class ResourceGovernor:
         ):
             scale = control_budget / max(0.25, float(snapshot.last_elapsed_ms))
             measured_batch = int(ceil(float(snapshot.last_count) * scale))
+            prior_batch = int(batch)
+            prior_bytes = int(byte_cap)
             batch = max(int(batch), min(int(batch_max), measured_batch))
             if snapshot.last_byte_count > 0:
                 measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
                 byte_cap = max(int(byte_cap), measured_byte_cap)
+            details.append(
+                f"single-item below-warning recovery scale={scale:.2f} batch {prior_batch}->{batch} byte-cap {prior_bytes}->{byte_cap}"
+            )
         elif (
             channel in _PRESENTATION_UPLOAD_CHANNELS
             and presentation_model is None
@@ -365,6 +428,8 @@ class ResourceGovernor:
         ):
             scale = float(control_budget) / max(0.25, float(snapshot.last_elapsed_ms))
             measured_batch = int(float(snapshot.last_count) * scale)
+            prior_batch = int(batch)
+            prior_bytes = int(byte_cap)
             batch = max(int(feedback.tuning.min_batch), min(int(batch), measured_batch))
             if snapshot.last_byte_count > 0:
                 measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
@@ -376,6 +441,9 @@ class ResourceGovernor:
             ):
                 batch = min(int(batch_max), int(feedback.tuning.min_batch) + 1)
                 byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
+            details.append(
+                f"over-budget backoff scale={scale:.2f} batch {prior_batch}->{batch} byte-cap {prior_bytes}->{byte_cap}"
+            )
         elif (
             channel in _PRESENTATION_UPLOAD_CHANNELS
             and presentation_model is None
@@ -384,10 +452,15 @@ class ResourceGovernor:
         ):
             scale = control_budget / max(0.25, float(snapshot.last_elapsed_ms))
             measured_batch = int(ceil(float(snapshot.last_count) * scale))
+            prior_batch = int(batch)
+            prior_bytes = int(byte_cap)
             batch = max(int(batch), min(int(batch_max), measured_batch))
             if snapshot.last_byte_count > 0:
                 measured_byte_cap = int(float(snapshot.last_byte_count) * scale)
                 byte_cap = max(int(byte_cap), measured_byte_cap)
+            details.append(
+                f"under-warning recovery scale={scale:.2f} batch {prior_batch}->{batch} byte-cap {prior_bytes}->{byte_cap}"
+            )
         if (
             channel in _PRESENTATION_UPLOAD_CHANNELS
             and presentation_model is None
@@ -396,9 +469,12 @@ class ResourceGovernor:
             and snapshot.last_count <= max(1, int(feedback.tuning.min_batch))
             and batch <= int(feedback.tuning.min_batch)
         ):
+            prior_batch = int(batch)
+            prior_bytes = int(byte_cap)
             batch = min(int(batch_max), max(3, int(feedback.tuning.min_batch) + 2))
             if snapshot.last_byte_count > 0:
                 byte_cap = max(int(byte_cap), int(snapshot.last_byte_count) * int(batch))
+            details.append(f"idle single-item floor batch {prior_batch}->{batch} byte-cap {prior_bytes}->{byte_cap}")
         if (
             channel not in _PRESENTATION_UPLOAD_CHANNELS
             and 0.0 < snapshot.last_elapsed_ms < float(control_budget)
@@ -412,12 +488,66 @@ class ResourceGovernor:
             # decay back one drain at a time.
             scale = float(control_budget) / max(0.25, float(snapshot.last_elapsed_ms))
             measured_batch = int(ceil(float(snapshot.last_count) * scale))
+            prior = int(batch)
             batch = max(int(batch), min(int(batch_max), measured_batch))
+            details.append(f"non-presentation under-budget recovery scale={scale:.2f} batch {prior}->{batch}")
+        cold_start_remaining = int(self._conservative_cold_start_channels.get(channel, 0) or 0)
+        if cold_start_remaining > 0:
+            cold_cap = int(feedback.tuning.min_batch) + max(0, 4 - cold_start_remaining)
+            prior = int(batch)
+            batch = max(int(feedback.tuning.min_batch), min(int(batch), cold_cap))
+            details.append(f"conservative cold start remaining={cold_start_remaining} cap={cold_cap} batch {prior}->{batch}")
         interval = int(feedback.commit_interval_ms(channel, interactive=interactive))
+        details.append(f"interval={interval}ms")
         reason = "interactive feedback target" if interactive else "feedback target"
-        decision = UiWorkDecision(channel, batch, budget, interval, reason, int(byte_cap))
+        decision = UiWorkDecision(
+            channel,
+            batch,
+            budget,
+            interval,
+            reason,
+            int(byte_cap),
+            float(control_budget),
+            model_name,
+            tuple(details),
+        )
         self._ui_decisions[channel] = decision
         return decision
+
+    def reset_ui_work_feedback(self, channel: str, *, conservative_start: bool = False) -> None:
+        channel = str(channel)
+        self.latency_feedback.reset_channel(channel)
+        self._feedback_outlier_streak.pop(channel, None)
+        if conservative_start:
+            self._conservative_cold_start_channels[channel] = 4
+        else:
+            self._conservative_cold_start_channels.pop(channel, None)
+
+    def _note_ui_work_observation_for_cold_start(
+        self,
+        channel: str,
+        *,
+        item_count: int,
+        byte_count: int,
+        work_class: str = "",
+    ) -> None:
+        channel = str(channel)
+        remaining = int(self._conservative_cold_start_channels.get(channel, 0) or 0)
+        if remaining <= 0:
+            return
+        if str(work_class or "") != "tile_layer_commit":
+            return
+        if int(item_count or 0) <= 0:
+            return
+        # Cheap visibility commits are exactly what should NOT release the
+        # startup guard for complex/RGB data; wait for real image work.
+        if int(byte_count or 0) <= 0:
+            return
+        remaining -= 1
+        if remaining <= 0:
+            self._conservative_cold_start_channels.pop(channel, None)
+        else:
+            self._conservative_cold_start_channels[channel] = remaining
 
 
     def decide_montage_prefetch(self, *, stage_ready_or_in_flight: bool, visible_busy: bool) -> PrefetchAdmissionDecision:
@@ -580,3 +710,23 @@ def _clamp_int(value: int, low: int, high: int) -> int:
 
 def _clamp_float(value: float, low: float, high: float) -> float:
     return max(float(low), min(float(high), float(value)))
+
+
+def _optional_ms(value: float | None) -> str:
+    return "n/a" if value is None else f"{float(value):.2f}ms"
+
+
+def _diagnostics_only_ui_observation(observation: GuiCallbackObservation) -> bool:
+    return _diagnostics_only_ui_work(
+        observation.channel,
+        work_class=observation.work_class,
+        byte_count=observation.processed_bytes,
+    )
+
+
+def _diagnostics_only_ui_work(channel: str, *, work_class: str = "", byte_count: int = 0) -> bool:
+    return bool(
+        str(channel) == "tile_layer_commit"
+        and str(work_class or "") in {"presentation_upsert", "tile_layer_commit"}
+        and int(byte_count or 0) <= 0
+    )

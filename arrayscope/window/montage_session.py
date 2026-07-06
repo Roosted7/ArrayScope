@@ -1466,37 +1466,45 @@ class MontageRenderSession:
             and int(tile) not in stale_level_tiles
             and previous_payloads.get(int(tile)) is payload
         )
-        resident_retarget_upserts = {
-            int(tile): payload
-            for tile, payload in upserts.items()
-            if int(tile) in resident_retarget_tiles
-        }
         cold_upserts = {
             int(tile): payload
             for tile, payload in upserts.items()
             if int(tile) not in resident_retarget_tiles
         }
+        all_candidate_upserts = dict(upserts)
         admission = TileAdmissionQueue(self._tile_priority_context()).admit(
-            tuple(cold_upserts),
+            tuple(all_candidate_upserts),
             retained=(),
             cost_fn=(
-                (lambda tile: int(upsert_cost_fn(cold_upserts[int(tile)])))
+                (
+                    lambda tile: (
+                        0
+                        if int(tile) in resident_retarget_tiles
+                        else int(upsert_cost_fn(cold_upserts[int(tile)]))
+                    )
+                )
                 if upsert_cost_fn is not None
-                else (lambda tile: int(getattr(cold_upserts[int(tile)], "nbytes", 0) or 0))
+                else (
+                    lambda tile: (
+                        0
+                        if int(tile) in resident_retarget_tiles
+                        else int(getattr(cold_upserts[int(tile)], "nbytes", 0) or 0)
+                    )
+                )
             ),
             max_items=max_upserts,
             max_bytes=max_upsert_bytes,
             deadline_ms=cold_deadline_ms,
         )
-        capped_cold_upserts = {
-            int(tile): cold_upserts[int(tile)]
+        capped_upserts = {
+            int(tile): all_candidate_upserts[int(tile)]
             for tile in admission.admitted
-            if int(tile) in cold_upserts
+            if int(tile) in all_candidate_upserts
         }
         upserts = {
             int(tile): payload
             for tile, payload in upserts.items()
-            if int(tile) in resident_retarget_upserts or int(tile) in capped_cold_upserts
+            if int(tile) in capped_upserts
         }
         if max_upserts is not None or max_upsert_bytes is not None:
             admitted = set(int(tile) for tile in upserts)
@@ -1535,7 +1543,6 @@ class MontageRenderSession:
         presentation_geometry_changed = bool(
             getattr(self, "_layout_geometry_changed_pending", False)
             or viewport_changed
-            or active != self._last_active_tiles
             or planned != self._last_planned_tiles
             or near != self._last_near_tiles
         )

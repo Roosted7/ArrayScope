@@ -148,11 +148,16 @@ Active LOD queue inside X5:
    reduce-before-ops note. **Implementation status (2026-07-06):** commuting tiled-montage
    previews evaluate reduced input, RGB preview floors carry display histogram planes for
    re-windowing, exact refinement remains native, and the evaluator can classify axis-aware
-   non-display transforms and native-output-reduced opaque previews. The current per-tile
-   scheduler intentionally launches previews only for pipelines that remove work today; non-display
-   transform previews need a shared/batched route before they can be enabled without duplicating
-   FFT work per tile. Remaining work is that shared transform-preview route plus the measured
-   PyQtGraph default decision.
+   non-display transforms and native-output-reduced opaque previews. The benchmark tool now reports
+   first payload, first complete fill, and settled frame separately. PyQtGraph cold tile-layer
+   commits and level-only re-windowing are governed by the same priority/chunking system as exact
+   tile work; they must not fall back to tile-id row/column order. Aggregate histogram sample
+   construction is excluded from progressive PyQtGraph tile commits after the first display commit;
+   the 2026-07-06 visible Wayland run reported scalar visible fill at ~0.71 s versus FFT visible
+   fill at ~1.12 s. The current scheduler intentionally launches previews only for pipelines that remove work today. Shared non-display transform
+   previews exist behind `ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW`, but traces showed the default path
+   was slower when that work competed with exact FFT tiles. Remaining work is a separate/batched
+   transform-preview queue and the measured PyQtGraph default decision.
 2. **Level-value convergence in the lifecycle machine.** Presentation, semantic identity, and
    demanded-level residency are machine-owned; per-tile level values still live in
    `PresentationGenerationTracker`. Move convergence evidence and values into the same lifecycle

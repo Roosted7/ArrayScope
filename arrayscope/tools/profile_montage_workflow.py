@@ -473,6 +473,7 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
     probe.reset()
     start = perf_counter()
     draw_start = _vispy_draw_count(win)
+    phase_ui_work_start = _recent_ui_work_observations(win)
     action_result = action()
     milestones = _wait_for_montage_complete(
         app,
@@ -491,6 +492,7 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
         event_loop_p95_gap_ms=probe.percentile_ms(95),
         event_loop_p99_gap_ms=probe.percentile_ms(99),
         event_loop_max_gap_ms=probe.max_gap_ms,
+        phase_ui_work_start=phase_ui_work_start,
     )
     if isinstance(action_result, dict):
         record.update(action_result)
@@ -510,13 +512,15 @@ def _wait_for_montage_complete(
     require_presentation_settled: bool = False,
 ) -> dict[str, float | int | bool | None]:
     deadline = time.monotonic() + float(timeout_s)
-    first_loaded_ms = None
+    first_materialized_tile_ms = None
+    first_presented_tile_ms = None
     first_display_committed_ms = None
     first_overlay_clear_ms = None
     saw_overlays = _montage_overlay_count(win) > 0
     first_logical_complete_ms = None
     draw_after_complete_ms = None
     fully_visible_ms = None
+    first_visible_tile_ms = None
     first_display_payload_ms = None
     first_display_payload_fill_ms = None
     first_preview_payload_ms = None
@@ -525,14 +529,17 @@ def _wait_for_montage_complete(
     presentation_settled_ms = None
     final_visibility_state: dict[str, object] = {}
     final_level_state: dict[str, object] = {}
+    final_payload_state: dict[str, object] = {}
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
         session = getattr(win, "_montage_session", None)
         mode = getattr(win.img_view, "montageDisplayMode", lambda: "")()
         vispy_tiled = str(mode) == "vispy_tile_layer" and _vispy_canvas_visible(win)
         if session is not None:
-            if first_loaded_ms is None and bool(getattr(session, "presented_tiles", ())):
-                first_loaded_ms = (perf_counter() - start) * 1000.0
+            if first_materialized_tile_ms is None and bool(getattr(session, "rendered_tiles", None)):
+                first_materialized_tile_ms = (perf_counter() - start) * 1000.0
+            if first_presented_tile_ms is None and bool(getattr(session, "presented_tiles", ())):
+                first_presented_tile_ms = (perf_counter() - start) * 1000.0
             if first_display_committed_ms is None and bool(getattr(session, "display_committed", False)):
                 first_display_committed_ms = (perf_counter() - start) * 1000.0
         overlay_count = _montage_overlay_count(win)
@@ -553,8 +560,11 @@ def _wait_for_montage_complete(
             presentation_settled_ms = (perf_counter() - start) * 1000.0
         visibility_state = _montage_visibility_state(win, mode=str(mode))
         final_visibility_state = visibility_state
+        if first_visible_tile_ms is None and int(visibility_state["active_presented_tile_count"]) > 0:
+            first_visible_tile_ms = (perf_counter() - start) * 1000.0
         if session is not None:
             payload_state = _montage_display_payload_state(session, active_tiles=visibility_state["active_tiles"])
+            final_payload_state = payload_state
             if first_display_payload_ms is None and payload_state["display_payload_count"] > 0:
                 first_display_payload_ms = (perf_counter() - start) * 1000.0
             if first_preview_payload_ms is None and payload_state["preview_payload_count"] > 0:
@@ -573,14 +583,38 @@ def _wait_for_montage_complete(
         if fully_visible and (not vispy_tiled or final_drawn) and presentation_ready:
             if vispy_tiled:
                 draw_after_complete_ms = (perf_counter() - start) * 1000.0
+            display_payload_fill_after_first_payload_ms = _elapsed_between_ms(
+                first_display_payload_ms,
+                first_display_payload_fill_ms,
+            )
+            fully_visible_after_first_payload_ms = _elapsed_between_ms(
+                first_display_payload_ms,
+                fully_visible_ms,
+            )
+            fully_visible_after_first_visible_tile_ms = _elapsed_between_ms(
+                first_visible_tile_ms,
+                fully_visible_ms,
+            )
             return {
-                "first_loaded_tile_ms": first_loaded_ms,
+                "first_loaded_tile_ms": first_materialized_tile_ms,
+                "first_materialized_tile_ms": first_materialized_tile_ms,
+                "first_presented_tile_ms": first_presented_tile_ms,
                 "first_display_committed_ms": first_display_committed_ms,
                 "first_overlay_clear_ms": first_overlay_clear_ms,
                 "first_display_payload_ms": first_display_payload_ms,
                 "first_display_payload_fill_ms": first_display_payload_fill_ms,
+                "first_display_payload_fill_after_first_payload_ms": display_payload_fill_after_first_payload_ms,
+                "fully_visible_after_first_display_payload_ms": fully_visible_after_first_payload_ms,
+                "first_visible_tile_ms": first_visible_tile_ms,
+                "fully_visible_after_first_visible_tile_ms": fully_visible_after_first_visible_tile_ms,
                 "first_preview_payload_ms": first_preview_payload_ms,
                 "first_preview_payload_fill_ms": first_preview_payload_fill_ms,
+                "final_display_payload_count": int(final_payload_state.get("display_payload_count", 0)),
+                "final_preview_payload_count": int(final_payload_state.get("preview_payload_count", 0)),
+                "final_exact_payload_count": int(final_payload_state.get("exact_payload_count", 0)),
+                "preview_payload_reporting_scope": (
+                    "display payloads with quality=preview; not evidence that a second transform pass ran"
+                ),
                 "logical_complete_ms": first_logical_complete_ms,
                 "draw_after_complete_ms": draw_after_complete_ms,
                 "fully_visible_ms": fully_visible_ms,
@@ -675,6 +709,7 @@ def _phase_record(
     event_loop_p95_gap_ms: float | None,
     event_loop_p99_gap_ms: float | None,
     event_loop_max_gap_ms: float,
+    phase_ui_work_start: tuple[object, ...] = (),
 ) -> dict[str, object]:
     snapshot = win.collect_runtime_diagnostics()
     timing = snapshot.montage_timing
@@ -682,6 +717,10 @@ def _phase_record(
     resource = snapshot.resource_governor
     recent_callbacks = () if resource is None else tuple(resource.recent_over_warning_callbacks)
     recent_ui_work = () if resource is None else tuple(resource.recent_ui_work_observations)
+    phase_recent_ui_work, phase_recent_ui_work_truncated = _ui_work_observation_delta(
+        recent_ui_work,
+        phase_ui_work_start,
+    )
     feedback_channels = () if resource is None else tuple(resource.feedback_channels)
     ui_decisions = () if resource is None else tuple(resource.ui_decisions)
     lane_decisions = () if resource is None else tuple(resource.lane_decisions)
@@ -762,6 +801,14 @@ def _phase_record(
         "last_render_sync_ms": _optional_float(snapshot.render_timing.last_render_sync_ms),
         "last_display_commit_ms": _optional_float(snapshot.render_timing.last_display_commit_ms),
         "last_tile_commit_ms": _optional_float(timing.last_tile_commit_ms),
+        "last_tile_prepare_apply_ms": _optional_float(timing.last_tile_prepare_apply_ms),
+        "last_tile_layer_apply_ms": _optional_float(timing.last_tile_layer_apply_ms),
+        "last_tile_acknowledge_ms": _optional_float(timing.last_tile_acknowledge_ms),
+        "last_tile_retained_store_ms": _optional_float(timing.last_tile_retained_store_ms),
+        "last_tile_state_publish_ms": _optional_float(timing.last_tile_state_publish_ms),
+        "last_tile_geometry_sync_ms": _optional_float(timing.last_tile_geometry_sync_ms),
+        "last_tile_identity_check_ms": _optional_float(timing.last_tile_identity_check_ms),
+        "last_tile_followup_ms": _optional_float(timing.last_tile_followup_ms),
         "last_histogram_recompute_ms": _optional_float(timing.last_histogram_recompute_ms),
         "last_level_sync_ms": _optional_float(timing.last_level_sync_ms),
         "last_tile_layer_upload_ms": _optional_float(timing.last_tile_layer_upload_ms),
@@ -810,8 +857,35 @@ def _phase_record(
         ],
         "resource_ui_decisions": [asdict(decision) for decision in ui_decisions],
         "recent_ui_work_observations": [asdict(observation) for observation in recent_ui_work],
+        "phase_recent_ui_work_observations": [asdict(observation) for observation in phase_recent_ui_work],
+        "phase_recent_ui_work_observations_truncated": bool(phase_recent_ui_work_truncated),
         "recent_over_warning_callbacks": [asdict(callback) for callback in recent_callbacks],
     }
+
+
+def _elapsed_between_ms(start_ms, end_ms) -> float | None:
+    if start_ms is None or end_ms is None:
+        return None
+    return max(0.0, float(end_ms) - float(start_ms))
+
+
+def _recent_ui_work_observations(win) -> tuple[object, ...]:
+    try:
+        snapshot = win.collect_runtime_diagnostics()
+    except Exception:
+        return ()
+    resource = snapshot.resource_governor
+    return () if resource is None else tuple(resource.recent_ui_work_observations)
+
+
+def _ui_work_observation_delta(current: tuple[object, ...], start: tuple[object, ...]) -> tuple[tuple[object, ...], bool]:
+    current = tuple(current or ())
+    start = tuple(start or ())
+    if not start:
+        return current, False
+    if len(current) >= len(start) and current[: len(start)] == start:
+        return current[len(start) :], False
+    return current, True
 
 
 def _vispy_presentation_diagnostics(win) -> dict[str, object]:
@@ -911,10 +985,16 @@ def _montage_display_payload_state(session, *, active_tiles) -> dict[str, object
         for tile_number in display_payload_tiles
         if str(getattr(payloads.get(tile_number), "quality", "exact")) == "preview"
     }
+    exact_payload_tiles = {
+        int(tile_number)
+        for tile_number in display_payload_tiles
+        if str(getattr(payloads.get(tile_number), "quality", "exact")) == "exact"
+    }
     fill_target = active if active else display_payload_tiles
     return {
         "display_payload_count": len(display_payload_tiles),
         "preview_payload_count": len(preview_payload_tiles),
+        "exact_payload_count": len(exact_payload_tiles),
         "display_payload_fill": bool(fill_target) and fill_target.issubset(display_payload_tiles),
         "preview_payload_fill": bool(fill_target) and fill_target.issubset(preview_payload_tiles),
     }
@@ -1679,8 +1759,8 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
         return "No workflow timing records were produced.\n"
     lines = [
         "Workflow timing summary",
-        "| Backend | phase | first fill | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
-        "|---|---|---:|---:|---:|---:|---|---|---:|---:|---|",
+        "| Backend | phase | first fill | payload fill | visible fill | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|",
     ]
     for record in records:
         lines.append(
@@ -1690,6 +1770,8 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
                     f"`{record.get('backend', '')}`",
                     f"`{record.get('phase', '')}`",
                     _format_ms(record.get("first_display_payload_fill_ms", record.get("fully_visible_ms"))),
+                    _format_ms(record.get("first_display_payload_fill_after_first_payload_ms")),
+                    _format_ms(record.get("fully_visible_after_first_visible_tile_ms")),
                     _format_ms(record.get("elapsed_ms")),
                     _format_ms(record.get("event_loop_max_gap_ms")),
                     _histogram_loop_action_summary(record),
@@ -1950,6 +2032,8 @@ def _tile_summary(record: dict[str, object]) -> str:
 def _pacing_summary(record: dict[str, object]) -> str:
     first = record.get("first_loaded_tile_ms") or record.get("first_display_committed_ms")
     first_fill = record.get("first_display_payload_fill_ms")
+    fill_after_first_payload = record.get("first_display_payload_fill_after_first_payload_ms")
+    visible_after_first_tile = record.get("fully_visible_after_first_visible_tile_ms")
     preview_fill = record.get("first_preview_payload_fill_ms")
     exact_visible = record.get("fully_visible_ms")
     draw = record.get("draw_after_complete_ms")
@@ -1958,6 +2042,8 @@ def _pacing_summary(record: dict[str, object]) -> str:
         (
             f"first {_format_ms(first)}",
             f"fill {_format_ms(first_fill)}",
+            f"fill-after-first {_format_ms(fill_after_first_payload)}",
+            f"visible-fill {_format_ms(visible_after_first_tile)}",
             f"preview {_format_ms(preview_fill)}",
             f"visible {_format_ms(exact_visible)}",
             f"full {_format_ms(full)}",

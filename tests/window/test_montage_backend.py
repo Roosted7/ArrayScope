@@ -519,6 +519,7 @@ def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
 
     assert limits["max_upserts"] == 3
     assert limits["max_upsert_bytes"] == 1024 * 1024
+    assert limits["cold_deadline_ms"] == 24.0
     assert limits["upsert_cost_fn"](payload) == image.nbytes
 
 
@@ -549,7 +550,164 @@ def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
 
     assert limits["max_upserts"] == 2
     assert limits["max_upsert_bytes"] == 4096
+    assert limits["cold_deadline_ms"] == 24.0
     assert limits["upsert_cost_fn"](SimpleNamespace(image=np.zeros((8, 8), dtype=np.float32))) == 8 * 8 * 4
+
+
+def test_tile_layer_commit_feedback_counts_acknowledged_level_upserts():
+    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.display.model.frame import TileCommitReport
+
+    report = TileCommitReport(
+        presented_tiles=(0, 1, 2),
+        committed_upserts=(0, 1, 2),
+        texture_uploads=0,
+        texture_upload_bytes=0,
+    )
+
+    assert frame_renderer._tile_layer_commit_processed_count(report) == 3
+
+
+def test_retained_payload_store_receives_only_accepted_delta_payloads():
+    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta
+
+    payloads = {
+        index: DisplayTilePayload(
+            tile_number=index,
+            source_index=index,
+            image=np.full((2, 2), index, dtype=np.float32),
+            histogram_data=None,
+            source_id=("source", index),
+        )
+        for index in range(4)
+    }
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        base_revision=4,
+        target_revision=5,
+        upserts={1: payloads[1], 3: payloads[3]},
+    )
+    report = TileCommitReport(
+        presented_tiles=(0, 1, 2, 3),
+        committed_upserts=(3,),
+        delta_key=(4, 5),
+    )
+
+    retained = frame_renderer._accepted_tiled_payloads(payloads, delta, report)
+
+    assert retained == {3: payloads[3]}
+
+
+def test_pyqtgraph_visible_tile_layer_backlog_uses_minimum_commit_cadence():
+    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.core.compute_policy import compute_policy_from_settings
+    from arrayscope.core.memory_policy import MemoryProfileChoice
+    from arrayscope.core.resource_governor import ResourceGovernor
+    from arrayscope.app.settings_state import AppSettingsState
+
+    governor = ResourceGovernor(
+        compute_policy_from_settings(AppSettingsState(memory_profile=MemoryProfileChoice.BALANCED), cpu_count=8),
+        profile=MemoryProfileChoice.BALANCED,
+    )
+    governor.record_ui_observation("montage_commit", 80.0, item_count=4, byte_count=1024)
+    assert governor.decide_ui_work("montage_commit", interactive=False).interval_ms > governor.latency_feedback.tuning.min_interval_ms
+    session = SimpleNamespace(
+        dirty_payloads={0: None},
+        pending_payload_upserts={},
+        pending_removals=set(),
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=False,
+                shader_windowing=False,
+            )
+        ),
+        resource_governor=governor,
+        _viewport_interaction_active=False,
+        _ui_work_decision=lambda channel, **kwargs: governor.decide_ui_work(channel, **kwargs),
+        _montage_session=session,
+    )
+    window.win = window
+
+    interval = frame_renderer._montage_commit_interval_ms(window, force=False)
+
+    assert interval == governor.latency_feedback.tuning.min_interval_ms
+
+
+def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
+    import arrayscope.window.frame_renderer as frame_renderer
+
+    session = SimpleNamespace(display_committed=True)
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=False,
+                shader_windowing=False,
+            )
+        ),
+        _viewport_interaction_active=False,
+    )
+    window.win = window
+
+    assert frame_renderer._direct_montage_tile_delta_commit_enabled(window, session) is True
+    session.display_committed = False
+    assert frame_renderer._direct_montage_tile_delta_commit_enabled(window, session) is False
+
+
+def test_pyqtgraph_tile_layer_feedback_resets_on_complex_cost_class_change():
+    import arrayscope.window.frame_renderer as frame_renderer
+
+    resets = []
+    decisions = []
+
+    class Governor:
+        def reset_ui_work_feedback(self, channel, *, conservative_start=False):
+            resets.append((channel, bool(conservative_start)))
+
+    def decide(channel, **_kwargs):
+        decisions.append(str(channel))
+        return SimpleNamespace(batch_limit=2, byte_cap=4096, budget_ms=2.0)
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=False,
+                shader_windowing=False,
+            )
+        ),
+        resource_governor=Governor(),
+        _viewport_interaction_active=False,
+        _ui_work_decision=decide,
+    )
+    window.win = window
+    session = SimpleNamespace(
+        dirty_payloads={0: None},
+        pending_payload_upserts={},
+        pending_removals=set(),
+        rgb=False,
+        output_dtype=np.dtype("float32"),
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+    )
+
+    frame_renderer._tile_layer_upsert_limits(window, session)
+    session.rendered_tiles = {0: SimpleNamespace(image=np.zeros((8, 8), dtype=np.complex64))}
+    frame_renderer._tile_layer_upsert_limits(window, session)
+
+    assert decisions == ["tile_layer_commit", "tile_layer_commit"]
+    assert resets == [("tile_layer_commit", True)]
 
 
 def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):
@@ -624,13 +782,13 @@ def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):
     layer._update_tile_levels = update_levels
     tile_delta = SimpleNamespace(
         active_tiles=(3, 1, 2, 0),
-        upserts={},
+        upserts={3: payloads[3], 1: payloads[1]},
         removals=(),
         force_refresh=False,
         cold_deadline_ms=None,
     )
 
-    layer.update_presentation(
+    stats = layer.update_presentation(
         None,
         histogram_data=None,
         geometry=geometry,
@@ -641,7 +799,11 @@ def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):
         tile_delta=tile_delta,
     )
 
-    assert order == [3, 1, 2, 0]
+    assert order == [3, 1]
+    assert stats.presented_identities == {
+        tile_number: payload.source_id
+        for tile_number, payload in payloads.items()
+    }
 
 
 def test_tile_presentation_admission_uses_backend_cost_function():
@@ -776,6 +938,77 @@ def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
 
     assert delta.upserts == {}
     assert delta.active_tiles == (0, 1, 2, 3)
+
+
+def test_tile_presentation_limits_cap_resident_retarget_upserts():
+    from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    tiles = tuple(
+        MontageTile(
+            montage_index=index,
+            source_index=index,
+            row=0,
+            col=index,
+            x0=index * 2,
+            y0=0,
+            width=2,
+            height=2,
+            view_state=None,
+        )
+        for index in range(4)
+    )
+    session = MontageRenderSession(
+        session_id=1,
+        key=("test",),
+        render_generation=1,
+        level_key=None,
+        level_expected_indices=tuple(range(4)),
+        plan=MontagePlan(axis=0, tile_shape=(2, 2), grid_shape=(1, 4), columns=4, rows=1, gap=0, tiles=tiles),
+        view_state=None,
+        document=None,
+        montage_axis=0,
+        colormap_lut=None,
+        viewport_shape=(2, 8),
+        view_range=((0.0, 8.0), (0.0, 2.0)),
+        output_dtype=np.dtype("float32"),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    for index, tile in enumerate(tiles):
+        image = np.full((2, 2), index, dtype=np.float32)
+        session.rendered_tiles[index] = RenderedTile(
+            tile=tile,
+            image=image,
+            histogram_data=image,
+            eval_ms=0.0,
+            slab_shape=image.shape,
+            slab_nbytes=image.nbytes,
+        )
+        session.dirty_payloads[index] = None
+
+    state, delta = session.build_tile_presentation({})
+    session.tile_presentation_state = state
+    session.presented_tiles = set(delta.upserts)
+    for tile_number, payload in state.payloads.items():
+        session.acknowledged_source_ids.add(payload.source_id)
+        session.dirty_payloads[int(tile_number)] = None
+        session.pending_payload_upserts[int(tile_number)] = None
+
+    _state, delta = session.build_tile_presentation(
+        {},
+        max_upserts=2,
+        max_upsert_bytes=1,
+        upsert_cost_fn=lambda _payload: 0,
+    )
+
+    assert tuple(delta.upserts) == (1, 2)
 
 
 def test_auto_policy_uses_renderer_backend_name():
@@ -1890,6 +2123,81 @@ def test_ready_display_commit_refreshes_stale_commit_token_at_source(qt_app):
     assert session.flush_pending is True
 
 
+def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
+    pytest.importorskip("pyqtgraph")
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.model.frame import TilePresentationDelta, TilePresentationState
+    from arrayscope.display.slice_engine import DisplayImage
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class _Window(FrameRenderMixin):
+        def __init__(self):
+            self.win = self
+            self.img_view = SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
+            self.commits = 0
+
+        def _montage_session_is_current(self, _session):
+            return True
+
+        def _classify_visible_montage_tiles(self, _session):
+            return None
+
+        def _direct_montage_tile_layer_presentation(self, _session):
+            geometry = DisplayGeometry(
+                view_state=None,
+                display_shape=(2, 2),
+                montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0),
+            )
+            return DisplayImage(np.zeros((2, 2), dtype=np.float32)), geometry
+
+        def _montage_tile_source_ids(self, _session):
+            return {}
+
+        def _display_committer(self):
+            self.commits += 1
+            raise AssertionError("loading-only first commit must not reach backend")
+
+        def _schedule_montage_lod_materializations(self, _session):
+            return None
+
+    geometry = MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0)
+    delta = TilePresentationDelta(
+        structure_revision=0,
+        payload_revision=0,
+        visibility_revision=0,
+        level_revision=0,
+        histogram_revision=0,
+        viewport_revision=0,
+        base_revision=0,
+        target_revision=0,
+        active_tiles=(),
+        planned_tiles=(0,),
+    )
+    session = SimpleNamespace(
+        display_committed=False,
+        force_auto=False,
+        tile_presentation_state=TilePresentationState(),
+        consume_dirty_tiles=lambda: (),
+        ensure_tile_states=lambda: (),
+        build_tile_presentation=lambda *_args, **_kwargs: (TilePresentationState(), delta),
+        _selected_lod_factor=lambda: 1,
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+        level_generation=SimpleNamespace(target_levels=None),
+        user_levels_override=None,
+        final_commit_pending=True,
+        flush_pending=True,
+        plan=SimpleNamespace(geometry=geometry),
+    )
+
+    win = _Window()
+    win._commit_montage_session_presentation(session, force=False)
+
+    assert win.commits == 0
+    assert session.final_commit_pending is False
+    assert session.flush_pending is False
+
+
 def test_montage_commit_token_ignores_viewport_only_revision_changes():
     from arrayscope.window.frame_renderer import _montage_work_token
 
@@ -2051,45 +2359,6 @@ def test_loading_montage_profile_retry_waits_for_visibility_without_timer():
     win._retry_loading_montage_profile()
 
     assert win.updated == [(1.0, 2.0)]
-
-
-def test_native_tiled_payloads_publish_semantic_histogram_for_partial_commit():
-    from arrayscope.core.window_levels import LevelSourceRank
-    from arrayscope.display.model.frame import DisplayTilePayload
-    from arrayscope.display.model.montage_levels import MontageLevelStats
-    from arrayscope.window.frame_renderer import (
-        _should_publish_montage_histogram_plot,
-        _tiled_payloads_require_semantic_histogram_plot,
-    )
-
-    payloads = {
-        0: DisplayTilePayload(
-            tile_number=0,
-            source_index=0,
-            image=np.zeros((2, 2), dtype=np.float32),
-            histogram_data=None,
-            source_id=("native", 0),
-        )
-    }
-    stats = MontageLevelStats(
-        bounds=(0.0, 1.0),
-        source_indices=frozenset({0}),
-        expected_indices=frozenset({0, 1}),
-        rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
-        sample=np.asarray([0.0, 1.0], dtype=np.float32),
-    )
-
-    assert _tiled_payloads_require_semantic_histogram_plot(payloads) is True
-    assert (
-        _should_publish_montage_histogram_plot(
-            False,
-            False,
-            stats,
-            requires_semantic_plot=_tiled_payloads_require_semantic_histogram_plot(payloads),
-        )
-        is True
-    )
-    assert _should_publish_montage_histogram_plot(False, False, stats) is False
 
 
 def test_stage_wait_in_flight_is_not_actionable_timer_work():

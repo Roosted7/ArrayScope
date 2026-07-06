@@ -866,6 +866,37 @@ def test_layout_reflow_repositions_materialized_tiles_without_payload_upserts():
     assert not session.presentation_geometry_changed
 
 
+def test_loaded_active_set_change_without_payload_delta_is_not_geometry_change():
+    session = _session()
+    source_ids = {}
+    for tile in session.plan.tiles[:2]:
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
+
+    first_state, first_delta = session.build_tile_presentation(source_ids)
+    session.acknowledge_tile_presentation(
+        first_delta,
+        TileCommitReport(
+            presented_tiles=first_state.active_payloads(first_delta),
+            committed_upserts=frozenset(first_delta.upserts),
+        ),
+    )
+    session.mark_presented(first_state.active_payloads(first_delta))
+    # Simulate a viewport-scoped active-set expansion over already-presented
+    # payloads. The active scope should update for the next real delta, but
+    # it is not itself layout/viewport geometry that warrants a backend patch.
+    session._last_active_tiles = (0,)
+
+    _state, delta = session.build_tile_presentation(source_ids)
+
+    assert delta.upserts == {}
+    assert delta.removals == ()
+    assert delta.active_tiles == (0, 1)
+    assert session.visibility_revision == first_delta.visibility_revision + 1
+    assert not session.presentation_geometry_changed
+
+
 def test_montage_render_session_passes_cold_deadline_without_slicing_upserts():
     session = _session()
     session.pending_tiles.clear()
@@ -980,6 +1011,60 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
         rect,
     )
     assert image_view.calls == 1
+
+
+def test_montage_loading_overlay_refresh_has_own_cadence(monkeypatch):
+    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class ImageView:
+        def __init__(self):
+            self.overlays = ()
+            self.calls = 0
+
+        def setMontageTileOverlays(self, overlays):
+            self.overlays = tuple(overlays or ())
+            self.calls += 1
+
+        def montageTileOverlayCount(self):
+            return len(self.overlays)
+
+    now = [10.0]
+    monkeypatch.setattr(frame_renderer, "monotonic", lambda: now[0])
+    session = _session()
+    session.show_loading_overlays = True
+    session.mark_loading(session.plan.tiles[0])
+    image_view = ImageView()
+    owner = SimpleNamespace(img_view=image_view, _montage_session=session)
+    owner.win = owner
+    rect = (0, 0, 20, 20)
+
+    FrameRenderMixin._update_montage_tile_overlays_for_plan(
+        owner,
+        session.plan,
+        session.ensure_tile_states(),
+        rect,
+    )
+    assert image_view.calls == 1
+
+    session.mark_loading(session.plan.tiles[1])
+    now[0] += 0.01
+    FrameRenderMixin._update_montage_tile_overlays_for_plan(
+        owner,
+        session.plan,
+        session.ensure_tile_states(),
+        rect,
+    )
+    assert image_view.calls == 1
+
+    now[0] += 0.2
+    FrameRenderMixin._update_montage_tile_overlays_for_plan(
+        owner,
+        session.plan,
+        session.ensure_tile_states(),
+        rect,
+    )
+    assert image_view.calls == 2
 
 
 def test_level_presentation_finish_reuses_settled_generation():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import sqrt
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class LatencyFeedbackChannel:
     count_ewma: float | None = None
     count_var_ewma: float = 0.0
     count_elapsed_cov_ewma: float = 0.0
+    elapsed_var_ewma: float = 0.0
     byte_ewma: float | None = None
     byte_var_ewma: float = 0.0
     byte_elapsed_cov_ewma: float = 0.0
@@ -54,6 +56,9 @@ class LatencyFeedbackController:
     tuning: LatencyFeedbackTuning = field(default_factory=LatencyFeedbackTuning)
     _channels: dict[str, LatencyFeedbackChannel] = field(default_factory=dict)
 
+    def reset_channel(self, channel: str) -> None:
+        self._channels.pop(str(channel), None)
+
     def observe(self, channel: str, elapsed_ms: float, *, count: int = 1, byte_count: int = 0) -> None:
         state = self._channels.setdefault(str(channel), LatencyFeedbackChannel())
         elapsed = max(0.0, float(elapsed_ms))
@@ -66,24 +71,27 @@ class LatencyFeedbackController:
         # Exponentially-weighted first and second moments of (count, elapsed)
         # support a per-call-overhead + per-item-marginal cost model; deltas
         # are taken against the pre-update means.
-        if state.count_ewma is None or state.elapsed_ewma_ms is None:
+        previous_elapsed = state.elapsed_ewma_ms
+        if state.count_ewma is None or previous_elapsed is None:
             state.count_ewma = float(count)
             state.count_var_ewma = 0.0
             state.count_elapsed_cov_ewma = 0.0
+            state.elapsed_var_ewma = 0.0
         else:
             delta_count = float(count) - float(state.count_ewma)
-            delta_elapsed = elapsed - float(state.elapsed_ewma_ms)
+            delta_elapsed = elapsed - float(previous_elapsed)
             state.count_ewma = float(state.count_ewma) + alpha * delta_count
             state.count_var_ewma = (1.0 - alpha) * (state.count_var_ewma + alpha * delta_count * delta_count)
             state.count_elapsed_cov_ewma = (1.0 - alpha) * (state.count_elapsed_cov_ewma + alpha * delta_count * delta_elapsed)
+            state.elapsed_var_ewma = (1.0 - alpha) * (state.elapsed_var_ewma + alpha * delta_elapsed * delta_elapsed)
         if byte_count > 0:
-            if state.byte_ewma is None or state.elapsed_ewma_ms is None:
+            if state.byte_ewma is None or previous_elapsed is None:
                 state.byte_ewma = float(byte_count)
                 state.byte_var_ewma = 0.0
                 state.byte_elapsed_cov_ewma = 0.0
             else:
                 delta_bytes = float(byte_count) - float(state.byte_ewma)
-                delta_elapsed = elapsed - float(state.elapsed_ewma_ms)
+                delta_elapsed = elapsed - float(previous_elapsed)
                 state.byte_ewma = float(state.byte_ewma) + alpha * delta_bytes
                 state.byte_var_ewma = (1.0 - alpha) * (state.byte_var_ewma + alpha * delta_bytes * delta_bytes)
                 state.byte_elapsed_cov_ewma = (1.0 - alpha) * (state.byte_elapsed_cov_ewma + alpha * delta_bytes * delta_elapsed)
@@ -108,7 +116,14 @@ class LatencyFeedbackController:
         state = self._channels.get(str(channel))
         if state is None or state.count_ewma is None or state.elapsed_ewma_ms is None:
             return None
-        if state.observations < 4 or state.count_var_ewma <= 0.05:
+        if state.observations < 4 or state.count_var_ewma <= 0.05 or state.elapsed_var_ewma <= 0.05:
+            return None
+        if state.count_elapsed_cov_ewma <= 0.0:
+            return None
+        correlation = float(state.count_elapsed_cov_ewma) / sqrt(
+            max(1e-12, float(state.count_var_ewma) * float(state.elapsed_var_ewma))
+        )
+        if correlation < 0.25:
             return None
         marginal = max(0.01, float(state.count_elapsed_cov_ewma) / float(state.count_var_ewma))
         overhead = max(0.0, float(state.elapsed_ewma_ms) - marginal * float(state.count_ewma))
@@ -126,7 +141,18 @@ class LatencyFeedbackController:
         state = self._channels.get(str(channel))
         if state is None or state.byte_ewma is None or state.elapsed_ewma_ms is None:
             return None
-        if state.byte_observations < 4 or state.byte_var_ewma <= max(1.0, 0.0001 * float(state.byte_ewma) ** 2):
+        if (
+            state.byte_observations < 4
+            or state.byte_var_ewma <= max(1.0, 0.0001 * float(state.byte_ewma) ** 2)
+            or state.elapsed_var_ewma <= 0.05
+        ):
+            return None
+        if state.byte_elapsed_cov_ewma <= 0.0:
+            return None
+        correlation = float(state.byte_elapsed_cov_ewma) / sqrt(
+            max(1e-12, float(state.byte_var_ewma) * float(state.elapsed_var_ewma))
+        )
+        if correlation < 0.25:
             return None
         marginal = max(1e-12, float(state.byte_elapsed_cov_ewma) / float(state.byte_var_ewma))
         overhead = max(0.0, float(state.elapsed_ewma_ms) - marginal * float(state.byte_ewma))

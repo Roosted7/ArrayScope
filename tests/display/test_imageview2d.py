@@ -315,6 +315,33 @@ def test_tile_commit_report_uses_backend_presented_tile_ids_for_middle_holes():
     assert report.presented_tiles == frozenset({0, 2})
 
 
+def test_pyqtgraph_tile_commit_report_counts_distinct_updated_tiles():
+    from types import SimpleNamespace
+
+    from arrayscope.display.imageview2d import _tile_commit_report, _tile_layer_distinct_work_items
+    from arrayscope.display.model.tile_stats import TileLayerUpdateStats
+
+    payloads = {
+        index: SimpleNamespace(nbytes=1024)
+        for index in range(3)
+    }
+    stats = TileLayerUpdateStats(
+        visible_items=3,
+        presented_tiles=(0, 1, 2),
+        committed_upserts=(0, 1, 2),
+        updated_tiles=(0, 1, 2),
+        items_created=3,
+        items_updated=3,
+    )
+
+    report = _tile_commit_report(payloads, SimpleNamespace(upserts=payloads, removals=()), stats)
+
+    assert _tile_layer_distinct_work_items(stats) == 3
+    assert report.cold_count == 3
+    assert report.texture_uploads == 3
+    assert report.pyqtgraph_items_created == 0
+
+
 def test_update_image_data_fast_accepts_display_ready_rgb(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 

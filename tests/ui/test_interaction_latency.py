@@ -214,6 +214,7 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         win._set_view_state(state)
         win.update_image_view()
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: len(tuple(win._montage_session.presented_tiles)) == 3, timeout=_WAIT_TIMEOUT_MS)
 
         decision = SimpleNamespace(batch_limit=1, budget_ms=100.0, interval_ms=1000, byte_cap=0)
         monkeypatch.setattr(win, "_ui_work_decision", lambda _channel, *, interactive=False: decision)
@@ -222,10 +223,11 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         win.img_view.setLevels(0.5, 4.0)
         timing = win.img_view.lastImageUploadTiming()
 
-        # Preview rewindow reaches every visible RGB tile immediately.
-        assert timing.tile_layer_items_updated == 3
-        assert timing.tile_layer_rgb_window_tiles == 3
-        # Semantic acknowledgement is governed: only one tile settled so far.
+        # Physical rewindowing and semantic acknowledgement share the governed
+        # priority order: no all-at-once preview pass may bypass admission.
+        assert timing.tile_layer_items_updated == 1
+        assert timing.tile_layer_rgb_window_tiles == 1
+        # Only one tile settled so far.
         assert len(win._montage_session.pending_payload_upserts) == 0
         assert win._montage_session.has_stale_level_presentations() is True
         assert win._montage_session.has_pending_level_update() is True
@@ -295,6 +297,7 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
         win._set_view_state(state)
         win.update_image_view()
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "tile_layer", timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: len(tuple(win._montage_session.presented_tiles)) == 3, timeout=_WAIT_TIMEOUT_MS)
 
         decision = SimpleNamespace(batch_limit=1, budget_ms=100.0, interval_ms=1000, byte_cap=1)
         monkeypatch.setattr(win, "_ui_work_decision", lambda _channel, *, interactive=False: decision)
@@ -303,9 +306,10 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
         win.img_view.setLevels(0.5, 4.0)
         timing = win.img_view.lastImageUploadTiming()
 
-        # Scalar tiles take the shader/LUT level path: no image replacement or
-        # pixel re-upload for a pure level change.
-        assert timing.tile_layer_level_updates == 3
+        # Scalar tiles take the shader/LUT level path through the same governed
+        # priority order: no image replacement or pixel re-upload for a pure
+        # level change.
+        assert timing.tile_layer_level_updates == 1
         assert timing.tile_layer_items_updated == 0
         assert timing.tile_layer_image_replacements == 0
         assert timing.visible_bytes == 0

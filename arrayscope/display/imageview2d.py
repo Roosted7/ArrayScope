@@ -584,6 +584,7 @@ class ImageViewShell(QtWidgets.QWidget):
         elapsed_ms: float,
         item_count: int = 1,
         byte_count: int = 0,
+        details: tuple[str, ...] = (),
     ) -> None:
         observer = getattr(self, "_gui_callback_observer", None)
         if not callable(observer):
@@ -600,6 +601,7 @@ class ImageViewShell(QtWidgets.QWidget):
                 elapsed_ms=max(0.0, float(elapsed_ms)),
                 processed_items=max(1, int(item_count)),
                 processed_bytes=max(0, int(byte_count)),
+                details=tuple(str(detail) for detail in details),
             )
         )
 
@@ -926,13 +928,7 @@ class ImageViewShell(QtWidgets.QWidget):
             getattr(stats, "superseded_reclaimed_under_pressure", 0)
         )
         elapsed_ms = float(getattr(stats, "upload_ms", 0.0) or 0.0)
-        observed_items = (
-            int(getattr(stats, "items_created", 0))
-            + int(stats.items_updated)
-            + int(getattr(stats, "existing_items_shown", 0))
-            + int(getattr(stats, "relocated_tiles", 0))
-            + int(getattr(stats, "level_updates", 0))
-        )
+        observed_items = _tile_layer_distinct_work_items(stats)
         if elapsed_ms > 0.0 or observed_items > 0:
             self._record_gui_callback_observation(
                 channel="tile_layer_commit",
@@ -940,6 +936,15 @@ class ImageViewShell(QtWidgets.QWidget):
                 elapsed_ms=elapsed_ms,
                 item_count=max(1, observed_items),
                 byte_count=int(getattr(stats, "texture_upload_bytes", 0) or 0),
+                details=(
+                    f"created={int(getattr(stats, 'items_created', 0) or 0)}",
+                    f"updated={int(getattr(stats, 'items_updated', 0) or 0)}",
+                    f"skipped={int(getattr(stats, 'items_skipped', 0) or 0)}",
+                    f"rgb={int(getattr(stats, 'rgb_window_tiles', 0) or 0)}",
+                    f"level={int(getattr(stats, 'level_updates', 0) or 0)}",
+                    f"replaced={int(getattr(stats, 'image_replacements', 0) or 0)}",
+                    f"resident={int(getattr(stats, 'resident_items', 0) or 0)}",
+                ),
             )
 
     def _tile_layer_histogram_key(self, histogramData, histogramPlotData, *, levels, histogramRange):
@@ -2660,6 +2665,7 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     updated_tiles = tuple(int(tile) for tile in tuple(getattr(stats, "updated_tiles", ()) or ()))
     pyqtgraph_data_updates = max(0, len(updated_tiles) - rgb_window_tiles) if texture_uploads <= 0 else 0
     report_uploads = texture_uploads if texture_uploads > 0 else pyqtgraph_data_updates
+    pyqtgraph_created_without_update = max(0, items_created - len(updated_tiles)) if texture_uploads <= 0 else items_created
     report_upload_bytes = int(getattr(stats, "texture_upload_bytes", 0) or 0)
     if report_upload_bytes <= 0 and updated_tiles:
         report_upload_bytes = sum(int(getattr(payloads.get(int(tile)), "nbytes", 0) or 0) for tile in updated_tiles)
@@ -2677,7 +2683,7 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
         removed_tiles=frozenset(getattr(tile_delta, "removals", ()) or ()),
         texture_uploads=report_uploads,
         texture_upload_bytes=report_upload_bytes,
-        pyqtgraph_items_created=items_created,
+        pyqtgraph_items_created=pyqtgraph_created_without_update,
         cpu_windowed_tiles=rgb_window_tiles,
         resident_rebinds=resident,
         existing_items_shown=existing_items,
@@ -2685,6 +2691,20 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
         storage_rebuilds=int(getattr(stats, "storage_rebuilds", 0) or 0),
         cold_work_ms=float(getattr(stats, "upload_ms", 0.0) or 0.0),
     )
+
+
+def _tile_layer_distinct_work_items(stats) -> int:
+    updated_tiles = tuple(int(tile) for tile in tuple(getattr(stats, "updated_tiles", ()) or ()))
+    data_or_level_updates = max(
+        len(updated_tiles),
+        int(getattr(stats, "items_updated", 0) or 0),
+        int(getattr(stats, "level_updates", 0) or 0),
+        int(getattr(stats, "level_update_processed_items", 0) or 0),
+    )
+    resident_visibility = int(getattr(stats, "existing_items_shown", 0) or 0)
+    if resident_visibility <= 0:
+        resident_visibility = int(getattr(stats, "relocated_tiles", 0) or 0)
+    return int(data_or_level_updates + max(0, resident_visibility))
 
 
 def _is_tiled_loading_only_commit(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import ceil
 from time import perf_counter
-from typing import Callable
+from typing import Callable, Mapping
 
 import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
@@ -240,10 +240,13 @@ class MontageTileLayer:
             for tile in requested_active
             if int(tile) in self._states and not levels_match(self._states[int(tile)].levels, levels)
         )
+        level_update_scope = tuple(tile_order) if requested_upserts else requested_active
         level_update_tiles = tuple(
             int(tile)
-            for tile in requested_active
-            if int(tile) in self._states and not levels_match(self._states[int(tile)].levels, levels)
+            for tile in level_update_scope
+            if (not requested_upserts or int(tile) in requested_upserts)
+            and int(tile) in self._states
+            and not levels_match(self._states[int(tile)].levels, levels)
         )
         if level_update_tiles:
             tile_order = tuple(dict.fromkeys(tuple(tile_order) + tuple(level_update_tiles)))
@@ -379,13 +382,14 @@ class MontageTileLayer:
                 and tile_hist is not None
                 and (item_state.rgb_base is None or item_state.hist_source is None)
             )
+            level_update_admitted = not requested_upserts or int(tile_number) in requested_upserts
             should_upload = bool(
                 item_state is None
                 or source_changed
                 or dirty
                 or (not item_state.visible and not resident_current)
                 or missing_display
-                or needs_source_rewindow
+                or (needs_source_rewindow and level_update_admitted)
             )
             cold_candidate = bool(
                 item_state is None
@@ -394,7 +398,7 @@ class MontageTileLayer:
                 or dirty
                 or (not item_state.visible and not resident_current)
                 or missing_display
-                or needs_source_rewindow
+                or (needs_source_rewindow and level_update_admitted)
             )
             rewindow_only = bool(
                 existing_item
@@ -402,6 +406,7 @@ class MontageTileLayer:
                 and not dirty
                 and not missing_display
                 and needs_source_rewindow
+                and level_update_admitted
             )
             item_deadline_ms = level_rewindow_deadline_ms if rewindow_only else cold_deadline_ms
             if (
@@ -476,7 +481,7 @@ class MontageTileLayer:
                 cold_tiles_committed += int(cold_candidate)
                 if updated and int(tile_number) in requested_upserts:
                     committed_upserts.add(int(tile_number))
-            elif levels_changed:
+            elif levels_changed and level_update_admitted:
                 if (
                     level_rewindow_deadline_ms is not None
                     and level_updates > 0
@@ -499,7 +504,8 @@ class MontageTileLayer:
                     committed_upserts.add(int(tile_number))
             else:
                 items_skipped += 1
-                item_state.levels = levels
+                if not levels_changed:
+                    item_state.levels = levels
                 item_state.visible = True
                 item_state.source_index = int(source_index)
                 item_state.world_rect = world_rect
@@ -523,6 +529,7 @@ class MontageTileLayer:
         return TileLayerUpdateStats(
             visible_items=int(visible_items),
             presented_tiles=tuple(int(tile) for tile in sorted(active)),
+            presented_identities=_direct_presented_identities(self._states, tile_payloads),
             committed_upserts=tuple(int(tile) for tile in sorted(committed_upserts)),
             updated_tiles=tuple(int(tile) for tile in updated_tiles),
             items_created=int(items_created),
@@ -575,6 +582,7 @@ class MontageTileLayer:
         return TileLayerUpdateStats(
             visible_items=visible_items,
             presented_tiles=tuple(sorted(int(state.tile_number) for state in self._states.values() if state.visible)),
+            presented_identities=_direct_presented_identities(self._states),
             items_updated=items_updated,
             items_skipped=items_skipped,
             rgb_window_tiles=rgb_window_tiles,
@@ -739,6 +747,8 @@ class MontageTileLayer:
         visible_items = sum(1 for state in self._states.values() if bool(state.visible))
         return TileLayerUpdateStats(
             visible_items=int(visible_items),
+            presented_tiles=tuple(sorted(int(state.tile_number) for state in self._states.values() if state.visible)),
+            presented_identities=_direct_presented_identities(self._states, payloads),
             updated_tiles=tuple(updated_tiles),
             items_created=int(items_created),
             items_updated=int(items_updated),
@@ -1156,6 +1166,26 @@ def _source_key_for_state(state: TileLayerItemState) -> object | None:
         local_rect=state.local_rect,
         rgb_already_windowed=state.rgb_already_windowed,
     )
+
+
+def _direct_presented_identities(
+    states: Mapping[int, TileLayerItemState],
+    payloads: Mapping[int, DisplayTilePayload] | None = None,
+) -> dict[int, object]:
+    payloads = dict(payloads or {})
+    identities: dict[int, object] = {}
+    for state in tuple(dict(states).values()):
+        if not bool(getattr(state, "visible", False)) or state.source_array_id == 0:
+            continue
+        tile_number = int(state.tile_number)
+        payload = payloads.get(tile_number)
+        if payload is not None:
+            expected = _direct_payload_source_id(payload.source_id, payload)
+            if state.source_array_id == expected:
+                identities[tile_number] = payload.source_id
+                continue
+        identities[tile_number] = state.source_array_id
+    return identities
 
 
 def _direct_state_key(

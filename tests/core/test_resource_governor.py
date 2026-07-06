@@ -56,6 +56,105 @@ def test_tile_layer_commit_uses_presentation_upload_feedback_ramp():
 
     assert decision.batch_limit > 1
     assert decision.byte_cap >= 4096 * decision.batch_limit
+    assert decision.control_budget_ms >= decision.budget_ms
+    assert decision.model in {"fallback", "overhead+marginal"}
+    assert any("snapshot last=" in detail for detail in decision.details)
+
+
+def test_tile_layer_commit_reset_can_start_conservative_until_feedback():
+    governor = ResourceGovernor(_policy(MemoryProfileChoice.BALANCED), profile=MemoryProfileChoice.BALANCED)
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+    governor.record_ui_observation("tile_layer_commit", 2.0, item_count=1, byte_count=4096)
+    assert governor.decide_ui_work("tile_layer_commit", interactive=False).batch_limit > 1
+
+    governor.reset_ui_work_feedback("tile_layer_commit", conservative_start=True)
+    initial = governor.decide_ui_work("tile_layer_commit", interactive=False)
+    assert initial.batch_limit == governor.latency_feedback.tuning.min_batch
+
+    governor.record_ui_observation(
+        "tile_layer_commit",
+        2.0,
+        item_count=32,
+        byte_count=32 * 4096,
+        work_class="tile_layer_commit",
+    )
+    warmed = governor.decide_ui_work("tile_layer_commit", interactive=False)
+
+    assert warmed.batch_limit <= governor.latency_feedback.tuning.min_batch + 1
+
+    governor.record_ui_observation(
+        "tile_layer_commit",
+        0.5,
+        item_count=32,
+        byte_count=0,
+        work_class="presentation_upsert",
+    )
+    still_guarded = governor.decide_ui_work("tile_layer_commit", interactive=False)
+
+    assert still_guarded.batch_limit <= governor.latency_feedback.tuning.min_batch + 1
+
+
+def test_tile_layer_zero_byte_presentation_observation_is_diagnostics_only():
+    governor = ResourceGovernor(_policy(MemoryProfileChoice.BALANCED), profile=MemoryProfileChoice.BALANCED)
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+    governor.record_ui_observation(
+        "tile_layer_commit",
+        20.0,
+        item_count=4,
+        byte_count=4 * 1024 * 1024,
+        work_class="tile_layer_commit",
+        backend="pyqtgraph",
+    )
+    before = governor.decide_ui_work("tile_layer_commit", interactive=False)
+
+    governor.record_gui_callback_observation(
+        GuiCallbackObservation(
+            channel="tile_layer_commit",
+            work_class="presentation_upsert",
+            backend="pyqtgraph",
+            target_ms=8.0,
+            warning_ms=16.0,
+            item_cap=32,
+            byte_cap=0,
+            elapsed_ms=0.5,
+            processed_items=32,
+            processed_bytes=0,
+        )
+    )
+    after = governor.decide_ui_work("tile_layer_commit", interactive=False)
+    snapshot = governor.latency_feedback.channel_snapshot("tile_layer_commit")
+
+    assert after.batch_limit == before.batch_limit
+    assert snapshot.last_count == 4
+    assert governor.diagnostics().recent_ui_work_observations[-1].processed_items == 32
+
+
+def test_tile_layer_zero_byte_direct_observation_is_diagnostics_only():
+    governor = ResourceGovernor(_policy(MemoryProfileChoice.BALANCED), profile=MemoryProfileChoice.BALANCED)
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+    governor.record_ui_observation(
+        "tile_layer_commit",
+        20.0,
+        item_count=4,
+        byte_count=4 * 1024 * 1024,
+        work_class="tile_layer_commit",
+        backend="pyqtgraph",
+    )
+    before = governor.decide_ui_work("tile_layer_commit", interactive=False)
+
+    governor.record_ui_observation(
+        "tile_layer_commit",
+        0.5,
+        item_count=32,
+        byte_count=0,
+        work_class="tile_layer_commit",
+        backend="pyqtgraph",
+    )
+    after = governor.decide_ui_work("tile_layer_commit", interactive=False)
+    snapshot = governor.latency_feedback.channel_snapshot("tile_layer_commit")
+
+    assert after.batch_limit == before.batch_limit
+    assert snapshot.last_count == 4
 
 
 def test_presentation_single_tile_gray_zone_explores_larger_upload_batch():

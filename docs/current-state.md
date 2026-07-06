@@ -32,9 +32,9 @@ Y1–Y3/X5 entries in the [roadmap](roadmap.md).
 | Out-of-core/lazy sources | Initial (ADR 0049) | Source protocol + budgeted read seam under slab/stage evaluation; memmap `.npy`/`.cfl` adapters; `load_path(lazy="auto")` maps large files. Chunked (Zarr/HDF5-like) adapters not started. |
 | PyQtGraph backend | Fallback default (ADR 0047) | Bounded CPU/item convergence; large item counts and level re-window drains remain costly (X5a fixed starvation: 272-tile level drag never converged, now ~4.3 s). Selected by `auto` wherever hardware GL is absent or traces are missing. |
 | VisPy backend | Auto-selected on Linux hardware GL (ADR 0047) | X5a Linux traces: first frame faster in every scenario (1.4–13×); level changes are uniform-only (272-tile level drag ~0.26 s vs ~8 s). Still unstable under software GL (Xvfb/llvmpipe) — do not treat CI GL runs as evidence. |
-| LOD | Resident default on VisPy (ADR 0050) | Async pyramid + per-class atlas residency; ingest reduction, presentation floor, retained preview level, semantic identity, settled idle (0% CPU verified live). Exact inspection stays native. The first commuting reduced-input `quality="preview"` path is wired for tiled montage; PyQtGraph adoption, transforming/opaque input LOD, and default-policy evidence remain roadmap work. |
+| LOD | Resident default on VisPy (ADR 0050) | Async pyramid + per-class atlas residency; ingest reduction, presentation floor, retained preview level, semantic identity, settled idle (0% CPU verified live). Exact inspection stays native. The first commuting reduced-input `quality="preview"` path is wired for tiled montage; PyQtGraph resident LOD remains opt-in while shared transform previews and default-policy evidence remain roadmap work. |
 | Tile lifecycle | Single owner, machine-driven (ADR 0051, P1-P3) | Qt-free three-axis state machine in `presentation/tile_lifecycle.py`; presentation, semantic, and residency axes authoritative; identity-aware acknowledgement against backend slot identities; event-driven convergence; sessions survive same-key re-renders and index-window scrubs (reuse/retarget), and the P2 delta-commit walk now stays proportional to changed wrapper/order work. LOD materialization requests are lifecycle-backed views over owned per-level claims; `release_session_claims` scans the machine and the flush-path settle repair is gone. Per-slot mips (P4), PyQtGraph effects (P5) phased. |
-| Diagnostics/benchmarks | Good | Work-graph counters, JSONL, benchmark records; profilers drive the production window composition. |
+| Diagnostics/benchmarks | Good | Work-graph counters, JSONL, benchmark records; profilers drive the production window composition. Montage workflow records first payload, first complete fill, and settled frame separately. |
 | Test suite | Repaired (v32) + contract coverage (Y2) | Host-independent, no `sys.modules` replacement; `test_imagesurface_contract.py` pins cross-backend semantics; architecture guards pin the Y1/Y3 invariants. |
 | Documentation/ADRs | Updated through ADR 0051 | Roadmap gates Y1–Y3 recorded as done; X5a Linux traces published in `reviews/x5a-hardware-telemetry-linux-wayland.md`; X5b delivered for montage tiled scenes by ADR 0051; X5c–X5e remain open. |
 
@@ -94,6 +94,10 @@ first preview-quality reduced display/evaluation slice now evaluates `lod-commut
 montage work on reduced input and presents an honest `quality="preview"` payload with exact
 semantic planes absent; native `quality="exact"` payloads still refine through the ordinary
 lifecycle. RGB preview floors now retain display histogram planes for level re-windowing. The
-axis-aware and opaque preview evaluator pieces exist, but the scheduler keeps non-display
-transform previews disabled until they can be shared across tiles instead of recomputing the
-transform once per tile.
+axis-aware and opaque preview evaluator pieces exist, but shared non-display transform previews are
+default-off (`ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW`) because the measured path competed with exact
+FFT work. PyQtGraph cold tile-layer commits and level-only re-windowing now use the dynamic
+priority/chunking path instead of all-at-once or tile-id row/column presentation. Progressive
+PyQtGraph tile commits no longer rebuild aggregate histogram samples after the first display commit;
+visible Wayland evidence on 2026-07-06 put scalar first-visible-to-full-visible fill back ahead of
+FFT (`~0.71 s` vs `~1.12 s`) while keeping final histogram/level semantics on the side paths.

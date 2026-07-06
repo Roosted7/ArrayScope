@@ -299,13 +299,17 @@ def _non_display_transform_session_with_lazy_source():
 
 
 def test_non_display_transform_preview_is_not_scheduled_by_default_after_profile_regression():
-    session, _source = _non_display_transform_session_with_lazy_source()
+    session, source = _non_display_transform_session_with_lazy_source()
     session.pending_tiles.append(session.plan.tiles[0])
     renderer = _tile_worker_renderer(session, evaluated=[])
 
     assert renderer._schedule_next_montage_tile(session) is True
 
     assert len(renderer.montage_tile_evaluation_controller.calls) == 1
+    call = renderer.montage_tile_evaluation_controller.calls[0]
+    assert call["key"][0] == "montage_tile"
+    assert call["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
+    assert source.reads == []
     assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 0
 
 

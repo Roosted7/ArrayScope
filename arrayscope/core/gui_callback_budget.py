@@ -30,6 +30,7 @@ class GuiCallbackObservation:
     elapsed_ms: float
     processed_items: int
     processed_bytes: int
+    details: tuple[str, ...] = ()
 
     @property
     def over_warning(self) -> bool:
@@ -126,6 +127,7 @@ class GuiCallbackBudget:
             elapsed_ms=self.elapsed_ms,
             processed_items=int(self.processed_items),
             processed_bytes=int(self.processed_bytes),
+            details=(),
         )
 
 

@@ -245,6 +245,14 @@ class MontageTimingDiagnostics:
     last_tile_layer_rgb_window_ms: float | None = None
     last_level_sync_ms: float | None = None
     last_tile_commit_ms: float | None = None
+    last_tile_prepare_apply_ms: float | None = None
+    last_tile_layer_apply_ms: float | None = None
+    last_tile_acknowledge_ms: float | None = None
+    last_tile_retained_store_ms: float | None = None
+    last_tile_state_publish_ms: float | None = None
+    last_tile_geometry_sync_ms: float | None = None
+    last_tile_identity_check_ms: float | None = None
+    last_tile_followup_ms: float | None = None
     last_set_image_ms: float | None = None
     last_overlay_update_ms: float | None = None
     cached_tiles_last_session: int = 0
@@ -531,8 +539,12 @@ def _feedback_lines(diagnostics: ResourceGovernorDiagnostics | None) -> tuple[st
                 f"budget={decision.budget_ms:.1f} ms "
                 f"interval={decision.interval_ms} ms "
                 f"byte-cap={format_bytes(decision.byte_cap)}"
+                f" control={getattr(decision, 'control_budget_ms', 0.0):.1f} ms"
+                f" model={getattr(decision, 'model', '') or 'n/a'}"
                 f"{suffix}"
             )
+            for detail in tuple(getattr(decision, "details", ()) or ())[:4]:
+                lines.append(f"    - {_short_debug_text(detail, limit=92)}")
     if diagnostics.recent_over_warning_callbacks:
         lines.append("Callbacks over warning:")
         for callback in diagnostics.recent_over_warning_callbacks[-8:]:
@@ -956,6 +968,14 @@ _MONTAGE_TIMING_COVERED = frozenset(
         "last_tile_layer_rgb_window_ms",
         "last_level_sync_ms",
         "last_tile_commit_ms",
+        "last_tile_prepare_apply_ms",
+        "last_tile_layer_apply_ms",
+        "last_tile_acknowledge_ms",
+        "last_tile_retained_store_ms",
+        "last_tile_state_publish_ms",
+        "last_tile_geometry_sync_ms",
+        "last_tile_identity_check_ms",
+        "last_tile_followup_ms",
         "last_set_image_ms",
         "last_overlay_update_ms",
         "cached_tiles_last_session",
@@ -1142,6 +1162,14 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
                 ("tile_rgb", timing.last_tile_layer_rgb_window_ms),
                 ("level_sync", timing.last_level_sync_ms),
                 ("commit", timing.last_tile_commit_ms),
+                ("prepare", timing.last_tile_prepare_apply_ms),
+                ("apply", timing.last_tile_layer_apply_ms),
+                ("ack", timing.last_tile_acknowledge_ms),
+                ("retain", timing.last_tile_retained_store_ms),
+                ("state", timing.last_tile_state_publish_ms),
+                ("geometry", timing.last_tile_geometry_sync_ms),
+                ("identity", timing.last_tile_identity_check_ms),
+                ("followup", timing.last_tile_followup_ms),
                 ("set_image", timing.last_set_image_ms),
                 ("overlay", timing.last_overlay_update_ms),
             ),

@@ -63,6 +63,17 @@ def test_overhead_and_marginal_model_needs_varied_batch_sizes():
     assert feedback.channel_snapshot("montage_present_total").per_item_ewma_ms > 8.0
 
 
+def test_overhead_and_marginal_model_rejects_uncorrelated_samples():
+    from arrayscope.core.latency_feedback import LatencyFeedbackController
+
+    feedback = LatencyFeedbackController()
+    for count, elapsed in ((1, 30.0), (8, 20.0), (2, 32.0), (7, 18.0), (3, 34.0), (6, 16.0)):
+        feedback.observe("tile_layer_commit", elapsed, count=count)
+
+    assert feedback.overhead_and_marginal_ms("tile_layer_commit") is None
+    assert feedback.channel_snapshot("tile_layer_commit").marginal_per_item_ms is None
+
+
 def test_overhead_and_marginal_per_byte_model():
     from arrayscope.core.latency_feedback import LatencyFeedbackController
 
@@ -76,3 +87,14 @@ def test_overhead_and_marginal_per_byte_model():
     overhead, marginal = model
     assert 10.0 < overhead < 20.0
     assert 0.7 * 2.5 / tile < marginal < 1.5 * 2.5 / tile
+
+
+def test_overhead_and_marginal_per_byte_model_rejects_uncorrelated_samples():
+    from arrayscope.core.latency_feedback import LatencyFeedbackController
+
+    feedback = LatencyFeedbackController()
+    tile = 900 * 1024
+    for count, elapsed in ((1, 30.0), (8, 20.0), (2, 32.0), (7, 18.0), (3, 34.0), (6, 16.0)):
+        feedback.observe("tile_layer_commit", elapsed, count=count, byte_count=tile * count)
+
+    assert feedback.overhead_and_marginal_per_byte_ms("tile_layer_commit") is None
