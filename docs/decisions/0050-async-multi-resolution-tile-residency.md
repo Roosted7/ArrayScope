@@ -85,21 +85,30 @@ adjacent level per tile is allowed when the budget permits. Backend-native mipma
 remains a later, gated option (edge handling, complex mapping, and memory accounting must be
 proven first).
 
-PyQtGraph: same planner and materializer; reduced `payload.image` is applied only where measured
-scene savings exceed replacement cost. The first measured target is montage level re-window,
-whose cost scales with presented pixels (8.36 s baseline above).
+PyQtGraph: same planner and materializer; reduced display payloads are applied only where
+measured scene savings exceed replacement cost. The first measured target is montage level
+re-window, whose cost scales with presented pixels (8.36 s baseline above).
 
-**Adoption status (2026-07-05):** implemented behind `ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1`.
-Reduced images map onto native texels through a per-item scale transform
-(`_payload_direct_dims`/`_apply_item_lod_scale` in `backends/pyqtgraph/tiles.py`); world
-footprints, ROI/viewport math, and histogram/level planes stay native. The first hardware A/B
-(Wayland, 272-tile montage) applies factor 4 / level 2 with full ingest reduction, but timing
-regresses (raw settle 1263→1441 ms, FFT settle 2590→4367 ms, level drag 9019→9686 ms), so the
-default stays native-only per the "where measured" rule. Known costs to remove before
-re-measuring: the auto-levels wait wedge (ADR 0051 known issue — inflates FFT settle by ~2 s of
-watchdog rescue) and worker-side ingest-reduction contention (the same class the zero-redundant-
-work pass erased on VisPy). The expected level-drag win has not materialized yet — the phase is
-dominated by the histogram/full-stats loop, not per-tile re-window; measure that split first.
+**Adoption status (2026-07-06):** implemented behind `ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1`.
+Reduced display images map onto native texels through a per-item scale transform
+(`_payload_direct_dims`/`_apply_item_lod_scale` in `backends/pyqtgraph/tiles.py`); exact value,
+ROI, viewport, and semantic histogram sources stay native through `semantic_data` and
+`semantic_histogram_data`. The first PyQtGraph implementation accidentally let the backend draw
+native `payload.image` while reporting the reduced `texture_data` level, paying reduction cost
+without the display-side win. That is fixed: PyQtGraph now consumes display-sized payloads and
+ingest reduction admits the matching display histogram plane.
+
+Re-measured A/B on 2026-07-06 (Wayland, 272-tile montage, three repetitions, 0
+`STALL WATCHDOG` lines) applies factor 4 / level 2 in the resident arm. Medians:
+raw settle 1071→1155 ms, FFT settle 2245→3232 ms, FFT level-refinement loop
+7193→3012 ms. Resident LOD therefore stays off by default for PyQtGraph: level drag now wins
+by more than 2x, but first-settle paths still regress because worker-side display reductions are
+additional work after native evaluation. cProfile attribution before/after the display-payload
+fix showed native PyQtGraph phase/LUT work falling (~3.7 s→~1.0 s in the tooled run), while
+`reduce_box_mean` became the remaining hot path (~4.4 s with display and histogram reductions).
+The next PyQtGraph adoption attempt should land through the preview/reduce-before-display
+contract below, so first presentation builds the reduced display payload directly instead of
+evaluating native display pixels and then reducing them.
 
 ### Operations integration
 

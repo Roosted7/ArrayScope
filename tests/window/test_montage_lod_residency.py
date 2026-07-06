@@ -282,10 +282,10 @@ def test_admitted_level_streams_in_with_distinct_identity_and_shape():
         # Presentation identity separates levels: a reduced payload can never
         # share a residency key with the native payload it replaces.
         assert payload.source_id != native_ids[tile]
-        # Exact semantic sources are untouched by display LOD.
-        assert payload.image.shape[:2] == (TILE, TILE)
+        assert payload.image.shape[:2] == (TILE // 4, TILE // 4)
         assert payload.semantic_data.shape[:2] == (TILE, TILE)
-        assert payload.histogram_data.shape[:2] == (TILE, TILE)
+        # Exact semantic sources are untouched by display LOD.
+        assert payload.semantic_histogram_data.shape[:2] == (TILE, TILE)
     assert session.pending_lod_requests == []
 
 
@@ -393,7 +393,7 @@ def test_worker_ingest_reduction_presents_demanded_level_first():
     # part of the same materialization, before the result reaches the GUI.
     rendered = _rendered(session.plan.tiles[0])
     assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index)) is not None
-    assert len(pyramid) == 1
+    assert len(pyramid) == 2
     assert pyramid.pending_count == 0
     # Singleflight: the level is resident, a second admission is a no-op.
     assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index)) is None
@@ -406,9 +406,11 @@ def test_worker_ingest_reduction_presents_demanded_level_first():
     assert payload.lod.level == 2
     assert payload.lod.factor == 4
     assert payload.texture_data.shape[:2] == (TILE // 4, TILE // 4)
-    # Exact/semantic/histogram sources stay native.
-    assert payload.image.shape[:2] == (TILE, TILE)
-    assert payload.histogram_data.shape[:2] == (TILE, TILE)
+    assert payload.image.shape[:2] == (TILE // 4, TILE // 4)
+    assert payload.histogram_data.shape[:2] == (TILE // 4, TILE // 4)
+    # Exact semantic sources stay native.
+    assert payload.semantic_data.shape[:2] == (TILE, TILE)
+    assert payload.semantic_histogram_data.shape[:2] == (TILE, TILE)
     assert session.pending_lod_requests == []
 
 
@@ -714,10 +716,10 @@ def test_level_swap_carries_native_stats_and_recomputes_nothing():
         assert payload.lod.level == 2
         # The finest already-computed semantic stats ride along unchanged:
         # a display-LOD swap is invisible to the histogram/level system.
-        assert payload.histogram_data is np.asarray(rendered.histogram_data)
+        assert payload.semantic_histogram_data is np.asarray(rendered.histogram_data)
         assert payload.level_data is np.asarray(rendered.level_data)
         assert payload.level_stats is rendered.level_stats
-        assert payload.image is np.asarray(rendered.image)
+        assert payload.semantic_data is np.asarray(rendered.image)
     assert session.lod_stats_cross_level_reuses == len(delta.upserts) > 0
     assert session.lod_stats_recomputes == 0
 

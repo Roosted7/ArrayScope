@@ -93,7 +93,9 @@ one Qt-free derivation (`presentation/dispatch.py`) that every montage event edg
 with, declined admissions always arm a controller capacity waiter, and the stall
 watchdog is an assertion (`stall_repairs` asserted 0 in the GPU harness). PyQtGraph
 resident LOD is implemented behind `ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1` but stays
-off-by-default: the first A/B regresses settle times (ADR 0050 adoption status).
+off-by-default after the 2026-07-06 A/B: the display-payload bug is fixed and the
+FFT level loop wins by more than 2x, but raw/FFT settle still regress because reductions
+remain extra worker work after native evaluation (ADR 0050 adoption status).
 Sets-as-views landed the same day: `loading_tiles`/`active_tile_requests`/`skipped_tiles`
 are machine views (mutations are events; confirmed presentation clears load intent
 mechanically), stage fan-in reports its tile↔stage bindings through machine events, and
@@ -104,4 +106,5 @@ retarget's level-pending rebirth fallback is removed. P3 moved demanded-level re
 claims into the lifecycle record (`claimed → materializing → resident|released`), made
 the old pending-request list a machine view, and made session replacement release claims
 by scanning record owners.
-Next, in order: PyQtGraph resident-LOD A/B re-measure/default decision.
+Next, in order: reduce-before-ops / preview-then-refine consumer for first-evaluation
+black cures and PyQtGraph reduce-before-display adoption.

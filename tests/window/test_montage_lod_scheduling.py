@@ -203,7 +203,7 @@ def test_cold_tile_worker_reduces_at_ingest_before_first_presentation():
     # The reduction ran on the worker as part of tile materialization: the
     # demanded level was admitted before the done fan-in saw the result.
     assert len(evaluated) == 1
-    assert len(pyramid) == 1
+    assert len(pyramid) == 2
     assert pyramid.pending_count == 0
     assert renderer._montage_lod_ingest_reductions == 1
     assert len(renderer.completed) == 1

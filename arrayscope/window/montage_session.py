@@ -1000,7 +1000,11 @@ class MontageRenderSession:
         level_stats = getattr(rendered, "level_stats", None)
         semantic = getattr(rendered, "semantic_data", None)
         semantic = exact_image if semantic is None else np.asarray(semantic)
+        semantic_histogram = getattr(rendered, "semantic_histogram_data", None)
+        semantic_histogram = exact_histogram if semantic_histogram is None else np.asarray(semantic_histogram)
         texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered)
+        display_image = np.asarray(texture_data)
+        display_histogram = None if texture_histogram is None else np.asarray(texture_histogram)
         source_id = self._payload_source_id(
             base_source_id,
             texture_kind=texture_kind,
@@ -1012,8 +1016,10 @@ class MontageRenderSession:
             previous is not None
             and _base_source_id(previous.source_id) == base_source_id
             and previous.source_id == source_id
-            and previous.image is exact_image
-            and previous.histogram_data is exact_histogram
+            and previous.image is display_image
+            and previous.histogram_data is display_histogram
+            and previous.semantic_data is semantic
+            and previous.semantic_histogram_data is semantic_histogram
             and previous.level_data is exact_level_data
             and previous.level_stats is level_stats
             and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
@@ -1022,13 +1028,13 @@ class MontageRenderSession:
         if (
             previous is not None
             and _base_source_id(previous.source_id) == base_source_id
-            and previous.image is exact_image
+            and previous.semantic_data is semantic
             and int(getattr(getattr(previous, "lod", None), "level", 0) or 0) != int(lod.level)
         ):
             # Same native content presented at a different display-LOD level:
             # the level swap must be invisible to the histogram/level system.
             if (
-                previous.histogram_data is exact_histogram
+                previous.semantic_histogram_data is semantic_histogram
                 and previous.level_data is exact_level_data
                 and previous.level_stats is level_stats
             ):
@@ -1038,13 +1044,13 @@ class MontageRenderSession:
         payload = DisplayTilePayload(
             tile_number=tile_number,
             source_index=int(rendered.tile.source_index),
-            image=exact_image,
-            histogram_data=exact_histogram,
+            image=display_image,
+            histogram_data=display_histogram,
             source_id=source_id,
             texture_data=texture_data,
             texture_kind=texture_kind,
             semantic_data=semantic,
-            semantic_histogram_data=exact_histogram if texture_histogram is None else texture_histogram,
+            semantic_histogram_data=semantic_histogram,
             source_shape=tuple(int(value) for value in exact_image.shape[:2]),
             lod=lod,
             shader_mapping=mapping,
@@ -1221,7 +1227,10 @@ class MontageRenderSession:
         return montage_lod.ensure_floor_payloads(self, tile_numbers)
 
     def _texture_source_for(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
-        return texture_source_for_rendered(rendered)
+        return texture_source_for_rendered(
+            rendered,
+            shader_display=bool(getattr(self, "shader_display", True)),
+        )
 
     def _resident_texture_for_rendered_tile(
         self,

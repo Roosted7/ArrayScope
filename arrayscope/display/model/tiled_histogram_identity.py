@@ -1,11 +1,11 @@
 """Qt-free semantic identity of the tiled histogram stream (ADR 0050).
 
 Histogram/level work is driven by SEMANTIC tile content, never by texture or
-display-LOD identity.  ``payload.image`` is a tile's native exact plane and
-its histogram source arrays are retained unchanged across display-LOD level
-swaps, so a level swap leaves this identity — and therefore the histogram
-stream — untouched, while a real content change (new evaluation, slice
-change) replaces the arrays and refreshes it.
+display-LOD identity.  ``payload.image`` may be a reduced display plane;
+``payload.semantic_data`` and the semantic histogram source are retained
+unchanged across display-LOD level swaps, so a level swap leaves this identity
+— and therefore the histogram stream — untouched, while a real content change
+(new evaluation, slice change) replaces the arrays and refreshes it.
 """
 
 from __future__ import annotations
@@ -27,14 +27,13 @@ def tiled_semantic_histogram_identity(tile_payloads):
 
     if not tile_payloads:
         return None
-    return tuple(
-        (
-            int(tile),
-            id(getattr(payload, "image", None)),
-            id(payload_histogram_source(payload)),
-        )
-        for tile, payload in sorted(dict(tile_payloads).items())
-    )
+    result = []
+    for tile, payload in sorted(dict(tile_payloads).items()):
+        semantic = getattr(payload, "semantic_data", None)
+        if semantic is None:
+            semantic = getattr(payload, "image", None)
+        result.append((int(tile), id(semantic), id(payload_histogram_source(payload))))
+    return tuple(result)
 
 
 def tiled_histogram_key(histogram_range, *, histogram_plot_data, tile_delta, semantic_identity):

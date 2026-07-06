@@ -1,6 +1,6 @@
 """PyQtGraph resident-LOD adoption (ADR 0050 phase 3).
 
-Reduced payload.image maps onto native texels through a per-item scale
+Reduced display payloads map onto native texels through a per-item scale
 transform; world footprints stay native so montage geometry, ROIs, and
 viewport math never see display LOD.
 """

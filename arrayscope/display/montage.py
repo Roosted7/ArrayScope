@@ -191,6 +191,7 @@ class RenderedTilePayload:
     shader_mapping: ShaderMapping | None = None
     texture_kind: TexturePlaneKind | None = None
     semantic_data: np.ndarray | None = None
+    semantic_histogram_data: np.ndarray | None = None
     lod: LodInfo | None = None
     level_data: np.ndarray | None = None
     level_stats: object | None = None
@@ -201,6 +202,12 @@ class RenderedTilePayload:
             total += int(self.histogram_data.nbytes)
         if isinstance(self.semantic_data, np.ndarray) and self.semantic_data is not self.image:
             total += int(self.semantic_data.nbytes)
+        if (
+            isinstance(self.semantic_histogram_data, np.ndarray)
+            and self.semantic_histogram_data is not self.histogram_data
+            and self.semantic_histogram_data is not self.semantic_data
+        ):
+            total += int(self.semantic_histogram_data.nbytes)
         if isinstance(self.level_data, np.ndarray) and self.level_data is not self.image and self.level_data is not self.histogram_data:
             total += int(self.level_data.nbytes)
         return total
@@ -216,6 +223,7 @@ class RenderedTilePayload:
             shader_mapping=self.shader_mapping,
             texture_kind=self.texture_kind,
             semantic_data=self.semantic_data,
+            semantic_histogram_data=self.semantic_histogram_data,
             lod=self.lod,
             level_data=self.level_data,
             level_stats=self.level_stats,
@@ -233,6 +241,7 @@ class RenderedTile:
     shader_mapping: ShaderMapping | None = None
     texture_kind: TexturePlaneKind | None = None
     semantic_data: np.ndarray | None = None
+    semantic_histogram_data: np.ndarray | None = None
     lod: LodInfo | None = None
     level_data: np.ndarray | None = None
     level_stats: object | None = None
@@ -243,6 +252,12 @@ class RenderedTile:
             total += int(self.histogram_data.nbytes)
         if isinstance(self.semantic_data, np.ndarray) and self.semantic_data is not self.image:
             total += int(self.semantic_data.nbytes)
+        if (
+            isinstance(self.semantic_histogram_data, np.ndarray)
+            and self.semantic_histogram_data is not self.histogram_data
+            and self.semantic_histogram_data is not self.semantic_data
+        ):
+            total += int(self.semantic_histogram_data.nbytes)
         if isinstance(self.level_data, np.ndarray) and self.level_data is not self.image and self.level_data is not self.histogram_data:
             total += int(self.level_data.nbytes)
         return total
@@ -257,6 +272,7 @@ class RenderedTile:
             shader_mapping=self.shader_mapping,
             texture_kind=self.texture_kind,
             semantic_data=self.semantic_data,
+            semantic_histogram_data=self.semantic_histogram_data,
             lod=self.lod,
             level_data=self.level_data,
             level_stats=self.level_stats,

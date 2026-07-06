@@ -2256,6 +2256,7 @@ class FrameRenderMixin:
                     ingest_demand,
                     rendered_for_lod,
                     semantic_source_id=ingest_semantic_id,
+                    shader_display=shader_display,
                 )
                 ingest_state["admitted"] = reduced is not None
             if preview_pyramid is not None and preview_level > 0:
@@ -2272,6 +2273,7 @@ class FrameRenderMixin:
                     preview_level=preview_level,
                     reduced=reduced,
                     reduced_level=None if ingest_demand is None else int(ingest_demand.desired_level),
+                    shader_display=shader_display,
                 )
             return result
 
@@ -4400,9 +4402,16 @@ def _montage_priority_retarget_batch_limit(window, *, interactive: bool) -> int:
 
 
 def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
-    image = np.asarray(payload.image)
-    histogram = None if payload.histogram_data is None else np.asarray(payload.histogram_data)
     semantic = None if payload.semantic_data is None else np.asarray(payload.semantic_data)
+    image = semantic if semantic is not None else np.asarray(payload.image)
+    semantic_histogram = (
+        None
+        if getattr(payload, "semantic_histogram_data", None) is None
+        else np.asarray(payload.semantic_histogram_data)
+    )
+    histogram = semantic_histogram if semantic_histogram is not None else (
+        None if payload.histogram_data is None else np.asarray(payload.histogram_data)
+    )
     slab_shape = tuple(getattr(payload, "source_shape", None) or image.shape)
     return RenderedTile(
         tile=tile,
@@ -4414,6 +4423,7 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         shader_mapping=getattr(payload, "shader_mapping", None),
         texture_kind=getattr(payload, "texture_kind", None),
         semantic_data=semantic,
+        semantic_histogram_data=semantic_histogram,
         lod=getattr(payload, "lod", None),
         level_data=getattr(payload, "level_data", None),
         level_stats=getattr(payload, "level_stats", None),
@@ -4437,6 +4447,7 @@ def _rendered_tile_from_cached_display(tile, cached) -> RenderedTile:
         shader_mapping=getattr(cached, "shader_mapping", None),
         texture_kind=getattr(cached, "texture_kind", None),
         semantic_data=getattr(cached, "semantic_data", None),
+        semantic_histogram_data=getattr(cached, "semantic_histogram_data", None),
         lod=getattr(cached, "lod", None),
         level_data=getattr(cached, "level_data", None),
         level_stats=getattr(cached, "level_stats", None),
@@ -4455,6 +4466,7 @@ def _rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
         shader_mapping=getattr(value, "shader_mapping", None),
         texture_kind=getattr(value, "texture_kind", None),
         semantic_data=getattr(value, "semantic_data", None),
+        semantic_histogram_data=getattr(value, "semantic_histogram_data", None),
         lod=getattr(value, "lod", None),
         level_data=getattr(value, "level_data", None),
         level_stats=getattr(value, "level_stats", None),
@@ -4463,7 +4475,7 @@ def _rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
 
 def _rendered_tile_nbytes(rendered) -> int:
     total = 0
-    for name in ("image", "histogram_data", "semantic_data", "level_data"):
+    for name in ("image", "histogram_data", "semantic_data", "semantic_histogram_data", "level_data"):
         value = getattr(rendered, name, None)
         if value is not None:
             total += int(getattr(np.asarray(value), "nbytes", 0) or 0)
@@ -4471,6 +4483,9 @@ def _rendered_tile_nbytes(rendered) -> int:
 
 
 def _montage_refined_level_values(rendered) -> np.ndarray:
+    semantic_histogram = getattr(rendered, "semantic_histogram_data", None)
+    if semantic_histogram is not None:
+        return np.asarray(semantic_histogram)
     histogram = getattr(rendered, "histogram_data", None)
     if histogram is not None:
         return np.asarray(histogram)

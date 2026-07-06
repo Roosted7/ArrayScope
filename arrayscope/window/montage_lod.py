@@ -74,13 +74,21 @@ def viewport_identity(view_range, viewport_shape: tuple[int, int]) -> tuple[obje
         return (shape, repr(view_range))
 
 
-def texture_source_for_rendered(rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
+def texture_source_for_rendered(
+    rendered: RenderedTile,
+    *,
+    shader_display: bool = True,
+) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
     """Return the texture source plane, histogram, and plane kind of a tile."""
 
     texture_kind = getattr(rendered, "texture_kind", None)
     if texture_kind is not None and not isinstance(texture_kind, TexturePlaneKind):
         texture_kind = TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
-    if texture_kind == TexturePlaneKind.COMPLEX_RG32F and getattr(rendered, "semantic_data", None) is not None:
+    if (
+        bool(shader_display)
+        and texture_kind == TexturePlaneKind.COMPLEX_RG32F
+        and getattr(rendered, "semantic_data", None) is not None
+    ):
         source = np.asarray(rendered.semantic_data)
     else:
         source = np.asarray(rendered.image)
@@ -88,7 +96,7 @@ def texture_source_for_rendered(rendered: RenderedTile) -> tuple[np.ndarray, np.
     return source, histogram, texture_kind
 
 
-def component_for_rendered(rendered: RenderedTile) -> str:
+def component_for_rendered(rendered: RenderedTile, *, shader_display: bool = True) -> str:
     """Pyramid component tag of a rendered tile, without touching its arrays.
 
     ``texture_source_for_rendered`` normalizes the kind and picks a source
@@ -97,6 +105,12 @@ def component_for_rendered(rendered: RenderedTile) -> str:
     and must not pay ``np.asarray`` per call.
     """
 
+    if not bool(shader_display):
+        image = getattr(rendered, "image", None)
+        if image is not None:
+            shape = tuple(getattr(image, "shape", ()) or ())
+            if len(shape) == 3 and int(shape[-1]) in (3, 4):
+                return "display_rgb"
     texture_kind = getattr(rendered, "texture_kind", None)
     if texture_kind is None:
         return "scalar"
@@ -104,7 +118,7 @@ def component_for_rendered(rendered: RenderedTile) -> str:
 
 
 def pyramid_key_for_rendered(
-    rendered: RenderedTile, *, demand, level: int, semantic_source_id
+    rendered: RenderedTile, *, demand, level: int, semantic_source_id, shader_display: bool = True
 ) -> PyramidLevelKey:
     """Pyramid identity of one level of a rendered tile (ADR 0050 key contract).
 
@@ -120,7 +134,7 @@ def pyramid_key_for_rendered(
     return PyramidLevelKey(
         source_id=semantic_source_id,
         tile_id=int(rendered.tile.source_index),
-        component=component_for_rendered(rendered),
+        component=component_for_rendered(rendered, shader_display=shader_display),
         level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
     )
 
@@ -131,6 +145,18 @@ def pyramid_key_for(session, rendered: RenderedTile, *, demand, level: int) -> P
         demand=demand,
         level=level,
         semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+        shader_display=bool(getattr(session, "shader_display", True)),
+    )
+
+
+def histogram_key_for(session, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
+    key = pyramid_key_for(session, rendered, demand=demand, level=level)
+    return PyramidLevelKey(
+        source_id=key.source_id,
+        tile_id=key.tile_id,
+        component=f"{key.component}:histogram",
+        level_xy=key.level_xy,
+        algo_version=key.algo_version,
     )
 
 
@@ -202,7 +228,10 @@ def tile_resident_levels(session, rendered: RenderedTile, *, demand) -> tuple[in
         demand_sig = _demand_key_sig(demand)
         session._lod_demand_sig_cache = (demand, demand_sig)
     guard = (int(pyramid.revision), demand_sig)
-    memo_key = (int(rendered.tile.source_index), component_for_rendered(rendered))
+    memo_key = (
+        int(rendered.tile.source_index),
+        component_for_rendered(rendered, shader_display=bool(getattr(session, "shader_display", True))),
+    )
     hit = memo.get(memo_key)
     if hit is not None and hit[0] == guard:
         return hit[1]
@@ -362,7 +391,10 @@ def plan_materialization(
     """
 
     if native_source is None:
-        native_source, _histogram, _texture_kind = texture_source_for_rendered(rendered)
+        native_source, _histogram, _texture_kind = texture_source_for_rendered(
+            rendered,
+            shader_display=bool(getattr(session, "shader_display", True)),
+        )
     tile_number = int(rendered.tile.montage_index)
     factor_x, factor_y = (int(value) for value in key.factor_xy)
     native_shape = tuple(int(value) for value in np.shape(native_source)[:2])
@@ -528,7 +560,14 @@ def refresh_lod_for_viewport(session) -> bool:
 # --------------------------------------------------------------------------
 
 
-def admit_ingest_reduction(pyramid, demand, rendered: RenderedTile, *, semantic_source_id) -> bool:
+def admit_ingest_reduction(
+    pyramid,
+    demand,
+    rendered: RenderedTile,
+    *,
+    semantic_source_id,
+    shader_display: bool = True,
+) -> bool:
     """Reduce a freshly computed tile to the demanded level, worker-side.
 
     Runs on the evaluation worker as part of tile materialization (ADR 0041
@@ -547,12 +586,33 @@ def admit_ingest_reduction(pyramid, demand, rendered: RenderedTile, *, semantic_
     level = int(demand.desired_level)
     if level <= 0:
         return None
-    key = pyramid_key_for_rendered(rendered, demand=demand, level=level, semantic_source_id=semantic_source_id)
+    shader_display = bool(shader_display)
+    key = pyramid_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=level,
+        semantic_source_id=semantic_source_id,
+        shader_display=shader_display,
+    )
     if not pyramid.begin_pending(key):
         return None
     try:
-        source, _histogram, _texture_kind = texture_source_for_rendered(rendered)
-        return pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
+        source, histogram, _texture_kind = texture_source_for_rendered(rendered, shader_display=shader_display)
+        reduced = pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
+        if histogram is not None:
+            hist_key = PyramidLevelKey(
+                source_id=key.source_id,
+                tile_id=key.tile_id,
+                component=f"{key.component}:histogram",
+                level_xy=key.level_xy,
+                algo_version=key.algo_version,
+            )
+            if pyramid.begin_pending(hist_key):
+                try:
+                    pyramid.admit(hist_key, reduce_box_mean(histogram, hist_key.factor_xy))
+                except Exception:
+                    pyramid.end_pending(hist_key)
+        return reduced
     except Exception:
         # LOD is a display optimization: a failed reduction must not fail the
         # tile result.  Release the claim so a later commit can retry.
@@ -568,6 +628,7 @@ def admit_preview_reduction(
     preview_level: int,
     reduced: np.ndarray | None = None,
     reduced_level: int | None = None,
+    shader_display: bool = True,
 ) -> bool:
     """Admit the retained preview level for a freshly computed tile.
 
@@ -581,7 +642,8 @@ def admit_preview_reduction(
 
     if preview_pyramid is None or int(preview_level) <= 0:
         return False
-    component = component_for_rendered(rendered)
+    shader_display = bool(shader_display)
+    component = component_for_rendered(rendered, shader_display=shader_display)
     level = int(preview_level)
     key = PyramidLevelKey(
         source_id=semantic_source_id,
@@ -606,7 +668,7 @@ def admit_preview_reduction(
             relative = factor >> int(reduced_level)
             preview_pyramid.admit(key, reduce_box_mean(np.asarray(reduced), (relative, relative)))
         else:
-            source, _hist, _kind = texture_source_for_rendered(rendered)
+            source, _hist, _kind = texture_source_for_rendered(rendered, shader_display=shader_display)
             preview_pyramid.admit(key, reduce_box_mean(source, (factor, factor)))
     except Exception:
         preview_pyramid.end_pending(key)
@@ -808,6 +870,11 @@ def resident_texture_for_rendered_tile(
         return source, histogram, native_lod
     texture = np.asarray(texture)
     factor_xy = factor_xy_for_level(demand, applied)
+    texture_histogram = histogram
+    if histogram is not None and tuple(np.shape(histogram)[:2]) != tuple(np.shape(texture)[:2]):
+        hist_key = histogram_key_for(session, rendered, demand=demand, level=applied)
+        cached_histogram = pyramid.lookup(hist_key)
+        texture_histogram = None if cached_histogram is None else np.asarray(cached_histogram)
     lod = LodInfo(
         level=applied,
         factor=max(int(factor_xy[0]), int(factor_xy[1])),
@@ -815,7 +882,7 @@ def resident_texture_for_rendered_tile(
         texture_shape=tuple(int(value) for value in texture.shape[:2]),
         gutter=0,
     )
-    return texture, histogram, lod
+    return texture, texture_histogram, lod
 
 
 def _release_chain_claims(pyramid, chain) -> bool:
