@@ -145,7 +145,9 @@ Active LOD queue inside X5:
    may evaluate reduced input; `lod-opaque` pipelines still compute the transform at native
    resolution and reduce the output for display. See
    [Plan 04](plans/lod-remaining-work/04-preview-reduce-before-display.md) and ADR 0050's
-   reduce-before-ops note.
+   reduce-before-ops note. **Initial implementation landed 2026-07-06:** commuting tiled-montage
+   previews evaluate reduced input and exact refinement remains native. Remaining work is the
+   measured PyQtGraph default decision plus the broader transforming/opaque input-LOD routes.
 2. **Level-value convergence in the lifecycle machine.** Presentation, semantic identity, and
    demanded-level residency are machine-owned; per-tile level values still live in
    `PresentationGenerationTracker`. Move convergence evidence and values into the same lifecycle

@@ -44,7 +44,7 @@ def run_profile_montage_workflow(
     profiler_artifact_paths: tuple[str | Path, ...] = (),
     montage_lod_policy: str = "native-only",
 ) -> tuple[dict[str, object], ...]:
-    """Run raw full montage, then FFT-over-montage-axis full montage.
+    """Run raw full montage, then FFT/shift/iFFT-over-montage-axis montage.
 
     The function is intentionally suitable for wrapping with an external
     sampling profiler such as ``py-spy``.  Returned and JSONL records contain
@@ -58,7 +58,7 @@ def run_profile_montage_workflow(
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
-    from arrayscope.operations.pipeline import CenteredFFT
+    from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
     from arrayscope.window import ArrayScopeWindow
 
     backend = _normalize_backend(backend)
@@ -136,6 +136,14 @@ def run_profile_montage_workflow(
             indices=indices,
             text=":",
         )
+        fit_stretch_pulsed = {"raw": False, "fft": False}
+
+        def apply_raw() -> dict[str, object]:
+            win._set_view_state(raw_state)
+            win.render(reason="profile-raw-full-montage")
+            fit_stretch_pulsed["raw"] = _pulse_fit_stretch(win, app=app, QtCore=QtCore)
+            return {"fit_stretch_pulsed": fit_stretch_pulsed["raw"]}
+
         raw_record = _run_phase(
             app,
             QtCore,
@@ -143,12 +151,19 @@ def run_profile_montage_workflow(
             probe,
             phase="raw_full_tiled_montage",
             timeout_s=timeout_s,
-            action=lambda: (win._set_view_state(raw_state), win.render(reason="profile-raw-full-montage")),
+            action=apply_raw,
         )
         _append_record(records, jsonl, {**base, **raw_record, "run_temperature": "cold"})
 
-        def apply_fft() -> None:
-            win.operation_coordinator.load_operations((CenteredFFT(axis=montage_axis),))
+        def apply_fft() -> dict[str, object]:
+            win.operation_coordinator.load_operations(
+                _profile_transform_operations(
+                    montage_axis,
+                    centered_fft=CenteredFFT,
+                    fftshift=FFTShift,
+                    centered_ifft=CenteredIFFT,
+                )
+            )
             win._set_document(win.operation_coordinator.document)
             win._coerce_channel_for_current_dtype()
             fft_state = win.view_state.with_image_axes(0, 1).with_montage_axis(
@@ -159,6 +174,8 @@ def run_profile_montage_workflow(
             )
             win._set_view_state(fft_state)
             win.render(reason="profile-fft-full-montage")
+            fit_stretch_pulsed["fft"] = _pulse_fit_stretch(win, app=app, QtCore=QtCore)
+            return {"fit_stretch_pulsed": fit_stretch_pulsed["fft"]}
 
         fft_record = _run_phase(
             app,
@@ -169,7 +186,12 @@ def run_profile_montage_workflow(
             timeout_s=timeout_s,
             action=apply_fft,
         )
-        _append_record(records, jsonl, {**base, **fft_record, "run_temperature": "mixed"})
+        transform_pipeline = ("CenteredFFT", "FFTShift", "CenteredIFFT")
+        _append_record(
+            records,
+            jsonl,
+            {**base, **fft_record, "operation_pipeline": transform_pipeline, "run_temperature": "mixed"},
+        )
 
         level_record = _run_phase(
             app,
@@ -178,9 +200,16 @@ def run_profile_montage_workflow(
             probe,
             phase="fft_level_refinement_preview",
             timeout_s=timeout_s,
-            action=lambda: _apply_fft_level_refinement_preview(win, app=app, QtCore=QtCore),
+            action=lambda: {
+                **_apply_fft_level_refinement_preview(win, app=app, QtCore=QtCore),
+                "fit_stretch_pulsed": bool(fit_stretch_pulsed["fft"]),
+            },
         )
-        _append_record(records, jsonl, {**base, **level_record, "run_temperature": "warm"})
+        _append_record(
+            records,
+            jsonl,
+            {**base, **level_record, "operation_pipeline": transform_pipeline, "run_temperature": "warm"},
+        )
         return tuple(records)
     finally:
         if win is not None:
@@ -188,6 +217,33 @@ def run_profile_montage_workflow(
             _process_events(app, QtCore, count=10)
         _restore_setting(settings, "image_rendering_backend", previous_image_backend)
         settings.sync()
+
+
+def _profile_transform_operations(
+    montage_axis: int,
+    *,
+    centered_fft,
+    fftshift,
+    centered_ifft,
+):
+    return (
+        centered_fft(axis=int(montage_axis)),
+        fftshift(axis=int(montage_axis)),
+        centered_ifft(axis=int(montage_axis)),
+    )
+
+
+def _pulse_fit_stretch(win, *, app=None, QtCore=None) -> bool:
+    fit = getattr(win, "fit_image_to_view", None)
+    if not callable(fit):
+        return False
+    fit(True)
+    if app is not None and QtCore is not None:
+        _process_events(app, QtCore, count=10)
+    fit(False)
+    if app is not None and QtCore is not None:
+        _process_events(app, QtCore, count=5)
+    return True
 
 
 class _EventLoopProbe:
@@ -643,6 +699,16 @@ def _phase_record(
         "montage_lod_pending_materializations": int(getattr(montage, "tile_lod_pending_materializations", 0) or 0),
         "montage_lod_materializations_completed": int(getattr(montage, "tile_lod_materializations_completed", 0) or 0),
         "montage_lod_ingest_reductions": int(getattr(montage, "tile_lod_ingest_reductions", 0) or 0),
+        "montage_lod_preview_reduced_scheduled": int(
+            getattr(montage, "tile_lod_preview_reduced_scheduled", 0) or 0
+        ),
+        "montage_lod_preview_reduced_blocked": int(
+            getattr(montage, "tile_lod_preview_reduced_blocked", 0) or 0
+        ),
+        "montage_lod_preview_reduced_failures": int(
+            getattr(montage, "tile_lod_preview_reduced_failures", 0) or 0
+        ),
+        "montage_lod_preview_presentations": int(getattr(montage, "tile_lod_preview_presentations", 0) or 0),
         "montage_lod_stats_cross_level_reuses": int(getattr(montage, "tile_lod_stats_cross_level_reuses", 0) or 0),
         "montage_lod_stats_recomputes": int(getattr(montage, "tile_lod_stats_recomputes", 0) or 0),
         "montage_lod_cross_level_reductions": int(getattr(montage, "tile_lod_cross_level_reductions", 0) or 0),
@@ -2044,7 +2110,7 @@ def _py_spy_filtered_args(argv: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def main(argv: tuple[str, ...] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the realistic tiled montage + FFT profiling workflow")
+    parser = argparse.ArgumentParser(description="Run the realistic tiled montage + FFT/shift/iFFT profiling workflow")
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="Dataset path; defaults to the bundled realistic NIfTI")
     parser.add_argument("--backend", choices=("pyqtgraph", "vispy", "all"), default="pyqtgraph")
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")

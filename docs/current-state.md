@@ -32,7 +32,7 @@ Y1–Y3/X5 entries in the [roadmap](roadmap.md).
 | Out-of-core/lazy sources | Initial (ADR 0049) | Source protocol + budgeted read seam under slab/stage evaluation; memmap `.npy`/`.cfl` adapters; `load_path(lazy="auto")` maps large files. Chunked (Zarr/HDF5-like) adapters not started. |
 | PyQtGraph backend | Fallback default (ADR 0047) | Bounded CPU/item convergence; large item counts and level re-window drains remain costly (X5a fixed starvation: 272-tile level drag never converged, now ~4.3 s). Selected by `auto` wherever hardware GL is absent or traces are missing. |
 | VisPy backend | Auto-selected on Linux hardware GL (ADR 0047) | X5a Linux traces: first frame faster in every scenario (1.4–13×); level changes are uniform-only (272-tile level drag ~0.26 s vs ~8 s). Still unstable under software GL (Xvfb/llvmpipe) — do not treat CI GL runs as evidence. |
-| LOD | Resident default on VisPy (ADR 0050) | Async pyramid + per-class atlas residency; ingest reduction, presentation floor, retained preview level, semantic identity, settled idle (0% CPU verified live). Exact inspection stays native. PyQtGraph adoption, reduce-before-ops, and ops-input LOD remain roadmap work. |
+| LOD | Resident default on VisPy (ADR 0050) | Async pyramid + per-class atlas residency; ingest reduction, presentation floor, retained preview level, semantic identity, settled idle (0% CPU verified live). Exact inspection stays native. The first commuting reduced-input `quality="preview"` path is wired for tiled montage; PyQtGraph adoption, transforming/opaque input LOD, and default-policy evidence remain roadmap work. |
 | Tile lifecycle | Single owner, machine-driven (ADR 0051, P1-P3) | Qt-free three-axis state machine in `presentation/tile_lifecycle.py`; presentation, semantic, and residency axes authoritative; identity-aware acknowledgement against backend slot identities; event-driven convergence; sessions survive same-key re-renders and index-window scrubs (reuse/retarget), and the P2 delta-commit walk now stays proportional to changed wrapper/order work. LOD materialization requests are lifecycle-backed views over owned per-level claims; `release_session_claims` scans the machine and the flush-path settle repair is gone. Per-slot mips (P4), PyQtGraph effects (P5) phased. |
 | Diagnostics/benchmarks | Good | Work-graph counters, JSONL, benchmark records; profilers drive the production window composition. |
 | Test suite | Repaired (v32) + contract coverage (Y2) | Host-independent, no `sys.modules` replacement; `test_imagesurface_contract.py` pins cross-backend semantics; architecture guards pin the Y1/Y3 invariants. |
@@ -88,8 +88,9 @@ history and rationale live in ADR 0050 and ADR 0051.
 
 Inside X5, montage tiled scenes now have resident asynchronous LOD on VisPy and a single-owner
 tile lifecycle for presentation, semantic identity, and demanded-level residency claims.
-PyQtGraph resident LOD is implemented but remains opt-in: it now makes level changes more than
-2x faster, but cold settle still regresses because reduced display payloads are produced after
-native evaluation. The next LOD item is therefore preview-quality reduced display/evaluation,
-then exact refinement, so first presentation can show an honest lower-resolution result instead
-of black tiles while exact data streams in.
+PyQtGraph resident LOD is implemented but remains opt-in: it makes level changes more than
+2x faster, while cold settle still needs measured proof before it can become a default. The
+first preview-quality reduced display/evaluation slice now evaluates `lod-commuting` tiled
+montage work on reduced input and presents an honest `quality="preview"` payload with exact
+semantic planes absent; native `quality="exact"` payloads still refine through the ordinary
+lifecycle.

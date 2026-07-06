@@ -58,9 +58,15 @@ class DisplayTilePayload:
             histogram = np.asarray(self.histogram_data)
             if tuple(histogram.shape[:2]) != tuple(image.shape[:2]):
                 raise ValueError("display tile payload histogram shape must match image shape")
-        semantic = image if self.semantic_data is None else np.asarray(self.semantic_data)
-        semantic_histogram = self.histogram_data if self.semantic_histogram_data is None else self.semantic_histogram_data
-        semantic_histogram = None if semantic_histogram is None else np.asarray(semantic_histogram)
+        if quality == "preview":
+            if self.semantic_data is not None or self.semantic_histogram_data is not None:
+                raise ValueError("preview display tile payloads must not carry exact semantic planes")
+            semantic = None
+            semantic_histogram = None
+        else:
+            semantic = image if self.semantic_data is None else np.asarray(self.semantic_data)
+            semantic_histogram = self.histogram_data if self.semantic_histogram_data is None else self.semantic_histogram_data
+            semantic_histogram = None if semantic_histogram is None else np.asarray(semantic_histogram)
         source_shape = tuple(int(value) for value in (self.source_shape or image.shape[:2])[:2])
         texture_kind = self.texture_kind
         if texture_kind is None:

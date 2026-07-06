@@ -13,8 +13,11 @@ import numpy as np
 
 from arrayscope.core.work_graph import WorkLane
 from arrayscope.core.scheduler import EvalPriority
+from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.lod import LOD_POLICY_RESIDENT
+from arrayscope.display.model.frame import TiledValueSource
 from arrayscope.display.pyramid import PyramidCache
+from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.window.frame_renderer import FrameRenderMixin
 
 from tests.window.test_montage_lod_residency import TILE, _cold_session, _session
@@ -161,6 +164,10 @@ def _tile_worker_renderer(session, *, evaluated):
     )
     fake._on_montage_tile_error = lambda session_id, tile, exc: None
     fake._on_montage_tile_slow = lambda session_id: None
+    fake._is_current_montage_session = lambda session_id, key: True
+    fake._evaluation_context = lambda lane, token: None
+    fake._schedule_montage_presentation_commit = lambda session, force=False: None
+    fake._dispatch_montage_work = lambda session: None
 
     def _evaluate(session_arg, tile, token=None):
         image = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE)
@@ -185,6 +192,7 @@ def _tile_worker_renderer(session, *, evaluated):
 
     fake._evaluate_montage_tile_snapshot = _evaluate
     fake._schedule_next_montage_tile = FrameRenderMixin._schedule_next_montage_tile.__get__(fake)
+    fake._schedule_montage_preview_tile = FrameRenderMixin._schedule_montage_preview_tile.__get__(fake)
     return fake
 
 
@@ -236,6 +244,189 @@ def test_native_scale_scheduling_performs_no_ingest_reduction():
 
     assert len(pyramid) == 0
     assert int(getattr(renderer, "_montage_lod_ingest_reductions", 0)) == 0
+
+
+def test_reduced_preview_evaluation_admits_floor_payload_without_exact_semantics():
+    from dataclasses import replace
+
+    from arrayscope.display.montage import MontagePlan
+    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    data = np.arange(TILE * TILE * 2, dtype=np.float32).reshape(TILE, TILE, 2)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, indices=(0, 1), columns=2, text=":")
+    )
+    tiles = tuple(
+        replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+        for tile in session.plan.tiles
+    )
+    session.plan = MontagePlan(
+        axis=2,
+        tile_shape=session.plan.tile_shape,
+        grid_shape=session.plan.grid_shape,
+        columns=session.plan.columns,
+        rows=session.plan.rows,
+        gap=session.plan.gap,
+        tiles=tiles,
+    )
+    session.view_state = state
+    session.document = ArrayDocument(data)
+    tile = session.plan.tiles[0]
+    demand = session.ingest_lod_demand()
+
+    preview = _evaluate_montage_tile_preview_snapshot(
+        session,
+        tile,
+        demand=demand,
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert preview is not None
+    key, plane, histogram = preview
+    assert key.level_xy == (2, 2)
+    assert plane.shape == (TILE // 4, TILE // 4)
+    assert histogram is None
+    pyramid.admit(key, plane)
+    session._ensure_floor_payloads((0,))
+    payload = session.display_tile_payloads[0]
+    assert payload.quality == "preview"
+    assert payload.semantic_data is None
+    assert TiledValueSource({0: payload}).tile_region(tile, (slice(0, 1), slice(0, 1))) is None
+
+
+def test_reduced_preview_evaluation_reads_only_tile_display_range():
+    from dataclasses import replace
+
+    from arrayscope.display.montage import MontagePlan
+    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+
+    class LazyArray:
+        def __init__(self, data):
+            self._data = np.asarray(data)
+            self.shape = self._data.shape
+            self.dtype = self._data.dtype
+            self.reads = []
+
+        def read_region(self, index, *, cancellation_token=None):
+            self.reads.append(index)
+            return self._data[index]
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    data = np.arange((TILE * 2) * (TILE * 2) * 2, dtype=np.float32).reshape(TILE * 2, TILE * 2, 2)
+    source = LazyArray(data)
+    y_indices = tuple(range(5, 5 + TILE))
+    x_indices = tuple(range(7, 7 + TILE))
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_axis_range(0, y_indices, text="5:5+tile")
+        .with_axis_range(1, x_indices, text="7:7+tile")
+        .with_montage_axis(2, indices=(0, 1), columns=2, text=":")
+    )
+    tiles = tuple(
+        replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+        for tile in session.plan.tiles
+    )
+    session.plan = MontagePlan(
+        axis=2,
+        tile_shape=session.plan.tile_shape,
+        grid_shape=session.plan.grid_shape,
+        columns=session.plan.columns,
+        rows=session.plan.rows,
+        gap=session.plan.gap,
+        tiles=tiles,
+    )
+    session.view_state = state
+    session.document = ArrayDocument(source)
+    tile = session.plan.tiles[0]
+
+    preview = _evaluate_montage_tile_preview_snapshot(
+        session,
+        tile,
+        demand=session.ingest_lod_demand(),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert preview is not None
+    assert source.reads == [(slice(5, 5 + TILE, 1), slice(7, 7 + TILE, 1), slice(0, 1, 1))]
+    _key, plane, _histogram = preview
+    assert plane.shape == (TILE // 4, TILE // 4)
+
+
+def test_reduced_rgb_preview_floor_preserves_display_histogram_for_rewindowing():
+    from dataclasses import replace
+
+    from arrayscope.display.montage import MontagePlan
+    from arrayscope.window import montage_lod
+    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    real = np.arange(TILE * TILE * 2, dtype=np.float32).reshape(TILE, TILE, 2)
+    imag = real + 10.0
+    data = (real + 1j * imag).astype(np.complex64)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_channel(ChannelMode.COMPLEX)
+        .with_montage_axis(2, indices=(0, 1), columns=2, text=":")
+    )
+    tiles = tuple(
+        replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+        for tile in session.plan.tiles
+    )
+    session.plan = MontagePlan(
+        axis=2,
+        tile_shape=session.plan.tile_shape,
+        grid_shape=session.plan.grid_shape,
+        columns=session.plan.columns,
+        rows=session.plan.rows,
+        gap=session.plan.gap,
+        tiles=tiles,
+    )
+    session.view_state = state
+    session.document = ArrayDocument(data)
+    session.rgb = True
+    tile = session.plan.tiles[0]
+
+    preview = _evaluate_montage_tile_preview_snapshot(
+        session,
+        tile,
+        demand=session.ingest_lod_demand(),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert preview is not None
+    key, plane, histogram = preview
+    assert key.component == "rgb8"
+    assert plane.shape == (TILE // 4, TILE // 4, 3)
+    assert histogram is not None
+    assert histogram.shape == (TILE // 4, TILE // 4)
+    pyramid.admit(key, plane)
+    pyramid.admit(montage_lod.histogram_key_for_level_key(key), histogram)
+    session._ensure_floor_payloads((0,))
+    payload = session.display_tile_payloads[0]
+    assert payload.quality == "preview"
+    assert payload.texture_kind == "rgb8"
+    assert payload.histogram_data is not None
+    assert payload.histogram_data.shape == (TILE // 4, TILE // 4)
+    assert payload.semantic_data is None
+    assert payload.semantic_histogram_data is None
+    assert TiledValueSource({0: payload}).tile_region(tile, (slice(0, 1), slice(0, 1))) is None
 
 
 def test_pyramid_budget_retains_the_reference_montage_working_set():

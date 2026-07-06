@@ -1454,6 +1454,53 @@ def test_floor_presents_from_pinned_preview_when_main_pyramid_lost_the_level():
     assert payload.texture_data.shape[:2] == (TILE // 8, TILE // 8)
 
 
+def test_rgb_floor_from_pinned_preview_carries_display_histogram():
+    """RGB preview floors need the reduced display histogram so PyQtGraph can
+    re-window existing tiles on level changes before exact content arrives."""
+
+    main = PyramidCache(max_bytes=1 << 20)
+    preview = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=main, count=1)
+    session.lod_preview_pyramid = preview
+    session.lod_preview_level = 2
+    session.rgb = True
+
+    tile = session.plan.tiles[0]
+    rgb = np.zeros((TILE, TILE, 3), dtype=np.uint8)
+    rgb[..., 0] = np.arange(TILE, dtype=np.uint8)[:, None]
+    histogram = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE)
+    rendered = RenderedTile(
+        tile=tile,
+        image=rgb,
+        histogram_data=histogram,
+        eval_ms=0.0,
+        slab_shape=rgb.shape,
+        slab_nbytes=rgb.nbytes,
+    )
+    semantic_id = session.tile_semantic_source_id(tile.source_index)
+    assert admit_preview_reduction(
+        preview,
+        rendered,
+        semantic_source_id=semantic_id,
+        preview_level=2,
+        shader_display=False,
+    )
+    del session.rendered_tiles[0]
+    session.display_tile_payloads.clear()
+    session.dirty_payloads.clear()
+
+    _state, delta = session.build_tile_presentation({})
+    payload = delta.upserts.get(0) or session.display_tile_payloads.get(0)
+    assert payload is not None
+    assert payload.quality == "preview"
+    assert payload.texture_kind == "rgb8"
+    assert payload.texture_data.shape == (TILE // 4, TILE // 4, 3)
+    assert payload.histogram_data is not None
+    assert payload.histogram_data.shape == (TILE // 4, TILE // 4)
+    assert payload.semantic_data is None
+    assert payload.semantic_histogram_data is None
+
+
 def test_preview_payload_at_acceptable_level_still_refines_to_exact():
     """Regression (screenshot: blocky tiles among exact neighbors): a
     preview payload whose level falls inside acceptable_levels looked

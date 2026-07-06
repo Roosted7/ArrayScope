@@ -110,9 +110,11 @@ def component_for_rendered(rendered: RenderedTile, *, shader_display: bool = Tru
         if image is not None:
             shape = tuple(getattr(image, "shape", ()) or ())
             if len(shape) == 3 and int(shape[-1]) in (3, 4):
-                return "display_rgb"
+                return str(TexturePlaneKind.RGB8.value)
     texture_kind = getattr(rendered, "texture_kind", None)
     if texture_kind is None:
+        return "scalar"
+    if TexturePlaneKind(getattr(texture_kind, "value", texture_kind)) == TexturePlaneKind.SCALAR_R32F:
         return "scalar"
     return str(getattr(texture_kind, "value", texture_kind))
 
@@ -151,6 +153,10 @@ def pyramid_key_for(session, rendered: RenderedTile, *, demand, level: int) -> P
 
 def histogram_key_for(session, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
     key = pyramid_key_for(session, rendered, demand=demand, level=level)
+    return histogram_key_for_level_key(key)
+
+
+def histogram_key_for_level_key(key: PyramidLevelKey) -> PyramidLevelKey:
     return PyramidLevelKey(
         source_id=key.source_id,
         tile_id=key.tile_id,
@@ -600,13 +606,7 @@ def admit_ingest_reduction(
         source, histogram, _texture_kind = texture_source_for_rendered(rendered, shader_display=shader_display)
         reduced = pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
         if histogram is not None:
-            hist_key = PyramidLevelKey(
-                source_id=key.source_id,
-                tile_id=key.tile_id,
-                component=f"{key.component}:histogram",
-                level_xy=key.level_xy,
-                algo_version=key.algo_version,
-            )
+            hist_key = histogram_key_for_level_key(key)
             if pyramid.begin_pending(hist_key):
                 try:
                     pyramid.admit(hist_key, reduce_box_mean(histogram, hist_key.factor_xy))
@@ -655,6 +655,7 @@ def admit_preview_reduction(
         return False
     try:
         factor = 1 << level
+        source, histogram, _kind = texture_source_for_rendered(rendered, shader_display=shader_display)
         if reduced is not None and reduced_level is not None and int(reduced_level) == level:
             # The ingest reduction already produced exactly the preview
             # level: pin the same plane, zero extra reduction or copy.
@@ -668,8 +669,14 @@ def admit_preview_reduction(
             relative = factor >> int(reduced_level)
             preview_pyramid.admit(key, reduce_box_mean(np.asarray(reduced), (relative, relative)))
         else:
-            source, _hist, _kind = texture_source_for_rendered(rendered, shader_display=shader_display)
             preview_pyramid.admit(key, reduce_box_mean(source, (factor, factor)))
+        if histogram is not None:
+            hist_key = histogram_key_for_level_key(key)
+            if preview_pyramid.begin_pending(hist_key):
+                try:
+                    preview_pyramid.admit(hist_key, reduce_box_mean(histogram, hist_key.factor_xy))
+                except Exception:
+                    preview_pyramid.end_pending(hist_key)
     except Exception:
         preview_pyramid.end_pending(key)
         return False
@@ -686,7 +693,7 @@ def floor_component_tags(session) -> tuple[str, ...]:
 
     if bool(getattr(session, "shader_display", False)):
         return (str(TexturePlaneKind.COMPLEX_RG32F.value), "scalar")
-    return ("scalar", str(TexturePlaneKind.COMPLEX_RG32F.value))
+    return (str(TexturePlaneKind.RGB8.value), "scalar", str(TexturePlaneKind.COMPLEX_RG32F.value))
 
 
 def best_floor_key(session, source_index: int):
@@ -802,6 +809,7 @@ def ensure_floor_payloads(session, tile_numbers) -> None:
         plane = owning_cache.peek(key)
         if plane is None:
             continue
+        histogram = owning_cache.peek(histogram_key_for_level_key(key))
         factor_x = 1 << int(key.level_xy[0])
         factor_y = 1 << int(key.level_xy[1])
         tile_shape = tuple(int(value) for value in session.plan.tile_shape)
@@ -816,16 +824,23 @@ def ensure_floor_payloads(session, tile_numbers) -> None:
             tile_number=tile_number,
             source_index=source_index,
             image=np.asarray(plane),
-            histogram_data=None,
+            histogram_data=None if histogram is None else np.asarray(histogram),
             source_id=(*semantic_id, "floor", str(key.component), key.level_xy),
             texture_data=np.asarray(plane),
-            texture_kind=None if key.component == "scalar" else TexturePlaneKind(key.component),
+            texture_kind=_floor_texture_kind(key.component),
             lod=lod,
             quality="preview",
         )
         session.display_tile_payloads[tile_number] = payload
         session.pending_payload_upserts[tile_number] = None
         session.lod_floor_presentations = int(getattr(session, "lod_floor_presentations", 0) or 0) + 1
+
+
+def _floor_texture_kind(component: object) -> TexturePlaneKind:
+    value = str(getattr(component, "value", component))
+    if value == "scalar":
+        return TexturePlaneKind.SCALAR_R32F
+    return TexturePlaneKind(value)
 
 
 # --------------------------------------------------------------------------

@@ -116,6 +116,36 @@ def test_profile_workflow_forces_backend_specific_themes():
     assert vispy.theme == ThemeChoice.DARK
 
 
+def test_profile_transform_pipeline_uses_fft_shift_ifft_sequence():
+    from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
+    from arrayscope.tools.profile_montage_workflow import _profile_transform_operations
+
+    operations = _profile_transform_operations(
+        2,
+        centered_fft=CenteredFFT,
+        fftshift=FFTShift,
+        centered_ifft=CenteredIFFT,
+    )
+
+    assert tuple(type(operation) for operation in operations) == (
+        CenteredFFT,
+        FFTShift,
+        CenteredIFFT,
+    )
+    assert tuple(operation.axis for operation in operations) == (2, 2, 2)
+
+
+def test_profile_fit_stretch_pulse_uses_window_fit_command():
+    from arrayscope.tools.profile_montage_workflow import _pulse_fit_stretch
+
+    calls = []
+    win = SimpleNamespace(fit_image_to_view=lambda enabled: calls.append(bool(enabled)))
+
+    assert _pulse_fit_stretch(win) is True
+
+    assert calls == [True, False]
+
+
 def test_profile_suite_manifest_records_success_and_summary(tmp_path, monkeypatch):
     import arrayscope.tools.profile_montage_workflow as workflow
 

@@ -190,12 +190,14 @@ class Harness:
     # -- pixels ----------------------------------------------------------------
 
     def fit_view(self) -> None:
-        s = self.session
-        height, width = s.plan.display_shape
-        self.win.img_view.getView().setRange(
-            xRange=(0, width), yRange=(0, height), padding=0
-        )
+        self.toggle_fit_stretch(True)
         self.pump(0.4)
+        self.toggle_fit_stretch(False)
+        self.pump(0.2)
+
+    def toggle_fit_stretch(self, enabled: bool) -> None:
+        self.win.fit_image_to_view(bool(enabled))
+        self.app.processEvents()
 
     def screenshot(self) -> np.ndarray:
         from pyqtgraph.Qt import QtGui

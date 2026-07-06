@@ -3,9 +3,11 @@
 **Status:** Accepted and implemented for VisPy montage/tiled scenes (2026-07-04); default
 policy is `resident` on VisPy (Performance → Montage LOD), `native-only` elsewhere. The
 retained preview level below is implemented (pinned preview pyramid cache, worker-side
-opportunistic fill, background preview walk); its preview-then-refine consumer
-(reduce-before-ops) remains open. The defect inventory from these landings motivated
-[ADR 0051](0051-single-owner-tile-lifecycle.md), which now owns the tile lifecycle.
+opportunistic fill, background preview walk). The first preview-then-refine consumer for
+`lod-commuting` tiled montage pipelines landed on 2026-07-06; transforming/opaque input-LOD
+routes and PyQtGraph default enablement remain evidence-gated. The defect inventory from these
+landings motivated [ADR 0051](0051-single-owner-tile-lifecycle.md), which now owns the tile
+lifecycle.
 
 ## Context
 
@@ -167,21 +169,23 @@ contractual:
   `relative_factor**2` fewer texels; uneven shapes keep the single canonical native reduction so
   level content never depends on cache state.
 
-### Reduce-before-ops and preview-then-refine (design note, not yet wired)
+### Reduce-before-ops and preview-then-refine (initial slice implemented 2026-07-06)
 
 `OperationCapabilities.lod_commuting` (default False; True for pointwise value maps such as
 conjugate) and `pipeline_commutes_for_display_lod()` define which pipelines may take box-mean
-reduced input for display evaluation. The evaluator input-reduction lane itself is deliberately
-not wired yet: committed tile payloads carry the native exact/semantic planes that exact
-consumers read directly (`TiledValueSource.value_at`/`tile_region`, refined level sampling), so a
-reduced-input evaluation cannot replace the native one — it can only precede it. Wiring it
-therefore requires preview-then-refine: evaluate the commuting pipeline on reduced input
-(`~1/factor**2` of the op cost), present the result as a `quality="preview"` payload whose exact
-planes are explicitly absent for semantic reads, and stream the native `"exact"` result through
-the ordinary supersession path. Until that payload-quality contract exists, running the reduced
-pipeline alongside the mandatory native one would add work rather than remove it, so commuting
-pipelines still evaluate natively and reduce the output at ingest. Exact consumers always use the
-native pipeline in either world.
+reduced input for display evaluation. The first tiled-montage implementation uses that predicate
+to schedule a bounded `quality="preview"` worker after the exact worker is admitted: the preview
+reads only the tile's display-axis range, reduces input to the demanded LOD, evaluates the
+commuting display pipeline, and admits the display-only plane to the existing pyramid floor. Exact
+semantic planes are explicitly absent, so `TiledValueSource.value_at`/`tile_region`, refined level
+sampling, hover, ROI, profile, and export paths continue to wait for the native `"exact"` payload.
+The exact worker still owns refinement and supersedes preview through the ordinary
+backend-acknowledged lifecycle.
+
+This initial slice intentionally does not claim full input-LOD coverage. `lod-transforming`
+pipelines still need planner-level level mapping, and `lod-opaque` pipelines still compute the
+transform at native resolution before output reduction. PyQtGraph resident LOD also stays opt-in
+until traces show cold raw/FFT settle no worse than native while preserving the level-loop win.
 
 ## Implemented contracts (2026-07-04)
 
@@ -240,7 +244,7 @@ ADR 0021 (scheduler v2), 0025/0026 (operation capabilities), 0027 (stage cache),
 scheduler), 0041 (LOD separation), 0044 (acknowledged residency), 0046 (evidence-first strategy),
 0049 (out-of-core sources).
 
-## Retained preview level (implemented 2026-07-04; reduce-before-ops consumer open)
+## Retained preview level (implemented 2026-07-04; commuting reduce-before-ops consumer 2026-07-06)
 
 A fixed coarse "preview" level per dataset (chosen from data size and the memory budget,
 typically the level whose full-dataset footprint fits comfortably in the spare display
@@ -264,6 +268,7 @@ dataset is open. Consequences it must deliver:
 
 The landed implementation keeps preview payloads presentation-only (`quality="preview"`,
 invisible to hover/ROI/profile/histogram reads), so no preview data leaks into semantic
-consumers. The preview-then-refine bullet — running the op pipeline on reduced data first so
-first-ever evaluations show an instant coarse result instead of black until their stage
-computes — is the remaining open piece (the reduce-before-ops consumer contract).
+consumers. The first commuting preview-then-refine slice now runs the display pipeline on reduced
+tile input and admits that result as the preview floor while exact evaluation continues. The
+remaining transforming/opaque variants and default backend policy decisions stay behind the X5
+evidence gates.

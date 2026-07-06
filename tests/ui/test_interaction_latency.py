@@ -396,7 +396,6 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
         win._set_view_state(win.view_state.with_montage_axis(2, columns=8, indices=tuple(range(8)), text=":"))
         win.update_image_view()
         plan = win._montage_session.plan
-        display_height, display_width = tuple(float(value) for value in plan.display_shape[:2])
         tile_count = len(plan.tiles)
         # Expanded montage ranges auto-fit by design. Narrow explicitly so this
         # test measures viewport retargeting rather than initial fit policy.
@@ -404,17 +403,9 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
         win.renderer._run_montage_viewport_update()
         initial_visible = len(win._montage_session.visible_tiles)
 
-        # The view box is aspect-locked to square pixels, so request an x/y
-        # pair that already matches the viewport aspect; otherwise pyqtgraph
-        # rewrites the ranges and keeps part of the tile row off screen.
-        viewport = win.img_view.graphicsView.viewport().size()
-        y_span = display_width * max(1, viewport.height()) / max(1, viewport.width())
-        y_center = display_height / 2.0
-        win.img_view.getView().setRange(
-            xRange=(0.0, display_width),
-            yRange=(y_center - y_span / 2.0, y_center + y_span / 2.0),
-            padding=0,
-        )
+        win.fit_image_to_view(True)
+        process_events(qtbot, count=20)
+        win.fit_image_to_view(False)
         win.renderer._run_montage_viewport_update()
         expanded_visible = len(win._montage_session.visible_tiles)
 

@@ -132,6 +132,10 @@ class MontageRuntimeDiagnostics:
     tile_lod_pending_materializations: int = 0
     tile_lod_materializations_completed: int = 0
     tile_lod_ingest_reductions: int = 0
+    tile_lod_preview_reduced_scheduled: int = 0
+    tile_lod_preview_reduced_blocked: int = 0
+    tile_lod_preview_reduced_failures: int = 0
+    tile_lod_preview_presentations: int = 0
     # ADR 0050 zero-redundant-work counters: histogram/level recomputes caused
     # by display-LOD level swaps must stay 0; the reuse counters make the
     # avoided work observable in JSONL A/B traces.
@@ -894,6 +898,10 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_pending_materializations",
         "tile_lod_materializations_completed",
         "tile_lod_ingest_reductions",
+        "tile_lod_preview_reduced_scheduled",
+        "tile_lod_preview_reduced_blocked",
+        "tile_lod_preview_reduced_failures",
+        "tile_lod_preview_presentations",
         "tile_lod_stats_cross_level_reuses",
         "tile_lod_stats_recomputes",
         "tile_lod_cross_level_reductions",
@@ -1041,7 +1049,8 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"{montage.tile_lod_pyramid_evictions} "
             f"pending={montage.tile_lod_pending_materializations} "
             f"completed={montage.tile_lod_materializations_completed} "
-            f"ingest={montage.tile_lod_ingest_reductions}"
+            f"ingest={montage.tile_lod_ingest_reductions} "
+            f"preview={montage.tile_lod_preview_presentations}"
         ),
         *warning_lines,
         (
@@ -1088,6 +1097,9 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"stats_reused={montage.tile_lod_stats_cross_level_reuses} "
             f"stats_recomputed={montage.tile_lod_stats_recomputes} "
             f"level_from_level={montage.tile_lod_cross_level_reductions} "
+            f"preview_sched/block/fail={montage.tile_lod_preview_reduced_scheduled}/"
+            f"{montage.tile_lod_preview_reduced_blocked}/"
+            f"{montage.tile_lod_preview_reduced_failures} "
             f"reruns_avoided={montage.tile_lod_pipeline_reruns_avoided} "
             f"stage_hits={montage.tile_lod_stage_hits_serving_derivations} "
             f"hist_recomputes={montage.tile_histogram_lod_swap_recomputes} "
