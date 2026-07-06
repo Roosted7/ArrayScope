@@ -56,6 +56,7 @@ dev = [
     "pytest-xdist>=3.5.0",
     "tomli>=2.0.0; python_version < '3.11'",
     "twine>=4.0.0",
+    "scalene>=2.2.0",
 ]
 [tool.pytest.ini_options]
 # Run in parallel by default across all cores (pytest-xdist).
