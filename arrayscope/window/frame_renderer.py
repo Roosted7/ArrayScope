@@ -2428,7 +2428,7 @@ class FrameRenderMixin:
             current = getattr(self, "_montage_session", None)
             if current is None or not self._is_current_montage_session(session_id, session_key):
                 return
-            if tile_number in current.rendered_tiles or preview is None:
+            if preview is None:
                 return
             key, plane, histogram = preview
             current.lod_pyramid.admit(key, plane)
@@ -2530,8 +2530,6 @@ class FrameRenderMixin:
             upserted = False
             for tile_number, key, plane, histogram in tuple(previews or ()):
                 tile_number = int(tile_number)
-                if tile_number in current.rendered_tiles:
-                    continue
                 current.lod_pyramid.admit(key, plane)
                 if histogram is not None:
                     current.lod_pyramid.admit(montage_lod.histogram_key_for_level_key(key), histogram)
@@ -5392,8 +5390,12 @@ def _tile_layer_upsert_limits(window, session) -> dict[str, int]:
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     if not (
         not capabilities.shader_windowing
-        and session.has_pending_level_update()
-        and session.has_stale_level_presentations()
+        and (
+            getattr(session, "dirty_payloads", None)
+            or getattr(session, "pending_payload_upserts", None)
+            or getattr(session, "pending_removals", None)
+            or (session.has_pending_level_update() and session.has_stale_level_presentations())
+        )
     ):
         return {}
     interactive = _interactive_active(window)

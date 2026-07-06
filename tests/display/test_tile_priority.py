@@ -1,4 +1,4 @@
-from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext
+from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext, prioritize_tile_numbers
 
 
 def _plan(count=9, columns=3):
@@ -31,6 +31,36 @@ def test_priority_queue_retargets_focus_without_reinserting_tiles():
     queue.set_context(_context(focus=(27.0, 27.0), visible=range(9), priority=(8,)), max_items=3)
 
     assert queue.pop().montage_index == 8
+
+
+def test_priority_queue_explicit_focus_tile_precedes_nearer_visible_tiles():
+    plan = _plan()
+    queue = MontageTilePriorityQueue(
+        plan.tiles,
+        context=_context(
+            focus=(16.0, 16.0),
+            visible=range(9),
+            priority=(8,),
+        ),
+    )
+
+    assert queue.pop().montage_index == 8
+
+
+def test_prioritize_tile_numbers_honors_explicit_focus_tile():
+    plan = _plan()
+
+    ordered = prioritize_tile_numbers(
+        range(9),
+        plan_tiles=plan.tiles,
+        context=_context(
+            focus=(16.0, 16.0),
+            visible=range(9),
+            priority=(8,),
+        ),
+    )
+
+    assert ordered[0] == 8
 
 
 def test_priority_queue_orders_visible_before_near_and_waiting():

@@ -217,6 +217,7 @@ class MontageTilePriorityQueue:
         band = _band_for_index(int(index), self.context)
         return (
             int(band),
+            _priority_focus_rank(int(index), self.context),
             _distance_score(tile, self.context),
             int(self._sequence.get(int(index), 0)),
             int(index),
@@ -251,6 +252,7 @@ def prioritize_tile_numbers(tiles, *, plan_tiles, context: TilePriorityContext) 
         tile = plan_tiles[index]
         return (
             int(_band_for_index(index, context)),
+            _priority_focus_rank(index, context),
             distance_score(tile),
             int(sequence.get(index, 0)),
             index,
@@ -269,6 +271,8 @@ def _tile_index(tile_or_index) -> int:
 
 
 def _band_for_index(index: int, context: TilePriorityContext) -> TilePriorityBand:
+    if int(index) in context.priority_tiles:
+        return TilePriorityBand.VISIBLE
     if int(index) in context.visible_tiles:
         return TilePriorityBand.VISIBLE
     if int(index) in context.near_tiles:
@@ -278,6 +282,10 @@ def _band_for_index(index: int, context: TilePriorityContext) -> TilePriorityBan
 
 def _distance_score(tile, context: TilePriorityContext) -> float:
     return _distance_scorer(context)(tile)
+
+
+def _priority_focus_rank(index: int, context: TilePriorityContext) -> int:
+    return 0 if int(index) in context.priority_tiles else 1
 
 
 def _distance_scorer(context: TilePriorityContext):

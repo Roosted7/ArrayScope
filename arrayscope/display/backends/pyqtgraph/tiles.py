@@ -246,7 +246,7 @@ class MontageTileLayer:
             if int(tile) in self._states and not levels_match(self._states[int(tile)].levels, levels)
         )
         if level_update_tiles:
-            tile_order = tuple(dict.fromkeys(tuple(tile_order) + tuple(sorted(level_update_tiles))))
+            tile_order = tuple(dict.fromkeys(tuple(tile_order) + tuple(level_update_tiles)))
         # Match the VisPy atlas path's ordering: resolve active payloads to
         # resident identities, bind tile placement to resident storage, then
         # decide whether any data upload is needed.  For PyQtGraph the

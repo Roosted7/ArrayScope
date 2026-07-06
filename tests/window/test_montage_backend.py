@@ -522,6 +522,128 @@ def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
     assert limits["upsert_cost_fn"](payload) == image.nbytes
 
 
+def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
+    import arrayscope.window.frame_renderer as frame_renderer
+
+    session = SimpleNamespace(
+        dirty_payloads={0: None},
+        pending_payload_upserts={},
+        pending_removals=set(),
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=False,
+                shader_windowing=False,
+            )
+        ),
+        _viewport_interaction_active=False,
+        _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=2, byte_cap=4096, budget_ms=2.0),
+    )
+    window.win = window
+
+    limits = frame_renderer._tile_layer_upsert_limits(window, session)
+
+    assert limits["max_upserts"] == 2
+    assert limits["max_upsert_bytes"] == 4096
+    assert limits["upsert_cost_fn"](SimpleNamespace(image=np.zeros((8, 8), dtype=np.float32))) == 8 * 8 * 4
+
+
+def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):
+    from pyqtgraph.graphicsItems.ImageItem import ImageItem
+
+    from arrayscope.display.backends.pyqtgraph.tiles import (
+        MontageTileLayer,
+        TileLayerItemState,
+        _direct_payload_source_id,
+    )
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.model.frame import DisplayTilePayload
+
+    class Owner:
+        def add_tile_item(self, *_args):
+            pass
+
+        def remove_tile_item(self, *_args):
+            pass
+
+        def move_tile_item(self, *_args):
+            pass
+
+    geometry = DisplayGeometry(
+        view_state=None,
+        display_shape=(4, 4),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=0),
+    )
+    layer = MontageTileLayer(
+        Owner(),
+        set_image_item_data=lambda *_args, **_kwargs: None,
+        record_upload_timing=lambda *_args, **_kwargs: None,
+        histogram_levels_for_display=lambda levels: levels,
+        is_rgb_image=lambda _image: False,
+    )
+    payloads = {}
+    for tile_number in range(4):
+        image = np.full((2, 2), tile_number, dtype=np.float32)
+        payload = DisplayTilePayload(
+            tile_number=tile_number,
+            source_index=tile_number,
+            image=image,
+            histogram_data=None,
+            source_id=("source", tile_number),
+            semantic_data=image,
+            source_shape=image.shape,
+        )
+        payloads[tile_number] = payload
+        item = ImageItem(axisOrder="row-major")
+        source_id = _direct_payload_source_id(payload.source_id, payload)
+        layer.states[tile_number] = TileLayerItemState(
+            tile_number=tile_number,
+            source_index=tile_number,
+            item=item,
+            local_rect=(0, 0, 2, 2),
+            world_rect=(-1, -1, -1, -1),
+            source_array_id=source_id,
+            histogram_array_id=None,
+            levels=(0.0, 1.0),
+            rgb_already_windowed=False,
+            visible=True,
+            display_cache=image,
+        )
+
+    order = []
+
+    def update_levels(state, levels):
+        order.append(int(state.tile_number))
+        state.levels = levels
+        return False, False
+
+    layer._update_tile_levels = update_levels
+    tile_delta = SimpleNamespace(
+        active_tiles=(3, 1, 2, 0),
+        upserts={},
+        removals=(),
+        force_refresh=False,
+        cold_deadline_ms=None,
+    )
+
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.25, 0.75),
+        rgb_already_windowed=False,
+        dirty_tiles=(),
+        tile_payloads=payloads,
+        tile_delta=tile_delta,
+    )
+
+    assert order == [3, 1, 2, 0]
+
+
 def test_tile_presentation_admission_uses_backend_cost_function():
     from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
     from arrayscope.window.montage_session import MontageRenderSession
