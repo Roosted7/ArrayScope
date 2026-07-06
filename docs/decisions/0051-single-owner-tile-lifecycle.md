@@ -203,8 +203,8 @@ The Lifecycle diagnostics line classifies any stale-presentation report; check i
   once a session has presented.  Sessions with pending level refinement still rebirth until
   the machine owns level convergence.  Kill switch `ARRAYSCOPE_DISABLE_SESSION_RETARGET`;
   counters `_montage_session_reuses` / `_montage_session_retargets` / retarget-reject reasons.
-  Warm scrub step: ~50 → ~36 ms measured; the remaining cost is the delta-commit walk itself
-  (vispy layer update, overlays, full-image apply) — queued with dispatch below.
+  Warm scrub step: ~50 → ~36 ms measured; the remaining cost was the delta-commit walk itself
+  (VisPy layer update, wrapper seeding, priority ordering, full-image apply).
   **Field-verify gate: passed (2026-07-05, manual).** Verdict "good enough for now" with
   known short-lived inconsistencies attributed to the split ownership this rework is
   removing; the counters above stay the triage vocabulary for regression reports.
@@ -256,7 +256,18 @@ The Lifecycle diagnostics line classifies any stale-presentation report; check i
   and watchdog-visible, and the retarget resets the per-window evidence scan counters.
   Level convergence values themselves still live in `PresentationGenerationTracker` — the
   machine owns visibility and pumping, not yet the per-tile level axis.
-  **P2 remaining:** the per-commit delta walk cost.
+  **Delta-commit walk cost (landed 2026-07-06):** warm retarget commits are delta-proportional
+  enough for the P2 gate: wrapper seeding now receives the dirty-tile delta and reuses resident
+  base identities before any LOD/texture lookup, and one-shot upsert/stale-level ordering uses a
+  pure priority helper instead of constructing mutable queues.  Fair AC-power reruns against the
+  clean base measured the no-cProfile warm scrub path at 15.7 ms mean / 15.0 ms p50 / 21.4 ms
+  worst, with commit slices 8.4–13.7 ms and payload-build slices 3.7–5.9 ms.  The changed tree
+  measured 14.8 ms mean / 14.0 ms p50 / 24.3 ms worst, with commit slices 7.3–13.5 ms and
+  payload-build slices 2.5–5.1 ms.  cProfile-confirmed worst-case commit spikes narrowed under
+  instrumentation (clean commit slices 17.7–32.7 ms, changed 22.9–30.5 ms), while outer profiled
+  step means were effectively noise-equivalent.  Corrected scrub-fastpath probe: 59 steps,
+  mean 9.4 ms, worst 21.8 ms, heartbeat p95 14.9 ms, max 48.5 ms, `stall_repairs=0`.
+  No new kill switch.
 - **P2-adjacent (landed 2026-07-05, the few-Hz-scroll cure):** rule 4 applied at the
   architecture level — the interaction path is cheap by construction.  Dimension scrubbing
   notes viewport interaction (it was invisible to every gate); during a burst, stage planning

@@ -33,7 +33,12 @@ from arrayscope.display.model.presentation_generation import (
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import TileLifecycle
-from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
+from arrayscope.display.model.tile_priority import (
+    MontageTilePriorityQueue,
+    TilePriorityContext,
+    prioritize_tile_numbers,
+    tile_numbers,
+)
 from arrayscope.window import montage_lod
 from arrayscope.window.montage_lod import (  # noqa: F401  (re-exports; canonical home is montage_lod)
     LodMaterializationRequest,
@@ -959,7 +964,13 @@ class MontageRenderSession:
         self.display_tile_payloads[tile_number] = payload
         return payload
 
-    def seed_display_tile_payloads(self, previous_payloads: dict[int, DisplayTilePayload], source_ids: dict[int, object]) -> None:
+    def seed_display_tile_payloads(
+        self,
+        previous_payloads: dict[int, DisplayTilePayload],
+        source_ids: dict[int, object],
+        *,
+        tile_numbers=None,
+    ) -> None:
         """Reuse compatible wrappers *and committed presentation ownership*.
 
         Retargeting a montage is a placement change, not evidence that resident
@@ -987,22 +998,31 @@ class MontageRenderSession:
                     by_base.setdefault(base, payload)
         seeded_state = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
         changed_state = False
-        for tile_number, rendered in self.rendered_tiles.items():
+        if tile_numbers is None:
+            candidate_numbers = tuple(int(tile) for tile in self.rendered_tiles)
+        else:
+            candidate_numbers = tuple(
+                int(tile) for tile in tuple(tile_numbers or ()) if int(tile) in self.rendered_tiles
+            )
+        for tile_number in candidate_numbers:
+            rendered = self.rendered_tiles.get(int(tile_number))
+            if rendered is None:
+                continue
             tile_number = int(tile_number)
             previous = self.display_tile_payloads.get(tile_number)
             owns_committed_presentation = tile_number in self.presented_tiles
             if previous is None:
                 base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
-                texture_data, _texture_histogram, lod = self._texture_for_rendered_tile(rendered)
-                source_id = self._payload_source_id(
-                    base_source_id,
-                    texture_kind=getattr(rendered, "texture_kind", None),
-                    lod=lod,
-                    texture_data=texture_data,
-                )
-                previous = by_source.get(source_id)
+                previous = by_base.get(base_source_id)
                 if previous is None:
-                    previous = by_base.get(base_source_id)
+                    texture_data, _texture_histogram, lod = self._texture_for_rendered_tile(rendered)
+                    source_id = self._payload_source_id(
+                        base_source_id,
+                        texture_kind=getattr(rendered, "texture_kind", None),
+                        lod=lod,
+                        texture_data=texture_data,
+                    )
+                    previous = by_source.get(source_id)
                 owns_committed_presentation = previous is not None
             if previous is None:
                 continue
@@ -1961,23 +1981,11 @@ class MontageRenderSession:
         return ()
 
     def _prioritized_tile_numbers(self, tiles) -> tuple[int, ...]:
-        requested = tuple(dict.fromkeys(int(tile) for tile in tuple(tiles or ())))
-        if len(requested) <= 1:
-            return requested
-        valid_tiles = []
-        fallback = []
-        plan_tiles = tuple(getattr(self.plan, "tiles", ()) or ())
-        for tile_number in requested:
-            if 0 <= int(tile_number) < len(plan_tiles):
-                valid_tiles.append(plan_tiles[int(tile_number)])
-            else:
-                fallback.append(int(tile_number))
-        if not valid_tiles:
-            return requested
-        queue = MontageTilePriorityQueue(valid_tiles, context=self._tile_priority_context())
-        ordered = list(tile_numbers(queue.ordered_tiles()))
-        ordered.extend(tile for tile in fallback if tile not in ordered)
-        return tuple(int(tile) for tile in ordered if int(tile) in set(requested))
+        return prioritize_tile_numbers(
+            tiles,
+            plan_tiles=tuple(getattr(self.plan, "tiles", ()) or ()),
+            context=self._tile_priority_context(),
+        )
 
     def _ensure_pending_priority_queue(self, *, context: TilePriorityContext | None = None) -> None:
         del context

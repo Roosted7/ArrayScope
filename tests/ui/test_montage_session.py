@@ -1255,6 +1255,63 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
     assert 0 in shifted.presented_tiles
 
 
+def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(monkeypatch):
+    original = _session()
+    tile = original.plan.tiles[2]
+    image = np.full((2, 2), 2, dtype=np.float32)
+    rendered = RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
+    original.mark_loaded(rendered)
+    state, delta = original.build_tile_presentation({2: ("tile-source", 2)})
+    original.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(presented_tiles=state.active_payloads(delta)),
+    )
+    original.mark_presented(state.active_payloads(delta))
+
+    shifted_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(2, 3), text="2:4")
+    shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2)
+    shifted = MontageRenderSession(
+        session_id=2,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        level_expected_indices=(2, 3),
+        plan=shifted_plan,
+        view_state=shifted_state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(10, 10),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=shifted_plan.tiles,
+        rendered_tiles={
+            0: RenderedTile(shifted_plan.tiles[0], image, image, 0.0, image.shape, image.nbytes)
+        },
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    monkeypatch.setattr(shifted, "_resident_lod_active", lambda: True)
+    monkeypatch.setattr(
+        shifted,
+        "_texture_for_rendered_tile",
+        lambda _rendered: (_ for _ in ()).throw(AssertionError("texture lookup should not seed resident payload")),
+    )
+
+    shifted.seed_display_tile_payloads(
+        state.payloads,
+        {0: ("tile-source", 2)},
+        tile_numbers=(0,),
+    )
+
+    assert shifted.display_tile_payloads[0].source_index == 2
+    assert shifted.tile_presentation_state.payloads[0] is shifted.display_tile_payloads[0]
+
+
 def test_resident_retarget_upserts_bypass_cold_priority_cap():
     original = _session()
     images = {

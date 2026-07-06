@@ -3128,7 +3128,11 @@ class FrameRenderMixin:
                         }
                     )
                 if previous_payloads:
-                    session.seed_display_tile_payloads(previous_payloads, tile_source_ids)
+                    session.seed_display_tile_payloads(
+                        previous_payloads,
+                        tile_source_ids,
+                        tile_numbers=tuple(session.dirty_payloads),
+                    )
                     if reuse_any_lod:
                         # Converge seeded stale-level payloads to the live
                         # demand: mismatched tiles become dirty and rebuild

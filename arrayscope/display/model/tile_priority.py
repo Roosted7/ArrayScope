@@ -226,6 +226,42 @@ def tile_numbers(tiles) -> tuple[int, ...]:
     return tuple(int(_tile_index(tile)) for tile in tuple(tiles or ()))
 
 
+def prioritize_tile_numbers(tiles, *, plan_tiles, context: TilePriorityContext) -> tuple[int, ...]:
+    """Return tile numbers in the same priority order as the queue.
+
+    This is for one-shot commit/admission ordering.  It deliberately avoids
+    constructing a mutable queue when the caller already owns the candidate
+    set and only needs a sorted view.
+    """
+
+    requested = tuple(dict.fromkeys(int(tile) for tile in tuple(tiles or ())))
+    if len(requested) <= 1:
+        return requested
+    plan_tiles = tuple(plan_tiles or ())
+    requested_set = set(requested)
+    sequence = {int(tile): offset for offset, tile in enumerate(requested)}
+    valid = tuple(tile for tile in requested if 0 <= int(tile) < len(plan_tiles))
+    if not valid:
+        return requested
+
+    distance_score = _distance_scorer(context)
+
+    def priority_key(tile_number: int) -> tuple[object, ...]:
+        index = int(tile_number)
+        tile = plan_tiles[index]
+        return (
+            int(_band_for_index(index, context)),
+            distance_score(tile),
+            int(sequence.get(index, 0)),
+            index,
+        )
+
+    ordered = sorted(valid, key=priority_key)
+    ordered_set = set(ordered)
+    ordered.extend(tile for tile in requested if tile not in ordered_set)
+    return tuple(int(tile) for tile in ordered if int(tile) in requested_set)
+
+
 def _tile_index(tile_or_index) -> int:
     if hasattr(tile_or_index, "montage_index"):
         return int(tile_or_index.montage_index)
@@ -241,9 +277,13 @@ def _band_for_index(index: int, context: TilePriorityContext) -> TilePriorityBan
 
 
 def _distance_score(tile, context: TilePriorityContext) -> float:
+    return _distance_scorer(context)(tile)
+
+
+def _distance_scorer(context: TilePriorityContext):
     ranges = _normalize_view_range(context.view_range)
     if ranges is None:
-        return 0.0
+        return lambda _tile: 0.0
     (x0, x1), (y0, y1) = ranges
     span_x = max(1.0, abs(float(x1) - float(x0)))
     span_y = max(1.0, abs(float(y1) - float(y0)))
@@ -253,11 +293,15 @@ def _distance_score(tile, context: TilePriorityContext) -> float:
         focus_y = (float(y0) + float(y1)) * 0.5
     else:
         focus_x, focus_y = focus
-    center_x = float(getattr(tile, "x0", 0.0)) + float(getattr(tile, "width", 1.0)) * 0.5
-    center_y = float(getattr(tile, "y0", 0.0)) + float(getattr(tile, "height", 1.0)) * 0.5
-    dx = (center_x - focus_x) / span_x
-    dy = (center_y - focus_y) / span_y
-    return float(dx * dx + dy * dy)
+
+    def score(tile) -> float:
+        center_x = float(getattr(tile, "x0", 0.0)) + float(getattr(tile, "width", 1.0)) * 0.5
+        center_y = float(getattr(tile, "y0", 0.0)) + float(getattr(tile, "height", 1.0)) * 0.5
+        dx = (center_x - focus_x) / span_x
+        dy = (center_y - focus_y) / span_y
+        return float(dx * dx + dy * dy)
+
+    return score
 
 
 def _normalize_focus(focus) -> tuple[float, float] | None:
