@@ -1,19 +1,24 @@
-# Execution plans — remaining LOD / tile-lifecycle work
+# Execution plans — LOD / tile-lifecycle work
 
-**Date:** 2026-07-06 · **Branch:** `feature/lod-residency` · **Worktree:** `~/projects/ArrayScope-lod-test` (tip 5b781500)
-**Source of truth for history and queue:** ADR 0050, ADR 0051 (Phases), `docs/current-state.md`, commit messages. These plans are execution recipes on top of them — if they disagree, the ADRs win; update the plan.
+**Date:** 2026-07-06.
+**Source of truth for current priority:** `docs/roadmap.md`.
+**Source of truth for LOD/lifecycle rationale and history:** ADR 0050, ADR 0051, and commit
+messages. These plans are execution recipes on top of them; if they disagree, update the plan or
+the ADR rather than carrying two queues.
 
 ## What these plans are
 
 Self-contained, step-by-step plans a less experienced developer (or model) can execute:
 
-| Plan | Item | Queue position |
+| Plan | Item | Status |
 |---|---|---|
-| [01-delta-commit-walk.md](01-delta-commit-walk.md) | Delta-commit walk cost (~20–30 ms warm scrub) | 1 — ADR 0051 "P2 remaining" |
-| [02-pyqtgraph-lod-ab.md](02-pyqtgraph-lod-ab.md) | Re-measure PyQtGraph resident-LOD A/B → default decision | Cheap, measurement-only; run any time (independent of 01, which is VisPy-side) |
+| [01-delta-commit-walk.md](01-delta-commit-walk.md) | Delta-commit walk cost (~20–30 ms warm scrub) | Done — 2026-07-06 |
+| [02-pyqtgraph-lod-ab.md](02-pyqtgraph-lod-ab.md) | Re-measure PyQtGraph resident-LOD A/B → default decision | Done — 2026-07-06; PyQtGraph resident LOD remains opt-in |
 | [03-p3-residency-axis.md](03-p3-residency-axis.md) | P3: residency axis authoritative | Done — 2026-07-06 |
+| [04-preview-reduce-before-display.md](04-preview-reduce-before-display.md) | Preview-quality reduced display/evaluation, then exact refinement | Active next item in the roadmap |
 
-Backlog beyond these three is at the bottom of this file.
+The roadmap owns the queue beyond these recipes. Add another numbered plan only when an item
+reaches the head of the roadmap and needs command-level execution detail.
 
 ## Ground rules (read before ANY plan)
 
@@ -28,7 +33,7 @@ Backlog beyond these three is at the bottom of this file.
 ## Environment & commands
 
 - Python: `~/miniconda3/envs/arrayscope/bin/python` (host conda env; the Cowork sandbox cannot load PyQt6 — GUI/GPU work must run on the host, e.g. via Desktop Commander).
-- **Full suite** (~35 s, KEEP PARALLEL): `cd ~/projects/ArrayScope-lod-test && ~/miniconda3/envs/arrayscope/bin/python -m pytest tests -q -n 16 --ignore=tests/gpu_interaction`
+- **Full suite** (~35 s, KEEP PARALLEL): `cd ~/projects/ArrayScope && ~/miniconda3/envs/arrayscope/bin/python -m pytest tests -q -n 16 --ignore=tests/gpu_interaction`
   - Known parallel-only flakes (pass alone; pre-existing, ignore unless newly consistent): `test_selecting_fft_workers_updates_settings`, `test_resource_governor_applies_worker_and_callback_limits`, `test_compute_policy_configures_stage_and_montage_lanes`, teardown of `test_montage_ready_display_payloads_commit_immediately`.
 - **GPU harness** (~14 s, real hardware; asserts `stall_repairs==0`):
   `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland ~/miniconda3/envs/arrayscope/bin/python -m pytest tests/gpu_interaction -n 0` (a bare DC shell lacks the display env — always set these).
@@ -52,21 +57,13 @@ Backlog beyond these three is at the bottom of this file.
 
 1. Full suite green (`-n 16`), GPU harness green including `stall_repairs==0`.
 2. Numbers recorded (before/after) in the commit message and, when they change a decision, in the ADR.
-3. Docs updated the same day, same branch: the ADR's phase/status section + `docs/current-state.md` closing paragraph ("Next, in order: …").
-4. Claude memory updated (`arrayscope-lod-residency` note: queue position, new tip, new recipes/gotchas discovered).
+3. Docs updated the same day: the ADR's phase/status section, `docs/roadmap.md` when priority
+   changes, and `docs/current-state.md` only for high-level state changes.
+4. Claude memory appended (`arrayscope-lod-residency` note: queue position, new tip, new
+   recipes/gotchas discovered). Do not delete historical memory notes.
 
-## Backlog (after plans 01–03, in recorded priority order)
+## Backlog
 
-Each of these becomes its own plan when it reaches the head of the queue; the ADR sections named are the background reading.
-
-1. **PyQtGraph resident-LOD A/B re-measure → default decision.** Plan 02 remains the cheap measurement gate; the old A/B included the now-fixed auto-levels wedge.
-2. **Reduce-before-ops consumer (first-eval black cure).** ADR 0050 "Reduce-before-ops and preview-then-refine" + "Retained preview level" — the design is fully captured there. Needs the payload-quality contract: evaluate commuting pipelines on reduced input, present as `quality="preview"` (exact planes explicitly absent), stream native `"exact"` through ordinary supersession. Do NOT wire reduced-input evaluation without preview-then-refine (it adds work instead of removing it).
-3. **Probe `[DESYNC!]`/stuck-scan false-positive refinement** — probe-side reporting polish in `verify_stale.py`/scan probes; not an app defect.
-4. **2 blank tiles at zoom-back settle** — field observation; reproduce with the GPU-harness content assertions (per-tile analytic patterns) before touching code.
-5. **wrongly-scaled-on-open xfail XPASSES on the GPU harness** (again 2026-07-05 #6) — consider un-xfailing to lock the fix in.
-6. **Level-value convergence into the machine's presentation axis** — level VALUES still live in `PresentationGenerationTracker`; machine owns visibility/pumping only. Full ownership dissolves the last split-brain (see ADR 0051 P2 "Retarget level-pending fallback removed" closing note).
-7. **P4 — per-slot mip validity tracking**; re-enable atlas mipmaps by default (rule 5; currently `ARRAYSCOPE_ATLAS_MIPMAPS=1` opt-in after the previous-occupant defect).
-8. **P5 / X5e — PyQtGraph tiled backend consumes the same effects; benchmark matrix** on both backends, then the cross-platform (Windows/macOS) trace gap from `current-state.md` risk #1.
-9. **Perf watch:** FFT settle drift — bisect with `/tmp/lod-baseline/bisect_*.jsonl` recipe if it recurs.
-10. **Zoom-across-threshold harness test** — scripted zoom crossing a LOD threshold with content assertions.
-11. **X5c / X5d** (viewport-scoped normal images; region-first materialization) — roadmap gates, blocked on nothing but priority; P3's owner-carrying claims are a prerequisite cleanup.
+No independent backlog lives here anymore. Current next steps, including small follow-up tests and
+probe polish, are listed in `docs/roadmap.md` under X5. Historical detail remains in ADR 0050,
+ADR 0051, and the completed plans above.

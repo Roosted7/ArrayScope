@@ -1,13 +1,12 @@
 # Plan 02 — Re-measure PyQtGraph resident-LOD A/B → default decision
 
-**Status:** measurement-only, cheap (~10 min of runs); independent of Plan 01 (that is
-VisPy-side). Read `README.md` ground rules first.
+**Status:** landed 2026-07-06. Read `README.md` ground rules first.
 
 ## Background
 
 ADR 0050 phase 3 (commit 8704438c) implemented PyQtGraph resident LOD behind
 `ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1`, default OFF per the "where measured" rule, because the
-first hardware A/B (Wayland, 272-tile montage) REGRESSED: raw settle 1263→1441 ms, FFT settle
+first hardware A/B (Wayland, 272-tile montage) REGRESSED: raw settle 1263->1441 ms, FFT settle
 2590→4367 ms, level drag 9019→9686 ms.
 
 Since then the **auto-levels wait wedge was fixed** (ADR 0051, commit 448b8c4b line; stalls
@@ -16,6 +15,12 @@ FFT regression in the numbers the default-off decision was based on. **The decis
 re-made on clean numbers.** Remaining named suspects if it still regresses: worker-side
 ingest-reduction contention, and the level-drag phase being dominated by the
 histogram/full-stats loop rather than per-tile re-window (ADR 0050 adoption-status paragraph).
+
+The clean 2026-07-06 rerun fixed the display-payload bug and kept the PyQtGraph policy opt-in:
+native raw/FFT/level medians were 1071/2245/7193 ms; resident medians were
+1155/3232/3012 ms with 0 watchdogs and applied factor 4 / level 2. The level loop now wins
+by more than 2x, but first-settle still regresses because display reductions are extra work after
+native evaluation. The next adoption attempt is Plan 04, not another blind A/B.
 
 ## Step 1 — Clean A/B runs
 
@@ -68,7 +73,7 @@ Decision table:
 
 1. ADR 0050 "Adoption status" paragraph: replace the stale first-A/B numbers with the new
    median numbers + date + decision (either way — a re-confirmed OFF is also a result).
-2. `docs/current-state.md`: PyQtGraph LOD sentence (currently "stays off-by-default: the first
-   A/B regresses settle times") — update to the new evidence.
-3. Commit; update Claude memory (`arrayscope-lod-residency`): remove the "re-measure before
-   default decision" note, record the decision + numbers.
+2. `docs/roadmap.md`: advance the X5 active queue if the decision changes the next step; update
+   `docs/current-state.md` only for the high-level PyQtGraph LOD state.
+3. Commit; append to Claude memory (`arrayscope-lod-residency`) with the superseding decision and
+   numbers; do not delete historical notes.

@@ -1,7 +1,7 @@
 # Current state
 
 **Snapshot:** ArrayScope v33/Y1–Y3, v34 review adjustments, and the LOD/tile-lifecycle
-landings (ADR 0050/0051), 2026-07-05.
+landings (ADR 0050/0051), 2026-07-06.
 The v30/X1–X4 control-plane work is preserved; v32 moved render orchestration
 off the window into a composed `RenderOrchestrator` and fixed the crash class
 that motivated it; Y1–Y3 then unified the staleness vocabulary, the shared
@@ -81,30 +81,15 @@ Y1–Y3/X5 entries in the [roadmap](roadmap.md).
 
 ## Current direction
 
-The structural gates are done enough to stop broad refactoring. Current work is
-X5: base GPU, backend-default, singleton/direct fast-path, viewport-residency,
-and multi-resolution decisions on measured device behavior, not headless runs.
-Ordered gates and exit criteria are in the [roadmap](roadmap.md).
+Broad ownership refactors are no longer the focus. Current work is X5: make physical
+presentation, residency, backend defaults, and multi-resolution policy evidence-led on real
+devices. The ordered gates and active LOD queue live in the [roadmap](roadmap.md); detailed
+history and rationale live in ADR 0050 and ADR 0051.
 
-Inside X5, ADR 0051 P1-P3 are landed. Field verification passed
-(2026-07-05, manual — "good enough", residual short-lived inconsistencies attributed to
-the split ownership being removed) and machine-derived dispatch landed the same day:
-one Qt-free derivation (`presentation/dispatch.py`) that every montage event edge ends
-with, declined admissions always arm a controller capacity waiter, and the stall
-watchdog is an assertion (`stall_repairs` asserted 0 in the GPU harness). PyQtGraph
-resident LOD is implemented behind `ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1` but stays
-off-by-default after the 2026-07-06 A/B: the display-payload bug is fixed and the
-FFT level loop wins by more than 2x, but raw/FFT settle still regress because reductions
-remain extra worker work after native evaluation (ADR 0050 adoption status).
-Sets-as-views landed the same day: `loading_tiles`/`active_tile_requests`/`skipped_tiles`
-are machine views (mutations are events; confirmed presentation clears load intent
-mechanically), stage fan-in reports its tile↔stage bindings through machine events, and
-the pyqtgraph+resident auto-levels wait wedge is fixed (stall_repairs 8–10 → 0 per
-workflow run: evidence producer always armed, vacuous evidence for non-finite sources,
-level evidence and stale-level drain visible to dispatch and the watchdog).  The
-retarget's level-pending rebirth fallback is removed. P3 moved demanded-level residency
-claims into the lifecycle record (`claimed → materializing → resident|released`), made
-the old pending-request list a machine view, and made session replacement release claims
-by scanning record owners.
-Next, in order: reduce-before-ops / preview-then-refine consumer for first-evaluation
-black cures and PyQtGraph reduce-before-display adoption.
+Inside X5, montage tiled scenes now have resident asynchronous LOD on VisPy and a single-owner
+tile lifecycle for presentation, semantic identity, and demanded-level residency claims.
+PyQtGraph resident LOD is implemented but remains opt-in: it now makes level changes more than
+2x faster, but cold settle still regresses because reduced display payloads are produced after
+native evaluation. The next LOD item is therefore preview-quality reduced display/evaluation,
+then exact refinement, so first presentation can show an honest lower-resolution result instead
+of black tiles while exact data streams in.

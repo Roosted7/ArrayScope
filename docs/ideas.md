@@ -46,6 +46,23 @@ Measure whether bounded sampling/binning actually violates budget. When it does,
 
 Record device limits, attempt representative allocations conservatively, and cache proven-compatible texture classes for the session. Treat allocation failure as recoverable evidence, not a crash.
 
+### Elastic preview residency
+
+Experiment with a retained preview LOD tier that uses otherwise-unused CPU/GPU memory for nearby
+or whole-dataset preview tiles, especially on low-end devices where exact work is slow. This is not
+the active preview-then-refine contract in the roadmap; it is the more aggressive policy question
+after that contract exists.
+
+Questions to answer before it can move to the roadmap:
+
+- whether the preview tier should have a fixed budget or borrow only memory not needed for exact
+  visible work;
+- whether preview residency belongs in GPU memory, stage memory, or both;
+- how far speculative coverage should extend beyond the viewport without starving visible/exact
+  refinement;
+- how to evict preview data without causing black tiles, re-upload churn, or misleading diagnostics;
+- how source-provided pyramids and chunked/lazy sources should feed the preview tier.
+
 ## Product candidates
 
 ### Linked viewer groups

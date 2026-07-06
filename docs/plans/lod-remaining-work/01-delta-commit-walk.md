@@ -1,10 +1,10 @@
 # Plan 01 — Delta-commit walk cost (warm scrub ~36 ms → target ≤25 ms, stretch ≤16 ms)
 
-**Status:** queue head (ADR 0051 "P2 remaining"). Read `README.md` ground rules first.
+**Status:** landed 2026-07-06. Read `README.md` ground rules first.
 
 ## Background
 
-Dimension-scrub cost history on `feature/lod-residency` (VisPy, 272-tile montage):
+Historical dimension-scrub cost on the LOD residency branch (VisPy, 272-tile montage):
 ~216 ms → ~23 ms (uncached burst, P2-adjacent scrub fastpath) / ~50 ms (cached rebuild) → ~36 ms
 (session reuse + index-window retarget, commit 07121fc2). ADR 0051 P2 names the remainder
 explicitly: "the remaining cost is the delta-commit walk itself (vispy layer update, overlays,
@@ -23,8 +23,9 @@ no-optimistic-transitions and rule 6 event-driven convergence).
 3. Also run `/tmp/lod-baseline/verify_scrub.py` for the heartbeat-gap histogram.
 4. Record: warm scrub ms/step, retargets vs rejects (rejects should be ~0 since the
    level-pending fallback removal), max heartbeat gap. Save output to
-   `/tmp/lod-baseline/p01_baseline.log`. If warm scrub is no longer ~36 ms, STOP and
-   re-check you're on tip 5b781500 with no kill switches set.
+   `/tmp/lod-baseline/p01_baseline.log`. If warm scrub is no longer ~36 ms while replaying this
+   historical plan, stop and re-check ADR 0051's recorded baseline and kill switches before
+   interpreting the result.
 
 ## Step 1 — Profile the walk (find the split)
 
@@ -83,8 +84,8 @@ Constraints:
 
 1. ADR 0051: replace "**P2 remaining:** the per-commit delta walk cost." with a landed
    paragraph in the P2 phase entry (what changed, before/after ms, any new kill switch).
-2. `docs/current-state.md`: update the closing "Next, in order:" line (P3 becomes head) and
-   the scrub numbers in the LOD/lifecycle rows if quoted.
+2. `docs/roadmap.md`: advance the X5 active queue if this changes priority; update
+   `docs/current-state.md` only if the high-level lifecycle/performance state changes.
 3. Commit (style: what + why + numbers). Then update Claude memory
-   (`arrayscope-lod-residency`): new tip, new warm-scrub number, queue head = P3, any new
+   (`arrayscope-lod-residency`): new tip, new warm-scrub number, new roadmap head, any new
    gotchas/probes.

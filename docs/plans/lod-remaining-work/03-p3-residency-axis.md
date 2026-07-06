@@ -98,7 +98,6 @@ optimistic release (a release without a terminal event is the old defect class).
 
 1. ADR 0051: P3 phase entry → landed paragraph (what moved into the machine, what was deleted,
    counters added, before/after diagnostics).
-2. `docs/current-state.md`: tile-lifecycle row ("Residency axis (P3)" no longer phased) +
-   closing "Next, in order:" line (next = PyQtGraph default decision if Plan 02 not yet done,
-   else the backlog head from README).
+2. `docs/roadmap.md`: advance the X5 active queue; update `docs/current-state.md` only for the
+   high-level tile-lifecycle state.
 3. Commit; update Claude memory: tip, queue, the dangling-claim scan as a new triage tool.

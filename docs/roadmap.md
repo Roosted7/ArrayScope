@@ -12,11 +12,11 @@ The v32 composition change (render orchestration off the window) is recorded in
 [ADR 0045](decisions/0045-render-orchestrator-composition.md) and the
 [v32 audit](reviews/v32-composition-audit.md).
 
-## Now — finish ownership after the v32 composition change
+## Done — finish ownership after the v32 composition change
 
 ### Y1. One generation contract and one admission path
 
-**Status:** Done (2026-07-02). `window/render_contract.py` owns the staleness
+Done (2026-07-02). `window/render_contract.py` owns the staleness
 vocabulary (render generation, session currency, per-kind work tokens);
 orchestrator predicates delegate to it and architecture guards forbid local
 reimplementations and context-free `singleShot` callbacks. The orchestrator
@@ -26,34 +26,9 @@ viewport/priority retargets now record admissions. The redundant
 prefetch-dispatch and frame-viewport-update revision counters were deleted
 (coalescing is structural: one queued flag / one restarted timer).
 
-**Goal:** a single staleness/ordering vocabulary inside `RenderOrchestrator`
-so that no fix ever has to choose between parallel token schemes.
-
-Work:
-
-- Inventory the remaining revision counters, session keys, and staleness
-  predicates in the orchestrator (the v32 audit counted 8/3/5 before the
-  extraction; they now live in one namespace).
-- Define one `RenderGeneration`-anchored contract: `(document_key,
-  semantic_key, render_generation)` with derived session/level/histogram
-  revisions, owned by the orchestrator.
-- Replace per-site staleness checks with the shared predicate; delete the
-  duplicates.
-- Route the remaining ad-hoc work admission (montage tile scheduling and
-  result fan-in paths that bypass the graph) through `WorkGraph` lanes.
-- Keep timers as pure rescheduling; every deferred callback carries the
-  generation guard and a receiver context (the ADR 0045 pattern).
-
-Exit gate:
-
-- one module defines staleness; grep finds no local reimplementation;
-- every admission decision is observable in `WorkGraph` counters;
-- the montage timer/token tests pass unchanged or are strengthened;
-- no deferred callback can outlive the window or apply across generations.
-
 ### Y2. Backend de-duplication against the surface contract
 
-**Status:** Done (2026-07-02). Measured reality differed from the audit
+Done (2026-07-02). Measured reality differed from the audit
 estimate: `ImageView2D` is an empty subclass (the shell *is* the PyQtGraph
 implementation) and the two `tiles.py` files share zero functions — their
 divergence is physical (CPU items vs. GPU atlas), with semantic tile
@@ -70,29 +45,9 @@ both backends. Two real forks were found and fixed by those tests: VisPy's
 close path had lost `_cancel_interaction`, and VisPy hid tiled presentation
 into a private `"idle"` mode instead of the shared `"none"`.
 
-**Goal:** one implementation of everything that is not texture/atlas vs.
-QGraphicsItem mechanics.
-
-Work:
-
-- Hoist the ~40 methods implemented in both `ImageView2D` and
-  `VisPyImageView2D` into `ImageViewShell` (audit: ~1,200 duplicated lines,
-  ~465 directly hoistable).
-- Extract the shared Qt-free tile bookkeeping from
-  `display/backends/pyqtgraph/tiles.py` and `display/backends/vispy/tiles.py`
-  into a common model; keep upload/visual mechanics per backend.
-- Share the identical histogram preview handling.
-- Feature-parity tests target the `ImageSurface` contract, not widget classes.
-
-Exit gate:
-
-- a behavior fix in shared shell logic cannot be applied to one backend only;
-- the two `tiles.py` files contain only physical mechanics;
-- display-tree tests pass on both backends with no per-backend semantic forks.
-
 ### Y3. Declarative UI sync, tools on production composition, one cache core
 
-**Status:** Done (2026-07-02).
+Done (2026-07-02).
 
 - `ui/state_binding.py` (`ViewStateBinder`) owns ViewState→widget mirroring:
   each control registers one binding where it is created, applies run with
@@ -114,27 +69,6 @@ Exit gate:
   eviction loops.
 - Idle stage warmup stays removed; if it returns it must be admitted through
   the `WorkGraph` speculative-residency lane (unchanged policy).
-
-**Goal:** remove the remaining drift machines.
-
-Work:
-
-- Replace the 17 manual `_sync_*` fan-outs with one binder that observes
-  `ViewState` revisions and updates registered widgets; controls emit intent
-  only.
-- Make `tools/profile_montage_workflow.py` and the scroll profiler drive the
-  real `ArrayScopeWindow` composition instead of re-implementing it; profiling
-  scenarios become thin scripts over production wiring.
-- Unify the three cache eviction/priority implementations (stage cache, slab
-  cache, display/payload caches) behind one bounded-cache core in `core/`.
-- If idle stage warmup is wanted again, admit it through the `WorkGraph`
-  speculative-residency lane; the removed bespoke scheduler is not the model.
-
-Exit gate:
-
-- adding a control requires registering it once, not editing sync methods;
-- profiler output is produced by production composition;
-- one eviction/priority implementation with focused tests.
 
 ## Now — evidence-first performance gates
 
@@ -158,8 +92,12 @@ adds the resulting `auto` backend choice: VisPy on Linux with hardware GL, PyQtG
 else. **X5b done for montage tiled scenes (2026-07-05)** via
 [ADR 0051](decisions/0051-single-owner-tile-lifecycle.md): presentation state is a machine whose
 only path to `presented` is a backend-acknowledged commit, and acknowledgement is identity-aware
-(backend slot identities vs. emitted payload identities, causally bound reports). Windows/macOS
-traces and X5c–X5e remain open.
+(backend slot identities vs. emitted payload identities, causally bound reports). ADR 0051 P1-P3
+are landed: presentation, semantic identity, and demanded-level residency claims are machine-owned,
+and the delta-commit walk is within the interaction budget. Plan 02 re-measured PyQtGraph resident
+LOD after the wedge and display-payload fixes: level changes now win by more than 2x, but cold
+settle still regresses, so PyQtGraph resident LOD remains opt-in until the
+preview/reduce-before-display contract lands. Windows/macOS traces and X5c–X5e remain open.
 
 **Goal:** base GPU, backend-default, singleton/direct fast-path, viewport-residency, and
 multi-resolution decisions on real device behavior.
@@ -175,10 +113,9 @@ Ordered gates:
    causally-bound acknowledgement is the machine invariant, with conformance coverage for partial
    acceptance, declines, parking, stale reports, and session replacement. Normal-image tiled
    scenes inherit this when X5c routes them through the same machine. Field verification
-   passed and machine-derived dispatch landed (2026-07-05): every event edge re-derives all
-   pumps from the records, declined admissions arm capacity waiters, and the stall watchdog
-   is an assertion. Remaining P2 work (legacy sets as views + stage fan-in events,
-   delta-commit walk cost) is tracked in ADR 0051's phases.
+   passed, machine-derived dispatch landed, legacy session sets are machine views, stage fan-in
+   reports through machine events, the P2 delta-commit walk is within budget, and P3 made
+   demanded-level residency claims authoritative. Remaining lifecycle phases are P4/P5 below.
 3. **X5c — Viewport-scoped tiled scenes.** Change viewport retarget scheduling from montage-mode
    checks to tiled-scene/storage checks before enabling visible-only active regions for internally
    tiled normal images.
@@ -196,6 +133,33 @@ Ordered gates:
    already run resident asynchronous LOD (ADR 0050); this gate governs internally tiled normal
    images and source-provided pyramids, which land only after the acknowledged-residency,
    viewport-retarget, region-first materialization, and compatible-residency contracts are proven.
+
+Active LOD queue inside X5:
+
+1. **Preview-quality reduced display/evaluation, then exact refinement.** This is the next LOD
+   implementation item and the PyQtGraph adoption route. If exact work cannot produce a visible
+   tile within the interaction budget, present a reduced `quality="preview"` display payload
+   instead of black tiles or placeholders. Preview payloads draw pixels only: exact planes are
+   explicitly absent, exact consumers refuse them, and native `quality="exact"` payloads supersede
+   preview through the ordinary backend-acknowledged lifecycle. `lod-commuting` display pipelines
+   may evaluate reduced input; `lod-opaque` pipelines still compute the transform at native
+   resolution and reduce the output for display. See
+   [Plan 04](plans/lod-remaining-work/04-preview-reduce-before-display.md) and ADR 0050's
+   reduce-before-ops note.
+2. **Level-value convergence in the lifecycle machine.** Presentation, semantic identity, and
+   demanded-level residency are machine-owned; per-tile level values still live in
+   `PresentationGenerationTracker`. Move convergence evidence and values into the same lifecycle
+   model so level progress has one owner.
+3. **P4 — per-slot derived-state tracking.** Track mip validity per backend slot, then re-enable
+   atlas mipmaps by default only when previous-occupant defects are impossible and memory
+   accounting is explicit.
+4. **P5/X5e — PyQtGraph effects and benchmark matrix.** Make the PyQtGraph tiled backend consume
+   the same machine effects as VisPy where physical mechanics allow it, then run the backend/LOD
+   matrix across Linux X11/Wayland, Windows, and macOS.
+5. **Harness and probe hardening.** Reproduce the reported two blank tiles at zoom-back settle with
+   analytic per-tile content assertions before touching code; un-xfail the wrongly-scaled-on-open
+   GPU test if it continues to XPASS; add a scripted zoom-across-threshold content test; refine
+   `[DESYNC!]`/stuck-scan probe reporting if it still produces false positives.
 
 Policy constraints:
 
