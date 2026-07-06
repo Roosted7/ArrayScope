@@ -24,18 +24,11 @@ def test_montage_presents_every_tile_with_its_own_content(montage_window):
     h.assert_lifecycle_settled()
 
 
-@pytest.mark.xfail(
-    reason="known defect (ADR 0051 context): enabling the montage after the "
-    "single-frame view has settled keeps a stale fit, so the session shows "
-    "the montage wrongly scaled in a corner; scheduled for the "
-    "presentation-pipeline rework",
-    strict=False,
-)
 def test_view_fits_montage_when_enabled_after_settle():
     """Reproduces the field report 'sessions often open with wrongly scaled
     items': the fast path (montage enabled right after open, as in the shared
     fixture) fits correctly, but enabling it after the single-frame view has
-    fully settled leaves the old fit in place."""
+    fully settled must still fit the montage content."""
 
     from tests.gpu_interaction.conftest import Harness, synthetic_montage_data
     from arrayscope.app.qt_binding import prefer_pyside6
@@ -83,6 +76,30 @@ def test_pan_keeps_event_loop_responsive_and_content_correct(montage_window):
         f"event loop hung {worst:.0f} ms during pan (bar: {MAX_INTERACTION_GAP_MS} ms)"
     )
     # Back to rest: content must still be each tile's own.
+    h.fit_view()
+    assert h.wait_settled()
+    h.assert_tile_identity_ramp()
+    h.assert_lifecycle_settled()
+
+
+def test_zoom_across_lod_threshold_keeps_content_and_levels_in_sync(montage_window):
+    h = montage_window
+    h.fit_view()
+    assert h.wait_settled()
+    view = h.win.img_view.getView()
+    height, width = h.session.plan.display_shape
+
+    ranges = (
+        ((0.0, float(width)), (0.0, float(height))),
+        ((0.0, float(width) * 0.45), (0.0, float(height) * 0.45)),
+        ((float(width) * 0.25, float(width) * 0.75), (float(height) * 0.25, float(height) * 0.75)),
+        ((0.0, float(width)), (0.0, float(height))),
+    )
+    for x_range, y_range in ranges:
+        view.setRange(xRange=x_range, yRange=y_range, padding=0)
+        assert h.wait_settled(timeout=20.0), f"never settled after zoom range {x_range}/{y_range}"
+        h.assert_lifecycle_settled()
+
     h.fit_view()
     assert h.wait_settled()
     h.assert_tile_identity_ramp()

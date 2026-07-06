@@ -87,6 +87,39 @@ def pipeline_commutes_for_display_lod(operations, base_shape, base_dtype=None) -
     return True
 
 
+def pipeline_supports_reduced_display_lod(operations, base_shape, base_dtype=None, *, display_axes=()) -> bool:
+    """True when display axes may be reduced before evaluating this pipeline.
+
+    This is broader than ``pipeline_commutes_for_display_lod``.  Pointwise
+    operations may touch display axes only when they declare ``lod_commuting``;
+    non-commuting operations are still compatible when their affected axes are
+    completely outside the display axes (for example an FFT over a montage
+    axis while x/y are the display axes).
+    """
+
+    shape = tuple(int(size) for size in base_shape)
+    dtype = base_dtype
+    display = set(_normalize_axes(display_axes, ndim=len(shape)))
+    for operation in tuple(operations or ()):
+        capabilities = getattr(operation, "capabilities", None)
+        output_shape = getattr(operation, "output_shape", None)
+        if not callable(capabilities) or not callable(output_shape):
+            return False
+        next_shape = tuple(int(size) for size in output_shape(shape))
+        if next_shape != shape:
+            return False
+        caps = normalize_capabilities(capabilities(shape, dtype), ndim=len(shape))
+        if not bool(caps.lod_commuting):
+            touched = set(caps.blocking_axes) | set(caps.expands_request_axes) | set(_operation_declared_axes(operation))
+            if touched & display:
+                return False
+        output_dtype = getattr(operation, "output_dtype", None)
+        if callable(output_dtype):
+            dtype = output_dtype(dtype)
+        shape = next_shape
+    return True
+
+
 def _normalize_kind(kind) -> OperationKind:
     if isinstance(kind, OperationKind):
         return kind
@@ -103,3 +136,18 @@ def _normalize_axes(axes, *, ndim: int) -> tuple[int, ...]:
         if axis not in result:
             result.append(axis)
     return tuple(result)
+
+
+def _operation_declared_axes(operation) -> tuple[int, ...]:
+    axes = []
+    for name in ("axis", "axes"):
+        if not hasattr(operation, name):
+            continue
+        value = getattr(operation, name)
+        if value is None:
+            continue
+        if isinstance(value, (tuple, list)):
+            axes.extend(int(axis) for axis in value)
+        else:
+            axes.append(int(value))
+    return tuple(dict.fromkeys(axes))

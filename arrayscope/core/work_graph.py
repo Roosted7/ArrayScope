@@ -22,6 +22,7 @@ class WorkLane(str, Enum):
 
     VISIBLE_PLANNING = "visible_planning"
     VISIBLE_MATERIALIZATION = "visible_materialization"
+    DISPLAY_PREVIEW = "display_preview"
     DISPLAY_PREPARATION = "display_preparation"
     BACKEND_COMMIT = "backend_commit"
     GUI_FAN_IN = "gui_fan_in"
@@ -35,6 +36,7 @@ VISIBLE_LANES = frozenset(
     {
         WorkLane.VISIBLE_PLANNING,
         WorkLane.VISIBLE_MATERIALIZATION,
+        WorkLane.DISPLAY_PREVIEW,
         WorkLane.DISPLAY_PREPARATION,
         WorkLane.BACKEND_COMMIT,
         WorkLane.GUI_FAN_IN,

@@ -12,12 +12,12 @@ from types import SimpleNamespace
 import numpy as np
 
 from arrayscope.core.work_graph import WorkLane
-from arrayscope.core.scheduler import EvalPriority
+from arrayscope.core.scheduler import EvalPriority, FrameTarget
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.lod import LOD_POLICY_RESIDENT
 from arrayscope.display.model.frame import TiledValueSource
 from arrayscope.display.pyramid import PyramidCache
-from arrayscope.operations.pipeline import ArrayDocument
+from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, CenteredIFFT, FFTShift
 from arrayscope.window.frame_renderer import FrameRenderMixin
 
 from tests.window.test_montage_lod_residency import TILE, _cold_session, _session
@@ -193,6 +193,7 @@ def _tile_worker_renderer(session, *, evaluated):
     fake._evaluate_montage_tile_snapshot = _evaluate
     fake._schedule_next_montage_tile = FrameRenderMixin._schedule_next_montage_tile.__get__(fake)
     fake._schedule_montage_preview_tile = FrameRenderMixin._schedule_montage_preview_tile.__get__(fake)
+    fake._schedule_montage_shared_preview_batch = FrameRenderMixin._schedule_montage_shared_preview_batch.__get__(fake)
     return fake
 
 
@@ -244,6 +245,74 @@ def test_native_scale_scheduling_performs_no_ingest_reduction():
 
     assert len(pyramid) == 0
     assert int(getattr(renderer, "_montage_lod_ingest_reductions", 0)) == 0
+
+
+def test_non_display_transform_preview_is_scheduled_once_for_shared_tile_window():
+    from dataclasses import replace
+
+    from arrayscope.display.montage import MontagePlan
+
+    class LazyArray:
+        def __init__(self, data):
+            self._data = np.asarray(data)
+            self.shape = self._data.shape
+            self.dtype = self._data.dtype
+            self.reads = []
+
+        def read_region(self, index, *, cancellation_token=None):
+            self.reads.append(index)
+            return self._data[index]
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    data = np.arange(TILE * TILE * 2, dtype=np.float32).reshape(TILE, TILE, 2)
+    source = LazyArray(data)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, indices=(0, 1), columns=2, text=":")
+    )
+    tiles = tuple(
+        replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+        for tile in session.plan.tiles
+    )
+    session.plan = MontagePlan(
+        axis=2,
+        tile_shape=session.plan.tile_shape,
+        grid_shape=session.plan.grid_shape,
+        columns=2,
+        rows=1,
+        gap=session.plan.gap,
+        tiles=tiles,
+    )
+    session.view_state = state
+    session.montage_axis = 2
+    session.document = ArrayDocument(
+        source,
+        steps=(CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2)),
+    )
+    session.frame_plan = SimpleNamespace(
+        target=FrameTarget(("semantic",), ("viewport",), ("presentation",), "final"),
+        tile_shape=(TILE, TILE),
+    )
+    session.pending_tiles.append(session.plan.tiles[0])
+    renderer = _tile_worker_renderer(session, evaluated=[])
+
+    assert renderer._schedule_next_montage_tile(session) is True
+
+    calls = renderer.montage_tile_evaluation_controller.calls
+    assert len(calls) == 2
+    assert calls[0]["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
+    assert calls[1]["work_item"].lane == WorkLane.DISPLAY_PREVIEW
+    assert calls[1]["key"][0] == "montage_preview_batch"
+    assert source.reads == [(slice(None, None, None), slice(None, None, None), slice(None, None, None))]
+    assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 1
+    assert session.lod_preview_presentations == 2
+    assert sorted(session.display_tile_payloads) == [0, 1]
+    assert {payload.quality for payload in session.display_tile_payloads.values()} == {"preview"}
+    assert {payload.texture_data.shape[:2] for payload in session.display_tile_payloads.values()} == {
+        (TILE // 4, TILE // 4)
+    }
 
 
 def test_reduced_preview_evaluation_admits_floor_payload_without_exact_semantics():
@@ -360,6 +429,131 @@ def test_reduced_preview_evaluation_reads_only_tile_display_range():
 
     assert preview is not None
     assert source.reads == [(slice(5, 5 + TILE, 1), slice(7, 7 + TILE, 1), slice(0, 1, 1))]
+    _key, plane, _histogram = preview
+    assert plane.shape == (TILE // 4, TILE // 4)
+
+
+def test_fft_over_montage_axis_preview_reduces_display_input_and_expands_transform_axis():
+    from dataclasses import replace
+
+    from arrayscope.display.montage import MontagePlan
+    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+
+    class LazyArray:
+        def __init__(self, data):
+            self._data = np.asarray(data)
+            self.shape = self._data.shape
+            self.dtype = self._data.dtype
+            self.reads = []
+
+        def read_region(self, index, *, cancellation_token=None):
+            self.reads.append(index)
+            return self._data[index]
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    data = np.arange((TILE * 2) * (TILE * 2) * 2, dtype=np.float32).reshape(TILE * 2, TILE * 2, 2)
+    source = LazyArray(data)
+    y_indices = tuple(range(5, 5 + TILE))
+    x_indices = tuple(range(7, 7 + TILE))
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_axis_range(0, y_indices, text="5:5+tile")
+        .with_axis_range(1, x_indices, text="7:7+tile")
+        .with_montage_axis(2, indices=(0, 1), columns=2, text=":")
+    )
+    tiles = tuple(
+        replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+        for tile in session.plan.tiles
+    )
+    session.plan = MontagePlan(
+        axis=2,
+        tile_shape=session.plan.tile_shape,
+        grid_shape=session.plan.grid_shape,
+        columns=2,
+        rows=1,
+        gap=session.plan.gap,
+        tiles=tiles,
+    )
+    session.view_state = state
+    session.document = ArrayDocument(
+        source,
+        steps=(CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2)),
+    )
+    tile = session.plan.tiles[1]
+
+    preview = _evaluate_montage_tile_preview_snapshot(
+        session,
+        tile,
+        demand=session.ingest_lod_demand(),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert preview is not None
+    assert source.reads == [(slice(5, 5 + TILE, 1), slice(7, 7 + TILE, 1), slice(None, None, None))]
+    _key, plane, _histogram = preview
+    assert plane.shape == (TILE // 4, TILE // 4)
+
+
+def test_fft_over_display_axis_preview_falls_back_to_native_output_reduction():
+    from dataclasses import replace
+
+    from arrayscope.display.montage import MontagePlan
+    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+
+    class LazyArray:
+        def __init__(self, data):
+            self._data = np.asarray(data)
+            self.shape = self._data.shape
+            self.dtype = self._data.dtype
+            self.reads = []
+
+        def read_region(self, index, *, cancellation_token=None):
+            self.reads.append(index)
+            return self._data[index]
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    data = np.arange(TILE * TILE * 2, dtype=np.float32).reshape(TILE, TILE, 2)
+    source = LazyArray(data)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, indices=(0, 1), columns=2, text=":")
+    )
+    tiles = tuple(
+        replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+        for tile in session.plan.tiles
+    )
+    session.plan = MontagePlan(
+        axis=2,
+        tile_shape=session.plan.tile_shape,
+        grid_shape=session.plan.grid_shape,
+        columns=2,
+        rows=1,
+        gap=session.plan.gap,
+        tiles=tiles,
+    )
+    session.view_state = state
+    session.document = ArrayDocument(source, steps=(CenteredFFT(axis=0),))
+    tile = session.plan.tiles[0]
+
+    preview = _evaluate_montage_tile_preview_snapshot(
+        session,
+        tile,
+        demand=session.ingest_lod_demand(),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert preview is not None
+    assert source.reads == [(slice(None, None, None), slice(None, None, None), 0)]
     _key, plane, _histogram = preview
     assert plane.shape == (TILE // 4, TILE // 4)
 

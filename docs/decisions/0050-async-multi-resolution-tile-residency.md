@@ -108,9 +108,13 @@ by more than 2x, but first-settle paths still regress because worker-side displa
 additional work after native evaluation. cProfile attribution before/after the display-payload
 fix showed native PyQtGraph phase/LUT work falling (~3.7 s→~1.0 s in the tooled run), while
 `reduce_box_mean` became the remaining hot path (~4.4 s with display and histogram reductions).
-The next PyQtGraph adoption attempt should land through the preview/reduce-before-display
-contract below, so first presentation builds the reduced display payload directly instead of
-evaluating native display pixels and then reducing them.
+The preview/reduce-before-display contract below now exists for `lod-commuting` tiled-montage
+pipelines, so first presentation can build a reduced display payload directly instead of
+evaluating native display pixels and then reducing them. A 2026-07-06 offscreen smoke with the
+realistic 272-tile workflow still keeps PyQtGraph resident LOD opt-in: resident raw/FFT/level
+phases were 3226/5458/5708 ms versus native raw/FFT 1536/3508 ms, and the native level loop timed
+out with all tiles visible but stale level evidence. The resident path was correct and settled,
+but cold settle is still not a default-quality win.
 
 ### Operations integration
 
@@ -173,19 +177,24 @@ contractual:
 
 `OperationCapabilities.lod_commuting` (default False; True for pointwise value maps such as
 conjugate) and `pipeline_commutes_for_display_lod()` define which pipelines may take box-mean
-reduced input for display evaluation. The first tiled-montage implementation uses that predicate
-to schedule a bounded `quality="preview"` worker after the exact worker is admitted: the preview
-reads only the tile's display-axis range, reduces input to the demanded LOD, evaluates the
-commuting display pipeline, and admits the display-only plane to the existing pyramid floor. Exact
-semantic planes are explicitly absent, so `TiledValueSource.value_at`/`tile_region`, refined level
-sampling, hover, ROI, profile, and export paths continue to wait for the native `"exact"` payload.
-The exact worker still owns refinement and supersedes preview through the ordinary
-backend-acknowledged lifecycle.
+reduced input for per-tile display evaluation today. That predicate schedules a bounded
+`quality="preview"` worker after the exact worker is admitted: the preview reads only the tile's
+display-axis range, reduces input to the demanded LOD, evaluates the commuting display pipeline,
+and admits the display-only plane to the existing pyramid floor. Exact semantic planes are
+explicitly absent, so `TiledValueSource.value_at`/`tile_region`, refined level sampling, hover,
+ROI, profile, and export paths continue to wait for the native `"exact"` payload. The exact worker
+still owns refinement and supersedes preview through the ordinary backend-acknowledged lifecycle.
 
-This initial slice intentionally does not claim full input-LOD coverage. `lod-transforming`
-pipelines still need planner-level level mapping, and `lod-opaque` pipelines still compute the
-transform at native resolution before output reduction. PyQtGraph resident LOD also stays opt-in
-until traces show cold raw/FFT settle no worse than native while preserving the level-loop win.
+`pipeline_supports_reduced_display_lod()` is the broader axis-aware predicate: transforms that
+touch only non-display axes (for example an FFT over the montage axis while x/y are display axes)
+can be evaluated from display-reduced input. The evaluator has that route, and it also has a
+native-output-reduced opaque fallback for pipelines that cannot take reduced input. The current
+per-tile scheduler deliberately does not launch those broader routes yet. A direct per-tile
+non-display-transform preview duplicates the full transform once per tile and did not present
+before exact work in the 2026-07-06 profile; the next implementation step is a shared/batched
+preview route that computes the reduced non-display transform once and fans out display-only
+preview planes for the requested tile window. PyQtGraph resident LOD stays opt-in until traces show
+cold raw/FFT settle no worse than native while preserving the level-loop win.
 
 ## Implemented contracts (2026-07-04)
 
@@ -269,6 +278,8 @@ dataset is open. Consequences it must deliver:
 The landed implementation keeps preview payloads presentation-only (`quality="preview"`,
 invisible to hover/ROI/profile/histogram reads), so no preview data leaks into semantic
 consumers. The first commuting preview-then-refine slice now runs the display pipeline on reduced
-tile input and admits that result as the preview floor while exact evaluation continues. The
-remaining transforming/opaque variants and default backend policy decisions stay behind the X5
-evidence gates.
+tile input and admits that result as the preview floor while exact evaluation continues. RGB
+preview floors retain display histogram planes so PyQtGraph can re-window them correctly before
+exact payloads arrive. Axis-aware and opaque evaluator routes are present but not scheduler-enabled
+until shared transform preview removes the duplicate per-tile work; default backend policy
+decisions stay behind the X5 evidence gates.

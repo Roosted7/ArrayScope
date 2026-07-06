@@ -93,4 +93,7 @@ PyQtGraph resident LOD is implemented but remains opt-in: it makes level changes
 first preview-quality reduced display/evaluation slice now evaluates `lod-commuting` tiled
 montage work on reduced input and presents an honest `quality="preview"` payload with exact
 semantic planes absent; native `quality="exact"` payloads still refine through the ordinary
-lifecycle.
+lifecycle. RGB preview floors now retain display histogram planes for level re-windowing. The
+axis-aware and opaque preview evaluator pieces exist, but the scheduler keeps non-display
+transform previews disabled until they can be shared across tiles instead of recomputing the
+transform once per tile.

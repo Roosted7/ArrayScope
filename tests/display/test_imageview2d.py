@@ -1399,6 +1399,95 @@ def test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots(qt_app):
         view.close()
 
 
+def test_pyqtgraph_rgb_preview_tile_rewindows_after_zoom_without_exact_payload(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((8, 8, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":"),
+        display_shape=(8, 8),
+        montage=MontageGeometry(indices=(0,), tile_shape=(8, 8), columns=1, rows=1, gap=0),
+        montage_tile_states=(MontageTileState.LOADED,),
+    )
+    rgb = np.array(
+        [
+            [[255, 0, 0], [0, 255, 0]],
+            [[0, 0, 255], [255, 255, 255]],
+        ],
+        dtype=np.uint8,
+    )
+    histogram = np.array([[0.0, 2.0], [4.0, 8.0]], dtype=np.float32)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        rgb,
+        histogram,
+        ("preview-rgb", 0),
+        texture_kind=TexturePlaneKind.RGB8,
+        source_shape=(8, 8),
+        lod=LodInfo(level=2, factor=4, source_shape=(8, 8), texture_shape=(2, 2), gutter=0),
+        quality="preview",
+    )
+    try:
+        view.setTiledPresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState({0: payload}),
+            tile_delta=TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=1,
+                visibility_revision=1,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=1,
+                upserts={0: payload},
+                active_tiles=(0,),
+                planned_tiles=(0,),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 8.0),
+            histogramRange=(0.0, 8.0),
+            rgb_already_windowed=False,
+        )
+        view.getView().setRange(xRange=(0.0, 4.0), yRange=(0.0, 4.0), padding=0)
+        before = view._montage_tile_layer.states[0].item.image.copy()
+
+        view.setTiledPresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState({0: payload}),
+            tile_delta=TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=1,
+                visibility_revision=1,
+                level_revision=2,
+                histogram_revision=1,
+                viewport_revision=2,
+                upserts={},
+                active_tiles=(0,),
+                planned_tiles=(0,),
+            ),
+            histogramPlotData=None,
+            levels=(2.0, 6.0),
+            histogramRange=(0.0, 8.0),
+            rgb_already_windowed=False,
+        )
+
+        state = view._montage_tile_layer.states[0]
+        timing = view.lastImageUploadTiming()
+        assert timing.tile_layer_rgb_window_tiles == 1
+        assert tuple(float(value) for value in state.levels) == (2.0, 6.0)
+        assert state.lod_scale == (4.0, 4.0)
+        assert state.item.image.shape == (2, 2, 3)
+        assert not np.array_equal(state.item.image, before)
+    finally:
+        view.close()
+
+
 def test_pyqtgraph_clean_typed_tiled_commit_stays_noop(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry

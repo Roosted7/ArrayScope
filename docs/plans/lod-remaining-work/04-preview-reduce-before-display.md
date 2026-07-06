@@ -1,6 +1,15 @@
 # Plan 04 — Preview-quality reduced display/evaluation, then exact refinement
 
-**Status:** active next item. Read `README.md` ground rules first.
+**Status:** partially implemented on 2026-07-06. Read `README.md` ground rules first.
+
+Implemented so far: the preview payload quality contract, reduced-input evaluation for
+`lod-commuting` tiled montage pipelines, RGB preview histogram planes for PyQtGraph re-windowing,
+axis-aware reduced-input evaluator support, native-output-reduced opaque evaluator support, and
+GPU/zoom-threshold regressions. The current scheduler only launches previews for pipelines that
+remove work in the per-tile implementation. Non-display transform previews are semantically valid
+but must be shared/batched across the requested tile window before scheduler enablement; the direct
+per-tile route duplicated FFT work and did not present before exact payloads in the 2026-07-06
+profile.
 
 ## Background
 
@@ -49,8 +58,11 @@ devices:
 1. For `lod-commuting` display pipelines, reduce input first and evaluate the display result at the
    demanded preview level.
 2. For `lod-transforming` pipelines, map the demanded level through the region planner before
-   display evaluation.
+   display evaluation. Non-display transform support must fan out one shared reduced transform to
+   the requested tile window; do not schedule one transform preview worker per tile.
 3. For `lod-opaque` pipelines, keep native transform semantics and reduce the output for display.
+   This is an evaluator fallback until there is evidence that scheduling it beats placeholders
+   without duplicating exact work.
 4. Do not reduce exact semantic planes. A preview tile must never masquerade as exact inspection
    data.
 
