@@ -324,6 +324,30 @@ def test_dangling_claims_is_the_rule2_audit(lc):
     assert lc.dangling_claims() == (ReleaseClaim(2, "b", ClaimOwner.PREVIEW),)
 
 
+def test_materialization_requests_are_claimed_record_view(lc):
+    """P3: pending LOD work is derived from residency records, not a side list."""
+
+    request = type(
+        "Req",
+        (),
+        {"tile_number": 8, "key": "lvl2", "chain": (("lvl1", (2, 2)), ("lvl2", (2, 2)))},
+    )()
+
+    lc.materialization_planned(8, request, owner=ClaimOwner.CHAIN)
+    assert lc.pending_materializations() == (request,)
+    assert set(lc.dangling_claims()) == {
+        ReleaseClaim(8, "lvl1", ClaimOwner.CHAIN),
+        ReleaseClaim(8, "lvl2", ClaimOwner.CHAIN),
+    }
+
+    lc.materialization_started(request)
+    assert lc.pending_materializations() == ()
+    assert len(lc.dangling_claims()) == 2
+
+    lc.materialization_resident(request)
+    assert lc.dangling_claims() == ()
+
+
 # -- lifecycle end-to-end -------------------------------------------------------
 
 

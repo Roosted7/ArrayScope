@@ -57,6 +57,7 @@ class LevelPhase(str, Enum):
     CLAIMED = "claimed"
     MATERIALIZING = "materializing"
     RESIDENT = "resident"
+    RELEASED = "released"
 
 
 class ClaimOwner(str, Enum):
@@ -80,6 +81,8 @@ class ReleaseClaim:
 class _LevelEntry:
     phase: LevelPhase
     owner: ClaimOwner
+    request: object = None
+    order: int = 0
 
 
 @dataclass
@@ -132,6 +135,7 @@ class TileLifecycle:
         #: (tile, emitted_id, backend_id) -> consecutive rejection count; a
         #: pair rejected IDENTITY_RESIGN_AFTER times is resigned (see below).
         self._identity_rejection_counts: dict[tuple[int, object, object], int] = {}
+        self._level_order = 0
 
     #: After this many identical rejections the machine records the backend's
     #: identity as the presented truth and stops the re-emit loop: a backend
@@ -343,14 +347,27 @@ class TileLifecycle:
 
     # -- residency axis ----------------------------------------------------
 
-    def level_claimed(self, tile_number: int, level_key, owner: ClaimOwner) -> None:
+    def level_claimed(
+        self,
+        tile_number: int,
+        level_key,
+        owner: ClaimOwner,
+        *,
+        request: object = None,
+    ) -> None:
         rec = self.record(tile_number)
-        rec.levels[level_key] = _LevelEntry(LevelPhase.CLAIMED, ClaimOwner(owner))
+        self._level_order += 1
+        rec.levels[level_key] = _LevelEntry(
+            LevelPhase.CLAIMED,
+            ClaimOwner(owner),
+            request=request,
+            order=int(self._level_order),
+        )
 
     def level_materializing(self, tile_number: int, level_key) -> None:
         rec = self.record(tile_number)
         entry = rec.levels.get(level_key)
-        if entry is not None:
+        if entry is not None and entry.phase is LevelPhase.CLAIMED:
             entry.phase = LevelPhase.MATERIALIZING
 
     def level_resident(self, tile_number: int, level_key) -> None:
@@ -363,12 +380,56 @@ class TileLifecycle:
 
     def level_declined(self, tile_number: int, level_key) -> tuple[ReleaseClaim, ...]:
         rec = self.record(tile_number)
-        entry = rec.levels.pop(level_key, None)
-        if entry is None or entry.phase is LevelPhase.RESIDENT:
-            if entry is not None:
-                rec.levels[level_key] = entry
+        entry = rec.levels.get(level_key)
+        if entry is None or entry.phase in (LevelPhase.RESIDENT, LevelPhase.RELEASED):
             return ()
+        entry.phase = LevelPhase.RELEASED
         return (ReleaseClaim(rec.tile_number, level_key, entry.owner),)
+
+    def materialization_planned(
+        self,
+        tile_number: int,
+        request: object,
+        *,
+        owner: ClaimOwner = ClaimOwner.CHAIN,
+    ) -> None:
+        """Record all singleflight claims held by a materialization request."""
+
+        for level_key in _request_level_keys(request):
+            self.level_claimed(tile_number, level_key, owner, request=request)
+
+    def materialization_started(self, request: object) -> None:
+        for rec, level_key, _entry in self._entries_for_request(request):
+            self.level_materializing(rec.tile_number, level_key)
+
+    def materialization_resident(self, request: object) -> None:
+        for rec, level_key, _entry in self._entries_for_request(request, include_released=True):
+            self.level_resident(rec.tile_number, level_key)
+
+    def materialization_released(self, request: object) -> tuple[ReleaseClaim, ...]:
+        effects: list[ReleaseClaim] = []
+        for rec, level_key, entry in self._entries_for_request(request):
+            if entry.phase in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING):
+                entry.phase = LevelPhase.RELEASED
+                effects.append(ReleaseClaim(rec.tile_number, level_key, entry.owner))
+        return tuple(effects)
+
+    def pending_materializations(self) -> tuple[object, ...]:
+        """Dispatchable LOD materialization requests derived from claimed records."""
+
+        seen: set[int] = set()
+        pending: list[tuple[int, object]] = []
+        for rec in self._records.values():
+            for entry in rec.levels.values():
+                request = entry.request
+                if entry.phase is not LevelPhase.CLAIMED or request is None:
+                    continue
+                identity = id(request)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                pending.append((int(entry.order), request))
+        return tuple(request for _order, request in sorted(pending, key=lambda item: item[0]))
 
     def session_replaced(self) -> tuple[ReleaseClaim, ...]:
         """Release every non-resident claim; the session's records are done."""
@@ -376,11 +437,11 @@ class TileLifecycle:
         effects: list[ReleaseClaim] = []
         for rec in self._records.values():
             for level_key, entry in tuple(rec.levels.items()):
-                if entry.phase is not LevelPhase.RESIDENT:
+                if entry.phase in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING):
                     effects.append(
                         ReleaseClaim(rec.tile_number, level_key, entry.owner)
                     )
-                    rec.levels.pop(level_key, None)
+                    entry.phase = LevelPhase.RELEASED
         return tuple(effects)
 
     def dangling_claims(self) -> tuple[ReleaseClaim, ...]:
@@ -390,7 +451,7 @@ class TileLifecycle:
             ReleaseClaim(rec.tile_number, level_key, entry.owner)
             for rec in self._records.values()
             for level_key, entry in rec.levels.items()
-            if entry.phase is not LevelPhase.RESIDENT
+            if entry.phase in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING)
         )
 
     # -- presentation axis ---------------------------------------------------
@@ -624,7 +685,43 @@ class TileLifecycle:
     ) -> tuple[ReleaseClaim, ...]:
         effects: list[ReleaseClaim] = []
         for level_key, entry in tuple(rec.levels.items()):
-            if entry.owner is owner and entry.phase is not LevelPhase.RESIDENT:
+            if entry.owner is owner and entry.phase in (
+                LevelPhase.CLAIMED,
+                LevelPhase.MATERIALIZING,
+            ):
                 effects.append(ReleaseClaim(rec.tile_number, level_key, entry.owner))
-                rec.levels.pop(level_key, None)
+                entry.phase = LevelPhase.RELEASED
         return tuple(effects)
+
+    def _entries_for_request(
+        self,
+        request: object,
+        *,
+        include_released: bool = False,
+    ) -> tuple[tuple[TileRecord, object, _LevelEntry], ...]:
+        entries: list[tuple[TileRecord, object, _LevelEntry]] = []
+        for rec in self._records.values():
+            for level_key, entry in rec.levels.items():
+                if entry.request is not request:
+                    continue
+                if (
+                    not include_released
+                    and entry.phase in (LevelPhase.RESIDENT, LevelPhase.RELEASED)
+                ):
+                    continue
+                entries.append((rec, level_key, entry))
+        return tuple(sorted(entries, key=lambda item: int(item[2].order)))
+
+
+def _request_level_keys(request: object) -> tuple[object, ...]:
+    chain = tuple(getattr(request, "chain", ()) or ())
+    keys: list[object] = []
+    if chain:
+        for level_key, _rel in chain:
+            if level_key is not None:
+                keys.append(level_key)
+    else:
+        key = getattr(request, "key", None)
+        if key is not None:
+            keys.append(key)
+    return tuple(keys)

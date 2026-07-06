@@ -3039,24 +3039,6 @@ class FrameRenderMixin:
                     int(getattr(self, "_montage_orphaned_stages_repaired", 0) or 0) + 1
                 )
         if (
-            not session.pending_tiles
-            and not session.loading_tiles
-            and not session.active_tile_requests
-            and not session.stage_fan_in.attached_requests
-        ):
-            # Settle repair (field defect 2026-07-05, JSONL 110937 sid=80):
-            # materializations for the demanded level die to supersession
-            # during zoom bounces, and refresh_lod_for_viewport only runs on
-            # camera events — at idle nothing re-requested the missing level,
-            # so tiles wedged on a coarser resident level until the next pan.
-            # Re-evaluate demand as the last work drains; singleflight claims
-            # make this idempotent, and this flush only runs when new work
-            # completed, so a repeatedly blocked admission cannot loop.
-            if session.refresh_lod_for_viewport():
-                self._schedule_montage_presentation_commit(session, force=False)
-            if getattr(session, "pending_lod_requests", None):
-                self._schedule_montage_lod_materializations(session)
-        if (
             getattr(session, "show_loading_overlays", False)
             and not session.visible_plan_complete()
             and (session.pending_tiles or session.loading_tiles or session.active_tile_requests or session.stage_fan_in.attached_requests)

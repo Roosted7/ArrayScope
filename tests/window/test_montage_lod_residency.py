@@ -91,6 +91,8 @@ def _session(*, mode=LOD_POLICY_RESIDENT, pyramid=None, view_range=ZOOMED_OUT_RA
 def _materialize(session, request):
     """Run one request the way the worker does: walk the chain, admit each step."""
 
+    if hasattr(session.pending_lod_requests, "mark_started"):
+        session.pending_lod_requests.mark_started(request)
     plane = request.source
     admitted = None
     steps = tuple(getattr(request, "chain", ()) or ()) or ((request.key, request.reduce_factor_xy),)
@@ -100,15 +102,18 @@ def _materialize(session, request):
             plane = session.lod_pyramid.admit(step_key, plane)
             if step_key == request.key:
                 admitted = plane
+    if hasattr(session.pending_lod_requests, "mark_resident"):
+        session.pending_lod_requests.mark_resident(request)
     return request.key, admitted
 
 
 def _release(session, request):
     """Drop one request the way every non-run scheduling path must: all claims."""
 
-    from arrayscope.window.montage_lod import _release_chain_claims, _request_chain
+    from arrayscope.window.montage_lod import _apply_release_effects
 
-    _release_chain_claims(session.lod_pyramid, _request_chain(request))
+    if hasattr(session.pending_lod_requests, "release"):
+        _apply_release_effects(session.lod_pyramid, session.pending_lod_requests.release(request))
 
 
 def test_native_only_mode_is_unchanged_by_default():
@@ -1165,7 +1170,7 @@ def test_refresh_replans_missing_desired_level_at_unchanged_viewport():
 
     # Simulate supersession/session churn dropping the planned work.
     released = montage_lod.release_session_claims(session)
-    assert released == len(first)
+    assert released == sum(1 for request in first for step_key, _rel in request.chain if step_key is not None)
     assert not session.pending_lod_requests
 
     session.refresh_lod_for_viewport()
@@ -1501,13 +1506,27 @@ def test_replaced_session_releases_undrained_request_claims():
 
     released = release_session_claims(session)
 
-    assert released == 2
+    assert released == 4
     assert session.pending_lod_requests == []
     assert pyramid.pending_count == 0
     # The same slice revisited (equal session key) can claim its levels again.
     replacement = _session(pyramid=pyramid)
     replacement.build_tile_presentation({})
     assert len(replacement.pending_lod_requests) == 2
+
+
+def test_pending_lod_request_view_clear_releases_pyramid_claims():
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid)
+    session.build_tile_presentation({})
+    assert len(session.pending_lod_requests) == 2
+    assert pyramid.pending_count == 4
+
+    session.pending_lod_requests.clear()
+
+    assert session.pending_lod_requests == []
+    assert pyramid.pending_count == 0
+    assert session.lifecycle.dangling_claims() == ()
 
 
 def test_diagnostics_lod_reason_follows_the_presented_level():

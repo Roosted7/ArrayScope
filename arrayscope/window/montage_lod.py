@@ -838,6 +838,53 @@ def _release_chain_claims(pyramid, chain) -> bool:
     return admitted
 
 
+def _apply_release_effects(pyramid, effects) -> int:
+    if pyramid is None:
+        return 0
+    released = 0
+    for effect in tuple(effects or ()):
+        pyramid.end_pending(effect.level_key)
+        released += 1
+    return released
+
+
+def _finish_request_claims(session, request, pyramid) -> bool:
+    """Mark a drained request's claims resident or released from pyramid truth."""
+
+    admitted = False
+    for step_key, _rel in _request_chain(request):
+        if step_key is None:
+            continue
+        if pyramid is not None and pyramid.peek(step_key) is not None:
+            admitted = True
+            session.lifecycle.level_resident(int(request.tile_number), step_key)
+        else:
+            _apply_release_effects(
+                pyramid,
+                session.lifecycle.level_declined(int(request.tile_number), step_key),
+            )
+    return admitted
+
+
+def _release_request_claims(session, request, pyramid) -> bool:
+    """Release one request through the lifecycle machine and pyramid cache."""
+
+    admitted = False
+    for step_key, _rel in _request_chain(request):
+        if step_key is not None and pyramid is not None and pyramid.peek(step_key) is not None:
+            admitted = True
+    view = getattr(session, "pending_lod_requests", None)
+    if view is not None and hasattr(view, "release"):
+        _apply_release_effects(pyramid, view.release(request))
+    else:
+        _release_chain_claims(pyramid, _request_chain(request))
+    if admitted:
+        for step_key, _rel in _request_chain(request):
+            if step_key is not None and pyramid is not None and pyramid.peek(step_key) is not None:
+                session.lifecycle.level_resident(int(request.tile_number), step_key)
+    return admitted
+
+
 def _request_chain(request) -> tuple:
     chain = tuple(getattr(request, "chain", ()) or ())
     if chain:
@@ -848,7 +895,7 @@ def _request_chain(request) -> tuple:
 
 
 def release_session_claims(session) -> int:
-    """Release every pyramid claim still held by a session's undrained requests.
+    """Release every pyramid claim still held by a session's lifecycle records.
 
     A session can die between planning (claims taken in refresh/build) and
     scheduling (claims handed to work items) — slice scrubbing replaces
@@ -862,15 +909,19 @@ def release_session_claims(session) -> int:
 
     if session is None:
         return 0
-    requests = list(getattr(session, "pending_lod_requests", ()) or ())
-    if not requests:
-        return 0
     pyramid = getattr(session, "lod_pyramid", None)
+    lifecycle = getattr(session, "lifecycle", None)
+    if lifecycle is not None:
+        return _apply_release_effects(pyramid, lifecycle.session_replaced())
+    requests = list(getattr(session, "pending_lod_requests", ()) or ())
+    if pyramid is None:
+        return 0
     released = 0
-    if pyramid is not None:
-        for request in requests:
-            _release_chain_claims(pyramid, _request_chain(request))
-            released += 1
+    for request in requests:
+        for step_key, _rel in _request_chain(request):
+            if step_key is not None:
+                pyramid.end_pending(step_key)
+                released += 1
     session.pending_lod_requests.clear()
     return released
 
@@ -974,16 +1025,21 @@ def schedule_materializations(renderer, session) -> None:
     dirty-payload commit path a late tile result uses.
     """
 
-    requests = list(getattr(session, "pending_lod_requests", ()) or ())
+    pending = getattr(session, "pending_lod_requests", None)
+    if pending is not None and hasattr(pending, "drain"):
+        requests = list(pending.drain())
+    else:
+        requests = list(pending or ())
+        if pending is not None:
+            pending.clear()
     if not requests:
         return
-    session.pending_lod_requests.clear()
     pyramid = getattr(session, "lod_pyramid", None)
     if pyramid is None:
         return
     if not renderer._montage_session_is_current(session):
         for request in requests:
-            _release_chain_claims(pyramid, _request_chain(request))
+            _release_request_claims(session, request, pyramid)
         return
     controller = getattr(renderer.win, "montage_tile_evaluation_controller", renderer.win.visible_evaluation_controller)
     session_id = int(session.session_id)
@@ -1012,17 +1068,18 @@ def schedule_materializations(renderer, session) -> None:
                 _release_chain_claims(pyramid, chain)
                 raise
 
-        def done(_result, tile_number=tile_number, session_id=session_id, session_key=session_key):
+        def done(_result, request=request, tile_number=tile_number, session_id=session_id, session_key=session_key):
+            _finish_request_claims(session, request, pyramid)
             on_level_ready(renderer, session_id, session_key, tile_number)
 
-        def release(chain=chain, pyramid=pyramid, tile_number=tile_number, session_id=session_id, session_key=session_key):
+        def release(request=request, pyramid=pyramid, tile_number=tile_number, session_id=session_id, session_key=session_key):
             # Supersession cancels stale *work*, never a completed
             # result: the worker may have admitted levels before the
             # item went stale, and dropping the notification leaves the
             # tile presenting an outdated level until an unrelated event
             # (user-visible as tiles stuck mid-zoom).  Admitted levels
             # notify; unstarted ones release their singleflight claims.
-            if _release_chain_claims(pyramid, chain):
+            if _release_request_claims(session, request, pyramid):
                 on_level_ready(renderer, session_id, session_key, tile_number)
 
         started = controller.start_latest(
@@ -1031,7 +1088,7 @@ def schedule_materializations(renderer, session) -> None:
             priority=EvalPriority.PREFETCH,
             replace_group=f"montage-lod:{tile_number}",
             on_done=done,
-            on_error=lambda _exc, chain=chain, pyramid=pyramid: _release_chain_claims(pyramid, chain),
+            on_error=lambda _exc, request=request, pyramid=pyramid: _release_request_claims(session, request, pyramid),
             on_stale=release,
             supersession_key=("montage-lod", tile_number),
             supersession_value=supersession_value,
@@ -1053,7 +1110,7 @@ def schedule_materializations(renderer, session) -> None:
             # visible work): release every singleflight claim immediately,
             # or the next refresh can never re-request these levels and the
             # tile is stuck at its old LOD until the demand changes.
-            _release_chain_claims(pyramid, chain)
+            _release_request_claims(session, request, pyramid)
             renderer._montage_lod_materializations_blocked = (
                 int(getattr(renderer, "_montage_lod_materializations_blocked", 0) or 0) + 1
             )

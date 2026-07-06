@@ -11,7 +11,7 @@ Self-contained, step-by-step plans a less experienced developer (or model) can e
 |---|---|---|
 | [01-delta-commit-walk.md](01-delta-commit-walk.md) | Delta-commit walk cost (~20–30 ms warm scrub) | 1 — ADR 0051 "P2 remaining" |
 | [02-pyqtgraph-lod-ab.md](02-pyqtgraph-lod-ab.md) | Re-measure PyQtGraph resident-LOD A/B → default decision | Cheap, measurement-only; run any time (independent of 01, which is VisPy-side) |
-| [03-p3-residency-axis.md](03-p3-residency-axis.md) | P3: residency axis authoritative | 2 — after 01 |
+| [03-p3-residency-axis.md](03-p3-residency-axis.md) | P3: residency axis authoritative | Done — 2026-07-06 |
 
 Backlog beyond these three is at the bottom of this file.
 
@@ -59,13 +59,14 @@ Backlog beyond these three is at the bottom of this file.
 
 Each of these becomes its own plan when it reaches the head of the queue; the ADR sections named are the background reading.
 
-1. **Reduce-before-ops consumer (first-eval black cure).** ADR 0050 "Reduce-before-ops and preview-then-refine" + "Retained preview level" — the design is fully captured there. Needs the payload-quality contract: evaluate commuting pipelines on reduced input, present as `quality="preview"` (exact planes explicitly absent), stream native `"exact"` through ordinary supersession. Do NOT wire reduced-input evaluation without preview-then-refine (it adds work instead of removing it).
-2. **Probe `[DESYNC!]`/stuck-scan false-positive refinement** — probe-side reporting polish in `verify_stale.py`/scan probes; not an app defect.
-3. **2 blank tiles at zoom-back settle** — field observation; reproduce with the GPU-harness content assertions (per-tile analytic patterns) before touching code.
-4. **wrongly-scaled-on-open xfail XPASSES on the GPU harness** (again 2026-07-05 #6) — consider un-xfailing to lock the fix in.
-5. **Level-value convergence into the machine's presentation axis** — level VALUES still live in `PresentationGenerationTracker`; machine owns visibility/pumping only. Full ownership dissolves the last split-brain (see ADR 0051 P2 "Retarget level-pending fallback removed" closing note).
-6. **P4 — per-slot mip validity tracking**; re-enable atlas mipmaps by default (rule 5; currently `ARRAYSCOPE_ATLAS_MIPMAPS=1` opt-in after the previous-occupant defect).
-7. **P5 / X5e — PyQtGraph tiled backend consumes the same effects; benchmark matrix** on both backends, then the cross-platform (Windows/macOS) trace gap from `current-state.md` risk #1.
-8. **Perf watch:** FFT settle drift — bisect with `/tmp/lod-baseline/bisect_*.jsonl` recipe if it recurs.
-9. **Zoom-across-threshold harness test** — scripted zoom crossing a LOD threshold with content assertions.
-10. **X5c / X5d** (viewport-scoped normal images; region-first materialization) — roadmap gates, blocked on nothing but priority; P3's owner-carrying claims are a prerequisite cleanup.
+1. **PyQtGraph resident-LOD A/B re-measure → default decision.** Plan 02 remains the cheap measurement gate; the old A/B included the now-fixed auto-levels wedge.
+2. **Reduce-before-ops consumer (first-eval black cure).** ADR 0050 "Reduce-before-ops and preview-then-refine" + "Retained preview level" — the design is fully captured there. Needs the payload-quality contract: evaluate commuting pipelines on reduced input, present as `quality="preview"` (exact planes explicitly absent), stream native `"exact"` through ordinary supersession. Do NOT wire reduced-input evaluation without preview-then-refine (it adds work instead of removing it).
+3. **Probe `[DESYNC!]`/stuck-scan false-positive refinement** — probe-side reporting polish in `verify_stale.py`/scan probes; not an app defect.
+4. **2 blank tiles at zoom-back settle** — field observation; reproduce with the GPU-harness content assertions (per-tile analytic patterns) before touching code.
+5. **wrongly-scaled-on-open xfail XPASSES on the GPU harness** (again 2026-07-05 #6) — consider un-xfailing to lock the fix in.
+6. **Level-value convergence into the machine's presentation axis** — level VALUES still live in `PresentationGenerationTracker`; machine owns visibility/pumping only. Full ownership dissolves the last split-brain (see ADR 0051 P2 "Retarget level-pending fallback removed" closing note).
+7. **P4 — per-slot mip validity tracking**; re-enable atlas mipmaps by default (rule 5; currently `ARRAYSCOPE_ATLAS_MIPMAPS=1` opt-in after the previous-occupant defect).
+8. **P5 / X5e — PyQtGraph tiled backend consumes the same effects; benchmark matrix** on both backends, then the cross-platform (Windows/macOS) trace gap from `current-state.md` risk #1.
+9. **Perf watch:** FFT settle drift — bisect with `/tmp/lod-baseline/bisect_*.jsonl` recipe if it recurs.
+10. **Zoom-across-threshold harness test** — scripted zoom crossing a LOD threshold with content assertions.
+11. **X5c / X5d** (viewport-scoped normal images; region-first materialization) — roadmap gates, blocked on nothing but priority; P3's owner-carrying claims are a prerequisite cleanup.

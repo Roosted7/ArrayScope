@@ -32,7 +32,7 @@ from arrayscope.display.model.presentation_generation import (
 )
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
 from arrayscope.operations.stage_fanin import StageFanInState
-from arrayscope.presentation import TileLifecycle
+from arrayscope.presentation import ClaimOwner, ReleaseClaim, TileLifecycle
 from arrayscope.display.model.tile_priority import (
     MontageTilePriorityQueue,
     TilePriorityContext,
@@ -259,6 +259,93 @@ class LifecycleSkippedTiles(_LifecycleTileSetView):
         self._lifecycle.tile_unskipped(index)
 
 
+class LifecyclePendingLodRequests:
+    """List-like view over lifecycle-owned LOD residency claims.
+
+    The request object carries worker input (source plane and reduction chain),
+    but its existence is not a second truth source: the lifecycle record owns
+    the per-level claim and its phase.  Iteration returns records in claim order;
+    draining marks claims materializing, and terminal paths release or mark them
+    resident through machine events.
+    """
+
+    __slots__ = ("_session",)
+
+    def __init__(self, session, seed=()):
+        self._session = session
+        for request in tuple(seed or ()):
+            self.append(request)
+
+    @property
+    def _lifecycle(self):
+        return self._session.lifecycle
+
+    def _snapshot(self) -> tuple:
+        return self._lifecycle.pending_materializations()
+
+    def append(self, request) -> None:
+        tile_number = int(getattr(request, "tile_number", request[0]))
+        self._lifecycle.materialization_planned(
+            tile_number,
+            request,
+            owner=ClaimOwner.CHAIN,
+        )
+
+    def drain(self) -> tuple:
+        requests = self._snapshot()
+        for request in requests:
+            self._lifecycle.materialization_started(request)
+        return requests
+
+    def mark_started(self, request) -> None:
+        self._lifecycle.materialization_started(request)
+
+    def mark_resident(self, request) -> None:
+        self._lifecycle.materialization_resident(request)
+
+    def release(self, request) -> tuple[ReleaseClaim, ...]:
+        return self._lifecycle.materialization_released(request)
+
+    def clear(self) -> None:
+        for request in self._snapshot():
+            self._apply_release_effects(self.release(request))
+
+    def pop(self, index: int = -1):
+        requests = list(self._snapshot())
+        request = requests.pop(index)
+        self._lifecycle.materialization_started(request)
+        return request
+
+    def __getitem__(self, index):
+        return self._snapshot()[index]
+
+    def __iter__(self):
+        return iter(self._snapshot())
+
+    def __len__(self) -> int:
+        return len(self._snapshot())
+
+    def __bool__(self) -> bool:
+        return bool(self._snapshot())
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, LifecyclePendingLodRequests):
+            return self._snapshot() == other._snapshot()
+        if isinstance(other, (list, tuple)):
+            return list(self._snapshot()) == list(other)
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({list(self._snapshot())!r})"
+
+    def _apply_release_effects(self, effects) -> None:
+        pyramid = getattr(self._session, "lod_pyramid", None)
+        if pyramid is None:
+            return
+        for effect in tuple(effects or ()):
+            pyramid.end_pending(effect.level_key)
+
+
 def _stage_tile_index(tile_or_index) -> int:
     try:
         return int(tile_or_index.montage_index)
@@ -410,9 +497,9 @@ class MontageRenderSession:
     # choice vs. resident LOD not yet adopted on the active backend).
     lod_native_reason: str | None = None
     lod_pyramid: object | None = None
-    # (tile_number, PyramidLevelKey, source array) triples for the renderer to
-    # schedule as background materializations.  Filled only under the
-    # "resident" policy after a singleflight claim on the pyramid cache.
+    # List-like view over lifecycle-owned LOD materialization claims.  Filled
+    # only under the "resident" policy after a singleflight claim on the
+    # pyramid cache; the lifecycle record, not this attribute, owns truth.
     pending_lod_requests: list = field(default_factory=list)
     lod_materializations_completed: int = 0
     acknowledged_source_ids: set = field(default_factory=set)
@@ -514,6 +601,9 @@ class MontageRenderSession:
         )
         self.rendered_tiles = LifecycleRenderedTiles(self.lifecycle, self.rendered_tiles)
         self.attach_stage_fan_in(self.stage_fan_in)
+        self.pending_lod_requests = LifecyclePendingLodRequests(
+            self, self.pending_lod_requests
+        )
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)
 
@@ -1630,10 +1720,9 @@ class MontageRenderSession:
         requeued = 0
         for index in sorted(orphaned):
             tile = by_number.get(int(index))
-            # P1: no residency claims are routed through the machine yet, so
-            # the decline can have no ReleaseClaim effects to execute (rule 4:
-            # never silently drop effects -- fail loudly if P3 wiring lands
-            # without updating this repair path).
+            # Orphan requeue is an evaluation repair only.  LOD residency
+            # claims release through the materialization/session-replacement
+            # paths; never silently drop an unexpected effect here.
             if self.lifecycle.evaluation_declined(int(index)):
                 raise AssertionError("unexecuted ReleaseClaim effects in requeue repair")
             if tile is None or int(index) in self.skipped_tiles:

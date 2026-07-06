@@ -1,8 +1,8 @@
 # 0051 — Single-owner tile lifecycle (presentation-pipeline rework)
 
-**Status:** Accepted (2026-07-04). P1 and the P2 core (presentation + semantic axes
+**Status:** Accepted (2026-07-04). P1-P3 (presentation, semantic, and residency axes
 authoritative, identity-aware acknowledgement, event-driven convergence) implemented on
-`feature/lod-residency` as of 2026-07-05; later phases tracked below.
+`feature/lod-residency` as of 2026-07-06; later phases tracked below.
 
 ## Context
 
@@ -275,9 +275,16 @@ The Lifecycle diagnostics line classifies any stale-presentation report; check i
   landing step plans, so superseded steps take no claims at all); evaluator keys and pyramid
   resident-level scans are memoized behind semantic identity + a pyramid revision counter.
   Scrub steps: ~216 → ~23 ms (uncached burst) / ~50 ms (cached rebuild — remaining P2 target).
-- **P3:** residency axis authoritative — pyramid claims/chains/walk admissions carry owners;
-  `release_session_claims` becomes a machine scan; delete `pending_lod_requests`; the settle
-  repair becomes machine-driven convergence instead of a flush-path patch.
+- **P3 (landed 2026-07-06):** residency axis authoritative for demanded-level materialization.
+  `TileRecord.levels` now carries per-level phase, owner, request metadata, and release order
+  (`claimed → materializing → resident|released`).  The session's LOD materialization queue is a
+  lifecycle-backed view over claimed records instead of an owning list: planning records all chain
+  claims with `ClaimOwner.CHAIN`, draining marks them materializing, worker completion marks
+  admitted levels resident, and stale/blocked/error paths execute `ReleaseClaim` effects against
+  the shared pyramid.  `release_session_claims` is a machine scan (`session_replaced`) over live
+  non-resident claims, so chain intermediates and final requested levels release by record owner
+  on session replacement; the old flush-path settle repair was removed because LOD pumps are now
+  implied by machine-owned claims and dispatch/capacity wakeups.
 - **P4:** per-slot derived-state tracking in backends; re-enable atlas mipmaps by default.
 - **P5:** PyQtGraph tiled backend consumes the same effects; X5e benchmark matrix on both.
 

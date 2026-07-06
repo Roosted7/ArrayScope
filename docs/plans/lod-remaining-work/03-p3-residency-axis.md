@@ -1,6 +1,6 @@
 # Plan 03 — P3: residency axis authoritative
 
-**Status:** queue position 2, start after Plan 01. Read `README.md` ground rules first.
+**Status:** landed 2026-07-06. Read `README.md` ground rules first.
 
 ## Background
 
