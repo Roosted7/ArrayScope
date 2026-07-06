@@ -517,6 +517,10 @@ def _wait_for_montage_complete(
     first_logical_complete_ms = None
     draw_after_complete_ms = None
     fully_visible_ms = None
+    first_display_payload_ms = None
+    first_display_payload_fill_ms = None
+    first_preview_payload_ms = None
+    first_preview_payload_fill_ms = None
     fully_visible_tile_request_count = None
     presentation_settled_ms = None
     final_visibility_state: dict[str, object] = {}
@@ -549,6 +553,16 @@ def _wait_for_montage_complete(
             presentation_settled_ms = (perf_counter() - start) * 1000.0
         visibility_state = _montage_visibility_state(win, mode=str(mode))
         final_visibility_state = visibility_state
+        if session is not None:
+            payload_state = _montage_display_payload_state(session, active_tiles=visibility_state["active_tiles"])
+            if first_display_payload_ms is None and payload_state["display_payload_count"] > 0:
+                first_display_payload_ms = (perf_counter() - start) * 1000.0
+            if first_preview_payload_ms is None and payload_state["preview_payload_count"] > 0:
+                first_preview_payload_ms = (perf_counter() - start) * 1000.0
+            if first_display_payload_fill_ms is None and payload_state["display_payload_fill"]:
+                first_display_payload_fill_ms = (perf_counter() - start) * 1000.0
+            if first_preview_payload_fill_ms is None and payload_state["preview_payload_fill"]:
+                first_preview_payload_fill_ms = (perf_counter() - start) * 1000.0
         fully_visible = bool(visibility_state["fully_visible"])
         if fully_visible and fully_visible_ms is None:
             fully_visible_ms = (perf_counter() - start) * 1000.0
@@ -563,6 +577,10 @@ def _wait_for_montage_complete(
                 "first_loaded_tile_ms": first_loaded_ms,
                 "first_display_committed_ms": first_display_committed_ms,
                 "first_overlay_clear_ms": first_overlay_clear_ms,
+                "first_display_payload_ms": first_display_payload_ms,
+                "first_display_payload_fill_ms": first_display_payload_fill_ms,
+                "first_preview_payload_ms": first_preview_payload_ms,
+                "first_preview_payload_fill_ms": first_preview_payload_fill_ms,
                 "logical_complete_ms": first_logical_complete_ms,
                 "draw_after_complete_ms": draw_after_complete_ms,
                 "fully_visible_ms": fully_visible_ms,
@@ -830,6 +848,7 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
             "fully_visible": False,
             "active_presented_tile_count": 0,
             "active_planned_tile_count": 0,
+            "active_tiles": (),
         }
     active = set(_active_planned_montage_tiles(session))
     expected = set(_expected_requested_montage_tiles(session))
@@ -875,6 +894,29 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
         "active_presented_tile_count": len(active_presented),
         "active_planned_tile_count": len(active),
         "requested_tile_count": len(expected),
+        "active_tiles": tuple(sorted(active)),
+    }
+
+
+def _montage_display_payload_state(session, *, active_tiles) -> dict[str, object]:
+    active = {int(tile) for tile in tuple(active_tiles or ())}
+    payloads = getattr(session, "display_tile_payloads", {}) or {}
+    display_payload_tiles = {
+        int(tile_number)
+        for tile_number, payload in dict(payloads).items()
+        if payload is not None and (not active or int(tile_number) in active)
+    }
+    preview_payload_tiles = {
+        int(tile_number)
+        for tile_number in display_payload_tiles
+        if str(getattr(payloads.get(tile_number), "quality", "exact")) == "preview"
+    }
+    fill_target = active if active else display_payload_tiles
+    return {
+        "display_payload_count": len(display_payload_tiles),
+        "preview_payload_count": len(preview_payload_tiles),
+        "display_payload_fill": bool(fill_target) and fill_target.issubset(display_payload_tiles),
+        "preview_payload_fill": bool(fill_target) and fill_target.issubset(preview_payload_tiles),
     }
 
 
@@ -1637,8 +1679,8 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
         return "No workflow timing records were produced.\n"
     lines = [
         "Workflow timing summary",
-        "| Backend | phase | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
-        "|---|---|---:|---:|---:|---|---|---:|---:|---|",
+        "| Backend | phase | first fill | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
+        "|---|---|---:|---:|---:|---:|---|---|---:|---:|---|",
     ]
     for record in records:
         lines.append(
@@ -1647,6 +1689,7 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
                 (
                     f"`{record.get('backend', '')}`",
                     f"`{record.get('phase', '')}`",
+                    _format_ms(record.get("first_display_payload_fill_ms", record.get("fully_visible_ms"))),
                     _format_ms(record.get("elapsed_ms")),
                     _format_ms(record.get("event_loop_max_gap_ms")),
                     _histogram_loop_action_summary(record),
@@ -1906,12 +1949,16 @@ def _tile_summary(record: dict[str, object]) -> str:
 
 def _pacing_summary(record: dict[str, object]) -> str:
     first = record.get("first_loaded_tile_ms") or record.get("first_display_committed_ms")
+    first_fill = record.get("first_display_payload_fill_ms")
+    preview_fill = record.get("first_preview_payload_fill_ms")
     exact_visible = record.get("fully_visible_ms")
     draw = record.get("draw_after_complete_ms")
     full = draw if draw is not None else record.get("elapsed_ms")
     return " / ".join(
         (
             f"first {_format_ms(first)}",
+            f"fill {_format_ms(first_fill)}",
+            f"preview {_format_ms(preview_fill)}",
             f"visible {_format_ms(exact_visible)}",
             f"full {_format_ms(full)}",
         )

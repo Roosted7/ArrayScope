@@ -4747,6 +4747,8 @@ def _preview_removes_work_for_current_scheduler(session, tile) -> bool:
 
 
 def _shared_preview_removes_work_for_current_scheduler(session, tile) -> bool:
+    if not _shared_transform_preview_enabled():
+        return False
     if not _can_evaluate_reduced_preview(session, tile):
         return False
     document = getattr(session, "document", None)
@@ -4755,6 +4757,15 @@ def _shared_preview_removes_work_for_current_scheduler(session, tile) -> bool:
     if pipeline_commutes_for_display_lod(getattr(document, "enabled_operations", ()), base_shape, dtype):
         return False
     return True
+
+
+def _shared_transform_preview_enabled() -> bool:
+    return str(os.environ.get("ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _shared_preview_batch_key(session, tile, demand) -> tuple:

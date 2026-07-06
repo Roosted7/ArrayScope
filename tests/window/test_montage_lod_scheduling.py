@@ -247,7 +247,7 @@ def test_native_scale_scheduling_performs_no_ingest_reduction():
     assert int(getattr(renderer, "_montage_lod_ingest_reductions", 0)) == 0
 
 
-def test_non_display_transform_preview_is_scheduled_once_for_shared_tile_window():
+def _non_display_transform_session_with_lazy_source():
     from dataclasses import replace
 
     from arrayscope.display.montage import MontagePlan
@@ -295,6 +295,23 @@ def test_non_display_transform_preview_is_scheduled_once_for_shared_tile_window(
         target=FrameTarget(("semantic",), ("viewport",), ("presentation",), "final"),
         tile_shape=(TILE, TILE),
     )
+    return session, source
+
+
+def test_non_display_transform_preview_is_not_scheduled_by_default_after_profile_regression():
+    session, _source = _non_display_transform_session_with_lazy_source()
+    session.pending_tiles.append(session.plan.tiles[0])
+    renderer = _tile_worker_renderer(session, evaluated=[])
+
+    assert renderer._schedule_next_montage_tile(session) is True
+
+    assert len(renderer.montage_tile_evaluation_controller.calls) == 1
+    assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 0
+
+
+def test_non_display_transform_preview_can_schedule_once_for_experimental_shared_tile_window(monkeypatch):
+    monkeypatch.setenv("ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW", "1")
+    session, source = _non_display_transform_session_with_lazy_source()
     session.pending_tiles.append(session.plan.tiles[0])
     renderer = _tile_worker_renderer(session, evaluated=[])
 
