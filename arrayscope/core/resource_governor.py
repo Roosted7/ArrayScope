@@ -93,6 +93,7 @@ class ResourceGovernorDiagnostics:
     pressure: ResourcePressureState
     lane_decisions: tuple[LaneWorkerDecision, ...] = ()
     ui_decisions: tuple[UiWorkDecision, ...] = ()
+    recent_ui_work_decisions: tuple[UiWorkDecision, ...] = ()
     feedback_channels: tuple[FeedbackChannelDiagnostics, ...] = ()
     recent_ui_work_observations: tuple[GuiCallbackObservation, ...] = ()
     recent_over_warning_callbacks: tuple[GuiCallbackObservation, ...] = ()
@@ -155,6 +156,7 @@ class ResourceGovernor:
     _last_lane_update_monotonic: dict[ComputeLane, float] = field(default_factory=dict)
     _lane_decisions: dict[ComputeLane, LaneWorkerDecision] = field(default_factory=dict)
     _ui_decisions: dict[str, UiWorkDecision] = field(default_factory=dict)
+    _recent_ui_work_decisions: deque[UiWorkDecision] = field(default_factory=lambda: deque(maxlen=4096))
     _feedback_outlier_streak: dict[str, int] = field(default_factory=dict)
     _conservative_cold_start_channels: dict[str, int] = field(default_factory=dict)
     _recent_ui_work_observations: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=4096))
@@ -512,6 +514,7 @@ class ResourceGovernor:
             tuple(details),
         )
         self._ui_decisions[channel] = decision
+        self._recent_ui_work_decisions.append(decision)
         return decision
 
     def reset_ui_work_feedback(self, channel: str, *, conservative_start: bool = False) -> None:
@@ -535,7 +538,7 @@ class ResourceGovernor:
         remaining = int(self._conservative_cold_start_channels.get(channel, 0) or 0)
         if remaining <= 0:
             return
-        if str(work_class or "") != "tile_layer_commit":
+        if str(work_class or "") not in {"presentation_upsert", "texture_upload", "tile_layer_commit"}:
             return
         if int(item_count or 0) <= 0:
             return
@@ -588,6 +591,7 @@ class ResourceGovernor:
             pressure=self._pressure,
             lane_decisions=tuple(self._lane_decisions[lane] for lane in ComputeLane if lane in self._lane_decisions),
             ui_decisions=tuple(self._ui_decisions[channel] for channel in sorted(self._ui_decisions)),
+            recent_ui_work_decisions=tuple(self._recent_ui_work_decisions),
             feedback_channels=tuple(feedback_channels),
             recent_ui_work_observations=tuple(self._recent_ui_work_observations),
             recent_over_warning_callbacks=tuple(self._recent_over_warning_callbacks),

@@ -38,6 +38,7 @@ class TileAdmissionQueue:
         *,
         retained=(),
         cost_fn=None,
+        free_fn=None,
         max_items: int | None = None,
         max_bytes: int | None = None,
         deadline_ms: float | None = None,
@@ -45,26 +46,39 @@ class TileAdmissionQueue:
         ordered = self.order(candidates)
         item_cap = None if max_items is None else max(0, int(max_items))
         byte_cap = None if max_bytes is None else max(0, int(max_bytes))
-        if item_cap == 0 or byte_cap == 0:
+        if (item_cap == 0 or byte_cap == 0) and free_fn is None:
             return TileAdmissionDecision((), ordered, tuple(dict.fromkeys(int(tile) for tile in tuple(retained or ()))))
         started = perf_counter()
         admitted: list[int] = []
         deferred: list[int] = []
         used_bytes = 0
+        costed_admitted = 0
         for tile in ordered:
             tile = int(tile)
             cost = 0 if cost_fn is None else max(0, int(cost_fn(tile) or 0))
-            if item_cap is not None and len(admitted) >= item_cap:
-                deferred.append(tile)
-                continue
-            if byte_cap is not None and admitted and used_bytes + cost > byte_cap:
-                deferred.append(tile)
-                continue
-            if deadline_ms is not None and admitted and (perf_counter() - started) * 1000.0 >= float(deadline_ms):
-                deferred.append(tile)
-                continue
+            # `free_fn` declares an item genuinely instant for the backend
+            # (e.g. a VisPy resident atlas remap): it bypasses every cap.
+            # Everything else is paced — the item cap bounds per-commit work
+            # even at cost 0, because "not an upload" is not "not work" on
+            # backends that rebuild items (PyQtGraph re-level).  Callers own
+            # that truth; the queue only enforces it.
+            free = free_fn is not None and bool(free_fn(tile))
+            if not free:
+                if item_cap is not None and (item_cap == 0 or costed_admitted >= item_cap):
+                    deferred.append(tile)
+                    continue
+                if byte_cap is not None and (
+                    byte_cap == 0 or (costed_admitted and used_bytes + cost > byte_cap)
+                ):
+                    deferred.append(tile)
+                    continue
+                if deadline_ms is not None and costed_admitted and (perf_counter() - started) * 1000.0 >= float(deadline_ms):
+                    deferred.append(tile)
+                    continue
             admitted.append(tile)
             used_bytes += cost
+            if not free:
+                costed_admitted += 1
         active = tuple(dict.fromkeys((*tuple(int(tile) for tile in tuple(retained or ())), *admitted)))
         return TileAdmissionDecision(
             admitted=tuple(admitted),

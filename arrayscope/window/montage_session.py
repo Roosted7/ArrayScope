@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
+import os
 from time import monotonic
 
 import numpy as np
@@ -32,7 +33,7 @@ from arrayscope.display.model.presentation_generation import (
 )
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
 from arrayscope.operations.stage_fanin import StageFanInState
-from arrayscope.presentation import ClaimOwner, ReleaseClaim, TileLifecycle
+from arrayscope.presentation import ClaimOwner, LevelPhase, ReleaseClaim, TileLifecycle
 from arrayscope.display.model.tile_priority import (
     MontageTilePriorityQueue,
     TilePriorityContext,
@@ -52,6 +53,24 @@ from arrayscope.window.montage_lod import (  # noqa: F401  (re-exports; canonica
 
 def _shader_mapping_key(mapping):
     return None if mapping is None else getattr(mapping, "identity_key", mapping)
+
+
+def _debug_lod_pass_texture(texture, *, quality: str):
+    mode = str(os.environ.get("ARRAYSCOPE_LOD_DEBUG_PASS_MARKER", "") or "").strip().lower()
+    if not mode:
+        return texture
+    if str(quality) != "exact":
+        return texture
+    values = np.asarray(texture)
+    if mode in {"final-mirror-x", "final-mirror-negate"}:
+        values = np.flip(values, axis=1)
+    if mode in {"final-negate", "final-mirror-negate"}:
+        if np.issubdtype(values.dtype, np.integer):
+            info = np.iinfo(values.dtype)
+            values = np.asarray(info.max - values)
+        else:
+            values = -values
+    return np.ascontiguousarray(values)
 
 
 def _viewport_tiles(
@@ -794,6 +813,7 @@ class MontageRenderSession:
                 self.level_generation.forget_tile(index)
                 self.presented_tiles.discard(index)
                 self.skipped_tiles.discard(index)
+                self.pending_removals.add(index)
                 self.dirty_payloads[index] = None
                 self.loading_tiles.add(index)
                 if 0 <= index < len(plan.tiles):
@@ -1003,6 +1023,7 @@ class MontageRenderSession:
         semantic_histogram = getattr(rendered, "semantic_histogram_data", None)
         semantic_histogram = exact_histogram if semantic_histogram is None else np.asarray(semantic_histogram)
         texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered)
+        texture_data = _debug_lod_pass_texture(texture_data, quality="exact")
         display_image = np.asarray(texture_data)
         display_histogram = None if texture_histogram is None else np.asarray(texture_histogram)
         source_id = self._payload_source_id(
@@ -1217,14 +1238,67 @@ class MontageRenderSession:
     def _floor_component_tags(self) -> tuple[str, ...]:
         return montage_lod.floor_component_tags(self)
 
-    def _best_floor_key(self, source_index: int):
-        return montage_lod.best_floor_key(self, source_index)
+    def _best_floor_key(self, source_index: int, *, tile_number: int | None = None):
+        return montage_lod.best_floor_key(self, source_index, tile_number=tile_number)
 
     def _floor_can_progress(self, tile_number: int, tile=None) -> bool:
         return montage_lod.floor_can_progress(self, tile_number, tile=tile)
 
-    def _ensure_floor_payloads(self, tile_numbers) -> None:
-        return montage_lod.ensure_floor_payloads(self, tile_numbers)
+    def _ensure_floor_payloads(self, tile_numbers, *, max_count: int | None = None) -> None:
+        return montage_lod.ensure_floor_payloads(self, tile_numbers, max_count=max_count)
+
+    def preview_floor_cache(self):
+        return self.lod_preview_pyramid if self.lod_preview_pyramid is not None else self.lod_pyramid
+
+    def cache_for_floor_key(self, key):
+        preview = self.lod_preview_pyramid
+        if preview is not None and preview.peek(key) is not None:
+            return preview
+        return self.lod_pyramid
+
+    def admit_preview_plane(self, tile_number: int, key, plane, histogram=None) -> bool:
+        cache = self.preview_floor_cache()
+        if cache is None:
+            return False
+        cache.admit(key, plane)
+        if histogram is not None:
+            cache.admit(montage_lod.histogram_key_for_level_key(key), histogram)
+        rec = self.lifecycle.peek(int(tile_number))
+        entry = None if rec is None else rec.levels.get(key)
+        if entry is None or entry.owner is not ClaimOwner.PREVIEW:
+            self.lifecycle.level_claimed(int(tile_number), key, ClaimOwner.PREVIEW, request=("preview-floor", key))
+        self.lifecycle.level_resident(int(tile_number), key)
+        return True
+
+    def release_preview_claim(self, tile_number: int, key) -> None:
+        cache = self.preview_floor_cache()
+        effects = self.lifecycle.level_declined(int(tile_number), key)
+        if cache is not None:
+            for effect in effects:
+                cache.end_pending(effect.level_key)
+
+    def _lod_preview_floor_first_fill_active(self, planned_numbers) -> bool:
+        if not self._resident_lod_active():
+            return False
+        planned = tuple(int(tile) for tile in tuple(planned_numbers or ()))
+        if not planned:
+            return False
+        return any(self._tile_preview_floor_pending(tile) for tile in planned)
+
+    def _tile_preview_floor_pending(self, tile_number: int) -> bool:
+        payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
+        payload = payloads.get(int(tile_number))
+        if payload is not None and str(getattr(payload, "quality", "exact")) in {"preview", "exact"}:
+            return False
+        rec = self.lifecycle.peek(int(tile_number))
+        if rec is None:
+            return False
+        for entry in rec.levels.values():
+            if entry.owner is not ClaimOwner.PREVIEW:
+                continue
+            if entry.phase in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING, LevelPhase.RESIDENT):
+                return True
+        return False
 
     def _texture_source_for(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, TexturePlaneKind | None]:
         return texture_source_for_rendered(
@@ -1257,6 +1331,7 @@ class MontageRenderSession:
         max_upserts: int | None = None,
         max_upsert_bytes: int | None = None,
         upsert_cost_fn=None,
+        pace_resident_retargets: bool = False,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         source_ids = dict(source_ids or {})
         previous_state = self.tile_presentation_state
@@ -1388,15 +1463,39 @@ class MontageRenderSession:
         build_limit = None
         if max_upserts is not None:
             build_limit = max(int(max_upserts) * 2, 8)
+        floor_first_fill_active = self._lod_preview_floor_first_fill_active(planned_numbers)
+        if floor_first_fill_active:
+            floor_payload_tiles = tuple(planned_numbers)
+            if max_upserts is not None:
+                floor_payload_tiles = self._prioritized_tile_numbers(floor_payload_tiles)
+            self._ensure_floor_payloads(floor_payload_tiles, max_count=build_limit)
         built = 0
         for tile_number in dirty_payload_tiles:
             if build_limit is not None and built >= build_limit:
                 break
+            if floor_first_fill_active and self._tile_preview_floor_pending(int(tile_number)):
+                continue
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is not None:
                 self._ensure_display_tile_payload(int(tile_number), rendered, source_ids, lod_factor=lod_factor)
                 built += 1
-        self._ensure_floor_payloads(planned_numbers - set(current_loaded))
+        if not floor_first_fill_active:
+            floor_payload_tiles = tuple(planned_numbers - set(current_loaded))
+            floor_build_limit = None
+            if max_upserts is not None:
+                floor_payload_tiles = self._prioritized_tile_numbers(floor_payload_tiles)
+                floor_build_limit = build_limit
+            self._ensure_floor_payloads(floor_payload_tiles, max_count=floor_build_limit)
+        dirty_payload_tiles = tuple(
+            dict.fromkeys(
+                (
+                    *dirty_payload_tiles,
+                    *(int(tile) for tile in self.pending_payload_upserts),
+                )
+            )
+        )
+        if max_upserts is not None or max_upsert_bytes is not None or stale_level_tiles:
+            dirty_payload_tiles = self._prioritized_tile_numbers(dirty_payload_tiles)
         # Progress guarantee: a dirty entry is a promise that a build can
         # produce an upsert for the tile.  Without a rendered result and
         # without a pending upsert (floor included), no build can keep that
@@ -1450,9 +1549,14 @@ class MontageRenderSession:
 
         resident_retarget_tiles = _resident_retarget_upsert_tiles(upserts, previous_payloads)
         # Level swaps re-presenting a backend-acknowledged identity are
-        # residency remaps, not uploads: they bypass cold admission like
-        # other resident retargets, so a burst of swaps converges in one
-        # commit while governed upload limits stay untouched (ADR 0050).
+        # residency remaps, not uploads: they never charge the byte budget
+        # (ADR 0050).  Whether they also bypass the ITEM cap is backend
+        # truth, not a fixed rule (decided 2026-07-06): on a persistent
+        # GPU-residency backend a remap is instant, so a burst of swaps
+        # converges in one commit; on backends that rebuild items per
+        # re-level (PyQtGraph) the caller passes
+        # `pace_resident_retargets=True` and remaps stream through the item
+        # cap in priority order like everything else.
         resident_retarget_tiles |= {
             int(tile)
             for tile, payload in upserts.items()
@@ -1472,9 +1576,11 @@ class MontageRenderSession:
             if int(tile) not in resident_retarget_tiles
         }
         all_candidate_upserts = dict(upserts)
+        free_retarget_tiles = frozenset() if pace_resident_retargets else frozenset(resident_retarget_tiles)
         admission = TileAdmissionQueue(self._tile_priority_context()).admit(
             tuple(all_candidate_upserts),
             retained=(),
+            free_fn=(lambda tile: int(tile) in free_retarget_tiles) if free_retarget_tiles else None,
             cost_fn=(
                 (
                     lambda tile: (
@@ -1830,7 +1936,39 @@ class MontageRenderSession:
             or self.pending_payload_upserts
             or self.pending_removals
             or self.has_pending_level_update()
+            or self.has_unrefined_preview_payloads()
         )
+
+    def has_unrefined_preview_payloads(self) -> bool:
+        return bool(self.unrefined_preview_tiles(include_already_dirty=True))
+
+    def unrefined_preview_tiles(self, *, include_already_dirty: bool = False) -> tuple[int, ...]:
+        planned = set(int(tile) for tile in self.visible_tile_numbers) - set(int(tile) for tile in self.skipped_tiles)
+        if not planned:
+            return ()
+        payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
+        if not payloads:
+            payloads = dict(self.display_tile_payloads)
+        tiles: list[int] = []
+        for tile in planned:
+            if not include_already_dirty and (
+                int(tile) in self.dirty_payloads or int(tile) in self.pending_payload_upserts
+            ):
+                continue
+            payload = payloads.get(int(tile))
+            if (
+                int(tile) in self.rendered_tiles
+                and payload is not None
+                and str(getattr(payload, "quality", "exact")) == "preview"
+            ):
+                tiles.append(int(tile))
+        return tuple(sorted(tiles))
+
+    def mark_preview_refinements_dirty(self, tile_numbers) -> None:
+        for tile_number in tuple(tile_numbers or ()):
+            index = int(tile_number)
+            if index in self.rendered_tiles:
+                self.dirty_payloads[index] = None
 
     def visible_plan_complete(self) -> bool:
         required = set(int(tile) for tile in self.visible_tile_numbers) - set(int(tile) for tile in self.skipped_tiles)

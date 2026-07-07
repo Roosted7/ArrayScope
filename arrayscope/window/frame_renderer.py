@@ -36,7 +36,7 @@ from arrayscope.display.montage import (
     montage_rect_for_viewport,
 )
 from arrayscope.display.slice_engine import DisplayImage, make_image, make_image_from_slab, make_shader_image_from_slab
-from arrayscope.display.shader_mapping import apply_scale as apply_shader_scale, extract_component
+from arrayscope.display.shader_mapping import TexturePlaneKind, apply_scale as apply_shader_scale, extract_component
 from arrayscope.display.viewport import ViewportMode, ViewportPolicy, view_ranges_near
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.operations.capabilities import pipeline_commutes_for_display_lod, pipeline_supports_reduced_display_lod
@@ -62,8 +62,9 @@ from arrayscope.display.model.montage_levels import (
     sample_tile_level_stats,
 )
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, LodInfo, factor_xy_for_level
+from arrayscope.presentation import ClaimOwner
 from arrayscope.presentation.dispatch import derive_montage_dispatch
-from arrayscope.display.pyramid import PyramidCache, preview_level_for_tile_shape
+from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, preview_level_for_tile_shape
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
     payload_compatible_with_tile as _payload_compatible_with_tile,
@@ -584,7 +585,9 @@ class FrameRenderMixin:
         self._montage_session_id = session_id
         lod_policy_mode = self._montage_lod_policy_mode()
         lod_preview_level = (
-            preview_level_for_tile_shape(plan.tile_shape) if lod_policy_mode == LOD_POLICY_RESIDENT else 0
+            preview_level_for_tile_shape(plan.tile_shape, min_level=montage_lod.PREVIEW_FLOOR_MIN_LEVEL)
+            if lod_policy_mode == LOD_POLICY_RESIDENT
+            else 0
         )
         session = MontageRenderSession(
             session_id=session_id,
@@ -2388,8 +2391,6 @@ class FrameRenderMixin:
         presentation floor show it while exact content is still absent.
         """
 
-        if bool(shader_display):
-            return False
         if demand is None or pyramid is None or semantic_source_id is None:
             return False
         if int(getattr(demand, "desired_level", 0) or 0) <= 0:
@@ -2398,7 +2399,7 @@ class FrameRenderMixin:
         if tile_number in session.rendered_tiles:
             return False
         existing = session.display_tile_payloads.get(tile_number)
-        if existing is not None and str(getattr(existing, "quality", "exact")) == "exact":
+        if existing is not None:
             return False
         if _shared_preview_removes_work_for_current_scheduler(session, tile):
             return self._schedule_montage_shared_preview_batch(
@@ -2413,6 +2414,15 @@ class FrameRenderMixin:
         session_id = int(session.session_id)
         session_key = session.key
         preview_target = replace(session.frame_plan.target, quality="preview-visible")
+        preview_key = _preview_claim_key(
+            session,
+            tile,
+            demand=demand,
+            semantic_source_id=semantic_source_id,
+            shader_display=shader_display,
+        )
+        if not _claim_preview_floor(session, tile_number, preview_key):
+            return False
 
         def evaluate(token):
             return _evaluate_montage_tile_preview_snapshot(
@@ -2428,13 +2438,15 @@ class FrameRenderMixin:
         def done(preview):
             current = getattr(self, "_montage_session", None)
             if current is None or not self._is_current_montage_session(session_id, session_key):
+                session.release_preview_claim(tile_number, preview_key)
                 return
             if preview is None:
+                current.release_preview_claim(tile_number, preview_key)
                 return
             key, plane, histogram = preview
-            current.lod_pyramid.admit(key, plane)
-            if histogram is not None:
-                current.lod_pyramid.admit(montage_lod.histogram_key_for_level_key(key), histogram)
+            if key != preview_key:
+                current.release_preview_claim(tile_number, preview_key)
+            current.admit_preview_plane(tile_number, key, plane, histogram)
             current.lod_preview_presentations = int(getattr(current, "lod_preview_presentations", 0) or 0) + 1
             current._ensure_floor_payloads((tile_number,))
             if tile_number in current.pending_payload_upserts:
@@ -2442,6 +2454,7 @@ class FrameRenderMixin:
                 self._dispatch_montage_work(current)
 
         def error(_exc):
+            session.release_preview_claim(tile_number, preview_key)
             self._montage_preview_reduced_failures = (
                 int(getattr(self, "_montage_preview_reduced_failures", 0) or 0) + 1
             )
@@ -2473,10 +2486,11 @@ class FrameRenderMixin:
             ),
             on_done=done,
             on_error=error,
-            on_stale=lambda: None,
+            on_stale=lambda: session.release_preview_claim(tile_number, preview_key),
             pass_token=True,
         )
         if started is None:
+            session.release_preview_claim(tile_number, preview_key)
             self._montage_preview_reduced_blocked = (
                 int(getattr(self, "_montage_preview_reduced_blocked", 0) or 0) + 1
             )
@@ -2506,16 +2520,40 @@ class FrameRenderMixin:
         candidate_tiles = tuple(_shared_preview_candidate_tiles(session))
         if not candidate_tiles:
             return False
+        claim_rows = tuple(
+            (
+                int(candidate.montage_index),
+                _preview_claim_key(
+                    session,
+                    candidate,
+                    demand=demand,
+                    semantic_source_id=session.tile_semantic_source_id(candidate.source_index),
+                    shader_display=shader_display,
+                ),
+            )
+            for candidate in candidate_tiles
+        )
+        claimed_rows = tuple(
+            (tile_number, key)
+            for tile_number, key in claim_rows
+            if _claim_preview_floor(session, tile_number, key)
+        )
+        if not claimed_rows:
+            return False
         active.add(batch_key)
         session_id = int(session.session_id)
         session_key = session.key
         preview_target = replace(session.frame_plan.target, quality="preview-visible")
+        claimed_keys = {int(tile_number): key for tile_number, key in claimed_rows}
+        claimed_candidates = tuple(
+            candidate for candidate in candidate_tiles if int(candidate.montage_index) in claimed_keys
+        )
 
         def evaluate(token):
             return _evaluate_montage_shared_preview_snapshot(
                 session,
                 tile,
-                candidate_tiles,
+                claimed_candidates,
                 demand=demand,
                 cancellation_token=token,
                 shader_display=shader_display,
@@ -2525,18 +2563,27 @@ class FrameRenderMixin:
         def done(previews):
             current = getattr(self, "_montage_session", None)
             if current is None or not self._is_current_montage_session(session_id, session_key):
+                for tile_number, key in claimed_rows:
+                    session.release_preview_claim(tile_number, key)
                 return
             getattr(current, "_active_preview_batches", set()).discard(batch_key)
             admitted = 0
             upserted = False
-            for tile_number, key, plane, histogram in tuple(previews or ()):
+            preview_rows = tuple(previews or ())
+            seen_tiles: set[int] = set()
+            for tile_number, key, plane, histogram in preview_rows:
                 tile_number = int(tile_number)
-                current.lod_pyramid.admit(key, plane)
-                if histogram is not None:
-                    current.lod_pyramid.admit(montage_lod.histogram_key_for_level_key(key), histogram)
+                expected_key = claimed_keys.get(tile_number)
+                if expected_key is not None and expected_key != key:
+                    current.release_preview_claim(tile_number, expected_key)
+                current.admit_preview_plane(tile_number, key, plane, histogram)
                 current._ensure_floor_payloads((tile_number,))
                 admitted += 1
+                seen_tiles.add(tile_number)
                 upserted = upserted or tile_number in current.pending_payload_upserts
+            for tile_number, key in claimed_rows:
+                if int(tile_number) not in seen_tiles:
+                    current.release_preview_claim(tile_number, key)
             if admitted:
                 current.lod_preview_presentations = int(getattr(current, "lod_preview_presentations", 0) or 0) + admitted
                 if upserted:
@@ -2545,6 +2592,8 @@ class FrameRenderMixin:
 
         def error(_exc):
             getattr(session, "_active_preview_batches", set()).discard(batch_key)
+            for tile_number, key in claimed_rows:
+                session.release_preview_claim(tile_number, key)
             self._montage_preview_reduced_failures = (
                 int(getattr(self, "_montage_preview_reduced_failures", 0) or 0) + 1
             )
@@ -2577,11 +2626,16 @@ class FrameRenderMixin:
             ),
             on_done=done,
             on_error=error,
-            on_stale=lambda: getattr(session, "_active_preview_batches", set()).discard(batch_key),
+            on_stale=lambda: (
+                getattr(session, "_active_preview_batches", set()).discard(batch_key),
+                tuple(session.release_preview_claim(tile_number, key) for tile_number, key in claimed_rows),
+            ),
             pass_token=True,
         )
         if started is None:
             active.discard(batch_key)
+            for tile_number, key in claimed_rows:
+                session.release_preview_claim(tile_number, key)
             self._montage_preview_reduced_blocked = (
                 int(getattr(self, "_montage_preview_reduced_blocked", 0) or 0) + 1
             )
@@ -3049,6 +3103,9 @@ class FrameRenderMixin:
                     int(getattr(self, "_montage_orphaned_tiles_repaired", 0) or 0) + int(requeued)
                 )
                 plan = derive_montage_dispatch(session)
+        if plan.preview_refinements:
+            session.mark_preview_refinements_dirty(plan.preview_refinements)
+            plan = derive_montage_dispatch(session)
         if plan.deferred_planning:
             self._schedule_deferred_montage_planning(session)
         if plan.schedule_tiles:
@@ -4833,10 +4890,13 @@ def _preview_removes_work_for_current_scheduler(session, tile) -> bool:
     if not _can_evaluate_preview(session, tile):
         return False
     document = getattr(session, "document", None)
+    operations = tuple(getattr(document, "enabled_operations", ()) or ())
+    if not operations:
+        return False
     base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
     dtype = getattr(getattr(document, "base_data", None), "dtype", None)
     return pipeline_commutes_for_display_lod(
-        getattr(document, "enabled_operations", ()),
+        operations,
         base_shape,
         dtype,
     )
@@ -4865,6 +4925,7 @@ def _shared_transform_preview_enabled() -> bool:
 
 
 def _shared_preview_batch_key(session, tile, demand) -> tuple:
+    preview_level = _preview_evaluation_level(session, demand)
     view_state = tile.view_state
     image_axes = tuple(int(axis) for axis in view_state.image_axes)
     display_ranges = tuple(
@@ -4883,8 +4944,8 @@ def _shared_preview_batch_key(session, tile, demand) -> tuple:
         if axis not in image_axes and (montage_axis is None or axis != int(montage_axis))
     )
     return (
-        int(getattr(demand, "desired_level", 0) or 0),
-        tuple(int(value) for value in factor_xy_for_level(demand, int(getattr(demand, "desired_level", 0) or 0))),
+        int(preview_level),
+        tuple(int(value) for value in factor_xy_for_level(demand, int(preview_level))),
         image_axes,
         display_ranges,
         non_display_slices,
@@ -4897,15 +4958,55 @@ def _shared_preview_candidate_tiles(session):
         if tile_number in getattr(session, "rendered_tiles", {}):
             continue
         existing = getattr(session, "display_tile_payloads", {}).get(tile_number)
-        if existing is not None and str(getattr(existing, "quality", "exact")) == "exact":
+        if existing is not None:
             continue
         yield candidate
 
 
 def _preview_tile_shape(session, demand) -> tuple[int, int]:
-    factor_x, factor_y = factor_xy_for_level(demand, int(demand.desired_level))
+    factor_x, factor_y = factor_xy_for_level(demand, _preview_evaluation_level(session, demand))
     tile_h, tile_w = (max(1, int(value)) for value in tuple(session.plan.tile_shape)[:2])
     return (max(1, int(np.ceil(tile_h / max(1, factor_y)))), max(1, int(np.ceil(tile_w / max(1, factor_x)))))
+
+
+def _preview_evaluation_level(session, demand) -> int:
+    desired = int(getattr(demand, "desired_level", 0) or 0)
+    preview = int(getattr(session, "lod_preview_level", 0) or 0)
+    return max(desired, preview)
+
+
+def _preview_claim_component(session, *, shader_display: bool) -> str:
+    if bool(shader_display):
+        return str(TexturePlaneKind.COMPLEX_RG32F.value)
+    if not bool(shader_display) and bool(getattr(session, "rgb", False)):
+        return str(TexturePlaneKind.RGB8.value)
+    return "scalar"
+
+
+def _preview_claim_key(session, tile, *, demand, semantic_source_id, shader_display: bool):
+    level = _preview_evaluation_level(session, demand)
+    return PyramidLevelKey(
+        source_id=semantic_source_id,
+        tile_id=int(tile.source_index),
+        component=_preview_claim_component(session, shader_display=shader_display),
+        level_xy=(int(level), int(level)),
+    )
+
+
+def _claim_preview_floor(session, tile_number: int, key) -> bool:
+    cache = session.preview_floor_cache()
+    if cache is None:
+        return False
+    tile_number = int(tile_number)
+    if cache.peek(key) is not None:
+        session.lifecycle.level_claimed(tile_number, key, ClaimOwner.PREVIEW, request=("preview-floor", key))
+        session.lifecycle.level_resident(tile_number, key)
+        return True
+    if not cache.begin_pending(key):
+        return False
+    session.lifecycle.level_claimed(tile_number, key, ClaimOwner.PREVIEW, request=("preview-floor", key))
+    session.lifecycle.level_materializing(tile_number, key)
+    return True
 
 
 def _evaluate_montage_tile_preview_snapshot(
@@ -4937,7 +5038,7 @@ def _evaluate_montage_tile_preview_snapshot(
             shader_display=shader_display,
             evaluation_context=evaluation_context,
         )
-    level = int(demand.desired_level)
+    level = _preview_evaluation_level(session, demand)
     factor_xy = factor_xy_for_level(demand, level)
     reduced_base, preview_state = _read_reduced_preview_base_and_state(
         session.document,
@@ -5004,7 +5105,7 @@ def _evaluate_montage_shared_preview_snapshot(
 
     if not _shared_preview_removes_work_for_current_scheduler(session, seed_tile):
         return ()
-    level = int(demand.desired_level)
+    level = _preview_evaluation_level(session, demand)
     factor_xy = factor_xy_for_level(demand, level)
     reduced_base, _preview_state = _read_reduced_preview_base_and_state(
         session.document,
@@ -5019,6 +5120,7 @@ def _evaluate_montage_shared_preview_snapshot(
         cancellation_token=cancellation_token,
     )
     previews = []
+    preview_document = ArrayDocument(transformed, revision=session.document.revision) if bool(shader_display) else None
     for tile in tuple(tiles or ()):
         _check_preview_cancelled(cancellation_token)
         preview_state = _reduced_preview_view_state(
@@ -5027,7 +5129,19 @@ def _evaluate_montage_shared_preview_snapshot(
             factor_xy=factor_xy,
             slice_remap=_shared_preview_slice_remap(session, tile),
         )
-        value = make_image(transformed, preview_state, colormap_lut=session.colormap_lut)
+        if bool(shader_display):
+            result = evaluate_image_snapshot(
+                preview_document,
+                preview_state,
+                colormap_lut=session.colormap_lut,
+                cancellation_token=cancellation_token,
+                degraded=True,
+                shader_display=True,
+                provisional_histogram=True,
+            )
+            value = result.value
+        else:
+            value = make_image(transformed, preview_state, colormap_lut=session.colormap_lut)
         value = replace(
             value,
             semantic_data=None,
@@ -5100,7 +5214,7 @@ def _evaluate_montage_tile_native_output_preview_snapshot(
     shader_display: bool,
     evaluation_context,
 ):
-    level = int(demand.desired_level)
+    level = _preview_evaluation_level(session, demand)
     factor_xy = factor_xy_for_level(demand, level)
     result = evaluate_image_snapshot(
         session.document,
@@ -5432,6 +5546,7 @@ def _persistent_gpu_tile_residency_backend(window, session) -> bool:
 def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
     if not _persistent_gpu_tile_residency_backend(window, session):
         return {}
+    _reset_persistent_tile_feedback_if_needed(window, session)
     interactive = _interactive_active(window)
     decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
         "montage_present_total",
@@ -5442,6 +5557,9 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
         interactive=interactive,
     )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
+    upload_batch_limit = int(getattr(upload_decision, "batch_limit", 0) or 0)
+    if not bool(getattr(session, "display_committed", False)) and upload_batch_limit > 0:
+        batch_limit = upload_batch_limit if batch_limit <= 0 else min(int(batch_limit), int(upload_batch_limit))
     byte_cap = max(
         int(getattr(decision, "byte_cap", 0) or 0),
         int(getattr(upload_decision, "byte_cap", 0) or 0),
@@ -5512,6 +5630,10 @@ def _tile_layer_upsert_limits(window, session) -> dict[str, object]:
             interactive=interactive,
         ),
         "upsert_cost_fn": _pyqtgraph_payload_upload_nbytes,
+        # PyQtGraph rebuilds items on re-level: resident retargets are byte-free
+        # but NOT time-free, so they stream through the item cap in priority
+        # order (2026-07-06 decision; see build_tile_presentation).
+        "pace_resident_retargets": True,
     }
 
 
@@ -5594,6 +5716,25 @@ def _reset_tile_layer_feedback_if_needed(window, session) -> None:
         return
     conservative = signature[1] == "rgb_or_complex"
     if previous is not None or conservative:
+        reset("tile_layer_commit", conservative_start=conservative)
+
+
+def _reset_persistent_tile_feedback_if_needed(window, session) -> None:
+    signature = _tile_layer_feedback_signature(window, session)
+    previous = getattr(window, "_persistent_tile_feedback_signature", None)
+    if previous == signature:
+        return
+    window._persistent_tile_feedback_signature = signature
+    if signature[0] != "vispy":
+        return
+    reset = getattr(getattr(window.win, "resource_governor", None), "reset_ui_work_feedback", None)
+    if not callable(reset):
+        return
+    conservative = signature[1] == "rgb_or_complex"
+    if previous is not None or conservative:
+        reset("montage_present_total", conservative_start=conservative)
+        reset("montage_cold_commit", conservative_start=conservative)
+        reset("montage_commit", conservative_start=False)
         reset("tile_layer_commit", conservative_start=conservative)
 
 

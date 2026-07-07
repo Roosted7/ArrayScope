@@ -448,6 +448,37 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
     assert limits["max_upsert_bytes"] == 2 * 1024 * 1024
 
 
+def test_vispy_first_persistent_upsert_limits_use_cold_upload_batch():
+    import arrayscope.window.frame_renderer as frame_renderer
+
+    session = SimpleNamespace(display_committed=False)
+
+    def decide(channel, **_kwargs):
+        if channel == "montage_present_total":
+            return SimpleNamespace(batch_limit=32, byte_cap=8 * 1024 * 1024, budget_ms=8.0)
+        if channel == "montage_cold_commit":
+            return SimpleNamespace(batch_limit=4, byte_cap=1024 * 1024, budget_ms=2.0)
+        return SimpleNamespace(batch_limit=0, byte_cap=0, budget_ms=0.0)
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="vispy",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            )
+        ),
+        _viewport_interaction_active=False,
+        _ui_work_decision=decide,
+    )
+    window.win = window
+
+    limits = frame_renderer._persistent_tile_upsert_limits(window, session)
+
+    assert limits["max_upserts"] == 4
+    assert limits["max_upsert_bytes"] == 8 * 1024 * 1024
+
+
 def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_batch_limit():
     import arrayscope.window.frame_renderer as frame_renderer
 
@@ -708,6 +739,51 @@ def test_pyqtgraph_tile_layer_feedback_resets_on_complex_cost_class_change():
 
     assert decisions == ["tile_layer_commit", "tile_layer_commit"]
     assert resets == [("tile_layer_commit", True)]
+
+
+def test_vispy_persistent_feedback_resets_on_complex_cost_class_change():
+    import arrayscope.window.frame_renderer as frame_renderer
+
+    resets = []
+
+    class Governor:
+        def reset_ui_work_feedback(self, channel, *, conservative_start=False):
+            resets.append((channel, bool(conservative_start)))
+
+    def decide(channel, **_kwargs):
+        return SimpleNamespace(batch_limit=8, byte_cap=8 * 1024 * 1024, budget_ms=8.0)
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="vispy",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            )
+        ),
+        resource_governor=Governor(),
+        _viewport_interaction_active=False,
+        _ui_work_decision=decide,
+    )
+    window.win = window
+    session = SimpleNamespace(
+        display_committed=True,
+        dirty_payloads={0: None},
+        pending_payload_upserts={},
+        output_dtype=np.dtype("float32"),
+        rgb=False,
+    )
+
+    frame_renderer._persistent_tile_upsert_limits(window, session)
+    session.output_dtype = np.dtype("complex64")
+    frame_renderer._persistent_tile_upsert_limits(window, session)
+
+    assert resets == [
+        ("montage_present_total", True),
+        ("montage_cold_commit", True),
+        ("montage_commit", False),
+        ("tile_layer_commit", True),
+    ]
 
 
 def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):
@@ -1006,6 +1082,12 @@ def test_tile_presentation_limits_cap_resident_retarget_upserts():
         max_upserts=2,
         max_upsert_bytes=1,
         upsert_cost_fn=lambda _payload: 0,
+        # PyQtGraph semantics: remaps are byte-free but not time-free, so the
+        # item cap paces them in priority order.  On persistent GPU-residency
+        # backends (default, pace_resident_retargets=False) remaps are instant
+        # and exempt — pinned by
+        # test_resident_retarget_upserts_bypass_cold_priority_cap.
+        pace_resident_retargets=True,
     )
 
     assert tuple(delta.upserts) == (1, 2)

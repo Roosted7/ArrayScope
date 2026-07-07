@@ -43,6 +43,7 @@ def run_profile_montage_workflow(
     profiler_type: str = "plain",
     profiler_artifact_paths: tuple[str | Path, ...] = (),
     montage_lod_policy: str = "native-only",
+    screenshot_dir: str | Path | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Run raw full montage, then FFT/shift/iFFT-over-montage-axis montage.
 
@@ -63,6 +64,7 @@ def run_profile_montage_workflow(
 
     backend = _normalize_backend(backend)
     data_path = Path(data_path)
+    screenshot_dir = None if screenshot_dir is None else Path(screenshot_dir)
     run_id = uuid4().hex
     records: list[dict[str, object]] = []
 
@@ -153,6 +155,7 @@ def run_profile_montage_workflow(
             timeout_s=timeout_s,
             action=apply_raw,
         )
+        _attach_phase_screenshot(raw_record, win, phase="raw_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir)
         _append_record(records, jsonl, {**base, **raw_record, "run_temperature": "cold"})
 
         def apply_fft() -> dict[str, object]:
@@ -186,6 +189,7 @@ def run_profile_montage_workflow(
             timeout_s=timeout_s,
             action=apply_fft,
         )
+        _attach_phase_screenshot(fft_record, win, phase="fft_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir)
         transform_pipeline = ("CenteredFFT", "FFTShift", "CenteredIFFT")
         _append_record(
             records,
@@ -204,6 +208,13 @@ def run_profile_montage_workflow(
                 **_apply_fft_level_refinement_preview(win, app=app, QtCore=QtCore),
                 "fit_stretch_pulsed": bool(fit_stretch_pulsed["fft"]),
             },
+        )
+        _attach_phase_screenshot(
+            level_record,
+            win,
+            phase="fft_level_refinement_preview",
+            backend=backend,
+            screenshot_dir=screenshot_dir,
         )
         _append_record(
             records,
@@ -474,6 +485,12 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
     start = perf_counter()
     draw_start = _vispy_draw_count(win)
     phase_ui_work_start = _recent_ui_work_observations(win)
+    phase_ui_work_decision_start = _recent_ui_work_decisions(win)
+    phase_session = getattr(win, "_montage_session", None)
+    preview_floor_session_id = None if phase_session is None else int(getattr(phase_session, "session_id", -1) or -1)
+    preview_floor_count_start = 0 if phase_session is None else int(
+        getattr(phase_session, "lod_preview_presentations", 0) or 0
+    )
     action_result = action()
     milestones = _wait_for_montage_complete(
         app,
@@ -482,6 +499,8 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
         timeout_s=timeout_s,
         start=start,
         draw_start=draw_start,
+        preview_floor_session_id=preview_floor_session_id,
+        preview_floor_count_start=preview_floor_count_start,
     )
     elapsed_ms = (perf_counter() - start) * 1000.0
     _process_events(app, QtCore, count=5)
@@ -493,6 +512,7 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
         event_loop_p99_gap_ms=probe.percentile_ms(99),
         event_loop_max_gap_ms=probe.max_gap_ms,
         phase_ui_work_start=phase_ui_work_start,
+        phase_ui_work_decision_start=phase_ui_work_decision_start,
     )
     if isinstance(action_result, dict):
         record.update(action_result)
@@ -510,6 +530,8 @@ def _wait_for_montage_complete(
     start: float,
     draw_start: int,
     require_presentation_settled: bool = False,
+    preview_floor_session_id: int | None = None,
+    preview_floor_count_start: int = 0,
 ) -> dict[str, float | int | bool | None]:
     deadline = time.monotonic() + float(timeout_s)
     first_materialized_tile_ms = None
@@ -525,6 +547,7 @@ def _wait_for_montage_complete(
     first_display_payload_fill_ms = None
     first_preview_payload_ms = None
     first_preview_payload_fill_ms = None
+    first_preview_floor_fill_ms = None
     fully_visible_tile_request_count = None
     presentation_settled_ms = None
     final_visibility_state: dict[str, object] = {}
@@ -565,6 +588,22 @@ def _wait_for_montage_complete(
         if session is not None:
             payload_state = _montage_display_payload_state(session, active_tiles=visibility_state["active_tiles"])
             final_payload_state = payload_state
+            preview_floor_count = int(getattr(session, "lod_preview_presentations", 0) or 0)
+            session_id = int(getattr(session, "session_id", -1) or -1)
+            preview_floor_delta = (
+                preview_floor_count - int(preview_floor_count_start)
+                if preview_floor_session_id is not None and session_id == int(preview_floor_session_id)
+                else preview_floor_count
+            )
+            preview_floor_target = int(visibility_state["active_planned_tile_count"]) or int(
+                visibility_state["requested_tile_count"]
+            )
+            if (
+                first_preview_floor_fill_ms is None
+                and preview_floor_target > 0
+                and preview_floor_delta >= preview_floor_target
+            ):
+                first_preview_floor_fill_ms = (perf_counter() - start) * 1000.0
             if first_display_payload_ms is None and payload_state["display_payload_count"] > 0:
                 first_display_payload_ms = (perf_counter() - start) * 1000.0
             if first_preview_payload_ms is None and payload_state["preview_payload_count"] > 0:
@@ -609,6 +648,7 @@ def _wait_for_montage_complete(
                 "fully_visible_after_first_visible_tile_ms": fully_visible_after_first_visible_tile_ms,
                 "first_preview_payload_ms": first_preview_payload_ms,
                 "first_preview_payload_fill_ms": first_preview_payload_fill_ms,
+                "first_preview_floor_fill_ms": first_preview_floor_fill_ms,
                 "final_display_payload_count": int(final_payload_state.get("display_payload_count", 0)),
                 "final_preview_payload_count": int(final_payload_state.get("preview_payload_count", 0)),
                 "final_exact_payload_count": int(final_payload_state.get("exact_payload_count", 0)),
@@ -710,6 +750,7 @@ def _phase_record(
     event_loop_p99_gap_ms: float | None,
     event_loop_max_gap_ms: float,
     phase_ui_work_start: tuple[object, ...] = (),
+    phase_ui_work_decision_start: tuple[object, ...] = (),
 ) -> dict[str, object]:
     snapshot = win.collect_runtime_diagnostics()
     timing = snapshot.montage_timing
@@ -717,9 +758,14 @@ def _phase_record(
     resource = snapshot.resource_governor
     recent_callbacks = () if resource is None else tuple(resource.recent_over_warning_callbacks)
     recent_ui_work = () if resource is None else tuple(resource.recent_ui_work_observations)
+    recent_ui_work_decisions = () if resource is None else tuple(getattr(resource, "recent_ui_work_decisions", ()))
     phase_recent_ui_work, phase_recent_ui_work_truncated = _ui_work_observation_delta(
         recent_ui_work,
         phase_ui_work_start,
+    )
+    phase_recent_ui_work_decisions, phase_recent_ui_work_decisions_truncated = _ui_work_observation_delta(
+        recent_ui_work_decisions,
+        phase_ui_work_decision_start,
     )
     feedback_channels = () if resource is None else tuple(resource.feedback_channels)
     ui_decisions = () if resource is None else tuple(resource.ui_decisions)
@@ -856,11 +902,36 @@ def _phase_record(
             for decision in lane_decisions
         ],
         "resource_ui_decisions": [asdict(decision) for decision in ui_decisions],
+        "recent_ui_work_decisions": [asdict(decision) for decision in recent_ui_work_decisions],
+        "phase_recent_ui_work_decisions": [asdict(decision) for decision in phase_recent_ui_work_decisions],
+        "phase_recent_ui_work_decisions_truncated": bool(phase_recent_ui_work_decisions_truncated),
         "recent_ui_work_observations": [asdict(observation) for observation in recent_ui_work],
         "phase_recent_ui_work_observations": [asdict(observation) for observation in phase_recent_ui_work],
         "phase_recent_ui_work_observations_truncated": bool(phase_recent_ui_work_truncated),
         "recent_over_warning_callbacks": [asdict(callback) for callback in recent_callbacks],
     }
+
+
+def _attach_phase_screenshot(
+    record: dict[str, object],
+    win,
+    *,
+    phase: str,
+    backend: str,
+    screenshot_dir: Path | None,
+) -> None:
+    if screenshot_dir is None:
+        return
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    path = screenshot_dir / f"{backend}-{phase}.png"
+    try:
+        pixmap = win.img_view.grab()
+        ok = bool(pixmap.save(str(path)))
+    except Exception as exc:
+        record["screenshot_error"] = repr(exc)
+        return
+    record["screenshot_path"] = str(path)
+    record["screenshot_saved"] = ok
 
 
 def _elapsed_between_ms(start_ms, end_ms) -> float | None:
@@ -876,6 +947,15 @@ def _recent_ui_work_observations(win) -> tuple[object, ...]:
         return ()
     resource = snapshot.resource_governor
     return () if resource is None else tuple(resource.recent_ui_work_observations)
+
+
+def _recent_ui_work_decisions(win) -> tuple[object, ...]:
+    try:
+        snapshot = win.collect_runtime_diagnostics()
+    except Exception:
+        return ()
+    resource = snapshot.resource_governor
+    return () if resource is None else tuple(getattr(resource, "recent_ui_work_decisions", ()))
 
 
 def _ui_work_observation_delta(current: tuple[object, ...], start: tuple[object, ...]) -> tuple[tuple[object, ...], bool]:
@@ -1759,8 +1839,8 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
         return "No workflow timing records were produced.\n"
     lines = [
         "Workflow timing summary",
-        "| Backend | phase | first fill | payload fill | visible fill | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|",
+        "| Backend | phase | first tile | preview floor | initial fill | full refined | visible after first | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|",
     ]
     for record in records:
         lines.append(
@@ -1769,8 +1849,10 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
                 (
                     f"`{record.get('backend', '')}`",
                     f"`{record.get('phase', '')}`",
+                    _format_ms(record.get("first_visible_tile_ms", record.get("first_display_payload_ms"))),
+                    _format_ms(_first_non_none(record, "first_preview_floor_fill_ms", "first_preview_payload_fill_ms")),
                     _format_ms(record.get("first_display_payload_fill_ms", record.get("fully_visible_ms"))),
-                    _format_ms(record.get("first_display_payload_fill_after_first_payload_ms")),
+                    _format_ms(_first_non_none(record, "draw_after_complete_ms", "fully_visible_ms")),
                     _format_ms(record.get("fully_visible_after_first_visible_tile_ms")),
                     _format_ms(record.get("elapsed_ms")),
                     _format_ms(record.get("event_loop_max_gap_ms")),
@@ -1785,6 +1867,14 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
             + " |"
         )
     return "\n".join(lines) + "\n"
+
+
+def _first_non_none(record: dict[str, object], *keys: str):
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            return value
+    return None
 
 
 def _histogram_loop_action_summary(record: dict[str, object]) -> str:
@@ -2247,6 +2337,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="Dataset path; defaults to the bundled realistic NIfTI")
     parser.add_argument("--backend", choices=("pyqtgraph", "vispy", "all"), default="pyqtgraph")
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")
+    parser.add_argument("--screenshot-dir", default=None, help="Optional directory for phase screenshots")
     parser.add_argument("--timeout-s", type=float, default=180.0)
     parser.add_argument("--max-tiles", type=int, default=0, help="Optional tile cap for local smoke runs; 0 means full dim 2")
     parser.add_argument("--columns", type=int, default=0, help="Montage columns; 0 chooses a near-square layout")
@@ -2294,6 +2385,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                 profiler_type=args.profiler_type,
                 profiler_artifact_paths=tuple(args.profiler_artifact or ()),
                 montage_lod_policy=args.montage_lod_policy,
+                screenshot_dir=args.screenshot_dir,
             )
         )
     print(_workflow_timing_summary(tuple(all_records)), end="")

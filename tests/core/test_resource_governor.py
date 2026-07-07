@@ -415,6 +415,49 @@ def test_presentation_feedback_records_but_filters_isolated_outlier():
     assert after.batch_limit >= before.batch_limit // 2
 
 
+def test_conservative_presentation_cold_start_releases_on_real_upload_work():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.reset_ui_work_feedback("montage_present_total", conservative_start=True)
+
+    first = governor.decide_ui_work("montage_present_total", interactive=False)
+    assert first.batch_limit == 1
+
+    for _ in range(4):
+        governor.record_ui_observation(
+            "montage_present_total",
+            2.0,
+            item_count=1,
+            byte_count=64 * 1024,
+            work_class="presentation_upsert",
+            backend="vispy",
+        )
+
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    assert decision.batch_limit > 1
+    assert not any("conservative cold start" in detail for detail in decision.details)
+
+
+def test_conservative_cold_start_ignores_zero_byte_visibility_work():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.reset_ui_work_feedback("montage_present_total", conservative_start=True)
+
+    for _ in range(4):
+        governor.record_ui_observation(
+            "montage_present_total",
+            0.1,
+            item_count=1,
+            byte_count=0,
+            work_class="presentation_upsert",
+            backend="vispy",
+        )
+
+    decision = governor.decide_ui_work("montage_present_total", interactive=False)
+
+    assert decision.batch_limit == 1
+    assert any("conservative cold start" in detail for detail in decision.details)
+
+
 def test_repeated_presentation_outliers_are_learned():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
     governor.record_ui_observation(

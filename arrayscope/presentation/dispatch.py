@@ -26,6 +26,7 @@ class MontageDispatchPlan:
     lod_materializations: bool = False
     stage_waits: bool = False
     level_evidence: bool = False
+    preview_refinements: tuple[int, ...] = ()
     commit: bool = False
     force_commit: bool = False
     unsettled: bool = False
@@ -40,6 +41,7 @@ class MontageDispatchPlan:
             or self.lod_materializations
             or self.stage_waits
             or self.level_evidence
+            or self.preview_refinements
             or self.commit
         )
 
@@ -84,6 +86,14 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
     level_evidence = bool(getattr(session, "pending_level_tiles", None)) or (
         int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
     )
+    preview_refinements = tuple(
+        int(tile)
+        for tile in (
+            getattr(session, "unrefined_preview_tiles", lambda: ())()
+            if callable(getattr(session, "unrefined_preview_tiles", None))
+            else ()
+        )
+    )
 
     # Stage-waiting tiles are `loading` with no active evaluation request by
     # design; requeueing them would bypass their attached stage into direct
@@ -99,7 +109,7 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
         and not stage_waiting
     )
     evaluation_drained = not (pending or active or completed or stage_active or stage_waiting)
-    commit = bool(dirty or upserts or removals or flushish)
+    commit = bool(dirty or upserts or removals or flushish or preview_refinements)
     unsettled = bool(
         pending
         or active
@@ -121,6 +131,7 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
         lod_materializations=lod_pending,
         stage_waits=bool(stage_waiting or stage_attached),
         level_evidence=level_evidence,
+        preview_refinements=preview_refinements,
         commit=commit,
         force_commit=bool(commit and evaluation_drained),
         unsettled=unsettled,

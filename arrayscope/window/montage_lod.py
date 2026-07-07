@@ -51,6 +51,10 @@ from arrayscope.display.montage import RenderedTile
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.display.shader_mapping import TexturePlaneKind
+from arrayscope.presentation import ClaimOwner, LevelPhase
+
+
+PREVIEW_FLOOR_MIN_LEVEL = 4
 
 
 # --------------------------------------------------------------------------
@@ -696,7 +700,7 @@ def floor_component_tags(session) -> tuple[str, ...]:
     return (str(TexturePlaneKind.RGB8.value), "scalar", str(TexturePlaneKind.COMPLEX_RG32F.value))
 
 
-def best_floor_key(session, source_index: int):
+def best_floor_key(session, source_index: int, *, tile_number: int | None = None):
     """Best resident pyramid key for one tile: nearest demand, finer ties."""
 
     pyramid = session.lod_pyramid
@@ -705,6 +709,24 @@ def best_floor_key(session, source_index: int):
     demand = session.lod_policy_decision.demand
     desired = int(demand.desired_level)
     semantic_id = session.tile_semantic_source_id(int(source_index))
+    if tile_number is not None:
+        rec = session.lifecycle.peek(int(tile_number))
+        if rec is not None:
+            best_preview = None
+            for key, entry in rec.levels.items():
+                if entry.owner is not ClaimOwner.PREVIEW or entry.phase is not LevelPhase.RESIDENT:
+                    continue
+                if getattr(key, "source_id", None) != semantic_id or int(getattr(key, "tile_id", -1)) != int(source_index):
+                    continue
+                cache = session.cache_for_floor_key(key)
+                if cache is None or cache.peek(key) is None:
+                    continue
+                level = max(int(key.level_xy[0]), int(key.level_xy[1]))
+                rank = (abs(level - desired), level)
+                if best_preview is None or rank < best_preview[0]:
+                    best_preview = (rank, key, level, cache)
+            if best_preview is not None:
+                return (best_preview[1], best_preview[2], best_preview[3])
     best = None
     for component in floor_component_tags(session):
         for key in pyramid.resident_keys_for(semantic_id, int(source_index), component):
@@ -752,7 +774,7 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
         return False
     if payload is not None and str(getattr(payload, "quality", "exact")) != "preview":
         return False
-    best = best_floor_key(session, int(tile.source_index))
+    best = best_floor_key(session, int(tile.source_index), tile_number=int(tile_number))
     if best is None:
         return False
     if payload is None:
@@ -761,7 +783,7 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
     return int(best[1]) != presented
 
 
-def ensure_floor_payloads(session, tile_numbers) -> None:
+def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None) -> None:
     """Present the best resident pyramid level for unrendered planned tiles.
 
     The floor invariant (ADR 0050): a planned tile with any resident
@@ -780,7 +802,10 @@ def ensure_floor_payloads(session, tile_numbers) -> None:
         int(tile.montage_index): tile
         for tile in tuple(session.visible_tiles)
     }
-    for tile_number in sorted(int(number) for number in tile_numbers):
+    built = 0
+    for tile_number in tuple(dict.fromkeys(int(number) for number in tuple(tile_numbers))):
+        if max_count is not None and built >= int(max_count):
+            break
         existing = session.display_tile_payloads.get(tile_number)
         if existing is not None and tile_number in session.active_tile_requests:
             # An exact evaluation is in flight and SOMETHING is on screen:
@@ -798,7 +823,7 @@ def ensure_floor_payloads(session, tile_numbers) -> None:
             continue
         source_index = int(tile.source_index)
         semantic_id = session.tile_semantic_source_id(source_index)
-        best = best_floor_key(session, source_index)
+        best = best_floor_key(session, source_index, tile_number=int(tile_number))
         if best is None:
             continue
         key, level, owning_cache = best
@@ -834,6 +859,7 @@ def ensure_floor_payloads(session, tile_numbers) -> None:
         session.display_tile_payloads[tile_number] = payload
         session.pending_payload_upserts[tile_number] = None
         session.lod_floor_presentations = int(getattr(session, "lod_floor_presentations", 0) or 0) + 1
+        built += 1
 
 
 def _floor_texture_kind(component: object) -> TexturePlaneKind:
@@ -994,7 +1020,13 @@ def release_session_claims(session) -> int:
     pyramid = getattr(session, "lod_pyramid", None)
     lifecycle = getattr(session, "lifecycle", None)
     if lifecycle is not None:
-        return _apply_release_effects(pyramid, lifecycle.session_replaced())
+        released = 0
+        for effect in lifecycle.session_replaced():
+            cache = session.preview_floor_cache() if effect.owner is ClaimOwner.PREVIEW else pyramid
+            if cache is not None:
+                cache.end_pending(effect.level_key)
+                released += 1
+        return released
     requests = list(getattr(session, "pending_lod_requests", ()) or ())
     if pyramid is None:
         return 0

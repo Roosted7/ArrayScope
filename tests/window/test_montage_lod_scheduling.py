@@ -18,9 +18,19 @@ from arrayscope.display.lod import LOD_POLICY_RESIDENT
 from arrayscope.display.model.frame import TiledValueSource
 from arrayscope.display.pyramid import PyramidCache
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, CenteredIFFT, FFTShift
+from arrayscope.presentation import ClaimOwner, LevelPhase
 from arrayscope.window.frame_renderer import FrameRenderMixin
 
 from tests.window.test_montage_lod_residency import TILE, _cold_session, _session
+
+
+def _preview_level_entries(session):
+    return tuple(
+        (rec.tile_number, key, entry)
+        for rec in session.lifecycle
+        for key, entry in rec.levels.items()
+        if entry.owner is ClaimOwner.PREVIEW
+    )
 
 
 class FakeController:
@@ -229,6 +239,26 @@ def test_cold_tile_worker_reduces_at_ingest_before_first_presentation():
     assert session.pending_lod_requests == []
 
 
+def test_noop_scalar_resident_lod_does_not_schedule_duplicate_preview_work():
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    session.document = ArrayDocument(np.zeros((TILE, TILE, 2), dtype=np.float32))
+    session.frame_plan = SimpleNamespace(
+        target=FrameTarget(("semantic",), ("viewport",), ("presentation",), "final"),
+        tile_shape=(TILE, TILE),
+    )
+    session.pending_tiles.append(session.plan.tiles[0])
+    renderer = _tile_worker_renderer(session, evaluated=[])
+
+    assert renderer._schedule_next_montage_tile(session) is True
+
+    calls = renderer.montage_tile_evaluation_controller.calls
+    assert len(calls) == 1
+    assert calls[0]["key"][0] == "montage_tile"
+    assert calls[0]["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
+    assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 0
+
+
 def test_native_scale_scheduling_performs_no_ingest_reduction():
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _cold_session(pyramid=pyramid)
@@ -265,6 +295,8 @@ def _non_display_transform_session_with_lazy_source():
 
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _cold_session(pyramid=pyramid)
+    session.lod_preview_pyramid = PyramidCache(max_bytes=1 << 20)
+    session.lod_preview_level = 4
     data = np.arange(TILE * TILE * 2, dtype=np.float32).reshape(TILE, TILE, 2)
     source = LazyArray(data)
     state = (
@@ -329,10 +361,55 @@ def test_non_display_transform_preview_can_schedule_once_for_experimental_shared
     assert source.reads == [(slice(None, None, None), slice(None, None, None), slice(None, None, None))]
     assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 1
     assert session.lod_preview_presentations == 2
+    preview_entries = _preview_level_entries(session)
+    resident_preview_entries = tuple(
+        row for row in preview_entries if row[2].phase is LevelPhase.RESIDENT
+    )
+    assert len(resident_preview_entries) == 2
+    assert session.lifecycle.dangling_claims() == ()
+    assert 4 not in session.lod_pyramid.resident_level_counts()
     assert sorted(session.display_tile_payloads) == [0, 1]
     assert {payload.quality for payload in session.display_tile_payloads.values()} == {"preview"}
+    assert {payload.lod.level for payload in session.display_tile_payloads.values()} == {4}
     assert {payload.texture_data.shape[:2] for payload in session.display_tile_payloads.values()} == {
-        (TILE // 4, TILE // 4)
+        (TILE // 16, TILE // 16)
+    }
+
+    session.pending_tiles.append(session.plan.tiles[1])
+    assert renderer._schedule_next_montage_tile(session) is True
+
+    assert len(calls) == 3
+    assert calls[2]["key"][0] == "montage_tile"
+    assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 1
+
+
+def test_non_display_transform_preview_uses_shader_texture_for_vispy_path(monkeypatch):
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    monkeypatch.setenv("ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW", "1")
+    session, source = _non_display_transform_session_with_lazy_source()
+    session.shader_display = True
+    session.pending_tiles.append(session.plan.tiles[0])
+    renderer = _tile_worker_renderer(session, evaluated=[])
+
+    assert renderer._schedule_next_montage_tile(session) is True
+
+    calls = renderer.montage_tile_evaluation_controller.calls
+    assert len(calls) == 2
+    assert calls[1]["key"][0] == "montage_preview_batch"
+    assert source.reads == [(slice(None, None, None), slice(None, None, None), slice(None, None, None))]
+    assert sorted(session.display_tile_payloads) == [0, 1]
+    preview_entries = _preview_level_entries(session)
+    resident_preview_entries = tuple(
+        row for row in preview_entries if row[2].phase is LevelPhase.RESIDENT
+    )
+    assert len(resident_preview_entries) == 2
+    assert session.lifecycle.dangling_claims() == ()
+    assert 4 not in session.lod_pyramid.resident_level_counts()
+    assert {payload.quality for payload in session.display_tile_payloads.values()} == {"preview"}
+    assert {payload.lod.level for payload in session.display_tile_payloads.values()} == {4}
+    assert {payload.texture_kind for payload in session.display_tile_payloads.values()} == {
+        TexturePlaneKind.COMPLEX_RG32F
     }
 
 
