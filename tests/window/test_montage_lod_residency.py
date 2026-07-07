@@ -2022,3 +2022,58 @@ def test_retarget_index_window_clears_active_work_without_completion_queue():
 
     assert stats["misses"] == 2
     assert not session.active_tile_requests
+
+
+def test_reduced_complex_base_keeps_a_level_matched_magnitude_histogram():
+    """A reduced RGB/complex base must never lose its magnitude histogram.
+
+    Regression (field defect 2026-07): for PyQtGraph complex tiles the RGB
+    plane is phase-hue and the magnitude lives in the histogram (it modulates
+    brightness at display time). The on-demand level worker reduces only the
+    texture plane, so a reduced level had no matching histogram and the read
+    path returned ``None`` — resident-LOD complex tiles rendered phase-only
+    with no magnitude, and levels had no effect. The read path must reduce the
+    native magnitude to the texture's shape and cache it.
+    """
+
+    from arrayscope.window import montage_lod
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, view_range=((0.0, 3.0 * 2 * TILE), (0.0, 3.0 * TILE)))
+    tile = session.plan.tiles[0]
+
+    # An RGB (phase-hue) base with a separate native magnitude histogram.
+    rgb_base = np.zeros((TILE, TILE, 3), dtype=np.uint8)
+    rgb_base[..., 0] = 200
+    magnitude = np.linspace(0.0, 1000.0, TILE * TILE, dtype=np.float32).reshape(TILE, TILE)
+    rendered = RenderedTile(
+        tile=tile,
+        image=rgb_base,
+        histogram_data=magnitude,
+        eval_ms=0.0,
+        slab_shape=rgb_base.shape,
+        slab_nbytes=rgb_base.nbytes,
+    )
+
+    demand = session.lod_policy_decision.demand
+    applied = int(demand.desired_level)
+    assert applied >= 1
+    # Make only the reduced *texture* resident (as the level worker does),
+    # deliberately WITHOUT its histogram.
+    level_key = montage_lod.pyramid_key_for(session, rendered, demand=demand, level=applied)
+    factor_x, factor_y = level_key.factor_xy
+    reduced_rgb = reduce_box_mean(rgb_base.astype(np.float32), (factor_x, factor_y)).astype(np.uint8)
+    pyramid.admit(level_key, reduced_rgb)
+
+    texture, texture_histogram, lod = montage_lod.resident_texture_for_rendered_tile(
+        session, rendered, source=rgb_base, histogram=magnitude
+    )
+
+    assert lod.level == applied
+    assert texture.shape[:2] == reduced_rgb.shape[:2]
+    # Magnitude survives, reduced to match the texture, with real variation.
+    assert texture_histogram is not None
+    assert texture_histogram.shape[:2] == texture.shape[:2]
+    assert float(texture_histogram.max()) > float(texture_histogram.min())
+    # And it is cached so later reads/level system stay level-consistent.
+    assert pyramid.lookup(montage_lod.histogram_key_for(session, rendered, demand=demand, level=applied)) is not None

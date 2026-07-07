@@ -536,7 +536,14 @@ class MontagePipelineEffects:
             prepare_metadata_start = perf_counter()
             level_metadata_improved = renderer._should_publish_montage_level_metadata(session, level_stats)
             publish_auto_metadata = bool(explicit_auto and (first_display_commit or level_metadata_improved))
-            publish_histogram_plot = bool(first_display_commit)
+            # The aggregate histogram plot is derived from the level stats, so
+            # it must (re)publish whenever those stats first arrive or improve
+            # — not only on the first display commit. On startup the first
+            # commit runs before any tile has level stats, so a first-commit-
+            # only publish left the histogram panel empty until an unrelated
+            # action (index change, channel toggle) forced a fresh first
+            # commit (field defect 2026-07).
+            publish_histogram_plot = bool(first_display_commit or level_metadata_improved)
             publish_metadata = publish_auto_metadata or publish_histogram_plot or level_metadata_improved
             renderer._last_montage_tile_prepare_metadata_ms = (perf_counter() - prepare_metadata_start) * 1000.0
             prepare_source_start = perf_counter()

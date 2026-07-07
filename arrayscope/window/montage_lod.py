@@ -879,6 +879,26 @@ def _floor_texture_kind(component: object) -> TexturePlaneKind:
 # --------------------------------------------------------------------------
 
 
+def _reduced_histogram_for_texture(
+    histogram: np.ndarray, texture_shape: tuple[int, int], factor_xy: tuple[int, int]
+) -> np.ndarray | None:
+    """Reduce a native magnitude histogram to a reduced texture's shape.
+
+    Box-mean by the level factor (the same reduction the texture used), then
+    verify the shape matches — returns None when it cannot compose so the
+    caller can fall back rather than mis-map magnitude onto pixels.
+    """
+
+    factor_x, factor_y = (max(1, int(factor_xy[0])), max(1, int(factor_xy[1])))
+    native_shape = tuple(int(value) for value in np.shape(histogram)[:2])
+    if native_shape[0] % factor_y or native_shape[1] % factor_x:
+        return None
+    reduced = np.asarray(reduce_box_mean(np.asarray(histogram), (factor_x, factor_y)))
+    if tuple(reduced.shape[:2]) != tuple(int(value) for value in texture_shape):
+        return None
+    return reduced
+
+
 def resident_texture_for_rendered_tile(
     session,
     rendered: RenderedTile,
@@ -920,7 +940,28 @@ def resident_texture_for_rendered_tile(
     if histogram is not None and tuple(np.shape(histogram)[:2]) != tuple(np.shape(texture)[:2]):
         hist_key = histogram_key_for(session, rendered, demand=demand, level=applied)
         cached_histogram = pyramid.lookup(hist_key)
-        texture_histogram = None if cached_histogram is None else np.asarray(cached_histogram)
+        if cached_histogram is not None:
+            texture_histogram = np.asarray(cached_histogram)
+        elif texture.ndim == 3:
+            # RGB/complex base ONLY: the magnitude histogram is NOT optional
+            # for a reduced RGB base — without it the phase-hue plane renders
+            # at full brightness with no magnitude (field defect 2026-07 —
+            # resident-LOD complex tiles showed phase-only, levels had no
+            # effect). The on-demand level worker reduces only the texture
+            # plane; reduce the native magnitude to match here and cache it so
+            # subsequent reads see a level-consistent magnitude. Scalar tiles
+            # keep the prior behavior (their histogram is level-stat data, not
+            # a brightness channel, and is applied through a different path).
+            reduced_histogram = _reduced_histogram_for_texture(
+                np.asarray(histogram), tuple(np.shape(texture)[:2]), hist_key.factor_xy
+            )
+            if reduced_histogram is not None:
+                pyramid.admit(hist_key, reduced_histogram)
+                texture_histogram = reduced_histogram
+            else:
+                texture_histogram = np.asarray(histogram)
+        else:
+            texture_histogram = None
     lod = LodInfo(
         level=applied,
         factor=max(int(factor_xy[0]), int(factor_xy[1])),
