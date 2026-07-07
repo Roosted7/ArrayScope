@@ -9,7 +9,7 @@ from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
-from arrayscope.core.work_graph import WorkItem, WorkLane
+from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.core.window_levels import LevelSourceRank
 from arrayscope.display.colormaps import named_colormap, phase_colormap
 from arrayscope.display.colormap_policy import resolved_colormap_name
@@ -64,12 +64,6 @@ class RenderOrchestrator(
         super().__init__(win)
         self.win = win
         self._render_generation = RenderGeneration()
-
-    @property
-    def work_graph(self):
-        """The window's admission graph; orchestrator work records land there."""
-
-        return getattr(self.win, "work_graph", None)
 
     def _active_display_colormap_lut(self):
         view = getattr(self.win, "img_view", None)

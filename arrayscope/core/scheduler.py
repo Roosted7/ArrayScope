@@ -75,4 +75,4 @@ class SchedulerDiagnostics:
     active_target: FrameTarget | None = None
     queued_latest_target: FrameTarget | None = None
     work_lanes: tuple[str, ...] = ()
-    work_graph: object | None = None
+    kernel: object | None = None

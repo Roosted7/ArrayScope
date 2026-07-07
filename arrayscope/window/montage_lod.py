@@ -33,7 +33,7 @@ from typing import NamedTuple
 import numpy as np
 
 from arrayscope.core.scheduler import EvalPriority
-from arrayscope.core.work_graph import WorkItem, WorkLane
+from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,

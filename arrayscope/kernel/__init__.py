@@ -29,6 +29,8 @@ from arrayscope.kernel.task import (
     TaskOutcome,
     TaskSpec,
     VISIBLE_LANES,
+    WorkItem,
+    complete_inline_work,
 )
 from arrayscope.kernel.completions import CompletionEvent, CompletionQueue, DrainBudget
 from arrayscope.kernel.scheduler import Kernel, TaskHandle
@@ -49,4 +51,6 @@ __all__ = [
     "ThreadWorkerBackend",
     "VISIBLE_LANES",
     "WorkerBackend",
+    "WorkItem",
+    "complete_inline_work",
 ]

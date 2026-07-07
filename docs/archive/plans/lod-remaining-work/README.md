@@ -39,7 +39,7 @@ reaches the head of the roadmap and needs command-level execution detail.
 - **GPU harness** (~14 s, real hardware; asserts `stall_repairs==0`):
   `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland ~/miniconda3/envs/arrayscope/bin/python -m pytest tests/gpu_interaction -n 0` (a bare DC shell lacks the display env — always set these).
 - **Workflow benchmark** (~30–40 s/run; `--data` optional, default = synthetic 272-tile scene):
-  `~/miniconda3/envs/arrayscope/bin/python -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-lod-policy {resident|native-only} [--json-out FILE]`
+  `~/miniconda3/envs/arrayscope/bin/python -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-lod-policy {resident|native-only} [--jsonl FILE]`
   (check exact flag names with `--help` before first use). Count `STALL WATCHDOG` on stderr — must be 0.
 - **Probes** (in `tmp_probes/` and `/tmp/lod-baseline/`): `verify_scrub_fastpath.py`, `profile_cached_rebuild.py` (prints retargets/rejects; ONSCREEN — tell Thomas hands-off before running), `verify_stale.py` (phase machine + DISPATCH counters), `/tmp/lod-baseline/verify_scrub.py` (10 ms heartbeat gap probe), `profile_scrub.py`.
 - **PROBE TRAP:** `with_montage_axis(axis, text=...)` does NOT set the index window — you MUST pass `indices=range(...)`. `tmp_probes/profile_cached_rebuild.py` does it right; copy from there.

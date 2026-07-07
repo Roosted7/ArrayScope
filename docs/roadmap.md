@@ -15,14 +15,13 @@ ADR 0050/0051 and the archived
 
 **One queue, owned by [`docs/redesign/README.md`](redesign/README.md).**
 
-The kernel (`arrayscope/kernel/`), the modular pipeline nucleus and unified
-LOD ladder (`arrayscope/render/`), the vocabulary canonicalization, and the
-first hygiene deletions are landed on the `redesign` branch. Remaining, in
-order:
+The kernel (`arrayscope/kernel/`), R1 app adoption, the modular pipeline
+nucleus and unified LOD ladder (`arrayscope/render/`), the vocabulary
+canonicalization, and the first hygiene deletions are landed on the
+`redesign` branch. Remaining, in order:
 
 | plan | delivers |
 |---|---|
-| R1 | all execution on the kernel; 8 controllers + WorkGraph deleted |
 | R2 | MontagePipeline live; frame_renderer clusters B/C/E dissolved |
 | R3 | LOD ladder adoption; montage_lod deleted; ops once per rung; PyQtGraph parity decision |
 | R4 | timer/governor audit: no scheduling timers, governor = telemetry + 2 knobs |

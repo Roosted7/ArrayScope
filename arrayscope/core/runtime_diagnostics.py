@@ -364,7 +364,7 @@ class WindowRuntimeDiagnostics:
     render_timing: RenderTimingDiagnostics = field(default_factory=RenderTimingDiagnostics)
     montage_timing: MontageTimingDiagnostics = field(default_factory=MontageTimingDiagnostics)
     render_coalescer: RenderCoalescerDiagnostics = field(default_factory=RenderCoalescerDiagnostics)
-    work_graph: object | None = None
+    kernel: object | None = None
     stage_materialization: object | None = None
     montage_prefetch: tuple[object, ...] = ()
     resource_governor: ResourceGovernorDiagnostics | None = None
@@ -383,7 +383,7 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
         "Montage": "\n".join(_montage_lines(snapshot)),
         "Render": "\n".join(_render_lines(snapshot)),
         "Feedback": "\n".join(_feedback_lines(snapshot.resource_governor)),
-        "Work Graph": "\n".join(_work_graph_lines(snapshot.work_graph)),
+        "Kernel": "\n".join(_kernel_lines(snapshot.kernel)),
         "Schedulers": "\n".join(_scheduler_lines(snapshot.schedulers)),
         "Caches": "\n".join(
             (
@@ -648,11 +648,11 @@ def runtime_has_live_work(snapshot: WindowRuntimeDiagnostics) -> bool:
     coalescer = snapshot.render_coalescer
     if bool(getattr(coalescer, "pending", False)):
         return True
-    work_graph = getattr(snapshot, "work_graph", None)
-    if work_graph is not None and (
-        int(getattr(work_graph, "active", 0) or 0)
-        or int(getattr(work_graph, "queued", 0) or 0)
-        or int(getattr(work_graph, "visible_backlog", 0) or 0)
+    kernel = getattr(snapshot, "kernel", None)
+    if kernel is not None and (
+        int(getattr(kernel, "active", 0) or 0)
+        or int(getattr(kernel, "queued", 0) or 0)
+        or int(getattr(kernel, "visible_backlog", 0) or 0)
     ):
         return True
     if any(
@@ -1452,14 +1452,14 @@ def _scheduler_lines(schedulers: tuple[object, ...]) -> tuple[str, ...]:
     return tuple(lines) or ("n/a",)
 
 
-def _work_graph_lines(work_graph) -> tuple[str, ...]:
-    if work_graph is None:
+def _kernel_lines(kernel) -> tuple[str, ...]:
+    if kernel is None:
         return ("n/a",)
-    lanes = dict(getattr(work_graph, "lanes", {}) or {})
+    lanes = dict(getattr(kernel, "lanes", {}) or {})
     lines = [
-        f"active={int(getattr(work_graph, 'active', 0) or 0)} "
-        f"queued={int(getattr(work_graph, 'queued', 0) or 0)} "
-        f"completed_keys={int(getattr(work_graph, 'completed_keys', 0) or 0)}"
+        f"active={int(getattr(kernel, 'active', 0) or 0)} "
+        f"queued={int(getattr(kernel, 'queued', 0) or 0)} "
+        f"completed_keys={int(getattr(kernel, 'completed_keys', 0) or 0)}"
     ]
     if not lanes:
         lines.append("lanes: n/a")

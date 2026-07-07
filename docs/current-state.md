@@ -1,8 +1,9 @@
 # Current state
 
-**Snapshot:** `redesign` branch, 2026-07-07. ADR 0053 accepted; the
-execution kernel and the modular-pipeline/LOD-ladder nucleus are landed;
-plans R1–R5 ([docs/redesign/](redesign/README.md)) dissolve the legacy
+**Snapshot:** `redesign` branch, 2026-07-07. ADR 0053 accepted; R1 is
+landed, so app background execution now runs through one kernel plus one
+Qt bridge. The modular-pipeline/LOD-ladder nucleus is landed; plans R2–R5
+([docs/redesign/](redesign/README.md)) dissolve the remaining legacy
 orchestration. `main` (6fa5c758) holds the pre-redesign state described in
 this file's git history.
 
@@ -22,14 +23,14 @@ first-class via capabilities, core-green test bar with a known-red ledger.
 
 | Area | State | Notes |
 |---|---|---|
-| Execution kernel | **New, tested** | `arrayscope/kernel/`: real priorities/deps/staleness, lane quotas, one GUI fan-in bridge; 32 Qt-free tests + 5 bridge tests. Not yet driving the app (R1). |
+| Execution kernel | **Driving the app** | `arrayscope/kernel/`: real priorities/deps/staleness, lane quotas, one GUI fan-in bridge; R1 routes the former controller submissions through this scheduler. |
 | Modular pipeline | **Nucleus** | `arrayscope/render/`: typed stage contracts, MontagePipeline scheduling skeleton with one-place supersession; effects (evaluation/commit) are R2 ports. |
 | Unified LOD ladder | **New, tested** | `render/ladder.py`: FLOOR→PREVIEW→DESIRED→EXACT pure planner; replaces four scattered decision sites at R3. |
 | Tile lifecycle | Unchanged owner | ADR 0051 machine stays; pipeline feeds it events instead of frame_renderer. |
-| Legacy orchestration | **Dissolving** | frame_renderer/montage_lod/evaluation controllers/WorkGraph are deletion targets with a [method-by-method map](redesign/frame-renderer-map.md). |
+| Legacy orchestration | **Dissolving** | WorkGraph is deleted and `window/evaluation_controller.py` is import-only. `frame_renderer`/`montage_lod` remain R2/R3 deletion targets with a [method-by-method map](redesign/frame-renderer-map.md). |
 | Vocabulary | Canonical in kernel | `WorkLane`/`EvalPriority` are compat aliases of kernel `Lane`/`Priority`. |
 | Hygiene | Done (first pass) | Kill switches, P3 fallbacks, tmp_probes deleted; 3 probes live in `tools/probes/`. |
-| Baseline health | Green | Full suite 1729 passed (4 documented parallel-only flakes in [known-red](redesign/known-red.md)); GPU harness 6/6 on live Wayland; the main-branch fit-unlock regression is fixed here (bisected to 2995d039). |
+| Baseline health | Green, with known slow wedge | R1 validation: `pytest tests -q -n 16 --ignore=tests/gpu_interaction` → 1696 passed, 3 skipped; GPU harness → 6 passed. The FFT transform-preview wedge is pre-existing and tracked in [known-red](redesign/known-red.md) for R2/R3. |
 
 ## What is working well
 
@@ -53,5 +54,5 @@ first-class via capabilities, core-green test bar with a known-red ledger.
 
 ## Current direction
 
-Execute R1→R5 in order (`docs/redesign/README.md` owns the queue), then
+Execute R2→R5 in order (`docs/redesign/README.md` owns the queue), then
 return to the X5 evidence gates in `docs/roadmap.md`.

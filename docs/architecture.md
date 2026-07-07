@@ -16,10 +16,11 @@ orchestration described in parts of this document. New execution goes
 through `arrayscope/kernel` (one scheduler: priorities, dependencies, lanes,
 supersession, one GUI fan-in) and `arrayscope/render` (typed pipeline
 stages, the unified LOD ladder, MontagePipeline). `RenderOrchestrator`,
-`FrameRenderMixin`, `montage_lod`, the eight evaluation controllers, and
-`WorkGraph` are deletion targets — see [ADR 0053](decisions/0053-execution-kernel-and-modular-pipeline.md)
-and the [redesign plans](redesign/README.md). Sections below describing them
-are accurate for `main` and are rewritten in plan R5.
+`FrameRenderMixin`, and `montage_lod` remain deletion targets; WorkGraph and
+the controller internals were removed in R1. See
+[ADR 0053](decisions/0053-execution-kernel-and-modular-pipeline.md) and the
+[redesign plans](redesign/README.md). Sections below describing remaining
+legacy orchestration are accurate for `main` and are rewritten in plan R5.
 
 This overview defines ownership and invariants. Implementation details are split into four focused documents:
 
@@ -220,8 +221,8 @@ when the source set is unchanged. See
 ```text
 ViewIntent
   -> FramePlanner
-  -> FramePlan / WorkGraph
-  -> DeadlineScheduler
+  -> FramePlan / Kernel
+  -> priority/dependency scheduler
   -> PresentationCommit
   -> ImageSurface (unified tiled regions with backend-specific commit mechanics)
 ```
@@ -230,9 +231,10 @@ A small plane, huge plane, one-tile montage, and many-tile montage should share 
 One-tile and small-tile cases are optimized below the surface; backend surfaces may commit them through
 different physical mechanics without changing their meaning. ADR 0046 makes this explicit: semantic
 unification is mandatory, identical physical storage is not.
-The `FramePlanner`, typed tiled surface, explicit `WorkGraph` admission, and
-`ImageViewShell`/`ImageSurface` boundary are implemented. X5 now owns hardware evidence, physical
-strategy policy, acknowledged residency, and region-first materialization.
+The `FramePlanner`, typed tiled surface, kernel-backed admission/execution,
+and `ImageViewShell`/`ImageSurface` boundary are implemented. X5 now owns
+hardware evidence, physical strategy policy, acknowledged residency, and
+region-first materialization.
 
 ## Non-negotiable invariants
 

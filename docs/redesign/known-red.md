@@ -6,16 +6,13 @@ suites are never allowed red.
 
 | test | state | cause | resolved by |
 |---|---|---|---|
-| `tests/ui/test_performance_settings.py::test_selecting_fft_workers_updates_settings` | flaky under `-n 16` only (pre-existing on main) | xdist worker contention on settings store | R4 (governor rescope reworks the settings⇄worker plumbing); passes alone today |
-| `tests/ui/test_resource_governor_integration.py::test_resource_governor_applies_worker_and_callback_limits` | flaky under `-n 16` only (pre-existing on main) | same class | R4 deletes the per-controller limits this pins |
-| `tests/ui/test_render_scheduler.py::test_compute_policy_configures_stage_and_montage_lanes` | flaky under `-n 16` only (pre-existing on main) | same class | R1 rewrites it against kernel lane quotas |
-| `tests/window/test_montage_backend.py::test_montage_ready_display_payloads_commit_immediately` (teardown) | flaky teardown under `-n 16` only | Qt teardown race | R2 replaces the commit path and its fixture |
+| none in the latest R1 all-core non-GPU run | n/a | n/a | keep this table empty unless a reproducible red test is intentionally carried by a named plan |
 
 ## Known-slow / wedge evidence (not test failures)
 
 | symptom | evidence | resolved by |
 |---|---|---|
-| FFT transform-preview montage floor fill takes ~73 s (272 tiles, vispy resident) with event-loop gaps up to 4.7 s; progress happens only via STALL WATCHDOG rescues (`lost wakeup: loading≈267→231, flush_pending=True, final=True`, 4 fires) | `profile_montage_workflow --backend vispy --montage-lod-policy resident`, 2026-07-07 on `redesign` (a3992c8f tip; attribution A/B against `main` 6fa5c758 still owed — the raw montage phase is healthy at 2.4 s, and the refinement phase is 150 ms/0 B uploads, so the wedge is specific to the transform-preview floor pump) | R2 replaces the flush/pump path with kernel completions + capacity waiters (lost wakeups become structurally impossible); R3 owns the transform-preview queue. If a one-line pump re-arm is found earlier, fix on main and record here |
+| FFT transform-preview montage floor fill takes ~64 s (272 tiles, vispy resident) with event-loop gaps up to 4.6 s; progress happens only via STALL WATCHDOG rescues (`lost wakeup: loading≈267→231, flush_pending=True, final=True`) | `profile_montage_workflow --backend vispy --montage-lod-policy resident --jsonl tests/artifacts/r1-profile-montage-workflow-vispy-resident.jsonl`, 2026-07-07 on `redesign`; raw montage is ~2.8 s and the later level-only refinement is ~145 ms, so the wedge is specific to the transform-preview floor pump | R2 replaces the flush/pump path with kernel completions + capacity waiters (lost wakeups become structurally impossible); R3 owns the transform-preview queue. If a one-line pump re-arm is found earlier, fix on main and record here |
 | GPU harness (`tests/gpu_interaction`) asserts `stall_repairs==0` but does not cover the FFT/transform-preview scenario — the 73 s wedge above passes CI | add an FFT-preview scenario to the harness in R2 step 4 | R2 |
 
 Resolved on this branch (for the record):
@@ -27,3 +24,6 @@ Resolved on this branch (for the record):
   main; bisected to 2995d039 (fit-unlock re-ranged around stale
   single-slice bounds while preview-floor gating deferred the first
   commit); fixed by plan-time content extent (a3992c8f).
+- Earlier parallel-only settings/governor/scheduler flakes are no longer
+  current R1 known-red entries after the kernel lane-quota and bridge-drain
+  rewrite; keep them out of the active table unless they reproduce again.

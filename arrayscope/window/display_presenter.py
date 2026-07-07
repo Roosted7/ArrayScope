@@ -15,7 +15,7 @@ import numpy as np
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.memory_policy import MiB, MemoryPolicy
 from arrayscope.core.scheduler import FrameTarget
-from arrayscope.core.work_graph import WorkItem, WorkLane, complete_inline_work as _complete_inline_work
+from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.region_source import EagerDisplayRegionSource

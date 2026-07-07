@@ -14,7 +14,7 @@ from arrayscope.core.compare import CompareDocument
 from arrayscope.core.histograms import HistogramSpec, comparison_histograms
 from arrayscope.core.roi import RoiKind, RoiStatsAccumulator, roi_bounding_rect, roi_values_for_region
 from arrayscope.core.scheduler import FrameTarget
-from arrayscope.core.work_graph import WorkItem, WorkLane
+from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.operations.tile_regions import TileRegionRequest
 from arrayscope.window.tile_data_provider import TileDataProvider

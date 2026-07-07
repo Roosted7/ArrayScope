@@ -1,13 +1,11 @@
 """Task model: the one vocabulary for schedulable work.
 
-This module is the canonical owner of lanes and priorities. Legacy modules
-(`core.scheduler`, `core.work_graph`) re-export from here during the redesign
-migration and are deleted at its end (redesign plan R1).
+This module is the canonical owner of lanes, priorities, and work metadata.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import Any, Callable
 
@@ -143,6 +141,41 @@ class TaskSpec:
         return tuple(":".join(parts[: index + 1]) for index in range(len(parts)))
 
 
+@dataclass(frozen=True)
+class WorkItem:
+    """Diagnostic/admission metadata for one unit of work.
+
+    The kernel owns execution and counters; callers use ``WorkItem`` only to
+    carry lane, dependency, supersession, deadline, and estimate metadata into
+    a ``TaskSpec``.
+    """
+
+    key: object
+    lane: Lane
+    frame_target: object | None = None
+    quality: str = ""
+    supersession_key: object | None = None
+    supersession_value: object | None = None
+    deadline_ns: int = 0
+    estimated_cpu_ms: float = 0.0
+    estimated_bytes: int = 0
+    dependency_keys: tuple[object, ...] = ()
+    expected_value: float = 0.0
+    reusable_output: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "lane", Lane(str(self.lane)))
+        quality = str(self.quality or getattr(self.frame_target, "quality", "") or "")
+        object.__setattr__(self, "quality", quality)
+        deadline = int(self.deadline_ns or getattr(self.frame_target, "deadline_ns", 0) or 0)
+        object.__setattr__(self, "deadline_ns", max(0, deadline))
+        object.__setattr__(self, "estimated_cpu_ms", max(0.0, float(self.estimated_cpu_ms or 0.0)))
+        object.__setattr__(self, "estimated_bytes", max(0, int(self.estimated_bytes or 0)))
+        object.__setattr__(self, "dependency_keys", tuple(self.dependency_keys or ()))
+        object.__setattr__(self, "expected_value", max(0.0, float(self.expected_value or 0.0)))
+        object.__setattr__(self, "reusable_output", bool(self.reusable_output))
+
+
 class CancellationToken:
     """Cooperative cancellation flag, checked by task functions."""
 
@@ -161,7 +194,7 @@ class CancellationToken:
 
 @dataclass
 class LaneCounters:
-    """Deterministic per-lane counters (superset of the old WorkGraph set)."""
+    """Deterministic per-lane counters for kernel-owned work."""
 
     queued: int = 0
     admitted: int = 0
@@ -181,6 +214,16 @@ class LaneCounters:
         return {name: int(getattr(self, name)) for name in self.__dataclass_fields__}
 
 
+def complete_inline_work(owner, item: WorkItem) -> None:
+    """Record bounded inline work against the owning kernel, when present."""
+
+    kernel = getattr(owner, "kernel", None)
+    if kernel is None:
+        kernel = getattr(getattr(owner, "win", None), "kernel", None)
+    if kernel is not None and hasattr(kernel, "note_inline_work"):
+        kernel.note_inline_work(item)
+
+
 __all__ = [
     "CancellationToken",
     "Lane",
@@ -190,4 +233,6 @@ __all__ = [
     "TaskOutcome",
     "TaskSpec",
     "VISIBLE_LANES",
+    "WorkItem",
+    "complete_inline_work",
 ]

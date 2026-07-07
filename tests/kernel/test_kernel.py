@@ -391,6 +391,40 @@ def test_optional_quota_limits_concurrent_speculation():
     assert backend.take() is not None
 
 
+def test_lane_quota_limits_and_releases_same_lane_work():
+    kernel, backend = make_manual()
+    lane = Lane.VISIBLE_MATERIALIZATION
+    kernel.set_lane_quota(lane, 1)
+    kernel.submit(TaskSpec(key="a", fn=lambda: "a", lane=lane))
+    kernel.submit(TaskSpec(key="b", fn=lambda: "b", lane=lane))
+
+    first = backend.take()
+    assert first is not None
+    assert first.spec.key == "a"
+    assert backend.take() is None
+    assert kernel.diagnostics().lanes[str(lane)]["blocked_by_quota"] == 1
+
+    kernel.set_lane_quota(lane, 2)
+    second = backend.take()
+    assert second is not None
+    assert second.spec.key == "b"
+    kernel._execute(first)
+    kernel._execute(second)
+
+    kernel.set_lane_quota(lane, 1)
+    kernel.submit(TaskSpec(key="c", fn=lambda: "c", lane=lane))
+    kernel.submit(TaskSpec(key="d", fn=lambda: "d", lane=lane))
+    third = backend.take()
+    assert third is not None
+    assert third.spec.key == "c"
+    assert backend.take() is None
+
+    kernel.set_lane_quota(lane, None)
+    fourth = backend.take()
+    assert fourth is not None
+    assert fourth.spec.key == "d"
+
+
 def test_expired_deadline_drops_optional_but_runs_visible():
     kernel, backend = make_manual()
     ran = []

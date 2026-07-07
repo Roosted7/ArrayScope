@@ -31,7 +31,6 @@ def test_slice_text_updates_immediately_while_render_is_coalesced(qtbot, monkeyp
     finally:
         win.close()
 
-
 def test_rapid_slice_burst_renders_only_latest_state(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -430,16 +429,3 @@ def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):
         assert refreshes == [{"active_render": False}]
     finally:
         win.close()
-
-
-def test_evaluation_queue_drain_is_bounded_for_non_callback_events():
-    from arrayscope.window.evaluation_controller import EvaluationController
-
-    controller = EvaluationController(max_queue_events_per_drain=3)
-    for index in range(10):
-        controller._queue.put(("started", index, None))
-
-    controller._drain_queue()
-
-    assert len(controller._started) == 3
-    assert not controller._queue.empty()

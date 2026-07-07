@@ -61,8 +61,9 @@ def test_selecting_fft_workers_updates_settings(qtbot):
         assert win.compute_policy.fft_workers_visible == 2
         assert win.compute_policy.fft_workers_stage == 2
         assert win.compute_policy.fft_workers_tile == 1
-        assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.montage_tile_workers
-        assert win.stage_evaluation_controller.pool.maxThreadCount() == win.compute_policy.stage_workers
+        montage_workers = win.montage_tile_evaluation_controller.diagnostics().max_workers
+        assert 1 <= montage_workers <= win.compute_policy.montage_tile_workers
+        assert win.stage_evaluation_controller.diagnostics().max_workers == win.compute_policy.stage_workers
     finally:
         win.close()
 

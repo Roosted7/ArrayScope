@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from arrayscope.core.work_graph import WorkLane
+from arrayscope.kernel import Lane as WorkLane
 from arrayscope.core.scheduler import EvalPriority, FrameTarget
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES

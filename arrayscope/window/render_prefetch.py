@@ -9,7 +9,7 @@ import pyqtgraph.Qt as Qt
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.prefetch_policy import SliceScrubMomentum
 from arrayscope.core.scheduler import FrameTarget
-from arrayscope.core.work_graph import WorkItem, WorkLane
+from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import stage_document_key
 from arrayscope.operations.slabs import plan_slab, request_for_image
@@ -26,7 +26,7 @@ class RenderPrefetchMixin:
         self._prefetch_dispatch_queued = True
         # Qt event-turn barrier with the orchestrator as receiver context. The
         # queued callback reads the latest pending request, so rapid slice
-        # changes collapse without a revision counter; WorkGraph/resource gates
+        # changes collapse without a revision counter; kernel/resource gates
         # below decide whether speculation is actually allowed.
         Qt.QtCore.QTimer.singleShot(0, self, self._run_pending_prefetch)
 

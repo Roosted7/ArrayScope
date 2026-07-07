@@ -12,7 +12,7 @@ from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.scheduler import FrameTarget
-from arrayscope.core.work_graph import WorkItem, WorkLane
+from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.display.slice_engine import make_image_from_slab, make_shader_image_from_slab
 from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.slabs import evaluate_slab_from_stage, plan_slab, request_for_image

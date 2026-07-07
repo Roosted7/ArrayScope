@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -226,7 +227,9 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
         assert getattr(win.img_view, "_vispy_overlay_visuals", [])
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(20.0, 20.0))
         win.img_view.view.scene().sigMouseMoved.emit(scene_pos)
-        _process_events(qt_app, count=8)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not win.widgets["labels"]["pixelValue"].text():
+            _process_events(qt_app, count=2)
 
         assert win.widgets["labels"]["pixelValue"].text()
         assert "FIXME" not in win.widgets["labels"]["pixelValue"].text()

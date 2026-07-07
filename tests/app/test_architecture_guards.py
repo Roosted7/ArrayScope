@@ -593,11 +593,14 @@ def test_frame_renderer_does_not_use_legacy_normal_render_decision_helper():
     assert "estimate_visible_render_context" not in text
 
 
-def test_visible_controller_remains_single_worker():
+def test_kernel_adapters_do_not_own_window_lane_quotas():
     text = (ROOT / "arrayscope" / "window" / "main.py").read_text()
-    policy_text = (ROOT / "arrayscope" / "core" / "compute_policy.py").read_text()
-    assert 'EvaluationController(self, max_workers=self.compute_policy.visible_workers, name="visible")' in text
-    assert "visible_workers=1" in policy_text
+    assert "self.visible_evaluation_controller = KernelEvaluationController(" in text
+    assert "self.montage_tile_evaluation_controller = KernelEvaluationController(" in text
+    assert "self.kernel.set_lane_quota(lane, workers)" in text
+    assert "def _kernel_lane_for_compute_lane" in text
+    assert text.count("apply_lane_quota=False") == 8
+    assert 'name="visible"' in text
 
 
 def test_frame_renderer_has_no_legacy_normal_degraded_preview_branch():

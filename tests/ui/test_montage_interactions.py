@@ -705,8 +705,8 @@ def test_montage_schedules_missing_tiles_on_montage_lane(qtbot, monkeypatch):
         assert calls
         assert calls[0]["key"][0] == "montage_tile"
         assert calls[0]["replace_group"].startswith("montage-tile:")
-        assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.montage_tile_workers
-        assert win.visible_evaluation_controller.pool.maxThreadCount() == 1
+        assert win.montage_tile_evaluation_controller.diagnostics().max_workers == win.compute_policy.montage_tile_workers
+        assert win.visible_evaluation_controller.diagnostics().max_workers == 1
         requested_indices = {0, 1, 2}
         scheduled_indices = {int(call["key"][-1]) for call in calls}
         assert scheduled_indices <= requested_indices
@@ -1513,8 +1513,8 @@ def test_visible_render_budget_uses_app_setting():
     assert renderer._visible_render_budget_bytes() == 256 * 1024 * 1024
 
 
-def test_montage_render_admissions_are_observable_in_work_graph(qtbot):
-    """Y1 exit gate: orchestrator admission decisions land in WorkGraph counters."""
+def test_montage_render_admissions_are_observable_in_kernel(qtbot):
+    """R1: orchestrator admission counters land in kernel diagnostics."""
 
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -1523,19 +1523,18 @@ def test_montage_render_admissions_are_observable_in_work_graph(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        assert win.renderer.work_graph is win.work_graph
         win._set_view_state(win.view_state.with_montage_axis(2, indices=(0, 1, 2, 3), text=":"))
         win.render(reason="test-montage")
 
         def planning_recorded():
-            lanes = win.work_graph.diagnostics().lanes
+            lanes = win.kernel.diagnostics().lanes
             return lanes.get("visible_planning", {}).get("admitted", 0) >= 1
 
         qtbot.waitUntil(planning_recorded, timeout=5000)
 
         def fan_in_recorded():
             _process_events(qtbot)
-            lanes = win.work_graph.diagnostics().lanes
+            lanes = win.kernel.diagnostics().lanes
             return lanes.get("gui_fan_in", {}).get("completed", 0) >= 1
 
         qtbot.waitUntil(fan_in_recorded, timeout=5000)

@@ -108,8 +108,8 @@ def test_benchmark_result_does_not_mask_backend_applied_lod():
     assert result.lod_applied_factor_xy == (4, 4)
     assert result.lod_policy == "backend-reported"
     assert "non-native applied" in result.lod_reason
-    assert result.work_graph_counters["backend_commit"]["admitted"] == 2
-    assert result.work_graph_counters["backend_commit"]["completed"] == 2
+    assert result.kernel_counters["backend_commit"]["admitted"] == 2
+    assert result.kernel_counters["backend_commit"]["completed"] == 2
 
 
 def test_vispy_gpu_stat_aggregation_keeps_atlas_uploads_out_of_visible_bytes():

@@ -68,7 +68,7 @@ Status terminology:
 | [0036](0036-vispy-rendering-backend-experiment.md) | VisPy experiment | Experiment completed; led to 0037/0038. |
 | [0037](0037-first-class-vispy-tiled-renderer.md) | VisPy tiled renderer | Preferred large-tiled target; CPU-side LOD portions superseded by 0041. |
 | [0038](0038-render-backend-composition.md) | Backend composition | Implemented; surfaces own presentation/lifecycle and mirror shared interaction state. |
-| [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Implemented (frame planner, typed tiled surface, work graph, backend composition, shared pointer capture); residual residency work moved to 0044/X5. |
+| [0039](0039-unified-image-surface-and-deadline-scheduler.md) | Unified surface/scheduler | Historical foundation; frame planner, typed tiled surface, backend composition, and pointer capture remain, while WorkGraph was superseded by the ADR 0053 kernel in R1. |
 | [0040](0040-backend-aware-presentation-convergence.md) | Backend-aware presentation convergence | Implemented for tiled presentation. |
 | [0041](0041-lod-selection-materialization-and-residency.md) | LOD selection/materialization/residency | Implemented via ADR 0050 (async materialization + compatible residency; `resident` default on VisPy tiled scenes). The three-way split remains the governing contract. |
 | [0042](0042-montage-viewport-reflow-and-roi-ownership.md) | Montage viewport reflow and ROI ownership | Implemented for tiled montage. |
@@ -79,6 +79,7 @@ Status terminology:
 | [0048](0048-linked-window-sync.md) | Linked-window sync over local sockets | Implemented; per-facet window/level, dimension-indexing, operations, and ROI sync across separately started processes. |
 | [0050](0050-async-multi-resolution-tile-residency.md) | Async multi-resolution tile residency | Implemented for VisPy tiled scenes (`resident` default on VisPy); retained preview level implemented; PyQtGraph adoption implemented opt-in (`ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1`, default off pending the measured gate); reduce-before-ops consumer and ops-input LOD remain roadmap work. |
 | [0051](0051-single-owner-tile-lifecycle.md) | Single-owner tile lifecycle | Accepted; P1 + P2 core implemented, field-verified, and machine-derived dispatch landed (every event edge re-derives all pumps; the stall watchdog is an assertion). Remaining P2: sets as views + stage fan-in events, delta-walk cost; P3–P5 phased. |
+| [0053](0053-execution-kernel-and-modular-pipeline.md) | Execution kernel and modular rendering pipeline | Accepted; kernel implemented and driving app background execution after R1; R2–R5 dissolve remaining frame_renderer, montage_lod, timer, and docs/test debt. |
 
 ## Adding or changing a decision
 

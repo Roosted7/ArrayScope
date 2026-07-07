@@ -3,9 +3,9 @@
 > **Redesign banner (2026-07-07):** execution now belongs to
 > `arrayscope/kernel` — real priorities, dependencies, lane quotas, one
 > staleness arbiter, one GUI fan-in ([ADR 0053](../decisions/0053-execution-kernel-and-modular-pipeline.md)).
-> The `WorkGraph`, per-controller drain, and pacing-governor sections below
-> describe the legacy system being deleted by plans R1/R4; do NOT extend
-> them. The GUI-thread contract and memory-policy sections remain accurate.
+> WorkGraph and per-controller drains are gone after R1. Remaining pacing
+> timers and governor complexity are R4 cleanup targets; do not add new
+> scheduling systems beside the kernel.
 
 ArrayScope must remain responsive when the requested work is larger than one event-loop turn or one safe allocation.
 
@@ -39,30 +39,22 @@ A persistent `MontageSession` tracks target, requested/materialized/presented se
 
 Reusable stages use singleflight. Nearby slice/tile work and warm residency are lower priority, gated by memory, scheduler busy state, feedback, and resource-governor decisions.
 
-## Work graph admission
+## Kernel execution
 
-ArrayScope now owns a Qt-free `WorkGraph` above the Qt worker controllers. It records visible
-planning/cache lookup, visible materialization, display preparation, backend commit, GUI fan-in,
-histogram refinement, ROI/profile/hover work, stage materialization, and speculative residency as
-lane-specific `WorkItem`s. A work item carries a frame target, quality, supersession key/value,
-deadline, estimated CPU/byte cost, dependencies, expected value, and reusable-output policy.
+ArrayScope owns a single Qt-free kernel scheduler. Tasks carry a lane,
+priority, scope, dependencies, supersession family/value, deadline, cost
+estimates, expected value, reusable-output policy, and cooperative
+cancellation token. Priorities order real worker pulls; dependencies gate
+execution; scope clears, supersession, and key resubmission are the only
+staleness arbiters.
 
-The graph admits exact visible work before optional work, drops stale queued work before admission,
-preserves already-running reusable visible work when a newer target arrives, and records deterministic
-counters for queued, admitted, dropped, superseded, completed, failed, rescheduled,
-reusable-finished, deadline-missed, and budget-blocked work by lane. Supersession is indexed by
-supersession key, so replacing a target touches only the affected queued family instead of scanning
-unrelated profile, ROI, stage, or prefetch queues. Re-admitting queued work never advances the current
-supersession value; if the queued value is stale it is dropped before it can become visible. Repeated
-budget polling reports the same queued blocked item once until its state changes.
+The former controller attributes are temporary public surfaces over this
+kernel while `frame_renderer` still exists. They do not own thread pools or
+GUI drains. Production worker limits are kernel lane quotas set once per
+canonical lane; the adapters only keep compatibility diagnostics for legacy
+callers.
 
-## Scheduler behavior
-
-Visible controllers hold explicit presented, active, and latest-queued targets. A new interaction
-replaces queued obsolete work but does not automatically kill an active item that is nearly complete
-or produces reusable cache data.
-
-A work item needs at least:
+A task needs at least:
 
 - semantic/viewport/presentation target keys;
 - lane and supersession key;
@@ -72,13 +64,14 @@ A work item needs at least:
 - expected quality/latency gain;
 - cancellation/reuse policy.
 
-After hard visible deadlines, optional admission should be value-based rather than timer-based:
+After hard visible deadlines, optional admission should be value-based rather
+than timer-based:
 
 ```text
 expected value = probability of use × latency saved × quality gain / estimated cost
 ```
 
-Local gates run before graph admission. Idle state, memory cost, dedupe, and in-flight caps reject
+Local gates run before kernel submission. Idle state, memory cost, dedupe, and in-flight caps reject
 prefetch and retained warmup before a `WorkItem` becomes active, which keeps diagnostics from showing
 work that never actually ran. `STAGE_MATERIALIZATION` can represent exact visible tile dependencies or
 retained stage warmup; retained quality is optional and must yield to visible backlog.
@@ -97,10 +90,10 @@ All paths that mutate Qt or OpenGL state follow these limits:
 - result fan-in is budgeted before visible admission; ready tile bursts must be admitted in bounded
   item/byte/time batches rather than drained unconditionally.
 
-`EvaluationController`, montage tile result fan-in, stage-wait release, and backend commit paths now
-publish bounded callback observations and work-graph counters. Priority rebuilds, histogram refresh,
-and some presentation updates still need broader large-tile-count traces before release-level
-performance claims.
+`QtKernelBridge`, montage tile result fan-in, stage-wait release, and backend
+commit paths publish bounded callback observations and kernel counters.
+Priority rebuilds, histogram refresh, and some presentation updates still
+need broader large-tile-count traces before release-level performance claims.
 
 ## Cancellation and supersession
 
@@ -149,9 +142,9 @@ Latency feedback records callback duration and work count. Resource telemetry sa
 
 Overload backoff should be immediate; recovery gradual. Metrics must be path/backend/payload aware, or a cheap warm rebind can incorrectly justify a larger cold-upload batch.
 
-Feedback loops must be closed on the channel that is actually measured. Each
-evaluation controller's drain observes and is governed by its own
-`<lane>_queue_drain` channel; non-controller GUI fan-in paths such as
+Feedback loops must be closed on the channel that is actually measured. The
+single kernel completion drain observes and is governed as
+`kernel_bridge_drain`; non-kernel GUI fan-in paths such as
 `montage_tile_result`, `histogram_refresh`, `roi_refresh`, and
 `profile_update` keep their own measured channels. Isolated latency outliers
 (GC pauses, one-off relayouts, event-loop stalls) are suppressed for a single
@@ -165,18 +158,18 @@ lightweight reapplication on interaction start/stop edges so interactive
 budgets and worker clamps take effect with the first drag event rather than
 up to a sampling period late.
 
-The per-controller drain-fallback timer is a safety net for missed
-cross-thread signals, not a scheduling mechanism: it backs off exponentially
-(10 → 100 ms) while polls come up empty and snaps back to 10 ms whenever it
-finds pending queue work. The `fallback_event_polls` / `fallback_idle_polls`
-counters make fallback activity observable per controller without treating an
+The bridge fallback timer is a safety net for missed cross-thread signals,
+not a scheduling mechanism: it backs off exponentially (10 -> 100 ms) while
+polls come up empty and snaps back to 10 ms whenever it finds pending queue
+work. The `fallback_event_polls` / `fallback_idle_polls` counters make
+fallback activity observable once per bridge without treating an
 event-bearing poll as proof of signal failure.
 
 Idle slice prefetch is momentum-aware (`core.prefetch_policy`): sustained
 same-direction scrubbing deepens speculation ahead of the motion (bounded,
 with a single reversal guard), while a pause or direction change collapses
 depth immediately. Planning is separate from admission; every candidate
-still passes the memory, cost, busy-state, and work-graph gates.
+still passes the memory, cost, busy-state, and kernel quota gates.
 
 ## Required metrics
 

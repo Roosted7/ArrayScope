@@ -16,7 +16,7 @@ Ownership rules:
 
 1. `TileLifecycle` (presentation/tile_lifecycle.py) remains the single owner
    of tile state; this package never keeps a parallel tile collection.
-2. The kernel (arrayscope.kernel) is the only executor. No QThreadPool, no
+2. The kernel (arrayscope.kernel) is the only executor. No per-purpose pools, no
    pacing timers here; the GUI thread only applies commit batches.
 3. Backends declare capabilities (shader windowing, atlas residency, uniform
    level changes); the ladder and pipeline branch on capabilities, never on

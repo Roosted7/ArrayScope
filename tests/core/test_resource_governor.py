@@ -620,12 +620,12 @@ def test_result_drain_feedback_filters_isolated_outlier():
     memory = _memory()
     governor.update_telemetry(_snapshot(memory), memory)
     for _ in range(6):
-        governor.record_ui_observation("visible_queue_drain", 2.0, item_count=4)
-    healthy = governor.decide_ui_work("visible_queue_drain", interactive=False)
+        governor.record_ui_observation("kernel_bridge_drain", 2.0, item_count=4)
+    healthy = governor.decide_ui_work("kernel_bridge_drain", interactive=False)
 
     # One GC pause / incidental relayout should not collapse the batch.
-    governor.record_ui_observation("visible_queue_drain", 60.0, item_count=4)
-    after_spike = governor.decide_ui_work("visible_queue_drain", interactive=False)
+    governor.record_ui_observation("kernel_bridge_drain", 60.0, item_count=4)
+    after_spike = governor.decide_ui_work("kernel_bridge_drain", interactive=False)
 
     assert healthy.batch_limit > 4
     # Without suppression the spike drives the per-item EWMA above the whole
@@ -638,13 +638,13 @@ def test_result_drain_repeated_slow_samples_are_learned():
     memory = _memory()
     governor.update_telemetry(_snapshot(memory), memory)
     for _ in range(6):
-        governor.record_ui_observation("visible_queue_drain", 2.0, item_count=4)
-    healthy = governor.decide_ui_work("visible_queue_drain", interactive=False)
+        governor.record_ui_observation("kernel_bridge_drain", 2.0, item_count=4)
+    healthy = governor.decide_ui_work("kernel_bridge_drain", interactive=False)
 
-    governor.record_ui_observation("visible_queue_drain", 60.0, item_count=4)
-    governor.record_ui_observation("visible_queue_drain", 60.0, item_count=4)
-    governor.record_ui_observation("visible_queue_drain", 60.0, item_count=4)
-    after_streak = governor.decide_ui_work("visible_queue_drain", interactive=False)
+    governor.record_ui_observation("kernel_bridge_drain", 60.0, item_count=4)
+    governor.record_ui_observation("kernel_bridge_drain", 60.0, item_count=4)
+    governor.record_ui_observation("kernel_bridge_drain", 60.0, item_count=4)
+    after_streak = governor.decide_ui_work("kernel_bridge_drain", interactive=False)
 
     assert after_streak.batch_limit < healthy.batch_limit
 
@@ -655,15 +655,15 @@ def test_result_drain_under_budget_batch_recovers_from_measured_rate():
     governor.update_telemetry(_snapshot(memory), memory)
     # Learned slow: repeated genuinely slow drains pin the batch low.
     for _ in range(8):
-        governor.record_ui_observation("montage_queue_drain", 40.0, item_count=4)
-    slow = governor.decide_ui_work("montage_queue_drain", interactive=False)
+        governor.record_ui_observation("kernel_bridge_drain", 40.0, item_count=4)
+    slow = governor.decide_ui_work("kernel_bridge_drain", interactive=False)
     assert slow.batch_limit <= 2
 
     # Real drains now complete far under budget while hitting their cap;
     # the next decision must grow from the measured rate instead of waiting
     # for the EWMA to decay one small drain at a time.
-    governor.record_ui_observation("montage_queue_drain", 1.0, item_count=max(1, slow.batch_limit))
-    recovered = governor.decide_ui_work("montage_queue_drain", interactive=False)
+    governor.record_ui_observation("kernel_bridge_drain", 1.0, item_count=max(1, slow.batch_limit))
+    recovered = governor.decide_ui_work("kernel_bridge_drain", interactive=False)
 
     assert recovered.batch_limit > slow.batch_limit
 

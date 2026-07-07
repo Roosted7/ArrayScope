@@ -4,7 +4,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
 from arrayscope.core.scheduler import EvalPriority, FrameTarget, WorkStart
-from arrayscope.core.work_graph import WorkItem, WorkLane
+from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.display.image_view_factory import create_image_view
 from arrayscope.ui.docks.inspection import InspectionDock
 from arrayscope.ui.docks.operations import OperationStackDock

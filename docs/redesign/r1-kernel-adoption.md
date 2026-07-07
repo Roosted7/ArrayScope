@@ -1,5 +1,11 @@
 # R1 — All background execution on the kernel
 
+**Status:** Implemented on `redesign` (2026-07-07). The FFT
+transform-preview montage wedge reproduced during the R1 benchmark and is
+tracked in [known-red.md](known-red.md) for R2/R3 instead of blocking this
+kernel-adoption commit. Validation: full non-GPU suite 1696 passed / 3
+skipped at `-n 16`; GPU harness 6 passed.
+
 **Goal:** one `Kernel` + one `QtKernelBridge` replace the eight
 `EvaluationController` QThreadPools and the bookkeeping-only `WorkGraph`.
 Priorities and lanes become real for every submission in the app.

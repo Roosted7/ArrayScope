@@ -6,6 +6,7 @@ prefer_pyside6()
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 import platform
+from arrayscope.app.errors import handle_ui_exception
 from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
@@ -14,14 +15,15 @@ from arrayscope.core.resource_governor import ResourceGovernor, SchedulerBusySta
 from arrayscope.core.resource_telemetry import sample_resource_snapshot
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.core.roi_store import RoiStore
-from arrayscope.core.work_graph import WorkGraph
+from arrayscope.kernel import Kernel, Lane, Priority, ThreadWorkerBackend
+from arrayscope.kernel.eval_adapter import KernelEvaluationController
+from arrayscope.kernel.qt_bridge import QtKernelBridge
 from arrayscope.export.workflow import ExportWorkflowMixin
 from arrayscope.ui.dimension_controls import DimensionControlMixin
 from arrayscope.ui.display_controls import DisplayControlBuildMixin
 from arrayscope.ui.menus import WindowMenuMixin
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
-from arrayscope.window.evaluation_controller import EvaluationController
 from arrayscope.window.file_view_session import FileViewSessionMixin
 from arrayscope.window.file_reload import FileReloadMixin
 from arrayscope.window.inspection import InspectionWorkflowMixin
@@ -87,21 +89,91 @@ class ArrayScopeWindow(
             self.renderer._memory_policy(),
         )
         self._init_compare_document(data)
-        self.work_graph = WorkGraph()
-        self.visible_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.visible_workers, name="visible")
+        self.kernel = Kernel(ThreadWorkerBackend(), handler_error_hook=handle_ui_exception)
+        self.kernel_bridge = QtKernelBridge(self.kernel, self)
+        self.visible_evaluation_controller = KernelEvaluationController(
+            self.kernel,
+            self.kernel_bridge,
+            self,
+            max_workers=self.compute_policy.visible_workers,
+            name="visible",
+            lane_default=Lane.VISIBLE_MATERIALIZATION,
+            priority_default=Priority.VISIBLE_IMAGE,
+            apply_lane_quota=False,
+        )
         self.evaluation_controller = self.visible_evaluation_controller
-        self.montage_tile_evaluation_controller = EvaluationController(
+        self.montage_tile_evaluation_controller = KernelEvaluationController(
+            self.kernel,
+            self.kernel_bridge,
             self,
             max_workers=self.compute_policy.montage_tile_workers,
-            name="montage",
+            name="montage_tile",
+            lane_default=Lane.VISIBLE_MATERIALIZATION,
+            priority_default=Priority.VISIBLE_IMAGE,
             max_callback_dispatch_per_drain=8,
+            apply_lane_quota=False,
         )
-        self.stage_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.stage_workers, name="stage")
-        self.histogram_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.histogram_workers, name="histogram")
-        self.pixel_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.pixel_workers, name="pixel")
-        self.profile_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.profile_workers, name="profile")
-        self.roi_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.roi_workers, name="roi")
-        self.prefetch_evaluation_controller = EvaluationController(self, max_workers=self.compute_policy.prefetch_workers, name="prefetch")
+        self.stage_evaluation_controller = KernelEvaluationController(
+            self.kernel,
+            self.kernel_bridge,
+            self,
+            max_workers=self.compute_policy.stage_workers,
+            name="stage",
+            lane_default=Lane.STAGE_MATERIALIZATION,
+            priority_default=Priority.VISIBLE_IMAGE,
+            apply_lane_quota=False,
+        )
+        self.histogram_evaluation_controller = KernelEvaluationController(
+            self.kernel,
+            self.kernel_bridge,
+            self,
+            max_workers=self.compute_policy.histogram_workers,
+            name="histogram",
+            lane_default=Lane.HISTOGRAM_REFINEMENT,
+            priority_default=Priority.HISTOGRAM,
+            apply_lane_quota=False,
+        )
+        self.pixel_evaluation_controller = KernelEvaluationController(
+            self.kernel,
+            self.kernel_bridge,
+            self,
+            max_workers=self.compute_policy.pixel_workers,
+            name="pixel",
+            lane_default=Lane.PROFILE_ROI_HOVER,
+            priority_default=Priority.HOVER,
+            apply_lane_quota=False,
+        )
+        self.profile_evaluation_controller = KernelEvaluationController(
+            self.kernel,
+            self.kernel_bridge,
+            self,
+            max_workers=self.compute_policy.profile_workers,
+            name="profile",
+            lane_default=Lane.PROFILE_ROI_HOVER,
+            priority_default=Priority.LIVE_PROFILE,
+            apply_lane_quota=False,
+        )
+        self.roi_evaluation_controller = KernelEvaluationController(
+            self.kernel,
+            self.kernel_bridge,
+            self,
+            max_workers=self.compute_policy.roi_workers,
+            name="roi",
+            lane_default=Lane.PROFILE_ROI_HOVER,
+            priority_default=Priority.SELECTED_ROI,
+            apply_lane_quota=False,
+        )
+        self.prefetch_evaluation_controller = KernelEvaluationController(
+            self.kernel,
+            self.kernel_bridge,
+            self,
+            max_workers=self.compute_policy.prefetch_workers,
+            name="prefetch",
+            lane_default=Lane.SPECULATIVE_RESIDENCY,
+            priority_default=Priority.PREFETCH,
+            apply_lane_quota=False,
+        )
+        self._apply_resource_governor_decisions(refresh_telemetry=False)
         self._ensure_resource_governor_timer()
         self.render_coordinator = RenderCoordinator(self)
         self._deferred_side_panel_refresh_pending = False
@@ -223,9 +295,17 @@ class ArrayScopeWindow(
             governor.update_policy(self.compute_policy, profile=getattr(self.app_settings, "memory_profile", None))
             self._apply_resource_governor_decisions()
             return
+        quota_by_lane: dict[Lane, int] = {}
         for lane, controller in self._evaluation_controllers_by_lane().items():
+            workers = self.compute_policy.workers_for_lane(lane)
             if controller is not None:
-                controller.set_max_workers(self.compute_policy.workers_for_lane(lane))
+                controller.set_reported_max_workers(workers)
+            kernel_lane = self._kernel_lane_for_compute_lane(lane)
+            quota_by_lane[kernel_lane] = max(int(workers), int(quota_by_lane.get(kernel_lane, 0)))
+        kernel = getattr(self, "kernel", None)
+        if kernel is not None:
+            for lane, workers in quota_by_lane.items():
+                kernel.set_lane_quota(lane, workers)
 
     def _evaluation_controllers_by_lane(self):
         return {
@@ -238,6 +318,18 @@ class ArrayScopeWindow(
             ComputeLane.ROI: getattr(self, "roi_evaluation_controller", None),
             ComputeLane.PIXEL: getattr(self, "pixel_evaluation_controller", None),
         }
+
+    def _kernel_lane_for_compute_lane(self, lane: ComputeLane) -> Lane:
+        return {
+            ComputeLane.VISIBLE: Lane.VISIBLE_MATERIALIZATION,
+            ComputeLane.MONTAGE_TILE: Lane.VISIBLE_MATERIALIZATION,
+            ComputeLane.STAGE: Lane.STAGE_MATERIALIZATION,
+            ComputeLane.HISTOGRAM: Lane.HISTOGRAM_REFINEMENT,
+            ComputeLane.PREFETCH: Lane.SPECULATIVE_RESIDENCY,
+            ComputeLane.PROFILE: Lane.PROFILE_ROI_HOVER,
+            ComputeLane.ROI: Lane.PROFILE_ROI_HOVER,
+            ComputeLane.PIXEL: Lane.PROFILE_ROI_HOVER,
+        }[ComputeLane(lane)]
 
     def _ensure_resource_governor_timer(self):
         timer = getattr(self, "_resource_governor_timer", None)
@@ -353,22 +445,27 @@ class ArrayScopeWindow(
         interactive = self._interaction_active_now()
         self._governor_interactive_applied = interactive
         busy = self._scheduler_busy_state()
+        quota_by_lane: dict[Lane, int] = {}
         for lane, controller in self._evaluation_controllers_by_lane().items():
             if controller is None:
                 continue
             decision = governor.decide_lane_workers(lane, interactive=interactive, busy_state=busy)
-            controller.set_max_workers(decision.target_workers)
-        for controller in self._evaluation_controllers_by_lane().values():
-            if controller is None:
-                continue
-            # Each controller's drain records its observations under
-            # "<name>_queue_drain"; deciding on the same channel closes the
-            # feedback loop with that drain's own measured latency instead of
-            # a channel nothing ever observes.
-            decision = governor.decide_ui_work(f"{controller.name}_queue_drain", interactive=interactive)
-            controller.set_max_callback_dispatch_per_drain(decision.batch_limit)
-            if hasattr(controller, "set_callback_budget_ms"):
-                controller.set_callback_budget_ms(decision.budget_ms)
+            controller.set_reported_max_workers(decision.target_workers)
+            kernel_lane = self._kernel_lane_for_compute_lane(lane)
+            quota_by_lane[kernel_lane] = max(
+                int(decision.target_workers),
+                int(quota_by_lane.get(kernel_lane, 0)),
+            )
+        for lane, workers in quota_by_lane.items():
+            self.kernel.set_lane_quota(lane, workers)
+        # R1: completions now drain through one QtKernelBridge. The old
+        # per-controller drain channels are gone; R4 will shrink the governor
+        # further to telemetry plus the remaining two knobs.
+        bridge = getattr(self, "kernel_bridge", None)
+        if bridge is not None:
+            decision = governor.decide_ui_work("kernel_bridge_drain", interactive=interactive)
+            bridge.set_max_items_per_drain(decision.batch_limit)
+            bridge.set_budget_ms(decision.budget_ms)
         histogram_decision = governor.decide_ui_work("histogram_preview", interactive=interactive)
         img_view = getattr(self, "img_view", None)
         if img_view is not None and hasattr(img_view, "setHistogramPreviewInterval"):
@@ -497,6 +594,12 @@ class ArrayScopeWindow(
             controller = getattr(self, name, None)
             if controller is not None:
                 controller.shutdown_for_close()
+        bridge = getattr(self, "kernel_bridge", None)
+        if bridge is not None:
+            bridge.close()
+        kernel = getattr(self, "kernel", None)
+        if kernel is not None:
+            kernel.shutdown()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------

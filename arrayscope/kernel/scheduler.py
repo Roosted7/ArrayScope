@@ -1,10 +1,9 @@
 """The kernel scheduler: one owner for background execution.
 
-Replaces the pre-redesign split between `core.work_graph.WorkGraph`
-(bookkeeping that never ran anything), `window.evaluation_controller`
-(a FIFO QThreadPool where priorities were decorative), and per-call-site
-staleness checks. Here, priorities order real worker pulls, dependencies
-gate real execution, and staleness has exactly one arbiter.
+Replaces the pre-redesign split between bookkeeping-only admission, per-purpose
+FIFO worker pools where priorities were decorative, and per-call-site staleness
+checks. Here, priorities order real worker pulls, dependencies gate real
+execution, and staleness has exactly one arbiter.
 
 Staleness has three sources, all decided here:
 
@@ -37,6 +36,7 @@ from arrayscope.kernel.task import (
     Supersession,
     TaskOutcome,
     TaskSpec,
+    WorkItem,
 )
 
 try:  # Qt-free; operations.cancellation defines the cooperative exception.
@@ -91,12 +91,14 @@ class KernelDiagnostics:
     lanes: dict[str, dict[str, int]]
     queued: int
     running: int
+    active: int
     parked_deps: int
     parked_quota: int
     workers: int
     completed_keys: int
     scopes: int
     oldest_queued_ms: float
+    visible_backlog: int = 0
 
 
 class Kernel:
@@ -133,6 +135,8 @@ class Kernel:
         self._counters: dict[Lane, LaneCounters] = {}
         self._running_visible = 0
         self._running_optional = 0
+        self._running_by_lane: dict[Lane, int] = {}
+        self._lane_quotas: dict[Lane, int] = {}
         self._queued_visible = 0
         self._speculative_fraction = min(1.0, max(0.05, float(speculative_fraction)))
         self.optional_value_threshold = float(optional_value_threshold)
@@ -218,6 +222,41 @@ class Kernel:
                     record.token.cancel()
             self._cond.notify_all()
 
+    def set_lane_quota(self, lane: Lane, quota: int | None) -> None:
+        """Set or clear the maximum concurrent tasks for one lane.
+
+        The thread backend supplies physical workers; lane quotas shape which
+        ready records those workers may pull. ``None`` clears the hint.
+        """
+
+        lane = Lane(str(lane))
+        with self._lock:
+            if quota is None:
+                self._lane_quotas.pop(lane, None)
+            else:
+                self._lane_quotas[lane] = max(1, int(quota))
+            self._release_parked_quota_locked()
+            self._cond.notify_all()
+        self._backend.wake()
+
+    def note_inline_work(self, item: WorkItem) -> None:
+        """Record already-executed GUI-thread work in kernel diagnostics.
+
+        Some R1-era frame renderer code still performs bounded commit/fan-in
+        work synchronously on the GUI thread. It is not submitted for worker
+        execution, but it should be visible in the same lane counters until R2
+        ports those effects into pipeline tasks.
+        """
+
+        item = item if isinstance(item, WorkItem) else WorkItem(**item)
+        with self._lock:
+            counters = self._lane(item.lane)
+            counters.queued += 1
+            counters.admitted += 1
+            counters.started += 1
+            counters.completed += 1
+            self._completed_keys.add(item.key)
+
     def shutdown(self, timeout: float = 5.0) -> None:
         with self._lock:
             self._shutting_down = True
@@ -302,12 +341,14 @@ class Kernel:
                 lanes=lanes,
                 queued=sum(1 for r in self._records.values() if r.state == _QUEUED),
                 running=sum(1 for r in self._records.values() if r.state == _RUNNING),
+                active=sum(1 for r in self._records.values() if r.state == _RUNNING),
                 parked_deps=sum(1 for r in self._records.values() if r.state == _PARKED_DEPS),
                 parked_quota=len(self._parked_quota),
                 workers=int(getattr(self._backend, "workers", 0)),
                 completed_keys=len(self._completed_keys),
                 scopes=len(self._scope_epochs),
                 oldest_queued_ms=oldest_ms,
+                visible_backlog=int(self._queued_visible + self._running_visible),
             )
 
     @property
@@ -368,6 +409,11 @@ class Kernel:
                 self._running_visible = max(0, self._running_visible - 1)
             else:
                 self._running_optional = max(0, self._running_optional - 1)
+            lane_running = int(self._running_by_lane.get(spec.lane, 0) or 0)
+            if lane_running <= 1:
+                self._running_by_lane.pop(spec.lane, None)
+            else:
+                self._running_by_lane[spec.lane] = lane_running - 1
             counters = self._lane(spec.lane)
             if outcome == TaskOutcome.COMPLETED and self._record_is_stale_locked(record):
                 outcome = TaskOutcome.STALE
@@ -428,7 +474,9 @@ class Kernel:
                 if not spec.visible:
                     self._drop_record_locked(record, reason="deadline", superseded=False)
                     continue
-            if not spec.visible and self._optional_blocked_locked(spec):
+            if self._lane_quota_blocked_locked(spec) or (
+                not spec.visible and self._optional_blocked_locked(spec)
+            ):
                 if not record.quota_blocked_noted:
                     counters.blocked_by_quota += 1
                     record.quota_blocked_noted = True
@@ -441,8 +489,15 @@ class Kernel:
                 self._running_visible += 1
             else:
                 self._running_optional += 1
+            self._running_by_lane[spec.lane] = int(self._running_by_lane.get(spec.lane, 0) or 0) + 1
             return record
         return None
+
+    def _lane_quota_blocked_locked(self, spec: TaskSpec) -> bool:
+        quota = self._lane_quotas.get(spec.lane)
+        if quota is None:
+            return False
+        return int(self._running_by_lane.get(spec.lane, 0) or 0) >= int(quota)
 
     def _optional_blocked_locked(self, spec: TaskSpec) -> bool:
         quota = max(1, int(getattr(self._backend, "workers", 1) * self._speculative_fraction))

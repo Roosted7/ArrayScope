@@ -166,7 +166,7 @@ def test_prefetch_skips_while_visible_controller_busy(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import AppSettingsState
     from arrayscope.core.scheduler import FrameTarget
-    from arrayscope.core.work_graph import WorkItem, WorkLane
+    from arrayscope.kernel import Lane as WorkLane, WorkItem
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))

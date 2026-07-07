@@ -25,7 +25,7 @@ from arrayscope.core.gui_callback_budget import GuiCallbackBudget, WARNING_THRES
 from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
-from arrayscope.core.work_graph import WorkItem, WorkLane, complete_inline_work as _complete_inline_work
+from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
 from arrayscope.display.imageview2d import MontageTileOverlay
@@ -1475,7 +1475,7 @@ class FrameRenderMixin:
         if timer is None:
             # Bounded continuation. Cached level stats are secondary UI work
             # and each slice is budgeted by `_process_montage_cached_level_stats`;
-            # remove when histogram refinement is fully WorkGraph-owned.
+            # remove when histogram refinement is fully kernel-owned.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._process_montage_cached_level_stats)
@@ -2213,7 +2213,7 @@ class FrameRenderMixin:
         if hasattr(self.win, "_apply_resource_governor_decisions"):
             self.win._apply_resource_governor_decisions()
         controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
-        max_workers = max(1, int(controller.pool.maxThreadCount()))
+        max_workers = max(1, int(controller.diagnostics().max_workers))
         while len(session.active_tile_requests) < max_workers:
             scheduled = self._schedule_next_montage_tile(session)
             if not scheduled:
@@ -3352,7 +3352,7 @@ class FrameRenderMixin:
         if timer is None:
             # Bounded continuation guarded by `_montage_commit_token`.
             # Commit spacing comes from feedback/resource policy; remove when
-            # backend commits are scheduled directly as WorkGraph callbacks.
+        # backend commits are recorded directly in kernel diagnostics.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._flush_montage_presentation_commit)

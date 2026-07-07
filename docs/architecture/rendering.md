@@ -71,8 +71,8 @@ Presentation-generation and admission state are Qt-free. `PresentationGeneration
 latest level target, revision, active coverage, pending work, and acknowledgement state.
 `TileAdmissionQueue` owns priority/aging/item/byte/deadline admission without knowing array semantics.
 `LevelConvergenceStrategy` keeps PyQtGraph progressive tile redraws and VisPy uniform updates behind
-one semantic convergence contract. `WorkGraph` sits above these component models and owns lane-level
-frame-value admission/counters for visible planning, materialization, display preparation, GUI fan-in,
+one semantic convergence contract. The kernel sits above these component models and owns real
+lane-level execution/counters for visible planning, materialization, display preparation, GUI fan-in,
 backend commit, side analysis, stage materialization, and speculative residency. Work visibility is
 carried by target quality as well as lane: exact visible stage materialization is visible work, while
 retained stage warmup is optional and subject to available-budget admission.

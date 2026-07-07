@@ -8,8 +8,14 @@ defers to it while the redesign is in flight.
 ## What already landed on `redesign`
 
 - `arrayscope/kernel/` — the execution kernel (scheduler, workers,
-  completions, Qt bridge), 32 tests. Priorities/dependencies/staleness are
+  completions, Qt bridge), 33 tests. Priorities/dependencies/staleness are
   now real at execution level.
+- **R1 kernel adoption** — app submissions now share one `Kernel` and one
+  `QtKernelBridge`; WorkGraph is deleted; `window/evaluation_controller.py`
+  is an import-only surface over `arrayscope/kernel/eval_adapter.py`.
+  Validation: 1696 passed / 3 skipped in the full non-GPU suite at `-n 16`;
+  GPU harness 6 passed. The vispy/resident FFT preview wedge reproduced and
+  remains in [known-red.md](known-red.md) for R2/R3.
 - `arrayscope/render/` — typed stage contracts, the unified LOD ladder
   (pure planner, 11 tests), and the kernel-backed `MontagePipeline`
   skeleton (5 tests) with `PipelineEffects` integration points.
@@ -24,7 +30,6 @@ defers to it while the redesign is in flight.
 
 | Plan | What | Size | Blocked by |
 |---|---|---|---|
-| [R1](r1-kernel-adoption.md) | All background execution on the kernel; delete the 8 controllers + WorkGraph | L | — |
 | [R2](r2-pipeline-integration.md) | MontagePipeline live: port evaluation/commit effects, dissolve frame_renderer clusters B/C/E | XL | R1 |
 | [R3](r3-lod-ladder-adoption.md) | Ladder replaces montage_lod planning; one pyramid store; ops once per rung; PyQtGraph parity via capabilities | L | R2 |
 | [R4](r4-timer-and-governor-audit.md) | Every QTimer justified or deleted; governor shrinks to telemetry + two knobs | M | R2 |
@@ -74,7 +79,7 @@ guide us back to the wrong path.
 - **GPU harness** (~20 s, real hardware, asserts `stall_repairs==0`):
   `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland … -m pytest tests/gpu_interaction -n 0`
 - **Workflow benchmark:**
-  `… -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-lod-policy {resident|native-only} [--json-out FILE]`
+  `… -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-lod-policy {resident|native-only} [--jsonl FILE]`
   `STALL WATCHDOG` on stderr must stay 0.
 - **Probes:** `tools/probes/` (`verify_scrub_fastpath.py`,
   `profile_cached_rebuild.py` — ONSCREEN, tell Thomas hands-off,

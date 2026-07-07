@@ -226,21 +226,14 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
                     "roi_refresh",
                     "profile_update",
                     "pixel_hover",
-                    "visible_queue_drain",
-                    "montage_queue_drain",
-                    "stage_queue_drain",
-                    "histogram_queue_drain",
-                    "profile_queue_drain",
-                    "roi_queue_drain",
-                    "pixel_queue_drain",
-                    "prefetch_queue_drain",
+                    "kernel_bridge_drain",
                 )
             )
         ),
         schedulers=tuple(schedulers),
         render=render,
         montage=montage,
-        work_graph=None if getattr(window, "work_graph", None) is None else window.work_graph.diagnostics(),
+        kernel=None if getattr(window, "kernel", None) is None else window.kernel.diagnostics(),
         canvas_preserve=(
             window.layout_manager.canvas_preserver.diagnostics()
             if hasattr(getattr(window, "layout_manager", None), "canvas_preserver")

@@ -106,13 +106,3 @@ def test_orchestrator_owns_the_render_generation():
     first = orchestrator._advance_render_generation("test")
     assert orchestrator._capture_render_generation() == first
     assert orchestrator._render_generation.last_reason == "test"
-
-
-def test_orchestrator_exposes_window_work_graph():
-    from arrayscope.core.work_graph import WorkGraph
-    from arrayscope.window.render import RenderOrchestrator
-
-    graph = WorkGraph()
-    orchestrator = RenderOrchestrator.__new__(RenderOrchestrator)
-    orchestrator.win = SimpleNamespace(work_graph=graph)
-    assert orchestrator.work_graph is graph

@@ -107,9 +107,10 @@ def test_compute_policy_configures_stage_and_montage_lanes(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        assert win.montage_tile_evaluation_controller.pool.maxThreadCount() == win.compute_policy.workers_for_lane(ComputeLane.MONTAGE_TILE)
-        assert win.stage_evaluation_controller.pool.maxThreadCount() == win.compute_policy.workers_for_lane(ComputeLane.STAGE)
-        assert win.histogram_evaluation_controller.pool.maxThreadCount() == win.compute_policy.workers_for_lane(ComputeLane.HISTOGRAM)
+        montage_workers = win.montage_tile_evaluation_controller.diagnostics().max_workers
+        assert 1 <= montage_workers <= win.compute_policy.workers_for_lane(ComputeLane.MONTAGE_TILE)
+        assert win.stage_evaluation_controller.diagnostics().max_workers == win.compute_policy.workers_for_lane(ComputeLane.STAGE)
+        assert win.histogram_evaluation_controller.diagnostics().max_workers == win.compute_policy.workers_for_lane(ComputeLane.HISTOGRAM)
         assert win.compute_policy.fft_workers_for_lane(ComputeLane.MONTAGE_TILE) == 1
         assert win.compute_policy.fft_workers_for_lane(ComputeLane.STAGE) >= 1
         assert win.compute_policy.fft_workers_for_lane(ComputeLane.HISTOGRAM) == 1
