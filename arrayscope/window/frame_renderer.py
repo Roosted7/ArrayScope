@@ -19,13 +19,12 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.core.gui_callback_budget import GuiCallbackBudget, WARNING_THRESHOLD_MS
+from arrayscope.core.gui_callback_budget import GuiCallbackBudget
 from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.frame_planner import FramePlanner
-from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
 from arrayscope.display.imageview2d import MontageTileOverlay
 from arrayscope.display.montage import (
     MontageTileState,
@@ -33,8 +32,7 @@ from arrayscope.display.montage import (
     make_montage_plan,
     montage_rect_for_viewport,
 )
-from arrayscope.display.slice_engine import DisplayImage
-from arrayscope.display.viewport import ViewportMode, ViewportPolicy, view_ranges_near
+from arrayscope.display.viewport import ViewportMode, view_ranges_near
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.operations.evaluator import _document_key, stage_document_key
 from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked, stage_materialization_allowed_chunk_axes
@@ -54,10 +52,6 @@ from arrayscope.display.model.montage_levels import (
     provisional_tile_level_stats,
     sample_tile_level_stats,
 )
-from arrayscope.display.model.tile_feedback import (
-    tile_presentation_feedback_conservative_start,
-    tile_presentation_feedback_signature,
-)
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level
 from arrayscope.presentation import ClaimOwner
 from arrayscope.presentation.dispatch import derive_montage_dispatch
@@ -65,10 +59,11 @@ from arrayscope.display.pyramid import PyramidCache, preview_level_for_tile_shap
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
     payload_compatible_with_tile as _payload_compatible_with_tile,
-    previous_tiled_payloads as _previous_tiled_payloads,
     previous_tiled_payloads_by_base_source as _previous_tiled_payloads_by_base_source,
     RetainedTiledPayloadStore,
 )
+from arrayscope.window import montage_commit
+from arrayscope.window.montage_commit import MontagePipelineEffects
 from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
@@ -94,10 +89,7 @@ from arrayscope.window.render_contract import (
     montage_work_token_is_current as _montage_work_token_is_current,
     session_token_is_current as _session_token_is_current,
 )
-from arrayscope.display.planning import LevelSourceRank, decide_presentation, fallback_level_source, normalize_bounds
-from arrayscope.display.model.commit import CommitKind, DisplayPayload, PresentationInput
-from arrayscope.display.model.frame import TiledValueSource
-from arrayscope.window.display_presenter import tile_residency_budget_bytes
+from arrayscope.display.planning import LevelSourceRank, fallback_level_source, normalize_bounds
 
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
@@ -1208,7 +1200,7 @@ class FrameRenderMixin:
             cached_tiles.extend(display_cached)
             missing_tiles.extend(display_missing)
             processed_additions += 1
-            byte_count = sum(_rendered_tile_nbytes(rendered) for rendered in display_cached)
+            byte_count = sum(montage_commit.rendered_tile_nbytes(rendered) for rendered in display_cached)
             budget.record_item(byte_count=byte_count)
             if budget.should_yield():
                 break
@@ -1617,7 +1609,7 @@ class FrameRenderMixin:
             else:
                 pending.append(rendered)
                 queued_sources.add(source_index)
-            budget.record_item(byte_count=_rendered_tile_nbytes(rendered))
+            budget.record_item(byte_count=montage_commit.rendered_tile_nbytes(rendered))
             if budget.should_yield():
                 break
         session.level_scan_cursor = int(cursor)
@@ -1657,7 +1649,7 @@ class FrameRenderMixin:
                 )
             self._queue_montage_level_refinement(session, rendered)
             processed += 1
-            budget.record_item(byte_count=_rendered_tile_nbytes(rendered))
+            budget.record_item(byte_count=montage_commit.rendered_tile_nbytes(rendered))
             if budget.should_yield():
                 break
         if not pending and not budget.should_yield():
@@ -2415,7 +2407,7 @@ class FrameRenderMixin:
         if existing is not None:
             return False
         upload_preview_useful = bool(
-            _persistent_gpu_tile_residency_backend(self, session)
+            montage_commit.persistent_gpu_tile_residency_backend(self, session)
             and int(getattr(demand, "desired_level", 0) or 0) > 0
         )
         if render_effects.shared_preview_is_useful(
@@ -2477,7 +2469,7 @@ class FrameRenderMixin:
             if preview is None:
                 current.release_preview_claim(tile_number, preview_key)
                 return
-            key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = _preview_payload_parts(preview)
+            key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = montage_commit.preview_payload_parts(preview)
             if key != preview_key:
                 current.release_preview_claim(tile_number, preview_key)
             current.admit_preview_plane(
@@ -2628,7 +2620,7 @@ class FrameRenderMixin:
             seen_tiles: set[int] = set()
             for row in preview_rows:
                 tile_number, key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = (
-                    _preview_row_parts(row)
+                    montage_commit.preview_row_parts(row)
                 )
                 tile_number = int(tile_number)
                 expected_key = claimed_keys.get(tile_number)
@@ -2908,7 +2900,7 @@ class FrameRenderMixin:
             return
         self._montage_tile_result_key = (int(session.session_id), session.key)
         self._montage_tile_result_token = _montage_work_token(session, "tile_result")
-        if _persistent_tile_layer_fast_drain_enabled(self, session):
+        if montage_commit.persistent_tile_layer_fast_drain_enabled(self, session):
             if not bool(getattr(self, "_montage_tile_result_flush_queued", False)):
                 self._montage_tile_result_flush_queued = True
                 try:
@@ -2955,7 +2947,7 @@ class FrameRenderMixin:
         processed = 0
         processed_tiles = []
         first_vispy_display = bool(
-            _persistent_tile_residency_backend(self, session)
+            montage_commit.persistent_tile_residency_backend(self, session)
             and not getattr(session, "display_committed", False)
         )
         expected_indices = self._montage_level_expected_indices(session)
@@ -3045,7 +3037,7 @@ class FrameRenderMixin:
         self._queue_montage_level_refinement(session, rendered)
         session.mark_loaded(rendered)
         session.dirty_tiles.append(int(tile.montage_index))
-        return _rendered_tile_nbytes(rendered)
+        return montage_commit.rendered_tile_nbytes(rendered)
 
     def _on_montage_tile_error(self, session_id, tile, exc) -> None:
         session = getattr(self, "_montage_session", None)
@@ -3288,7 +3280,7 @@ class FrameRenderMixin:
             if not session.pending_tiles and not session.loading_tiles and not session.active_tile_requests:
                 return _montage_commit_interval_ms(self, force=True)
         interval = _montage_commit_interval_ms(self, force=False)
-        if _persistent_tile_layer_fast_drain_enabled(self, session):
+        if montage_commit.persistent_tile_layer_fast_drain_enabled(self, session):
             return min(int(interval), 8)
         return interval
 
@@ -3334,558 +3326,7 @@ class FrameRenderMixin:
     def _commit_montage_session_presentation(self, session, *, force=False) -> None:
         if not self._montage_session_is_current(session):
             return
-        commit_start = perf_counter()
-        self._classify_visible_montage_tiles(session)
-        direct_presentation = self._direct_montage_tile_layer_presentation(session)
-        if direct_presentation is None:
-            raise RuntimeError("montage presentation could not be built")
-        self._commit_montage_session_tile_layer(session, direct_presentation, commit_start=commit_start)
-
-    def _direct_montage_tile_layer_presentation(self, session):
-        tile_states = session.ensure_tile_states()
-        placeholder = _montage_tile_layer_placeholder(session)
-        geometry = DisplayGeometry(
-            view_state=session.view_state,
-            display_shape=tuple(placeholder.shape[:2]),
-            montage=session.plan.geometry,
-            montage_origin_x=0,
-            montage_origin_y=0,
-            montage_tile_states=tile_states,
-        )
-        decision = self._montage_backend_policy(geometry, placeholder)
-        if decision.backend != "tile_layer":
-            return None
-        return DisplayImage(data=placeholder, histogram_data=None, rgb_already_windowed=False), geometry
-
-    def _commit_montage_session_tile_layer(self, session, direct_presentation, *, commit_start: float) -> None:
-        display_image, rendered_geometry = direct_presentation
-        dirty_tiles = session.consume_dirty_tiles()
-        tile_source_ids = self._montage_tile_source_ids(session)
-        self._montage_committed_tile_upserts_last_flush = len(dirty_tiles)
-        self._current_montage_geometry = session.plan.geometry
-        self._current_montage_plan = session.plan
-        self._next_viewport_policy = ViewportPolicy.PRESERVE
-        self._montage_presentation_commit_active = True
-        self._last_montage_tile_prepare_apply_ms = 0.0
-        self._last_montage_tile_prepare_stats_ms = 0.0
-        self._last_montage_tile_prepare_metadata_ms = 0.0
-        self._last_montage_tile_prepare_source_ms = 0.0
-        self._last_montage_tile_prepare_histogram_ms = 0.0
-        self._last_montage_tile_layer_apply_ms = 0.0
-        self._last_montage_tile_acknowledge_ms = 0.0
-        self._last_montage_tile_retained_store_ms = 0.0
-        self._last_montage_tile_state_publish_ms = 0.0
-        self._last_montage_tile_geometry_sync_ms = 0.0
-        self._last_montage_tile_identity_check_ms = 0.0
-        self._last_montage_tile_followup_ms = 0.0
-        try:
-            payload_start = perf_counter()
-            selected_lod_factor = int(session._selected_lod_factor())
-            # ADR 0050: seeding a fresh session must keep whatever level the
-            # previous session presented on screen; the resident policy swaps
-            # levels afterwards through ordinary payload-identity commits.
-            reuse_any_lod = bool(getattr(session, "_resident_lod_active", lambda: False)())
-            # The previous-frame and retained-store scans exist only to seed
-            # a session that has never presented; for every later flush (and
-            # for retargeted sessions, whose payloads persist in-session)
-            # they were O(committed frame + retained store) per commit for
-            # nothing.
-            if not getattr(session, "presented_tiles", None):
-                previous_payloads = {
-                    int(tile): payload
-                    for tile, payload in _previous_tiled_payloads(getattr(self.win, "_committed_display_frame", None)).items()
-                    if reuse_any_lod or _payload_lod_matches(payload, selected_lod_factor)
-                }
-                retained_payloads = self._retained_tiled_payload_store().payloads_by_base_source(
-                    lod_factor=None if reuse_any_lod else selected_lod_factor
-                )
-                if retained_payloads:
-                    previous_payloads.update(
-                        {
-                            int(tile): payload
-                            for tile, payload in enumerate(retained_payloads.values())
-                        }
-                    )
-                if previous_payloads:
-                    session.seed_display_tile_payloads(
-                        previous_payloads,
-                        tile_source_ids,
-                        tile_numbers=tuple(session.dirty_payloads),
-                    )
-                    if reuse_any_lod:
-                        # Converge seeded stale-level payloads to the live
-                        # demand: mismatched tiles become dirty and rebuild
-                        # below; missing levels are queued and drained after
-                        # this commit.
-                        session.refresh_lod_for_viewport()
-            base_tile_state = session.tile_presentation_state
-            fast_drain = _persistent_tile_layer_fast_drain_enabled(self, session)
-            self._persistent_tile_layer_fast_drain_last_enabled = bool(fast_drain)
-            self._persistent_tile_layer_fast_drain_enabled_count = int(
-                getattr(self, "_persistent_tile_layer_fast_drain_enabled_count", 0) or 0
-            ) + int(bool(fast_drain))
-            tile_layer_limits = _tile_layer_upsert_limits(self, session)
-            tile_layer_cold_deadline_ms = None
-            if tile_layer_limits:
-                tile_layer_limits = dict(tile_layer_limits)
-                tile_layer_cold_deadline_ms = tile_layer_limits.pop("cold_deadline_ms", None)
-            tile_state, tile_delta = session.build_tile_presentation(
-                tile_source_ids,
-                cold_deadline_ms=tile_layer_cold_deadline_ms,
-                **tile_layer_limits,
-            )
-            if _persistent_tile_residency_backend(self, session):
-                dirty_tiles = tuple(int(tile) for tile in dirty_tiles if int(tile) in set(tile_delta.upserts))
-            active_payloads = tile_state.active_payloads(tile_delta)
-            first_display_commit = not bool(session.display_committed)
-            requested_levels = _session_requested_levels(session)
-            explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
-            if (
-                first_display_commit
-                and not explicit_auto
-                and not active_payloads
-                and not getattr(tile_delta, "upserts", None)
-                and not getattr(tile_delta, "removals", None)
-                and not (session.has_pending_level_update() and session.has_stale_level_presentations())
-            ):
-                session.final_commit_pending = False
-                session.flush_pending = False
-                self._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-                self._schedule_montage_lod_materializations(session)
-                return
-            if (
-                not first_display_commit
-                and not explicit_auto
-                and not getattr(tile_delta, "force_refresh", False)
-                and not getattr(tile_delta, "upserts", None)
-                and not getattr(tile_delta, "removals", None)
-                and not bool(getattr(session, "presentation_geometry_changed", False))
-                and not (session.has_pending_level_update() and session.has_stale_level_presentations())
-            ):
-                session.final_commit_pending = False
-                session.flush_pending = False
-                self._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-                session.note_committed()
-                self._settle_montage_visible_plan_if_complete(session)
-                self._finish_montage_session_if_complete(session)
-                if not (getattr(session, "dirty_payloads", None) or getattr(session, "pending_removals", None)):
-                    schedule_near_viewport_montage_prefetch(self, session)
-                self._schedule_montage_lod_materializations(session)
-                self._retry_live_profile_after_montage_tile()
-                return
-            level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
-            self._queue_montage_level_stats_for_payloads(session, level_payloads)
-            rendered_geometry = replace(
-                rendered_geometry,
-                montage_tile_states=session.ensure_tile_states(),
-            )
-            self._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-            prepare_apply_start = perf_counter()
-            prepare_stats_start = perf_counter()
-            level_stats = self._montage_level_stats_for_session(session)
-            self._last_montage_tile_prepare_stats_ms = (perf_counter() - prepare_stats_start) * 1000.0
-            semantic_commit = bool(active_payloads)
-            decision_force_auto = bool(explicit_auto and semantic_commit)
-            if _tile_layer_auto_levels_wait_for_complete_source(self, session, decision_force_auto, level_stats):
-                session.final_commit_pending = True
-                session.flush_pending = True
-                # Rule 6: this park waits on level evidence, so ARM the
-                # producer.  When no level work is queued (stats absent for a
-                # fresh level key whose upserts were all consumed already),
-                # mark the session scan pending — otherwise the continuation
-                # below is a no-op and the parked flush can never re-commit
-                # (the pyqtgraph+resident auto-levels wedge).
-                if (
-                    not getattr(session, "pending_level_tiles", None)
-                    and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0
-                ):
-                    self._mark_montage_level_scan_pending(session)
-                self._schedule_montage_cached_level_stats(session)
-                return
-            prepare_metadata_start = perf_counter()
-            level_metadata_improved = self._should_publish_montage_level_metadata(session, level_stats)
-            publish_auto_metadata = bool(explicit_auto and (first_display_commit or level_metadata_improved))
-            publish_histogram_plot = bool(first_display_commit)
-            publish_metadata = (
-                publish_auto_metadata
-                or publish_histogram_plot
-                or level_metadata_improved
-            )
-            self._last_montage_tile_prepare_metadata_ms = (perf_counter() - prepare_metadata_start) * 1000.0
-            prepare_source_start = perf_counter()
-            semantic_source = self._montage_level_source_for_session(session, allow_partial=publish_metadata)
-            self._last_montage_tile_prepare_source_ms = (perf_counter() - prepare_source_start) * 1000.0
-            prepare_histogram_start = perf_counter()
-            histogram_plot_data = (
-                self._montage_histogram_plot_data_for_session(session, allow_partial=publish_metadata)
-                if publish_histogram_plot
-                else None
-            )
-            self._last_montage_tile_prepare_histogram_ms = (perf_counter() - prepare_histogram_start) * 1000.0
-            self._last_montage_tile_prepare_apply_ms = (perf_counter() - prepare_apply_start) * 1000.0
-            apply_start = perf_counter()
-            if first_display_commit:
-                self._apply_full_display_image(
-                    display_image,
-                    geometry=rendered_geometry,
-                    window_mode=session.window_mode,
-                    previous_frame=getattr(self.win, "_committed_display_frame", None),
-                    force_auto=decision_force_auto,
-                    defer_side_panels=getattr(session, "defer_side_panels", False),
-                    semantic_source=semantic_source,
-                    applied_level_source=session.applied_level_source,
-                    histogram_plot_data=histogram_plot_data,
-                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if decision_force_auto else CommitKind.FULL_FRAME_INITIAL,
-                    document_key=_document_key(session.document),
-                    request_key=session.key,
-                    render_generation=session.render_generation,
-                    montage_level_key=session.level_key,
-                    tile_state=tile_state,
-                    base_tile_state=base_tile_state,
-                    tile_delta=tile_delta,
-                    frame_plan=session.frame_plan,
-                    user_levels=requested_levels,
-                    semantic_commit=semantic_commit,
-                )
-            elif _direct_montage_tile_delta_commit_enabled(self, session) and self._commit_montage_tile_delta_direct(
-                session,
-                display_image,
-                rendered_geometry,
-                tile_state=tile_state,
-                base_tile_state=base_tile_state,
-                tile_delta=tile_delta,
-                semantic_source=semantic_source,
-                applied_level_source=session.applied_level_source,
-                histogram_plot_data=histogram_plot_data,
-                explicit_auto=explicit_auto,
-                semantic_commit=semantic_commit,
-            ):
-                pass
-            else:
-                self._apply_progressive_display_image(
-                    display_image,
-                    geometry=rendered_geometry,
-                    window_mode=session.window_mode,
-                    previous_frame=getattr(self.win, "_committed_display_frame", None),
-                    force_auto=False,
-                    viewport_policy=ViewportPolicy.PRESERVE,
-                    semantic_source=semantic_source,
-                    applied_level_source=session.applied_level_source,
-                    histogram_plot_data=histogram_plot_data,
-                    commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_FRAME_PATCH,
-                    document_key=_document_key(session.document),
-                    request_key=session.key,
-                    render_generation=session.render_generation,
-                    montage_level_key=session.level_key,
-                    tile_state=tile_state,
-                    base_tile_state=base_tile_state,
-                    tile_delta=tile_delta,
-                    frame_plan=session.frame_plan,
-                    user_levels=requested_levels,
-                    semantic_commit=semantic_commit,
-                )
-            self._last_montage_tile_layer_apply_ms = (perf_counter() - apply_start) * 1000.0
-            report = getattr(self._display_committer(), "last_tile_commit_report", None)
-            acknowledge_start = perf_counter()
-            acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=normalize_bounds(self.win.img_view.getLevels()))
-            self._last_montage_tile_acknowledge_ms = (perf_counter() - acknowledge_start) * 1000.0
-            retained_store_start = perf_counter()
-            self._retained_tiled_payload_store().remember_acknowledged(
-                _accepted_tiled_payloads(acknowledged.payloads, tile_delta, report)
-            )
-            self._last_montage_tile_retained_store_ms = (perf_counter() - retained_store_start) * 1000.0
-            state_publish_start = perf_counter()
-            if not session.has_stale_level_presentations():
-                session.set_level_update_pending(False)
-            presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)
-            session.mark_presented(presented_tiles)
-            session.display_committed = bool(session.presented_tiles)
-            rendered_geometry = replace(
-                rendered_geometry,
-                montage_tile_states=session.ensure_tile_states(),
-            )
-            self._last_montage_tile_state_publish_ms = (perf_counter() - state_publish_start) * 1000.0
-            geometry_sync_start = perf_counter()
-            self._sync_committed_montage_geometry(rendered_geometry, semantic_commit=bool(semantic_commit))
-            self._last_montage_tile_geometry_sync_ms = (perf_counter() - geometry_sync_start) * 1000.0
-            if first_display_commit:
-                # The first commit rescales the viewport to the montage; the
-                # queues were prioritized against the pre-montage range.
-                self._refresh_montage_priority_targets(session)
-            overlay_start = perf_counter()
-            rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
-            self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
-            self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
-        finally:
-            self._montage_presentation_commit_active = False
-        self._schedule_montage_lod_materializations(session)
-        # Convergence must be event-driven, not luck-driven (field defect
-        # 2026-07-05 #3): the report acknowledged above is the FIRST evidence
-        # of drawn-slot identities, and the reconciliation that consumes it
-        # runs inside the NEXT commit.  A settled session (dirty/upserts
-        # empty) got no next commit, freezing backend_stale_identities
-        # nonzero until a pan happened to schedule one.  Bounded by the
-        # resigned-pair and attempt limits inside the query, so a backend
-        # that cannot converge stops re-scheduling after the retry budget.
-        identity_check_start = perf_counter()
-        identity_mismatches = session.backend_identity_mismatch_tiles()
-        self._last_montage_tile_identity_check_ms = (perf_counter() - identity_check_start) * 1000.0
-        if identity_mismatches:
-            self._montage_identity_repair_commits = (
-                int(getattr(self, "_montage_identity_repair_commits", 0) or 0) + 1
-            )
-            self._schedule_montage_presentation_commit(session, force=False)
-        self._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
-        report = getattr(self._display_committer(), "last_tile_commit_report", None)
-        _complete_inline_work(
-            self,
-            WorkItem(
-                key=("montage_backend_commit", session.key, int(session.session_id), int(tile_state.revision), "tile_layer"),
-                lane=WorkLane.BACKEND_COMMIT,
-                frame_target=session.frame_plan.target,
-                supersession_key=("montage-backend-commit", session.key),
-                supersession_value=int(session.session_id),
-                estimated_cpu_ms=float(self._last_montage_tile_commit_ms),
-                estimated_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
-            ),
-        )
-        cold_count = int(getattr(report, "cold_count", 0) or 0)
-        warm_count = int(getattr(report, "existing_items_shown", 0) or 0) + int(getattr(report, "relocated_tiles", 0) or 0)
-        processed_count = _tile_layer_commit_processed_count(report)
-        texture_upload_bytes = int(getattr(report, "texture_upload_bytes", 0) or 0)
-        storage_rebuilds = int(getattr(report, "storage_rebuilds", 0) or 0)
-        backend_name = image_view_backend_capabilities(self.win.img_view).name
-        feedback = _latency_feedback(self)
-        if feedback is not None:
-            tile_layer_commit_details = (
-                f"payload={float(getattr(self, '_last_montage_tile_payload_build_ms', 0.0) or 0.0):.3f}",
-                f"prepare={float(getattr(self, '_last_montage_tile_prepare_apply_ms', 0.0) or 0.0):.3f}",
-                f"prep_stats={float(getattr(self, '_last_montage_tile_prepare_stats_ms', 0.0) or 0.0):.3f}",
-                f"prep_meta={float(getattr(self, '_last_montage_tile_prepare_metadata_ms', 0.0) or 0.0):.3f}",
-                f"prep_source={float(getattr(self, '_last_montage_tile_prepare_source_ms', 0.0) or 0.0):.3f}",
-                f"prep_hist={float(getattr(self, '_last_montage_tile_prepare_histogram_ms', 0.0) or 0.0):.3f}",
-                f"apply={float(getattr(self, '_last_montage_tile_layer_apply_ms', 0.0) or 0.0):.3f}",
-                f"ack={float(getattr(self, '_last_montage_tile_acknowledge_ms', 0.0) or 0.0):.3f}",
-                f"retain={float(getattr(self, '_last_montage_tile_retained_store_ms', 0.0) or 0.0):.3f}",
-                f"state={float(getattr(self, '_last_montage_tile_state_publish_ms', 0.0) or 0.0):.3f}",
-                f"geometry={float(getattr(self, '_last_montage_tile_geometry_sync_ms', 0.0) or 0.0):.3f}",
-                f"overlay={float(getattr(self, '_last_montage_overlay_update_ms', 0.0) or 0.0):.3f}",
-                f"identity={float(getattr(self, '_last_montage_tile_identity_check_ms', 0.0) or 0.0):.3f}",
-                f"followup={float(getattr(self, '_last_montage_tile_followup_ms', 0.0) or 0.0):.3f}",
-            )
-            cold_ms = 0.0
-            if cold_count > 0 and storage_rebuilds <= 0:
-                cold_ms = float(getattr(report, "cold_work_ms", 0.0) or 0.0) or self._last_montage_tile_commit_ms
-                if hasattr(self.win, "_record_ui_work"):
-                    self.win._record_ui_work(
-                        "montage_cold_commit",
-                        cold_ms,
-                        count=cold_count,
-                        byte_count=texture_upload_bytes,
-                        work_class="texture_upload",
-                        backend=backend_name,
-                    )
-                else:
-                    feedback.observe(
-                        "montage_cold_commit",
-                        cold_ms,
-                        count=cold_count,
-                        byte_count=texture_upload_bytes,
-                    )
-            commit_feedback_ms = self._last_montage_tile_commit_ms
-            commit_feedback_bytes = texture_upload_bytes
-            vispy_backend = backend_name.lower() == "vispy"
-            vispy_uniform_only = bool(
-                vispy_backend
-                and cold_count == 0
-                and warm_count == 0
-                and texture_upload_bytes == 0
-            )
-            if vispy_backend and storage_rebuilds > 0 and cold_count > 0:
-                if hasattr(self.win, "_record_ui_work"):
-                    self.win._record_ui_work(
-                        "montage_layout_commit",
-                        self._last_montage_tile_commit_ms,
-                        count=processed_count,
-                        byte_count=texture_upload_bytes,
-                        work_class="presentation_layout",
-                        backend=backend_name,
-                    )
-                else:
-                    feedback.observe(
-                        "montage_layout_commit",
-                        self._last_montage_tile_commit_ms,
-                        count=processed_count,
-                        byte_count=texture_upload_bytes,
-                    )
-                commit_feedback_ms = 0.0
-                commit_feedback_bytes = 0
-            elif vispy_backend and (cold_count > 0 or vispy_uniform_only):
-                if hasattr(self.win, "_record_ui_work"):
-                    self.win._record_ui_work(
-                        "montage_present_total",
-                        self._last_montage_tile_commit_ms,
-                        count=processed_count,
-                        byte_count=texture_upload_bytes,
-                        work_class="presentation_upsert",
-                        backend=backend_name,
-                    )
-                else:
-                    feedback.observe(
-                        "montage_present_total",
-                        self._last_montage_tile_commit_ms,
-                        count=processed_count,
-                        byte_count=texture_upload_bytes,
-                    )
-                commit_feedback_ms = max(0.0, self._last_montage_tile_commit_ms - cold_ms)
-                commit_feedback_bytes = 0
-                if vispy_uniform_only:
-                    commit_feedback_ms = 0.0
-            if hasattr(self.win, "_record_ui_work"):
-                self.win._record_ui_work(
-                    "montage_commit",
-                    commit_feedback_ms,
-                    count=processed_count,
-                    byte_count=commit_feedback_bytes,
-                    work_class="presentation_upsert",
-                    backend=backend_name,
-                )
-            else:
-                feedback.observe(
-                    "montage_commit",
-                    commit_feedback_ms,
-                    count=processed_count,
-                    byte_count=commit_feedback_bytes,
-                )
-            if hasattr(self.win, "_record_ui_work"):
-                self.win._record_ui_work(
-                    "tile_layer_commit",
-                    self._last_montage_tile_commit_ms,
-                    count=processed_count,
-                    byte_count=max(texture_upload_bytes, commit_feedback_bytes),
-                    work_class="tile_layer_commit",
-                    backend=backend_name,
-                    details=tile_layer_commit_details,
-                )
-            else:
-                feedback.observe(
-                    "tile_layer_commit",
-                    self._last_montage_tile_commit_ms,
-                    count=processed_count,
-                    byte_count=max(texture_upload_bytes, commit_feedback_bytes),
-                )
-        upload_backlog = bool(
-            getattr(session, "dirty_payloads", None)
-            or getattr(session, "pending_removals", None)
-            or getattr(session, "pending_payload_upserts", None)
-            or (session.has_pending_level_update() and session.has_stale_level_presentations())
-        )
-        followup_start = perf_counter()
-        session.note_committed()
-        self._notify_file_session_montage_committed()
-        if upload_backlog:
-            self._schedule_montage_ready_display_commit(session)
-        self._settle_montage_visible_plan_if_complete(session)
-        self._finish_montage_session_if_complete(session)
-        if not upload_backlog:
-            schedule_near_viewport_montage_prefetch(self, session)
-        self._retry_live_profile_after_montage_tile()
-        self._last_montage_tile_followup_ms = (perf_counter() - followup_start) * 1000.0
-
-    def _commit_montage_tile_delta_direct(
-        self,
-        session,
-        display_image,
-        geometry,
-        *,
-        tile_state,
-        base_tile_state,
-        tile_delta,
-        semantic_source,
-        applied_level_source,
-        histogram_plot_data,
-        explicit_auto: bool,
-        semantic_commit: bool,
-    ) -> bool:
-        previous_frame = getattr(self.win, "_committed_display_frame", None)
-        if previous_frame is None or not isinstance(getattr(previous_frame, "value_source", None), TiledValueSource):
-            return False
-        previous_geometry = getattr(previous_frame, "geometry", None)
-        if not _safe_tiled_payload_geometry_retarget(previous_geometry, geometry):
-            return False
-        context = self._render_request_context(
-            document_key=_document_key(session.document),
-            request_key=session.key,
-            render_generation=session.render_generation,
-            semantic_key=session.level_key,
-        )
-        decision = decide_presentation(
-            PresentationInput(
-                payload=DisplayPayload(
-                    image=display_image,
-                    geometry=geometry,
-                    viewport_policy=ViewportPolicy.PRESERVE,
-                    frame_plan=session.frame_plan,
-                    rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
-                    histogram_plot_data=histogram_plot_data,
-                    tile_state=tile_state,
-                    base_tile_state=base_tile_state,
-                    tile_delta=tile_delta,
-                    tile_residency_budget_bytes=tile_residency_budget_bytes(self._memory_policy()),
-                ),
-                context=context,
-                previous_frame=previous_frame,
-                window_mode=session.window_mode,
-                force_auto=False,
-                commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW if explicit_auto else CommitKind.PROGRESSIVE_FRAME_PATCH,
-                semantic_source=semantic_source,
-                applied_level_source=applied_level_source,
-                user_levels=_session_requested_levels(session),
-            )
-        )
-        set_image_start = perf_counter()
-        backend_decision = self._montage_backend_decision_for_display(geometry, display_image.data)
-        if backend_decision.backend != "tile_layer":
-            return False
-        committer = self._display_committer()
-        committer.commit_tiled_delta(decision.display_presentation)
-        self._record_montage_backend_commit(backend_decision, "tile_layer")
-        self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
-        self.display_geometry = geometry
-
-        report = getattr(committer, "last_tile_commit_report", None)
-        semantic_frame_commit = bool(
-            semantic_commit
-            and bool(getattr(report, "presented_tiles", ()))
-        )
-        if semantic_frame_commit:
-            committed_state = getattr(committer, "last_tile_committed_state", None)
-            payloads = getattr(committed_state, "payloads", None)
-            if payloads is not None:
-                frame = replace(
-                    previous_frame,
-                    key=context.frame_key,
-                    geometry=geometry,
-                    levels=decision.levels,
-                    histogram_range=decision.histogram_range,
-                    value_source=TiledValueSource(payloads),
-                    scene=None,
-                )
-                self._set_committed_display_frame(frame)
-                self._consume_pending_display_levels(session.user_levels_override)
-                self._note_display_level_source(decision)
-                apply_restored_viewport = getattr(self.win, "_apply_viewport_continuity_when_ready", None)
-                if callable(apply_restored_viewport):
-                    apply_restored_viewport()
-                show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
-                if callable(show_pending_montage_revert):
-                    show_pending_montage_revert()
-                refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
-                if callable(refresh_hover):
-                    refresh_hover()
-        self.win.apply_axis_flips()
-        self.win.img_view.setImageStale(False)
-        return True
+        MontagePipelineEffects(self, session).commit_pending_session(force=force)
 
     def _schedule_montage_ready_display_commit(self, session) -> None:
         if not self._montage_session_is_current(session):
@@ -3905,7 +3346,7 @@ class FrameRenderMixin:
             return
         self._montage_commit_token = _montage_work_token(session, "commit")
         if bool(getattr(session, "display_committed", False)):
-            if _persistent_tile_layer_fast_drain_enabled(self, session):
+            if montage_commit.persistent_tile_layer_fast_drain_enabled(self, session):
                 session.final_commit_pending = True
                 session.flush_pending = True
                 if self._queue_montage_presentation_commit_flush():
@@ -3914,7 +3355,7 @@ class FrameRenderMixin:
             return
         session.final_commit_pending = True
         session.flush_pending = True
-        if _persistent_tile_layer_fast_drain_enabled(self, session) and self._queue_montage_presentation_commit_flush():
+        if montage_commit.persistent_tile_layer_fast_drain_enabled(self, session) and self._queue_montage_presentation_commit_flush():
             return
         try:
             # Qt event-turn barrier guarded by `_montage_commit_token`; the
@@ -4914,27 +4355,6 @@ def _preview_tile_shape(session, demand) -> tuple[int, int]:
     return (max(1, int(np.ceil(tile_h / max(1, factor_y)))), max(1, int(np.ceil(tile_w / max(1, factor_x)))))
 
 
-def _preview_payload_parts(preview):
-    row = tuple(preview)
-    key, plane, histogram = row[:3]
-    return (
-        key,
-        plane,
-        histogram,
-        row[3] if len(row) > 3 else None,
-        row[4] if len(row) > 4 else None,
-        row[5] if len(row) > 5 else None,
-        row[6] if len(row) > 6 else None,
-    )
-
-
-def _preview_row_parts(row):
-    values = tuple(row)
-    tile_number = int(values[0])
-    key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = _preview_payload_parts(values[1:])
-    return tile_number, key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats
-
-
 def _preview_floor_blocks_exact_submission(session, tile) -> bool:
     if tile is None:
         return False
@@ -4963,230 +4383,11 @@ def _claim_preview_floor(session, tile_number: int, key) -> bool:
     return True
 
 
-def _rendered_tile_nbytes(rendered) -> int:
-    total = 0
-    for name in ("image", "histogram_data", "semantic_data", "semantic_histogram_data", "level_data"):
-        value = getattr(rendered, name, None)
-        if value is not None:
-            total += int(getattr(np.asarray(value), "nbytes", 0) or 0)
-    return int(total)
-
-
-def _session_requested_levels(session) -> tuple[float, float] | None:
-    """Return the exact level target for the current presentation session.
-
-    ``user_levels_override`` describes persistence/window-mode semantics.
-    ``level_generation.target_levels`` is the latest presentation command and remains
-    authoritative while progressive PyQtGraph CPU redraws converge.  Keeping
-    these concepts separate prevents an in-flight automatic commit from
-    restoring older levels after a user or auto-window command.
-    """
-
-    return (
-        normalize_bounds(getattr(session.level_generation, "target_levels", None))
-        or normalize_bounds(getattr(session, "user_levels_override", None))
-    )
-
-
-def _montage_commit_budget_ms(window) -> float:
-    interactive = _interactive_active(window)
+def _montage_commit_interval_ms(window, *, force: bool) -> int:
     decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
         "montage_commit",
-        interactive=interactive,
+        interactive=_interactive_active(window),
     )
-    if decision is not None:
-        return max(1.0, float(decision.budget_ms))
-    feedback = _latency_feedback(window)
-    if feedback is None:
-        return 4.0 if interactive else 8.0
-    return max(1.0, float(feedback.work_budget_ms("montage_commit", interactive=interactive)))
-
-
-def _persistent_tile_layer_fast_drain_enabled(window, session) -> bool:
-    if _viewport_interaction_active(window):
-        return False
-    if not bool(getattr(session, "display_committed", False)):
-        return False
-    return _persistent_gpu_tile_residency_backend(window, session)
-
-
-def _direct_montage_tile_delta_commit_enabled(window, session) -> bool:
-    if _viewport_interaction_active(window):
-        return False
-    if not bool(getattr(session, "display_committed", False)):
-        return False
-    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    return bool(capabilities.persistent_tile_residency or not capabilities.shader_windowing)
-
-
-def _persistent_tile_residency_backend(window, session) -> bool:
-    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    return bool(capabilities.persistent_tile_residency)
-
-
-def _persistent_gpu_tile_residency_backend(window, session) -> bool:
-    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    kind = str(getattr(capabilities, "tile_residency_kind", "none") or "none")
-    return bool(
-        capabilities.persistent_tile_residency
-        and capabilities.shader_windowing
-        and kind in {"gpu_atlas", "none"}
-    )
-
-
-def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
-    if not _persistent_gpu_tile_residency_backend(window, session):
-        return {}
-    interactive = _interactive_active(window)
-    decision = _tile_presentation_ui_work_decision(
-        window,
-        session,
-        "montage_present_total",
-        interactive=interactive,
-    )
-    upload_decision = _tile_presentation_ui_work_decision(
-        window,
-        session,
-        "montage_cold_commit",
-        interactive=interactive,
-    )
-    batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
-    upload_batch_limit = int(getattr(upload_decision, "batch_limit", 0) or 0)
-    if not bool(getattr(session, "display_committed", False)) and upload_batch_limit > 0:
-        batch_limit = upload_batch_limit if batch_limit <= 0 else min(int(batch_limit), int(upload_batch_limit))
-    byte_cap = max(
-        int(getattr(decision, "byte_cap", 0) or 0),
-        int(getattr(upload_decision, "byte_cap", 0) or 0),
-    )
-    if batch_limit <= 0:
-        feedback = _latency_feedback(window)
-        batch_limit = 4 if feedback is None else int(feedback.batch_limit("montage_present_total", interactive=interactive))
-    if byte_cap <= 0:
-        byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
-    limits = {
-        "max_upserts": max(1, int(batch_limit)),
-        "max_upsert_bytes": max(1024, int(byte_cap)),
-        "upsert_cost_fn": _vispy_payload_upload_nbytes,
-    }
-    return limits
-
-
-def _vispy_payload_upload_nbytes(payload) -> int:
-    texture = getattr(payload, "texture_data", None)
-    if texture is None:
-        texture = getattr(payload, "image", None)
-    total = 0 if texture is None else int(getattr(np.asarray(texture), "nbytes", 0) or 0)
-    histogram = getattr(payload, "histogram_data", None)
-    if histogram is not None and histogram is not texture:
-        total += int(getattr(np.asarray(histogram), "nbytes", 0) or 0)
-    return max(1, int(total))
-
-
-def _pyqtgraph_payload_upload_nbytes(payload) -> int:
-    image = getattr(payload, "image", None)
-    return max(1, 0 if image is None else int(getattr(np.asarray(image), "nbytes", 0) or 0))
-
-
-def _tile_layer_upsert_limits(window, session) -> dict[str, object]:
-    if _persistent_gpu_tile_residency_backend(window, session):
-        return _persistent_tile_upsert_limits(window, session)
-    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    if not (
-        not capabilities.shader_windowing
-        and (
-            getattr(session, "dirty_payloads", None)
-            or getattr(session, "pending_payload_upserts", None)
-            or getattr(session, "pending_removals", None)
-            or (session.has_pending_level_update() and session.has_stale_level_presentations())
-        )
-    ):
-        return {}
-    interactive = _interactive_active(window)
-    decision = _tile_presentation_ui_work_decision(
-        window,
-        session,
-        "tile_layer_commit",
-        interactive=interactive,
-    )
-    batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
-    byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
-    if batch_limit <= 0:
-        feedback = _latency_feedback(window)
-        batch_limit = 8 if feedback is None else int(feedback.batch_limit("tile_layer_commit", interactive=interactive))
-    if byte_cap <= 0:
-        byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
-    return {
-        "max_upserts": max(1, int(batch_limit)),
-        "max_upsert_bytes": max(1024, int(byte_cap)),
-        "cold_deadline_ms": _presentation_upload_control_budget_ms(
-            window,
-            "tile_layer_commit",
-            decision,
-            interactive=interactive,
-        ),
-        "upsert_cost_fn": _pyqtgraph_payload_upload_nbytes,
-        # PyQtGraph rebuilds items on re-level: resident retargets are byte-free
-        # but NOT time-free, so they stream through the item cap in priority
-        # order (2026-07-06 decision; see build_tile_presentation).
-        "pace_resident_retargets": True,
-    }
-
-
-def _presentation_upload_control_budget_ms(window, channel: str, decision, *, interactive: bool) -> float:
-    budget = float(getattr(decision, "budget_ms", 0.0) or 0.0)
-    feedback = _latency_feedback(window)
-    target = 4.0 if interactive else 8.0
-    if feedback is not None:
-        tuning = getattr(feedback, "tuning", None)
-        target = float(
-            getattr(
-                tuning,
-                "target_interactive_ms" if interactive else "target_idle_ms",
-                target,
-            )
-        )
-    if budget <= 0.0:
-        budget = target
-    # Presentation/upload channels intentionally control against a wider
-    # budget than their display target: fixed GUI overhead can exceed the
-    # nominal target even for one item.  Use the same control budget here as
-    # ResourceGovernor.decide_ui_work; otherwise the session/backend deadline
-    # vetoes a batch that the tile-layer controller deliberately admitted.
-    return max(float(budget), float(WARNING_THRESHOLD_MS) + float(target))
-
-
-def _tile_presentation_ui_work_decision(window, session, channel: str, *, interactive: bool):
-    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    backend = str(getattr(capabilities, "name", "")).lower()
-    signature = tile_presentation_feedback_signature(session, backend=backend)
-    return getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
-        channel,
-        interactive=interactive,
-        work_signature=signature,
-        conservative_start=tile_presentation_feedback_conservative_start(signature),
-    )
-
-
-def _tile_layer_commit_processed_count(report) -> int:
-    cold_count = int(getattr(report, "cold_count", 0) or 0)
-    warm_count = int(getattr(report, "existing_items_shown", 0) or 0) + int(getattr(report, "relocated_tiles", 0) or 0)
-    acknowledged_upserts = len(tuple(getattr(report, "committed_upserts", ()) or ()))
-    return max(1, cold_count + warm_count, acknowledged_upserts)
-
-
-def _accepted_tiled_payloads(payloads, delta, report) -> dict[int, object]:
-    if report is None or delta is None:
-        return {}
-    accepted = report.accepted_upserts(delta)
-    return {
-        int(tile): payloads[int(tile)]
-        for tile in accepted
-        if int(tile) in dict(payloads or {})
-    }
-
-
-def _montage_commit_interval_ms(window, *, force: bool) -> int:
-    decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)("montage_commit", interactive=_interactive_active(window))
     session = getattr(window, "_montage_session", None)
     if session is not None and _visible_cpu_tile_layer_backlog_pending(window, session):
         feedback = _latency_feedback(window)
@@ -5211,25 +4412,6 @@ def _visible_cpu_tile_layer_backlog_pending(window, session) -> bool:
         or getattr(session, "pending_payload_upserts", None)
         or getattr(session, "pending_removals", None)
         or (session.has_pending_level_update() and session.has_stale_level_presentations())
-    )
-
-
-def _safe_tiled_payload_geometry_retarget(previous_geometry, geometry) -> bool:
-    if display_geometry_coordinates_equal(previous_geometry, geometry):
-        return True
-    if previous_geometry is None or geometry is None:
-        return False
-    previous_montage = getattr(previous_geometry, "montage", None)
-    montage = getattr(geometry, "montage", None)
-    if previous_montage is None or montage is None:
-        return False
-    return (
-        previous_geometry.view_state == geometry.view_state
-        and tuple(previous_montage.indices) == tuple(montage.indices)
-        and tuple(previous_montage.tile_shape) == tuple(montage.tile_shape)
-        and int(previous_montage.gap) == int(montage.gap)
-        and int(previous_geometry.montage_origin_x) == int(geometry.montage_origin_x)
-        and int(previous_geometry.montage_origin_y) == int(geometry.montage_origin_y)
     )
 
 

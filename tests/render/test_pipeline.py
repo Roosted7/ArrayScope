@@ -32,7 +32,7 @@ class StubEffects:
     def apply_commit(self, batch):
         self.batches.append(batch)
 
-    def tile_states(self, intent):
+    def tile_states(self, _intent, _demand):
         return tuple(
             self.states.get(number, TileLodState(tile_number=number))
             for number in range(self.tiles)

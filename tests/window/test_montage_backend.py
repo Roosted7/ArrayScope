@@ -426,7 +426,7 @@ def test_auto_small_scalar_vispy_montage_uses_tile_layer():
 
 
 def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
 
     session = SimpleNamespace()
     window = SimpleNamespace(
@@ -442,14 +442,14 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
     )
     window.win = window
 
-    limits = frame_renderer._persistent_tile_upsert_limits(window, session)
+    limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
     assert limits["max_upserts"] == 11
     assert limits["max_upsert_bytes"] == 2 * 1024 * 1024
 
 
 def test_vispy_first_persistent_upsert_limits_use_cold_upload_batch():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
 
     session = SimpleNamespace(display_committed=False)
 
@@ -473,14 +473,14 @@ def test_vispy_first_persistent_upsert_limits_use_cold_upload_batch():
     )
     window.win = window
 
-    limits = frame_renderer._persistent_tile_upsert_limits(window, session)
+    limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
     assert limits["max_upserts"] == 4
     assert limits["max_upsert_bytes"] == 8 * 1024 * 1024
 
 
 def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_batch_limit():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
 
     image = np.zeros((512, 512), dtype=np.float32)
     texture = np.zeros((512, 512), dtype=np.complex64)
@@ -510,7 +510,7 @@ def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_
     )
     window.win = window
 
-    limits = frame_renderer._persistent_tile_upsert_limits(window, session)
+    limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
     assert limits["max_upserts"] == 1
     assert limits["max_upsert_bytes"] == 1024 * 1024
@@ -518,7 +518,7 @@ def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_
 
 
 def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
 
     image = np.zeros((512, 512), dtype=np.float32)
     semantic = np.zeros((1024, 1024), dtype=np.complex64)
@@ -546,7 +546,7 @@ def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
     )
     window.win = window
 
-    limits = frame_renderer._tile_layer_upsert_limits(window, session)
+    limits = montage_commit.tile_layer_upsert_limits(window, session)
 
     assert limits["max_upserts"] == 3
     assert limits["max_upsert_bytes"] == 1024 * 1024
@@ -555,7 +555,7 @@ def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
 
 
 def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
 
     session = SimpleNamespace(
         dirty_payloads={0: None},
@@ -577,7 +577,7 @@ def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
     )
     window.win = window
 
-    limits = frame_renderer._tile_layer_upsert_limits(window, session)
+    limits = montage_commit.tile_layer_upsert_limits(window, session)
 
     assert limits["max_upserts"] == 2
     assert limits["max_upsert_bytes"] == 4096
@@ -586,7 +586,7 @@ def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
 
 
 def test_tile_layer_commit_feedback_counts_acknowledged_level_upserts():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
     from arrayscope.display.model.frame import TileCommitReport
 
     report = TileCommitReport(
@@ -596,11 +596,11 @@ def test_tile_layer_commit_feedback_counts_acknowledged_level_upserts():
         texture_upload_bytes=0,
     )
 
-    assert frame_renderer._tile_layer_commit_processed_count(report) == 3
+    assert montage_commit.tile_layer_commit_processed_count(report) == 3
 
 
 def test_retained_payload_store_receives_only_accepted_delta_payloads():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
     from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta
 
     payloads = {
@@ -630,7 +630,7 @@ def test_retained_payload_store_receives_only_accepted_delta_payloads():
         delta_key=(4, 5),
     )
 
-    retained = frame_renderer._accepted_tiled_payloads(payloads, delta, report)
+    retained = montage_commit.accepted_tiled_payloads(payloads, delta, report)
 
     assert retained == {3: payloads[3]}
 
@@ -676,7 +676,7 @@ def test_pyqtgraph_visible_tile_layer_backlog_uses_minimum_commit_cadence():
 
 
 def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
 
     session = SimpleNamespace(display_committed=True)
     window = SimpleNamespace(
@@ -691,13 +691,13 @@ def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
     )
     window.win = window
 
-    assert frame_renderer._direct_montage_tile_delta_commit_enabled(window, session) is True
+    assert montage_commit.direct_montage_tile_delta_commit_enabled(window, session) is True
     session.display_committed = False
-    assert frame_renderer._direct_montage_tile_delta_commit_enabled(window, session) is False
+    assert montage_commit.direct_montage_tile_delta_commit_enabled(window, session) is False
 
 
 def test_pyqtgraph_tile_layer_feedback_passes_cost_class_signature():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
 
     decisions = []
 
@@ -727,9 +727,9 @@ def test_pyqtgraph_tile_layer_feedback_passes_cost_class_signature():
         has_stale_level_presentations=lambda: False,
     )
 
-    frame_renderer._tile_layer_upsert_limits(window, session)
+    montage_commit.tile_layer_upsert_limits(window, session)
     session.rendered_tiles = {0: SimpleNamespace(image=np.zeros((8, 8), dtype=np.complex64))}
-    frame_renderer._tile_layer_upsert_limits(window, session)
+    montage_commit.tile_layer_upsert_limits(window, session)
 
     assert [channel for channel, _signature, _conservative in decisions] == [
         "tile_layer_commit",
@@ -742,7 +742,7 @@ def test_pyqtgraph_tile_layer_feedback_passes_cost_class_signature():
 
 
 def test_vispy_persistent_feedback_passes_cost_class_signature():
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window import montage_commit
 
     decisions = []
 
@@ -770,9 +770,9 @@ def test_vispy_persistent_feedback_passes_cost_class_signature():
         rgb=False,
     )
 
-    frame_renderer._persistent_tile_upsert_limits(window, session)
+    montage_commit._persistent_tile_upsert_limits(window, session)
     session.output_dtype = np.dtype("complex64")
-    frame_renderer._persistent_tile_upsert_limits(window, session)
+    montage_commit._persistent_tile_upsert_limits(window, session)
 
     assert [channel for channel, _signature, _conservative in decisions] == [
         "montage_present_total",
@@ -1136,7 +1136,7 @@ def test_auto_preserves_vispy_tile_layer_mode():
 
 
 def test_interactive_montage_commit_is_timer_coalesced(qt_app, monkeypatch):
-    from pyqtgraph.Qt import QtCore, QtWidgets
+    from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.window.frame_renderer import FrameRenderMixin
@@ -1702,7 +1702,6 @@ def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
 
 
 def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(qt_app):
-    from dataclasses import replace
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -1746,7 +1745,7 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
 
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
     from arrayscope.window.montage_viewport import montage_viewport_retarget_policy
-    from arrayscope.window.frame_renderer import _persistent_gpu_tile_residency_backend, _persistent_tile_residency_backend
+    from arrayscope.window.montage_commit import persistent_gpu_tile_residency_backend, persistent_tile_residency_backend
 
     capabilities = ImageViewBackendCapabilities(
         name="vispy",
@@ -1784,21 +1783,21 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     assert _montage_viewport_update_delay_ms(fallback) == 120
     assert montage_viewport_retarget_policy(capabilities, "vispy_tile_layer").coverage_margin_tiles == 1
     assert (
-        _persistent_tile_residency_backend(
+        persistent_tile_residency_backend(
             _window_ns(img_view=SimpleNamespace(rendering_capabilities=persistent_nonvispy)),
             SimpleNamespace(),
         )
         is True
     )
     assert (
-        _persistent_tile_residency_backend(
+        persistent_tile_residency_backend(
             _window_ns(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
             SimpleNamespace(),
         )
         is True
     )
     assert (
-        _persistent_gpu_tile_residency_backend(
+        persistent_gpu_tile_residency_backend(
             _window_ns(img_view=SimpleNamespace(rendering_capabilities=persistent_without_shader)),
             SimpleNamespace(),
         )
@@ -2215,10 +2214,10 @@ def test_ready_display_commit_refreshes_stale_commit_token_at_source(qt_app):
 
 def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     pytest.importorskip("pyqtgraph")
-    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.geometry import MontageGeometry
     from arrayscope.display.model.frame import TilePresentationDelta, TilePresentationState
-    from arrayscope.display.slice_engine import DisplayImage
     from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.montage_backend import MontageBackendDecision
 
     class _Window(FrameRenderMixin):
         def __init__(self):
@@ -2232,13 +2231,8 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         def _classify_visible_montage_tiles(self, _session):
             return None
 
-        def _direct_montage_tile_layer_presentation(self, _session):
-            geometry = DisplayGeometry(
-                view_state=None,
-                display_shape=(2, 2),
-                montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0),
-            )
-            return DisplayImage(np.zeros((2, 2), dtype=np.float32)), geometry
+        def _montage_backend_policy(self, _geometry, _data):
+            return MontageBackendDecision("tile_layer", "test")
 
         def _montage_tile_source_ids(self, _session):
             return {}
@@ -2277,7 +2271,9 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         user_levels_override=None,
         final_commit_pending=True,
         flush_pending=True,
-        plan=SimpleNamespace(geometry=geometry),
+        plan=SimpleNamespace(geometry=geometry, display_shape=(2, 2)),
+        view_state=None,
+        rgb=False,
     )
 
     win = _Window()
@@ -2541,7 +2537,7 @@ def test_direct_tiled_payload_retarget_allows_only_safe_layout_reflow():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry
     from arrayscope.display.montage import make_montage_plan
-    from arrayscope.window.frame_renderer import _safe_tiled_payload_geometry_retarget
+    from arrayscope.window.montage_commit import safe_tiled_payload_geometry_retarget
 
     state = ViewState.from_shape((4, 4, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
     plan3 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=3)
@@ -2555,5 +2551,5 @@ def test_direct_tiled_payload_retarget_allows_only_safe_layout_reflow():
         montage=changed_indices.geometry,
     )
 
-    assert _safe_tiled_payload_geometry_retarget(previous, reflow)
-    assert not _safe_tiled_payload_geometry_retarget(previous, incompatible)
+    assert safe_tiled_payload_geometry_retarget(previous, reflow)
+    assert not safe_tiled_payload_geometry_retarget(previous, incompatible)

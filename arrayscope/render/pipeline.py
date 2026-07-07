@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
-from arrayscope.kernel import Kernel, Lane, Priority, Supersession, TaskSpec
+from arrayscope.kernel import Kernel, Supersession, TaskSpec
 from arrayscope.render.ladder import LodLadder, RungStep, TileLodState
 from arrayscope.render.stages import CommitBatch, PipelineCounters, RenderIntent
 
@@ -60,7 +60,7 @@ class PipelineEffects(Protocol):
         """
         ...
 
-    def tile_states(self, intent: RenderIntent) -> tuple[TileLodState, ...]:
+    def tile_states(self, intent: RenderIntent, demand) -> tuple[TileLodState, ...]:
         """Snapshot per-tile lod state from TileLifecycle claims.
 
         TODO(redesign R2): derive from `TileLifecycle` records +
@@ -130,7 +130,7 @@ class MontagePipeline:
             self.kernel.clear_scope(self._scope(previous.semantic_key))
             self._ready_upserts.clear()
 
-        states = self.effects.tile_states(intent)
+        states = self.effects.tile_states(intent, demand)
         steps = self.ladder.plan(states, demand)
         self.counters.ladder_plans += 1
         submitted = 0
