@@ -227,6 +227,35 @@ def run_profile_montage_workflow(
             jsonl,
             {**base, **level_record, "operation_pipeline": transform_pipeline, "run_temperature": "warm"},
         )
+
+        if tile_count >= 8:
+            scroll_record = _run_phase(
+                app,
+                QtCore,
+                win,
+                probe,
+                phase="montage_scroll_scrub",
+                timeout_s=timeout_s,
+                action=lambda: _apply_scroll_scrub(
+                    win,
+                    montage_axis=montage_axis,
+                    columns=columns,
+                    tile_count=tile_count,
+                    probe=probe,
+                    app=app,
+                    QtCore=QtCore,
+                ),
+                backend=backend,
+                screenshot_dir=screenshot_dir,
+            )
+            _attach_phase_screenshot(
+                scroll_record, win, phase="montage_scroll_scrub", backend=backend, screenshot_dir=screenshot_dir
+            )
+            _append_record(
+                records,
+                jsonl,
+                {**base, **scroll_record, "operation_pipeline": transform_pipeline, "run_temperature": "warm"},
+            )
         return tuple(records)
     finally:
         if win is not None:
@@ -234,6 +263,109 @@ def run_profile_montage_workflow(
             _process_events(app, QtCore, count=10)
         _restore_setting(settings, "image_rendering_backend", previous_image_backend)
         settings.sync()
+
+
+def _scroll_montage_window(win, *, montage_axis, columns, start, size, text=":"):
+    """Set the montage index window to [start, start+size)."""
+
+    indices = tuple(range(int(start), int(start) + int(size)))
+    state = win.view_state.with_image_axes(0, 1).with_montage_axis(
+        montage_axis, columns=columns, indices=indices, text=text
+    )
+    win._set_view_state(state)
+    win.render(reason="profile-scroll")
+
+
+def _apply_scroll_scrub(win, *, montage_axis, columns, tile_count, probe=None, app=None, QtCore=None) -> dict[str, object]:
+    """Scroll-scrub stage: fitted mid-range window, one fast jump, then slow steps.
+
+    Exercises the interaction hot path the LOD/commit pipeline is most likely
+    to stall on (session retarget + LOD convergence under rapid index-window
+    changes). Reuses the phase event-loop ``probe`` (reset per step) to record
+    each step's max gap and whether it settled — the numbers that reveal
+    freezes and stuck-LOD tiles.
+    """
+
+    # Window sizing adapts to the dataset; the reference is 50-wide windows
+    # at 100:150 -> 150:200 like a user scrubbing a thick stack.
+    size = max(4, min(50, tile_count // 4))
+    first_start = max(0, min(100, tile_count - 2 * size))
+    fast_start = max(0, min(first_start + size, tile_count - size))
+
+    # 1) Fitted mid-range window with auto levels.
+    _scroll_montage_window(win, montage_axis=montage_axis, columns=columns, start=first_start, size=size)
+    if app is not None and QtCore is not None:
+        _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=15.0)
+    auto = getattr(win, "auto_window_levels", None) or getattr(getattr(win, "renderer", None), "auto_window_levels", None)
+    if callable(auto):
+        auto()
+    _pulse_fit_stretch(win, app=app, QtCore=QtCore)  # toggle auto-stretch on/off to fit
+
+    def _step(action, budget_s: float) -> dict[str, object]:
+        if probe is not None:
+            probe.reset()
+        t0 = perf_counter()
+        action()
+        settled = True
+        if app is not None and QtCore is not None:
+            settled = _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=budget_s)
+        return {
+            "elapsed_ms": (perf_counter() - t0) * 1000.0,
+            "max_gap_ms": 0.0 if probe is None else float(probe.max_gap_ms),
+            "settled": bool(settled),
+        }
+
+    # 2) One fast jump (scroll a full window forward), as fast as the GUI allows.
+    fast = _step(
+        lambda: _scroll_montage_window(win, montage_axis=montage_axis, columns=columns, start=fast_start, size=size),
+        budget_s=20.0,
+    )
+
+    # 3) Ten slow single-index scrolls, ~0.1 s of GUI time between each.
+    slow_gaps: list[float] = []
+    slow_unsettled = 0
+    slow_start = fast_start
+    for _step_index in range(10):
+        slow_start = max(0, min(slow_start + 1, tile_count - size))
+        result = _step(
+            lambda s=slow_start: _scroll_montage_window(win, montage_axis=montage_axis, columns=columns, start=s, size=size),
+            budget_s=2.0,
+        )
+        slow_gaps.append(float(result["max_gap_ms"]))
+        slow_unsettled += 0 if result["settled"] else 1
+        if app is not None and QtCore is not None:
+            _pump_for(app, QtCore, seconds=0.1)  # ~0.1 s between scrolls, as requested
+
+    return {
+        "scroll_window_size": int(size),
+        "scroll_fast_max_gap_ms": float(fast["max_gap_ms"]),
+        "scroll_fast_elapsed_ms": float(fast["elapsed_ms"]),
+        "scroll_fast_settled": bool(fast["settled"]),
+        "scroll_slow_max_gap_ms": float(max(slow_gaps) if slow_gaps else 0.0),
+        "scroll_slow_mean_gap_ms": float(sum(slow_gaps) / len(slow_gaps)) if slow_gaps else 0.0,
+        "scroll_slow_unsettled_steps": int(slow_unsettled),
+    }
+
+
+def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float) -> bool:
+    """Pump the loop up to budget_s, return whether the montage settled."""
+
+    deadline = perf_counter() + float(budget_s)
+    while perf_counter() < deadline:
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        session = getattr(win, "_montage_session", None)
+        if session is not None and session.is_complete() and not bool(getattr(session, "flush_pending", False)) \
+                and not bool(getattr(session, "final_commit_pending", False)) \
+                and not bool(getattr(session, "dirty_payloads", None)) \
+                and not bool(getattr(session, "pending_payload_upserts", None)):
+            return True
+    return False
+
+
+def _pump_for(app, QtCore, *, seconds: float) -> None:
+    deadline = perf_counter() + float(seconds)
+    while perf_counter() < deadline:
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
 
 
 def _profile_transform_operations(
