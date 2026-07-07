@@ -461,21 +461,7 @@ class ArrayScopeWindow(
         bridge = getattr(self, "kernel_bridge", None)
         if bridge is not None:
             decision = governor.decide_ui_work("kernel_bridge_drain", interactive=interactive)
-            montage_session = getattr(getattr(self, "renderer", None), "_montage_session", None)
-            montage_busy = bool(
-                montage_session is not None
-                and (
-                    getattr(montage_session, "pending_tiles", None)
-                    or getattr(montage_session, "active_tile_requests", None)
-                    or getattr(montage_session, "loading_tiles", None)
-                    or getattr(montage_session, "pending_payload_upserts", None)
-                    or getattr(montage_session, "dirty_payloads", None)
-                    or getattr(montage_session, "flush_pending", False)
-                    or getattr(montage_session, "final_commit_pending", False)
-                )
-            )
-            batch_limit = min(int(decision.batch_limit), 2 if montage_busy else int(decision.batch_limit))
-            bridge.set_max_items_per_drain(batch_limit)
+            bridge.set_max_items_per_drain(decision.batch_limit)
             bridge.set_budget_ms(decision.budget_ms)
         histogram_decision = governor.decide_ui_work("histogram_preview", interactive=interactive)
         img_view = getattr(self, "img_view", None)

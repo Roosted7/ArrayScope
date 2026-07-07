@@ -85,7 +85,6 @@ class QtKernelBridge(Qt.QtCore.QObject):
 
     def set_max_items_per_drain(self, count: int) -> None:
         self._max_items_per_drain = max(1, int(count))
-        self._max_events_per_drain = max(1, self._max_items_per_drain)
 
     def set_budget_ms(self, budget_ms: float | None) -> None:
         self._budget_ms = None if budget_ms is None else max(0.25, float(budget_ms))

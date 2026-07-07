@@ -255,7 +255,11 @@ def _pulse_fit_stretch(win, *, app=None, QtCore=None) -> bool:
     if not callable(fit):
         return False
     fit(True)
+    if app is not None and QtCore is not None:
+        _process_events(app, QtCore, count=10)
     fit(False)
+    if app is not None and QtCore is not None:
+        _process_events(app, QtCore, count=5)
     return True
 
 
