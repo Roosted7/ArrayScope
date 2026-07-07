@@ -399,9 +399,13 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
         resident_levels = set(_resident_levels_from_lifecycle(record))
         rendered = rendered_tiles.get(tile_number)
         if rendered is not None:
+            # Native resident. For *planning* this dominates every pyramid
+            # level (finest_available()==0 → no steps), so probing the
+            # pyramid per acceptable level here was pure overhead — at
+            # ~10 keys × N tiles × replan it was a measurable slice of the
+            # O(N²) replan storm. Presented-level *selection* happens in the
+            # commit path, which reads the pyramid directly.
             resident_levels.add(0)
-        if rendered is not None and demand is not None:
-            resident_levels.update(_resident_levels_from_pyramid(session, rendered, demand=demand))
         payload = payloads.get(tile_number)
         lod = None if payload is None else getattr(payload, "lod", None)
         presented_level = None if lod is None else int(getattr(lod, "level", 0) or 0)
@@ -469,21 +473,6 @@ def _resident_levels_from_lifecycle(record) -> tuple[int, ...]:
         level_xy = tuple(getattr(key, "level_xy", ()) or ())
         if level_xy:
             levels.append(max(int(value) for value in level_xy))
-    return tuple(sorted(set(levels)))
-
-
-def _resident_levels_from_pyramid(session, rendered, *, demand) -> tuple[int, ...]:
-    pyramid = getattr(session, "lod_pyramid", None)
-    if pyramid is None:
-        return ()
-    levels = []
-    for level in tuple(getattr(demand, "acceptable_levels", ()) or ()):
-        level = int(level)
-        if level <= 0:
-            continue
-        key = montage_lod.pyramid_key_for(session, rendered, demand=demand, level=level)
-        if pyramid.peek(key) is not None:
-            levels.append(level)
     return tuple(sorted(set(levels)))
 
 

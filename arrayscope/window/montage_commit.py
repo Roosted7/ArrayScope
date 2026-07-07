@@ -210,13 +210,32 @@ class MontagePipelineEffects:
         self._rearm_if_backlog()
 
     def _backlog_signature(self) -> tuple:
+        """Everything a presentation commit can make progress on.
+
+        Progress dimensions MUST all appear here: the gate stops re-arming
+        when the signature repeats, so an invisible dimension turns steady
+        progress into a false no-progress stop. Level convergence proved
+        this: bounded per-commit level rewindows shrank the stale count
+        while flush/dirty stayed constant, and the gate stalled a 272-tile
+        FFT level refinement at 145 stale tiles.
+        """
+
         session = self.session
+        level_pending = bool(session.has_pending_level_update())
+        level_stale = 0
+        if level_pending:
+            snapshot = session.level_presentation_snapshot()
+            level_stale = int(getattr(snapshot, "stale_count", 0) or 0)
         return (
             bool(getattr(session, "flush_pending", False)),
             bool(getattr(session, "final_commit_pending", False)),
             len(tuple(getattr(session, "dirty_payloads", ()) or ())),
             len(tuple(getattr(session, "pending_payload_upserts", ()) or ())),
             len(tuple(getattr(session, "pending_removals", ()) or ())),
+            level_pending,
+            level_stale,
+            int(getattr(session, "level_revision", 0) or 0),
+            len(tuple(_call(session, "backend_identity_mismatch_tiles") or ())),
         )
 
     def _rearm_if_backlog(self) -> None:
@@ -1006,7 +1025,8 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
             current.stage_fan_in.active_requests.discard(key)
             current.stage_fan_in.attached_requests.discard(key)
             current.stage_fan_in.values[key] = value
-            renderer.retarget_montage_pipeline(current)
+            # Per-completion: coalesced replan, never a direct O(tiles) one.
+            renderer.request_montage_replan(current)
 
         def stale(key=request.key):
             renderer.win.operation_evaluator.stage_materializer.cancel(key)
@@ -1014,7 +1034,7 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
             if current is not None:
                 current.stage_fan_in.active_requests.discard(key)
                 release_stage_dependents_to_direct(current, key)
-                renderer.retarget_montage_pipeline(current)
+                renderer.request_montage_replan(current)
 
         def failed(exc, session_id=session.session_id, session_key=session.key, key=request.key):
             current = getattr(renderer, "_montage_session", None)
@@ -1057,7 +1077,7 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
             renderer._montage_stage_admission_declined = (
                 int(getattr(renderer, "_montage_stage_admission_declined", 0) or 0) + 1
             )
-            renderer.retarget_montage_pipeline(session)
+            renderer.request_montage_replan(session)
 
 
 def release_stage_dependents_to_direct(session, key) -> None:

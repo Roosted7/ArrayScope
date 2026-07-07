@@ -149,6 +149,32 @@ class MontageRuntimeMixin:
         self._montage_pipeline = pipeline
         return pipeline
 
+    def request_montage_replan(self, session) -> None:
+        """Coalesced ladder replan: at most one per event-loop turn.
+
+        Per-completion callbacks (level ready, stage done/stale, declined
+        admissions) must NOT call `retarget_montage_pipeline` directly: a
+        full replan snapshots every tile, so N completions × N tiles was an
+        O(N²) GUI-thread storm (272-tile fill: 204 replans, 2.5–14 s
+        event-loop gaps). They mark their own bounded state and request one
+        replan here. Category: zero-delay coalescing continuation.
+        """
+
+        if bool(getattr(self, "_montage_replan_gate_armed", False)):
+            return
+        self._montage_replan_gate_armed = True
+        session_id = int(session.session_id)
+        session_key = session.key
+
+        def fire() -> None:
+            self._montage_replan_gate_armed = False
+            current = getattr(self, "_montage_session", None)
+            if current is None or not self._is_current_montage_session(session_id, session_key):
+                return
+            self.retarget_montage_pipeline(current)
+
+        Qt.QtCore.QTimer.singleShot(0, self, fire)
+
     def retarget_montage_pipeline(self, session, *, force_commit: bool = False) -> int:
         if session is None or not self._montage_session_is_current(session):
             return 0

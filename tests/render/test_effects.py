@@ -270,7 +270,11 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
         for state in effects.tile_lod_states(session, demand, tile_numbers=(tile.montage_index,))
     }[int(tile.montage_index)]
 
-    assert state.resident_levels == (0, 1)
+    # Rendered => native (0) resident, which dominates planning; pyramid
+    # levels are deliberately NOT probed here anymore (per-replan pyramid
+    # probing was part of the O(N^2) replan storm). Lifecycle-acknowledged
+    # levels still appear via _resident_levels_from_lifecycle.
+    assert state.resident_levels == (0,)
     assert state.floor_available is True
 
 

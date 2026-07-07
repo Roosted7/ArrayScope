@@ -1261,6 +1261,8 @@ def on_level_ready(renderer, session_id, session_key, tile_number) -> None:
         session.dirty_payloads[int(tile_number)] = None
         session.flush_pending = True
         session.final_commit_pending = True
-    # A completed level is backend evidence with its own consumer: retarget
-    # the pipeline so the ladder can swap resident levels and finish commits.
-    renderer.retarget_montage_pipeline(session)
+    # A completed level is backend evidence with its own consumer — but a
+    # full replan per completed level was the O(N²) freeze (272 levels x
+    # 272-tile snapshots). Mark bounded state above; one coalesced replan
+    # per loop turn swaps resident levels and finishes commits.
+    renderer.request_montage_replan(session)
