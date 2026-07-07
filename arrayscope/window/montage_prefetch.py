@@ -277,7 +277,6 @@ def _busy(window, session=None) -> bool:
         # walk for lane capacity: speculation waits until they are drained.
         or getattr(session, "pending_lod_requests", None)
         or session.stage_fan_in.active_requests
-        or session.stage_fan_in.waiting_tiles
     ):
         return True
     return bool(

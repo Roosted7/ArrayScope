@@ -23,7 +23,6 @@ class MontageDispatchPlan:
     deferred_planning: bool = False
     schedule_tiles: bool = False
     lod_materializations: bool = False
-    stage_waits: bool = False
     level_evidence: bool = False
     preview_refinements: tuple[int, ...] = ()
     commit: bool = False
@@ -37,7 +36,6 @@ class MontageDispatchPlan:
             or self.deferred_planning
             or self.schedule_tiles
             or self.lod_materializations
-            or self.stage_waits
             or self.level_evidence
             or self.preview_refinements
             or self.commit
@@ -69,7 +67,6 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
     loading = bool(getattr(session, "loading_tiles", None))
     stage_active = bool(getattr(stage_fan_in, "active_requests", None))
     stage_attached = bool(getattr(stage_fan_in, "attached_requests", None))
-    stage_waiting = bool(getattr(stage_fan_in, "waiting_tiles", None))
     dirty = bool(getattr(session, "dirty_payloads", None)) or bool(getattr(session, "dirty_tiles", None))
     upserts = bool(getattr(session, "pending_payload_upserts", None))
     removals = bool(getattr(session, "pending_removals", None))
@@ -92,19 +89,14 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
         )
     )
 
-    # Stage-waiting tiles are `loading` with no active evaluation request by
-    # design; requeueing them would bypass their attached stage into direct
-    # per-tile evaluation.  The orphan scan therefore requires that no stage
-    # records exist at all.
     requeue_orphans = (
         loading
         and not deferred
         and not active
         and not stage_active
         and not stage_attached
-        and not stage_waiting
     )
-    evaluation_drained = not (pending or active or stage_active or stage_waiting)
+    evaluation_drained = not (pending or active or stage_active)
     commit = bool(dirty or upserts or removals or flushish or preview_refinements)
     unsettled = bool(
         pending
@@ -112,7 +104,6 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
         or loading
         or stage_active
         or stage_attached
-        or stage_waiting
         or commit
         or lod_pending
         or deferred
@@ -123,7 +114,6 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
         deferred_planning=deferred,
         schedule_tiles=bool(pending or requeue_orphans),
         lod_materializations=lod_pending,
-        stage_waits=bool(stage_waiting or stage_attached),
         level_evidence=level_evidence,
         preview_refinements=preview_refinements,
         commit=commit,

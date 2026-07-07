@@ -1095,7 +1095,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"cache_hit={montage.tile_compute_cache_hits} stage_backed={montage.tile_compute_stage_backed} "
             f"direct={montage.tile_compute_direct} waiting_stage={montage.tile_compute_waiting_for_stage} "
             f"lead_direct={montage.lead_direct_tiles} stage_pending={montage.stage_backed_tiles_pending} "
-            f"stage_waits={montage.attached_stage_requests}/{montage.waiting_stage_requests}"
+            f"stage_deps={montage.attached_stage_requests}/{montage.waiting_stage_requests}"
         ),
         (
             "Compute time (ms): "

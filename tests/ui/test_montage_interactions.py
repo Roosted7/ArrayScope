@@ -1224,16 +1224,14 @@ def test_fft_montage_computes_shared_stage_on_stage_lane(qtbot, monkeypatch):
         win.update_image_view()
 
         assert len(stage_calls) == 1
-        assert tile_calls == []
+        assert len(tile_calls) == 4
         assert not win._montage_session.stage_fan_in.lead_warmups
         assert win._montage_session.tile_compute_waiting_for_stage == 4
-        assert sum(len(tiles) for tiles in win._montage_session.stage_fan_in.waiting_tiles.values()) == 4
+        stage_key = stage_calls[0]["work_item"].key
+        assert all(call["work_item"].dependency_keys == (stage_key,) for call in tile_calls)
 
         result = stage_calls[0]["fn"](None)
         stage_calls[0]["on_done"](result)
-
-        qtbot.waitUntil(lambda: len(tile_calls) >= 1, timeout=1000)
-        qtbot.waitUntil(lambda: not win._montage_session.stage_fan_in.waiting_tiles, timeout=1000)
     finally:
         win.close()
 
@@ -1284,7 +1282,7 @@ def test_fft_montage_stage_cache_hit_keeps_per_tile_slab_plans(qtbot, monkeypatc
         win.close()
 
 
-def test_fft_montage_keeps_waiting_tiles_behind_in_flight_stage_job(qtbot, monkeypatch):
+def test_fft_montage_tile_tasks_depend_on_in_flight_stage_job(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.operations.pipeline import CenteredFFT
     from arrayscope.window import ArrayScopeWindow
@@ -1304,12 +1302,13 @@ def test_fft_montage_keeps_waiting_tiles_behind_in_flight_stage_job(qtbot, monke
         win.update_image_view()
         win.update_image_view()
 
-        # A re-render while the shared stage is in flight must not release
-        # tiles to direct evaluation or schedule a different stage job.
+        # A re-render while the shared stage is in flight must not duplicate
+        # the stage job; tile work is admitted with an explicit kernel dep.
         assert len(stage_calls) >= 1
         assert len({call["key"] for call in stage_calls}) == 1
-        assert tile_calls == []
-        assert win._montage_session.stage_fan_in.waiting_tiles
+        assert tile_calls
+        stage_key = stage_calls[0]["work_item"].key
+        assert all(call["work_item"].dependency_keys == (stage_key,) for call in tile_calls)
     finally:
         win.close()
 
@@ -1350,9 +1349,9 @@ def test_fft_montage_attached_stage_keeps_all_tiles_waiting(qtbot, monkeypatch):
 
         win.update_image_view()
 
-        assert len(stage_calls) == 1
-        assert tile_calls == []
-        assert len(win._montage_session.stage_fan_in.waiting_tiles) == 1
+        assert stage_calls == []
+        assert tile_calls
+        assert all(call["work_item"].dependency_keys for call in tile_calls)
         assert not win._montage_session.stage_fan_in.lead_warmups
         assert win._montage_session.tile_compute_waiting_for_stage == 4
     finally:

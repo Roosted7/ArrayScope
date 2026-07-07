@@ -78,7 +78,6 @@ def _renderer(session, *, blocked=False, current=True):
     # pumps; the commit pump is what this fixture observes.
     fake._dispatch_montage_work = FrameRenderMixin._dispatch_montage_work.__get__(fake)
     fake._schedule_montage_tiles = lambda session: None
-    fake._schedule_montage_attached_stage_waits = lambda session: None
     fake._schedule_deferred_montage_planning = lambda session, delay_ms=0: None
     fake._ensure_montage_watchdog = lambda: None
     fake._schedule_montage_lod_materializations = (
@@ -213,7 +212,6 @@ def _tile_worker_renderer(session, *, evaluated, capabilities=None):
     fake._montage_level_expected_indices = lambda session: tuple(
         int(tile.source_index) for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
     )
-    fake._activate_cached_waiting_stages = lambda session, release_missing=False: None
     fake._schedule_montage_cached_level_stats = lambda session, *args, **kwargs: None
     fake._schedule_montage_ready_display_commit = lambda session: None
     fake._schedule_montage_presentation_commit = lambda session, force=False: None

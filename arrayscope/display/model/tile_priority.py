@@ -141,11 +141,11 @@ class MontageTilePriorityQueue:
         """Adopt a new scheduling context; takes effect on every tile.
 
         Re-keying happens lazily on the next ``pop``, so this is O(1)
-        regardless of queue size. ``max_items`` is accepted for backward
-        compatibility and ignored. When a ``context_provider`` is set it
-        takes precedence over the value stored here.
+        regardless of queue size. ``max_items`` is accepted by callers that
+        share retarget signatures with bounded queues and is ignored here.
+        When a ``context_provider`` is set it takes precedence over the value
+        stored here.
         """
-        del max_items
         self._context = context
         self.retargeted_last = len(self._tiles)
         return int(self.retargeted_last)

@@ -21,7 +21,6 @@ class StageReleaseBatch:
 
 @dataclass
 class StageFanInState:
-    waiting_tiles: dict[object, list[object]] = field(default_factory=dict)
     active_requests: set[object] = field(default_factory=set)
     attached_requests: set[object] = field(default_factory=set)
     values: dict[object, object] = field(default_factory=dict)
@@ -31,10 +30,6 @@ class StageFanInState:
     lead_warmups: dict[int, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.waiting_tiles = {
-            key: list(value or ())
-            for key, value in dict(self.waiting_tiles or {}).items()
-        }
         self.active_requests = set(self.active_requests or ())
         self.attached_requests = set(self.attached_requests or ())
         self.values = dict(self.values or {})
@@ -47,14 +42,6 @@ class StageFanInState:
         self.tile_stage_keys.update({int(key): value for key, value in dict(plan.get("tile_stage_keys", {})).items()})
         self.tile_stage_plans.update({int(key): value for key, value in dict(plan.get("tile_stage_plans", {})).items()})
         self.tile_stage_candidates.update({int(key): value for key, value in dict(plan.get("tile_stage_candidates", {})).items()})
-        for key, waiting in dict(plan.get("stage_waiting_tiles", {})).items():
-            existing = self.waiting_tiles.setdefault(key, [])
-            existing_numbers = {_tile_index(tile) for tile in existing}
-            existing.extend(
-                tile
-                for tile in tuple(waiting or ())
-                if _tile_index(tile) not in existing_numbers
-            )
         self.attached_requests.update(plan.get("attached_stage_keys", ()) or ())
         self.values.update(dict(plan.get("stage_values", {}) or {}))
         self.lead_warmups.update({int(key): value for key, value in dict(plan.get("lead_stage_warmups", {})).items()})
@@ -63,43 +50,23 @@ class StageFanInState:
         self.active_requests.discard(key)
         self.attached_requests.discard(key)
         self.values[key] = value
-        waiting = self.waiting_tiles.get(key)
-        if not waiting:
-            self.waiting_tiles.pop(key, None)
-            return StageActivationBatch(key=key, tiles=(), complete=True)
-        batch, complete = _take_batch(waiting, max_items=max_items)
-        if complete:
-            self.waiting_tiles.pop(key, None)
-        else:
-            self.waiting_tiles[key] = waiting
-        return StageActivationBatch(key=key, tiles=batch, complete=complete)
+        return StageActivationBatch(key=key, tiles=(), complete=True)
 
     def release_missing(self, key, *, max_items: int | None = None) -> StageReleaseBatch:
         self.active_requests.discard(key)
         self.attached_requests.discard(key)
-        waiting = self.waiting_tiles.get(key)
-        if not waiting:
-            self.waiting_tiles.pop(key, None)
-            return StageReleaseBatch(key=key, tiles=(), complete=True)
-        batch, complete = _take_batch(waiting, max_items=max_items)
-        for tile in batch:
-            self.tile_stage_keys.pop(_tile_index(tile), None)
-        if complete:
-            self.waiting_tiles.pop(key, None)
-        else:
-            self.waiting_tiles[key] = waiting
-        return StageReleaseBatch(key=key, tiles=batch, complete=complete)
+        return StageReleaseBatch(key=key, tiles=(), complete=True)
 
     def fail(self, key) -> tuple[object, ...]:
         self.active_requests.discard(key)
         self.attached_requests.discard(key)
-        waiting = tuple(self.waiting_tiles.pop(key, ()) or ())
-        for tile in waiting:
+        failed_tiles = tuple(tile for tile, stage_key in tuple(self.tile_stage_keys.items()) if stage_key == key)
+        for tile in failed_tiles:
             self.tile_stage_keys.pop(_tile_index(tile), None)
-        return waiting
+        return failed_tiles
 
     def has_waiting(self) -> bool:
-        return any(bool(value) for value in self.waiting_tiles.values())
+        return bool(self.tile_stage_keys)
 
 
 def _take_batch(waiting, *, max_items: int | None) -> tuple[tuple[object, ...], bool]:

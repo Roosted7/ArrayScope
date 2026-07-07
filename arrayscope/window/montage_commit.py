@@ -156,6 +156,8 @@ class MontagePipelineEffects:
             session.tile_compute_stage_backed += 1
             session.tile_compute_stage_backed_ms += eval_ms
             session.tile_compute_stage_backed_max_ms = max(float(session.tile_compute_stage_backed_max_ms), eval_ms)
+            session.stage_backed_tiles_pending = max(0, int(session.stage_backed_tiles_pending) - 1)
+            session.tile_compute_waiting_for_stage = max(0, int(session.tile_compute_waiting_for_stage) - 1)
         else:
             session.tile_compute_direct += 1
             session.tile_compute_direct_ms += eval_ms

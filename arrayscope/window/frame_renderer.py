@@ -547,11 +547,7 @@ class FrameRenderMixin:
             stage_plan = self._plan_montage_stages(document, missing_tiles)
         self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
         session_setup_start = perf_counter()
-        pending_tiles = (
-            []
-            if defer_stage_planning
-            else [tile for tile in missing_tiles if int(tile.montage_index) not in stage_plan["waiting_indices"]]
-        )
+        pending_tiles = [] if defer_stage_planning else list(missing_tiles)
         session_key = montage_session_key(_document_key(document), view_state, viewport_plan, colormap_lut)
         level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
         frame_plan = self._montage_frame_planner().plan(
@@ -607,7 +603,6 @@ class FrameRenderMixin:
                 tile_stage_keys=stage_plan["tile_stage_keys"],
                 tile_stage_plans=stage_plan["tile_stage_plans"],
                 tile_stage_candidates=stage_plan["tile_stage_candidates"],
-                waiting_tiles=stage_plan["stage_waiting_tiles"],
                 attached_requests=stage_plan["attached_stage_keys"],
                 values=stage_plan["stage_values"],
                 lead_warmups=stage_plan["lead_stage_warmups"],
@@ -717,7 +712,6 @@ class FrameRenderMixin:
             self._schedule_deferred_montage_planning(session)
         else:
             self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-            self._schedule_montage_attached_stage_waits(session)
             self._schedule_montage_tiles(session)
 
     def _maybe_retarget_montage_session(
@@ -1072,7 +1066,6 @@ class FrameRenderMixin:
 
     def _merge_montage_stage_plan(self, session: MontageRenderSession, stage_plan) -> None:
         session.stage_fan_in.merge_plan(stage_plan)
-        session.ensure_stage_waiting_priority_queues()
         session.tile_compute_waiting_for_stage += len(stage_plan["waiting_indices"])
         session.stage_backed_tiles_pending += len(stage_plan["waiting_indices"])
         session.lead_direct_tiles += int(stage_plan["lead_direct_tiles"])
@@ -1233,11 +1226,10 @@ class FrameRenderMixin:
 
         stage_plan = self._plan_montage_stages(session.document, missing_tiles)
         self._merge_montage_stage_plan(session, stage_plan)
-        waiting = {int(index) for index in stage_plan["waiting_indices"]}
         queued = set(session.pending_tile_numbers())
         for tile in missing_tiles:
             index = int(tile.montage_index)
-            if index not in waiting and index not in queued:
+            if index not in queued:
                 _enqueue_session_pending_tile(session, tile)
                 queued.add(index)
 
@@ -1268,17 +1260,6 @@ class FrameRenderMixin:
                 if 0 <= int(index) < len(session.tile_states):
                     session.tile_states[int(index)] = MontageTileState.UNLOADED
                     session.invalidate_tile_states()
-        for key, waiting in list(session.stage_fan_in.waiting_tiles.items()):
-            kept = [tile for tile in waiting if int(tile.montage_index) in keep]
-            if kept:
-                if hasattr(waiting, "clear") and hasattr(waiting, "extend"):
-                    waiting.clear()
-                    waiting.extend(kept)
-                    session.stage_fan_in.waiting_tiles[key] = waiting
-                else:
-                    session.stage_fan_in.waiting_tiles[key] = kept
-            else:
-                session.stage_fan_in.waiting_tiles.pop(key, None)
         pruned = pruned_pending + len(stale)
         if pruned > 0:
             self._last_montage_pruned_tile_work = int(getattr(self, "_last_montage_pruned_tile_work", 0) or 0) + int(pruned)
@@ -1788,7 +1769,6 @@ class FrameRenderMixin:
             tile_stage_candidates[int(tile.montage_index)] = candidate
 
         tile_stage_keys = {}
-        stage_waiting_tiles = {}
         stage_values = {}
         lead_stage_warmups = {}
         stage_requests = []
@@ -1815,13 +1795,9 @@ class FrameRenderMixin:
                     tile_stage_candidates[int(tile.montage_index)] = candidate
                 continue
             if result.decision == "scheduled":
-                # Compute the shared stage as a stage-lane job and keep every
-                # tile behind the fan-in. A montage-tile "lead" computing the
-                # stage inline runs it with the tile lane's single FFT worker
-                # while the whole montage waits; the stage lane gets the
-                # multi-worker FFT context. The stage cache's in-flight claim
-                # keeps any concurrent direct evaluation from duplicating it.
-                stage_waiting_tiles[key] = list(tiles)
+                # Compute the shared stage as a stage-lane job. Tile tasks
+                # depend on this cache key, so the kernel parks them until
+                # the stage lane has admitted the value into the cache.
                 for tile in tiles:
                     tile_stage_keys[int(tile.montage_index)] = key
                     tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
@@ -1830,15 +1806,12 @@ class FrameRenderMixin:
                 stage_requests.append((result.request, group["plan"]))
                 continue
             if result.decision == "attached":
-                stage_waiting_tiles[key] = list(tiles)
                 attached_stage_keys.add(key)
                 for tile in tiles:
                     tile_stage_keys[int(tile.montage_index)] = key
                     tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
                     tile_stage_candidates[int(tile.montage_index)] = candidate
                     waiting_indices.add(int(tile.montage_index))
-                if result.request is not None:
-                    stage_requests.append((result.request, group["plan"]))
                 continue
             for tile in tiles:
                 tile_stage_keys.pop(int(tile.montage_index), None)
@@ -1848,7 +1821,6 @@ class FrameRenderMixin:
             "tile_stage_keys": tile_stage_keys,
             "tile_stage_plans": tile_stage_plans,
             "tile_stage_candidates": tile_stage_candidates,
-            "stage_waiting_tiles": stage_waiting_tiles,
             "stage_values": stage_values,
             "lead_stage_warmups": lead_stage_warmups,
             "stage_requests": stage_requests,
@@ -1900,14 +1872,12 @@ class FrameRenderMixin:
             tile_stage_keys=stage_plan["tile_stage_keys"],
             tile_stage_plans=stage_plan["tile_stage_plans"],
             tile_stage_candidates=stage_plan["tile_stage_candidates"],
-            waiting_tiles=stage_plan["stage_waiting_tiles"],
             attached_requests=stage_plan["attached_stage_keys"],
             values=stage_plan["stage_values"],
             lead_warmups=stage_plan["lead_stage_warmups"],
         ))
         for tile in missing_tiles:
-            if int(tile.montage_index) not in stage_plan["waiting_indices"]:
-                session.enqueue_pending_tile(tile)
+            session.enqueue_pending_tile(tile)
         session.tile_compute_waiting_for_stage = len(stage_plan["waiting_indices"])
         session.stage_backed_tiles_pending = len(stage_plan["waiting_indices"])
         session.lead_direct_tiles = stage_plan["lead_direct_tiles"]
@@ -1915,6 +1885,7 @@ class FrameRenderMixin:
         session.retained_stage_decision = stage_plan["retained_stage_decision"]
         session.repeated_expensive_stage_per_tile = stage_plan["repeated_expensive_stage_per_tile"]
         self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
+        self._schedule_montage_tiles(session)
         self._dispatch_montage_work(session)
 
     def _schedule_montage_stage_jobs(self, session, stage_requests) -> None:
@@ -1949,7 +1920,7 @@ class FrameRenderMixin:
                 supersession_key=("montage-stage", request.key),
                 supersession_value=(session.key, int(session.session_id)),
                 work_item=WorkItem(
-                    key=("montage_stage_materialization", request.key, int(session.session_id)),
+                    key=request.key,
                     lane=WorkLane.STAGE_MATERIALIZATION,
                     frame_target=session.frame_plan.target,
                     quality=session.frame_plan.target.quality,
@@ -1973,17 +1944,18 @@ class FrameRenderMixin:
                 # ~490 MB stage after a session-restore burst). Roll back
                 # so the next planning pass re-requests it.
                 session.stage_fan_in.active_requests.discard(request.key)
+                self._release_stage_dependent_tiles_to_direct(session, request.key)
                 self._montage_stage_admission_declined = (
                     int(getattr(self, "_montage_stage_admission_declined", 0) or 0) + 1
                 )
+                self._dispatch_montage_work(session)
 
     def _on_montage_stage_stale(self, key) -> None:
         self.win.operation_evaluator.stage_materializer.cancel(key)
         session = getattr(self, "_montage_session", None)
         if session is not None:
             session.stage_fan_in.active_requests.discard(key)
-            # A superseded stage can strand its waiting tiles: re-derive
-            # (the stage-waits pump releases them to direct evaluation).
+            self._release_stage_dependent_tiles_to_direct(session, key)
             self._dispatch_montage_work(session)
 
     def _on_montage_stage_done(self, session_id, key, value) -> None:
@@ -1993,174 +1965,42 @@ class FrameRenderMixin:
             return
         if not self._is_current_render_generation(session.render_generation):
             return
-        # Activation batches pop waiting tiles in priority order; make sure
-        # that order reflects the live viewport, not the pre-commit range.
-        self._refresh_montage_priority_targets(session)
-        budget = self._montage_callback_budget(
-            "montage_stage_wait",
-            interactive=_interactive_active(self),
-            work_class="stage_wait_activation",
-        )
-        self._activate_montage_stage_value(session, key, value, budget=budget)
-        self._record_gui_budget(budget)
+        session.stage_fan_in.active_requests.discard(key)
+        session.stage_fan_in.attached_requests.discard(key)
+        session.stage_fan_in.values[key] = value
         self._dispatch_montage_work(session)
 
-    def _activate_montage_stage_value(self, session, key, value, *, budget: GuiCallbackBudget | None = None) -> None:
-        max_items = None if budget is None else max(0, int(budget.item_cap) - int(budget.processed_items))
-        if max_items == 0:
-            return
-        batch = session.stage_fan_in.activate_value(key, value, max_items=max_items)
-        processed = 0
-        for tile in batch.tiles:
-            index = int(tile.montage_index)
-            if index not in session.rendered_tiles and index not in session.skipped_tiles:
-                _enqueue_session_pending_tile(session, tile)
-                session.mark_loading(tile)
-            processed += 1
-        if budget is not None and processed:
-            budget.record_item(item_count=processed)
-
-    def _release_stage_waiting_tiles_to_direct(self, session, key, *, budget: GuiCallbackBudget | None = None) -> None:
-        max_items = None if budget is None else max(0, int(budget.item_cap) - int(budget.processed_items))
-        if max_items == 0:
-            return
-        batch = session.stage_fan_in.release_missing(key, max_items=max_items)
-        processed = 0
-        for tile in batch.tiles:
-            index = int(tile.montage_index)
-            if index not in session.rendered_tiles and index not in session.skipped_tiles:
-                _enqueue_session_pending_tile(session, tile)
-                session.mark_loading(tile)
-            processed += 1
-        if budget is not None and processed:
-            budget.record_item(item_count=processed)
-
-    def _schedule_montage_attached_stage_waits(self, session) -> None:
-        if not self._stage_wait_has_actionable_work(session, release_missing=True):
-            return
-        self._montage_attached_stage_token = _montage_work_token(session, "stage_wait")
-        timer = getattr(self, "_montage_attached_stage_timer", None)
-        if timer is None:
-            # Bounded continuation guarded by `_montage_attached_stage_token`.
-            # It releases stage waiters in GUI-budgeted batches instead of
-            # draining a completed stage in one callback.
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._process_montage_attached_stage_waits)
-            self._montage_attached_stage_timer = timer
-        if not timer.isActive():
-            timer.start(0)
-
-    def _process_montage_attached_stage_waits(self) -> None:
-        session = getattr(self, "_montage_session", None)
-        if not self._montage_session_is_current(session):
-            return
-        token = getattr(self, "_montage_attached_stage_token", None)
-        if not _montage_work_token_is_current(session, token, "stage_wait"):
-            return
-        pending_keys = tuple(
-            dict.fromkeys(
-                tuple(session.stage_fan_in.attached_requests)
-                + tuple(session.stage_fan_in.waiting_tiles)
-            )
-        )
-        if not pending_keys:
-            return
-        wait_start = perf_counter()
-        budget = self._montage_callback_budget(
-            "montage_stage_wait",
-            interactive=_interactive_active(self),
-            work_class="stage_wait_release",
-        )
-        for key in pending_keys:
-            self._activate_or_release_waiting_stage(session, key, release_missing=True, budget=budget)
-            if budget.should_yield():
-                break
-        self._last_montage_stage_attach_wait_ms = (perf_counter() - wait_start) * 1000.0
-        if budget.processed_items:
-            _complete_inline_work(
-                self,
-                WorkItem(
-                    key=("montage_stage_wait_fan_in", session.key, int(session.session_id), int(session.stage_fan_in.has_waiting())),
-                    lane=WorkLane.GUI_FAN_IN,
-                    frame_target=session.frame_plan.target,
-                    supersession_key=("montage-stage-wait", session.key),
-                    supersession_value=int(session.session_id),
-                    estimated_cpu_ms=float(self._last_montage_stage_attach_wait_ms),
-                    estimated_bytes=int(budget.processed_bytes),
-                ),
-            )
-        self._record_gui_budget(budget)
-        self._dispatch_montage_work(session)
-
-    def _activate_cached_waiting_stages(self, session, *, release_missing: bool = False) -> None:
-        if not self._stage_wait_has_actionable_work(session, release_missing=release_missing):
-            return
-        budget = self._montage_callback_budget(
-            "montage_stage_wait",
-            interactive=_interactive_active(self),
-            work_class="stage_wait_cached_activation",
-        )
-        for key in tuple(session.stage_fan_in.waiting_tiles):
-            self._activate_or_release_waiting_stage(session, key, release_missing=release_missing, budget=budget)
-            if budget.should_yield():
-                break
-        if budget.processed_items:
-            _complete_inline_work(
-                self,
-                WorkItem(
-                    key=("montage_cached_stage_fan_in", session.key, int(session.session_id), bool(release_missing)),
-                    lane=WorkLane.GUI_FAN_IN,
-                    frame_target=session.frame_plan.target,
-                    supersession_key=("montage-stage-wait", session.key),
-                    supersession_value=int(session.session_id),
-                    estimated_bytes=int(budget.processed_bytes),
-                ),
-            )
-        self._record_gui_budget(budget)
-        if self._stage_wait_has_actionable_work(session, release_missing=release_missing):
-            self._schedule_montage_attached_stage_waits(session)
-
-    def _activate_or_release_waiting_stage(self, session, key, *, release_missing: bool, budget: GuiCallbackBudget | None = None) -> None:
-        if key in session.stage_fan_in.values:
-            self._activate_montage_stage_value(session, key, session.stage_fan_in.values[key], budget=budget)
-            return
-        cache = self.win.operation_evaluator.stage_cache
-        value = cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)
-        if value is not None:
-            self.win.operation_evaluator.stage_materializer.cancel(key)
-            self._activate_montage_stage_value(session, key, value, budget=budget)
-            return
-        in_flight = getattr(self.win.operation_evaluator.stage_materializer, "_in_flight", {})
-        if release_missing and key not in in_flight:
-            self._release_stage_waiting_tiles_to_direct(session, key, budget=budget)
-
-    def _stage_wait_has_actionable_work(self, session, *, release_missing: bool) -> bool:
-        waiting_by_key = session.stage_fan_in.waiting_tiles
-        if not waiting_by_key:
-            return False
-        cache = self.win.operation_evaluator.stage_cache
-        in_flight = getattr(self.win.operation_evaluator.stage_materializer, "_in_flight", {})
-        for key, waiting in dict(waiting_by_key).items():
-            if not waiting:
+    def _release_stage_dependent_tiles_to_direct(self, session, key) -> None:
+        queued = set(session.pending_tile_numbers())
+        released = 0
+        for tile_number, stage_key in tuple(session.stage_fan_in.tile_stage_keys.items()):
+            tile_number = int(tile_number)
+            if stage_key != key:
                 continue
-            if key in session.stage_fan_in.values:
-                return True
-            value = cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)
-            if value is not None:
-                return True
-            if release_missing and key not in in_flight:
-                return True
-        return False
+            session.stage_fan_in.tile_stage_keys.pop(tile_number, None)
+            if tile_number in session.rendered_tiles or tile_number in session.skipped_tiles:
+                continue
+            if 0 <= tile_number < len(session.plan.tiles) and tile_number not in queued:
+                tile = session.plan.tiles[tile_number]
+                _enqueue_session_pending_tile(session, tile)
+                session.mark_loading(tile)
+                queued.add(tile_number)
+                released += 1
+        if released:
+            session.tile_compute_waiting_for_stage = max(0, int(session.tile_compute_waiting_for_stage) - released)
+            session.stage_backed_tiles_pending = max(0, int(session.stage_backed_tiles_pending) - released)
 
     def _on_montage_stage_error(self, session_id, key, exc) -> None:
         session = getattr(self, "_montage_session", None)
         self.win.operation_evaluator.stage_materializer.fail(key, exc)
         if session is None or not self._is_current_montage_session(session_id, session.key):
             return
-        waiting = list(session.stage_fan_in.fail(key))
-        for tile in waiting:
-            session.mark_skipped(tile)
+        for tile_number, stage_key in tuple(session.stage_fan_in.tile_stage_keys.items()):
+            tile_number = int(tile_number)
+            if stage_key == key and 0 <= tile_number < len(session.plan.tiles):
+                session.stage_fan_in.tile_stage_keys.pop(tile_number, None)
+                session.mark_skipped(session.plan.tiles[tile_number])
+        session.stage_fan_in.fail(key)
         show_status_message(self.win, f"Montage stage update failed: {exc}", timeout=4000)
         self._dispatch_montage_work(session, force=True)
 
@@ -2200,7 +2040,7 @@ class FrameRenderMixin:
         if tile is None:
             if session.active_tile_requests or session.loading_tiles:
                 return False
-            if session.stage_fan_in.active_requests or session.stage_fan_in.waiting_tiles:
+            if session.stage_fan_in.active_requests:
                 return False
             self._schedule_montage_presentation_commit(session, force=True)
             if session.pending_tiles:
@@ -2340,7 +2180,6 @@ class FrameRenderMixin:
             if first_vispy_display and (getattr(current, "dirty_tiles", None) or getattr(current, "dirty_payloads", None)):
                 self._commit_montage_session_presentation(current, force=False)
                 first_visible_committed = bool(getattr(current, "display_committed", False))
-            self._activate_cached_waiting_stages(current, release_missing=True)
             self._schedule_montage_cached_level_stats(current)
             if current.pending_tiles:
                 self._schedule_montage_tiles(current)
@@ -2377,6 +2216,12 @@ class FrameRenderMixin:
             _enqueue_session_pending_tile(session, tile)
             return False
         controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
+        stage_key = session.stage_fan_in.tile_stage_keys.get(int(tile.montage_index))
+        dependency_keys = (
+            ()
+            if stage_key is None or stage_key in session.stage_fan_in.values
+            else (stage_key,)
+        )
         started = controller.start_latest(
             evaluate,
             key=("montage_tile", session.key, int(tile.montage_index)),
@@ -2393,11 +2238,12 @@ class FrameRenderMixin:
                 supersession_key=("montage-tile", int(tile.montage_index)),
                 supersession_value=(session.key, session_id),
                 estimated_bytes=int(estimate_display_image_bytes(session.frame_plan.tile_shape, dtype=session.output_dtype, rgb=session.rgb)),
+                dependency_keys=dependency_keys,
                 reusable_output=True,
             ),
             on_done=done,
             on_error=error,
-            on_stale=lambda: None,
+            on_stale=lambda tile=tile: self._on_montage_tile_dependency_stale(session_id, session.key, tile),
             on_slow=lambda: self._on_montage_tile_slow(session_id),
             slow_ms=100,
             pass_token=True,
@@ -2425,6 +2271,20 @@ class FrameRenderMixin:
             )
             return False
         return True
+
+    def _on_montage_tile_dependency_stale(self, session_id, session_key, tile) -> None:
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._is_current_montage_session(session_id, session_key):
+            return
+        tile_number = int(tile.montage_index)
+        session.active_tile_requests.discard(tile_number)
+        session.loading_tiles.discard(tile_number)
+        stage_key = session.stage_fan_in.tile_stage_keys.pop(tile_number, None)
+        if stage_key is None:
+            return
+        if tile_number not in session.rendered_tiles and tile_number not in session.skipped_tiles:
+            _enqueue_session_pending_tile(session, tile)
+        self._dispatch_montage_work(session)
 
     def _schedule_montage_preview_tile(
         self,
@@ -2959,8 +2819,6 @@ class FrameRenderMixin:
             self._schedule_deferred_montage_planning(session)
         if plan.schedule_tiles:
             self._schedule_montage_tiles(session)
-        if plan.stage_waits:
-            self._schedule_montage_attached_stage_waits(session)
         if plan.lod_materializations:
             self._schedule_montage_lod_materializations(session)
         if plan.level_evidence:
@@ -3083,7 +2941,7 @@ class FrameRenderMixin:
             f"signature={signature} "
             f"stage_active={len(session.stage_fan_in.active_requests)} "
             f"stage_attached={len(session.stage_fan_in.attached_requests)} "
-            f"stage_waiting={len(session.stage_fan_in.waiting_tiles)} "
+            f"stage_deps={len(getattr(session.stage_fan_in, 'tile_stage_keys', {}))} "
             f"loading={len(session.loading_tiles)} "
             f"flush_pending={session.flush_pending} final={session.final_commit_pending}",
             file=sys.stderr,
@@ -3165,21 +3023,6 @@ class FrameRenderMixin:
                 int(getattr(self, "_montage_orphaned_tiles_repaired", 0) or 0) + int(repaired)
             )
             self._schedule_montage_tiles(session)
-        if session.stage_fan_in.waiting_tiles and not session.stage_fan_in.active_requests:
-            # Tiles are waiting on a stage no scheduler knows about (lost to
-            # declined admission or supersession): replan and reschedule the
-            # stage work, mirroring the orphaned-tile repair.
-            waiting_tiles = [
-                tile
-                for tiles in session.stage_fan_in.waiting_tiles.values()
-                for tile in tuple(tiles)
-            ]
-            if waiting_tiles:
-                stage_plan = self._plan_montage_stages(session.document, waiting_tiles)
-                self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-                self._montage_orphaned_stages_repaired = (
-                    int(getattr(self, "_montage_orphaned_stages_repaired", 0) or 0) + 1
-                )
         if (
             getattr(session, "show_loading_overlays", False)
             and not session.visible_plan_complete()
@@ -3753,7 +3596,7 @@ class FrameRenderMixin:
         session = getattr(self, "_montage_session", None)
         if not self._montage_session_is_current(session):
             return
-        if not (session.pending_tiles or session.stage_fan_in.waiting_tiles):
+        if not session.pending_tiles:
             return
         self._montage_priority_retarget_token = _montage_work_token(session, "priority_retarget")
         timer = getattr(self, "_montage_priority_retarget_timer", None)
@@ -3781,7 +3624,7 @@ class FrameRenderMixin:
         override; ``session.view_range`` is viewport bookkeeping shared with
         level/commit scoping and stays untouched.
         """
-        if not (session.pending_tiles or session.stage_fan_in.waiting_tiles):
+        if not session.pending_tiles:
             return 0
         # While a viewport-continuity restore (reload, layout change) is in
         # flight, the live camera range is transitional; prioritizing against
@@ -3800,9 +3643,7 @@ class FrameRenderMixin:
                 return 0
             view_range = viewport_plan.view_range
             focus = viewport_plan.priority_focus
-        total = len(session.pending_tiles) + sum(
-            len(waiting) for waiting in session.stage_fan_in.waiting_tiles.values()
-        )
+        total = len(session.pending_tiles)
         return session.retarget_tile_priority(
             focus=focus,
             max_items=max(1, int(total)),
@@ -3819,7 +3660,7 @@ class FrameRenderMixin:
         token = getattr(self, "_montage_priority_retarget_token", None)
         if not _montage_work_token_is_current(session, token, "priority_retarget"):
             return
-        if not (session.pending_tiles or session.stage_fan_in.waiting_tiles):
+        if not session.pending_tiles:
             return
         budget = self._montage_callback_budget(
             "montage_priority_retarget",
@@ -4429,7 +4270,6 @@ def _deferred_stage_plan_stub() -> dict:
         "tile_stage_keys": {},
         "tile_stage_plans": {},
         "tile_stage_candidates": {},
-        "stage_waiting_tiles": {},
         "stage_values": {},
         "lead_stage_warmups": {},
         "stage_requests": [],

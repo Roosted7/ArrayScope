@@ -573,7 +573,6 @@ def _wait_for_montage_complete(
     first_preview_floor_fill_ms = None
     preview_floor_screenshot_saved = None
     preview_floor_screenshot_error = None
-    fully_visible_tile_request_count = None
     presentation_settled_ms = None
     final_visibility_state: dict[str, object] = {}
     final_level_state: dict[str, object] = {}
@@ -660,7 +659,6 @@ def _wait_for_montage_complete(
         fully_visible = bool(visibility_state["fully_visible"])
         if fully_visible and fully_visible_ms is None:
             fully_visible_ms = (perf_counter() - start) * 1000.0
-            fully_visible_tile_request_count = _vispy_tile_presentation_request_count(win)
         current_request_count = _vispy_tile_presentation_request_count(win)
         final_drawn = _vispy_tile_presentation_draw_count(win) >= int(current_request_count)
         presentation_ready = bool(level_state["settled"]) or not bool(require_presentation_settled)
@@ -734,7 +732,7 @@ def _wait_for_montage_complete(
         f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
         f"loading={snapshot.montage.loading_tiles} "
         f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
-        f"stage_waiting={0 if fan_in is None else sum(len(tiles) for tiles in fan_in.waiting_tiles.values())} "
+        f"stage_deps={0 if fan_in is None else len(getattr(fan_in, 'tile_stage_keys', {}))} "
         f"lead_warmups={0 if fan_in is None else len(fan_in.lead_warmups)} "
         f"active_presented={final_visibility_state.get('active_presented_tile_count', 0)}/"
         f"{final_visibility_state.get('active_planned_tile_count', 0)} "
@@ -1092,7 +1090,6 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
         or getattr(session, "active_tile_requests", ())
         or session.stage_fan_in.active_requests
         or session.stage_fan_in.attached_requests
-        or session.stage_fan_in.waiting_tiles
         or getattr(session, "final_commit_pending", False)
         or getattr(session, "flush_pending", False)
         or getattr(session, "dirty_payloads", ())

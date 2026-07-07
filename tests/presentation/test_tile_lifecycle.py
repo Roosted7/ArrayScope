@@ -406,7 +406,7 @@ def test_full_tile_story(lc):
         "loading": 0,
         "active_requests": 0,
         "skipped": 0,
-        "stage_waiting": 0,
+        "stage_blocked": 0,
         "dangling_claims": 0,
         "identity_rejections": 0,
     }
@@ -481,14 +481,14 @@ def test_request_views_follow_semantic_events(lc):
 
 def test_stage_bindings_reconcile(lc):
     lc.stage_bindings_replaced({"stage-a": (1, 2), "stage-b": (3,)})
-    assert lc.stage_waiting_tiles == frozenset({1, 2, 3})
+    assert lc.stage_blocked_tiles == frozenset({1, 2, 3})
     assert lc.record(2).stage_key == "stage-a"
     # Activation batch consumed tile 2; fail dropped stage-b entirely.
     lc.stage_bindings_replaced({"stage-a": (1,)})
-    assert lc.stage_waiting_tiles == frozenset({1})
+    assert lc.stage_blocked_tiles == frozenset({1})
     assert lc.record(2).stage_key is None
     assert lc.record(3).stage_key is None
     # A completed evaluation unbinds mechanically.
     lc.evaluation_started(1)
     lc.evaluation_completed(1)
-    assert lc.stage_waiting_tiles == frozenset()
+    assert lc.stage_blocked_tiles == frozenset()

@@ -1472,7 +1472,7 @@ def test_resident_retarget_upserts_bypass_cold_priority_cap():
     assert tuple(next_delta.upserts) == (0,)
 
 
-def _session_with_waiting_tiles():
+def _session_with_pending_tiles():
     from arrayscope.operations.stage_fanin import StageFanInState
 
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
@@ -1498,38 +1498,16 @@ def _session_with_waiting_tiles():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
-        stage_fan_in=StageFanInState(waiting_tiles={"stage-key": list(plan.tiles)}),
+        pending_tiles=list(plan.tiles),
+        stage_fan_in=StageFanInState(),
         priority_focus=(8.0, 1.0),
     )
-
-
-def test_stage_waiting_tiles_release_in_priority_order_not_plan_order():
-    # Waiting lists arrive from the stage plan in row-major order; released
-    # as-is under a budget cap the montage would fill from the plan corner.
-    from arrayscope.display.model.tile_priority import MontageTilePriorityQueue
-
-    session = _session_with_waiting_tiles()
-    waiting = session.stage_fan_in.waiting_tiles["stage-key"]
-    assert isinstance(waiting, MontageTilePriorityQueue)
-
-    # Tile centers sit at x = 1, 4, 7, 10; the focus at x = 8 is closest to
-    # tile 2, then tile 3 — not the plan's row-major 0, 1.
-    batch = session.stage_fan_in.activate_value("stage-key", object(), max_items=2)
-    released = [int(tile.montage_index) for tile in batch.tiles]
-    assert released == [2, 3]
-    assert not batch.complete
-
-    rest = session.stage_fan_in.activate_value("stage-key", object(), max_items=None)
-    assert [int(tile.montage_index) for tile in rest.tiles] == [1, 0]
-    assert rest.complete
 
 
 def test_montage_prefetch_candidates_prefer_focus_proximity():
     from arrayscope.window.montage_prefetch import _candidate_tiles
 
-    session = _session_with_waiting_tiles()
-    session.stage_fan_in.waiting_tiles.clear()
+    session = _session_with_pending_tiles()
     session.visible_tiles = ()
     session.visible_tile_numbers = frozenset()
 
@@ -1539,10 +1517,10 @@ def test_montage_prefetch_candidates_prefer_focus_proximity():
 
 def test_layout_reflow_rebinds_queued_tiles_to_new_plan_geometry():
     # Session invariant: every queued tile belongs to session.plan. A column
-    # reflow during window-shape settling used to leave stage-waiting and
-    # pending tiles bound to the superseded geometry — scheduled by stale
+    # reflow during window-shape settling used to leave pending tiles bound
+    # to the superseded geometry — scheduled by stale
     # coordinates, drawn at new ones, so the fill ignored the priority order.
-    session = _session_with_waiting_tiles()
+    session = _session_with_pending_tiles()
 
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
     reflowed = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2)
@@ -1554,10 +1532,6 @@ def test_layout_reflow_rebinds_queued_tiles_to_new_plan_geometry():
         plan=reflowed,
     )
 
-    for waiting in session.stage_fan_in.waiting_tiles.values():
-        for tile in tuple(waiting):
-            expected = reflowed.tiles[int(tile.montage_index)]
-            assert (tile.x0, tile.y0) == (expected.x0, expected.y0)
     for tile in tuple(session.pending_tiles):
         expected = reflowed.tiles[int(tile.montage_index)]
         assert (tile.x0, tile.y0) == (expected.x0, expected.y0)

@@ -380,6 +380,13 @@ def _stage_tile_index(tile_or_index) -> int:
         return int(tile_or_index)
 
 
+def _stage_bindings_by_key(tile_stage_keys) -> dict[object, tuple[int, ...]]:
+    bindings: dict[object, list[int]] = {}
+    for tile_number, key in dict(tile_stage_keys or {}).items():
+        bindings.setdefault(key, []).append(int(tile_number))
+    return {key: tuple(sorted(values)) for key, values in bindings.items()}
+
+
 class LifecycleStageFanIn(StageFanInState):
     """Stage fan-in whose tile↔stage bindings report through machine events.
 
@@ -393,10 +400,6 @@ class LifecycleStageFanIn(StageFanInState):
     def __init__(self, lifecycle, state: StageFanInState | None = None):
         state = state if state is not None else StageFanInState()
         super().__init__()
-        # Adopt the source containers as-is: the state is already normalized
-        # by its own __post_init__, and re-normalizing here would flatten
-        # MontageTilePriorityQueue waiting lists back into plain lists.
-        self.waiting_tiles = state.waiting_tiles
         self.active_requests = state.active_requests
         self.attached_requests = state.attached_requests
         self.values = state.values
@@ -409,10 +412,7 @@ class LifecycleStageFanIn(StageFanInState):
 
     def _report_bindings(self) -> None:
         self._lifecycle.stage_bindings_replaced(
-            {
-                key: tuple(_stage_tile_index(tile) for tile in tuple(waiting or ()))
-                for key, waiting in self.waiting_tiles.items()
-            }
+            _stage_bindings_by_key(self.tile_stage_keys)
         )
 
     def merge_plan(self, plan: dict) -> None:
@@ -603,7 +603,6 @@ class MontageRenderSession:
         self.pending_refined_level_sources = {
             int(source) for source in (self.pending_refined_level_sources or ())
         } or {int(item.tile.source_index) for item in self.pending_refined_level_tiles}
-        self.ensure_stage_waiting_priority_queues()
         self.visible_tile_numbers = frozenset(int(tile.montage_index) for tile in tuple(self.visible_tiles or ()))
         self._selected_lod_factor()
         self.update_level_presentation_scope()
@@ -939,6 +938,7 @@ class MontageRenderSession:
         self.display_tile_payloads.pop(index, None)
         self.level_generation.forget_tile(index)
         self.dirty_payloads[index] = None
+        self.stage_fan_in.tile_stage_keys.pop(index, None)
         self.active_tile_requests.discard(index)
         self.skipped_tiles.discard(index)
         self.discard_pending_tile(index)
@@ -1097,7 +1097,6 @@ class MontageRenderSession:
 
         if not previous_payloads or not self.rendered_tiles:
             return
-        lod_factor = self._selected_lod_factor()
         by_source = {payload.source_id: payload for payload in dict(previous_payloads).values()}
         # ADR 0050: a payload whose base (semantic) identity matches but whose
         # LOD level differs is still this tile's content, resident on the
@@ -1980,7 +1979,6 @@ class MontageRenderSession:
             or self.active_tile_requests
             or self.stage_fan_in.active_requests
             or self.stage_fan_in.attached_requests
-            or self.stage_fan_in.waiting_tiles
             or self.final_commit_pending
             or self.flush_pending
             or self.dirty_payloads
@@ -2095,15 +2093,6 @@ class MontageRenderSession:
         self._ensure_pending_priority_queue()
         return tile_numbers(self.pending_tiles)
 
-    def append_stage_waiting_tiles(self, key, tiles) -> int:
-        waiting = self.stage_fan_in.waiting_tiles.get(key)
-        if not isinstance(waiting, MontageTilePriorityQueue):
-            waiting = MontageTilePriorityQueue(tuple(waiting or ()), context_provider=self._tile_priority_context)
-            self.stage_fan_in.waiting_tiles[key] = waiting
-        before = len(waiting)
-        waiting.extend(tuple(tiles or ()))
-        return max(0, len(waiting) - before)
-
     def _remap_queued_tiles_to_plan(self) -> None:
         """Rebind queued tile objects to the current plan's geometry.
 
@@ -2128,27 +2117,6 @@ class MontageRenderSession:
             tuple(remap(tile) for tile in pending),
             context_provider=self._tile_priority_context,
         )
-        for key, waiting in tuple(self.stage_fan_in.waiting_tiles.items()):
-            self.stage_fan_in.waiting_tiles[key] = MontageTilePriorityQueue(
-                tuple(remap(tile) for tile in tuple(waiting)),
-                context_provider=self._tile_priority_context,
-            )
-
-    def ensure_stage_waiting_priority_queues(self) -> None:
-        """Order stage fan-in waiting tiles by viewport/focus priority.
-
-        Stage plans collect waiting tiles in plan (row-major) order; released
-        as-is, budget-capped activation batches would fill the montage from a
-        corner no matter what the pending queue's priority says.
-        """
-        if not self.stage_fan_in.waiting_tiles:
-            return
-        for key, waiting in tuple(self.stage_fan_in.waiting_tiles.items()):
-            if not isinstance(waiting, MontageTilePriorityQueue):
-                self.stage_fan_in.waiting_tiles[key] = MontageTilePriorityQueue(
-                    tuple(waiting or ()), context_provider=self._tile_priority_context
-                )
-
     def retarget_tile_priority(
         self,
         *,
@@ -2182,18 +2150,15 @@ class MontageRenderSession:
             priority_tiles=self._priority_focus_tile_numbers(),
             view_range=range_for_priority,
         )
-        # Every ordering consumer (pending queue, stage fan-in waiting queues,
-        # per-commit upsert admission, prefetch candidates) reads this one
+        # Every ordering consumer (pending queue, per-commit upsert admission,
+        # prefetch candidates) reads this one
         # context through _tile_priority_context; retargets are the only
         # writer, and queues resolve it live via their context provider.
         # Rebuilding the context ad hoc per consumer let different stages of
         # the pipeline order the same fill around different anchors.
-        del max_items
         self._priority_context = context
         self._ensure_pending_priority_queue()
-        self.priority_retargeted_tiles = len(self.pending_tiles) + sum(
-            len(waiting) for waiting in self.stage_fan_in.waiting_tiles.values()
-        )
+        self.priority_retargeted_tiles = len(self.pending_tiles)
         return int(self.priority_retargeted_tiles)
 
     def _tile_priority_context(self) -> TilePriorityContext:

@@ -382,7 +382,6 @@ class ArrayScopeWindow(
             or bool(getattr(session, "final_commit_pending", False))
             or bool(getattr(session, "flush_pending", False))
             or getattr(session.stage_fan_in, "attached_requests", None)
-            or getattr(session.stage_fan_in, "waiting_tiles", None)
         )
 
     def _scheduler_busy_state(self) -> SchedulerBusyState:

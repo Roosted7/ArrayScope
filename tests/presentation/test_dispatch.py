@@ -14,7 +14,6 @@ from arrayscope.presentation.dispatch import derive_montage_dispatch
 class _StageFanIn:
     active_requests: set = field(default_factory=set)
     attached_requests: set = field(default_factory=set)
-    waiting_tiles: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -76,11 +75,8 @@ def test_orphans_are_requeued_even_alongside_pending_tiles():
     assert plan.schedule_tiles
 
 
-def test_stage_waiting_tiles_are_never_requeued_as_orphans():
-    # Stage-waiting tiles are `loading` with no active evaluation request by
-    # design; requeueing them would bypass the attached stage.
+def test_stage_records_prevent_orphan_requeue():
     for fan_in in (
-        _StageFanIn(waiting_tiles={"k": [object()]}),
         _StageFanIn(attached_requests={"k"}),
         _StageFanIn(active_requests={"k"}),
     ):
@@ -130,16 +126,16 @@ def test_pending_lod_requests_imply_materialization_pump():
     assert plan.unsettled
 
 
-def test_stage_records_imply_stage_pumps():
-    waiting = derive_montage_dispatch(
-        _Session(stage_fan_in=_StageFanIn(waiting_tiles={"k": [object()]}))
-    )
+def test_stage_records_keep_session_unsettled_without_wait_pump():
     attached = derive_montage_dispatch(
         _Session(stage_fan_in=_StageFanIn(attached_requests={"k"}))
     )
+    active = derive_montage_dispatch(
+        _Session(stage_fan_in=_StageFanIn(active_requests={"k"}))
+    )
 
-    assert waiting.stage_waits and waiting.unsettled
-    assert attached.stage_waits and attached.unsettled
+    assert attached.unsettled and not attached.any_work
+    assert active.unsettled and not active.any_work
 
 
 def test_every_single_record_kind_marks_unsettled():
@@ -149,7 +145,6 @@ def test_every_single_record_kind_marks_unsettled():
         _Session(loading_tiles={1}),
         _Session(stage_fan_in=_StageFanIn(active_requests={"k"})),
         _Session(stage_fan_in=_StageFanIn(attached_requests={"k"})),
-        _Session(stage_fan_in=_StageFanIn(waiting_tiles={"k": []})),
         _Session(dirty_payloads={1: None}),
         _Session(pending_payload_upserts={1: object()}),
         _Session(pending_removals={1}),
@@ -165,6 +160,8 @@ def test_every_single_record_kind_marks_unsettled():
         # alone (active/loading-covered work legitimately waits on
         # completions, which re-derive).
         covered_by_inflight = bool(
-            session.active_tile_requests or session.stage_fan_in.active_requests
+            session.active_tile_requests
+            or session.stage_fan_in.active_requests
+            or session.stage_fan_in.attached_requests
         )
         assert plan.any_work or covered_by_inflight, index

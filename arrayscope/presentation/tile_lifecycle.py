@@ -130,7 +130,7 @@ class TileLifecycle:
         self._loading: set[int] = set()
         self._active_requests: set[int] = set()
         self._skipped: set[int] = set()
-        self._stage_waiting: dict[object, set[int]] = {}
+        self._stage_blocked: dict[object, set[int]] = {}
         self._identity_rejections = 0
         #: (tile, emitted_id, backend_id) -> consecutive rejection count; a
         #: pair rejected IDENTITY_RESIGN_AFTER times is resigned (see below).
@@ -318,7 +318,7 @@ class TileLifecycle:
     def stage_attached(self, tile_number: int, stage_key: object) -> None:
         """This tile's evaluation waits on a reusable stage materialization.
 
-        A stage-waiting tile is loading WITHOUT an evaluation request BY
+        A stage-blocked tile is loading WITHOUT an evaluation request BY
         DESIGN; recording the binding makes that a per-record fact the
         dispatch derivation can read instead of correlating parallel sets.
         """
@@ -326,7 +326,7 @@ class TileLifecycle:
         rec = self.record(tile_number)
         self._stage_unbound(rec)
         rec.stage_key = stage_key
-        self._stage_waiting.setdefault(stage_key, set()).add(rec.tile_number)
+        self._stage_blocked.setdefault(stage_key, set()).add(rec.tile_number)
 
     def stage_detached(self, tile_number: int) -> None:
         rec = self._records.get(int(tile_number))
@@ -334,13 +334,13 @@ class TileLifecycle:
             self._stage_unbound(rec)
 
     def stage_resolved(self, stage_key: object) -> tuple[int, ...]:
-        """A stage completed/failed/released: unbind every waiting tile.
+        """A stage completed/failed/released: unbind every stage-blocked tile.
 
         Returns the tiles that were waiting so the caller can route them to
         evaluation (value arrived) or requeue/decline (stage lost).
         """
 
-        waiting = tuple(sorted(self._stage_waiting.pop(stage_key, ())))
+        waiting = tuple(sorted(self._stage_blocked.pop(stage_key, ())))
         for index in waiting:
             rec = self._records.get(index)
             if rec is not None and rec.stage_key == stage_key:
@@ -352,7 +352,7 @@ class TileLifecycle:
 
         The fan-in state remains the queue implementation; this event keeps
         the machine's per-record binding equal to it after every fan-in
-        mutation (merge/activate/release/fail), so "waiting on stage X" is a
+        mutation (merge/activate/release/fail), so "blocked by stage X" is a
         record fact and never set correlation.  Idempotent by construction.
         """
 
@@ -360,9 +360,9 @@ class TileLifecycle:
             key: {int(tile) for tile in tuple(tiles or ())}
             for key, tiles in dict(bindings or {}).items()
         }
-        for key in tuple(self._stage_waiting):
+        for key in tuple(self._stage_blocked):
             want = desired.get(key, set())
-            waiting = self._stage_waiting.get(key, set())
+            waiting = self._stage_blocked.get(key, set())
             for index in tuple(waiting):
                 if index not in want:
                     rec = self._records.get(index)
@@ -370,19 +370,19 @@ class TileLifecycle:
                         rec.stage_key = None
                     waiting.discard(index)
             if not waiting:
-                self._stage_waiting.pop(key, None)
+                self._stage_blocked.pop(key, None)
         for key, want in desired.items():
             for index in want:
                 rec = self.record(index)
                 if rec.stage_key != key:
                     self._stage_unbound(rec)
                     rec.stage_key = key
-                    self._stage_waiting.setdefault(key, set()).add(rec.tile_number)
+                    self._stage_blocked.setdefault(key, set()).add(rec.tile_number)
 
     @property
-    def stage_waiting_tiles(self) -> frozenset[int]:
+    def stage_blocked_tiles(self) -> frozenset[int]:
         return frozenset(
-            index for waiting in self._stage_waiting.values() for index in waiting
+            index for waiting in self._stage_blocked.values() for index in waiting
         )
 
     # -- residency axis ----------------------------------------------------
@@ -689,7 +689,7 @@ class TileLifecycle:
             "loading": len(self._loading),
             "active_requests": len(self._active_requests),
             "skipped": len(self._skipped),
-            "stage_waiting": sum(len(w) for w in self._stage_waiting.values()),
+            "stage_blocked": sum(len(w) for w in self._stage_blocked.values()),
             "dangling_claims": len(self.dangling_claims()),
             "identity_rejections": int(self._identity_rejections),
         }
@@ -714,11 +714,11 @@ class TileLifecycle:
         key = rec.stage_key
         rec.stage_key = None
         if key is not None:
-            waiting = self._stage_waiting.get(key)
+            waiting = self._stage_blocked.get(key)
             if waiting is not None:
                 waiting.discard(rec.tile_number)
                 if not waiting:
-                    self._stage_waiting.pop(key, None)
+                    self._stage_blocked.pop(key, None)
 
     def _release_owned(
         self, rec: TileRecord, owner: ClaimOwner
