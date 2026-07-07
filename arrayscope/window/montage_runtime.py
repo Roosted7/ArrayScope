@@ -184,6 +184,7 @@ class MontageRuntimeMixin:
         intent = self._montage_render_intent(session)
         pipeline = self._montage_pipeline_for_session(session)
         submitted = pipeline.retarget(intent, session.lod_policy_decision.demand)
+        submitted += pipeline.effects.submit_shared_transform_floor(intent)
         if getattr(session, "pending_lod_requests", None):
             self.materialize_montage_lod(session)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:

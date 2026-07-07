@@ -72,18 +72,32 @@ def _apply_item_lod_scale(state: "TileLayerItemState", scale_x: float, scale_y: 
 def _payload_rgb_already_windowed(payload: DisplayTilePayload, fallback: bool) -> bool:
     """Per-payload windowing from payload METADATA, never from dtype sniffing.
 
-    ``quality == "preview"`` marks an immutable plane (preview floors,
-    resident LOD planes): its RGB was windowed at evaluation time and there
-    is no exact histogram to re-window it against — re-windowing corrupts
-    it. Exact payloads follow the commit-global flag, preserving the
-    complex/RGB rewindow-on-level-change contract via rgb_base/hist_source.
-    (``texture_kind`` cannot discriminate here: DisplayTilePayload infers
-    RGB8 for any uint8 RGB image, including windowable user RGB data.)
+    A plane is immutably pre-windowed ONLY when it carries nothing to
+    re-window against (``histogram_data is None``). Everything else — exact
+    complex tiles AND preview/LOD planes with their reduced histograms —
+    keeps the rewindow-on-level-change contract via rgb_base/hist_source.
+
+    Field defect that fixed this rule: resident-LOD complex planes on
+    PyQtGraph are windowed at provisional levels at evaluation time; a
+    "preview planes never rewindow" shortcut froze them at those garbage
+    levels forever (saturated tiles in exactly the refined, center-out
+    region). Rewindowing a reduced plane against its reduced histogram is
+    cheap and correct; skipping it is neither.
     """
 
     if bool(fallback):
         return True
-    return str(getattr(payload, "quality", "exact") or "exact") == "preview"
+    image = getattr(payload, "image", None)
+    is_rgb_plane = bool(
+        image is not None
+        and getattr(image, "ndim", 0) == 3
+        and int(getattr(image, "shape", (0, 0, 0))[-1]) in (3, 4)
+    )
+    # Non-RGB planes: the flag is meaningless — keep it at the commit-global
+    # value so it never perturbs resident-state identity matching.
+    if not is_rgb_plane:
+        return False
+    return getattr(payload, "histogram_data", None) is None
 
 
 @dataclass

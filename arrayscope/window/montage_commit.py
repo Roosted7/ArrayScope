@@ -190,6 +190,83 @@ class MontagePipelineEffects:
 
         return self._admit_evaluation_result(tile, result)
 
+    def submit_shared_transform_floor(self, intent) -> int:
+        """Pass 1 for non-commuting pipelines (FFT…): one batch task.
+
+        The ladder deliberately plans no per-tile pre-native rungs when
+        operations do not commute with reduction (a per-tile "preview" costs
+        a full native evaluation). Symmetry with the scalar two-pass fill
+        comes from here instead: ONE reduced-volume evaluation of the whole
+        montage stack, fanned out as floor planes for every cold tile.
+        """
+
+        del intent
+        session = self.session
+        renderer = self.renderer
+        demand = session.ingest_lod_demand()
+        if demand is None or not self._session_is_current():
+            return 0
+        plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        if not plan_tiles:
+            return 0
+        seed = plan_tiles[0]
+        if render_effects.preview_pipeline_commutes_for_display_lod(session, seed):
+            return 0  # commuting pipelines get per-tile FLOOR rungs instead
+        if not render_effects.shared_preview_is_useful(session, seed, demand):
+            return 0
+        level = int(render_effects.preview_evaluation_level(session, demand))
+        tiles = tuple(_shared_floor_candidate_tiles(session))
+        if not tiles:
+            return 0
+        marker = (level, len(tiles))
+        if getattr(session, "_shared_floor_marker", None) == marker:
+            return 0  # identical batch already in flight or admitted
+        session._shared_floor_marker = marker
+        shader_display = bool(getattr(session, "shader_display", False))
+
+        def evaluate(token=None, tiles=tiles, level=level):
+            return render_effects.evaluate_shared_preview(
+                session,
+                tiles[0],
+                tiles,
+                demand=demand,
+                level=level,
+                cancellation_token=token,
+                shader_display=shader_display,
+                evaluation_context=renderer.win._evaluation_context(ComputeLane.MONTAGE_TILE, token),
+                upload_preview_useful=True,
+            )
+
+        def done(rows):
+            if not rows or not self._session_is_current():
+                return
+            self._admit_preview_payload(int(rows[0][0]), tuple(rows))
+            self.request_presentation()
+
+        def dropped():
+            if getattr(session, "_shared_floor_marker", None) == marker:
+                session._shared_floor_marker = None
+
+        handle = renderer.win.kernel.submit(
+            TaskSpec(
+                key=("shared-floor", session.key, level),
+                fn=evaluate,
+                lane=WorkLane.DISPLAY_PREVIEW,
+                priority=Priority.INTERACTIVE,
+                scope=f"montage:{session.key!r}",
+                supersession=Supersession(("shared-floor", session.key), (level,)),
+                reusable=True,
+                pass_token=True,
+            ),
+            on_done=done,
+            on_stale=dropped,
+            on_error=lambda exc: (dropped(), handle_ui_exception("shared transform floor", exc)),
+        )
+        if handle is None:
+            dropped()
+            return 0
+        return 1
+
     def commit_pending_session(self) -> None:
         if not self._session_is_current():
             return
@@ -831,6 +908,18 @@ class MontagePipelineEffects:
         if callable(predicate):
             return bool(predicate(self.session))
         return True
+
+
+def _shared_floor_candidate_tiles(session):
+    """Cold tiles a shared floor pass should cover (no payload, not rendered)."""
+
+    for candidate in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
+        tile_number = int(candidate.montage_index)
+        if tile_number in getattr(session, "rendered_tiles", {}):
+            continue
+        if getattr(session, "display_tile_payloads", {}).get(tile_number) is not None:
+            continue
+        yield candidate
 
 
 def build_stage_fan_in_plan(renderer, document, missing_tiles) -> dict[str, object]:

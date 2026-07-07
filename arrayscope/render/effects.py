@@ -896,12 +896,15 @@ def _display_axis_region_for_preview(view_state, axis: int, size: int) -> AxisRe
 
 
 def _shared_transform_preview_enabled() -> bool:
-    return str(os.environ.get("ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    """Default ON (decision 2026-07): the shared floor is pass 1 for
+    non-commuting pipelines — ONE reduced-volume evaluation fanned out to
+    every tile, restoring the two-pass fill FFT users expect at ~1/N of the
+    per-tile-native cost that was removed from the ladder. Env var is a
+    temporary opt-out for A/B only; delete the fork in R3 with the numbers.
+    """
+
+    value = str(os.environ.get("ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW", "")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 def _shared_preview_axis_override(session, tiles):

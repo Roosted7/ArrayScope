@@ -1506,11 +1506,16 @@ def test_pyqtgraph_rgb8_preview_tile_stays_windowed_after_zoom_without_exact_pay
 
         state = view._montage_tile_layer.states[0]
         timing = view.lastImageUploadTiming()
-        assert timing.tile_layer_rgb_window_tiles == 0
+        # Contract (field defect 2026-07): a preview/LOD plane that carries
+        # its reduced histogram MUST rewindow on level changes — freezing it
+        # at evaluation-time (provisional) levels leaves resident-LOD tiles
+        # permanently mis-windowed. Cheap: the plane is reduced-size.
+        assert timing.tile_layer_rgb_window_tiles == 1
+        assert timing.tile_layer_image_replacements == 0
         assert tuple(float(value) for value in state.levels) == (2.0, 6.0)
         assert state.lod_scale == (4.0, 4.0)
         assert state.item.image.shape == (2, 2, 3)
-        assert np.array_equal(state.item.image, before)
+        assert not np.array_equal(state.item.image, before)
     finally:
         view.close()
 
