@@ -407,7 +407,7 @@ def test_worker_ingest_reduction_presents_demanded_level_first():
 
     # GUI side: the first presentation build selects the reduced level.  No
     # native payload is ever emitted for the tile and nothing is re-requested.
-    session.mark_loaded(rendered)
+    session.mark_materialized(rendered)
     _state, delta = session.build_tile_presentation({})
     payload = delta.upserts[0]
     assert payload.lod.level == 2
@@ -446,7 +446,7 @@ def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
 
     # No special cases: presentation never over-reduces with the stale level;
     # it falls back and the ordinary streaming path materializes level 1.
-    session.mark_loaded(rendered)
+    session.mark_materialized(rendered)
     _state, delta = session.build_tile_presentation({})
     assert session.lod_policy_decision.demand.desired_level == 1
     assert delta.upserts[0].lod.level == 0
@@ -2007,13 +2007,11 @@ def test_retarget_index_window_demotes_misses_without_blanking():
     assert not session.lifecycle.evaluating_tiles
 
 
-def test_retarget_index_window_drains_stale_completions():
-    """In-flight completions for the old window are returned, not applied."""
+def test_retarget_index_window_clears_active_work_without_completion_queue():
+    """In-flight completions for the old window are rejected by session id."""
 
     session = _session(count=2)
     session.tile_source_ids = {0: ("src", 0), 1: ("src", 1)}
-    marker = (object(), object())
-    session.pending_completed_tiles.append(marker)
     session.active_tile_requests.update({0, 1})
     plan = _shifted_plan(count=2, offset=3)
 
@@ -2024,6 +2022,5 @@ def test_retarget_index_window_drains_stale_completions():
         cached_tiles={},
     )
 
-    assert stats["stale_completions"] == (marker,)
-    assert not session.pending_completed_tiles
+    assert stats["misses"] == 2
     assert not session.active_tile_requests

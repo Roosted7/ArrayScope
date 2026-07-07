@@ -253,7 +253,6 @@ def test_pyqtgraph_auto_levels_wait_for_complete_semantic_source():
         pending_tiles=[],
         loading_tiles=set(),
         active_tile_requests=set(),
-        pending_completed_tiles=deque(),
         pending_level_tiles=deque([object()]),
         level_scan_remaining_tiles=0,
     )

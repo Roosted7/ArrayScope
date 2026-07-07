@@ -477,7 +477,6 @@ class MontageRenderSession:
     level_scan_remaining_tiles: int = 0
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
     pending_refined_level_sources: set[int] = field(default_factory=set)
-    pending_completed_tiles: deque[tuple[MontageTile, object]] = field(default_factory=deque)
     tile_compute_cache_hits: int = 0
     tile_compute_stage_backed: int = 0
     tile_compute_direct: int = 0
@@ -604,7 +603,6 @@ class MontageRenderSession:
         self.pending_refined_level_sources = {
             int(source) for source in (self.pending_refined_level_sources or ())
         } or {int(item.tile.source_index) for item in self.pending_refined_level_tiles}
-        self.pending_completed_tiles = deque(self.pending_completed_tiles)
         self.ensure_stage_waiting_priority_queues()
         self.visible_tile_numbers = frozenset(int(tile.montage_index) for tile in tuple(self.visible_tiles or ()))
         self._selected_lod_factor()
@@ -768,8 +766,7 @@ class MontageRenderSession:
 
         The caller has already verified eligibility and released undrained
         pyramid claims; stage planning state is reset by the caller
-        (deferred-planning path).  Returns remap statistics plus the drained
-        ``stale_completions`` for the caller to store.
+        (deferred-planning path). Returns remap statistics.
         """
 
         old_source_ids = dict(self.tile_source_ids)
@@ -787,8 +784,6 @@ class MontageRenderSession:
         # via the session_id gate, and the deferred-planning pass reschedules
         # everything still missing.
         self.active_tile_requests.clear()
-        stale_completions = tuple(self.pending_completed_tiles)
-        self.pending_completed_tiles.clear()
         self.pending_level_tiles.clear()
         self.pending_level_sources.clear()
         self.pending_refined_level_tiles.clear()
@@ -842,7 +837,6 @@ class MontageRenderSession:
             "hits": int(hits),
             "misses": int(misses),
             "unchanged": int(unchanged),
-            "stale_completions": stale_completions,
         }
 
     def update_level_presentation_scope(self) -> None:
@@ -934,16 +928,6 @@ class MontageRenderSession:
             coverage_margin_tiles=margin_tiles,
         )
         return additions
-
-    def mark_loaded(self, rendered: RenderedTile) -> None:
-        """Compatibility alias for the materialization stage.
-
-        A tile is not user-visible merely because CPU/GPU source data has
-        arrived.  It becomes loaded only once the presentation backend has
-        accepted it through ``mark_presented``.
-        """
-
-        self.mark_materialized(rendered)
 
     def mark_materialized(self, rendered: RenderedTile) -> None:
         index = int(rendered.tile.montage_index)
@@ -1564,7 +1548,7 @@ class MontageRenderSession:
         # without a pending upsert (floor included), no build can keep that
         # promise — dropping the entry lets the commit loop settle instead
         # of rescheduling forever (100% single-core spin).  A later rendered
-        # result re-dirties the tile through mark_loaded/mark_materialized.
+        # result re-dirties the tile through mark_materialized.
         for tile_number in tuple(self.dirty_payloads):
             if (
                 int(tile_number) not in self.rendered_tiles
@@ -1902,10 +1886,6 @@ class MontageRenderSession:
             set(int(t) for t in self.loading_tiles)
             - set(int(t) for t in self.active_tile_requests)
             - set(int(t) for t in self.rendered_tiles)
-            - {
-                int(getattr(entry[0] if isinstance(entry, tuple) else entry, "montage_index", -1))
-                for entry in tuple(self.pending_completed_tiles)
-            }
             - {int(t.montage_index) for t in self.pending_tiles}
         )
         if not orphaned:
@@ -1997,7 +1977,6 @@ class MontageRenderSession:
         return not (
             self.pending_tiles
             or self.loading_tiles
-            or self.pending_completed_tiles
             or self.active_tile_requests
             or self.stage_fan_in.active_requests
             or self.stage_fan_in.attached_requests

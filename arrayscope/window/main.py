@@ -374,7 +374,6 @@ class ArrayScopeWindow(
             getattr(session, "pending_tiles", None)
             or getattr(session, "loading_tiles", None)
             or getattr(session, "active_tile_requests", None)
-            or getattr(session, "pending_completed_tiles", None)
             or getattr(session, "pending_level_tiles", None)
             or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
             or getattr(session, "pending_payload_upserts", None)
@@ -397,8 +396,7 @@ class ArrayScopeWindow(
                 or session.stage_fan_in.attached_requests
             )
             backlog = (
-                len(getattr(session, "pending_completed_tiles", ()) or ())
-                + len(getattr(session, "pending_payload_upserts", ()) or ())
+                len(getattr(session, "pending_payload_upserts", ()) or ())
                 + len(getattr(session, "pending_removals", ()) or ())
             )
         return SchedulerBusyState(

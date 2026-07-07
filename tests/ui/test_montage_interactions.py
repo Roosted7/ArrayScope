@@ -749,7 +749,7 @@ def test_montage_finished_tile_commits_payload_before_all_tiles_finish(qtbot, mo
         win.close()
 
 
-def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
+def test_montage_completed_tiles_admit_through_direct_fan_in(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -767,16 +767,11 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
         monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", capture_start_latest)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"))
         win.update_image_view()
-        win._montage_tile_result_batch_size = 4
         tile0 = _tile_for_callback(win, calls[0])
         tile1 = _tile_for_callback(win, calls[1])
         calls[0]["on_done"](_tile_result(tile0, 7))
         calls[1]["on_done"](_tile_result(tile1, 9))
 
-        # Completed tiles are queued, not applied inline in the done callback.
-        assert win._montage_session.pending_completed_tiles
-        assert not _committed_tile_has_value(win, tile0, 7)
-        assert not _committed_tile_has_value(win, tile1, 9)
         qtbot.waitUntil(
             lambda: (
                 _committed_tile_has_value(win, tile0, 7)
@@ -784,10 +779,7 @@ def test_montage_completed_tiles_are_batched_before_commit(qtbot, monkeypatch):
             ),
             timeout=1000,
         )
-
-        # Both queued results were drained by one batched flush before the
-        # presentation commit rather than one commit per tile result.
-        assert win.renderer._last_montage_tile_result_flush_count == 2
+        assert not hasattr(win.renderer, "_montage_tile_result_timer")
     finally:
         win.close()
 
@@ -820,6 +812,8 @@ def test_montage_progressive_tile_commit_preserves_current_levels(qtbot, monkeyp
 
 
 def test_montage_loading_presentation_preserves_levels_until_first_real_tile(qtbot, monkeypatch):
+    from arrayscope.window.montage_commit import MontagePipelineEffects
+
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -861,7 +855,7 @@ def test_montage_loading_presentation_preserves_levels_until_first_real_tile(qtb
         # whichever tile has not been delivered yet.
         used = {int(_tile_for_callback(win, call).montage_index) for call in calls[:2]}
         tile2 = next(tile for tile in win._montage_session.plan.tiles if int(tile.montage_index) not in used)
-        win.renderer._apply_montage_tile_result(win._montage_session, tile2, _tile_result(tile2, 300))
+        MontagePipelineEffects(win.renderer, win._montage_session).admit_tile_result(tile2, _tile_result(tile2, 300))
         win.renderer._schedule_montage_presentation_commit(win._montage_session, force=True)
         _process_events(qtbot)
 
@@ -941,6 +935,8 @@ def test_montage_auto_window_button_applies_current_semantic_bounds_immediately(
 
 
 def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatch):
+    from arrayscope.window.montage_commit import MontagePipelineEffects
+
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -955,8 +951,9 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
         win.update_image_view()
 
         session = win._montage_session
+        effects = MontagePipelineEffects(win.renderer, session)
         for index, tile in enumerate(session.plan.tiles):
-            win.renderer._apply_montage_tile_result(session, tile, _tile_result(tile, 100 * (index + 1)))
+            effects.admit_tile_result(tile, _tile_result(tile, 100 * (index + 1)))
         win.renderer._schedule_montage_presentation_commit(session, force=True)
         _process_events(qtbot)
 
@@ -1434,8 +1431,7 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_im
         qtbot.waitUntil(lambda: bool(win.img_view._montage_tile_layer.states), timeout=5000)
         qtbot.waitUntil(
             lambda: (
-                not getattr(win._montage_session, "pending_completed_tiles", ())
-                and not getattr(win._montage_session, "dirty_payloads", {})
+                not getattr(win._montage_session, "dirty_payloads", {})
                 and not getattr(win._montage_session, "pending_payload_upserts", {})
                 and not getattr(win._montage_session, "pending_removals", set())
                 and not getattr(win._montage_session, "active_tile_requests", set())
@@ -1484,6 +1480,7 @@ def test_stale_montage_tile_result_does_not_mutate_current_ui_state(qtbot, monke
         win.img_view.setEvaluationOverlay(True, "new overlay")
         current_session_id = win._montage_session.session_id
         current_frame = win._committed_display_frame
+        stale_reused_before = win.montage_tile_evaluation_controller.diagnostics().stale_reused
         old_callback(_tile_result(old_tile, 99))
 
         assert win._montage_session.session_id == current_session_id
@@ -1496,7 +1493,7 @@ def test_stale_montage_tile_result_does_not_mutate_current_ui_state(qtbot, monke
             colormap_lut=None,
             shader_display=False,
         ) is not None
-        assert win.montage_tile_evaluation_controller.diagnostics().stale_reused == 1
+        assert win.montage_tile_evaluation_controller.diagnostics().stale_reused == stale_reused_before + 1
     finally:
         win.close()
 

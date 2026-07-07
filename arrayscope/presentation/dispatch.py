@@ -22,7 +22,6 @@ class MontageDispatchPlan:
     requeue_orphans: bool = False
     deferred_planning: bool = False
     schedule_tiles: bool = False
-    flush_results: bool = False
     lod_materializations: bool = False
     stage_waits: bool = False
     level_evidence: bool = False
@@ -37,7 +36,6 @@ class MontageDispatchPlan:
             self.requeue_orphans
             or self.deferred_planning
             or self.schedule_tiles
-            or self.flush_results
             or self.lod_materializations
             or self.stage_waits
             or self.level_evidence
@@ -55,7 +53,7 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
     - Loading tiles with no work attached anywhere are unservable records;
       requeueing them IS the derivation (a record implies work), not a
       repair.  Deferred-planning sessions intentionally hold unattached
-      tiles, and in-flight evaluation/stage/completed work may legitimately
+      tiles, and in-flight evaluation/stage work may legitimately
       cover loading entries, so the orphan scan applies only when nothing
       is in flight.
     - ``force_commit`` means evaluation has fully drained and presentation
@@ -69,7 +67,6 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
     pending = bool(getattr(session, "pending_tiles", None))
     active = bool(getattr(session, "active_tile_requests", None))
     loading = bool(getattr(session, "loading_tiles", None))
-    completed = bool(getattr(session, "pending_completed_tiles", None))
     stage_active = bool(getattr(stage_fan_in, "active_requests", None))
     stage_attached = bool(getattr(stage_fan_in, "attached_requests", None))
     stage_waiting = bool(getattr(stage_fan_in, "waiting_tiles", None))
@@ -103,18 +100,16 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
         loading
         and not deferred
         and not active
-        and not completed
         and not stage_active
         and not stage_attached
         and not stage_waiting
     )
-    evaluation_drained = not (pending or active or completed or stage_active or stage_waiting)
+    evaluation_drained = not (pending or active or stage_active or stage_waiting)
     commit = bool(dirty or upserts or removals or flushish or preview_refinements)
     unsettled = bool(
         pending
         or active
         or loading
-        or completed
         or stage_active
         or stage_attached
         or stage_waiting
@@ -127,7 +122,6 @@ def derive_montage_dispatch(session) -> MontageDispatchPlan:
         requeue_orphans=requeue_orphans,
         deferred_planning=deferred,
         schedule_tiles=bool(pending or requeue_orphans),
-        flush_results=completed,
         lod_materializations=lod_pending,
         stage_waits=bool(stage_waiting or stage_attached),
         level_evidence=level_evidence,

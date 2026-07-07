@@ -22,7 +22,6 @@ class _Session:
     pending_tiles: list = field(default_factory=list)
     active_tile_requests: set = field(default_factory=set)
     loading_tiles: set = field(default_factory=set)
-    pending_completed_tiles: list = field(default_factory=list)
     stage_fan_in: _StageFanIn = field(default_factory=_StageFanIn)
     dirty_payloads: dict = field(default_factory=dict)
     dirty_tiles: list = field(default_factory=list)
@@ -64,15 +63,6 @@ def test_loading_covered_by_active_work_is_not_orphaned():
     )
 
     assert not plan.requeue_orphans
-
-
-def test_loading_covered_by_completed_fan_in_is_not_orphaned():
-    plan = derive_montage_dispatch(
-        _Session(loading_tiles={3}, pending_completed_tiles=[object()])
-    )
-
-    assert not plan.requeue_orphans
-    assert plan.flush_results
 
 
 def test_orphans_are_requeued_even_alongside_pending_tiles():
@@ -157,7 +147,6 @@ def test_every_single_record_kind_marks_unsettled():
         _Session(pending_tiles=[object()]),
         _Session(active_tile_requests={1}),
         _Session(loading_tiles={1}),
-        _Session(pending_completed_tiles=[object()]),
         _Session(stage_fan_in=_StageFanIn(active_requests={"k"})),
         _Session(stage_fan_in=_StageFanIn(attached_requests={"k"})),
         _Session(stage_fan_in=_StageFanIn(waiting_tiles={"k": []})),

@@ -90,7 +90,6 @@ class MontageRuntimeDiagnostics:
     loaded_tiles: int = 0
     loading_tiles: int = 0
     pending_tiles: int = 0
-    pending_completed_tiles: int = 0
     pending_payload_upserts: int = 0
     pending_removals: int = 0
     pending_level_tiles: int = 0
@@ -664,7 +663,6 @@ def runtime_has_live_work(snapshot: WindowRuntimeDiagnostics) -> bool:
     montage = snapshot.montage
     return bool(
         int(getattr(montage, "pending_tiles", 0) or 0)
-        or int(getattr(montage, "pending_completed_tiles", 0) or 0)
         or int(getattr(montage, "pending_payload_upserts", 0) or 0)
         or int(getattr(montage, "pending_removals", 0) or 0)
         or int(getattr(montage, "loading_tiles", 0) or 0)
@@ -887,7 +885,6 @@ _MONTAGE_COVERED = frozenset(
         "lifecycle_identity_rejections",
         "dirty_payload_tiles",
         "backend_stale_identities",
-        "pending_completed_tiles",
         "pending_payload_upserts",
         "pending_removals",
         "level_scan_remaining_tiles",
@@ -1075,7 +1072,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         *warning_lines,
         (
             "Queues: "
-            f"completed={montage.pending_completed_tiles} upserts={montage.pending_payload_upserts} "
+            f"upserts={montage.pending_payload_upserts} "
             f"removals={montage.pending_removals} level_scan={montage.level_scan_remaining_tiles} "
             f"flush={_bool_text(montage.flush_pending)} final={_bool_text(montage.final_commit_pending)}"
         ),

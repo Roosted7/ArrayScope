@@ -926,15 +926,6 @@ class FrameRenderMixin:
             },
             visible_tiles=tuple(display_tiles),
         )
-        for tile, result in stats["stale_completions"]:
-            self._store_reusable_montage_tile_result(
-                tile,
-                result,
-                document=document,
-                montage_axis=axis,
-                colormap_lut=colormap_lut,
-                shader_display=shader_display,
-            )
         session.force_auto = bool(force_auto)
         session.user_levels_override = user_levels
         session.attach_stage_fan_in(StageFanInState())
@@ -1212,7 +1203,7 @@ class FrameRenderMixin:
             self._montage_viewport_continue_immediately = True
         session.tile_compute_cache_hits += len(cached_tiles)
         for rendered in cached_tiles:
-            session.mark_loaded(rendered)
+            session.mark_materialized(rendered)
         self._queue_montage_cached_level_stats(session, cached_tiles, seed_if_empty=False)
 
         self._montage_cached_tiles_last_session = len(cached_tiles)
@@ -2207,7 +2198,7 @@ class FrameRenderMixin:
             return False
         tile = session.next_tile()
         if tile is None:
-            if session.active_tile_requests or session.loading_tiles or session.pending_completed_tiles:
+            if session.active_tile_requests or session.loading_tiles:
                 return False
             if session.stage_fan_in.active_requests or session.stage_fan_in.waiting_tiles:
                 return False
@@ -2303,18 +2294,74 @@ class FrameRenderMixin:
                     self._montage_lod_stage_hits_serving_derivations = (
                         int(getattr(self, "_montage_lod_stage_hits_serving_derivations", 0) or 0) + 1
                     )
-            self._on_montage_tile_done(
-                session_id,
-                tile,
-                result,
-                document=document,
-                montage_axis=montage_axis,
-                colormap_lut=colormap_lut,
-                shader_display=shader_display,
+            current = getattr(self, "_montage_session", None)
+            if current is None or not self._is_current_montage_session(session_id, session.key):
+                self._store_reusable_montage_tile_result(
+                    tile,
+                    result,
+                    document=document,
+                    montage_axis=montage_axis,
+                    colormap_lut=colormap_lut,
+                    shader_display=shader_display,
+                )
+                return
+            if not self._is_current_render_generation(current.render_generation):
+                self._store_reusable_montage_tile_result(
+                    tile,
+                    result,
+                    document=document,
+                    montage_axis=montage_axis,
+                    colormap_lut=colormap_lut,
+                    shader_display=shader_display,
+                )
+                return
+            fan_in_start = perf_counter()
+            first_vispy_display = bool(
+                montage_commit.persistent_tile_residency_backend(self, current)
+                and not getattr(current, "display_committed", False)
             )
+            byte_count = MontagePipelineEffects(self, current).admit_tile_result(tile, result)
+            elapsed_ms = (perf_counter() - fan_in_start) * 1000.0
+            self._last_montage_tile_result_fan_in_ms = elapsed_ms
+            self._last_montage_tile_result_fan_in_count = 1
+            _complete_inline_work(
+                self,
+                WorkItem(
+                    key=("montage_tile_result_fan_in", current.key, int(current.session_id), (int(tile.montage_index),)),
+                    lane=WorkLane.GUI_FAN_IN,
+                    frame_target=current.frame_plan.target,
+                    supersession_key=("montage-fan-in", current.key),
+                    supersession_value=int(current.session_id),
+                    estimated_cpu_ms=float(elapsed_ms),
+                    estimated_bytes=int(byte_count),
+                ),
+            )
+            first_visible_committed = False
+            if first_vispy_display and (getattr(current, "dirty_tiles", None) or getattr(current, "dirty_payloads", None)):
+                self._commit_montage_session_presentation(current, force=False)
+                first_visible_committed = bool(getattr(current, "display_committed", False))
+            self._activate_cached_waiting_stages(current, release_missing=True)
+            self._schedule_montage_cached_level_stats(current)
+            if current.pending_tiles:
+                self._schedule_montage_tiles(current)
+            force = not current.pending_tiles and not current.active_tile_requests
+            if first_visible_committed:
+                pass
+            elif force:
+                self._schedule_montage_presentation_commit(current, force=True)
+            else:
+                self._schedule_montage_ready_display_commit(current)
+            self._dispatch_montage_work(current)
 
         def error(exc):
-            self._on_montage_tile_error(session_id, tile, exc)
+            current = getattr(self, "_montage_session", None)
+            if current is None or not self._is_current_montage_session(session_id, session.key):
+                return
+            if not self._is_current_render_generation(current.render_generation):
+                return
+            current.mark_skipped(tile)
+            show_status_message(self.win, f"Montage tile update failed: {exc}", timeout=4000)
+            self._dispatch_montage_work(current, force=True)
 
         preview_started = self._schedule_montage_preview_tile(
             session,
@@ -2854,31 +2901,6 @@ class FrameRenderMixin:
         else:
             self.win._update_operation_dock()
 
-    def _on_montage_tile_done(self, session_id, tile, result, *, document, montage_axis: int | None, colormap_lut, shader_display: bool) -> None:
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session_id, session.key):
-            self._store_reusable_montage_tile_result(
-                tile,
-                result,
-                document=document,
-                montage_axis=montage_axis,
-                colormap_lut=colormap_lut,
-                shader_display=shader_display,
-            )
-            return
-        if not self._is_current_render_generation(session.render_generation):
-            self._store_reusable_montage_tile_result(
-                tile,
-                result,
-                document=document,
-                montage_axis=montage_axis,
-                colormap_lut=colormap_lut,
-                shader_display=shader_display,
-            )
-            return
-        session.pending_completed_tiles.append((tile, result))
-        self._schedule_montage_tile_result_flush(session)
-
     def _store_reusable_montage_tile_result(self, tile, result, *, document, montage_axis: int | None, colormap_lut, shader_display: bool):
         if _document_key(document) != _document_key(self.win.document):
             return None
@@ -2894,160 +2916,6 @@ class FrameRenderMixin:
         if stored is not None and controller is not None and hasattr(controller, "note_stale_reused"):
             controller.note_stale_reused()
         return stored
-
-    def _schedule_montage_tile_result_flush(self, session) -> None:
-        if not self._montage_session_is_current(session):
-            return
-        self._montage_tile_result_key = (int(session.session_id), session.key)
-        self._montage_tile_result_token = _montage_work_token(session, "tile_result")
-        if montage_commit.persistent_tile_layer_fast_drain_enabled(self, session):
-            if not bool(getattr(self, "_montage_tile_result_flush_queued", False)):
-                self._montage_tile_result_flush_queued = True
-                try:
-                    queued = Qt.QtCore.QMetaObject.invokeMethod(
-                        self,
-                        "_flush_montage_tile_results",
-                        Qt.QtCore.Qt.ConnectionType.QueuedConnection,
-                    )
-                except Exception:
-                    queued = False
-                if queued:
-                    return
-                self._montage_tile_result_flush_queued = False
-        timer = getattr(self, "_montage_tile_result_timer", None)
-        if timer is None:
-            # Bounded continuation guarded by `_montage_tile_result_token`.
-            # Ready worker bursts are fan-in work, not a license to mutate the
-            # whole scene in one GUI callback.
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._flush_montage_tile_results)
-            self._montage_tile_result_timer = timer
-        if not timer.isActive():
-            timer.start(0)
-
-    @Qt.QtCore.Slot()
-    def _flush_montage_tile_results(self) -> None:
-        self._montage_tile_result_flush_queued = False
-        key = getattr(self, "_montage_tile_result_key", None)
-        session = getattr(self, "_montage_session", None)
-        if session is None or key is None or not self._is_current_montage_session(key[0], key[1]):
-            return
-        token = getattr(self, "_montage_tile_result_token", None)
-        if not _montage_work_token_is_current(session, token, "tile_result"):
-            return
-        interactive = _interactive_active(self)
-        budget = self._montage_callback_budget(
-            "montage_tile_result",
-            interactive=interactive,
-            work_class="ready_tile_fan_in",
-            item_cap=_montage_tile_result_batch_limit(self, interactive=interactive),
-        )
-        flush_start = perf_counter()
-        processed = 0
-        processed_tiles = []
-        first_vispy_display = bool(
-            montage_commit.persistent_tile_residency_backend(self, session)
-            and not getattr(session, "display_committed", False)
-        )
-        expected_indices = self._montage_level_expected_indices(session)
-        while session.pending_completed_tiles:
-            tile, result = session.pending_completed_tiles.popleft()
-            byte_count = self._apply_montage_tile_result(session, tile, result, expected_indices=expected_indices)
-            processed_tiles.append(tile)
-            processed += 1
-            budget.record_item(byte_count=byte_count)
-            if budget.should_yield():
-                break
-        if processed:
-            elapsed_ms = (perf_counter() - flush_start) * 1000.0
-            self._last_montage_tile_result_flush_ms = elapsed_ms
-            self._last_montage_tile_result_flush_count = int(processed)
-            _complete_inline_work(
-                self,
-                WorkItem(
-                    key=("montage_tile_result_fan_in", session.key, int(session.session_id), tuple(int(tile.montage_index) for tile in processed_tiles)),
-                    lane=WorkLane.GUI_FAN_IN,
-                    frame_target=session.frame_plan.target,
-                    supersession_key=("montage-fan-in", session.key),
-                    supersession_value=int(session.session_id),
-                    estimated_cpu_ms=float(elapsed_ms),
-                    estimated_bytes=int(budget.processed_bytes),
-                ),
-            )
-            self._record_gui_budget(budget)
-            first_visible_committed = False
-            if first_vispy_display and (getattr(session, "dirty_tiles", None) or getattr(session, "dirty_payloads", None)):
-                self._commit_montage_session_presentation(session, force=False)
-                first_visible_committed = bool(getattr(session, "display_committed", False))
-            self._activate_cached_waiting_stages(session, release_missing=True)
-            self._schedule_montage_cached_level_stats(session)
-            if session.pending_tiles:
-                self._schedule_montage_tiles(session)
-            force = not session.pending_tiles and not session.active_tile_requests and not session.pending_completed_tiles
-            if first_visible_committed:
-                pass
-            elif force:
-                self._schedule_montage_presentation_commit(session, force=True)
-            else:
-                self._schedule_montage_ready_display_commit(session)
-        if session.pending_completed_tiles:
-            self._schedule_montage_tile_result_flush(session)
-        # Machine-derived dispatch (ADR 0051 P2): re-derive everything the
-        # records imply after this fan-in edge — nothing above may be the
-        # only holder of a pending record.
-        self._dispatch_montage_work(session)
-
-    def _apply_montage_tile_result(self, session, tile, result, *, expected_indices=None) -> int:
-        if not self._montage_session_is_current(session):
-            return 0
-        if not self._is_current_render_generation(session.render_generation):
-            return 0
-        # The semantic display cache is the reuse point for every later
-        # demand on this tile (session rebuilds, viewport re-entry, display
-        # LOD changes).  The fast-drain path used to skip this store, so
-        # tiles evaluated during a settled VisPy drain were reachable only as
-        # backend-acknowledged payloads; once those were superseded or
-        # evicted, a display-LOD-driven request re-ran the full pipeline
-        # (observed as occasional per-tile FFT re-runs).  Level stats are
-        # attached worker-side, so the store is a cache put, cheap enough for
-        # every drain mode (ADR 0050).
-        rendered = self.win.operation_evaluator.store_montage_tile_result(
-            tile,
-            montage_axis=session.montage_axis,
-            colormap_lut=session.colormap_lut,
-            result=result,
-            shader_display=bool(getattr(session, "shader_display", False)),
-        )
-        compute_path = str(getattr(result, "compute_path", "direct") or "direct")
-        eval_ms = max(0.0, float(getattr(result, "eval_ms", 0.0) or 0.0))
-        if compute_path == "stage_backed":
-            session.tile_compute_stage_backed += 1
-            session.tile_compute_stage_backed_ms += eval_ms
-            session.tile_compute_stage_backed_max_ms = max(float(session.tile_compute_stage_backed_max_ms), eval_ms)
-        else:
-            session.tile_compute_direct += 1
-            session.tile_compute_direct_ms += eval_ms
-            session.tile_compute_direct_max_ms = max(float(session.tile_compute_direct_max_ms), eval_ms)
-        self._update_montage_level_bounds_from_rendered(
-            session.level_key,
-            rendered,
-            expected_indices=self._montage_level_expected_indices(session) if expected_indices is None else expected_indices,
-        )
-        self._queue_montage_level_refinement(session, rendered)
-        session.mark_loaded(rendered)
-        session.dirty_tiles.append(int(tile.montage_index))
-        return montage_commit.rendered_tile_nbytes(rendered)
-
-    def _on_montage_tile_error(self, session_id, tile, exc) -> None:
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session_id, session.key):
-            return
-        if not self._is_current_render_generation(session.render_generation):
-            return
-        session.mark_skipped(tile)
-        show_status_message(self.win, f"Montage tile update failed: {exc}", timeout=4000)
-        self._dispatch_montage_work(session, force=True)
 
     def _montage_lod_policy_mode(self) -> str:
         return montage_lod.policy_mode_for_renderer(self)
@@ -3067,7 +2935,7 @@ class FrameRenderMixin:
         """The single montage pump: schedule everything the records imply.
 
         Every montage event edge (tile done/error, stage done/stale/error,
-        LOD level ready, result flush, admission-decline wakeup, watchdog
+        LOD level ready, admission-decline wakeup, watchdog
         assertion) ends here.  `derive_montage_dispatch` is the one decision
         site; the schedulers below are idempotent and coalesced, so redundant
         dispatch is cheap.  A state mutation that does NOT end in dispatch is
@@ -3091,8 +2959,6 @@ class FrameRenderMixin:
             self._schedule_deferred_montage_planning(session)
         if plan.schedule_tiles:
             self._schedule_montage_tiles(session)
-        if plan.flush_results:
-            self._schedule_montage_tile_result_flush(session)
         if plan.stage_waits:
             self._schedule_montage_attached_stage_waits(session)
         if plan.lod_materializations:
@@ -3241,7 +3107,6 @@ class FrameRenderMixin:
             force
             and not session.pending_tiles
             and not session.active_tile_requests
-            and not session.pending_completed_tiles
             and (
                 getattr(session, "dirty_payloads", None)
                 or getattr(session, "pending_payload_upserts", None)
@@ -4530,7 +4395,6 @@ def _tile_layer_auto_levels_wait_for_complete_source(window, session, decision_f
         getattr(session, "pending_tiles", None)
         or getattr(session, "loading_tiles", None)
         or getattr(session, "active_tile_requests", None)
-        or getattr(session, "pending_completed_tiles", None)
         or getattr(session, "pending_level_tiles", None)
         or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
     )

@@ -134,9 +134,12 @@ def test_canvas_preserve_controller_owns_strong_preserve_path():
     assert "commit_nudge" in preserve_text
 
 
-def test_frame_renderer_commits_frames_through_region_payloads():
+def test_montage_commits_flow_through_pipeline_effects_and_shared_surface():
     frame_text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
-    assert "_commit_montage_session_tile_layer(" in frame_text
+    commit_text = (ROOT / "arrayscope" / "window" / "montage_commit.py").read_text()
+    assert "_commit_montage_session_tile_layer(" not in frame_text
+    assert "class MontagePipelineEffects" in commit_text
+    assert ".commit_tiled_delta(" in commit_text
 
 
 def test_render_display_commits_go_through_display_committer():
@@ -576,15 +579,18 @@ def test_update_image_view_does_not_batch_missing_regions():
     raise AssertionError("update_image_view not found")
 
 
-def test_stale_montage_callbacks_do_not_clear_current_overlay():
+def test_legacy_montage_tile_callbacks_are_deleted():
     text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
-    for name in ("_on_montage_tile_done", "_on_montage_tile_error"):
-        marker = f"def {name}"
-        assert marker in text
-        segment = text.split(marker, 1)[1].split("\n    def ", 1)[0]
-        stale_prefix = segment.split("return", 1)[0]
-        assert "setEvaluationOverlay(False)" not in stale_prefix
-        assert "setImageStale(False)" not in stale_prefix
+    for name in (
+        "_on_montage_tile_done",
+        "_on_montage_tile_error",
+        "_flush_montage_tile_results",
+        "_apply_montage_tile_result",
+        "_schedule_montage_tile_result_flush",
+    ):
+        assert f"def {name}" not in text
+    session_text = (ROOT / "arrayscope" / "window" / "montage_session.py").read_text()
+    assert "def mark_loaded" not in session_text
 
 
 def test_frame_renderer_does_not_use_legacy_normal_render_decision_helper():

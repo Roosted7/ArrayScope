@@ -271,7 +271,6 @@ def _busy(window, session=None) -> bool:
         getattr(session, "pending_tiles", None)
         or getattr(session, "loading_tiles", None)
         or getattr(session, "active_tile_requests", None)
-        or getattr(session, "pending_completed_tiles", None)
         or getattr(session, "dirty_payloads", None)
         or getattr(session, "pending_removals", None)
         # Demanded-but-missing LOD levels of *visible* tiles outrank the

@@ -42,7 +42,6 @@ def test_montage_render_session_returns_pending_tiles_in_order():
     session = _session()
 
     assert isinstance(session.pending_level_tiles, deque)
-    assert isinstance(session.pending_completed_tiles, deque)
     assert [tile.source_index for tile in session.pending_tiles] == [0, 1, 2]
     assert session.next_tile().source_index == 0
     assert session.next_tile().source_index == 1
@@ -67,7 +66,7 @@ def test_montage_priority_retarget_preserves_payload_identity():
     tile = session.plan.tiles[0]
     image = np.ones((2, 2), dtype=np.float32)
     rendered = RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
-    session.mark_loaded(rendered)
+    session.mark_materialized(rendered)
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
 
     session.retarget_tile_priority(
@@ -87,7 +86,7 @@ def test_montage_render_session_materialized_tile_stays_loading_until_presented(
     tile = session.next_tile()
     rendered = RenderedTile(tile, np.ones((2, 2), dtype=np.float32), np.ones((2, 2), dtype=np.float32), 0.0, (2, 2), 16)
 
-    session.mark_loaded(rendered)
+    session.mark_materialized(rendered)
 
     assert session.is_tile_loaded(tile)
     assert int(tile.montage_index) in session.loading_tiles
@@ -115,7 +114,7 @@ def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes
     image = np.ones((2, 2), dtype=np.float32)
     histogram = image * 2.0
     first_rendered = RenderedTile(tile, image, histogram, 0.0, image.shape, image.nbytes)
-    session.mark_loaded(first_rendered)
+    session.mark_materialized(first_rendered)
 
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})
     second = session.snapshot_display_tile_payloads({0: ("tile", 0)})
@@ -129,7 +128,7 @@ def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes
     assert clean_state.payloads[0] is first[0]
     assert clean_delta.upserts == {}
     replacement = np.full((2, 2), 3.0, dtype=np.float32)
-    session.mark_loaded(RenderedTile(tile, replacement, replacement, 0.0, replacement.shape, replacement.nbytes))
+    session.mark_materialized(RenderedTile(tile, replacement, replacement, 0.0, replacement.shape, replacement.nbytes))
     third_state, third_delta = session.build_tile_presentation({0: ("tile", 0, "replacement")})
     assert third_state.payloads[0] is not first[0]
     assert third_state.payloads[0].image is replacement
@@ -142,7 +141,7 @@ def test_montage_render_session_retries_capped_payload_until_backend_acknowledge
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile", int(tile.montage_index))
 
     proposed, delta = session.build_tile_presentation(source_ids, max_upserts=1)
@@ -171,7 +170,7 @@ def test_montage_render_session_does_not_acknowledge_deferred_visible_upsert():
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile", int(tile.montage_index))
 
     proposed, delta = session.build_tile_presentation(source_ids)
@@ -199,7 +198,7 @@ def test_level_snapshot_keeps_deferred_visible_upsert_pending_until_acknowledged
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile", int(tile.montage_index))
 
     first_state, first_delta = session.build_tile_presentation(source_ids)
@@ -252,7 +251,7 @@ def test_montage_render_session_caps_active_tiles_with_upsert_admission():
     source_ids = {}
     for tile in session.plan.tiles[:3]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
     first_state, first_delta = session.build_tile_presentation(source_ids, max_upserts=1)
@@ -277,7 +276,7 @@ def test_montage_render_session_capped_upserts_preserve_ready_priority_order():
     for index in (2, 0, 1):
         tile = session.plan.tiles[index]
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
     first_state, first_delta = session.build_tile_presentation(source_ids, max_upserts=1)
@@ -299,7 +298,7 @@ def test_montage_render_session_dirty_payloads_keep_session_incomplete_until_ack
     session.pending_tiles.clear()
     session.loading_tiles.clear()
 
-    session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+    session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
 
     assert not session.is_complete()
 
@@ -372,7 +371,7 @@ def test_montage_render_session_delta_carries_near_sources_without_payloads():
     session = _session()
     tile = session.plan.tiles[0]
     image = np.ones((2, 2), dtype=np.float32)
-    session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+    session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
 
     source_ids = {index: ("tile-source", index) for index in range(4)}
     _state, delta = session.build_tile_presentation(source_ids)
@@ -423,7 +422,7 @@ def test_lod_payload_does_not_reduce_display_ready_rgb_phase_tiles():
         texture_kind=TexturePlaneKind.RGB8,
         semantic_data=rgb,
     )
-    session.mark_loaded(rendered)
+    session.mark_materialized(rendered)
 
     payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
 
@@ -478,7 +477,7 @@ def test_zoomed_out_scalar_payload_keeps_exact_texture_on_ui_commit_path():
         texture_kind=TexturePlaneKind.SCALAR_R32F,
         semantic_data=image,
     )
-    session.mark_loaded(rendered)
+    session.mark_materialized(rendered)
 
     payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
     decision = session.lod_policy_decision
@@ -511,7 +510,7 @@ def test_zoomed_out_payload_reuses_clean_wrapper_without_cpu_lod_work():
         texture_kind=TexturePlaneKind.SCALAR_R32F,
         semantic_data=image,
     )
-    session.mark_loaded(rendered)
+    session.mark_materialized(rendered)
 
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
     second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
@@ -532,12 +531,12 @@ def test_exact_payload_seeds_from_previous_session_without_materialization():
         texture_kind=TexturePlaneKind.SCALAR_R32F,
         semantic_data=image,
     )
-    first_session.mark_loaded(rendered)
+    first_session.mark_materialized(rendered)
     source_ids = {0: ("tile", 0)}
     first = first_session.snapshot_display_tile_payloads(source_ids)[0]
 
     second_session = _zoomed_out_session()
-    second_session.mark_loaded(rendered)
+    second_session.mark_materialized(rendered)
     second_session.seed_display_tile_payloads({0: first}, source_ids)
     second = second_session.snapshot_display_tile_payloads(source_ids)[0]
 
@@ -564,7 +563,7 @@ def test_zoomed_out_complex_payload_keeps_exact_semantics_and_texture():
             display_mode=ShaderDisplayMode.PHASE_COLOR,
         ),
     )
-    session.mark_loaded(rendered)
+    session.mark_materialized(rendered)
 
     payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
     decision = session.lod_policy_decision
@@ -600,7 +599,7 @@ def test_shader_mapping_change_reuses_texture_content_identity():
         semantic_data=source,
         shader_mapping=first_mapping,
     )
-    session.mark_loaded(first_rendered)
+    session.mark_materialized(first_rendered)
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
 
     second_rendered = RenderedTile(
@@ -609,7 +608,7 @@ def test_shader_mapping_change_reuses_texture_content_identity():
         semantic_data=source,
         shader_mapping=second_mapping,
     )
-    session.mark_loaded(second_rendered)
+    session.mark_materialized(second_rendered)
     second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
 
     assert second is not first
@@ -646,7 +645,7 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
     )
     for tile in plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
 
     additions, changed = session.retarget_viewport(
         view_range=((8.0, 9.0), (0.0, 1.0)),
@@ -694,7 +693,7 @@ def test_retarget_viewport_range_change_with_same_tiles_is_presentation_change()
     source_ids = {}
     for tile in plan.tiles:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
     additions, changed = session.retarget_viewport(
@@ -739,7 +738,7 @@ def test_temporary_materialization_gap_does_not_remove_committed_payloads():
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
     first_state, first_delta = session.build_tile_presentation(source_ids)
     session.acknowledge_tile_presentation(
@@ -827,7 +826,7 @@ def test_layout_reflow_repositions_materialized_tiles_without_payload_upserts():
     source_ids = {}
     for tile in first_plan.tiles:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
     first_state, first_delta = session.build_tile_presentation(source_ids)
@@ -871,7 +870,7 @@ def test_loaded_active_set_change_without_payload_delta_is_not_geometry_change()
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
     first_state, first_delta = session.build_tile_presentation(source_ids)
@@ -903,7 +902,7 @@ def test_montage_render_session_passes_cold_deadline_without_slicing_upserts():
     source_ids = {}
     for tile in session.plan.tiles:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
     first_state, first_delta = session.build_tile_presentation(source_ids, cold_deadline_ms=3.5)
@@ -928,7 +927,7 @@ def test_montage_render_session_tile_states_keep_materialized_tiles_loading_unti
     source_ids = {}
     for tile in session.plan.tiles:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
     state, delta = session.build_tile_presentation(source_ids)
@@ -1140,7 +1139,7 @@ def test_stale_level_delta_cannot_acknowledge_newer_target():
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile", int(tile.montage_index))
 
     first_state, first_delta = session.build_tile_presentation(source_ids)
@@ -1242,7 +1241,7 @@ def test_montage_render_session_commits_ready_payloads_atomically():
     source_ids = {}
     for tile in session.plan.tiles:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
     state, delta = session.build_tile_presentation(source_ids)
@@ -1258,7 +1257,7 @@ def test_tile_presentation_state_rejects_stale_delta():
     session = _session()
     tile = session.plan.tiles[0]
     image = np.ones((2, 2), dtype=np.float32)
-    session.mark_loaded(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+    session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
     state, delta = session.build_tile_presentation({0: ("tile-source", 0)})
 
     stale = type(delta)(
@@ -1282,7 +1281,7 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
     tile = original.plan.tiles[2]
     image = np.full((2, 2), 2, dtype=np.float32)
     rendered = RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
-    original.mark_loaded(rendered)
+    original.mark_materialized(rendered)
     source_ids = {2: ("tile-source", 2)}
     state, delta = original.build_tile_presentation(source_ids)
     original.acknowledge_tile_presentation(
@@ -1345,7 +1344,7 @@ def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(mon
     tile = original.plan.tiles[2]
     image = np.full((2, 2), 2, dtype=np.float32)
     rendered = RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
-    original.mark_loaded(rendered)
+    original.mark_materialized(rendered)
     state, delta = original.build_tile_presentation({2: ("tile-source", 2)})
     original.acknowledge_tile_presentation(
         delta,
@@ -1406,7 +1405,7 @@ def test_resident_retarget_upserts_bypass_cold_priority_cap():
     original_sources = {index: ("tile-source", index) for index in range(4)}
     for index in range(4):
         image = images[index]
-        original.mark_loaded(
+        original.mark_materialized(
             RenderedTile(
                 original.plan.tiles[index],
                 image,
@@ -1451,7 +1450,7 @@ def test_resident_retarget_upserts_bypass_cold_priority_cap():
     shifted_sources = {tile: ("tile-source", tile + 3) for tile in range(4)}
     for tile_number, source_index in enumerate((3, 4, 5, 6)):
         image = images[source_index]
-        shifted.mark_loaded(
+        shifted.mark_materialized(
             RenderedTile(
                 shifted_plan.tiles[tile_number],
                 image,

@@ -86,6 +86,15 @@ class MontagePipelineEffects:
             return
         self.commit_pending_session()
 
+    def admit_tile_result(self, tile, result) -> int:
+        """Admit one exact tile result into session/lifecycle state.
+
+        Kernel bridge callbacks are already bounded; the old
+        frame_renderer-side result deque/timer was a second fan-in queue.
+        """
+
+        return self._admit_evaluation_result(tile, result)
+
     def commit_pending_session(self, *, force: bool = False) -> None:
         del force
         if not self._session_is_current():
@@ -157,7 +166,7 @@ class MontagePipelineEffects:
             expected_indices=self.renderer._montage_level_expected_indices(session),
         )
         self.renderer._queue_montage_level_refinement(session, rendered)
-        session.mark_loaded(rendered)
+        session.mark_materialized(rendered)
         session.dirty_tiles.append(int(tile.montage_index))
         return rendered_tile_nbytes(rendered)
 
@@ -787,7 +796,6 @@ def tile_layer_auto_levels_wait_for_complete_source(window, session, decision_fo
         getattr(session, "pending_tiles", None)
         or getattr(session, "loading_tiles", None)
         or getattr(session, "active_tile_requests", None)
-        or getattr(session, "pending_completed_tiles", None)
         or getattr(session, "pending_level_tiles", None)
         or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
     )

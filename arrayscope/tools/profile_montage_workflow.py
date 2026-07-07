@@ -734,7 +734,6 @@ def _wait_for_montage_complete(
         f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
         f"loading={snapshot.montage.loading_tiles} "
         f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
-        f"completed={0 if session is None else len(getattr(session, 'pending_completed_tiles', ()) or ())} "
         f"stage_waiting={0 if fan_in is None else sum(len(tiles) for tiles in fan_in.waiting_tiles.values())} "
         f"lead_warmups={0 if fan_in is None else len(fan_in.lead_warmups)} "
         f"active_presented={final_visibility_state.get('active_presented_tile_count', 0)}/"
@@ -1090,7 +1089,6 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
     has_backlog = bool(
         getattr(session, "pending_tiles", ())
         or getattr(session, "loading_tiles", ())
-        or getattr(session, "pending_completed_tiles", ())
         or getattr(session, "active_tile_requests", ())
         or session.stage_fan_in.active_requests
         or session.stage_fan_in.attached_requests

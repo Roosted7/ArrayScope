@@ -56,7 +56,6 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         loaded_tiles=0 if session is None else len(session.rendered_tiles),
         loading_tiles=0 if session is None else len(session.loading_tiles),
         pending_tiles=0 if session is None else len(session.pending_tiles),
-        pending_completed_tiles=0 if session is None else len(getattr(session, "pending_completed_tiles", ())),
         pending_payload_upserts=0 if session is None else len(getattr(session, "pending_payload_upserts", ())),
         pending_removals=0 if session is None else len(getattr(session, "pending_removals", ())),
         pending_level_tiles=0 if session is None else len(getattr(session, "pending_level_tiles", ())),
