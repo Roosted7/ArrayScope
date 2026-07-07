@@ -1,8 +1,8 @@
 # Plan 05 — Preview floor through the lifecycle machine (finish the VisPy preview WIP)
 
-**Status:** active (2026-07-06). This plan finishes the uncommitted VisPy preview-floor work by
-fixing its root architecture problem first. Read `README.md` ground rules; background is
-Plan 04 and ADR 0051.
+**Status:** landed in code (2026-07-07), validation/docs cleanup in progress. This plan finished
+the uncommitted VisPy preview-floor work by fixing its root architecture problem first. Read
+`README.md` ground rules; background is Plan 04 and ADR 0051.
 
 ## The root cause to fix
 
@@ -44,11 +44,11 @@ Preview-plane availability is residency-axis data; the machine already owns it s
    dirty payload inside `derive_montage_dispatch` (rule 6: the evidence has a consumer at
    arrival), replacing the loop in `_finish_lod_preview_floor_if_complete` that marks tiles
    dirty. `has_unrefined_preview_payloads()` should read `tile_presentation_state` only.
-5. **One preview-cache seam.** Either keep `lod_preview_pyramid` but route every admit through
-   one session method (`admit_preview_plane(key, plane, histogram)`), or fold the preview tier
-   into the main `PyramidCache` as a pinned retention class (`BoundedCache.retention_key`
-   exists for exactly this). Prefer the retention class unless measurement says otherwise;
-   three call sites currently repeat `preview_cache if … else lod_pyramid`.
+5. **One preview-cache seam.** Keep `lod_preview_pyramid` for the floor tier, but route every
+   admit through one session method (`admit_preview_plane(key, plane, histogram, metadata...)`).
+   Preview display metadata (`shader_mapping`, `texture_kind`, `level_data`) is part of that
+   seam: losing it made complex/phase-color preview floors render with the wrong colors even
+   though the reduced plane itself was correct.
 6. **Name the policy constant.** `preview_level_for_tile_shape(…, min_level=4)` buries policy
    in a call site. Hoist `PREVIEW_FLOOR_MIN_LEVEL` next to the LOD policy constants with a
    comment stating the evidence (or "unmeasured — benchmark levels 3/4/5" until it is).
@@ -90,6 +90,45 @@ Preview-plane availability is residency-axis data; the machine already owns it s
    `--screenshot-dir` + `ARRAYSCOPE_LOD_DEBUG_PASS_MARKER=final-mirror-x`; watch
    `first_preview_floor_fill_ms`, first-complete-fill, settled, heartbeat p95; screenshots must
    show the un-mirrored preview pass first, mirrored exact after.
+
+## 2026-07-07 findings
+
+- Fixed the placeholder regressions called out in step 0 before benchmarking.
+- The preview floor is now lifecycle-owned: `ClaimOwner.PREVIEW` records replace the old
+  `lod_preview_floor_*` counters, floor-first-fill is derived from lifecycle records, and
+  `derive_montage_dispatch` marks preview-exact refinement dirty.
+- Preview planes enter through one session seam and carry display metadata. This fixed the
+  observed complex FFT preview colormap bug: the plane was correct, but the floor payload had
+  lost the phase-color shader mapping and provisional level sample.
+- Preview is now queued before exact materialization for cold tiles. Exact still wins if it is
+  already resident/evaluated; preview only wins over blank/placeholder.
+- VisPy scalar/no-op montage also uses preview when preview LOD is coarser than the target LOD,
+  because the reduced first pass lowers GPU upload/commit pressure even without operations.
+  Native-scale or equal-preview-level cases skip preview.
+
+Visible Wayland evidence (battery state not controlled; do not treat as a backend A/B):
+
+- `tests/artifacts/x5-item1-preview-metadata-vispy.jsonl`: FFT preview floor fully filled at
+  ~1.33 s, final exact at ~5.42 s; screenshot
+  `tests/artifacts/x5-item1-preview-metadata-screenshots/vispy-fft_full_tiled_montage_preview_floor.png`
+  shows the corrected phase-color preview.
+- `tests/artifacts/x5-item1-refinement-rearm-vispy.jsonl`: scalar/no-op preview floor fully
+  filled at ~1.92 s and final exact at ~1.94 s (`final_exact_payload_count=272`,
+  `final_preview_payload_count=0`); FFT preview floor at ~1.17 s and final exact at ~4.64 s.
+
+Follow-up that belongs to roadmap item 2, not this plan:
+
+- Unify preview and desired-LOD compute as one reduced-input ladder: preview LOD 4 is the first
+  display rung, desired LOD is the refinement rung, and both should use the same operation-aware
+  reduced-input machinery where operations permit it. Today desired LOD and preview LOD still
+  travel partly separate paths.
+- Reuse preview-derived level samples for the first display and avoid per-tile exact level churn;
+  after the desired LOD is fully shown, sample higher-quality histogram/levels once as a
+  coordinated refinement.
+- Add a lower-priority preview/offscreen warming queue that uses retained preview pyramid planes
+  to pre-upload nearby/not-yet-visible tiles after visible work settles. This should not replace
+  the stage cache; stage intermediates remain the reusable operation cache, while
+  `lod_preview_pyramid` is the retained display-preview tier.
 
 ## Docs afterwards
 

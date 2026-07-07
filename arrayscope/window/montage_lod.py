@@ -835,6 +835,13 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         if plane is None:
             continue
         histogram = owning_cache.peek(histogram_key_for_level_key(key))
+        metadata = None
+        metadata_fn = getattr(session, "preview_floor_metadata", None)
+        if callable(metadata_fn):
+            metadata = metadata_fn(key)
+        texture_kind = getattr(metadata, "texture_kind", None)
+        if texture_kind is None:
+            texture_kind = _floor_texture_kind(key.component)
         factor_x = 1 << int(key.level_xy[0])
         factor_y = 1 << int(key.level_xy[1])
         tile_shape = tuple(int(value) for value in session.plan.tile_shape)
@@ -852,9 +859,12 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             histogram_data=None if histogram is None else np.asarray(histogram),
             source_id=(*semantic_id, "floor", str(key.component), key.level_xy),
             texture_data=np.asarray(plane),
-            texture_kind=_floor_texture_kind(key.component),
+            texture_kind=texture_kind,
             lod=lod,
             quality="preview",
+            shader_mapping=getattr(metadata, "shader_mapping", None),
+            level_data=getattr(metadata, "level_data", None),
+            level_stats=getattr(metadata, "level_stats", None),
         )
         session.display_tile_payloads[tile_number] = payload
         session.pending_payload_upserts[tile_number] = None
@@ -1026,6 +1036,8 @@ def release_session_claims(session) -> int:
             if cache is not None:
                 cache.end_pending(effect.level_key)
                 released += 1
+            if effect.owner is ClaimOwner.PREVIEW:
+                getattr(session, "lod_preview_metadata", {}).pop(effect.level_key, None)
         return released
     requests = list(getattr(session, "pending_lod_requests", ()) or ())
     if pyramid is None:

@@ -154,6 +154,8 @@ def run_profile_montage_workflow(
             phase="raw_full_tiled_montage",
             timeout_s=timeout_s,
             action=apply_raw,
+            backend=backend,
+            screenshot_dir=screenshot_dir,
         )
         _attach_phase_screenshot(raw_record, win, phase="raw_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir)
         _append_record(records, jsonl, {**base, **raw_record, "run_temperature": "cold"})
@@ -188,6 +190,8 @@ def run_profile_montage_workflow(
             phase="fft_full_tiled_montage",
             timeout_s=timeout_s,
             action=apply_fft,
+            backend=backend,
+            screenshot_dir=screenshot_dir,
         )
         _attach_phase_screenshot(fft_record, win, phase="fft_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir)
         transform_pipeline = ("CenteredFFT", "FFTShift", "CenteredIFFT")
@@ -208,6 +212,8 @@ def run_profile_montage_workflow(
                 **_apply_fft_level_refinement_preview(win, app=app, QtCore=QtCore),
                 "fit_stretch_pulsed": bool(fit_stretch_pulsed["fft"]),
             },
+            backend=backend,
+            screenshot_dir=screenshot_dir,
         )
         _attach_phase_screenshot(
             level_record,
@@ -480,7 +486,18 @@ def _histogram_loop_record_fields(prefix: str, stats: dict[str, object]) -> dict
     }
 
 
-def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_s: float, action) -> dict[str, object]:
+def _run_phase(
+    app,
+    QtCore,
+    win,
+    probe: _EventLoopProbe,
+    *,
+    phase: str,
+    timeout_s: float,
+    action,
+    backend: str = "",
+    screenshot_dir: Path | None = None,
+) -> dict[str, object]:
     probe.reset()
     start = perf_counter()
     draw_start = _vispy_draw_count(win)
@@ -501,6 +518,11 @@ def _run_phase(app, QtCore, win, probe: _EventLoopProbe, *, phase: str, timeout_
         draw_start=draw_start,
         preview_floor_session_id=preview_floor_session_id,
         preview_floor_count_start=preview_floor_count_start,
+        preview_floor_screenshot_path=(
+            None
+            if screenshot_dir is None
+            else screenshot_dir / f"{backend}-{phase}_preview_floor.png"
+        ),
     )
     elapsed_ms = (perf_counter() - start) * 1000.0
     _process_events(app, QtCore, count=5)
@@ -532,6 +554,7 @@ def _wait_for_montage_complete(
     require_presentation_settled: bool = False,
     preview_floor_session_id: int | None = None,
     preview_floor_count_start: int = 0,
+    preview_floor_screenshot_path: Path | None = None,
 ) -> dict[str, float | int | bool | None]:
     deadline = time.monotonic() + float(timeout_s)
     first_materialized_tile_ms = None
@@ -548,6 +571,8 @@ def _wait_for_montage_complete(
     first_preview_payload_ms = None
     first_preview_payload_fill_ms = None
     first_preview_floor_fill_ms = None
+    preview_floor_screenshot_saved = None
+    preview_floor_screenshot_error = None
     fully_visible_tile_request_count = None
     presentation_settled_ms = None
     final_visibility_state: dict[str, object] = {}
@@ -612,6 +637,16 @@ def _wait_for_montage_complete(
                 first_display_payload_fill_ms = (perf_counter() - start) * 1000.0
             if first_preview_payload_fill_ms is None and payload_state["preview_payload_fill"]:
                 first_preview_payload_fill_ms = (perf_counter() - start) * 1000.0
+                if preview_floor_screenshot_path is not None and preview_floor_screenshot_saved is None:
+                    _wait_for_vispy_tile_draw(win, app, QtCore)
+                    try:
+                        preview_floor_screenshot_saved = _save_view_screenshot(
+                            win,
+                            preview_floor_screenshot_path,
+                        )
+                    except Exception as exc:  # pragma: no cover - diagnostic path
+                        preview_floor_screenshot_saved = False
+                        preview_floor_screenshot_error = repr(exc)
         fully_visible = bool(visibility_state["fully_visible"])
         if fully_visible and fully_visible_ms is None:
             fully_visible_ms = (perf_counter() - start) * 1000.0
@@ -649,6 +684,13 @@ def _wait_for_montage_complete(
                 "first_preview_payload_ms": first_preview_payload_ms,
                 "first_preview_payload_fill_ms": first_preview_payload_fill_ms,
                 "first_preview_floor_fill_ms": first_preview_floor_fill_ms,
+                "preview_floor_screenshot_path": (
+                    None
+                    if preview_floor_screenshot_saved is None
+                    else str(preview_floor_screenshot_path)
+                ),
+                "preview_floor_screenshot_saved": preview_floor_screenshot_saved,
+                "preview_floor_screenshot_error": preview_floor_screenshot_error,
                 "final_display_payload_count": int(final_payload_state.get("display_payload_count", 0)),
                 "final_preview_payload_count": int(final_payload_state.get("preview_payload_count", 0)),
                 "final_exact_payload_count": int(final_payload_state.get("exact_payload_count", 0)),
@@ -922,16 +964,30 @@ def _attach_phase_screenshot(
 ) -> None:
     if screenshot_dir is None:
         return
-    screenshot_dir.mkdir(parents=True, exist_ok=True)
     path = screenshot_dir / f"{backend}-{phase}.png"
     try:
-        pixmap = win.img_view.grab()
-        ok = bool(pixmap.save(str(path)))
+        ok = _save_view_screenshot(win, path)
     except Exception as exc:
         record["screenshot_error"] = repr(exc)
         return
     record["screenshot_path"] = str(path)
     record["screenshot_saved"] = ok
+
+
+def _save_view_screenshot(win, path: Path) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pixmap = win.img_view.grab()
+    return bool(pixmap.save(str(path)))
+
+
+def _wait_for_vispy_tile_draw(win, app, QtCore, *, timeout_s: float = 0.5) -> None:
+    deadline = time.monotonic() + float(timeout_s)
+    while time.monotonic() < deadline:
+        if _vispy_tile_presentation_draw_count(win) >= _vispy_tile_presentation_request_count(win):
+            _process_events(app, QtCore, count=2)
+            return
+        _process_events(app, QtCore, count=2)
+        time.sleep(0.005)
 
 
 def _elapsed_between_ms(start_ms, end_ms) -> float | None:

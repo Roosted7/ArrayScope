@@ -1579,7 +1579,8 @@ def test_shared_preview_floor_is_presented_before_exact_refinement():
     session.mark_presented(tuple(preview_delta.upserts))
 
     plan = derive_montage_dispatch(session)
-    assert set(plan.preview_refinements) == {0, 1}
+    assert set(plan.preview_refinements) == set()
+    assert set(session.dirty_payloads) == {0, 1}
     session.mark_preview_refinements_dirty(plan.preview_refinements)
     assert set(session.dirty_payloads) == {0, 1}
 
@@ -1613,6 +1614,101 @@ def test_preview_floor_does_not_complete_full_refinement():
     session.mark_presented(tuple(exact_delta.upserts))
 
     assert session.is_complete()
+
+
+def test_preview_floor_commit_activates_every_planned_preview_tile_before_exact():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=4)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    for rendered in tuple(session.rendered_tiles.values()):
+        semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+        key = pyramid_key_for_rendered(rendered, demand=demand, level=2, semantic_source_id=semantic_id)
+        pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+        _claim_preview_resident(session, rendered.tile.montage_index, key)
+
+    # Exact results already exist for the priority-center tiles.  The preview
+    # floor still owns the first fill: the commit must activate the whole
+    # planned preview set, not flash exact islands one tile at a time.
+    for tile_number in (0, 3):
+        del session.rendered_tiles[tile_number]
+        session.dirty_payloads.pop(tile_number, None)
+
+    _state, preview_delta = session.build_tile_presentation({}, max_upserts=4)
+
+    assert set(preview_delta.upserts) == {0, 1, 2, 3}
+    assert set(preview_delta.active_tiles) == {0, 1, 2, 3}
+    assert {payload.quality for payload in preview_delta.upserts.values()} == {"preview"}
+
+
+def test_preview_floor_scope_defers_exact_until_scoped_tiles_are_covered():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    preview = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=4)
+    session.lod_preview_pyramid = preview
+    session.lod_preview_level = 4
+    session.mark_preview_floor_scope(range(4))
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    rendered = session.rendered_tiles[0]
+    key = pyramid_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=4,
+        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    preview.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+    _claim_preview_resident(session, 0, key)
+
+    _state, delta = session.build_tile_presentation({}, max_upserts=4)
+
+    assert set(delta.upserts) == {0}
+    assert delta.upserts[0].quality == "preview"
+    assert all(payload.quality != "exact" for payload in delta.upserts.values())
+    assert set(session.dirty_payloads) == {0, 1, 2, 3}
+
+
+def test_acknowledged_preview_with_exact_result_rearms_exact_refinement():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    for rendered in tuple(session.rendered_tiles.values()):
+        semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+        key = pyramid_key_for_rendered(rendered, demand=demand, level=2, semantic_source_id=semantic_id)
+        pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+        _claim_preview_resident(session, rendered.tile.montage_index, key)
+
+    _state, preview_delta = session.build_tile_presentation({}, max_upserts=2)
+    _acknowledge(session, preview_delta)
+    session.mark_presented(tuple(preview_delta.upserts))
+
+    assert {payload.quality for payload in preview_delta.upserts.values()} == {"preview"}
+    assert set(session.dirty_payloads) == {0, 1}
+    _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
+    assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
+
+
+def test_acknowledged_preview_floor_stays_active_until_exact_refinement():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=4)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    for rendered in tuple(session.rendered_tiles.values()):
+        semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+        key = pyramid_key_for_rendered(rendered, demand=demand, level=2, semantic_source_id=semantic_id)
+        pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+        _claim_preview_resident(session, rendered.tile.montage_index, key)
+    for tile_number in (0, 3):
+        del session.rendered_tiles[tile_number]
+        session.dirty_payloads.pop(tile_number, None)
+
+    _state, preview_delta = session.build_tile_presentation({}, max_upserts=4)
+    _acknowledge(session, preview_delta)
+    session.mark_presented(tuple(preview_delta.upserts))
+    session.mark_preview_refinements_dirty((1, 2))
+
+    _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
+
+    assert set(exact_delta.upserts) == {1, 2}
+    assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
+    assert set(exact_delta.active_tiles) == {0, 1, 2, 3}
 
 
 def test_preview_floor_claim_release_unblocks_exact_payload():
@@ -1652,10 +1748,12 @@ def test_replaced_session_releases_preview_floor_claims_from_preview_cache():
     assert preview.begin_pending(key)
     session.lifecycle.level_claimed(0, key, ClaimOwner.PREVIEW, request=("test-preview", key))
     session.lifecycle.level_materializing(0, key)
+    session.lod_preview_metadata[key] = object()
 
     assert release_session_claims(session) == 1
 
     assert session.lifecycle.dangling_claims() == ()
+    assert key not in session.lod_preview_metadata
     assert preview.begin_pending(key)
     preview.end_pending(key)
 

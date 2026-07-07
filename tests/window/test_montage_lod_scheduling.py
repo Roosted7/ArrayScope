@@ -14,9 +14,11 @@ import numpy as np
 from arrayscope.core.work_graph import WorkLane
 from arrayscope.core.scheduler import EvalPriority, FrameTarget
 from arrayscope.core.view_state import ChannelMode, ViewState
+from arrayscope.display.backend_contract import VISPY_CAPABILITIES
 from arrayscope.display.lod import LOD_POLICY_RESIDENT
 from arrayscope.display.model.frame import TiledValueSource
 from arrayscope.display.pyramid import PyramidCache
+from arrayscope.display.shader_mapping import ShaderDisplayMode, TexturePlaneKind
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, CenteredIFFT, FFTShift
 from arrayscope.presentation import ClaimOwner, LevelPhase
 from arrayscope.window.frame_renderer import FrameRenderMixin
@@ -157,13 +159,15 @@ def test_stale_session_releases_claims_without_scheduling():
     assert session.pending_lod_requests == []
 
 
-def _tile_worker_renderer(session, *, evaluated):
+def _tile_worker_renderer(session, *, evaluated, capabilities=None):
     """Fake window/renderer composition around the real tile scheduling method."""
 
     from arrayscope.operations.evaluator import EvaluationResult
 
     fake = SimpleNamespace()
     fake.win = fake
+    if capabilities is not None:
+        fake.img_view = SimpleNamespace(rendering_capabilities=capabilities)
     fake.montage_tile_evaluation_controller = FakeController()
     fake.visible_evaluation_controller = fake.montage_tile_evaluation_controller
     fake._montage_session = session
@@ -255,6 +259,99 @@ def test_noop_scalar_resident_lod_does_not_schedule_duplicate_preview_work():
     calls = renderer.montage_tile_evaluation_controller.calls
     assert len(calls) == 1
     assert calls[0]["key"][0] == "montage_tile"
+    assert calls[0]["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
+    assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 0
+
+
+def test_noop_scalar_vispy_preview_schedules_before_exact_for_upload_reduction():
+    from dataclasses import replace
+
+    from arrayscope.display.montage import MontagePlan
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    data = np.zeros((TILE, TILE, 2), dtype=np.float32)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, indices=(0, 1), columns=2, text=":")
+    )
+    tiles = tuple(
+        replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+        for tile in session.plan.tiles
+    )
+    session.plan = MontagePlan(
+        axis=2,
+        tile_shape=session.plan.tile_shape,
+        grid_shape=session.plan.grid_shape,
+        columns=session.plan.columns,
+        rows=session.plan.rows,
+        gap=session.plan.gap,
+        tiles=tiles,
+    )
+    session.view_state = state
+    session.montage_axis = 2
+    session.document = ArrayDocument(data)
+    session.lod_preview_pyramid = PyramidCache(max_bytes=1 << 20)
+    session.lod_preview_level = 4
+    session.frame_plan = SimpleNamespace(
+        target=FrameTarget(("semantic",), ("viewport",), ("presentation",), "final"),
+        tile_shape=(TILE, TILE),
+    )
+    session.pending_tiles.append(session.plan.tiles[0])
+    renderer = _tile_worker_renderer(session, evaluated=[], capabilities=VISPY_CAPABILITIES)
+
+    assert renderer._schedule_next_montage_tile(session) is True
+
+    calls = renderer.montage_tile_evaluation_controller.calls
+    assert len(calls) == 2
+    assert calls[0]["work_item"].lane == WorkLane.DISPLAY_PREVIEW
+    assert calls[1]["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
+    assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 1
+
+
+def test_noop_scalar_preview_is_skipped_when_preview_level_matches_demand():
+    from dataclasses import replace
+
+    from arrayscope.display.montage import MontagePlan
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    data = np.zeros((TILE, TILE, 2), dtype=np.float32)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, indices=(0, 1), columns=2, text=":")
+    )
+    tiles = tuple(
+        replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+        for tile in session.plan.tiles
+    )
+    session.plan = MontagePlan(
+        axis=2,
+        tile_shape=session.plan.tile_shape,
+        grid_shape=session.plan.grid_shape,
+        columns=session.plan.columns,
+        rows=session.plan.rows,
+        gap=session.plan.gap,
+        tiles=tiles,
+    )
+    session.view_state = state
+    session.montage_axis = 2
+    session.document = ArrayDocument(data)
+    session.lod_preview_pyramid = PyramidCache(max_bytes=1 << 20)
+    session.lod_preview_level = 2
+    session.frame_plan = SimpleNamespace(
+        target=FrameTarget(("semantic",), ("viewport",), ("presentation",), "final"),
+        tile_shape=(TILE, TILE),
+    )
+    session.pending_tiles.append(session.plan.tiles[0])
+    renderer = _tile_worker_renderer(session, evaluated=[], capabilities=VISPY_CAPABILITIES)
+
+    assert renderer._schedule_next_montage_tile(session) is True
+
+    calls = renderer.montage_tile_evaluation_controller.calls
+    assert len(calls) == 1
     assert calls[0]["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
     assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 0
 
@@ -355,9 +452,9 @@ def test_non_display_transform_preview_can_schedule_once_for_experimental_shared
 
     calls = renderer.montage_tile_evaluation_controller.calls
     assert len(calls) == 2
-    assert calls[0]["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
-    assert calls[1]["work_item"].lane == WorkLane.DISPLAY_PREVIEW
-    assert calls[1]["key"][0] == "montage_preview_batch"
+    assert calls[0]["work_item"].lane == WorkLane.DISPLAY_PREVIEW
+    assert calls[0]["key"][0] == "montage_preview_batch"
+    assert calls[1]["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
     assert source.reads == [(slice(None, None, None), slice(None, None, None), slice(None, None, None))]
     assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 1
     assert session.lod_preview_presentations == 2
@@ -396,7 +493,7 @@ def test_non_display_transform_preview_uses_shader_texture_for_vispy_path(monkey
 
     calls = renderer.montage_tile_evaluation_controller.calls
     assert len(calls) == 2
-    assert calls[1]["key"][0] == "montage_preview_batch"
+    assert calls[0]["key"][0] == "montage_preview_batch"
     assert source.reads == [(slice(None, None, None), slice(None, None, None), slice(None, None, None))]
     assert sorted(session.display_tile_payloads) == [0, 1]
     preview_entries = _preview_level_entries(session)
@@ -456,7 +553,7 @@ def test_reduced_preview_evaluation_admits_floor_payload_without_exact_semantics
     )
 
     assert preview is not None
-    key, plane, histogram = preview
+    key, plane, histogram, *_ = preview
     assert key.level_xy == (2, 2)
     assert plane.shape == (TILE // 4, TILE // 4)
     assert histogram is None
@@ -527,7 +624,7 @@ def test_reduced_preview_evaluation_reads_only_tile_display_range():
 
     assert preview is not None
     assert source.reads == [(slice(5, 5 + TILE, 1), slice(7, 7 + TILE, 1), slice(0, 1, 1))]
-    _key, plane, _histogram = preview
+    _key, plane, _histogram, *_ = preview
     assert plane.shape == (TILE // 4, TILE // 4)
 
 
@@ -593,7 +690,7 @@ def test_fft_over_montage_axis_preview_reduces_display_input_and_expands_transfo
 
     assert preview is not None
     assert source.reads == [(slice(5, 5 + TILE, 1), slice(7, 7 + TILE, 1), slice(None, None, None))]
-    _key, plane, _histogram = preview
+    _key, plane, _histogram, *_ = preview
     assert plane.shape == (TILE // 4, TILE // 4)
 
 
@@ -652,7 +749,7 @@ def test_fft_over_display_axis_preview_falls_back_to_native_output_reduction():
 
     assert preview is not None
     assert source.reads == [(slice(None, None, None), slice(None, None, None), 0)]
-    _key, plane, _histogram = preview
+    _key, plane, _histogram, *_ = preview
     assert plane.shape == (TILE // 4, TILE // 4)
 
 
@@ -703,7 +800,7 @@ def test_reduced_rgb_preview_floor_preserves_display_histogram_for_rewindowing()
     )
 
     assert preview is not None
-    key, plane, histogram = preview
+    key, plane, histogram, *_ = preview
     assert key.component == "rgb8"
     assert plane.shape == (TILE // 4, TILE // 4, 3)
     assert histogram is not None
@@ -719,6 +816,80 @@ def test_reduced_rgb_preview_floor_preserves_display_histogram_for_rewindowing()
     assert payload.semantic_data is None
     assert payload.semantic_histogram_data is None
     assert TiledValueSource({0: payload}).tile_region(tile, (slice(0, 1), slice(0, 1))) is None
+
+
+def test_complex_shader_preview_floor_preserves_mapping_and_level_samples():
+    from dataclasses import replace
+
+    from arrayscope.display.montage import MontagePlan
+    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _cold_session(pyramid=pyramid)
+    real = np.arange(TILE * TILE * 2, dtype=np.float32).reshape(TILE, TILE, 2)
+    imag = real + 10.0
+    data = (real + 1j * imag).astype(np.complex64)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_channel(ChannelMode.COMPLEX)
+        .with_montage_axis(2, indices=(0, 1), columns=2, text=":")
+    )
+    tiles = tuple(
+        replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+        for tile in session.plan.tiles
+    )
+    session.plan = MontagePlan(
+        axis=2,
+        tile_shape=session.plan.tile_shape,
+        grid_shape=session.plan.grid_shape,
+        columns=session.plan.columns,
+        rows=session.plan.rows,
+        gap=session.plan.gap,
+        tiles=tiles,
+    )
+    session.view_state = state
+    session.document = ArrayDocument(data)
+    session.shader_display = True
+    tile = session.plan.tiles[0]
+
+    preview = _evaluate_montage_tile_preview_snapshot(
+        session,
+        tile,
+        demand=session.ingest_lod_demand(),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+
+    assert preview is not None
+    key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = preview
+    assert key.component == TexturePlaneKind.COMPLEX_RG32F.value
+    assert plane.shape == (TILE // 4, TILE // 4)
+    assert histogram is None
+    assert texture_kind == TexturePlaneKind.COMPLEX_RG32F
+    assert shader_mapping.display_mode == ShaderDisplayMode.PHASE_COLOR
+    assert level_data is not None
+
+    assert session.admit_preview_plane(
+        0,
+        key,
+        plane,
+        histogram,
+        shader_mapping=shader_mapping,
+        texture_kind=texture_kind,
+        level_data=level_data,
+        level_stats=level_stats,
+    )
+    session._ensure_floor_payloads((0,))
+
+    payload = session.display_tile_payloads[0]
+    assert payload.quality == "preview"
+    assert payload.texture_kind == TexturePlaneKind.COMPLEX_RG32F
+    assert payload.shader_mapping.display_mode == ShaderDisplayMode.PHASE_COLOR
+    assert payload.level_data is not None
+    assert payload.semantic_data is None
 
 
 def test_pyramid_budget_retains_the_reference_montage_working_set():

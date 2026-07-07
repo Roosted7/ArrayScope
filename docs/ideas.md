@@ -63,6 +63,12 @@ Questions to answer before it can move to the roadmap:
 - how to evict preview data without causing black tiles, re-upload churn, or misleading diagnostics;
 - how source-provided pyramids and chunked/lazy sources should feed the preview tier.
 
+Important distinction from the 2026-07-07 Plan 05 work: retained preview planes are display
+previews (`lod_preview_pyramid`) and should be used for fast first pixels / future offscreen GPU
+warming. They are not a replacement for the stage cache, which remains the reusable operation
+intermediate cache. A later roadmap item should decide how the two cooperate without letting
+speculative preview uploads steal visible or exact-refinement bandwidth.
+
 ## Product candidates
 
 ### Linked viewer groups

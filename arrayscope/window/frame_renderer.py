@@ -1557,12 +1557,21 @@ class FrameRenderMixin:
         inspected = 0
         pending, queued_sources = self._pending_montage_level_sources(session)
         require_refined = _montage_level_evidence_requires_refined(self, session)
+        tiles_by_number = {
+            int(getattr(tile, "montage_index", offset)): tile
+            for offset, tile in enumerate(tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()))
+        }
         for tile_number in payloads or ():
             if inspected >= MONTAGE_LEVEL_STATS_COMMIT_BATCH:
                 self._mark_montage_level_scan_pending(session)
                 break
             inspected += 1
+            payload = payloads.get(int(tile_number)) if isinstance(payloads, dict) else None
             rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
+            if rendered is None and payload is not None:
+                tile = tiles_by_number.get(int(tile_number))
+                if tile is not None:
+                    rendered = _rendered_tile_from_previous_payload(tile, payload)
             if rendered is None:
                 continue
             source_index = int(rendered.tile.source_index)
@@ -2250,6 +2259,11 @@ class FrameRenderMixin:
             if preview_pyramid is not None and preview_level > 0 and ingest_semantic_id is None
             else ingest_semantic_id
         )
+        session_id = int(session.session_id)
+        montage_axis = session.montage_axis
+        document = session.document
+        colormap_lut = session.colormap_lut
+        shader_display = bool(getattr(session, "shader_display", False))
 
         def evaluate(token):
             result = self._evaluate_montage_tile_snapshot(session, tile, token)
@@ -2285,12 +2299,6 @@ class FrameRenderMixin:
                 )
             return result
 
-        session_id = int(session.session_id)
-        montage_axis = session.montage_axis
-        document = session.document
-        colormap_lut = session.colormap_lut
-        shader_display = bool(getattr(session, "shader_display", False))
-
         def done(result):
             if ingest_state["admitted"]:
                 self._montage_lod_ingest_reductions = (
@@ -2316,6 +2324,14 @@ class FrameRenderMixin:
         def error(exc):
             self._on_montage_tile_error(session_id, tile, exc)
 
+        self._schedule_montage_preview_tile(
+            session,
+            tile,
+            demand=ingest_demand,
+            pyramid=ingest_pyramid,
+            semantic_source_id=ingest_semantic_id,
+            shader_display=shader_display,
+        )
         controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
         started = controller.start_latest(
             evaluate,
@@ -2364,14 +2380,6 @@ class FrameRenderMixin:
                 lambda: self._dispatch_montage_work(getattr(self, "_montage_session", None)),
             )
             return False
-        self._schedule_montage_preview_tile(
-            session,
-            tile,
-            demand=ingest_demand,
-            pyramid=ingest_pyramid,
-            semantic_source_id=ingest_semantic_id,
-            shader_display=shader_display,
-        )
         return True
 
     def _schedule_montage_preview_tile(
@@ -2408,7 +2416,16 @@ class FrameRenderMixin:
                 demand=demand,
                 shader_display=shader_display,
             )
-        if not _preview_removes_work_for_current_scheduler(session, tile):
+        upload_preview_useful = bool(
+            _persistent_gpu_tile_residency_backend(self, session)
+            and int(getattr(demand, "desired_level", 0) or 0) > 0
+        )
+        if not _preview_is_useful_for_current_scheduler(
+            session,
+            tile,
+            demand,
+            upload_preview_useful=upload_preview_useful,
+        ):
             return False
 
         session_id = int(session.session_id)
@@ -2423,6 +2440,12 @@ class FrameRenderMixin:
         )
         if not _claim_preview_floor(session, tile_number, preview_key):
             return False
+        mark_scope = getattr(session, "mark_preview_floor_scope", None)
+        if callable(mark_scope):
+            mark_scope(
+                getattr(session, "_last_planned_tiles", ())
+                or (int(candidate.montage_index) for candidate in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()))
+            )
 
         def evaluate(token):
             return _evaluate_montage_tile_preview_snapshot(
@@ -2443,10 +2466,19 @@ class FrameRenderMixin:
             if preview is None:
                 current.release_preview_claim(tile_number, preview_key)
                 return
-            key, plane, histogram = preview
+            key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = _preview_payload_parts(preview)
             if key != preview_key:
                 current.release_preview_claim(tile_number, preview_key)
-            current.admit_preview_plane(tile_number, key, plane, histogram)
+            current.admit_preview_plane(
+                tile_number,
+                key,
+                plane,
+                histogram,
+                shader_mapping=shader_mapping,
+                texture_kind=texture_kind,
+                level_data=level_data,
+                level_stats=level_stats,
+            )
             current.lod_preview_presentations = int(getattr(current, "lod_preview_presentations", 0) or 0) + 1
             current._ensure_floor_payloads((tile_number,))
             if tile_number in current.pending_payload_upserts:
@@ -2540,6 +2572,9 @@ class FrameRenderMixin:
         )
         if not claimed_rows:
             return False
+        mark_scope = getattr(session, "mark_preview_floor_scope", None)
+        if callable(mark_scope):
+            mark_scope(tile_number for tile_number, _key in claimed_rows)
         active.add(batch_key)
         session_id = int(session.session_id)
         session_key = session.key
@@ -2571,12 +2606,24 @@ class FrameRenderMixin:
             upserted = False
             preview_rows = tuple(previews or ())
             seen_tiles: set[int] = set()
-            for tile_number, key, plane, histogram in preview_rows:
+            for row in preview_rows:
+                tile_number, key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = (
+                    _preview_row_parts(row)
+                )
                 tile_number = int(tile_number)
                 expected_key = claimed_keys.get(tile_number)
                 if expected_key is not None and expected_key != key:
                     current.release_preview_claim(tile_number, expected_key)
-                current.admit_preview_plane(tile_number, key, plane, histogram)
+                current.admit_preview_plane(
+                    tile_number,
+                    key,
+                    plane,
+                    histogram,
+                    shader_mapping=shader_mapping,
+                    texture_kind=texture_kind,
+                    level_data=level_data,
+                    level_stats=level_stats,
+                )
                 current._ensure_floor_payloads((tile_number,))
                 admitted += 1
                 seen_tiles.add(tile_number)
@@ -4886,20 +4933,23 @@ def _can_evaluate_reduced_preview(session, tile) -> bool:
     )
 
 
-def _preview_removes_work_for_current_scheduler(session, tile) -> bool:
+def _preview_is_useful_for_current_scheduler(session, tile, demand, *, upload_preview_useful: bool = False) -> bool:
     if not _can_evaluate_preview(session, tile):
+        return False
+    if demand is None:
+        return False
+    if _preview_evaluation_level(session, demand) <= int(getattr(demand, "desired_level", 0) or 0):
         return False
     document = getattr(session, "document", None)
     operations = tuple(getattr(document, "enabled_operations", ()) or ())
-    if not operations:
-        return False
     base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
     dtype = getattr(getattr(document, "base_data", None), "dtype", None)
-    return pipeline_commutes_for_display_lod(
+    compute_preview_useful = pipeline_commutes_for_display_lod(
         operations,
         base_shape,
         dtype,
     )
+    return bool(compute_preview_useful or upload_preview_useful)
 
 
 def _shared_preview_removes_work_for_current_scheduler(session, tile) -> bool:
@@ -4993,6 +5043,27 @@ def _preview_claim_key(session, tile, *, demand, semantic_source_id, shader_disp
     )
 
 
+def _preview_payload_parts(preview):
+    row = tuple(preview)
+    key, plane, histogram = row[:3]
+    return (
+        key,
+        plane,
+        histogram,
+        row[3] if len(row) > 3 else None,
+        row[4] if len(row) > 4 else None,
+        row[5] if len(row) > 5 else None,
+        row[6] if len(row) > 6 else None,
+    )
+
+
+def _preview_row_parts(row):
+    values = tuple(row)
+    tile_number = int(values[0])
+    key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = _preview_payload_parts(values[1:])
+    return tile_number, key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats
+
+
 def _claim_preview_floor(session, tile_number: int, key) -> bool:
     cache = session.preview_floor_cache()
     if cache is None:
@@ -5065,8 +5136,8 @@ def _evaluate_montage_tile_preview_snapshot(
     value = replace(
         result.value,
         semantic_data=None,
-        level_data=None,
-        level_stats=None,
+        level_data=getattr(result.value, "level_data", None),
+        level_stats=getattr(result.value, "level_stats", None),
         lod=LodInfo(
             level=level,
             factor=max(int(factor_xy[0]), int(factor_xy[1])),
@@ -5088,7 +5159,15 @@ def _evaluate_montage_tile_preview_snapshot(
     )
     source, _histogram, _kind = montage_lod.texture_source_for_rendered(rendered, shader_display=bool(shader_display))
     histogram = getattr(value, "histogram_data", None)
-    return key, np.asarray(source), None if histogram is None else np.asarray(histogram)
+    return (
+        key,
+        np.asarray(source),
+        None if histogram is None else np.asarray(histogram),
+        getattr(value, "shader_mapping", None),
+        getattr(value, "texture_kind", None),
+        getattr(value, "level_data", None),
+        getattr(value, "level_stats", None),
+    )
 
 
 def _evaluate_montage_shared_preview_snapshot(
@@ -5167,8 +5246,8 @@ def _evaluate_montage_shared_preview_snapshot(
             semantic_data=None,
             semantic_histogram_data=None,
             lod=getattr(value, "lod", None),
-            level_data=None,
-            level_stats=None,
+            level_data=getattr(value, "level_data", None),
+            level_stats=getattr(value, "level_stats", None),
         )
         key = montage_lod.pyramid_key_for_rendered(
             rendered,
@@ -5179,7 +5258,18 @@ def _evaluate_montage_shared_preview_snapshot(
         )
         source, _histogram, _kind = montage_lod.texture_source_for_rendered(rendered, shader_display=bool(shader_display))
         histogram = getattr(value, "histogram_data", None)
-        previews.append((int(tile.montage_index), key, np.asarray(source), None if histogram is None else np.asarray(histogram)))
+        previews.append(
+            (
+                int(tile.montage_index),
+                key,
+                np.asarray(source),
+                None if histogram is None else np.asarray(histogram),
+                getattr(value, "shader_mapping", None),
+                getattr(value, "texture_kind", None),
+                getattr(value, "level_data", None),
+                getattr(value, "level_stats", None),
+            )
+        )
     return tuple(previews)
 
 
@@ -5234,8 +5324,8 @@ def _evaluate_montage_tile_native_output_preview_snapshot(
         data=reduced_data,
         histogram_data=reduced_histogram,
         semantic_data=None,
-        level_data=None,
-        level_stats=None,
+        level_data=getattr(result.value, "level_data", None),
+        level_stats=getattr(result.value, "level_stats", None),
         lod=LodInfo(
             level=level,
             factor=max(int(factor_xy[0]), int(factor_xy[1])),
@@ -5256,7 +5346,15 @@ def _evaluate_montage_tile_native_output_preview_snapshot(
         shader_display=bool(shader_display),
     )
     source, _histogram, _kind = montage_lod.texture_source_for_rendered(rendered, shader_display=bool(shader_display))
-    return key, np.asarray(source), None if reduced_histogram is None else np.asarray(reduced_histogram)
+    return (
+        key,
+        np.asarray(source),
+        None if reduced_histogram is None else np.asarray(reduced_histogram),
+        getattr(value, "shader_mapping", None),
+        getattr(value, "texture_kind", None),
+        getattr(value, "level_data", None),
+        getattr(value, "level_stats", None),
+    )
 
 
 def _read_reduced_preview_base_and_state(

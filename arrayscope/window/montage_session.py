@@ -51,6 +51,14 @@ from arrayscope.window.montage_lod import (  # noqa: F401  (re-exports; canonica
 )
 
 
+@dataclass(frozen=True)
+class PreviewFloorMetadata:
+    shader_mapping: object | None = None
+    texture_kind: TexturePlaneKind | None = None
+    level_data: np.ndarray | None = None
+    level_stats: object | None = None
+
+
 def _shader_mapping_key(mapping):
     return None if mapping is None else getattr(mapping, "identity_key", mapping)
 
@@ -541,6 +549,8 @@ class MontageRenderSession:
     _reconcile_attempts: dict = field(default_factory=dict)
     lod_preview_pyramid: object | None = None
     lod_preview_level: int = 0
+    lod_preview_metadata: dict[object, PreviewFloorMetadata] = field(default_factory=dict)
+    lod_preview_floor_scope: set[int] = field(default_factory=set)
     # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but
     # must carry the tile's finest already-computed semantic stats forward
     # unchanged.  `cross_level_reuses` counts swaps that reused the retained
@@ -961,7 +971,9 @@ class MontageRenderSession:
         confirmed: list[int] = []
         for tile_number in tuple(tile_numbers or ()):
             index = int(tile_number)
-            if index not in self.rendered_tiles:
+            payload = self.display_tile_payloads.get(index)
+            preview_presented = payload is not None and str(getattr(payload, "quality", "exact")) == "preview"
+            if index not in self.rendered_tiles and not preview_presented:
                 continue
             confirmed.append(index)
             if index not in self.presented_tiles and len(self.presented_order) < 64:
@@ -972,6 +984,8 @@ class MontageRenderSession:
             self.loading_tiles.discard(index)
             self.skipped_tiles.discard(index)
             self.dirty_payloads.pop(index, None)
+            if preview_presented and index in self.rendered_tiles:
+                self.dirty_payloads[index] = None
             self.pending_removals.discard(index)
             if 0 <= index < len(self.plan.tiles):
                 self.mark_tile_state(self.plan.tiles[index], MontageTileState.LOADED)
@@ -1256,13 +1270,35 @@ class MontageRenderSession:
             return preview
         return self.lod_pyramid
 
-    def admit_preview_plane(self, tile_number: int, key, plane, histogram=None) -> bool:
+    def preview_floor_metadata(self, key) -> PreviewFloorMetadata | None:
+        return self.lod_preview_metadata.get(key)
+
+    def admit_preview_plane(
+        self,
+        tile_number: int,
+        key,
+        plane,
+        histogram=None,
+        *,
+        shader_mapping=None,
+        texture_kind=None,
+        level_data=None,
+        level_stats=None,
+    ) -> bool:
         cache = self.preview_floor_cache()
         if cache is None:
             return False
         cache.admit(key, plane)
         if histogram is not None:
             cache.admit(montage_lod.histogram_key_for_level_key(key), histogram)
+        metadata = PreviewFloorMetadata(
+            shader_mapping=shader_mapping,
+            texture_kind=texture_kind,
+            level_data=None if level_data is None else np.asarray(level_data),
+            level_stats=level_stats,
+        )
+        if any(value is not None for value in (metadata.shader_mapping, metadata.texture_kind, metadata.level_data, metadata.level_stats)):
+            self.lod_preview_metadata[key] = metadata
         rec = self.lifecycle.peek(int(tile_number))
         entry = None if rec is None else rec.levels.get(key)
         if entry is None or entry.owner is not ClaimOwner.PREVIEW:
@@ -1270,12 +1306,16 @@ class MontageRenderSession:
         self.lifecycle.level_resident(int(tile_number), key)
         return True
 
+    def mark_preview_floor_scope(self, tile_numbers) -> None:
+        self.lod_preview_floor_scope.update(int(tile) for tile in tuple(tile_numbers or ()))
+
     def release_preview_claim(self, tile_number: int, key) -> None:
         cache = self.preview_floor_cache()
         effects = self.lifecycle.level_declined(int(tile_number), key)
         if cache is not None:
             for effect in effects:
                 cache.end_pending(effect.level_key)
+        self.lod_preview_metadata.pop(key, None)
 
     def _lod_preview_floor_first_fill_active(self, planned_numbers) -> bool:
         if not self._resident_lod_active():
@@ -1283,6 +1323,15 @@ class MontageRenderSession:
         planned = tuple(int(tile) for tile in tuple(planned_numbers or ()))
         if not planned:
             return False
+        preview_scope = set(int(tile) for tile in getattr(self, "lod_preview_floor_scope", set()) or set())
+        if preview_scope:
+            payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
+            scoped_planned = preview_scope.intersection(planned)
+            if scoped_planned and any(
+                str(getattr(payloads.get(int(tile)), "quality", "")) not in {"preview", "exact"}
+                for tile in scoped_planned
+            ):
+                return True
         return any(self._tile_preview_floor_pending(tile) for tile in planned)
 
     def _tile_preview_floor_pending(self, tile_number: int) -> bool:
@@ -1473,7 +1522,7 @@ class MontageRenderSession:
         for tile_number in dirty_payload_tiles:
             if build_limit is not None and built >= build_limit:
                 break
-            if floor_first_fill_active and self._tile_preview_floor_pending(int(tile_number)):
+            if floor_first_fill_active and int(tile_number) in planned_numbers:
                 continue
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is not None:
@@ -1493,9 +1542,23 @@ class MontageRenderSession:
                     *(int(tile) for tile in self.pending_payload_upserts),
                 )
             )
-        )
+            )
         if max_upserts is not None or max_upsert_bytes is not None or stale_level_tiles:
             dirty_payload_tiles = self._prioritized_tile_numbers(dirty_payload_tiles)
+        presented_preview_tiles = tuple(
+            int(tile)
+            for tile in planned_numbers
+            if int(tile) in self.presented_tiles
+            and str(getattr(self.display_tile_payloads.get(int(tile)), "quality", "exact")) == "preview"
+        )
+        floor_active_tiles = tuple(
+            int(tile)
+            for tile in self.pending_payload_upserts
+            if int(tile) in planned_numbers
+            and str(getattr(self.display_tile_payloads.get(int(tile)), "quality", "exact")) == "preview"
+        )
+        if floor_active_tiles or presented_preview_tiles:
+            active = tuple(dict.fromkeys((*active, *presented_preview_tiles, *floor_active_tiles)))
         # Progress guarantee: a dirty entry is a promise that a build can
         # produce an upsert for the tile.  Without a rendered result and
         # without a pending upsert (floor included), no build can keep that
@@ -1754,6 +1817,15 @@ class MontageRenderSession:
         for tile in accepted_upserts:
             self.dirty_payloads.pop(int(tile), None)
             self.pending_payload_upserts.pop(int(tile), None)
+        for tile in accepted_upserts:
+            index = int(tile)
+            payload = acknowledged.payloads.get(index)
+            if (
+                index in self.rendered_tiles
+                and payload is not None
+                and str(getattr(payload, "quality", "exact")) == "preview"
+            ):
+                self.dirty_payloads[index] = None
         # Viewport-scoped backends accept only the active set (ADR 0044);
         # non-active upserts they decline are parked, not retried — every
         # payload stays cached and re-arms when the tile becomes active.

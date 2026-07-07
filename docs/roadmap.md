@@ -137,18 +137,18 @@ Ordered gates:
 Active LOD queue inside X5 (**this list is the one "current and next steps" list**; details
 live in the linked plans and ADRs, "perhaps later" material lives in [ideas.md](ideas.md)):
 
-1. **NOW — VisPy preview floor through the lifecycle machine.** Finish the in-flight VisPy
-   preview-then-refine work by first moving its floor bookkeeping into the machine:
-   [Plan 05](plans/lod-remaining-work/05-preview-floor-machine.md) (claims with
-   `owner=PREVIEW`, derived floor-first-fill phase, refinement as a dispatch fact, one
-   preview-cache seam, named `min_level` constant). Then iterate the benchmark loop from
-   Plan 04 §Verification (screenshots + `ARRAYSCOPE_LOD_DEBUG_PASS_MARKER`) until the
-   preview floor demonstrably beats the pre-preview first-fill numbers without hurting
-   settle or heartbeat. Prior status and 2026-07-06 evidence: Plan 04's status header and
-   "2026-07-06 conclusions".
-2. **Transform-preview queue, then the two waiting default decisions.** Give non-display
+1. **NOW — Close Plan 05 validation and cleanup.** The VisPy preview floor now runs through
+   lifecycle `owner=PREVIEW` claims, a derived floor-first-fill phase, one preview-cache seam
+   carrying shader metadata, and acknowledge-driven exact refinement. Finish doc cleanup and
+   one final validation/commit pass from
+   [Plan 05](plans/lod-remaining-work/05-preview-floor-machine.md), then move to item 2.
+2. **Transform-preview queue, unified LOD ladder, then default decisions.** Give non-display
    transform previews their own lower-priority preview queue/controller so they cannot
-   compete with exact visible fills (Plan 04 step 2/conclusions), then re-decide
+   compete with exact visible fills (Plan 04 step 2/conclusions). In the same design pass,
+   unify preview and desired-LOD compute as one reduced-input ladder: preview LOD is the
+   first display rung, desired LOD is the refinement rung, preview-derived level samples stay
+   authoritative until a coordinated higher-quality histogram/level pass, and retained
+   preview planes can later feed bounded offscreen GPU warming. Then re-decide
    `ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW` and the PyQtGraph resident-LOD default on fresh
    A/Bs.
 3. **Pacing-governor design pass.** Execute [ADR 0052](decisions/0052-ui-work-pacing-governor.md)
@@ -173,7 +173,8 @@ Simplification/hygiene lane (small, safe to interleave; each is one commit):
 
 - Delete the transitional `hasattr(view, "release")`/`drain` fallbacks in `montage_lod` now
   that `pending_lod_requests` is always the lifecycle-backed view.
-- Collapse the preview-cache seam (Plan 05 step 5) and hoist `PREVIEW_FLOOR_MIN_LEVEL`.
+- Delete any leftover Plan 05-only probes or debug-marker affordances that are not useful
+  after the final validation pass.
 - Gate the governor decision-ring dump out of default benchmark JSONL (ADR 0052 item 5).
 - Retire proven kill switches after a field-verify window (`ARRAYSCOPE_DISABLE_SCRUB_FASTPATH`,
   `ARRAYSCOPE_DISABLE_SESSION_RETARGET`); each removal deletes a policy fork.

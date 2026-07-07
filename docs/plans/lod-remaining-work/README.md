@@ -16,7 +16,7 @@ Self-contained, step-by-step plans a less experienced developer (or model) can e
 | [02-pyqtgraph-lod-ab.md](02-pyqtgraph-lod-ab.md) | Re-measure PyQtGraph resident-LOD A/B → default decision | Done — 2026-07-06; PyQtGraph resident LOD remains opt-in |
 | [03-p3-residency-axis.md](03-p3-residency-axis.md) | P3: residency axis authoritative | Done — 2026-07-06 |
 | [04-preview-reduce-before-display.md](04-preview-reduce-before-display.md) | Preview-quality reduced display/evaluation, then exact refinement | Partially landed; continuation is Plan 05 |
-| [05-preview-floor-machine.md](05-preview-floor-machine.md) | VisPy preview floor through the lifecycle machine (finish the WIP) | ACTIVE — roadmap X5 queue item 1 |
+| [05-preview-floor-machine.md](05-preview-floor-machine.md) | VisPy preview floor through the lifecycle machine (finish the WIP) | Landed 2026-07-07; validation cleanup is roadmap X5 queue item 1 |
 
 The roadmap owns the queue beyond these recipes. Add another numbered plan only when an item
 reaches the head of the roadmap and needs command-level execution detail.
