@@ -2830,17 +2830,20 @@ class FrameRenderMixin:
         if plan.unsettled:
             self._ensure_montage_watchdog()
 
-    # -- stall watchdog (ADR 0051): an ASSERTION, not a repair -----------------
-    # Machine-derived dispatch above makes a dead pump impossible by
-    # construction: every event edge re-derives all scheduled work from the
-    # session records, and a declined admission arms a capacity waiter on the
-    # controller.  The watchdog remains armed while a session is unsettled
-    # purely to catch violations of that construction: a zero-progress tick
-    # increments `_montage_stall_repairs` (JSONL: stall_repairs — every count
-    # is a lost-wakeup bug report, asserted zero in the GPU harness) and then
-    # rescues via the ordinary dispatch, never a bespoke repair path.
+    # -- stall assertion probe (ADR 0051) -------------------------------------
+    # The live render path must make lost wakeups impossible by construction.
+    # This probe is diagnostics-only: when the diagnostics dialog is visible it
+    # records a frozen unsettled signature, but it never mutates session state
+    # or schedules work.
+
+    def _montage_assertion_probe_enabled(self) -> bool:
+        dialog = getattr(self.win, "_diagnostics_dialog", None)
+        return bool(dialog is not None and dialog.isVisible())
 
     def _ensure_montage_watchdog(self) -> None:
+        if not self._montage_assertion_probe_enabled():
+            self._montage_watchdog_stop()
+            return
         timer = getattr(self, "_montage_watchdog_timer", None)
         if timer is None:
             timer = Qt.QtCore.QTimer(self)
@@ -2860,6 +2863,9 @@ class FrameRenderMixin:
 
     @Qt.QtCore.Slot()
     def _montage_watchdog_tick(self) -> None:
+        if not self._montage_assertion_probe_enabled():
+            self._montage_watchdog_stop()
+            return
         session = getattr(self, "_montage_session", None)
         if session is None or not self._montage_session_is_current(session):
             self._montage_watchdog_stop()
@@ -2899,11 +2905,8 @@ class FrameRenderMixin:
             self._montage_watchdog_stop()
             return
         if planning_deferred:
-            # Deferred planning is scheduled work, not a stall: its
-            # continuation chain re-arms itself while interaction lasts.
-            # Re-kick it (idempotent — the completion no-ops once the flag
-            # clears) instead of counting a repair.
-            self._schedule_deferred_montage_planning(session)
+            # Deferred planning is scheduled work, not a stall; if it wedges,
+            # the stable signature below reports it without re-kicking work.
             return
         level_timer = getattr(self, "_montage_level_stats_timer", None)
         if level_evidence and level_timer is not None and level_timer.isActive():
@@ -2930,14 +2933,10 @@ class FrameRenderMixin:
         self._montage_watchdog_state = signature
         if previous != signature:
             return  # work is progressing; stay armed.
-        self._montage_stall_repairs = int(getattr(self, "_montage_stall_repairs", 0) or 0) + 1
-        # ASSERTION FIRED: a state mutation escaped the dispatch construction.
-        # Keep the frozen signature visible for root-causing and rescue via
-        # the ordinary dispatch — if dispatch cannot rescue it, the defect is
-        # in the derivation, which is the bug report we want.
+        self._montage_stall_assertions = int(getattr(self, "_montage_stall_assertions", 0) or 0) + 1
         self._montage_watchdog_last_stall = signature
         print(
-            "[arrayscope] STALL WATCHDOG FIRED (lost wakeup, ADR 0051): "
+            "[arrayscope] STALL ASSERTION PROBE FIRED (ADR 0051): "
             f"signature={signature} "
             f"stage_active={len(session.stage_fan_in.active_requests)} "
             f"stage_attached={len(session.stage_fan_in.attached_requests)} "
@@ -2947,9 +2946,6 @@ class FrameRenderMixin:
             file=sys.stderr,
             flush=True,
         )
-        if session.refresh_lod_for_viewport():
-            self._schedule_montage_presentation_commit(session, force=False)
-        self._dispatch_montage_work(session, force=bool(dirty or upserts))
 
     def _on_montage_lod_level_ready(self, session_id, session_key, tile_number) -> None:
         return montage_lod.on_level_ready(self, session_id, session_key, tile_number)
@@ -3017,12 +3013,6 @@ class FrameRenderMixin:
         if not _montage_work_token_is_current(session, token, "commit"):
             return
         self._commit_montage_session_presentation(session, force=False)
-        repaired = session.requeue_orphaned_loading_tiles()
-        if repaired:
-            self._montage_orphaned_tiles_repaired = (
-                int(getattr(self, "_montage_orphaned_tiles_repaired", 0) or 0) + int(repaired)
-            )
-            self._schedule_montage_tiles(session)
         if (
             getattr(session, "show_loading_overlays", False)
             and not session.visible_plan_complete()

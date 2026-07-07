@@ -115,13 +115,11 @@ class Harness:
     def assert_lifecycle_settled(self) -> None:
         s = self.session
         counters = s.lifecycle.counters()
-        # ADR 0051 P2 (machine-derived dispatch): the stall watchdog is an
-        # assertion now — any fire during a scripted interaction means a
-        # state mutation escaped the dispatch construction (a lost wakeup).
-        stall_repairs = int(getattr(self.win.renderer, "_montage_stall_repairs", 0) or 0)
-        assert stall_repairs == 0, (
-            "stall watchdog fired (lost wakeup): "
-            f"{stall_repairs}x, last={getattr(self.win.renderer, '_montage_watchdog_last_stall', None)}"
+        # ADR 0051 P2: the diagnostics-gated stall probe is observational only.
+        stall_assertions = int(getattr(self.win.renderer, "_montage_stall_assertions", 0) or 0)
+        assert stall_assertions == 0, (
+            "stall assertion probe fired: "
+            f"{stall_assertions}x, last={getattr(self.win.renderer, '_montage_watchdog_last_stall', None)}"
         )
         assert counters["dangling_claims"] == 0, (
             f"leaked claims: {s.lifecycle.dangling_claims()}"

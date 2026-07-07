@@ -134,6 +134,29 @@ def test_canvas_preserve_controller_owns_strong_preserve_path():
     assert "commit_nudge" in preserve_text
 
 
+def test_montage_stall_probe_is_diagnostics_only():
+    path = ROOT / "arrayscope" / "window" / "frame_renderer.py"
+    text = path.read_text()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_montage_watchdog_tick":
+            source = ast.get_source_segment(text, node) or ""
+            forbidden = (
+                "_dispatch_montage_work",
+                "_schedule_montage_presentation_commit",
+                "_schedule_deferred_montage_planning",
+                "refresh_lod_for_viewport",
+                "requeue_orphaned_loading_tiles",
+                "_montage_stall_" + "repairs",
+                "STALL " + "WATCHDOG",
+            )
+            for token in forbidden:
+                assert token not in source
+            assert "_montage_stall_assertions" in source
+            return
+    raise AssertionError("_montage_watchdog_tick not found")
+
+
 def test_montage_commits_flow_through_pipeline_effects_and_shared_surface():
     frame_text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
     commit_text = (ROOT / "arrayscope" / "window" / "montage_commit.py").read_text()

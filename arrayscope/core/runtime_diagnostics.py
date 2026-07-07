@@ -174,11 +174,10 @@ class MontageRuntimeDiagnostics:
     lifecycle_identity_rejections: int = 0
     # Tiles whose payload is dirty (queued for re-presentation).
     dirty_payload_tiles: int = 0
-    # Stall-watchdog rescues (ADR 0051): each one means every montage pump
-    # was dead while work remained — a lost wakeup that must be root-caused;
-    # the watchdog is a safety net, not the fix.  The signature captures what
-    # was frozen: (session, pending, evaluating, active, dirty, upserts, lod).
-    stall_repairs: int = 0
+    # Stall assertion probes (ADR 0051): each one means an unsettled montage
+    # session had the same signature across diagnostics ticks.  The probe is
+    # observational only and never schedules or mutates render work.
+    stall_assertions: int = 0
     last_stall_signature: tuple[int, ...] = ()
     # ADR 0051 rule 1 ground truth: drawn tiles whose backend-reported slot
     # identity differs from the session's current payload — nonzero at idle
