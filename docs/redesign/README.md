@@ -66,6 +66,21 @@ guide us back to the wrong path.
    old methods AND their pacing tests. Never leave a compatibility shim.
 7. **One cluster per commit; measure after each.** Commit messages: what +
    why + numbers (suite counts, before/after timings).
+8. **Exit gates are hard and immutable.** A plan is not done while its
+   gate fails; never edit a gate to match a result (this happened once —
+   see the R2b section of the R2 plan — and cost a full stabilization
+   pass).
+9. **No symptom patches.** Clamping workers/batches, adding pacing, or
+   editing a harness because "it reduces the symptom" requires a written
+   root-cause note first. The R2 freezes were a per-completion commit
+   storm, camera-key churn, deps-as-ordering, and per-tile-native FFT
+   floors — none of which worker clamps could fix.
+10. **Deps are not ordering; cameras are not identity.** Kernel deps
+    fail-propagate (data dependencies only); viewport keys never belong in
+    task keys or supersession values
+    (`test_camera_only_retarget_never_invalidates_rung_work` pins this).
+11. **Payload semantics ride payload metadata** (`quality`,
+    `texture_kind`, levels) — never dtype/shape sniffing in a backend.
 
 ## Environment & commands (unchanged mechanics, new locations)
 

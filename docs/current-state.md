@@ -1,13 +1,19 @@
 # Current state
 
-**Snapshot:** `redesign` branch, 2026-07-07. ADR 0053 accepted; R1 and R2
-are landed. App background execution runs through one kernel plus one Qt
-bridge, and the montage data path now runs through the render pipeline for
-evaluation, stage dependencies, commit batching, lifecycle acknowledgement,
-and presentation. Plans R3–R5 ([docs/redesign/](redesign/README.md))
-dissolve the remaining LOD, timer/governor, and docs/test debt. `main`
-(6fa5c758) holds the pre-redesign state described in this file's git
-history.
+**Snapshot:** `redesign` branch, 2026-07 (post R2 stabilization). ADR 0053
+accepted; R1 landed; **R2 is code-complete but NOT closed** — its first
+completion attempt shipped four architectural defects (per-completion
+commit storm, camera-key churn, deps-as-ordering, per-tile-native FFT
+floors) plus symptom patches; those are reverted/fixed (a23fb2b2,
+4464a6e4) and the R2 exit gate (benchmark bars) must now be re-measured.
+App background execution runs through one kernel plus one Qt bridge; the
+montage data path runs through the render pipeline with an
+admission/presentation split (bounded commit per event-loop turn behind a
+coalescing gate). R2b work items and the red-test ledger live in
+[known-red.md](redesign/known-red.md); plans R3–R5
+([docs/redesign/](redesign/README.md)) dissolve the remaining LOD,
+timer/governor, and docs/test debt. `main` (6fa5c758) holds the
+pre-redesign state described in this file's git history.
 
 ## Why the redesign (one paragraph)
 
@@ -32,7 +38,7 @@ first-class via capabilities, core-green test bar with a known-red ledger.
 | Legacy orchestration | **Dissolving** | WorkGraph is deleted and `window/evaluation_controller.py` is import-only. `frame_renderer.py` is below the R2 gate (1,888 lines) with clusters B/C/E moved out or deleted; `montage_lod.py` and level-stats timers remain R3/R4 deletion targets with a [method-by-method map](redesign/frame-renderer-map.md). |
 | Vocabulary | Canonical in kernel | `WorkLane`/`EvalPriority` are compat aliases of kernel `Lane`/`Priority`. |
 | Hygiene | Done (first pass) | Kill switches, P3 fallbacks, tmp_probes deleted; 3 probes live in `tools/probes/`. |
-| Baseline health | Green, with known slow full workflows | R2 validation: GPU harness → 7 passed, including FFT-preview; focused kernel/render/presentation/surface/architecture suites → 166 passed; montage/UI/workflow slice → 210 passed, 2 skipped. Workflow JSONL for both backends and both LOD policies is under `tests/artifacts/`; the FFT wedge now completes, but full-workflow event-loop gaps remain known-slow evidence. |
+| Baseline health | 8 ledgered red tests; benchmarks await re-measure | Full suite 1642 passed / 8 red (all in [known-red.md](redesign/known-red.md) with R2b owners); GPU harness 7/7 incl. FFT-preview. The pre-fix workflow JSONLs (multi-second event-loop gaps, 42.8 s VisPy resident FFT) predate 4464a6e4 — re-measure before quoting them. |
 
 ## What is working well
 
@@ -44,17 +50,21 @@ first-class via capabilities, core-green test bar with a known-red ledger.
 
 ## Material risks
 
-1. **R3/R4 must finish the remaining hot-path debt.** R2 removed the stuck
-   FFT floor pump, but full-workflow JSONL still shows multi-second
-   event-loop gaps in raw/FFT phases, especially VisPy resident.
-2. **Hardware evidence still Linux-only** (X5c–X5e untouched by the
+1. **R2 closes only on re-measured benchmark bars** (ground rule 8: gates
+   are immutable). The pre-fix JSONLs are failure evidence, not baselines.
+2. **The window-levels cluster** (3 red tests, one likely root cause in
+   the moved level flow) is user-facing correctness — R2b item 1 before
+   anything else.
+3. **Hardware evidence still Linux-only** (X5c–X5e untouched by the
    redesign; Windows/macOS traces owed).
-3. **Histogram adapter remains version-sensitive** to private PyQtGraph
+4. **Histogram adapter remains version-sensitive** to private PyQtGraph
    API (unchanged).
-4. **One temporary dual path remains**: montage level stats still use the
+5. **One temporary dual path remains**: montage level stats still use the
    existing bounded timer path until R3's LevelStatsService.
 
 ## Current direction
 
-Execute R3→R5 in order (`docs/redesign/README.md` owns the queue), then
-return to the X5 evidence gates in `docs/roadmap.md`.
+Finish R2b (window-levels cluster → overlay/ROI timing → diagnostics
+formatter → complex windowing seam → benchmark re-measure against the
+unchanged R2 gate), then R3→R5 in order (`docs/redesign/README.md` owns
+the queue), then the X5 evidence gates in `docs/roadmap.md`.
