@@ -67,7 +67,7 @@ tricky seams.
 - Montage workflow benchmark (both backends, resident + native-only):
   first-payload / first-complete-fill / settled within ±10% of pre-R2, and
   warm scrub ≤ 15 ms (the Plan 01 bar).
-- GPU harness green, `stall_repairs==0`, `[DESYNC!]` probes quiet.
+- GPU harness green, `stall_assertions==0`, `[DESYNC!]` probes quiet.
 - frame_renderer.py shrinks below 2,000 lines with clusters B, C, E gone;
   every deleted method's tests deleted or rewritten against
   pipeline/ladder/kernel counters.

@@ -109,11 +109,11 @@ def compute_policy_from_settings(settings, *, cpu_count: int | None = None) -> C
     tile_fft = 1
     product_limit = max(2, count // 2)
     if profile == MemoryProfileChoice.CONSERVATIVE:
-        tile_workers = max(1, min(4, max(1, count // 4)))
+        tile_workers = 1
     elif profile == MemoryProfileChoice.AGGRESSIVE:
-        tile_workers = max(2, min(12, max(2, count - 2)))
+        tile_workers = max(2, min(4, max(2, count // 4)))
     else:
-        tile_workers = max(2, min(8, product_limit))
+        tile_workers = max(1, min(2, product_limit))
     if not explicit_aggressive:
         while tile_workers * tile_fft > product_limit and tile_workers > 1:
             tile_workers -= 1

@@ -2,8 +2,8 @@
 
 Pins: retarget submits exactly the missing rung work, semantic changes clear
 the scope, viewport changes supersede per-tile rung families, and commit
-batches stay bounded. Effects are stubbed — evaluation/commit porting is
-redesign R2 (see pipeline.py TODOs).
+batches stay bounded. Effects are stubbed here so the tests isolate the
+pipeline/kernel contract from the concrete montage backend bridge.
 """
 
 from __future__ import annotations
@@ -58,6 +58,19 @@ def make_pipeline(tiles=2, **policy_kwargs):
     ladder = LodLadder(LadderPolicy(**policy_kwargs)) if policy_kwargs else LodLadder()
     pipeline = MontagePipeline(kernel, effects, ladder)
     return kernel, effects, pipeline
+
+
+class CaptureKernel:
+    def __init__(self):
+        self.specs = []
+        self.cleared_scopes = []
+
+    def submit(self, spec, **_callbacks):
+        self.specs.append(spec)
+        return object()
+
+    def clear_scope(self, scope):
+        self.cleared_scopes.append(scope)
 
 
 def drain(kernel):
@@ -168,3 +181,21 @@ def test_rung_dependencies_park_tasks_until_stage_key_completes():
     drain(kernel)
 
     assert len(effects.evaluated) == 3
+
+
+def test_pipeline_adds_per_tile_rung_dependencies_to_kernel_specs():
+    kernel = CaptureKernel()
+    effects = StubEffects(tiles=2)
+    pipeline = MontagePipeline(kernel, effects, LodLadder())
+
+    assert pipeline.retarget(intent(), demand(1)) == 6
+
+    floors = [spec for spec in kernel.specs if spec.key.rung == 0]
+    previews = [spec for spec in kernel.specs if spec.key.rung == 1]
+    desired = [spec for spec in kernel.specs if spec.key.rung == 2]
+    assert len(floors) == len(previews) == len(desired) == 2
+    assert all(spec.deps == () for spec in floors)
+    floor_by_tile = {spec.key.tile_number: spec.key for spec in floors}
+    preview_by_tile = {spec.key.tile_number: spec.key for spec in previews}
+    assert all(spec.deps == (floor_by_tile[spec.key.tile_number],) for spec in previews)
+    assert all(spec.deps == (preview_by_tile[spec.key.tile_number],) for spec in desired)

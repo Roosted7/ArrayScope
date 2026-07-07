@@ -17,8 +17,13 @@ defers to it while the redesign is in flight.
   GPU harness 6 passed. The vispy/resident FFT preview wedge reproduced and
   remains in [known-red.md](known-red.md) for R2/R3.
 - `arrayscope/render/` — typed stage contracts, the unified LOD ladder
-  (pure planner, 11 tests), and the kernel-backed `MontagePipeline`
-  skeleton (5 tests) with `PipelineEffects` integration points.
+  (pure planner), and the kernel-backed `MontagePipeline` now driving the
+  live montage path through evaluation effects, stage dependencies, commit
+  batches, lifecycle acknowledgement, and backend presentation.
+- **R2 pipeline integration** — `frame_renderer.py` is 1,888 lines; clusters
+  B/C/E are deleted or extracted, stage fan-in is kernel-dependency based,
+  the watchdog is diagnostics-only (`stall_assertions`), and the FFT
+  transform-preview GPU harness scenario is covered.
 - Lane/priority vocabulary canonicalized in the kernel (legacy modules are
   compat aliases).
 - Plan-time viewport content extent (fixes the fit-unlock regression,
@@ -30,10 +35,10 @@ defers to it while the redesign is in flight.
 
 | Plan | What | Size | Blocked by |
 |---|---|---|---|
-| [R2](r2-pipeline-integration.md) | MontagePipeline live: port evaluation/commit effects, dissolve frame_renderer clusters B/C/E | XL | R1 |
+| [R2](r2-pipeline-integration.md) | MontagePipeline live: port evaluation/commit effects, dissolve frame_renderer clusters B/C/E | Done | R1 |
 | [R3](r3-lod-ladder-adoption.md) | Ladder replaces montage_lod planning; one pyramid store; ops once per rung; PyQtGraph parity via capabilities | L | R2 |
 | [R4](r4-timer-and-governor-audit.md) | Every QTimer justified or deleted; governor shrinks to telemetry + two knobs | M | R2 |
-| [R5](r5-test-and-docs-truth-pass.md) | Delete wrong-path tests; docs/current-state truth pass; known-red ledger emptied | M | R2–R4 |
+| [R5](r5-test-and-docs-truth-pass.md) | Delete wrong-path tests; docs/current-state truth pass; known-red ledger emptied | M | R3–R4 |
 
 A plan is done only when its exit gate passes and the source code it
 replaces is DELETED. "Both paths work" is not done — old remnants subtly
@@ -76,11 +81,13 @@ guide us back to the wrong path.
   teardown of `test_montage_ready_display_payloads_commit_immediately`.
 - **Kernel/render suites only** (fast TDD loop, no Qt):
   `… -m pytest tests/kernel tests/render tests/presentation -q -n 0`
-- **GPU harness** (~20 s, real hardware, asserts `stall_repairs==0`):
+- **GPU harness** (~20 s, real hardware, asserts `stall_assertions==0`):
   `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland … -m pytest tests/gpu_interaction -n 0`
 - **Workflow benchmark:**
   `… -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-lod-policy {resident|native-only} [--jsonl FILE]`
-  `STALL WATCHDOG` on stderr must stay 0.
+  `STALL ASSERTION` on stderr must stay 0.
+  R2 evidence is saved as
+  `tests/artifacts/r2-profile-montage-workflow-{pyqtgraph,vispy}-{resident,native-only}.jsonl`.
 - **Probes:** `tools/probes/` (`verify_scrub_fastpath.py`,
   `profile_cached_rebuild.py` — ONSCREEN, tell Thomas hands-off,
   `verify_stale.py`).
@@ -103,7 +110,7 @@ guide us back to the wrong path.
 
 ## Definition of done (every plan)
 
-1. Suites per rule 5; GPU harness green incl. `stall_repairs==0`.
+1. Suites per rule 5; GPU harness green incl. `stall_assertions==0`.
 2. The replaced code is deleted; grep proves no references remain.
 3. Numbers in the commit message; ADR 0053 status table updated.
 4. Claude memory updated (`arrayscope-lod-residency` note: queue position,

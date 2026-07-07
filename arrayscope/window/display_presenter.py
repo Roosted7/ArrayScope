@@ -423,9 +423,9 @@ class DisplayPresentationMixin:
 
     def _schedule_frame_viewport_update(self, *, delay_ms: int | None = None) -> None:
         if getattr(self.win.view_state, "montage_axis", None) is not None:
-            scheduler = getattr(self, "_schedule_montage_viewport_update", None)
+            scheduler = getattr(self, "retarget_montage_viewport", None)
             if callable(scheduler):
-                scheduler(delay_ms=delay_ms)
+                scheduler()
             return
         timer = getattr(self, "_frame_viewport_update_timer", None)
         if timer is None:
@@ -715,14 +715,14 @@ class DisplayPresentationMixin:
             return True
 
         if bool(final):
-            committer = getattr(self, "_commit_montage_session_presentation", None)
+            committer = getattr(self, "commit_montage_session_presentation", None)
             if callable(committer) and not bool(getattr(self, "_montage_presentation_commit_active", False)):
-                committer(session, force=True)
+                committer(session)
                 return True
 
-        scheduler = getattr(self, "_schedule_montage_presentation_commit", None)
+        scheduler = getattr(self, "apply_montage_presentation", None)
         if callable(scheduler):
-            scheduler(session, force=bool(final))
+            scheduler(session)
         return True
 
 

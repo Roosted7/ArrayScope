@@ -85,7 +85,6 @@ class StageMaterializationManager:
         return StageMaterializationResult("scheduled", key, request=request)
 
     def complete(self, key: StageKey, value) -> None:
-        del value
         self._in_flight.pop(key, None)
         self._completed += 1
         self._record_key("completed", key, "shared stage ready")

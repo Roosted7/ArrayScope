@@ -26,18 +26,14 @@ optimistic bookkeeping — these rules are load-bearing):
 """
 
 from __future__ import annotations
-
-import os
 from typing import NamedTuple
 
 import numpy as np
 
 from arrayscope.core.scheduler import EvalPriority
 from arrayscope.kernel import Lane as WorkLane, WorkItem
-from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
-    LOD_REASON_BACKEND_ADOPTION_PENDING,
     LOD_REASON_NATIVE_POLICY,
     LOD_POLICY_RESIDENT,
     LodInfo,
@@ -696,7 +692,7 @@ def floor_component_tags(session) -> tuple[str, ...]:
     """Component tags a floor probe may find for this session's tiles."""
 
     if bool(getattr(session, "shader_display", False)):
-        return (str(TexturePlaneKind.COMPLEX_RG32F.value), "scalar")
+        return (str(TexturePlaneKind.RGB8.value), str(TexturePlaneKind.COMPLEX_RG32F.value), "scalar")
     return (str(TexturePlaneKind.RGB8.value), "scalar", str(TexturePlaneKind.COMPLEX_RG32F.value))
 
 
@@ -704,8 +700,6 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
     """Best resident pyramid key for one tile: nearest demand, finer ties."""
 
     pyramid = session.lod_pyramid
-    if pyramid is None:
-        return None
     demand = session.lod_policy_decision.demand
     desired = int(demand.desired_level)
     semantic_id = session.tile_semantic_source_id(int(source_index))
@@ -727,17 +721,18 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
                     best_preview = (rank, key, level, cache)
             if best_preview is not None:
                 return (best_preview[1], best_preview[2], best_preview[3])
-    best = None
-    for component in floor_component_tags(session):
-        for key in pyramid.resident_keys_for(semantic_id, int(source_index), component):
-            level = max(int(key.level_xy[0]), int(key.level_xy[1]))
-            rank = (abs(level - desired), level)
-            if best is None or rank < best[0]:
-                best = (rank, key, level)
+    if pyramid is not None:
+        best = None
+        for component in floor_component_tags(session):
+            for key in pyramid.resident_keys_for(semantic_id, int(source_index), component):
+                level = max(int(key.level_xy[0]), int(key.level_xy[1]))
+                rank = (abs(level - desired), level)
+                if best is None or rank < best[0]:
+                    best = (rank, key, level)
+            if best is not None:
+                break
         if best is not None:
-            break
-    if best is not None:
-        return (best[1], best[2], pyramid)
+            return (best[1], best[2], pyramid)
     preview = session.lod_preview_pyramid
     level = int(session.lod_preview_level)
     if preview is None or level <= 0:
@@ -795,8 +790,8 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
 
     if not tile_numbers or not resident_lod_active(session):
         return
-    pyramid = session.lod_pyramid
-    if pyramid is None:
+    cache = session.preview_floor_cache()
+    if cache is None:
         return
     by_number = {
         int(tile.montage_index): tile
@@ -1058,29 +1053,16 @@ def release_session_claims(session) -> int:
 def policy_mode_for_renderer(renderer) -> str:
     """Resolve the configured montage LOD policy for the active backend.
 
-    ADR 0050 scopes the first "resident" slice to VisPy tiled scenes;
-    any other backend keeps native-only regardless of the setting.
+    The user setting owns the production policy.  Both tiled backends now use
+    the same resident-LOD ladder; backend differences live in presentation
+    capabilities, not in policy downgrades.
     """
 
     choice = getattr(getattr(renderer.win, "app_settings", None), "montage_lod_policy", None)
     value = str(getattr(choice, "value", choice) or LOD_POLICY_NATIVE_ONLY)
     if value != LOD_POLICY_RESIDENT:
         return LOD_POLICY_NATIVE_ONLY
-    capabilities = image_view_backend_capabilities(renderer.win.img_view)
-    name = str(getattr(capabilities, "name", ""))
-    if name == "vispy":
-        return LOD_POLICY_RESIDENT
-    if name == "pyqtgraph" and _pyqtgraph_resident_lod_enabled():
-        # ADR 0050 phase 3: the shared planner/materializer feed reduced
-        # payload.image to per-tile ImageItems (scale transform maps image
-        # pixels onto native texels).  Opt-in until the A/B evidence gate
-        # ("where measured") flips the default.
-        return LOD_POLICY_RESIDENT
-    return LOD_POLICY_NATIVE_ONLY
-
-
-def _pyqtgraph_resident_lod_enabled() -> bool:
-    return str(os.environ.get("ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD", "") or "").strip() == "1"
+    return LOD_POLICY_RESIDENT
 
 
 def native_policy_reason_for_renderer(renderer) -> str:
@@ -1095,10 +1077,6 @@ def native_policy_reason_for_renderer(renderer) -> str:
     value = str(getattr(choice, "value", choice) or LOD_POLICY_NATIVE_ONLY)
     if value != LOD_POLICY_RESIDENT:
         return LOD_REASON_NATIVE_POLICY
-    capabilities = image_view_backend_capabilities(renderer.win.img_view)
-    name = str(getattr(capabilities, "name", ""))
-    if name != "vispy" and not (name == "pyqtgraph" and _pyqtgraph_resident_lod_enabled()):
-        return LOD_REASON_BACKEND_ADOPTION_PENDING
     return LOD_REASON_NATIVE_POLICY
 
 
@@ -1265,8 +1243,8 @@ def retry_blocked_materializations(renderer) -> None:
     if session is None or not renderer._montage_session_is_current(session):
         return
     if session.refresh_lod_for_viewport():
-        renderer._schedule_montage_presentation_commit(session, force=False)
-    renderer._retarget_montage_pipeline(session)
+        renderer.apply_montage_presentation(session)
+    renderer.retarget_montage_pipeline(session)
 
 
 def on_level_ready(renderer, session_id, session_key, tile_number) -> None:
@@ -1281,6 +1259,8 @@ def on_level_ready(renderer, session_id, session_key, tile_number) -> None:
     session.lod_materializations_completed = int(getattr(session, "lod_materializations_completed", 0) or 0) + 1
     if int(tile_number) in session.rendered_tiles:
         session.dirty_payloads[int(tile_number)] = None
+        session.flush_pending = True
+        session.final_commit_pending = True
     # A completed level is backend evidence with its own consumer: retarget
     # the pipeline so the ladder can swap resident levels and finish commits.
-    renderer._retarget_montage_pipeline(session)
+    renderer.retarget_montage_pipeline(session)

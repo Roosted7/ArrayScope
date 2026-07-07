@@ -12,8 +12,7 @@ suites are never allowed red.
 
 | symptom | evidence | resolved by |
 |---|---|---|
-| FFT transform-preview montage floor fill takes ~64 s (272 tiles, vispy resident) with event-loop gaps up to 4.6 s; progress happens only via STALL WATCHDOG rescues (`lost wakeup: loading≈267→231, flush_pending=True, final=True`) | `profile_montage_workflow --backend vispy --montage-lod-policy resident --jsonl tests/artifacts/r1-profile-montage-workflow-vispy-resident.jsonl`, 2026-07-07 on `redesign`; raw montage is ~2.8 s and the later level-only refinement is ~145 ms, so the wedge is specific to the transform-preview floor pump | R2 replaces the flush/pump path with kernel completions + capacity waiters (lost wakeups become structurally impossible); R3 owns the transform-preview queue. If a one-line pump re-arm is found earlier, fix on main and record here |
-| GPU harness (`tests/gpu_interaction`) asserts `stall_repairs==0` but does not cover the FFT/transform-preview scenario — the 73 s wedge above passes CI | add an FFT-preview scenario to the harness in R2 step 4 | R2 |
+| Full montage workflows still show multi-second event-loop gaps even though they complete without stall assertions | R2 JSONL saved in `tests/artifacts/r2-profile-montage-workflow-{pyqtgraph,vispy}-{resident,native-only}.jsonl`: PyQtGraph FFT full ~5.2–5.4 s with max gaps ~2.1–3.9 s; VisPy native-only FFT full ~6.8 s with max gap ~5.2 s; VisPy resident FFT full ~42.8 s with max gap ~22.8 s | R3 removes the remaining `montage_lod.py`/level-stats dual path; R4 audits governor/timer pacing and GUI-thread commit work |
 
 Resolved on this branch (for the record):
 
@@ -24,6 +23,9 @@ Resolved on this branch (for the record):
   main; bisected to 2995d039 (fit-unlock re-ranged around stale
   single-slice bounds while preview-floor gating deferred the first
   commit); fixed by plan-time content extent (a3992c8f).
+- The R1 vispy/resident FFT transform-preview wedge no longer sticks after
+  R2: the same workflow completes in the R2 JSONL, and the GPU harness now
+  includes `test_fft_preview_refinement_settles_without_stalls`.
 - Earlier parallel-only settings/governor/scheduler flakes are no longer
   current R1 known-red entries after the kernel lane-quota and bridge-drain
   rewrite; keep them out of the active table unless they reproduce again.

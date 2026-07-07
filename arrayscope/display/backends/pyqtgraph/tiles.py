@@ -14,6 +14,7 @@ from pyqtgraph.Qt import QtGui
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.model.presentation_generation import levels_match
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
+from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.tile_layout import tile_layout_map, tile_layout_regions
 
 from arrayscope.display.image_upload import rgb_display_for_levels
@@ -66,6 +67,17 @@ def _apply_item_lod_scale(state: "TileLayerItemState", scale_x: float, scale_y: 
     if scale != (1.0, 1.0):
         transform.scale(scale[0], scale[1])
     state.item.setTransform(transform)
+
+
+def _payload_rgb_already_windowed(payload: DisplayTilePayload, fallback: bool) -> bool:
+    if bool(fallback):
+        return True
+    data = np.asarray(getattr(payload, "image", None))
+    return bool(
+        data.ndim == 3
+        and data.shape[-1] in (3, 4)
+        and np.issubdtype(data.dtype, np.integer)
+    )
 
 
 @dataclass
@@ -261,11 +273,7 @@ class MontageTileLayer:
             states=states,
             tile_source_ids=tile_source_ids,
         )
-        cold_holes = _direct_cold_hole_count(
-            preclaim_specs,
-            self._states_by_source_key,
-            rgb_already_windowed=bool(rgb_already_windowed),
-        )
+        cold_holes = _direct_cold_hole_count(preclaim_specs, self._states_by_source_key)
         # Moving an ImageItem is destructive for its old slot.  Unlike VisPy's
         # coherent atlas remap, a backend-local cold deadline could stop before
         # the displaced slot is replaced.  The unconstrained range-shift path
@@ -275,12 +283,13 @@ class MontageTileLayer:
         if allow_resident_reuse:
             for tile_number, spec in preclaim_specs.items():
                 item_state = self._states.get(int(tile_number))
+                spec_rgb_already_windowed = bool(spec[3])
                 if _direct_state_matches(
                     item_state,
                     source_id=spec[0],
                     histogram_id=spec[1],
                     local_rect=spec[2],
-                    rgb_already_windowed=bool(rgb_already_windowed),
+                    rgb_already_windowed=spec_rgb_already_windowed,
                 ):
                     continue
                 self._take_resident_direct_state(
@@ -288,7 +297,7 @@ class MontageTileLayer:
                     source_id=spec[0],
                     histogram_id=spec[1],
                     local_rect=spec[2],
-                    rgb_already_windowed=bool(rgb_already_windowed),
+                    rgb_already_windowed=spec_rgb_already_windowed,
                 )
         for tile_number in tile_order:
             region = layout.get(int(tile_number))
@@ -331,6 +340,7 @@ class MontageTileLayer:
                 if tile_source_ids is not None
                 else payload.source_id
             )
+            payload_rgb_already_windowed = _payload_rgb_already_windowed(payload, bool(rgb_already_windowed))
             source_id = _direct_payload_source_id(base_source_id, payload)
             hist_id = ("tile-source", source_id) if tile_hist is not None else None
             local_rect = (0, 0, int(crop_w), int(crop_h))
@@ -341,7 +351,7 @@ class MontageTileLayer:
                 source_id=source_id,
                 histogram_id=hist_id,
                 local_rect=local_rect,
-                rgb_already_windowed=bool(rgb_already_windowed),
+                rgb_already_windowed=payload_rgb_already_windowed,
             )
             if allow_resident_reuse and (item_state is None or not resident_current):
                 reused = self._take_resident_direct_state(
@@ -349,7 +359,7 @@ class MontageTileLayer:
                     source_id=source_id,
                     histogram_id=hist_id,
                     local_rect=local_rect,
-                    rgb_already_windowed=bool(rgb_already_windowed),
+                    rgb_already_windowed=payload_rgb_already_windowed,
                 )
                 if reused is not None:
                     item_state = reused
@@ -366,7 +376,7 @@ class MontageTileLayer:
                 or item_state.source_array_id != source_id
                 or item_state.histogram_array_id != hist_id
                 or tuple(item_state.local_rect) != local_rect
-                or bool(item_state.rgb_already_windowed) != bool(rgb_already_windowed)
+                or bool(item_state.rgb_already_windowed) != payload_rgb_already_windowed
             )
             dirty = dirty_set is None or int(tile_number) in dirty_set
             if resident_current:
@@ -378,7 +388,7 @@ class MontageTileLayer:
                 item_state is not None
                 and levels_changed
                 and is_rgb_tile
-                and not bool(rgb_already_windowed)
+                and not payload_rgb_already_windowed
                 and tile_hist is not None
                 and (item_state.rgb_base is None or item_state.hist_source is None)
             )
@@ -433,7 +443,7 @@ class MontageTileLayer:
                         source_array_id=0,
                         histogram_array_id=None,
                         levels=levels,
-                        rgb_already_windowed=bool(rgb_already_windowed),
+                        rgb_already_windowed=payload_rgb_already_windowed,
                         visible=False,
                     )
                     created_item = True
@@ -470,7 +480,7 @@ class MontageTileLayer:
                     source_array_id=source_id,
                     histogram_array_id=hist_id,
                     local_rect=local_rect,
-                    rgb_already_windowed=bool(rgb_already_windowed),
+                    rgb_already_windowed=payload_rgb_already_windowed,
                 )
                 item_state.world_rect = world_rect
                 items_updated += int(updated)
@@ -652,6 +662,7 @@ class MontageTileLayer:
                 tile_data = tile_data[:crop_h, :crop_w, ...]
             tile_hist = None if payload.histogram_data is None else np.asarray(payload.histogram_data)[:height, :width]
             base_source_id = near_source_ids.get(int(tile_number), payload.source_id)
+            payload_rgb_already_windowed = _payload_rgb_already_windowed(payload, bool(rgb_already_windowed))
             source_id = _direct_payload_source_id(base_source_id, payload)
             hist_id = ("tile-source", source_id) if tile_hist is not None else None
             local_rect = (0, 0, int(crop_w), int(crop_h))
@@ -661,14 +672,14 @@ class MontageTileLayer:
                 source_id=source_id,
                 histogram_id=hist_id,
                 local_rect=local_rect,
-                rgb_already_windowed=bool(rgb_already_windowed),
+                rgb_already_windowed=payload_rgb_already_windowed,
             ):
                 item_state = self._take_resident_direct_state(
                 int(tile_number),
                 source_id=source_id,
                 histogram_id=hist_id,
                 local_rect=local_rect,
-                rgb_already_windowed=bool(rgb_already_windowed),
+                rgb_already_windowed=payload_rgb_already_windowed,
                 )
             if item_state is None:
                 item_state = self._pop_direct_reuse_pool() if self._direct_reuse_pool else None
@@ -683,7 +694,7 @@ class MontageTileLayer:
                         source_array_id=0,
                         histogram_array_id=None,
                         levels=levels,
-                        rgb_already_windowed=bool(rgb_already_windowed),
+                        rgb_already_windowed=payload_rgb_already_windowed,
                         visible=False,
                     )
                     created_item = True
@@ -706,7 +717,7 @@ class MontageTileLayer:
                 source_id=source_id,
                 histogram_id=hist_id,
                 local_rect=local_rect,
-                rgb_already_windowed=bool(rgb_already_windowed),
+                rgb_already_windowed=payload_rgb_already_windowed,
             )
             if not matches or tuple(item_state.levels) != levels:
                 updated, windowed = self._set_tile_data(
@@ -718,7 +729,7 @@ class MontageTileLayer:
                     source_array_id=source_id,
                     histogram_array_id=hist_id,
                     local_rect=local_rect,
-                    rgb_already_windowed=bool(rgb_already_windowed),
+                    rgb_already_windowed=payload_rgb_already_windowed,
                 )
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
@@ -1256,7 +1267,7 @@ def _direct_tile_order(
                     tile_payloads[int(tile)],
                     tile_states=tile_states,
                     tile_source_ids=tile_source_ids,
-                    rgb_already_windowed=bool(rgb_already_windowed),
+                    rgb_already_windowed=_payload_rgb_already_windowed(tile_payloads[int(tile)], bool(rgb_already_windowed)),
                 )
             )
         )
@@ -1292,8 +1303,7 @@ def _direct_tile_binding_stale(
     tile_data = np.asarray(payload.image)
     if tile_data.ndim < 2:
         return False
-    width = min(int(region.width), int(tile_data.shape[1]))
-    height = min(int(region.height), int(tile_data.shape[0]))
+    width, height, crop_w, crop_h, _scale_x, _scale_y = _payload_direct_dims(region, tile_data, payload)
     if width <= 0 or height <= 0:
         return False
     base_source_id = (
@@ -1307,7 +1317,7 @@ def _direct_tile_binding_stale(
         state,
         source_id=source_id,
         histogram_id=histogram_id,
-        local_rect=(0, 0, int(width), int(height)),
+        local_rect=(0, 0, int(crop_w), int(crop_h)),
         rgb_already_windowed=bool(rgb_already_windowed),
     )
 
@@ -1319,8 +1329,8 @@ def _direct_preclaim_specs(
     *,
     states: tuple[object, ...],
     tile_source_ids: dict[int, object] | None,
-) -> dict[int, tuple[object, object | None, tuple[int, int, int, int]]]:
-    specs: dict[int, tuple[object, object | None, tuple[int, int, int, int]]] = {}
+) -> dict[int, tuple[object, object | None, tuple[int, int, int, int], bool]]:
+    specs: dict[int, tuple[object, object | None, tuple[int, int, int, int], bool]] = {}
     for tile_number in tile_order:
         tile_number = int(tile_number)
         region = layout.get(tile_number)
@@ -1349,18 +1359,17 @@ def _direct_preclaim_specs(
             source_id,
             histogram_id,
             (0, 0, int(crop_w), int(crop_h)),
+            _payload_rgb_already_windowed(payload, False),
         )
     return specs
 
 
 def _direct_cold_hole_count(
-    specs: dict[int, tuple[object, object | None, tuple[int, int, int, int]]],
+    specs: dict[int, tuple[object, object | None, tuple[int, int, int, int], bool]],
     states_by_source_key: dict[object, TileLayerItemState],
-    *,
-    rgb_already_windowed: bool,
 ) -> int:
     cold = 0
-    for source_id, histogram_id, local_rect in specs.values():
+    for source_id, histogram_id, local_rect, rgb_already_windowed in specs.values():
         key = _direct_state_key(
             source_id=source_id,
             histogram_id=histogram_id,

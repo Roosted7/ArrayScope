@@ -283,7 +283,7 @@ class RenderOrchestrator(
         self._last_image_hover_focus = self._image_hover_focus_from_scene_pos(pos)
         self._last_image_hover_focus_frame_key = getattr(getattr(self.win, "_committed_display_frame", None), "key", None)
         self.getPixel(pos)
-        schedule_priority = getattr(self, "_schedule_montage_priority_retarget_from_hover", None)
+        schedule_priority = getattr(self, "retarget_montage_priority_from_hover", None)
         if callable(schedule_priority):
             schedule_priority()
 

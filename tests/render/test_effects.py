@@ -139,6 +139,29 @@ def test_evaluate_preview_tile_returns_display_only_payload():
     assert level_stats is None
 
 
+def test_evaluate_preview_tile_uses_requested_rung_level():
+    session = _session()
+    tile = session.plan.tiles[2]
+    demand = _demand(0)
+    source_id = session.tile_semantic_source_id(tile.source_index)
+
+    preview = effects.evaluate_preview_tile(
+        session,
+        tile,
+        demand=demand,
+        semantic_source_id=source_id,
+        level=2,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert preview is not None
+    key, plane, *_rest = preview
+    assert key.level_xy == (2, 2)
+    assert plane.shape == (1, 2)
+
+
 def test_evaluate_shared_preview_fans_out_display_only_payloads():
     session = _session()
     demand = _demand(0)

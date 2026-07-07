@@ -69,6 +69,9 @@ def evaluate_exact_tile(
     start = perf_counter()
     stage_key = session.stage_fan_in.tile_stage_keys.get(int(tile.montage_index))
     stage_value = None if stage_key is None else session.stage_fan_in.values.get(stage_key)
+    if stage_value is None and stage_key is not None and stage_cache is not None:
+        getter = stage_cache.get_containing if hasattr(stage_cache, "get_containing") else stage_cache.get
+        stage_value = getter(stage_key)
     if stage_value is not None:
         request = request_for_image(tile.view_state)
         plan = session.stage_fan_in.tile_stage_plans.get(int(tile.montage_index))
@@ -152,6 +155,7 @@ def evaluate_preview_tile(
     *,
     demand,
     semantic_source_id,
+    level: int | None = None,
     cancellation_token=None,
     shader_display: bool,
     evaluation_context=None,
@@ -170,7 +174,7 @@ def evaluate_preview_tile(
             shader_display=shader_display,
             evaluation_context=evaluation_context,
         )
-    level = preview_evaluation_level(session, demand)
+    level = preview_evaluation_level(session, demand) if level is None else int(level)
     factor_xy = factor_xy_for_level(demand, level)
     reduced_base, preview_state = read_reduced_preview_base_and_state(
         session.document,
@@ -240,6 +244,7 @@ def evaluate_shared_preview(
     tiles,
     *,
     demand,
+    level: int | None = None,
     cancellation_token=None,
     shader_display: bool,
     evaluation_context=None,
@@ -254,7 +259,7 @@ def evaluate_shared_preview(
         upload_preview_useful=upload_preview_useful,
     ):
         return ()
-    level = preview_evaluation_level(session, demand)
+    level = preview_evaluation_level(session, demand) if level is None else int(level)
     factor_xy = factor_xy_for_level(demand, level)
     independent_tiles = preview_pipeline_commutes_for_display_lod(session, seed_tile)
     axis_overrides = {}

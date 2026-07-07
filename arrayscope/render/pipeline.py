@@ -14,13 +14,9 @@ One modular chunk per stage, one owner per piece of state:
 
 The pipeline never owns tile state (TileLifecycle does), never runs work
 (the kernel does), and never paces with timers (completions drive it; the
-bridge's fallback is the only safety net).
-
-STATUS (redesign R2): the scheduling skeleton below is real and unit-tested
-against the kernel; the evaluation/commit effect implementations are
-integration points that R2 fills in by porting logic OUT of
-`window/frame_renderer.py` (see docs/redesign/frame-renderer-map.md for the
-method-by-method destination table).
+bridge's fallback is the only safety net). R2 supplies concrete effects for
+worker evaluation, stage dependencies, commit batching, and backend
+acknowledgement.
 """
 
 from __future__ import annotations
@@ -53,18 +49,17 @@ class PipelineEffects(Protocol):
     def apply_commit(self, batch: CommitBatch) -> None:
         """Apply one bounded batch through the backend adapter (GUI thread).
 
-        TODO(redesign R2): port `_commit_montage_session_tile_layer` /
-        `_commit_montage_tile_delta_direct` batching into CommitBatch
-        consumption; acknowledgement flows back via TileLifecycle events,
-        not return values.
+        The concrete effect consumes ``CommitBatch`` rows, builds the shared
+        tiled-presentation delta, presents through the surface contract, and
+        feeds backend acknowledgement back to ``TileLifecycle``.
         """
         ...
 
     def tile_states(self, intent: RenderIntent, demand) -> tuple[TileLodState, ...]:
         """Snapshot per-tile lod state from TileLifecycle claims.
 
-        TODO(redesign R2): derive from `TileLifecycle` records +
-        `PyramidCache` residency; keep it a pure read.
+        Implementations read ``TileLifecycle`` records and pyramid residency
+        without mutating either source of truth.
         """
         ...
 
@@ -86,6 +81,7 @@ class _RungKey:
     """Kernel task key for one tile rung under one semantic target."""
 
     semantic_key: object
+    viewport_key: object
     tile_number: int
     rung: int
     level: int
@@ -146,9 +142,13 @@ class MontagePipeline:
         steps = self.ladder.plan(states, demand)
         self.counters.ladder_plans += 1
         submitted = 0
+        previous_step_key_by_tile: dict[int, _RungKey] = {}
         for step in steps:
-            if self._submit_step(intent, step):
+            previous_step_key = previous_step_key_by_tile.get(int(step.tile_number))
+            step_key = self._rung_key(intent, step)
+            if self._submit_step(intent, step, previous_step_key=previous_step_key, step_key=step_key):
                 submitted += 1
+            previous_step_key_by_tile[int(step.tile_number)] = step_key
         self._flush_ready()
         return submitted
 
@@ -161,22 +161,33 @@ class MontagePipeline:
     def _scope(self, semantic_key: object) -> str:
         return f"{self.SCOPE}:{semantic_key!r}"
 
-    def _submit_step(self, intent: RenderIntent, step: RungStep) -> bool:
-        if not self.effects.prepare_rung(intent, step):
-            return False
-        key = _RungKey(
+    def _rung_key(self, intent: RenderIntent, step: RungStep) -> _RungKey:
+        return _RungKey(
             semantic_key=intent.semantic_key,
-            tile_number=step.tile_number,
+            viewport_key=intent.viewport_key,
+            tile_number=int(step.tile_number),
             rung=int(step.rung),
             level=int(step.level),
         )
+
+    def _submit_step(
+        self,
+        intent: RenderIntent,
+        step: RungStep,
+        *,
+        previous_step_key: _RungKey | None,
+        step_key: _RungKey,
+    ) -> bool:
+        if not self.effects.prepare_rung(intent, step):
+            return False
+        deps = tuple(dict.fromkeys((*self.effects.rung_deps(intent, step), *((previous_step_key,) if previous_step_key is not None else ()))))
         spec = TaskSpec(
-            key=key,
+            key=step_key,
             fn=self.effects.evaluate_rung(intent, step),
             lane=step.lane,
             priority=step.priority,
             scope=self._scope(intent.semantic_key),
-            deps=self.effects.rung_deps(intent, step),
+            deps=deps,
             # Latest-only per tile+rung: a viewport/demand change replaces
             # the level target; reusable results may still land in caches.
             supersession=Supersession(
@@ -202,19 +213,14 @@ class MontagePipeline:
 
     def _on_rung_done(self, step: RungStep, payload) -> None:
         self._ready_upserts.append((step, payload))
-        # TODO(redesign R2): feed TileLifecycle `level_materialized` /
-        # residency-claim events here (single owner), then flush.
         self._flush_ready()
 
     def _on_rung_reusable(self, step: RungStep, payload) -> None:
         # Stale-but-reusable: cache only, never commit.
-        # TODO(redesign R2): store into PyramidCache/RetainedTiledPayloadStore.
         if self._current_intent is not None:
             self.effects.rung_dropped(self._current_intent, step)
 
     def _on_rung_error(self, step: RungStep, exc: BaseException) -> None:
-        # TODO(redesign R2): route through app error handling + lifecycle
-        # `level_failed` so the machine can re-plan; silence is forbidden.
         if self._current_intent is not None:
             self.effects.rung_dropped(self._current_intent, step)
         raise exc
@@ -231,19 +237,8 @@ class MontagePipeline:
             upserts=tuple(batch_items),
             max_items=self._commit_max_items,
         )
-        while not batch.empty:
-            self.counters.commit_batches += 1
-            self.effects.apply_commit(batch)
-            if not self._ready_upserts:
-                break
-            batch_items = self._ready_upserts[: self._commit_max_items]
-            del self._ready_upserts[: len(batch_items)]
-            batch = CommitBatch(
-                semantic_key=intent.semantic_key,
-                presentation_key=intent.presentation_key,
-                upserts=tuple(batch_items),
-                max_items=self._commit_max_items,
-            )
+        self.counters.commit_batches += 1
+        self.effects.apply_commit(batch)
 
 
 __all__ = ["MontagePipeline", "PipelineEffects"]

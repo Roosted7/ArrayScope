@@ -89,7 +89,7 @@ def report(status):
     print(f"steps={len(steps)} mean={sum(steps)/max(1,len(steps)):.1f}ms worst={max(steps or [0]):.1f}ms")
     print(f"burst heartbeat: p50={pct(burst_gaps,0.5):.1f} p95={pct(burst_gaps,0.95):.1f} max={max(burst_gaps or [0]):.1f}ms")
     print(f"deferred_at_burst_end={state['deferred_at_burst_end']}")
-    print(f"stall_repairs={getattr(win.renderer, '_montage_stall_repairs', 0)}")
+    print(f"stall_assertions={getattr(win.renderer, '_montage_stall_assertions', 0)}")
     print(f"plans_deferred={getattr(win.renderer, '_montage_stage_plans_deferred', 0)}")
     s = win.renderer._montage_session
     if s is not None:

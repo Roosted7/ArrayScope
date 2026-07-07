@@ -169,9 +169,9 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, monkeypatch
         # An explicit forced flush may drain pending level refinement once;
         # the steady state after it must be a true no-op — the backend's
         # upload record does not change again.
-        win.renderer._commit_montage_session_presentation(win._montage_session, force=True)
+        win.renderer.commit_montage_session_presentation(win._montage_session)
         drained_timing = win.img_view.lastImageUploadTiming()
-        win.renderer._commit_montage_session_presentation(win._montage_session, force=True)
+        win.renderer.commit_montage_session_presentation(win._montage_session)
         settled_timing = win.img_view.lastImageUploadTiming()
 
         assert calls == []
@@ -204,8 +204,8 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
         qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer", timeout=3000)
         monkeypatch.setattr(
             win.renderer,
-            "_schedule_montage_viewport_update",
-            lambda **_kwargs: scheduled.append(win.img_view.getView().viewRange()),
+            "retarget_montage_viewport",
+            lambda: scheduled.append(win.img_view.getView().viewRange()),
         )
 
         assert win.img_view._vispy_canvas_native.testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -254,13 +254,13 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
         # Expanded montage ranges auto-fit by design. Narrow explicitly so this
         # test measures viewport retargeting rather than initial fit policy.
         win.img_view.getView().setRange(xRange=(0.0, 10.0), yRange=(0.0, 4.0), padding=0)
-        win.renderer._run_montage_viewport_update()
+        win.renderer.apply_montage_viewport_retarget()
         initial_visible = len(win._montage_session.visible_tiles)
 
         win.fit_image_to_view(True)
         process_events(qtbot, count=20)
         win.fit_image_to_view(False)
-        win.renderer._run_montage_viewport_update()
+        win.renderer.apply_montage_viewport_retarget()
         expanded_visible = len(win._montage_session.visible_tiles)
 
         assert initial_visible < tile_count

@@ -140,7 +140,6 @@ class DimensionChip(QtWidgets.QFrame):
             tooltip=x_tooltip,
         )
         _set_tooltip_if_changed(self.p_button, f"Toggle dim {self.axis} as profile axis")
-        is_display_axis = self.axis in image_axes or is_m
         is_singleton = size == 1
         can_use_as_image = not is_singleton and view_state.image_axes is not None
         _set_enabled_if_changed(self.y_button, can_use_as_image)

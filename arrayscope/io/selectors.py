@@ -34,7 +34,7 @@ def _show_selector(filepath, selector_class_name, interpret_as_complex):
     
     # Create QApplication
     import pyqtgraph as pg
-    app = pg.mkQApp()
+    pg.mkQApp()
     
     # Create selector
     selector = selector_class(filepath)
@@ -129,7 +129,7 @@ class DatasetSelector:
         # Ensure QApplication exists
         if block:
             import pyqtgraph as pg
-            app = pg.mkQApp()
+            pg.mkQApp()
             
             if selected_path := self.show():
                 data = self.load_data(selected_path)

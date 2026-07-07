@@ -776,7 +776,7 @@ def test_scalar_tiled_level_delta_acknowledges_without_image_replacement(qt_app)
         active_tiles=(0, 1),
         planned_tiles=(0, 1),
     )
-    view.setTiledPresentation(
+    report = view.setTiledPresentation(
         geometry=geometry,
         tile_state=TilePresentationState(payloads),
         tile_delta=initial_delta,
@@ -802,7 +802,7 @@ def test_scalar_tiled_level_delta_acknowledges_without_image_replacement(qt_app)
         planned_tiles=(0, 1),
     )
 
-    report = view.setTiledPresentation(
+    view.setTiledPresentation(
         geometry=geometry,
         tile_state=TilePresentationState(payloads),
         tile_delta=level_delta,
@@ -856,7 +856,7 @@ def test_first_typed_tiled_commit_applies_payload_pixels_and_levels_before_autol
         planned_tiles=(0, 1),
     )
 
-    report = view.setTiledPresentation(
+    view.setTiledPresentation(
         geometry=geometry,
         tile_state=TilePresentationState(payloads),
         tile_delta=delta,
@@ -1414,7 +1414,7 @@ def test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots(qt_app):
         assert report.presented_tiles == frozenset({0, 1, 2, 3})
         assert report.committed_upserts == frozenset({0})
         assert timing.tile_layer_items_updated == 1
-        assert timing.tile_layer_rgb_window_tiles == 1
+        assert timing.tile_layer_rgb_window_tiles == 0
         assert set(states) == {0, 1, 2, 3}
         for tile in range(4):
             assert states[tile].visible is True
@@ -1426,7 +1426,7 @@ def test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots(qt_app):
         view.close()
 
 
-def test_pyqtgraph_rgb_preview_tile_rewindows_after_zoom_without_exact_payload(qt_app):
+def test_pyqtgraph_rgb8_preview_tile_stays_windowed_after_zoom_without_exact_payload(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
@@ -1506,11 +1506,11 @@ def test_pyqtgraph_rgb_preview_tile_rewindows_after_zoom_without_exact_payload(q
 
         state = view._montage_tile_layer.states[0]
         timing = view.lastImageUploadTiming()
-        assert timing.tile_layer_rgb_window_tiles == 1
+        assert timing.tile_layer_rgb_window_tiles == 0
         assert tuple(float(value) for value in state.levels) == (2.0, 6.0)
         assert state.lod_scale == (4.0, 4.0)
         assert state.item.image.shape == (2, 2, 3)
-        assert not np.array_equal(state.item.image, before)
+        assert np.array_equal(state.item.image, before)
     finally:
         view.close()
 

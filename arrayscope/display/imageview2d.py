@@ -1002,7 +1002,6 @@ class ImageViewShell(QtWidgets.QWidget):
 
         self._cancel_active_capture_for_frame_replacement()
         self._start_upload_timing("full")
-        previous_shape = None if self.image is None else tuple(self.image.shape[:2])
         try:
             # Normal-image commit: content extent is the image again.
             self.setViewportContentExtent(None)
@@ -2686,7 +2685,6 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     rgb_window_tiles = int(getattr(stats, "rgb_window_tiles", 0) or 0)
     existing_items = int(getattr(stats, "existing_items_shown", 0) or 0)
     relocated = int(getattr(stats, "relocated_tiles", 0) or 0)
-    updated = int(getattr(stats, "items_updated", 0) or 0)
     updated_tiles = tuple(int(tile) for tile in tuple(getattr(stats, "updated_tiles", ()) or ()))
     pyqtgraph_data_updates = max(0, len(updated_tiles) - rgb_window_tiles) if texture_uploads <= 0 else 0
     report_uploads = texture_uploads if texture_uploads > 0 else pyqtgraph_data_updates

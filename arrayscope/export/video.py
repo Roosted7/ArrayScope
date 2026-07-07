@@ -406,7 +406,7 @@ class VideoExportDialog(QtWidgets.QDialog):
             mb.setText(message)
             open_dir_btn = mb.addButton("Open directory", QtWidgets.QMessageBox.ActionRole)
             open_file_btn = mb.addButton("Open video", QtWidgets.QMessageBox.ActionRole)
-            ok_btn = mb.addButton(QtWidgets.QMessageBox.Ok)
+            mb.addButton(QtWidgets.QMessageBox.Ok)
             mb.exec_()
 
             clicked = mb.clickedButton()

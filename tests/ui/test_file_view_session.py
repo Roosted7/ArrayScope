@@ -505,7 +505,7 @@ def test_restored_montage_viewport_schedules_retarget_after_set_range(qt_app, mo
             view_range=((10.0, 20.0), (30.0, 40.0)),
         )
     )
-    window._schedule_montage_viewport_update = lambda *, delay_ms=None: scheduled.append(delay_ms)
+    window.retarget_montage_viewport = lambda: scheduled.append("retargeted")
     monkeypatch.setattr(file_view_session, "show_revert_action", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(file_view_session.Qt.QtCore.QTimer, "singleShot", lambda delay, receiver, callback: single_shots.append((delay, callback)))
 
@@ -518,7 +518,7 @@ def test_restored_montage_viewport_schedules_retarget_after_set_range(qt_app, mo
     assert len(single_shots) == 1
     assert single_shots[0][0] == 0
     single_shots[0][1]()
-    assert scheduled == [0]
+    assert scheduled == ["retargeted"]
 
 
 def test_restored_montage_auto_range_reopens_as_user_camera(qt_app, monkeypatch):

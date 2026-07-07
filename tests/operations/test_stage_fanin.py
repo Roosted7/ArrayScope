@@ -63,3 +63,12 @@ def test_stage_fanin_merge_records_dependency_keys():
     assert state.tile_stage_keys == {0: "stage"}
     assert state.attached_requests == {"stage"}
     assert "cached" in state.values
+
+
+def test_stage_fanin_detaches_requests_after_last_tile_binding_is_removed():
+    state = StageFanInState(attached_requests={"stage"}, tile_stage_keys={0: "stage"})
+
+    state.tile_stage_keys.pop(0)
+    state.detach_unbound_requests()
+
+    assert state.attached_requests == set()

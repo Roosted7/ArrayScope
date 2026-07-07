@@ -7,56 +7,38 @@ region payloads; backends differ only in physical presentation mechanics.
 
 from __future__ import annotations
 
-import sys
 
-from collections import deque
 from dataclasses import replace
-from time import monotonic, perf_counter
+from time import perf_counter
 
 import numpy as np
 import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
-from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.core.gui_callback_budget import GuiCallbackBudget
 from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.frame_planner import FramePlanner
-from arrayscope.display.imageview2d import MontageTileOverlay
 from arrayscope.display.montage import (
     MontageTileState,
     RenderedTile,
     make_montage_plan,
-    montage_rect_for_viewport,
 )
-from arrayscope.display.viewport import ViewportMode, view_ranges_near
+from arrayscope.display.viewport import view_ranges_near
 from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.operations.evaluator import _document_key, stage_document_key
-from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked, stage_materialization_allowed_chunk_axes
-from arrayscope.operations.stage_fanin import StageFanInState
-from arrayscope.operations.slabs import (
-    plan_slab,
-    request_for_image,
-)
+from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
-from arrayscope.render.pipeline import MontagePipeline
 from arrayscope.render.stages import RenderIntent
-from arrayscope.ui.toasts import show_revert_action, show_status_message
-from arrayscope.window.evaluation_controller import EvalPriority
+from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
-    MontageLevelTracker,
-    montage_level_key,
-    provisional_tile_level_stats,
-    sample_tile_level_stats,
 )
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level
 from arrayscope.presentation import ClaimOwner
-from arrayscope.display.pyramid import PyramidCache, preview_level_for_tile_shape
+from arrayscope.display.pyramid import preview_level_for_tile_shape
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
     payload_compatible_with_tile as _payload_compatible_with_tile,
@@ -65,7 +47,9 @@ from arrayscope.window.montage_payload_cache import (
 )
 from arrayscope.window import montage_commit
 from arrayscope.window.montage_commit import MontagePipelineEffects
+from arrayscope.window.montage_level_stats import MontageLevelStatsMixin
 from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
+from arrayscope.window.montage_runtime import MontageRuntimeMixin
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     effective_montage_columns,
@@ -73,20 +57,12 @@ from arrayscope.window.montage_viewport import (
     montage_tile_semantic_key,
     montage_viewport_intent,
     montage_viewport_retarget_policy,
-    prioritize_montage_tiles,
     remap_montage_roi_selections,
     retarget_montage_viewport_plan,
-    square_montage_fit_view_range,
 )
 from arrayscope.window import montage_lod
-from arrayscope.window.montage_lod import (
-    admit_ingest_reduction as _admit_ingest_reduction,
-    admit_preview_reduction as _admit_preview_reduction,
-)
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.window.render_contract import (
-    montage_work_token as _montage_work_token,
-    montage_work_token_is_current as _montage_work_token_is_current,
     session_token_is_current as _session_token_is_current,
 )
 from arrayscope.display.planning import LevelSourceRank, fallback_level_source, normalize_bounds
@@ -94,13 +70,7 @@ from arrayscope.display.planning import LevelSourceRank, fallback_level_source, 
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
 MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
-MONTAGE_LEVEL_STATS_COMMIT_BATCH = 8
-MONTAGE_LEVEL_STATS_BACKGROUND_BATCH = 4
-MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS = 4.0
-MONTAGE_LOADING_OVERLAY_REFRESH_INTERVAL_MS = 125.0
-
-
-class FrameRenderMixin:
+class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
     def _interactive_frame_cache_hit(self) -> bool:
         view_state = getattr(self.win, "view_state", None)
         if view_state is None or view_state.image_axes is None:
@@ -280,7 +250,7 @@ class FrameRenderMixin:
             if callable(restore_viewport_shape):
                 restore_viewport_shape()
             self._set_montage_view_range(active_continuity_range)
-            self._schedule_montage_viewport_update(delay_ms=0)
+            self.retarget_montage_viewport()
             return
         self._montage_live_layout_reflow = True
         self.win._montage_viewport_update_pending = False
@@ -291,7 +261,7 @@ class FrameRenderMixin:
         )
         if viewport_plan is not None:
             self._retarget_montage_resize_payloads(viewport_plan)
-        self._schedule_montage_viewport_update(delay_ms=0)
+        self.retarget_montage_viewport()
 
     def _current_montage_resize_focus(self, view_range) -> tuple[float, float] | None:
         return _montage_priority_focus(self, view_range)
@@ -381,16 +351,16 @@ class FrameRenderMixin:
         )
         lod_swap_ready = session.refresh_lod_for_viewport()
         if getattr(session, "pending_lod_requests", None):
-            self._schedule_montage_lod_materializations(session)
+            self.materialize_montage_lod(session)
         if presentation_changed or lod_swap_ready:
             self._commit_montage_resize_presentation_retarget(session)
         return True
 
     def _commit_montage_resize_presentation_retarget(self, session) -> None:
         if bool(getattr(self, "_montage_presentation_commit_active", False)):
-            self._schedule_montage_presentation_commit(session, force=True)
+            self.apply_montage_presentation(session)
             return
-        self._commit_montage_session_presentation(session, force=True)
+        self.commit_montage_session_presentation(session)
 
     def update_image_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         for attribute in (
@@ -432,7 +402,10 @@ class FrameRenderMixin:
         tile_shape = viewport_plan.tile_shape
         plan = viewport_plan.plan
         if self._maybe_auto_fit_montage_tiles(plan):
-            viewport_plan = self._montage_viewport_plan(view_state)
+            viewport_plan = self._montage_viewport_plan(
+                view_state,
+                view_range=self._current_montage_global_view_range(),
+            )
             viewport_shape = viewport_plan.viewport_shape
             tile_shape = viewport_plan.tile_shape
             plan = viewport_plan.plan
@@ -537,12 +510,12 @@ class FrameRenderMixin:
             and getattr(previous_session, "montage_axis", None) == axis
         )
         if defer_stage_planning:
-            stage_plan = _deferred_stage_plan_stub()
+            stage_plan = montage_commit.deferred_stage_fan_in_plan()
             self._montage_stage_plans_deferred = (
                 int(getattr(self, "_montage_stage_plans_deferred", 0) or 0) + 1
             )
         else:
-            stage_plan = self._plan_montage_stages(document, missing_tiles)
+            stage_plan = montage_commit.build_stage_fan_in_plan(self, document, missing_tiles)
         self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
         session_setup_start = perf_counter()
         pending_tiles = [] if defer_stage_planning else list(missing_tiles)
@@ -597,14 +570,7 @@ class FrameRenderMixin:
             loading_tiles={int(tile.montage_index) for tile in missing_tiles},
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
             pending_tiles=list(pending_tiles),
-            stage_fan_in=StageFanInState(
-                tile_stage_keys=stage_plan["tile_stage_keys"],
-                tile_stage_plans=stage_plan["tile_stage_plans"],
-                tile_stage_candidates=stage_plan["tile_stage_candidates"],
-                attached_requests=stage_plan["attached_stage_keys"],
-                values=stage_plan["stage_values"],
-                lead_warmups=stage_plan["lead_stage_warmups"],
-            ),
+            stage_fan_in=montage_commit.stage_fan_in_state(stage_plan),
             defer_side_panels=bool(defer_side_panels),
             applied_level_source=(
                 pending_auto_level_source
@@ -651,7 +617,7 @@ class FrameRenderMixin:
                 session.last_presented_identities = dict(inherited)
         self._montage_session = session
         # A viewport-update token armed for the dying session would make every
-        # later _run_montage_viewport_update bail as stale — a dead
+        # later apply_montage_viewport_retarget bail as stale — a dead
         # continuation (lost-wakeup class).  The new session's construction
         # subsumes any pending retarget; clear the token so future runs (timer
         # or explicit) act on the current session.
@@ -681,7 +647,7 @@ class FrameRenderMixin:
         self._last_montage_session_setup_ms = (perf_counter() - session_setup_start) * 1000.0
         initial_commit_start = perf_counter()
         try:
-            self._commit_montage_session_presentation(session, force=True)
+            self.commit_montage_session_presentation(session)
         except MemoryError as exc:
             show_status_message(self.win, str(exc), timeout=6000)
             return
@@ -704,13 +670,13 @@ class FrameRenderMixin:
         else:
             self.win._update_operation_dock()
         if not visible_complete:
-            self._schedule_montage_session_slow_overlay(session)
+            self.show_montage_session_slow_overlay(session)
         self._schedule_montage_cached_level_stats(session)
         if defer_stage_planning:
-            self._schedule_deferred_montage_planning(session)
+            self.retarget_montage_pipeline(session)
         else:
-            self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-            self._retarget_montage_pipeline(session)
+            montage_commit.submit_stage_tasks(self, session, stage_plan["stage_requests"])
+            self.retarget_montage_pipeline(session)
 
     def _maybe_retarget_montage_session(
         self,
@@ -849,7 +815,7 @@ class FrameRenderMixin:
                     or session.pending_payload_upserts
                     or not session.display_committed
                 ):
-                    self._commit_montage_session_presentation(session, force=True)
+                    self.commit_montage_session_presentation(session)
             finally:
                 self._last_montage_initial_commit_ms = (
                     perf_counter() - reuse_commit_start
@@ -920,7 +886,7 @@ class FrameRenderMixin:
         )
         session.force_auto = bool(force_auto)
         session.user_levels_override = user_levels
-        session.attach_stage_fan_in(StageFanInState())
+        session.attach_stage_fan_in(montage_commit.stage_fan_in_state(montage_commit.deferred_stage_fan_in_plan()))
         session.stage_planning_deferred = bool(missing_tiles)
         session.deferred_missing_tiles = tuple(missing_tiles)
         session.tile_compute_cache_hits = int(stats["hits"])
@@ -961,7 +927,7 @@ class FrameRenderMixin:
         )
         initial_commit_start = perf_counter()
         try:
-            self._commit_montage_session_presentation(session, force=True)
+            self.commit_montage_session_presentation(session)
         finally:
             self._last_montage_initial_commit_ms = (
                 perf_counter() - initial_commit_start
@@ -971,17 +937,7 @@ class FrameRenderMixin:
         else:
             self.win._update_operation_dock()
         if session.stage_planning_deferred:
-            if (
-                _viewport_interaction_active(self)
-                and self._montage_lod_policy_mode() == LOD_POLICY_RESIDENT
-            ):
-                # Mid-burst under the resident policy: floors carry the
-                # screen; the landing step plans (deferred continuation).
-                self._schedule_deferred_montage_planning(session)
-            else:
-                # Single step, or a policy without floors: plan inline so
-                # evaluations start within this call, like a rebirth.
-                self._plan_deferred_montage_stages_now(session)
+            self.retarget_montage_pipeline(session)
         return True
 
     def _resolve_montage_tiles_from_cache(
@@ -1062,20 +1018,6 @@ class FrameRenderMixin:
             ) + len(cached_tiles)
         return cached_tiles, missing_tiles
 
-    def _merge_montage_stage_plan(self, session: MontageRenderSession, stage_plan) -> None:
-        session.stage_fan_in.merge_plan(stage_plan)
-        session.tile_compute_waiting_for_stage += len(stage_plan["waiting_indices"])
-        session.stage_backed_tiles_pending += len(stage_plan["waiting_indices"])
-        session.lead_direct_tiles += int(stage_plan["lead_direct_tiles"])
-        if stage_plan["retained_stage_index"] is not None:
-            session.retained_stage_index = stage_plan["retained_stage_index"]
-        if stage_plan["retained_stage_decision"]:
-            session.retained_stage_decision = stage_plan["retained_stage_decision"]
-        session.repeated_expensive_stage_per_tile = bool(
-            session.repeated_expensive_stage_per_tile
-            or stage_plan["repeated_expensive_stage_per_tile"]
-        )
-
     def _try_update_montage_viewport_only(self) -> bool:
         """Retarget a persistent tiled session without restarting evaluation."""
 
@@ -1122,7 +1064,7 @@ class FrameRenderMixin:
             coverage_margin_tiles=retarget_policy.coverage_margin_tiles,
             near_margin_tiles=retarget_policy.near_margin_tiles,
             priority_focus=viewport_plan.priority_focus,
-            priority_retarget_limit=_montage_priority_retarget_batch_limit(self, interactive=_interactive_active(self)),
+            priority_retarget_limit=max(1, len(tuple(getattr(session, "pending_tiles", ()) or ())) + len(tuple(viewport_plan.plan.tiles))),
         )
         memory_policy = self._memory_policy() if hasattr(self, "_memory_policy") else None
         session.frame_plan = self._montage_frame_planner().plan(
@@ -1146,14 +1088,14 @@ class FrameRenderMixin:
         # 0050).  Demand math only; reduction stays on worker lanes.
         lod_swap_ready = session.refresh_lod_for_viewport()
         if getattr(session, "pending_lod_requests", None):
-            self._schedule_montage_lod_materializations(session)
+            self.materialize_montage_lod(session)
         additions = viewport_plan.prioritize_tiles(additions)
         self._prune_stale_montage_tile_work(session)
         if not additions:
             if presentation_changed or lod_swap_ready:
-                self._schedule_montage_presentation_commit(session, force=False)
+                self.apply_montage_presentation(session)
             if session.pending_tiles and not _viewport_interaction_active(self):
-                self._retarget_montage_pipeline(session)
+                self.retarget_montage_pipeline(session)
                 return True
             if session.pending_tiles:
                 return True
@@ -1161,15 +1103,15 @@ class FrameRenderMixin:
                 self._finish_montage_session_if_complete(session)
                 schedule_near_viewport_montage_prefetch(self, session)
             return True
+        additions_to_process = tuple(additions)
         budget = self._montage_callback_budget(
             "montage_viewport_update",
             interactive=_interactive_active(self),
             work_class="viewport_cached_additions",
-            item_cap=_montage_viewport_addition_batch_limit(self, interactive=_interactive_active(self)),
+            item_cap=max(1, len(additions_to_process)),
         )
         cached_tiles = []
         missing_tiles = []
-        additions_to_process = tuple(additions)
         processed_additions = 0
         for tile in additions_to_process:
             display_cached, display_missing = self._resolve_montage_tiles_from_cache(
@@ -1200,7 +1142,7 @@ class FrameRenderMixin:
         self._montage_cached_tiles_last_session = len(cached_tiles)
         self._montage_missing_tiles_last_session = len(missing_tiles)
         if presentation_changed or cached_tiles or lod_swap_ready:
-            self._schedule_montage_presentation_commit(session, force=False)
+            self.apply_montage_presentation(session)
         if cached_tiles:
             self._schedule_montage_cached_level_stats(session)
         if not missing_tiles:
@@ -1222,8 +1164,8 @@ class FrameRenderMixin:
         for tile in missing_tiles:
             session.mark_loading(tile)
 
-        stage_plan = self._plan_montage_stages(session.document, missing_tiles)
-        self._merge_montage_stage_plan(session, stage_plan)
+        stage_plan = montage_commit.build_stage_fan_in_plan(self, session.document, missing_tiles)
+        montage_commit.merge_stage_fan_in_plan(session, stage_plan)
         queued = set(session.pending_tile_numbers())
         for tile in missing_tiles:
             index = int(tile.montage_index)
@@ -1236,9 +1178,9 @@ class FrameRenderMixin:
             CacheStatus.COMPUTING,
             "Extending montage viewport",
         )
-        self._schedule_montage_session_slow_overlay(session)
-        self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-        self._retarget_montage_pipeline(session)
+        self.show_montage_session_slow_overlay(session)
+        montage_commit.submit_stage_tasks(self, session, stage_plan["stage_requests"])
+        self.retarget_montage_pipeline(session)
         return True
 
     def _prune_stale_montage_tile_work(self, session: MontageRenderSession) -> None:
@@ -1261,733 +1203,6 @@ class FrameRenderMixin:
         pruned = pruned_pending + len(stale)
         if pruned > 0:
             self._last_montage_pruned_tile_work = int(getattr(self, "_last_montage_pruned_tile_work", 0) or 0) + int(pruned)
-
-    def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
-        return montage_level_key(
-            _document_key(document),
-            view_state,
-            all_indices,
-            colormap_lut,
-        )
-
-    def _montage_level_expected_indices(self, session) -> tuple[int, ...]:
-        expected = tuple(int(index) for index in getattr(session, "level_expected_indices", ()) or ())
-        if expected:
-            return expected
-        return tuple(int(tile.source_index) for tile in getattr(session.plan, "tiles", ()))
-
-    def _empty_montage_level_stats(self, expected_indices) -> MontageLevelStats:
-        tracker = self._montage_level_tracker()
-        key = ("empty", tuple(int(index) for index in expected_indices))
-        return tracker.ensure(key, expected_indices)
-
-    def _ensure_montage_level_stats(self, level_key, *, expected_indices) -> MontageLevelStats:
-        return self._montage_level_tracker().ensure(level_key, expected_indices)
-
-    def _montage_coverage_rank(self, source_indices, expected_indices) -> int:
-        stats = self._montage_level_tracker().ensure(("rank", tuple(expected_indices)), expected_indices)
-        rank = self._montage_level_tracker()._rank_for(source_indices, stats.expected_indices)
-        if rank == LevelSourceRank.NONE:
-            return 0
-        if rank == LevelSourceRank.MONTAGE_COMPLETE:
-            return 2
-        return 1
-
-    def _update_montage_level_bounds_from_rendered(self, level_key, rendered, *, expected_indices=None, refined: bool = False) -> None:
-        if expected_indices is None:
-            previous_stats = self._montage_level_tracker().stats_for(level_key)
-            expected_indices = () if previous_stats is None else previous_stats.expected_indices
-        tracker = self._montage_level_tracker()
-        tracker.ensure_expected(level_key, expected_indices)
-        source_index = int(rendered.tile.source_index)
-        level_stats = getattr(rendered, "level_stats", None)
-        existing_refined = tracker.has_source(level_key, source_index, refined=True)
-        existing_any = existing_refined or tracker.has_source(level_key, source_index)
-        if existing_refined or (
-            existing_any
-            and not bool(refined)
-            and (level_stats is None or not bool(getattr(level_stats, "refined", False)))
-        ):
-            return
-        if level_stats is not None and not refined:
-            tracker.update_from_stats(level_key, level_stats, aggregate=False)
-            return
-        level_data = getattr(rendered, "level_data", None)
-        if level_data is not None and not refined:
-            stats = provisional_tile_level_stats(level_data, source_index)
-            if stats is not None:
-                tracker.update_from_stats(level_key, stats, aggregate=False)
-                return
-        stats = sample_tile_level_stats(
-            render_effects.montage_refined_level_values(rendered),
-            source_index,
-            refined=bool(refined),
-        )
-        if stats is not None:
-            tracker.update_from_stats(level_key, stats, aggregate=False)
-        elif refined:
-            # Nothing finite to sample: record that as refined evidence, or
-            # level convergence re-queues this source forever and an
-            # explicit-auto flush parked on the rank can never re-commit.
-            tracker.record_vacuous_source(level_key, source_index)
-
-    def _update_montage_level_bounds_from_prepared(self, level_key, rendered, *, expected_indices=None, require_refined: bool = False) -> bool:
-        """Merge already-prepared level evidence without sampling source pixels."""
-
-        if expected_indices is None:
-            previous_stats = self._montage_level_tracker().stats_for(level_key)
-            expected_indices = () if previous_stats is None else previous_stats.expected_indices
-        tracker = self._montage_level_tracker()
-        tracker.ensure_expected(level_key, expected_indices)
-        source_index = int(rendered.tile.source_index)
-        if tracker.has_source(level_key, source_index, refined=bool(require_refined)):
-            return True
-        if require_refined and tracker.has_source(level_key, source_index):
-            return False
-        level_stats = getattr(rendered, "level_stats", None)
-        if level_stats is not None:
-            if require_refined and not bool(getattr(level_stats, "refined", False)):
-                return False
-            tracker.update_from_stats(level_key, level_stats, aggregate=False)
-            return True
-        if require_refined:
-            return False
-        level_data = getattr(rendered, "level_data", None)
-        if level_data is not None:
-            stats = provisional_tile_level_stats(level_data, source_index)
-            if stats is not None:
-                tracker.update_from_stats(level_key, stats, aggregate=False)
-                return True
-        return False
-
-    def _queue_montage_level_refinement(self, session, rendered) -> None:
-        tracker = self._montage_level_tracker()
-        source_index = int(rendered.tile.source_index)
-        if tracker.has_source(session.level_key, source_index, refined=True):
-            return
-        pending = getattr(session, "pending_refined_level_tiles", None)
-        if pending is None:
-            pending = deque()
-            session.pending_refined_level_tiles = pending
-        pending_sources = getattr(session, "pending_refined_level_sources", None)
-        if pending_sources is None:
-            pending_sources = {int(item.tile.source_index) for item in pending}
-            session.pending_refined_level_sources = pending_sources
-        if source_index in pending_sources:
-            return
-        pending.append(rendered)
-        pending_sources.add(source_index)
-
-    def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
-        expected = self._montage_level_expected_indices(session)
-        self._montage_level_tracker().ensure_expected(session.level_key, expected)
-        stats = self._montage_level_tracker().summary_for(session.level_key)
-        if stats is None:
-            return self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
-        return stats
-
-    def _montage_level_bounds_for_session(self, session, *, allow_partial: bool = False):
-        source = self._montage_level_source_for_session(session, allow_partial=allow_partial)
-        return None if source is None else source.histogram_range
-
-    def _montage_level_source_for_session(self, session, *, allow_partial: bool = False):
-        # Partial semantic tile coverage is a valid provisional level source.
-        # It must not be confused with viewport pixels; the level key is semantic
-        # and excludes zoom/pan.  WindowLevelController keeps updates monotonic.
-        tracker = self._montage_level_tracker()
-        stats = tracker.summary_for(session.level_key)
-        if stats is None:
-            return None
-        if not allow_partial and stats.rank not in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
-            return None
-        return tracker.source_for_stats(session.level_key, stats)
-
-    def _montage_histogram_plot_data_for_session(self, session, *, allow_partial: bool = False):
-        tracker = self._montage_level_tracker()
-        stats = tracker.stats_for(session.level_key)
-        if stats is None:
-            return None
-        if not allow_partial and stats.rank not in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
-            return None
-        return tracker.histogram_data_for_stats(stats)
-
-    def _montage_level_tracker(self) -> MontageLevelTracker:
-        tracker = getattr(self, "_montage_level_tracker_instance", None)
-        if tracker is None:
-            tracker = MontageLevelTracker()
-            self._montage_level_tracker_instance = tracker
-        return tracker
-
-    def _schedule_montage_cached_level_stats(self, session) -> None:
-        if (
-            not getattr(session, "pending_level_tiles", None)
-            and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0
-        ):
-            return
-        timer = getattr(self, "_montage_level_stats_timer", None)
-        if timer is None:
-            # Bounded continuation. Cached level stats are secondary UI work
-            # and each slice is budgeted by `_process_montage_cached_level_stats`;
-            # remove when histogram refinement is fully kernel-owned.
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._process_montage_cached_level_stats)
-            self._montage_level_stats_timer = timer
-        if not timer.isActive():
-            timer.start(0)
-
-    def _pending_montage_level_sources(self, session):
-        pending = getattr(session, "pending_level_tiles", None)
-        if pending is None:
-            pending = deque()
-            session.pending_level_tiles = pending
-        queued_sources = getattr(session, "pending_level_sources", None)
-        if queued_sources is None:
-            queued_sources = {int(item.tile.source_index) for item in pending}
-            session.pending_level_sources = queued_sources
-        return pending, queued_sources
-
-    def _mark_montage_level_scan_pending(self, session) -> None:
-        # Restart a FULL pass even mid-scan: a tile that materializes after
-        # the cursor already passed its position would otherwise fall through
-        # a completed pass and no continuation would ever sample it (level
-        # rank then never completes for exactly that source).  Passes are
-        # cheap — already-merged sources are skip-checked — and arrivals are
-        # bounded by the plan, so restarts terminate.
-        tile_count = len(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-        if tile_count <= 0:
-            return
-        session.level_scan_remaining_tiles = tile_count
-
-    def _queue_montage_cached_level_stats(self, session, rendered_tiles, *, seed_if_empty: bool) -> None:
-        """Admit cached-payload level work without making commit latency scale with tile count.
-
-        Prepared per-tile evidence can be merged immediately for a small,
-        bounded batch.  Anything requiring source-pixel sampling is queued for
-        the same timer-driven maintenance path used by later cached residents.
-        """
-
-        tracker = self._montage_level_tracker()
-        expected = self._montage_level_expected_indices(session)
-        tracker.ensure_expected(session.level_key, expected)
-        pending, queued_sources = self._pending_montage_level_sources(session)
-        require_refined = _montage_level_evidence_requires_refined(self, session)
-        summary = tracker.summary_for(session.level_key)
-        inspected = 0
-        seeded = bool(summary is not None and summary.source_indices)
-        for rendered in rendered_tiles or ():
-            if inspected >= MONTAGE_LEVEL_STATS_COMMIT_BATCH:
-                self._mark_montage_level_scan_pending(session)
-                break
-            inspected += 1
-            source_index = int(rendered.tile.source_index)
-            if source_index in queued_sources or tracker.has_source(session.level_key, source_index, refined=require_refined):
-                continue
-            if self._update_montage_level_bounds_from_prepared(
-                session.level_key,
-                rendered,
-                expected_indices=expected,
-                require_refined=require_refined,
-            ):
-                seeded = True
-                self._queue_montage_level_refinement(session, rendered)
-                continue
-            pending.append(rendered)
-            queued_sources.add(source_index)
-            if seed_if_empty and not seeded:
-                seeded = True
-        self._montage_pending_level_tiles_last_session = len(pending or ())
-
-    def _queue_montage_level_stats_for_payloads(self, session, payloads) -> int:
-        """Request level evidence for a presentation delta without scanning it inline."""
-
-        tracker = self._montage_level_tracker()
-        expected = self._montage_level_expected_indices(session)
-        tracker.ensure_expected(session.level_key, expected)
-        stats_start = perf_counter()
-        merged = 0
-        inspected = 0
-        pending, queued_sources = self._pending_montage_level_sources(session)
-        require_refined = _montage_level_evidence_requires_refined(self, session)
-        tiles_by_number = {
-            int(getattr(tile, "montage_index", offset)): tile
-            for offset, tile in enumerate(tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()))
-        }
-        for tile_number in payloads or ():
-            if inspected >= MONTAGE_LEVEL_STATS_COMMIT_BATCH:
-                self._mark_montage_level_scan_pending(session)
-                break
-            inspected += 1
-            payload = payloads.get(int(tile_number)) if isinstance(payloads, dict) else None
-            rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
-            if rendered is None and payload is not None:
-                tile = tiles_by_number.get(int(tile_number))
-                if tile is not None:
-                    rendered = _rendered_tile_from_previous_payload(tile, payload)
-            if rendered is None:
-                continue
-            source_index = int(rendered.tile.source_index)
-            if tracker.has_source(session.level_key, source_index, refined=require_refined):
-                continue
-            if self._update_montage_level_bounds_from_prepared(
-                session.level_key,
-                rendered,
-                expected_indices=expected,
-                require_refined=require_refined,
-            ):
-                self._queue_montage_level_refinement(session, rendered)
-                queued_sources.discard(source_index)
-                merged += 1
-            elif source_index not in queued_sources:
-                pending.append(rendered)
-                queued_sources.add(source_index)
-        self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
-        self._montage_level_sources_added_last_commit = int(merged)
-        self._montage_pending_level_tiles_last_session = len(getattr(session, "pending_level_tiles", ()) or ())
-        self._schedule_montage_cached_level_stats(session)
-        return int(merged)
-
-    def _scan_montage_level_stats_from_session(self, session, *, expected, stats_start: float, processed: int, budget: GuiCallbackBudget) -> int:
-        tile_count = len(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-        remaining = int(getattr(session, "level_scan_remaining_tiles", 0) or 0)
-        if tile_count <= 0 or remaining <= 0:
-            session.level_scan_remaining_tiles = 0
-            return int(processed)
-        pending, queued_sources = self._pending_montage_level_sources(session)
-        tracker = self._montage_level_tracker()
-        require_refined = _montage_level_evidence_requires_refined(self, session)
-        cursor = int(getattr(session, "level_scan_cursor", 0) or 0) % tile_count
-        inspected = 0
-        while remaining > 0 and inspected < int(budget.item_cap):
-            rendered = getattr(session, "rendered_tiles", {}).get(cursor)
-            cursor = (cursor + 1) % tile_count
-            remaining -= 1
-            inspected += 1
-            if rendered is None:
-                continue
-            source_index = int(rendered.tile.source_index)
-            if source_index in queued_sources or tracker.has_source(session.level_key, source_index, refined=require_refined):
-                continue
-            if self._update_montage_level_bounds_from_prepared(
-                session.level_key,
-                rendered,
-                expected_indices=expected,
-                require_refined=require_refined,
-            ):
-                self._queue_montage_level_refinement(session, rendered)
-                processed += 1
-            else:
-                pending.append(rendered)
-                queued_sources.add(source_index)
-            budget.record_item(byte_count=montage_commit.rendered_tile_nbytes(rendered))
-            if budget.should_yield():
-                break
-        session.level_scan_cursor = int(cursor)
-        session.level_scan_remaining_tiles = max(0, int(remaining))
-        return int(processed)
-
-    def _process_montage_cached_level_stats(self) -> None:
-        session = getattr(self, "_montage_session", None)
-        if not self._montage_session_is_current(session):
-            return
-        pending = getattr(session, "pending_level_tiles", None)
-        if not pending and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0:
-            return
-        budget = self._montage_callback_budget(
-            "montage_level_evidence",
-            interactive=_interactive_active(self),
-            work_class="semantic_level_evidence",
-            item_cap=MONTAGE_LEVEL_STATS_BACKGROUND_BATCH,
-            target_ms=MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS,
-        )
-        stats_start = perf_counter()
-        expected = self._montage_level_expected_indices(session)
-        require_refined = _montage_level_evidence_requires_refined(self, session)
-        processed = 0
-        while pending and processed < int(budget.item_cap):
-            rendered = pending.popleft()
-            source_index = int(rendered.tile.source_index)
-            pending_sources = getattr(session, "pending_level_sources", None)
-            if pending_sources is not None:
-                pending_sources.discard(source_index)
-            if not self._montage_level_tracker().has_source(session.level_key, source_index, refined=require_refined):
-                self._update_montage_level_bounds_from_rendered(
-                    session.level_key,
-                    rendered,
-                    expected_indices=expected,
-                    refined=require_refined,
-                )
-            self._queue_montage_level_refinement(session, rendered)
-            processed += 1
-            budget.record_item(byte_count=montage_commit.rendered_tile_nbytes(rendered))
-            if budget.should_yield():
-                break
-        if not pending and not budget.should_yield():
-            processed = self._scan_montage_level_stats_from_session(
-                session,
-                expected=expected,
-                stats_start=stats_start,
-                processed=processed,
-                budget=budget,
-            )
-        self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
-        self._montage_pending_level_tiles_last_session = len(pending or ())
-        self._record_gui_budget(budget)
-        if processed:
-            _complete_inline_work(
-                self,
-                WorkItem(
-                    key=(
-                        "montage_level_evidence",
-                        session.key,
-                        int(session.session_id),
-                        int(getattr(session, "level_revision", 0) or 0),
-                        int(processed),
-                    ),
-                    lane=WorkLane.HISTOGRAM_REFINEMENT,
-                    quality="retained",
-                    supersession_key=("montage-level-evidence", session.key),
-                    supersession_value=int(session.session_id),
-                    estimated_cpu_ms=float(self._last_montage_level_stats_ms or 0.0),
-                    estimated_bytes=int(budget.processed_bytes),
-                ),
-            )
-        # A histogram/level refinement is presentation metadata.  It must not
-        # force a full tiled-payload refresh or replay stale removals after a
-        # viewport change.  Normal display commits will publish richer sources;
-        # when there is no visible upload backlog, a non-forced commit can
-        # update uniforms/histogram without invalidating residency.
-        # Evidence-drain pacing (wedge cost fix 2026-07-05): while a parked
-        # explicit-auto flush waits on level evidence, committing after EVERY
-        # budget slice re-runs the full payload build per handful of tiles
-        # (~68 no-op commits for a 272-tile scene).  Commit when the evidence
-        # queue actually drained — the parked flush re-checks the rank then —
-        # or when nothing is parked (metadata refresh for a settled session).
-        evidence_remaining = bool(pending) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
-        flush_parked = bool(getattr(session, "flush_pending", False) or getattr(session, "final_commit_pending", False))
-        if (
-            processed
-            and not (evidence_remaining and flush_parked)
-            and not getattr(session, "dirty_payloads", ())
-            and not getattr(session, "pending_removals", ())
-        ):
-            self._schedule_montage_presentation_commit(session, force=flush_parked)
-        self._schedule_montage_cached_level_stats(session)
-
-    def _schedule_montage_refined_level_stats(self, session) -> None:
-        if not self._montage_session_is_current(session):
-            return
-        pending = getattr(session, "pending_refined_level_tiles", None)
-        if not pending:
-            return
-        controller = getattr(self.win, "histogram_evaluation_controller", None)
-        if controller is None:
-            return
-        scheduled = 0
-        while pending and scheduled < 4:
-            rendered = pending.popleft()
-            source_index = int(rendered.tile.source_index)
-            if self._montage_level_tracker().has_source(session.level_key, source_index, refined=True):
-                pending_sources = getattr(session, "pending_refined_level_sources", None)
-                if pending_sources is not None:
-                    pending_sources.discard(source_index)
-                continue
-            source = render_effects.montage_refined_level_values(rendered)
-            key = ("montage_refined_level_stats", session.level_key, source_index)
-
-            def evaluate(source=source, source_index=source_index):
-                return sample_tile_level_stats(source, int(source_index), refined=True)
-
-            def done(
-                stats,
-                session_id=session.session_id,
-                session_key=session.key,
-                level_key=session.level_key,
-                source_index=source_index,
-            ):
-                self._on_montage_refined_level_stats_done(session_id, session_key, level_key, source_index, stats)
-
-            started = controller.start_latest(
-                evaluate,
-                on_done=done,
-                key=key,
-                priority=EvalPriority.HISTOGRAM,
-                replace_group=f"montage_level_refinement:{source_index}",
-                memory_budget_bytes=self._memory_policy().display_cache_budget_bytes,
-            )
-            if started is None:
-                pending.appendleft(rendered)
-                break
-            scheduled += 1
-
-    def _on_montage_refined_level_stats_done(self, session_id, session_key, level_key, source_index, stats) -> None:
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session_id, session_key):
-            return
-        pending_sources = getattr(session, "pending_refined_level_sources", None)
-        if pending_sources is not None:
-            pending_sources.discard(int(source_index))
-        if stats is not None:
-            self._montage_level_tracker().update_from_stats(level_key, stats, aggregate=False)
-            summary = self._montage_level_tracker().summary_for(level_key)
-            if (
-                summary is not None
-                and session.display_committed
-                and not getattr(session, "dirty_payloads", ())
-                and not getattr(session, "pending_removals", ())
-                and getattr(session, "user_levels_override", None) is None
-                and self._should_publish_montage_level_metadata(session, summary)
-            ):
-                self._schedule_montage_presentation_commit(session, force=False)
-        self._schedule_montage_refined_level_stats(session)
-
-    def _plan_montage_stages(self, document, missing_tiles):
-        document_key = stage_document_key(document)
-        groups = {}
-        tile_candidates = {}
-        tile_stage_plans = {}
-        tile_stage_candidates = {}
-        for tile in tuple(missing_tiles):
-            try:
-                request = request_for_image(tile.view_state)
-                plan = plan_slab(document, request)
-            except Exception as exc:
-                handle_ui_exception("montage stage planning", exc)
-                continue
-            candidates = tuple(getattr(plan.region_plan, "cache_candidates", ()))
-            retained = tuple(candidate for candidate in candidates if getattr(candidate, "retain", True))
-            if not retained:
-                continue
-            candidate = retained[-1]
-            key = self.win.operation_evaluator.stage_materializer.key_for_candidate(document_key, candidate)
-            groups.setdefault(key, {"candidate": candidate, "tiles": [], "plan": plan, "request": request})
-            groups[key]["tiles"].append(tile)
-            tile_candidates[int(tile.montage_index)] = key
-            tile_stage_plans[int(tile.montage_index)] = plan
-            tile_stage_candidates[int(tile.montage_index)] = candidate
-
-        tile_stage_keys = {}
-        stage_values = {}
-        lead_stage_warmups = {}
-        stage_requests = []
-        attached_stage_keys = set()
-        waiting_indices = set()
-        lead_direct_tile_count = 0
-        retained_stage_index = None
-        retained_stage_decision = ""
-        repeated_expensive_stage_per_tile = False
-        for key, group in groups.items():
-            tiles = tuple(group["tiles"])
-            candidate = group["candidate"]
-            retained_stage_index = int(getattr(candidate, "stage_index", -1) or -1)
-            estimated = int(getattr(candidate, "estimated_nbytes", 0) or 0)
-            if len(tiles) < 2 and estimated < 16 * 1024 * 1024:
-                continue
-            result = self.win.operation_evaluator.stage_materializer.request_stage(document_key, candidate)
-            retained_stage_decision = result.decision
-            if result.decision == "hit":
-                stage_values[key] = result.value
-                for tile in tiles:
-                    tile_stage_keys[int(tile.montage_index)] = key
-                    tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
-                    tile_stage_candidates[int(tile.montage_index)] = candidate
-                continue
-            if result.decision == "scheduled":
-                # Compute the shared stage as a stage-lane job. Tile tasks
-                # depend on this cache key, so the kernel parks them until
-                # the stage lane has admitted the value into the cache.
-                for tile in tiles:
-                    tile_stage_keys[int(tile.montage_index)] = key
-                    tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
-                    tile_stage_candidates[int(tile.montage_index)] = candidate
-                    waiting_indices.add(int(tile.montage_index))
-                stage_requests.append((result.request, group["plan"]))
-                continue
-            if result.decision == "attached":
-                attached_stage_keys.add(key)
-                for tile in tiles:
-                    tile_stage_keys[int(tile.montage_index)] = key
-                    tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
-                    tile_stage_candidates[int(tile.montage_index)] = candidate
-                    waiting_indices.add(int(tile.montage_index))
-                continue
-            for tile in tiles:
-                tile_stage_keys.pop(int(tile.montage_index), None)
-            if len(tiles) > 1:
-                repeated_expensive_stage_per_tile = True
-        return {
-            "tile_stage_keys": tile_stage_keys,
-            "tile_stage_plans": tile_stage_plans,
-            "tile_stage_candidates": tile_stage_candidates,
-            "stage_values": stage_values,
-            "lead_stage_warmups": lead_stage_warmups,
-            "stage_requests": stage_requests,
-            "attached_stage_keys": attached_stage_keys,
-            "waiting_indices": waiting_indices,
-            "lead_direct_tiles": int(lead_direct_tile_count),
-            "retained_stage_index": retained_stage_index,
-            "retained_stage_decision": retained_stage_decision,
-            "repeated_expensive_stage_per_tile": bool(repeated_expensive_stage_per_tile),
-        }
-
-    def _schedule_deferred_montage_planning(self, session, *, delay_ms: int = 0) -> None:
-        self._complete_deferred_montage_planning(session)
-
-    def _complete_deferred_montage_planning(self, session) -> None:
-        if not self._montage_session_is_current(session):
-            return
-        if not bool(getattr(session, "stage_planning_deferred", False)):
-            return
-        if _viewport_interaction_active(self):
-            # Still mid-burst: floors are carrying the screen. The viewport
-            # quiet edge retargets the pipeline and completes this planning.
-            self.win._montage_viewport_update_pending = True
-            return
-        self._plan_deferred_montage_stages_now(session)
-
-    def _plan_deferred_montage_stages_now(self, session) -> None:
-        """Run the deferred stage planning immediately (no interaction gate)."""
-
-        missing_tiles = tuple(getattr(session, "deferred_missing_tiles", ()) or ())
-        session.stage_planning_deferred = False
-        session.deferred_missing_tiles = ()
-        stage_plan_start = perf_counter()
-        stage_plan = self._plan_montage_stages(session.document, missing_tiles)
-        self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
-        session.attach_stage_fan_in(StageFanInState(
-            tile_stage_keys=stage_plan["tile_stage_keys"],
-            tile_stage_plans=stage_plan["tile_stage_plans"],
-            tile_stage_candidates=stage_plan["tile_stage_candidates"],
-            attached_requests=stage_plan["attached_stage_keys"],
-            values=stage_plan["stage_values"],
-            lead_warmups=stage_plan["lead_stage_warmups"],
-        ))
-        for tile in missing_tiles:
-            session.enqueue_pending_tile(tile)
-        session.tile_compute_waiting_for_stage = len(stage_plan["waiting_indices"])
-        session.stage_backed_tiles_pending = len(stage_plan["waiting_indices"])
-        session.lead_direct_tiles = stage_plan["lead_direct_tiles"]
-        session.retained_stage_index = stage_plan["retained_stage_index"]
-        session.retained_stage_decision = stage_plan["retained_stage_decision"]
-        session.repeated_expensive_stage_per_tile = stage_plan["repeated_expensive_stage_per_tile"]
-        self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-        self._retarget_montage_pipeline(session)
-
-    def _schedule_montage_stage_jobs(self, session, stage_requests) -> None:
-        if not self._montage_session_is_current(session):
-            return
-        controller = getattr(self.win, "stage_evaluation_controller", self.win.visible_evaluation_controller)
-        for request, plan in tuple(stage_requests):
-            if request is None or request.key in session.stage_fan_in.active_requests:
-                continue
-            session.stage_fan_in.active_requests.add(request.key)
-
-            def evaluate(token, request=request, plan=plan):
-                context = self.win._evaluation_context(ComputeLane.STAGE, token)
-                return materialize_stage_candidate_chunked(
-                    session.document,
-                    plan.region_plan,
-                    request.candidate,
-                    stage_cache=self.win.operation_evaluator.stage_cache,
-                    document_key=request.document_key,
-                    cancellation_token=token,
-                    evaluation_context=context,
-                    memory_policy=context.memory_policy,
-                    allowed_chunk_axes=stage_materialization_allowed_chunk_axes(request.candidate.shape),
-                )
-
-            started = controller.start_latest(
-                evaluate,
-                key=("stage", request.key),
-                priority=EvalPriority.VISIBLE_IMAGE,
-                replace_group=f"montage-stage:{int(session.session_id)}:{hash(request.key)}",
-                frame_target=session.frame_plan.target,
-                supersession_key=("montage-stage", request.key),
-                supersession_value=(session.key, int(session.session_id)),
-                work_item=WorkItem(
-                    key=request.key,
-                    lane=WorkLane.STAGE_MATERIALIZATION,
-                    frame_target=session.frame_plan.target,
-                    quality=session.frame_plan.target.quality,
-                    supersession_key=("montage-stage", request.key),
-                    supersession_value=(session.key, int(session.session_id)),
-                    estimated_bytes=int(getattr(request.candidate, "estimated_nbytes", 0) or 0),
-                    reusable_output=True,
-                ),
-                on_done=lambda value, session_id=session.session_id, key=request.key: self._on_montage_stage_done(session_id, key, value),
-                on_error=lambda exc, session_id=session.session_id, key=request.key: self._on_montage_stage_error(session_id, key, exc),
-                on_stale=lambda key=request.key: self._on_montage_stage_stale(key),
-                on_slow=lambda: self._on_montage_tile_slow(session.session_id),
-                slow_ms=100,
-                pass_token=True,
-            )
-            if started is None:
-                # Admission declined: the key was optimistically marked
-                # active, and leaving it there makes the planner's dedup
-                # skip this stage forever while every stage-backed tile
-                # waits on it (observed: 64 tiles wedged behind one lost
-                # ~490 MB stage after a session-restore burst). Roll back
-                # so the next planning pass re-requests it.
-                session.stage_fan_in.active_requests.discard(request.key)
-                self._release_stage_dependent_tiles_to_direct(session, request.key)
-                self._montage_stage_admission_declined = (
-                    int(getattr(self, "_montage_stage_admission_declined", 0) or 0) + 1
-                )
-                self._retarget_montage_pipeline(session)
-
-    def _on_montage_stage_stale(self, key) -> None:
-        self.win.operation_evaluator.stage_materializer.cancel(key)
-        session = getattr(self, "_montage_session", None)
-        if session is not None:
-            session.stage_fan_in.active_requests.discard(key)
-            self._release_stage_dependent_tiles_to_direct(session, key)
-            self._retarget_montage_pipeline(session)
-
-    def _on_montage_stage_done(self, session_id, key, value) -> None:
-        session = getattr(self, "_montage_session", None)
-        self.win.operation_evaluator.stage_materializer.complete(key, value)
-        if session is None or not self._is_current_montage_session(session_id, session.key):
-            return
-        if not self._is_current_render_generation(session.render_generation):
-            return
-        session.stage_fan_in.active_requests.discard(key)
-        session.stage_fan_in.attached_requests.discard(key)
-        session.stage_fan_in.values[key] = value
-        self._retarget_montage_pipeline(session)
-
-    def _release_stage_dependent_tiles_to_direct(self, session, key) -> None:
-        queued = set(session.pending_tile_numbers())
-        released = 0
-        for tile_number, stage_key in tuple(session.stage_fan_in.tile_stage_keys.items()):
-            tile_number = int(tile_number)
-            if stage_key != key:
-                continue
-            session.stage_fan_in.tile_stage_keys.pop(tile_number, None)
-            if tile_number in session.rendered_tiles or tile_number in session.skipped_tiles:
-                continue
-            if 0 <= tile_number < len(session.plan.tiles) and tile_number not in queued:
-                tile = session.plan.tiles[tile_number]
-                _enqueue_session_pending_tile(session, tile)
-                session.mark_loading(tile)
-                queued.add(tile_number)
-                released += 1
-        if released:
-            session.tile_compute_waiting_for_stage = max(0, int(session.tile_compute_waiting_for_stage) - released)
-            session.stage_backed_tiles_pending = max(0, int(session.stage_backed_tiles_pending) - released)
-
-    def _on_montage_stage_error(self, session_id, key, exc) -> None:
-        session = getattr(self, "_montage_session", None)
-        self.win.operation_evaluator.stage_materializer.fail(key, exc)
-        if session is None or not self._is_current_montage_session(session_id, session.key):
-            return
-        for tile_number, stage_key in tuple(session.stage_fan_in.tile_stage_keys.items()):
-            tile_number = int(tile_number)
-            if stage_key == key and 0 <= tile_number < len(session.plan.tiles):
-                session.stage_fan_in.tile_stage_keys.pop(tile_number, None)
-                session.mark_skipped(session.plan.tiles[tile_number])
-        session.stage_fan_in.fail(key)
-        show_status_message(self.win, f"Montage stage update failed: {exc}", timeout=4000)
-        self._retarget_montage_pipeline(session, force_commit=True)
 
     def _warn_montage_tiles_skipped(self, *, skipped_count: int, tile_bytes: int, budget_bytes: int, tile_shape) -> None:
         message = (
@@ -2089,258 +1304,13 @@ class FrameRenderMixin:
         if callable(schedule_refresh):
             schedule_refresh("montage-layout-reflow")
 
-    def _on_montage_tile_slow(self, session_id):
-        session = getattr(self, "_montage_session", None)
-        # Not the shared predicate: on_slow callbacks capture only the session
-        # id, so this is intentionally an id-only currency check.
-        if session is None or int(session.session_id) != int(session_id):
-            return
-        self._show_montage_session_loading_overlay(session)
-
-    def _schedule_montage_session_slow_overlay(self, session):
-        self._show_montage_session_loading_overlay_if_current(int(session.session_id), session.key)
-
-    def _stop_montage_session_slow_overlay(self):
-        self._montage_session_slow_key = None
-
-    def _show_montage_session_loading_overlay_if_current(self, session_id, key):
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session_id, key):
-            return
-        if session.visible_plan_complete():
-            return
-        if not session.pending_tiles and not session.loading_tiles and not session.stage_fan_in.attached_requests:
-            return
-        self._show_montage_session_loading_overlay(session)
-
-    def _show_montage_session_loading_overlay(self, session):
-        if not self._montage_session_is_current(session):
-            return
-        if session.visible_plan_complete():
-            return
-        session.show_loading_overlays = True
-        self._schedule_montage_presentation_commit(session, force=True)
-        self.win.img_view.setImageStale(True)
-        self.win.img_view.setEvaluationOverlay(True, "Updating image frame...")
-        rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
-        overlay_start = perf_counter()
-        self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
-        self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
-        self.win.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image frame")
-        if getattr(session, "defer_side_panels", False) or _viewport_interaction_active(self):
-            self.win._deferred_side_panel_refresh_pending = True
-        else:
-            self.win._update_operation_dock()
-
-    def _store_reusable_montage_tile_result(self, tile, result, *, document, montage_axis: int | None, colormap_lut, shader_display: bool):
-        if _document_key(document) != _document_key(self.win.document):
-            return None
-        stored = self.win.operation_evaluator.store_montage_tile_result(
-            tile,
-            montage_axis=montage_axis,
-            colormap_lut=colormap_lut,
-            result=result,
-            document=document,
-            shader_display=shader_display,
-        )
-        controller = getattr(self.win, "montage_tile_evaluation_controller", None)
-        if stored is not None and controller is not None and hasattr(controller, "note_stale_reused"):
-            controller.note_stale_reused()
-        return stored
-
-    def _montage_lod_policy_mode(self) -> str:
-        return montage_lod.policy_mode_for_renderer(self)
-
-    def _montage_lod_pyramid(self) -> PyramidCache:
-        return montage_lod.shared_pyramid(self)
-
-    def _montage_lod_preview_pyramid(self) -> PyramidCache:
-        return montage_lod.preview_pyramid(self)
-
-    def _montage_render_intent(self, session) -> RenderIntent:
-        return RenderIntent(
-            semantic_key=session.key,
-            viewport_key=session.view_range,
-            presentation_key=(
-                str(session.window_mode),
-                normalize_bounds(getattr(session, "user_levels_override", None)),
-                bool(getattr(session, "force_auto", False)),
-            ),
-            view_range=session.view_range,
-            viewport_shape=tuple(session.viewport_shape),
-            interactive=_interactive_active(self),
-        )
-
-    def _montage_pipeline_for_session(self, session) -> MontagePipeline:
-        pipeline = getattr(session, "pipeline", None)
-        if pipeline is None:
-            pipeline = MontagePipeline(
-                self.win.kernel,
-                MontagePipelineEffects(self, session),
-                commit_max_items=8,
-            )
-            session.pipeline = pipeline
-        self._montage_pipeline = pipeline
-        return pipeline
-
-    def _retarget_montage_pipeline(self, session, *, force_commit: bool = False) -> int:
-        if session is None or not self._montage_session_is_current(session):
-            return 0
-        if bool(getattr(session, "stage_planning_deferred", False)) and not _viewport_interaction_active(self):
-            self._plan_deferred_montage_stages_now(session)
-            return 0
-        montage_lod.selected_lod_factor(session)
-        intent = self._montage_render_intent(session)
-        pipeline = self._montage_pipeline_for_session(session)
-        submitted = pipeline.retarget(intent, session.lod_policy_decision.demand)
-        if getattr(session, "pending_lod_requests", None):
-            self._schedule_montage_lod_materializations(session)
-        if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
-            self._schedule_montage_cached_level_stats(session)
-        if force_commit or session.flush_pending or session.final_commit_pending:
-            self._schedule_montage_ready_display_commit(session)
-        if not submitted:
-            self._finish_montage_session_if_complete(session)
-        unsettled = bool(
-            getattr(session, "pending_tiles", None)
-            or getattr(session, "active_tile_requests", None)
-            or getattr(session, "loading_tiles", None)
-            or getattr(session.stage_fan_in, "active_requests", None)
-            or getattr(session.stage_fan_in, "attached_requests", None)
-            or getattr(session, "dirty_payloads", None)
-            or getattr(session, "pending_payload_upserts", None)
-        )
-        if unsettled:
-            self._ensure_montage_watchdog()
-        return int(submitted)
-
-    def _schedule_montage_lod_materializations(self, session) -> None:
-        return montage_lod.schedule_materializations(self, session)
-
-    # -- stall assertion probe (ADR 0051) -------------------------------------
-    # The live render path must make lost wakeups impossible by construction.
-    # This probe is diagnostics-only: when the diagnostics dialog is visible it
-    # records a frozen unsettled signature, but it never mutates session state
-    # or schedules work.
-
-    def _montage_assertion_probe_enabled(self) -> bool:
-        dialog = getattr(self.win, "_diagnostics_dialog", None)
-        return bool(dialog is not None and dialog.isVisible())
-
-    def _ensure_montage_watchdog(self) -> None:
-        if not self._montage_assertion_probe_enabled():
-            self._montage_watchdog_stop()
-            return
-        timer = getattr(self, "_montage_watchdog_timer", None)
-        if timer is None:
-            timer = Qt.QtCore.QTimer(self)
-            timer.setInterval(1000)
-            timer.timeout.connect(self._montage_watchdog_tick)
-            self._montage_watchdog_timer = timer
-            self._montage_watchdog_state = None
-        if not timer.isActive():
-            self._montage_watchdog_state = None
-            timer.start()
-
-    def _montage_watchdog_stop(self) -> None:
-        timer = getattr(self, "_montage_watchdog_timer", None)
-        if timer is not None:
-            timer.stop()
-        self._montage_watchdog_state = None
-
-    @Qt.QtCore.Slot()
-    def _montage_watchdog_tick(self) -> None:
-        if not self._montage_assertion_probe_enabled():
-            self._montage_watchdog_stop()
-            return
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._montage_session_is_current(session):
-            self._montage_watchdog_stop()
-            return
-        pending = len(session.pending_tiles)
-        evaluating = len(session.lifecycle.evaluating_tiles)
-        active = len(session.active_tile_requests)
-        dirty = len(session.dirty_payloads)
-        upserts = len(session.pending_payload_upserts)
-        lod_pending = len(getattr(session, "pending_lod_requests", ()) or ())
-        planning_deferred = bool(getattr(session, "stage_planning_deferred", False))
-        level_evidence = len(getattr(session, "pending_level_tiles", ()) or ()) + int(
-            getattr(session, "level_scan_remaining_tiles", 0) or 0
-        )
-        # Level-value convergence drains stale tiles through budgeted commits
-        # without touching dirty/upsert queues; its progress must be part of
-        # the stall signature or a long drain reads as a frozen session.
-        level_stale = (
-            int(session.level_presentation_snapshot().stale_count)
-            if session.has_pending_level_update()
-            else 0
-        )
-        unsettled = bool(
-            pending
-            or evaluating
-            or active
-            or dirty
-            or upserts
-            or lod_pending
-            or planning_deferred
-            or level_evidence
-            or level_stale
-            or session.flush_pending
-            or session.final_commit_pending
-        )
-        if not unsettled:
-            self._montage_watchdog_stop()
-            return
-        if planning_deferred:
-            # Deferred planning is scheduled work, not a stall; if it wedges,
-            # the stable signature below reports it without re-kicking work.
-            return
-        level_timer = getattr(self, "_montage_level_stats_timer", None)
-        if level_evidence and level_timer is not None and level_timer.isActive():
-            # Level evidence with its continuation timer armed is scheduled
-            # work; a busy event loop can hold the drain across watchdog
-            # ticks (pyqtgraph fft commits block for hundreds of ms).  A
-            # lost wakeup is the timer NOT being armed while records imply
-            # level work — that still fires below.
-            return
-        signature = (
-            int(session.session_id),
-            pending,
-            evaluating,
-            active,
-            dirty,
-            upserts,
-            lod_pending,
-            level_evidence,
-            level_stale,
-            len(session.presented_tiles),
-            len(session.rendered_tiles),
-        )
-        previous = getattr(self, "_montage_watchdog_state", None)
-        self._montage_watchdog_state = signature
-        if previous != signature:
-            return  # work is progressing; stay armed.
-        self._montage_stall_assertions = int(getattr(self, "_montage_stall_assertions", 0) or 0) + 1
-        self._montage_watchdog_last_stall = signature
-        print(
-            "[arrayscope] STALL ASSERTION PROBE FIRED (ADR 0051): "
-            f"signature={signature} "
-            f"stage_active={len(session.stage_fan_in.active_requests)} "
-            f"stage_attached={len(session.stage_fan_in.attached_requests)} "
-            f"stage_deps={len(getattr(session.stage_fan_in, 'tile_stage_keys', {}))} "
-            f"loading={len(session.loading_tiles)} "
-            f"flush_pending={session.flush_pending} final={session.final_commit_pending}",
-            file=sys.stderr,
-            flush=True,
-        )
-
     def _on_montage_lod_level_ready(self, session_id, session_key, tile_number) -> None:
         return montage_lod.on_level_ready(self, session_id, session_key, tile_number)
 
-    def _schedule_montage_presentation_commit(self, session, *, force=False) -> None:
+    def apply_montage_presentation(self, session) -> None:
         if not self._montage_session_is_current(session):
             return
-        self._commit_montage_session_presentation(session, force=force)
+        self.commit_montage_session_presentation(session)
         if (
             getattr(session, "show_loading_overlays", False)
             and not session.visible_plan_complete()
@@ -2349,12 +1319,12 @@ class FrameRenderMixin:
             self.win.img_view.setImageStale(True)
             self.win.img_view.setEvaluationOverlay(True, "Updating image frame...")
 
-    def _commit_montage_session_presentation(self, session, *, force=False) -> None:
+    def commit_montage_session_presentation(self, session) -> None:
         if not self._montage_session_is_current(session):
             return
-        MontagePipelineEffects(self, session).commit_pending_session(force=force)
+        MontagePipelineEffects(self, session).commit_pending_session()
 
-    def _schedule_montage_ready_display_commit(self, session) -> None:
+    def apply_ready_montage_display(self, session) -> None:
         if not self._montage_session_is_current(session):
             return
         has_commit_work = (
@@ -2372,7 +1342,7 @@ class FrameRenderMixin:
             return
         session.final_commit_pending = True
         session.flush_pending = True
-        self._commit_montage_session_presentation(session, force=False)
+        self.commit_montage_session_presentation(session)
 
     def _finish_montage_session_if_complete(self, session) -> bool:
         if not self._montage_session_is_current(session):
@@ -2424,202 +1394,6 @@ class FrameRenderMixin:
         if callable(schedule_roi_refresh):
             schedule_roi_refresh("montage-semantic-commit")
 
-    def _publish_montage_content_extent(self, plan) -> None:
-        """Publish the semantic montage extent as the viewport content shape.
-
-        Layout geometry is known at plan time; camera policy (fit/unlock/1:1)
-        must never wait for — or trust — physical tile commits. Without this,
-        unlocking fit while commits are still gated (preview-floor first
-        fill) re-fits the camera around the stale single-slice shape.
-        """
-
-        geometry = getattr(plan, "geometry", plan)
-        montage = getattr(geometry, "montage", geometry)
-        set_extent = getattr(self.win.img_view, "setViewportContentExtent", None)
-        if not callable(set_extent):
-            return
-        if montage is None or not getattr(montage, "indices", ()):
-            set_extent(None)
-            return
-        (x0, x1), (y0, y1) = _montage_full_view_range(montage)
-        set_extent((max(1, int(round(y1 - y0))), max(1, int(round(x1 - x0)))))
-
-    def _maybe_auto_fit_montage_tiles(self, plan_or_geometry) -> bool:
-        if bool(getattr(self, "_montage_live_layout_reflow", False)):
-            return False
-        pending_continuity = getattr(self.win, "_pending_viewport_continuity_range", None)
-        active_continuity = getattr(self.win, "_active_viewport_continuity_range", None)
-        if callable(pending_continuity) and pending_continuity() is not None:
-            return False
-        if callable(active_continuity) and active_continuity() is not None:
-            return False
-        plan = plan_or_geometry if hasattr(plan_or_geometry, "geometry") else None
-        geometry = getattr(plan_or_geometry, "geometry", plan_or_geometry)
-        montage = getattr(geometry, "montage", geometry)
-        if montage is None or not getattr(montage, "indices", ()):
-            self._last_montage_autofit_signature = None
-            return False
-        tile_count = len(tuple(montage.indices))
-        fallback_range = _montage_full_view_range(montage)
-        if plan is not None:
-            viewport_size = self.win.img_view.graphicsView.viewport().size()
-            auto_range = square_montage_fit_view_range(
-                plan,
-                (max(1, viewport_size.height()), max(1, viewport_size.width())),
-            )
-        else:
-            auto_range = fallback_range
-        signature = _montage_autofit_signature(montage)
-        revert_previous_signature = getattr(self, "_last_montage_revert_signature", None)
-        self._last_montage_revert_signature = signature
-        scope_grew_for_revert = bool(
-            revert_previous_signature is not None
-            and _montage_autofit_scope_grew(revert_previous_signature, signature)
-        )
-        previous_signature = getattr(self, "_last_montage_autofit_signature", None)
-        self._last_montage_autofit_signature = signature
-        if previous_signature is not None and not _montage_autofit_scope_grew(previous_signature, signature):
-            return False
-        viewport_controller = getattr(self.win.img_view, "viewport_controller", None)
-        if viewport_controller is not None and viewport_controller.is_fit_locked():
-            return False
-        view = self.win.img_view.getView()
-        before_range = _copy_view_range(view.viewRange())
-        auto_like = _viewport_controller_auto_active_for_range(viewport_controller, before_range)
-        visible_count = _visible_montage_tile_count(montage, before_range)
-        can_auto_adjust = _should_auto_fit_montage_view(
-            before_range,
-            auto_range,
-            viewport_controller=viewport_controller,
-            visible_count=visible_count,
-            tile_count=tile_count,
-        )
-        if (
-            can_auto_adjust
-            and scope_grew_for_revert
-            and not auto_like
-            and tile_count > 0
-            and visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION
-            and not _view_range_contains_near(before_range, fallback_range)
-            and viewport_controller is not None
-        ):
-            if not bool(getattr(self.win, "_suppress_montage_autofit_revert_message", False)):
-                previous_mode = viewport_controller.mode
-                self._pending_montage_view_revert = (
-                    before_range,
-                    previous_mode,
-                    "Adjusted montage view.",
-                )
-            return False
-        if not can_auto_adjust:
-            return False
-        if not auto_like and (tile_count <= 0 or visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION):
-            return False
-        if _view_range_contains_near(before_range, fallback_range):
-            return False
-        previous_mode = None if viewport_controller is None else viewport_controller.mode
-        self._set_montage_view_range(auto_range)
-        if viewport_controller is not None:
-            viewport_controller.mode = ViewportMode.AUTO_UNTOUCHED
-            viewport_controller.last_auto_view_range = auto_range
-
-        def undo():
-            self._set_montage_view_range(before_range)
-            if viewport_controller is not None and previous_mode is not None:
-                viewport_controller.mode = previous_mode
-
-        if not bool(getattr(self.win, "_suppress_montage_autofit_revert_message", False)):
-            show_revert_action(
-                self.win,
-                "Fitted montage to show all tiles.",
-                undo,
-                timeout=5000,
-            )
-        return True
-
-    def _show_pending_montage_view_revert(self) -> None:
-        pending = getattr(self, "_pending_montage_view_revert", None)
-        if pending is None:
-            return
-        self._pending_montage_view_revert = None
-        before_range, previous_mode, message = pending
-        try:
-            current_range = _copy_view_range(self.win.img_view.getView().viewRange())
-        except Exception:
-            return
-        if view_ranges_near(current_range, before_range, tolerance_fraction=0.005):
-            return
-        viewport_controller = getattr(self.win.img_view, "viewport_controller", None)
-
-        def undo():
-            self._set_montage_view_range(before_range)
-            if viewport_controller is not None and previous_mode is not None:
-                viewport_controller.mode = previous_mode
-
-        show_revert_action(
-            self.win,
-            message,
-            undo,
-            timeout=5000,
-        )
-
-    def _set_montage_view_range(self, view_range) -> None:
-        view = self.win.img_view.getView()
-        was_applying = bool(getattr(self.win.img_view, "_viewport_applying", False))
-        self.win.img_view._viewport_applying = True
-        try:
-            view.setRange(
-                xRange=(float(view_range[0][0]), float(view_range[0][1])),
-                yRange=(float(view_range[1][0]), float(view_range[1][1])),
-                padding=0,
-            )
-        finally:
-            self.win.img_view._viewport_applying = was_applying
-
-    def _montage_tile_source_ids(self, session) -> dict[int, object]:
-        source_ids = getattr(session, "tile_source_ids", None)
-        if source_ids is None:
-            source_ids = {}
-            session.tile_source_ids = source_ids
-        plan_tiles = {
-            int(tile.montage_index): tile
-            for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-        }
-        for stale in tuple(source_ids):
-            if int(stale) not in plan_tiles:
-                source_ids.pop(int(stale), None)
-        tile_key_for = self.win.operation_evaluator.montage_tile_key_batch(
-            colormap_lut=session.colormap_lut,
-            document=session.document,
-            shader_display=bool(getattr(session, "shader_display", False)),
-        )
-        for tile_number, tile in sorted(plan_tiles.items()):
-            if int(tile_number) in source_ids:
-                continue
-            try:
-                source_ids[tile_number] = tile_key_for(tile.view_state)
-            except Exception:
-                rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
-                if rendered is None:
-                    source_ids[tile_number] = (
-                        "planned_tile",
-                        int(getattr(tile, "montage_index", tile_number)),
-                        int(getattr(tile, "source_index", tile_number)),
-                        id(getattr(tile, "view_state", None)),
-                    )
-                else:
-                    image = getattr(rendered, "image", None)
-                    histogram = getattr(rendered, "histogram_data", None)
-                    source_ids[tile_number] = (
-                        id(image),
-                        tuple(np.shape(image)),
-                        None if image is None else str(np.asarray(image).dtype),
-                        id(histogram),
-                        None if histogram is None else tuple(np.shape(histogram)),
-                        None if histogram is None else str(np.asarray(histogram).dtype),
-                    )
-        return dict(source_ids)
-
     def _should_publish_montage_level_metadata(self, session, stats: MontageLevelStats) -> bool:
         # Histogram metadata is independent from whether display levels are
         # allowed to move.  Publishing better semantic stats lets absolute mode
@@ -2655,114 +1429,6 @@ class FrameRenderMixin:
         # to stale tiny placeholder ranges.
         session.applied_level_source = source
 
-    def _classify_visible_montage_tiles(self, session) -> None:
-        rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
-        pending = set(session.pending_tile_numbers())
-        newly_pending = []
-        for tile in session.plan.tiles:
-            index = int(tile.montage_index)
-            intersects = tile.x0 < rect[2] and tile.x0 + tile.width > rect[0] and tile.y0 < rect[3] and tile.y0 + tile.height > rect[1]
-            if not intersects:
-                continue
-            if index in session.rendered_tiles or index in session.loading_tiles or index in session.skipped_tiles:
-                continue
-            if index in pending:
-                session.mark_loading(tile)
-            else:
-                newly_pending.append(tile)
-                pending.add(index)
-        for tile in prioritize_montage_tiles(
-            newly_pending,
-            view_range=((rect[0], rect[2]), (rect[1], rect[3])),
-            focus=_montage_priority_focus(self, session.view_range),
-        ):
-            _enqueue_session_pending_tile(session, tile)
-            session.mark_loading(tile)
-
-    def _update_montage_tile_overlays_for_plan(self, plan, tile_states, viewport_rect) -> None:
-        if not hasattr(self.win.img_view, "setMontageTileOverlays"):
-            return
-        session = getattr(self, "_montage_session", None)
-        show_loading = bool(getattr(session, "show_loading_overlays", False))
-        candidate_numbers: tuple[int, ...] | None = None
-        tile_state_revision = None
-        if session is not None and getattr(session, "plan", None) is plan:
-            tile_state_revision = int(getattr(session, "tile_state_revision", 0) or 0)
-            candidates = set(int(tile) for tile in getattr(session, "skipped_tiles", ()) or ())
-            if show_loading:
-                candidates.update(int(tile) for tile in getattr(session, "loading_tiles", ()) or ())
-                candidates.update(
-                    int(tile)
-                    for tile in set(getattr(session, "rendered_tiles", {}) or {})
-                    - set(getattr(session, "presented_tiles", ()) or ())
-                )
-            candidate_numbers = tuple(sorted(candidates))
-            key = (
-                id(plan),
-                tuple(int(value) for value in viewport_rect),
-                tile_state_revision,
-                show_loading,
-                candidate_numbers,
-            )
-            if key == getattr(self, "_last_montage_overlay_update_key", None):
-                return
-            if not candidate_numbers:
-                self._last_montage_overlay_update_key = key
-                if int(getattr(self.win.img_view, "montageTileOverlayCount", lambda: 0)() or 0) != 0:
-                    self.win.img_view.setMontageTileOverlays(())
-                return
-            if (
-                show_loading
-                and int(getattr(self.win.img_view, "montageTileOverlayCount", lambda: 0)() or 0) > 0
-                and (
-                    monotonic() - float(getattr(self, "_last_montage_loading_overlay_refresh_monotonic", 0.0) or 0.0)
-                )
-                * 1000.0
-                < MONTAGE_LOADING_OVERLAY_REFRESH_INTERVAL_MS
-            ):
-                return
-            self._last_montage_overlay_update_key = key
-            if show_loading:
-                self._last_montage_loading_overlay_refresh_monotonic = monotonic()
-        overlays = []
-        viewport_x0, viewport_y0, viewport_x1, viewport_y1 = (int(value) for value in viewport_rect)
-        if candidate_numbers is None:
-            tiles = tuple(plan.tiles)
-        else:
-            plan_tiles = tuple(plan.tiles)
-            tiles = tuple(
-                plan_tiles[int(index)]
-                for index in candidate_numbers
-                if 0 <= int(index) < len(plan_tiles)
-            )
-        for tile in tiles:
-            state = tile_states[int(tile.montage_index)] if int(tile.montage_index) < len(tile_states) else MontageTileState.UNLOADED
-            if state == MontageTileState.LOADING and not show_loading:
-                continue
-            if state not in {MontageTileState.LOADING, MontageTileState.SKIPPED}:
-                continue
-            tile_x0 = int(tile.x0)
-            tile_y0 = int(tile.y0)
-            tile_x1 = tile_x0 + int(tile.width)
-            tile_y1 = tile_y0 + int(tile.height)
-            x = max(tile_x0, viewport_x0)
-            y = max(tile_y0, viewport_y0)
-            x1 = min(tile_x1, viewport_x1)
-            y1 = min(tile_y1, viewport_y1)
-            if x1 <= x or y1 <= y:
-                continue
-            overlays.append(
-                MontageTileOverlay(
-                    x=x,
-                    y=y,
-                    width=max(1, x1 - x),
-                    height=max(1, y1 - y),
-                    state=state.value,
-                    text="Skipped" if state == MontageTileState.SKIPPED else "Loading",
-                )
-            )
-        self.win.img_view.setMontageTileOverlays(tuple(overlays))
-
     def _is_current_montage_session(self, session_id, key) -> bool:
         return _session_token_is_current(getattr(self, "_montage_session", None), session_id, key)
 
@@ -2777,229 +1443,6 @@ class FrameRenderMixin:
         if session is None:
             return False
         return self._is_current_montage_session(session.session_id, session.key)
-
-    def _retry_live_profile_after_montage_tile(self) -> None:
-        try:
-            if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
-                return
-            position = self.win.img_view.profileMarkerPosition()
-            if position is None:
-                return
-            self._on_profile_marker_moved(*position)
-            self._update_live_profile_from_pending_pos()
-        except Exception as exc:
-            handle_ui_exception("montage live profile retry", exc)
-
-    def _montage_callback_budget(
-        self,
-        channel: str,
-        *,
-        interactive: bool,
-        work_class: str,
-        item_cap: int | None = None,
-        byte_cap: int | None = None,
-        target_ms: float | None = None,
-    ) -> GuiCallbackBudget:
-        decision = getattr(self.win, "_ui_work_decision", lambda *args, **kwargs: None)(
-            channel,
-            interactive=interactive,
-        )
-        budget = GuiCallbackBudget.for_decision(
-            channel,
-            decision,
-            interactive=interactive,
-            work_class=work_class,
-            backend=image_view_backend_capabilities(self.win.img_view).name,
-            item_cap=item_cap,
-            byte_cap=byte_cap,
-        )
-        if target_ms is not None:
-            budget.target_ms = max(0.0, float(target_ms))
-        return budget
-
-    def _record_gui_budget(self, budget: GuiCallbackBudget) -> None:
-        observation = budget.observation()
-        if observation.processed_items <= 0 and observation.elapsed_ms < observation.warning_ms:
-            return
-        recorder = getattr(getattr(self.win, "resource_governor", None), "record_gui_callback_observation", None)
-        if callable(recorder):
-            recorder(observation)
-            return
-        if hasattr(self.win, "_record_ui_work"):
-            self.win._record_ui_work(
-                observation.channel,
-                observation.elapsed_ms,
-                count=max(1, observation.processed_items),
-                byte_count=observation.processed_bytes,
-                work_class=observation.work_class,
-                backend=observation.backend,
-            )
-
-    def _schedule_loading_montage_profile_retry(self, x, y) -> None:
-        self._pending_montage_profile_retry = (float(x), float(y))
-        if self.win.profile_dock.isVisible():
-            self._retry_loading_montage_profile()
-
-    def _retry_loading_montage_profile(self) -> None:
-        point = getattr(self, "_pending_montage_profile_retry", None)
-        self._pending_montage_profile_retry = None
-        if point is None or self.win.view_state.montage_axis is None:
-            return
-        if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
-            return
-        if not self.win.profile_dock.isVisible():
-            self._pending_montage_profile_retry = (float(point[0]), float(point[1]))
-            return
-        self.win._pending_profile_point = (float(point[0]), float(point[1]))
-        self.win._pending_profile_pos = None
-        self._update_live_profile_from_pending_pos()
-
-    def _schedule_montage_viewport_update(self, *, delay_ms: int | None = None) -> None:
-        if getattr(self, "_montage_viewport_update_running", False):
-            self.win._montage_viewport_update_pending = True
-            return
-        session = getattr(self, "_montage_session", None)
-        self._montage_viewport_update_token = None if session is None else _montage_work_token(session, "viewport_update")
-        self._run_montage_viewport_update()
-
-    def _schedule_montage_priority_retarget_from_hover(self) -> None:
-        if getattr(self.win, "_closing", False):
-            return
-        if getattr(self.win.view_state, "montage_axis", None) is None:
-            return
-        session = getattr(self, "_montage_session", None)
-        if not self._montage_session_is_current(session):
-            return
-        if not session.pending_tiles:
-            return
-        self._montage_priority_retarget_token = _montage_work_token(session, "priority_retarget")
-        self._montage_priority_retarget_pending = True
-        self._run_montage_priority_retarget()
-
-    def _refresh_montage_priority_targets(self, session) -> int:
-        """Rebuild tile-queue priorities from the live viewport.
-
-        The session's priority context is captured before the first montage
-        commit rescales the viewport, so the distance-from-focus ordering can
-        point at the stale pre-montage view range — one corner of the montage
-        — for the entire fill. Retarget every queued tile against the live
-        range at the moments that decide fill order: the first display commit
-        and a shared-stage activation. The range is passed as a priority-only
-        override; ``session.view_range`` is viewport bookkeeping shared with
-        level/commit scoping and stays untouched.
-        """
-        if not session.pending_tiles:
-            return 0
-        # While a viewport-continuity restore (reload, layout change) is in
-        # flight, the live camera range is transitional; prioritizing against
-        # it anchors the fill order at an arbitrary point. Use the restore's
-        # target range instead.
-        continuity_range = getattr(self.win, "_active_viewport_continuity_range", lambda: None)()
-        if continuity_range is not None:
-            view_range = continuity_range
-            focus = _montage_priority_focus(self, view_range)
-        else:
-            try:
-                viewport_plan = self._montage_viewport_plan(self.win.view_state)
-            except Exception:
-                return 0
-            if viewport_plan.view_range is None:
-                return 0
-            view_range = viewport_plan.view_range
-            focus = viewport_plan.priority_focus
-        total = len(session.pending_tiles)
-        return session.retarget_tile_priority(
-            focus=focus,
-            max_items=max(1, int(total)),
-            view_range=view_range,
-        )
-
-    def _run_montage_priority_retarget(self) -> None:
-        self._montage_priority_retarget_pending = False
-        if getattr(self.win, "_closing", False):
-            return
-        session = getattr(self, "_montage_session", None)
-        if not self._montage_session_is_current(session):
-            return
-        token = getattr(self, "_montage_priority_retarget_token", None)
-        if not _montage_work_token_is_current(session, token, "priority_retarget"):
-            return
-        if not session.pending_tiles:
-            return
-        budget = self._montage_callback_budget(
-            "montage_priority_retarget",
-            interactive=True,
-            work_class="queue_metadata",
-            item_cap=_montage_priority_retarget_batch_limit(self, interactive=True),
-        )
-        viewport_plan = self._montage_viewport_plan(self.win.view_state)
-        session.priority_focus = viewport_plan.priority_focus
-        processed = session.retarget_tile_priority(
-            focus=viewport_plan.priority_focus,
-            max_items=budget.item_cap,
-        )
-        if processed:
-            budget.record_item(item_count=processed)
-            _complete_inline_work(
-                self,
-                WorkItem(
-                    key=(
-                        "montage_priority_retarget",
-                        session.key,
-                        int(session.session_id),
-                        int(getattr(session, "viewport_revision", 0) or 0),
-                    ),
-                    lane=WorkLane.VISIBLE_PLANNING,
-                    quality="retained",
-                    supersession_key=("montage-priority-retarget", session.key),
-                    supersession_value=int(session.session_id),
-                ),
-            )
-        self._last_montage_priority_retarget_count = int(processed)
-        self._last_montage_priority_retarget_pending = len(session.pending_tiles)
-        self._record_gui_budget(budget)
-        if session.pending_tiles:
-            self._retarget_montage_pipeline(session)
-
-    def _run_montage_viewport_update(self) -> None:
-        if getattr(self.win, "_closing", False):
-            return
-        session = getattr(self, "_montage_session", None)
-        token = getattr(self, "_montage_viewport_update_token", None)
-        if token is not None and (session is None or not _montage_work_token_is_current(session, token, "viewport_update")):
-            return
-        if getattr(self, "_montage_viewport_update_running", False):
-            self.win._montage_viewport_update_pending = True
-            return
-        self._montage_viewport_update_running = True
-        self.win._montage_viewport_update_pending = False
-        try:
-            if self._try_update_montage_viewport_only():
-                retargeted = getattr(self, "_montage_session", None)
-                if retargeted is not None:
-                    _complete_inline_work(
-                        self,
-                        WorkItem(
-                            key=(
-                                "montage_viewport_retarget",
-                                retargeted.key,
-                                int(retargeted.session_id),
-                                int(getattr(retargeted, "viewport_revision", 0) or 0),
-                            ),
-                            lane=WorkLane.DISPLAY_PREPARATION,
-                            quality="retained",
-                            supersession_key=("montage-viewport-retarget", retargeted.key),
-                            supersession_value=int(retargeted.session_id),
-                        ),
-                    )
-            else:
-                self.update_image_view()
-        finally:
-            self._montage_viewport_update_running = False
-        if getattr(self.win, "_montage_viewport_update_pending", False):
-            self.win._montage_viewport_update_pending = False
-            self._montage_viewport_continue_immediately = False
-            self._schedule_montage_viewport_update(delay_ms=0)
 
     def _montage_tile_shape(self, view_state):
         primary_axis, secondary_axis = view_state.image_axes
@@ -3152,39 +1595,6 @@ def _enqueue_session_pending_tile(session, tile) -> None:
         enqueue(tile)
         return
     session.pending_tiles.append(tile)
-
-
-def _montage_tile_result_batch_limit(window, *, interactive: bool) -> int:
-    configured = getattr(window.win, "_montage_tile_result_batch_size", None)
-    if configured is not None:
-        return max(1, int(configured))
-    decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)("montage_tile_result", interactive=interactive)
-    if decision is not None:
-        return max(1, int(decision.batch_limit))
-    feedback = _latency_feedback(window)
-    if feedback is None:
-        return 4 if interactive else 8
-    return int(feedback.batch_limit("montage_tile_result", interactive=interactive))
-
-
-def _montage_viewport_addition_batch_limit(window, *, interactive: bool) -> int:
-    configured = getattr(window.win, "_montage_viewport_addition_batch_size", None)
-    if configured is not None:
-        return max(1, int(configured))
-    decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)("montage_viewport_update", interactive=interactive)
-    if decision is not None:
-        return max(1, min(32, int(decision.batch_limit)))
-    return 8 if interactive else 16
-
-
-def _montage_priority_retarget_batch_limit(window, *, interactive: bool) -> int:
-    decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
-        "montage_priority_retarget",
-        interactive=interactive,
-    )
-    if decision is not None:
-        return max(1, min(128, int(decision.batch_limit)))
-    return 64 if interactive else 128
 
 
 def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
@@ -3479,27 +1889,3 @@ def _montage_level_evidence_requires_refined(window, session) -> bool:
 
 def _viewport_interaction_active(window) -> bool:
     return bool(getattr(window.win, "_viewport_interaction_active", False))
-
-
-def _deferred_stage_plan_stub() -> dict:
-    """Empty stage plan for interaction-burst sessions (planning deferred).
-
-    Shape-compatible with ``_plan_montage_stages`` so session construction is
-    identical; ``retained_stage_decision`` documents the deferral in
-    diagnostics.
-    """
-
-    return {
-        "tile_stage_keys": {},
-        "tile_stage_plans": {},
-        "tile_stage_candidates": {},
-        "stage_values": {},
-        "lead_stage_warmups": {},
-        "stage_requests": [],
-        "attached_stage_keys": set(),
-        "waiting_indices": set(),
-        "lead_direct_tiles": 0,
-        "retained_stage_index": None,
-        "retained_stage_decision": "deferred-interaction",
-        "repeated_expensive_stage_per_tile": False,
-    }

@@ -135,7 +135,7 @@ class OperationEvaluator:
             raise
 
     def image(self, view_state, colormap_lut=None):
-        request = request_for_image(view_state)
+        request_for_image(view_state)
         key = self.display_tile_key(view_state, colormap_lut=colormap_lut)
         cached = self._display_cache.get(key)
         if cached is not None:
@@ -158,7 +158,7 @@ class OperationEvaluator:
             raise
 
     def line(self, view_state):
-        request = request_for_line(view_state)
+        request_for_line(view_state)
         key = self.line_key(view_state)
         cached = self._profile_cache.get(key)
         if cached is not None:
@@ -180,7 +180,7 @@ class OperationEvaluator:
             raise
 
     def scalar(self, view_state, index):
-        request = request_for_scalar(view_state, index)
+        request_for_scalar(view_state, index)
         key = self.scalar_key(view_state, index)
         cached = self._profile_cache.get(key)
         if cached is not None:
@@ -203,7 +203,7 @@ class OperationEvaluator:
             raise
 
     def export_frame(self, view_state, frame_axis, frame_index, colormap_lut=None):
-        request = request_for_export_frame(view_state, frame_axis, frame_index)
+        request_for_export_frame(view_state, frame_axis, frame_index)
         key = self.export_frame_key(view_state, frame_axis, frame_index, colormap_lut=colormap_lut)
         cached = self._display_cache.get(key)
         if cached is not None:

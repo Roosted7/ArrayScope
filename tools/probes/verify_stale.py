@@ -283,10 +283,10 @@ def finish():
         f"worst_single_sample={floor_misses['worst']}",
         flush=True,
     )
-    # ADR 0051 P2 machine-derived dispatch: stall watchdog fires must be 0.
+    # ADR 0051 P2 machine-derived dispatch: stall assertion fires must be 0.
     print(
-        "DISPATCH: stall_repairs="
-        f"{int(getattr(win.renderer, '_montage_stall_repairs', 0) or 0)} "
+        "DISPATCH: stall_assertions="
+        f"{int(getattr(win.renderer, '_montage_stall_assertions', 0) or 0)} "
         f"admission_declined={int(getattr(win.renderer, '_montage_tile_admission_declined', 0) or 0)} "
         f"orphans_requeued={int(getattr(win.renderer, '_montage_orphaned_tiles_repaired', 0) or 0)} "
         f"last_stall={getattr(win.renderer, '_montage_watchdog_last_stall', None)}",

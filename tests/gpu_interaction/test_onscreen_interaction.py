@@ -134,6 +134,42 @@ def test_index_scrub_and_return_shows_no_stale_content_or_wedged_claims(montage_
         )
 
 
+def test_fft_preview_refinement_settles_without_stalls(montage_window):
+    """Exercise the transform-preview path that reproduced the 73 s floor wedge.
+
+    The raw identity-ramp assertions above cover per-tile pixel ownership.
+    This path instead proves that an FFT/shift/iFFT montage over the montage
+    axis reaches idle, survives a scrub, and leaves the lifecycle machine clean.
+    """
+
+    from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
+    from arrayscope.tools.profile_montage_workflow import _profile_transform_operations
+
+    h = montage_window
+    axis = 2
+    h.win.operation_coordinator.load_operations(
+        _profile_transform_operations(
+            axis,
+            centered_fft=CenteredFFT,
+            fftshift=FFTShift,
+            centered_ifft=CenteredIFFT,
+        )
+    )
+    h.win._set_document(h.win.operation_coordinator.document)
+    h.win._coerce_channel_for_current_dtype()
+
+    def select(text: str) -> None:
+        h.win._set_view_state(h.win.view_state.with_montage_axis(axis, text=text))
+        h.win.render(reason="gpu-harness-fft-preview")
+
+    for text in (":", "6:24", ":"):
+        select(text)
+        assert h.wait_settled(timeout=30.0), (
+            f"FFT preview/refinement montage never settled after scrub to {text!r}"
+        )
+        h.assert_lifecycle_settled()
+
+
 def test_idle_stays_settled_after_interaction(montage_window):
     """The idle-loop defect class: parked upserts re-emitted every commit kept
     the app at ~120 commits+draws/s at idle.  After interaction settles, the

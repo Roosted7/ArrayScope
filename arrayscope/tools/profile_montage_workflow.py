@@ -255,11 +255,7 @@ def _pulse_fit_stretch(win, *, app=None, QtCore=None) -> bool:
     if not callable(fit):
         return False
     fit(True)
-    if app is not None and QtCore is not None:
-        _process_events(app, QtCore, count=10)
     fit(False)
-    if app is not None and QtCore is not None:
-        _process_events(app, QtCore, count=5)
     return True
 
 
@@ -508,7 +504,9 @@ def _run_phase(
     preview_floor_count_start = 0 if phase_session is None else int(
         getattr(phase_session, "lod_preview_presentations", 0) or 0
     )
+    action_start = perf_counter()
     action_result = action()
+    action_elapsed_ms = (perf_counter() - action_start) * 1000.0
     milestones = _wait_for_montage_complete(
         app,
         QtCore,
@@ -538,6 +536,7 @@ def _run_phase(
     )
     if isinstance(action_result, dict):
         record.update(action_result)
+    record["action_elapsed_ms"] = float(action_elapsed_ms)
     record.update(milestones)
     record["event_loop_ticks"] = int(probe.tick_count)
     return record
@@ -732,10 +731,21 @@ def _wait_for_montage_complete(
         f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
         f"loading={snapshot.montage.loading_tiles} "
         f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
+        f"stage_active={0 if fan_in is None else len(getattr(fan_in, 'active_requests', ()) or ())} "
+        f"stage_attached={0 if fan_in is None else len(getattr(fan_in, 'attached_requests', ()) or ())} "
         f"stage_deps={0 if fan_in is None else len(getattr(fan_in, 'tile_stage_keys', {}))} "
         f"lead_warmups={0 if fan_in is None else len(fan_in.lead_warmups)} "
         f"active_presented={final_visibility_state.get('active_presented_tile_count', 0)}/"
         f"{final_visibility_state.get('active_planned_tile_count', 0)} "
+        f"fully_visible={final_visibility_state.get('fully_visible', False)} "
+        f"requested={final_visibility_state.get('requested_tile_count', 0)} "
+        f"mode={getattr(win.img_view, 'montageDisplayMode', lambda: '')()} "
+        f"display_committed={False if session is None else bool(getattr(session, 'display_committed', False))} "
+        f"dirty={0 if session is None else len(getattr(session, 'dirty_payloads', ()) or ())} "
+        f"upserts={0 if session is None else len(getattr(session, 'pending_payload_upserts', ()) or ())} "
+        f"removals={0 if session is None else len(getattr(session, 'pending_removals', ()) or ())} "
+        f"flush={False if session is None else bool(getattr(session, 'flush_pending', False))} "
+        f"final={False if session is None else bool(getattr(session, 'final_commit_pending', False))} "
         f"overlays={_montage_overlay_count(win)} vispy_draws={_vispy_draw_count(win)} "
         f"tile_draw={_vispy_tile_presentation_draw_count(win)}/{_vispy_tile_presentation_request_count(win)} "
         f"level_pending={final_level_state.get('pending', False)} "

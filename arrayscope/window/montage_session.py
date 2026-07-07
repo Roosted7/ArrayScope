@@ -429,6 +429,10 @@ class LifecycleStageFanIn(StageFanInState):
         self._report_bindings()
         return batch
 
+    def detach_unbound_requests(self) -> None:
+        super().detach_unbound_requests()
+        self._report_bindings()
+
     def fail(self, key):
         waiting = super().fail(key)
         self._report_bindings()
@@ -939,6 +943,7 @@ class MontageRenderSession:
         self.level_generation.forget_tile(index)
         self.dirty_payloads[index] = None
         self.stage_fan_in.tile_stage_keys.pop(index, None)
+        self.stage_fan_in.detach_unbound_requests()
         self.active_tile_requests.discard(index)
         self.skipped_tiles.discard(index)
         self.discard_pending_tile(index)
@@ -2014,10 +2019,15 @@ class MontageRenderSession:
         return tuple(sorted(tiles))
 
     def mark_preview_refinements_dirty(self, tile_numbers) -> None:
+        changed = False
         for tile_number in tuple(tile_numbers or ()):
             index = int(tile_number)
             if index in self.rendered_tiles:
                 self.dirty_payloads[index] = None
+                changed = True
+        if changed:
+            self.flush_pending = True
+            self.final_commit_pending = True
 
     def visible_plan_complete(self) -> bool:
         required = set(int(tile) for tile in self.visible_tile_numbers) - set(int(tile) for tile in self.skipped_tiles)

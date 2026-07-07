@@ -65,6 +65,12 @@ class StageFanInState:
             self.tile_stage_keys.pop(_tile_index(tile), None)
         return failed_tiles
 
+    def detach_unbound_requests(self) -> None:
+        bound = set(self.tile_stage_keys.values())
+        for key in tuple(self.attached_requests):
+            if key not in bound:
+                self.attached_requests.discard(key)
+
     def has_waiting(self) -> bool:
         return bool(self.tile_stage_keys)
 

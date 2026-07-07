@@ -24,7 +24,7 @@ class ViewportBridge:
             if callable(scheduler):
                 scheduler()
             elif self.owner.win.view_state.montage_axis is not None:
-                self.owner._schedule_montage_viewport_update()
+                self.owner.retarget_montage_viewport()
 
 
 def _range_change_has_pointer_gesture() -> bool:

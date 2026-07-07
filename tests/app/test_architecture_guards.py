@@ -135,7 +135,7 @@ def test_canvas_preserve_controller_owns_strong_preserve_path():
 
 
 def test_montage_stall_probe_is_diagnostics_only():
-    path = ROOT / "arrayscope" / "window" / "frame_renderer.py"
+    path = ROOT / "arrayscope" / "window" / "montage_runtime.py"
     text = path.read_text()
     tree = ast.parse(text)
     for node in ast.walk(tree):
@@ -143,7 +143,7 @@ def test_montage_stall_probe_is_diagnostics_only():
             source = ast.get_source_segment(text, node) or ""
             forbidden = (
                 "_dispatch_montage_" + "work",
-                "_schedule_montage_presentation_commit",
+                "apply_montage_presentation",
                 "_schedule_deferred_montage_planning",
                 "refresh_lod_for_viewport",
                 "requeue_orphaned_loading_tiles",
@@ -155,6 +155,11 @@ def test_montage_stall_probe_is_diagnostics_only():
             assert "_montage_stall_assertions" in source
             return
     raise AssertionError("_montage_watchdog_tick not found")
+
+
+def test_frame_renderer_stays_below_r2_line_count_gate():
+    path = ROOT / "arrayscope" / "window" / "frame_renderer.py"
+    assert len(path.read_text().splitlines()) < 2000
 
 
 def test_montage_commits_flow_through_pipeline_effects_and_shared_surface():
@@ -597,7 +602,7 @@ def test_update_image_view_does_not_batch_missing_regions():
             segment = ast.get_source_segment(text, node) or ""
             assert "tuple((tile, evaluate_image_snapshot" not in segment
             assert "for tile in missing_tiles)" not in segment
-            assert "_retarget_montage_pipeline" in segment
+            assert "retarget_montage_pipeline" in segment
             return
     raise AssertionError("update_image_view not found")
 

@@ -58,7 +58,7 @@ concern (LOD, previews, floors, pacing) had nowhere else to live.
   (observable via `fallback_event_polls` — a busy fallback is a bug report,
   ADR 0051 discipline retained).
 
-### Modular pipeline (`arrayscope/render/`, nucleus implemented)
+### Modular pipeline (`arrayscope/render/`, R2 live for montage)
 
 Stage boundaries are types (`render/stages.py`): `RenderIntent → TileWork →
 CommitBatch → AckExpectation`. One owner per state:
@@ -70,6 +70,13 @@ CommitBatch → AckExpectation`. One owner per state:
 | task execution + staleness | `arrayscope/kernel` |
 | commit batching queue | `render/pipeline.py` |
 | GPU/CPU application | backend adapter, GUI thread only |
+
+R2 ports the live montage path into this contract: Qt-free evaluation
+effects, lifecycle-backed tile-state snapshots, stage fan-in as kernel
+dependencies, commit batches applied through `present_tiled`, and the
+diagnostics-only stall assertion probe. `frame_renderer.py` is below the R2
+line gate (1,888 lines). The remaining planned dual path is montage
+level-stat publication, which R3 replaces with a LevelStatsService.
 
 ### Unified LOD ladder (`render/ladder.py`)
 
@@ -97,7 +104,8 @@ waiter.
 `core/work_graph.py`, `core/scheduler.py` (compat aliases already point at
 the kernel), `window/evaluation_controller.py` (after R1),
 `window/frame_renderer.py` and `window/montage_lod.py` dissolved per the
-[method map](../redesign/frame-renderer-map.md) (R2/R3), pacing-governor
+[method map](../redesign/frame-renderer-map.md) (R2/R3; R2 clusters B/C/E
+complete, R3 owns the remaining LOD/level-stats split), pacing-governor
 batch machinery reduced to governor-as-telemetry (R4). Tests pinning
 deleted machinery are deleted with it (R5) — a test asserting timer pacing
 of work the kernel now schedules is a wrong-path signpost, not coverage.

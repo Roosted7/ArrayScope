@@ -402,7 +402,7 @@ def test_montage_commits_cached_tiles_immediately_with_loading_placeholders(qtbo
         win._set_view_state(state)
         plan = make_montage_plan(state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=3)
         win.operation_evaluator.store_montage_tile_result(plan.tiles[0], montage_axis=2, colormap_lut=None, result=_tile_result(plan.tiles[0], 10))
-        monkeypatch.setattr(win.renderer, "_retarget_montage_pipeline", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: None)
 
         win.update_image_view()
 
@@ -470,8 +470,10 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
         _process_events(qtbot)
         _settle_initial_render(win, qtbot)
         monkeypatch.setattr(win.renderer, "_is_current_montage_session", lambda session_id, key: session_id == 999 and key == ("test-session",))
-        monkeypatch.setattr(win.renderer, "_commit_montage_session_presentation",
-            lambda _session, *, force=False: calls.append(
+        monkeypatch.setattr(
+            win.renderer,
+            "commit_montage_session_presentation",
+            lambda _session: calls.append(
                 (
                     bool(session.final_commit_pending),
                     bool(session.flush_pending),
@@ -480,7 +482,7 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
         )
         win.renderer._montage_session = session
 
-        win.renderer._schedule_montage_ready_display_commit(session)
+        win.renderer.apply_ready_montage_display(session)
 
         assert session.final_commit_pending
         assert session.flush_pending
@@ -500,7 +502,7 @@ def test_montage_active_tiles_are_all_accounted_for(qtbot, monkeypatch):
     try:
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":"))
-        monkeypatch.setattr(win.renderer, "_retarget_montage_pipeline", lambda _session: 0)
+        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: 0)
         win.update_image_view()
 
         states = win._montage_session.ensure_tile_states()
@@ -527,7 +529,7 @@ def test_montage_pan_schedules_viewport_update(qtbot, monkeypatch):
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":"))
         win.update_image_view()
-        monkeypatch.setattr(win.renderer, "_schedule_montage_viewport_update", lambda *args, **kwargs: calls.append((args, kwargs)))
+        monkeypatch.setattr(win.renderer, "retarget_montage_viewport", lambda: calls.append("retargeted"))
 
         win.img_view.getView().setRange(xRange=(6, 9), yRange=(0, 2), padding=0)
 
@@ -549,7 +551,7 @@ def test_cached_montage_tile_rebinds_to_current_layout(qtbot, monkeypatch):
         old_state = ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=1, indices=(0, 1, 2), text=":")
         old_plan = make_montage_plan(old_state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=1)
         win.operation_evaluator.store_montage_tile_result(old_plan.tiles[1], montage_axis=2, colormap_lut=None, result=_tile_result(old_plan.tiles[1], 11))
-        monkeypatch.setattr(win.renderer, "_retarget_montage_pipeline", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: None)
 
         new_state = win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
         win._set_view_state(new_state)
@@ -635,7 +637,7 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
         effects = MontagePipelineEffects(win.renderer, session)
         for index, tile in enumerate(session.plan.tiles):
             effects.admit_tile_result(tile, _tile_result(tile, 100 * (index + 1)))
-        win.renderer._schedule_montage_presentation_commit(session, force=True)
+        win.renderer.apply_montage_presentation(session)
         _process_events(qtbot)
 
         before_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
@@ -644,7 +646,7 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
         assert session.applied_level_source.expected_count == tile_count
 
         win.img_view.getView().setRange(xRange=(0.0, 2.0), yRange=(0.0, 2.0), padding=0)
-        win.renderer._run_montage_viewport_update()
+        win.renderer.apply_montage_viewport_retarget()
         _process_events(qtbot)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == before_levels
@@ -673,7 +675,7 @@ def test_enabling_montage_with_cached_tile_preserves_relative_window_fractions(q
         plan = make_montage_plan(state, axis=2, indices=(1, 2), tile_shape=(4, 5), columns=3)
         tile = plan.tiles[0]
         win.operation_evaluator.store_montage_tile_result(tile, montage_axis=2, colormap_lut=None, result=_tile_result(tile, 100.0))
-        monkeypatch.setattr(win.renderer, "_retarget_montage_pipeline", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: None)
 
         win._set_view_state(state)
         win.update_image_view()
@@ -708,7 +710,7 @@ def test_shifting_montage_range_preserves_relative_window_fractions(qtbot, monke
         first_plan = make_montage_plan(first_state, axis=2, indices=(0, 1), tile_shape=(4, 5), columns=2)
         for tile in first_plan.tiles:
             win.operation_evaluator.store_montage_tile_result(tile, montage_axis=2, colormap_lut=None, result=result_for(tile, data[:, :, tile.source_index]))
-        monkeypatch.setattr(win.renderer, "_retarget_montage_pipeline", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: None)
 
         win._set_view_state(first_state)
         win.update_image_view()
@@ -747,7 +749,7 @@ def test_cached_montage_commit_uses_all_loaded_tiles_for_initial_histogram(qtbot
                 colormap_lut=None,
                 result=_tile_result(tile, value),
             )
-        monkeypatch.setattr(win.renderer, "_retarget_montage_pipeline", lambda _session: None)
+        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: None)
 
         win.img_view.getView().setRange(xRange=(0, 20), yRange=(0, 2), padding=0)
         win._set_view_state(state)

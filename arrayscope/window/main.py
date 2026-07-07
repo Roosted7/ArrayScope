@@ -461,7 +461,21 @@ class ArrayScopeWindow(
         bridge = getattr(self, "kernel_bridge", None)
         if bridge is not None:
             decision = governor.decide_ui_work("kernel_bridge_drain", interactive=interactive)
-            bridge.set_max_items_per_drain(decision.batch_limit)
+            montage_session = getattr(getattr(self, "renderer", None), "_montage_session", None)
+            montage_busy = bool(
+                montage_session is not None
+                and (
+                    getattr(montage_session, "pending_tiles", None)
+                    or getattr(montage_session, "active_tile_requests", None)
+                    or getattr(montage_session, "loading_tiles", None)
+                    or getattr(montage_session, "pending_payload_upserts", None)
+                    or getattr(montage_session, "dirty_payloads", None)
+                    or getattr(montage_session, "flush_pending", False)
+                    or getattr(montage_session, "final_commit_pending", False)
+                )
+            )
+            batch_limit = min(int(decision.batch_limit), 2 if montage_busy else int(decision.batch_limit))
+            bridge.set_max_items_per_drain(batch_limit)
             bridge.set_budget_ms(decision.budget_ms)
         histogram_decision = governor.decide_ui_work("histogram_preview", interactive=interactive)
         img_view = getattr(self, "img_view", None)
@@ -543,7 +557,7 @@ class ArrayScopeWindow(
         self._note_interaction_state_changed()
         if getattr(self, "_montage_viewport_update_pending", False) and getattr(self.view_state, "montage_axis", None) is not None:
             self._montage_viewport_update_pending = False
-            self._schedule_montage_viewport_update()
+            self.retarget_montage_viewport()
         # Records deferred during the gesture retarget the pipeline the moment
         # interaction quiets.
         renderer = getattr(self, "renderer", None)
@@ -552,7 +566,7 @@ class ArrayScopeWindow(
 
             session = getattr(renderer, "_montage_session", None)
             if isinstance(session, MontageRenderSession):
-                renderer._retarget_montage_pipeline(session)
+                renderer.retarget_montage_pipeline(session)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -716,8 +730,8 @@ class ArrayScopeWindow(
     def _run_deferred_side_panel_refresh(self, *args, **kwargs):
         return self.renderer._run_deferred_side_panel_refresh(*args, **kwargs)
 
-    def _schedule_montage_viewport_update(self, *args, **kwargs):
-        return self.renderer._schedule_montage_viewport_update(*args, **kwargs)
+    def retarget_montage_viewport(self):
+        return self.renderer.retarget_montage_viewport()
 
     def _visible_render_budget_bytes(self, *args, **kwargs):
         return self.renderer._visible_render_budget_bytes(*args, **kwargs)

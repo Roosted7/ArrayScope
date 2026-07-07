@@ -100,7 +100,6 @@ class FileReloadMixin:
     def _reset_data(self, new_data):
         """Replace the displayed data, clamping slice positions to the new shape."""
         old_ndim = self.data.ndim
-        new_ndim = new_data.ndim
         reload_viewport = self._begin_reload_viewport_continuity()
         # The stored hover focus predates the reload (typically wherever the
         # pointer last crossed the image before reaching the reload control).
@@ -193,7 +192,7 @@ class FileReloadMixin:
         if reload_viewport is None:
             return
         self._apply_viewport_continuity_when_ready()
-        self._schedule_montage_viewport_update(delay_ms=0)
+        self.retarget_montage_viewport()
 
     def _confirm_reload_clearing_operations(self, exc):
         box = QtWidgets.QMessageBox(self)

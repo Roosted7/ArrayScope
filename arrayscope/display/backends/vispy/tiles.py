@@ -176,7 +176,6 @@ class TextureAtlasPage:
         y1 = y0 + tile_h
         x1 = x0 + tile_w
         uv = (x0 / atlas_w, y0 / atlas_h, x1 / atlas_w, y1 / atlas_h)
-        gutter = 0
         return uv
 
     def uv_for_slot_with_gutter(self, slot: int, gutter: int = 0) -> tuple[float, float, float, float]:

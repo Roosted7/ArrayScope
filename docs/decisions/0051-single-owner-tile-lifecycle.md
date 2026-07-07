@@ -162,9 +162,9 @@ The Lifecycle diagnostics line classifies any stale-presentation report; check i
    but nothing consumed it: a missing convergence trigger (rule 6 violation).
 3. `backend_stale_identities > 0` with dirty tiles churning — the backend cannot converge;
    check resignations before suspecting the machine.
-4. `stall_repairs > 0` / `last_stall_signature` — the watchdog rescued a dead pump. Every
-   rescue is a bug report (a completion path exited without rescheduling), not a fix;
-   machine-derived dispatch (P2) deletes the class and demotes the watchdog to an assertion.
+4. `stall_assertions > 0` / `last_stall_signature` — the diagnostics-gated probe observed
+   a dead pump. Every assertion is a bug report (a completion path exited without
+   rescheduling), not a fix; machine-derived dispatch (P2) deleted the rescue behavior.
 
 ### Design-review rule (recorded 2026-07-06)
 
@@ -231,9 +231,9 @@ a record with terminal paths, never a number that only ratchets up.
   clearing (endless no-op commits at idle); and blocked LOD materializations releasing claims
   with no consumer (tiles stuck on a coarse level until an unrelated pan).  Orphaned loading
   records are requeued by the derivation itself (never when stage records exist — waiting
-  tiles belong to their stage).  The 1 Hz watchdog is an ASSERTION now: a zero-progress tick
-  logs loudly, counts `stall_repairs` (asserted 0 in the GPU harness), and rescues via the
-  ordinary dispatch, never a bespoke repair.
+  tiles belong to their stage).  The diagnostics-gated idle probe is an ASSERTION now: a
+  zero-progress tick logs loudly and counts `stall_assertions` (asserted 0 in the GPU
+  harness) without bespoke repair behavior.
   **Sets-as-views + stage fan-in events (landed 2026-07-05 #6):** `loading_tiles`,
   `active_tile_requests`, and `skipped_tiles` are machine views — `TileRecord` carries
   `load_intent` / `request_active` / `stage_key`, the session attributes are set-like view
@@ -246,7 +246,7 @@ a record with terminal paths, never a number that only ratchets up.
   `attach_stage_fan_in`), so "loading without a request because a stage owns it" is a record
   fact.
   **Auto-levels wedge (fixed 2026-07-05, same landing):** the tile-layer auto-levels wait
-  path was a triple rule violation, reproduced at `stall_repairs` 8–10 per
+  path was a triple rule violation, reproduced as 8–10 stall rescues per
   pyqtgraph+resident workflow run and now 0 across repeated runs:
   (a) the legacy `loading_tiles` entry of a confirmed-presented tile had no owner, holding
   the wait open forever (the machine view dissolves this class); (b) the parked flush's
@@ -277,7 +277,7 @@ a record with terminal paths, never a number that only ratchets up.
   payload-build slices 2.5–5.1 ms.  cProfile-confirmed worst-case commit spikes narrowed under
   instrumentation (clean commit slices 17.7–32.7 ms, changed 22.9–30.5 ms), while outer profiled
   step means were effectively noise-equivalent.  Corrected scrub-fastpath probe: 59 steps,
-  mean 9.4 ms, worst 21.8 ms, heartbeat p95 14.9 ms, max 48.5 ms, `stall_repairs=0`.
+  mean 9.4 ms, worst 21.8 ms, heartbeat p95 14.9 ms, max 48.5 ms, `stall_assertions=0`.
   No new kill switch.
 - **P2-adjacent (landed 2026-07-05, the few-Hz-scroll cure):** rule 4 applied at the
   architecture level — the interaction path is cheap by construction.  Dimension scrubbing

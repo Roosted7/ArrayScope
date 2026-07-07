@@ -66,7 +66,7 @@ def _committed_tiled_frame(geometry, *, key):
 
 def test_known_montage_level_source_is_not_resampled(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
-    import arrayscope.window.frame_renderer as frame_renderer
+    import arrayscope.window.montage_level_stats as montage_level_stats
     from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class Window(FrameRenderMixin):
@@ -87,7 +87,7 @@ def test_known_montage_level_source_is_not_resampled(monkeypatch):
     )
     calls = []
     monkeypatch.setattr(
-        frame_renderer,
+        montage_level_stats,
         "sample_tile_level_stats",
         lambda *_args, **_kwargs: calls.append("sample") or None,
     )
@@ -106,7 +106,7 @@ def test_known_montage_level_source_is_not_resampled(monkeypatch):
 
 def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker
-    import arrayscope.window.frame_renderer as frame_renderer
+    import arrayscope.window.montage_level_stats as montage_level_stats
     from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class Window(FrameRenderMixin):
@@ -123,7 +123,7 @@ def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        frame_renderer,
+        montage_level_stats,
         "sample_tile_level_stats",
         lambda *_args, **_kwargs: calls.append("sample") or None,
     )
@@ -155,14 +155,14 @@ def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
 
     assert merged == 0
     assert calls == []
-    assert len(session.pending_level_tiles) <= frame_renderer.MONTAGE_LEVEL_STATS_COMMIT_BATCH
+    assert len(session.pending_level_tiles) <= montage_level_stats.MONTAGE_LEVEL_STATS_COMMIT_BATCH
     assert session.level_scan_remaining_tiles == 32
     assert win.scheduled == 1
 
 
 def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
-    import arrayscope.window.frame_renderer as frame_renderer
+    import arrayscope.window.montage_level_stats as montage_level_stats
     from arrayscope.window.frame_renderer import FrameRenderMixin
 
     class Window(FrameRenderMixin):
@@ -179,7 +179,7 @@ def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypa
 
     calls = []
     monkeypatch.setattr(
-        frame_renderer,
+        montage_level_stats,
         "sample_tile_level_stats",
         lambda *_args, **_kwargs: calls.append("sample") or None,
     )
@@ -1156,7 +1156,7 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     assert controller.groups == []
 
 
-def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
+def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_batches(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
@@ -1197,10 +1197,10 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
             self.resolved_batches.append(tuple(int(tile.montage_index) for tile in batch))
             return (), batch
 
-        def _schedule_montage_presentation_commit(self, session, *, force=False):
+        def apply_montage_presentation(self, session):
             self.commits += 1
 
-        def _retarget_montage_pipeline(self, session):
+        def retarget_montage_pipeline(self, session):
             self.pipeline_retargets += 1
 
     document = ArrayDocument(np.zeros((2, 2, 10), dtype=np.float32))
@@ -1244,17 +1244,17 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
 
     assert win._try_update_montage_viewport_only() is True
 
-    assert len(win.resolved_batches) == 3
+    assert len(win.resolved_batches) == 10
     resolved = [tile for batch in win.resolved_batches for tile in batch]
-    assert len(resolved) == 3
+    assert len(resolved) == 10
     pending = [int(tile.montage_index) for tile in session.pending_tiles]
     assert pending == resolved
     assert pending[0] == 6
     assert session.loading_tiles == set()
     assert win.pipeline_retargets == 0
     assert win._montage_viewport_update_pending is True
-    assert win._montage_viewport_continue_immediately is True
-    assert win._last_montage_viewport_deferred_additions == 7
+    assert not hasattr(win, "_montage_viewport_continue_immediately")
+    assert win._last_montage_viewport_deferred_additions == 0
 
 
 def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypatch):
@@ -1289,10 +1289,10 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypa
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
             return None
 
-        def _retarget_montage_pipeline(self, session):
+        def retarget_montage_pipeline(self, session):
             self.pipeline_retargets += 1
 
-        def _schedule_montage_presentation_commit(self, session, *, force=False):
+        def apply_montage_presentation(self, session):
             pass
 
     document = ArrayDocument(np.zeros((2, 2, 4), dtype=np.float32))
@@ -1394,12 +1394,11 @@ def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
         def _montage_frame_planner(self):
             return Planner()
 
-        def _commit_montage_session_presentation(self, session, *, force=False):
+        def commit_montage_session_presentation(self, session):
             assert session is self._montage_session
-            assert force is True
             self.commits += 1
 
-        def _schedule_montage_presentation_commit(self, session, *, force=False):
+        def apply_montage_presentation(self, session):
             raise AssertionError("resize geometry should commit immediately when no commit is active")
 
     state = ViewState.from_shape((4, 4, 4)).with_montage_axis(2, indices=tuple(range(4)), text=":")
@@ -1454,10 +1453,10 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
             return None
 
-        def _retarget_montage_pipeline(self, session):
+        def retarget_montage_pipeline(self, session):
             self.pipeline_retargets += 1
 
-        def _schedule_montage_presentation_commit(self, session, *, force=False):
+        def apply_montage_presentation(self, session):
             self.commits += 1
 
     document = ArrayDocument(np.zeros((2, 2, 4), dtype=np.float32))
@@ -1530,7 +1529,7 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
         def _is_current_montage_session(self, session_id, key):
             return True
 
-        def _retarget_montage_pipeline(self, session):
+        def retarget_montage_pipeline(self, session):
             tile = session.next_tile()
             if tile is not None:
                 self.scheduled.append(int(tile.montage_index))
@@ -1564,7 +1563,7 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
     win = Window(state, viewport_plan)
     win._montage_session = session
 
-    win._run_montage_priority_retarget()
+    win.apply_montage_priority_retarget()
 
     assert win.scheduled == [3]
 
@@ -2013,7 +2012,7 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
             self.commits += 1
             raise AssertionError("loading-only first commit must not reach backend")
 
-        def _schedule_montage_lod_materializations(self, _session):
+        def materialize_montage_lod(self, _session):
             return None
 
     geometry = MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0)
@@ -2049,7 +2048,7 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     )
 
     win = _Window()
-    win._commit_montage_session_presentation(session, force=False)
+    win.commit_montage_session_presentation(session)
 
     assert win.commits == 0
     assert session.final_commit_pending is False
@@ -2110,7 +2109,7 @@ def test_interactive_cache_hit_requires_committed_semantic_montage_mapping():
 
 
 def test_montage_viewport_update_token_tracks_viewport_revision():
-    from arrayscope.window.frame_renderer import _montage_work_token
+    from arrayscope.window.render_contract import montage_work_token as _montage_work_token
 
     session = SimpleNamespace(
         session_id=1,
@@ -2156,7 +2155,7 @@ def test_stale_montage_viewport_update_token_does_not_run():
 
     win = _Window()
 
-    win._run_montage_viewport_update()
+    win.apply_montage_viewport_retarget()
 
     assert win.called is False
 

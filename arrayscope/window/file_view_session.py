@@ -515,19 +515,19 @@ class FileViewSessionMixin:
     def _schedule_viewport_continuity_retarget(self) -> None:
         if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
             return
-        scheduler = getattr(self, "_schedule_montage_viewport_update", None)
+        scheduler = getattr(self, "retarget_montage_viewport", None)
         if not callable(scheduler):
             return
 
         def schedule_once():
-            scheduler(delay_ms=0)
+            scheduler()
 
         try:
             # Qt event-turn barrier. Retargeting follows the restored view range
             # after the ViewBox has accepted it.
             Qt.QtCore.QTimer.singleShot(0, self, schedule_once)
         except Exception:
-            scheduler(delay_ms=0)
+            scheduler()
 
     def _revert_file_view_session_restore(self) -> None:
         restore = self._viewport_continuity_transaction()
