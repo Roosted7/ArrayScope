@@ -1029,7 +1029,9 @@ def test_montage_loading_overlay_refresh_has_own_cadence(monkeypatch):
             return len(self.overlays)
 
     now = [10.0]
-    monkeypatch.setattr(frame_renderer, "monotonic", lambda: now[0])
+    from arrayscope.window import montage_runtime
+
+    monkeypatch.setattr(montage_runtime, "monotonic", lambda: now[0])
     session = _session()
     session.show_loading_overlays = True
     session.mark_loading(session.plan.tiles[0])

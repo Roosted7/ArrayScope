@@ -1322,7 +1322,15 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
     def commit_montage_session_presentation(self, session) -> None:
         if not self._montage_session_is_current(session):
             return
-        MontagePipelineEffects(self, session).commit_pending_session()
+        # One effects instance per session: it owns the in-flight rung guards
+        # and the presentation gate flag. A throwaway instance would fork
+        # that state (exactly the parallel-bookkeeping defect ADR 0051 bans).
+        # Commit-only callers without a live pipeline (tests, teardown) get a
+        # transient instance — they never submit rungs, so no guard state is
+        # forked.
+        pipeline = getattr(session, "pipeline", None)
+        effects = pipeline.effects if pipeline is not None else MontagePipelineEffects(self, session)
+        effects.commit_pending_session()
 
     def apply_ready_montage_display(self, session) -> None:
         if not self._montage_session_is_current(session):

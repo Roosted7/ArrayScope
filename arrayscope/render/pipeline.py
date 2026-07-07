@@ -78,10 +78,15 @@ class PipelineEffects(Protocol):
 
 @dataclass(frozen=True)
 class _RungKey:
-    """Kernel task key for one tile rung under one semantic target."""
+    """Kernel task key for one tile rung under one semantic target.
+
+    Deliberately viewport-free: camera-only changes must never restart
+    materialization (core invariant). Viewport moves change *which* steps
+    the ladder plans (levels, priorities, ordering) — an unchanged step
+    resubmits the same key and the kernel dedupes it.
+    """
 
     semantic_key: object
-    viewport_key: object
     tile_number: int
     rung: int
     level: int
@@ -142,13 +147,13 @@ class MontagePipeline:
         steps = self.ladder.plan(states, demand)
         self.counters.ladder_plans += 1
         submitted = 0
-        previous_step_key_by_tile: dict[int, _RungKey] = {}
+        # Cross-rung/cross-tile ordering comes from priorities plus this
+        # submission order (the kernel heap is FIFO within equal priority).
+        # NEVER express ordering through `deps`: dependencies fail-propagate,
+        # so a skipped floor would park its tile's exact work forever.
         for step in steps:
-            previous_step_key = previous_step_key_by_tile.get(int(step.tile_number))
-            step_key = self._rung_key(intent, step)
-            if self._submit_step(intent, step, previous_step_key=previous_step_key, step_key=step_key):
+            if self._submit_step(intent, step, step_key=self._rung_key(intent, step)):
                 submitted += 1
-            previous_step_key_by_tile[int(step.tile_number)] = step_key
         self._flush_ready()
         return submitted
 
@@ -164,7 +169,6 @@ class MontagePipeline:
     def _rung_key(self, intent: RenderIntent, step: RungStep) -> _RungKey:
         return _RungKey(
             semantic_key=intent.semantic_key,
-            viewport_key=intent.viewport_key,
             tile_number=int(step.tile_number),
             rung=int(step.rung),
             level=int(step.level),
@@ -175,24 +179,24 @@ class MontagePipeline:
         intent: RenderIntent,
         step: RungStep,
         *,
-        previous_step_key: _RungKey | None,
         step_key: _RungKey,
     ) -> bool:
         if not self.effects.prepare_rung(intent, step):
             return False
-        deps = tuple(dict.fromkeys((*self.effects.rung_deps(intent, step), *((previous_step_key,) if previous_step_key is not None else ()))))
         spec = TaskSpec(
             key=step_key,
             fn=self.effects.evaluate_rung(intent, step),
             lane=step.lane,
             priority=step.priority,
             scope=self._scope(intent.semantic_key),
-            deps=deps,
-            # Latest-only per tile+rung: a viewport/demand change replaces
-            # the level target; reusable results may still land in caches.
+            deps=self.effects.rung_deps(intent, step),
+            # Latest-only per tile+rung: a *demand/level* change replaces the
+            # target; camera-only changes keep the same value and therefore
+            # never invalidate running or queued materialization. Reusable
+            # results may still land in caches when superseded.
             supersession=Supersession(
                 family=("rung", intent.semantic_key, step.tile_number, int(step.rung)),
-                value=(intent.viewport_key, int(step.level)),
+                value=(int(step.level),),
             ),
             reusable=True,
             pass_token=True,
@@ -226,11 +230,18 @@ class MontagePipeline:
         raise exc
 
     def _flush_ready(self) -> None:
+        """Hand every ready payload to the effects for admission.
+
+        ``apply_commit`` is admission-only (cheap bookkeeping); the heavy
+        presentation commit is coalesced behind the effects' presentation
+        gate, one bounded commit per event-loop turn. Holding payloads back
+        here would only add a second queue with its own lost-wakeup risk.
+        """
+
         intent = self._current_intent
         if intent is None or not self._ready_upserts:
             return
-        batch_items = self._ready_upserts[: self._commit_max_items]
-        del self._ready_upserts[: len(batch_items)]
+        batch_items, self._ready_upserts = self._ready_upserts, []
         batch = CommitBatch(
             semantic_key=intent.semantic_key,
             presentation_key=intent.presentation_key,

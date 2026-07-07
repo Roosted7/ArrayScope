@@ -6,6 +6,7 @@ from dataclasses import replace
 from time import perf_counter
 
 import numpy as np
+import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS
@@ -50,6 +51,12 @@ class MontagePipelineEffects:
     def __init__(self, renderer, session) -> None:
         self.renderer = renderer
         self.session = session
+        # In-flight preview/floor rungs by (tile, rung) -> level. Guards
+        # retarget replans from resubmitting identical in-flight work (the
+        # DESIRED/EXACT rungs use session.active_tile_requests for the same
+        # purpose). A *different* level is allowed through: the supersession
+        # family stales the old instance.
+        self._pending_previews: dict[tuple[int, int], int] = {}
 
     def evaluate_rung(self, _intent, step):
         session = self.session
@@ -97,9 +104,17 @@ class MontagePipelineEffects:
         if tile is None or not self._session_is_current():
             return False
         tile_number = int(tile.montage_index)
+        if step.rung in (Rung.FLOOR, Rung.PREVIEW):
+            pending_key = (tile_number, int(step.rung))
+            if self._pending_previews.get(pending_key) == int(step.level):
+                return False  # identical rung already in flight
+            self._pending_previews[pending_key] = int(step.level)
+            return True
         if step.rung in (Rung.DESIRED, Rung.EXACT):
             if tile_number in self.session.rendered_tiles or tile_number in self.session.skipped_tiles:
                 return False
+            if tile_number in self.session.active_tile_requests:
+                return False  # identical rung already in flight
             self.session.mark_loading(tile)
             self.session.active_tile_requests.add(tile_number)
         return True
@@ -116,15 +131,52 @@ class MontagePipelineEffects:
         if tile is None:
             return
         tile_number = int(tile.montage_index)
+        if step.rung in (Rung.FLOOR, Rung.PREVIEW):
+            pending_key = (tile_number, int(step.rung))
+            if self._pending_previews.get(pending_key) == int(step.level):
+                self._pending_previews.pop(pending_key, None)
+            return
         if step.rung in (Rung.DESIRED, Rung.EXACT):
             self.session.active_tile_requests.discard(tile_number)
             self.session.loading_tiles.discard(tile_number)
             self.session.lifecycle.evaluation_declined(tile_number)
 
     def apply_commit(self, batch: CommitBatch) -> None:
+        """Admit ready rung payloads; presentation happens through the gate.
+
+        Admission (session/lifecycle bookkeeping) is cheap and runs per
+        drained completion. The *presentation* commit (classify + geometry +
+        delta walk + backend apply) is deliberately NOT run here: running it
+        per completion was the R2 commit storm (272 tiles → 272 full commits
+        inside bridge drains, multi-second event-loop gaps, and a visually
+        all-at-once fill because paints never interleaved).
+        """
+
         if batch.semantic_key is not None and batch.semantic_key != getattr(self.session, "key", batch.semantic_key):
             return
         self._admit_ready_payloads(batch.upserts)
+        if not self._session_is_current():
+            return
+        self.request_presentation()
+
+    def request_presentation(self) -> None:
+        """Coalesced presentation continuation: at most one per loop turn.
+
+        Category: zero-delay coalescing continuation (like the render
+        coordinator), NOT wall-clock pacing — it exists so paints and input
+        events interleave with bounded commits. Re-armed by the commit
+        itself while backlog (flush/final/dirty/upserts) remains, so a
+        bounded commit can never strand its remainder (the ADR 0051
+        lost-wakeup rule: every deferral leaves a wakeup armed).
+        """
+
+        if bool(getattr(self.renderer, "_montage_presentation_gate_armed", False)):
+            return
+        self.renderer._montage_presentation_gate_armed = True
+        Qt.QtCore.QTimer.singleShot(0, self.renderer, self._on_presentation_gate)
+
+    def _on_presentation_gate(self) -> None:
+        self.renderer._montage_presentation_gate_armed = False
         if not self._session_is_current():
             return
         self.commit_pending_session()
@@ -144,6 +196,7 @@ class MontagePipelineEffects:
         if bool(getattr(self.renderer, "_montage_commit_drain_active", False)):
             self.session.final_commit_pending = True
             self.session.flush_pending = True
+            self.request_presentation()
             return
         self.renderer._montage_commit_drain_active = True
         try:
@@ -154,6 +207,40 @@ class MontagePipelineEffects:
             self._commit_tile_layer(direct_presentation, commit_start=perf_counter())
         finally:
             self.renderer._montage_commit_drain_active = False
+        self._rearm_if_backlog()
+
+    def _backlog_signature(self) -> tuple:
+        session = self.session
+        return (
+            bool(getattr(session, "flush_pending", False)),
+            bool(getattr(session, "final_commit_pending", False)),
+            len(tuple(getattr(session, "dirty_payloads", ()) or ())),
+            len(tuple(getattr(session, "pending_payload_upserts", ()) or ())),
+            len(tuple(getattr(session, "pending_removals", ()) or ())),
+        )
+
+    def _rearm_if_backlog(self) -> None:
+        """Re-arm the gate while a *shrinking* backlog remains.
+
+        A commit that leaves the identical backlog signature is not making
+        progress; re-arming would spin the event loop. It is either waiting
+        on an external completion (level scans, evaluations — each of those
+        completion paths calls ``request_presentation`` itself) or a real
+        wedge, counted here as a bug report (ADR 0051: rescues hide bugs).
+        """
+
+        signature = self._backlog_signature()
+        if not any(signature):
+            self.renderer._montage_gate_last_backlog = None
+            return
+        previous = getattr(self.renderer, "_montage_gate_last_backlog", None)
+        self.renderer._montage_gate_last_backlog = signature
+        if previous == signature:
+            self.renderer._montage_gate_no_progress = (
+                int(getattr(self.renderer, "_montage_gate_no_progress", 0) or 0) + 1
+            )
+            return
+        self.request_presentation()
 
     def direct_tile_layer_presentation(self):
         session = self.session
@@ -187,6 +274,9 @@ class MontagePipelineEffects:
             if getattr(payload, "value", None) is not None:
                 self._admit_evaluation_result(tile, payload)
                 continue
+            pending_key = (int(step.tile_number), int(step.rung))
+            if self._pending_previews.get(pending_key) == int(step.level):
+                self._pending_previews.pop(pending_key, None)
             self._admit_preview_payload(int(step.tile_number), payload)
 
     def _admit_evaluation_result(self, tile, result) -> int:

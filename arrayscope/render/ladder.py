@@ -140,17 +140,26 @@ class LodLadder:
             candidates.extend(float(step.level) for step in steps)
             return min(candidates) if candidates else float("inf")
 
+        # Pre-native rungs are planned only when they are actually cheap:
+        # commuting operations evaluate on reduced input directly, and a
+        # retained floor plane commits with no evaluation at all. For
+        # non-commuting pipelines (FFT and friends) a "preview" would cost a
+        # FULL native evaluation per tile just to throw resolution away —
+        # twice the work of going native once. Those pipelines go native
+        # once and take reduced levels from ingest reduction; a cheap
+        # transform-preview path is R3's shared-volume queue, not a per-tile
+        # native evaluation.
+        cheap_pre_native = policy.ops_commute_with_reduction or state.floor_available
+
         # 1) FLOOR — only while the tile has nothing committable at all.
-        # Retained floor payloads commit without evaluation; otherwise the
-        # floor is the cheapest evaluated rung.
-        if presented is None and not resident:
+        if presented is None and not resident and cheap_pre_native:
             floor_level = max(policy.floor_level, desired)
             steps.append(
                 RungStep(
                     tile_number=state.tile_number,
                     rung=Rung.FLOOR,
                     level=floor_level,
-                    reduce_from_native=not policy.ops_commute_with_reduction,
+                    reduce_from_native=False,
                     lane=Lane.DISPLAY_PREVIEW,
                     priority=Priority.INTERACTIVE,
                     reason=(
@@ -162,13 +171,17 @@ class LodLadder:
         # 2) PREVIEW — the first *display-quality* rung; skipped when
         # something at least as fine already exists or DESIRED covers it.
         preview_level = max(policy.preview_level, desired)
-        if preview_level < finest_available() and preview_level != desired:
+        if (
+            policy.ops_commute_with_reduction
+            and preview_level < finest_available()
+            and preview_level != desired
+        ):
             steps.append(
                 RungStep(
                     tile_number=state.tile_number,
                     rung=Rung.PREVIEW,
                     level=preview_level,
-                    reduce_from_native=not policy.ops_commute_with_reduction,
+                    reduce_from_native=False,
                     lane=Lane.DISPLAY_PREVIEW,
                     priority=Priority.VISIBLE_IMAGE,
                     reason="preview rung (reduced-input display)",

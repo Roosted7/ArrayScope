@@ -378,9 +378,11 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
     """
 
     allowed = None if tile_numbers is None else {int(value) for value in tuple(tile_numbers)}
-    states: list[TileLodState] = []
+    ranked: list[tuple[tuple, TileLodState]] = []
     payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
     rendered_tiles = dict(getattr(session, "rendered_tiles", {}) or {})
+    visible_numbers = set(getattr(session, "visible_tile_numbers", ()) or ())
+    focus = _viewport_focus(getattr(session, "view_range", None))
     preview_cache = None
     preview_cache_fn = getattr(session, "preview_floor_cache", None)
     if callable(preview_cache_fn):
@@ -403,15 +405,39 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
         payload = payloads.get(tile_number)
         lod = None if payload is None else getattr(payload, "lod", None)
         presented_level = None if lod is None else int(getattr(lod, "level", 0) or 0)
-        states.append(
-            TileLodState(
-                tile_number=tile_number,
-                resident_levels=tuple(sorted(resident_levels)),
-                presented_level=presented_level,
-                floor_available=_floor_available(session, tile, demand, preview_cache=preview_cache),
+        ranked.append(
+            (
+                _tile_priority_rank(tile, focus=focus, visible=tile_number in visible_numbers),
+                TileLodState(
+                    tile_number=tile_number,
+                    resident_levels=tuple(sorted(resident_levels)),
+                    presented_level=presented_level,
+                    floor_available=_floor_available(session, tile, demand, preview_cache=preview_cache),
+                ),
             )
         )
-    return tuple(states)
+    # Priority order is part of the contract: the ladder preserves this
+    # order inside each rung and the kernel executes FIFO within equal
+    # priority, so visible tiles fill center-out before off-screen tiles.
+    ranked.sort(key=lambda item: item[0])
+    return tuple(state for _rank, state in ranked)
+
+
+def _viewport_focus(view_range) -> tuple[float, float] | None:
+    try:
+        (x0, x1), (y0, y1) = view_range
+        return ((float(x0) + float(x1)) / 2.0, (float(y0) + float(y1)) / 2.0)
+    except Exception:
+        return None
+
+
+def _tile_priority_rank(tile, *, focus, visible: bool) -> tuple:
+    if focus is None:
+        return (0 if visible else 1, 0.0, int(tile.montage_index))
+    center_x = float(getattr(tile, "x0", 0)) + float(getattr(tile, "width", 0)) / 2.0
+    center_y = float(getattr(tile, "y0", 0)) + float(getattr(tile, "height", 0)) / 2.0
+    distance = (center_x - focus[0]) ** 2 + (center_y - focus[1]) ** 2
+    return (0 if visible else 1, float(distance), int(tile.montage_index))
 
 
 def rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:

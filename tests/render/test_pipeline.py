@@ -41,8 +41,15 @@ class StubEffects:
             for number in range(self.tiles)
         )
 
-    def prepare_rung(self, _intent, step):
-        self.prepared.append((step.tile_number, int(step.rung), step.level))
+    def prepare_rung(self, intent, step):
+        _intent = intent
+        # Mirror the real effects' in-flight/admitted dedupe: an identical
+        # (tile, rung, level) is prepared at most once per target — that is
+        # the guard that makes camera-only replans free.
+        marker = (_intent.semantic_key, step.tile_number, int(step.rung), step.level)
+        if marker in self.prepared:
+            return False
+        self.prepared.append(marker)
         return True
 
     def rung_deps(self, _intent, step):
@@ -136,23 +143,41 @@ def test_semantic_change_clears_previous_scope():
     assert all(batch.semantic_key in ("doc-v1", "doc-v2") for batch in effects.batches)
 
 
-def test_viewport_change_supersedes_stale_rung_targets():
+def test_camera_only_retarget_never_invalidates_rung_work():
+    """Core invariant: camera-only changes do not restart evaluation.
+
+    Same demand, new viewport: the replan resubmits identical step keys and
+    the kernel/effects guards must dedupe them — nothing superseded,
+    nothing re-evaluated.
+    """
+
     kernel, effects, pipeline = make_pipeline(tiles=1)
-    first = intent(viewport="vp-1")
-    second = intent(viewport="vp-2")
-    pipeline.retarget(first, demand(2))
-    # Before the GUI drains, the viewport moves and demands a finer level.
-    pipeline.retarget(second, demand(1))
+    pipeline.retarget(intent(viewport="vp-1"), demand(2))
+    drain(kernel)
+    evaluated_before = len(effects.evaluated)
+    pipeline.retarget(intent(viewport="vp-2"), demand(2))
+    drain(kernel)
+    assert len(effects.evaluated) == evaluated_before
+    lanes = kernel.diagnostics().lanes
+    superseded = sum(counters.get("superseded", 0) for counters in lanes.values())
+    assert superseded == 0
+
+
+def test_demand_level_change_supersedes_stale_rung_targets():
+    kernel, effects, pipeline = make_pipeline(tiles=1)
+    pipeline.retarget(intent(viewport="vp-1"), demand(2))
+    # Before the GUI drains, the demand moves to a finer level.
+    pipeline.retarget(intent(viewport="vp-2"), demand(1))
     drain(kernel)
     lanes = kernel.diagnostics().lanes
     invalidated = sum(
         counters.get("superseded", 0) + counters.get("stale", 0) + counters.get("stale_reused", 0)
         for counters in lanes.values()
     )
-    assert invalidated >= 2, "older viewport rung targets must not survive"
-    # Only the current plan's payloads were committed: floor 4, preview 2,
-    # desired 1 — exactly once each. The vp-1 floor/desired results existed
-    # but were classified stale at dispatch and diverted to reuse.
+    assert invalidated >= 1, "older level targets must not survive"
+    # Only current-level payloads were committed: floor 4, preview 2,
+    # desired 1 — exactly once each. The desired-level-2 result existed but
+    # was classified stale at dispatch and diverted to reuse.
     committed = sorted(
         step.level for batch in effects.batches for (step, _payload) in batch.upserts
     )
@@ -183,19 +208,18 @@ def test_rung_dependencies_park_tasks_until_stage_key_completes():
     assert len(effects.evaluated) == 3
 
 
-def test_pipeline_adds_per_tile_rung_dependencies_to_kernel_specs():
+def test_pipeline_never_expresses_rung_ordering_through_deps():
+    """Deps fail-propagate (a skipped floor would park exact work forever);
+    ordering must come from priorities + submission order only. Deps are
+    reserved for real data dependencies (stage keys)."""
+
     kernel = CaptureKernel()
     effects = StubEffects(tiles=2)
     pipeline = MontagePipeline(kernel, effects, LodLadder())
 
     assert pipeline.retarget(intent(), demand(1)) == 6
 
-    floors = [spec for spec in kernel.specs if spec.key.rung == 0]
-    previews = [spec for spec in kernel.specs if spec.key.rung == 1]
-    desired = [spec for spec in kernel.specs if spec.key.rung == 2]
-    assert len(floors) == len(previews) == len(desired) == 2
-    assert all(spec.deps == () for spec in floors)
-    floor_by_tile = {spec.key.tile_number: spec.key for spec in floors}
-    preview_by_tile = {spec.key.tile_number: spec.key for spec in previews}
-    assert all(spec.deps == (floor_by_tile[spec.key.tile_number],) for spec in previews)
-    assert all(spec.deps == (preview_by_tile[spec.key.tile_number],) for spec in desired)
+    assert all(spec.deps == () for spec in kernel.specs)
+    # Coarse rungs are submitted before fine rungs across all tiles.
+    rungs_in_order = [spec.key.rung for spec in kernel.specs]
+    assert rungs_in_order == sorted(rungs_in_order)

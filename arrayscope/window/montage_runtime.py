@@ -19,6 +19,7 @@ from arrayscope.display.viewport import ViewportMode, view_ranges_near
 from arrayscope.display.planning import normalize_bounds
 from arrayscope.display.pyramid import PyramidCache
 from arrayscope.operations.evaluator import _document_key
+from arrayscope.render import effects as render_effects
 from arrayscope.render.ladder import LadderPolicy, LodLadder
 from arrayscope.render.pipeline import MontagePipeline
 from arrayscope.render.stages import RenderIntent
@@ -122,6 +123,11 @@ class MontageRuntimeMixin:
     def _montage_pipeline_for_session(self, session) -> MontagePipeline:
         pipeline = getattr(session, "pipeline", None)
         if pipeline is None:
+            seed_tile = next(iter(tuple(getattr(session.plan, "tiles", ()) or ())), None)
+            ops_commute = bool(
+                seed_tile is not None
+                and render_effects.preview_pipeline_commutes_for_display_lod(session, seed_tile)
+            )
             pipeline = MontagePipeline(
                 self.win.kernel,
                 MontagePipelineEffects(self, session),
@@ -130,6 +136,11 @@ class MontageRuntimeMixin:
                         mode=str(getattr(session, "lod_policy_mode", "native-only") or "native-only"),
                         floor_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
                         preview_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
+                        # Non-commuting pipelines (FFT…) must not pay a full
+                        # native evaluation per tile for pre-native rungs;
+                        # they go native once + ingest reduction (R3 owns the
+                        # shared transform-preview queue).
+                        ops_commute_with_reduction=ops_commute,
                     )
                 ),
                 commit_max_items=2,
