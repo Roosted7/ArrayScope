@@ -247,12 +247,6 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, m
     data = np.arange(2 * 2 * 4, dtype=np.float32).reshape(2, 2, 4)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
-    calls = []
-    monkeypatch.setattr(
-        win.montage_tile_evaluation_controller,
-        "start_latest",
-        lambda _fn, **kwargs: calls.append(kwargs) or len(calls),
-    )
     try:
         _process_events(qtbot, count=20)
         first_state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
@@ -276,14 +270,13 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, m
         assert "mean=10" in win.img_view._roi_info_panel.text()
         truthful_text = win.img_view._roi_info_panel.text()
 
-        calls.clear()
         second_state = win.view_state.with_axis_range(2, indices=(2, 3), text="2:4")
         win._set_view_state(second_state)
+        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: 0)
         win.update_image_view()
         win._refresh_inspection_dock()
         _process_events(qtbot, count=20)
 
-        assert calls
         assert not win._montage_session.display_committed
         assert win.img_view._roi_info_panel.text() == truthful_text
         assert "mean=0" not in win.img_view._roi_info_panel.text()

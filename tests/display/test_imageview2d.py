@@ -1359,6 +1359,7 @@ def test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots(qt_app):
             texture_kind=TexturePlaneKind.COMPLEX_RG32F,
             semantic_data=semantic,
             semantic_histogram_data=hist,
+            rgb_windowed_levels=(0.0, 7.0),
         )
 
     first_payloads = {tile: payload(tile, tile) for tile in range(4)}

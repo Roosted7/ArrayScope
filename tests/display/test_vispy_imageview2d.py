@@ -208,7 +208,7 @@ def test_factory_auto_resolves_from_gl_probe(qt_app, monkeypatch):
     monkeypatch.setattr(image_view_factory, "_auto_resolution_cache", None)
     monkeypatch.setattr(image_view_factory.platform, "system", lambda: "Windows")
     resolved, reason = image_view_factory.resolve_auto_backend_choice()
-    assert resolved == ImageRenderingBackendChoice.PYQTGRAPH
+    assert resolved.value == ImageRenderingBackendChoice.PYQTGRAPH.value
     assert "no reference performance traces" in reason
 
 

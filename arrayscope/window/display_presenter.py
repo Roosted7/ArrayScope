@@ -624,6 +624,14 @@ class DisplayPresentationMixin:
             )
         if session is not None:
             session.applied_level_source = source
+        if emit_user:
+            controller = getattr(self.win, "sync_controller", None)
+            publish_now = getattr(controller, "_publish_now", None)
+            if controller is not None and "levels" in getattr(controller, "_pending_requests", set()):
+                controller._pending_requests.discard("levels")
+                controller._ignore_join_state.add("levels")
+            if not callable(publish_now) or not publish_now("levels", force=True):
+                self.win._notify_sync("levels")
         return source
 
     def _on_display_levels_changed(self) -> None:

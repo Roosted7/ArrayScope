@@ -62,6 +62,7 @@ class SyncBus(Qt.QtCore.QObject):
 
     messageReceived = Qt.QtCore.Signal(object)
     roleChanged = Qt.QtCore.Signal(str)  # "broker" | "client" | "connecting" | "stopped"
+    peerCountChanged = Qt.QtCore.Signal(int)
 
     def __init__(self, server_name: str | None = None, parent=None):
         super().__init__(parent)
@@ -140,7 +141,7 @@ class SyncBus(Qt.QtCore.QObject):
         data = encode_message(message)
         if self._role == "broker":
             self._relay(data, exclude=None)
-            return True
+            return bool(self._peers)
         if self._role == "client" and self._client is not None:
             self._client.write(data)
             self._client.flush()
@@ -180,6 +181,7 @@ class SyncBus(Qt.QtCore.QObject):
             self._buffers[peer] = b""
             peer.readyRead.connect(lambda peer=peer: self._on_peer_ready_read(peer))
             peer.disconnected.connect(lambda peer=peer: self._on_peer_disconnected(peer))
+            self.peerCountChanged.emit(len(self._peers))
 
     def _on_peer_ready_read(self, peer) -> None:
         buffer = self._buffers.get(peer, b"") + bytes(peer.readAll().data())
@@ -191,6 +193,7 @@ class SyncBus(Qt.QtCore.QObject):
     def _on_peer_disconnected(self, peer) -> None:
         if peer in self._peers:
             self._peers.remove(peer)
+            self.peerCountChanged.emit(len(self._peers))
         self._buffers.pop(peer, None)
         peer.deleteLater()
 

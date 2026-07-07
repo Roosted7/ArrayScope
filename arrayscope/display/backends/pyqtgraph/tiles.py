@@ -69,7 +69,12 @@ def _apply_item_lod_scale(state: "TileLayerItemState", scale_x: float, scale_y: 
     state.item.setTransform(transform)
 
 
-def _payload_rgb_already_windowed(payload: DisplayTilePayload, fallback: bool) -> bool:
+def _payload_rgb_already_windowed(
+    payload: DisplayTilePayload,
+    fallback: bool,
+    *,
+    levels: tuple[float, float] | None = None,
+) -> bool:
     """Per-payload windowing from payload METADATA, never from dtype sniffing.
 
     A plane is immutably pre-windowed ONLY when it carries nothing to
@@ -97,7 +102,10 @@ def _payload_rgb_already_windowed(payload: DisplayTilePayload, fallback: bool) -
     # value so it never perturbs resident-state identity matching.
     if not is_rgb_plane:
         return False
-    return getattr(payload, "histogram_data", None) is None
+    if getattr(payload, "histogram_data", None) is None:
+        return True
+    payload_levels = getattr(payload, "rgb_windowed_levels", None)
+    return bool(levels is not None and payload_levels is not None and levels_match(payload_levels, levels))
 
 
 @dataclass
@@ -360,7 +368,11 @@ class MontageTileLayer:
                 if tile_source_ids is not None
                 else payload.source_id
             )
-            payload_rgb_already_windowed = _payload_rgb_already_windowed(payload, bool(rgb_already_windowed))
+            payload_rgb_already_windowed = _payload_rgb_already_windowed(
+                payload,
+                bool(rgb_already_windowed),
+                levels=levels,
+            )
             source_id = _direct_payload_source_id(base_source_id, payload)
             hist_id = ("tile-source", source_id) if tile_hist is not None else None
             local_rect = (0, 0, int(crop_w), int(crop_h))
@@ -419,7 +431,6 @@ class MontageTileLayer:
                 or dirty
                 or (not item_state.visible and not resident_current)
                 or missing_display
-                or (needs_source_rewindow and level_update_admitted)
             )
             cold_candidate = bool(
                 item_state is None
@@ -428,7 +439,6 @@ class MontageTileLayer:
                 or dirty
                 or (not item_state.visible and not resident_current)
                 or missing_display
-                or (needs_source_rewindow and level_update_admitted)
             )
             rewindow_only = bool(
                 existing_item
@@ -491,6 +501,7 @@ class MontageTileLayer:
             active.add(int(tile_number))
 
             if should_upload:
+                previous_source_id = item_state.source_array_id
                 updated, windowed = self._set_tile_data(
                     item_state,
                     tile_data,
@@ -507,7 +518,11 @@ class MontageTileLayer:
                 if updated:
                     updated_tiles.append(int(tile_number))
                 rgb_window_tiles += int(windowed)
-                image_replacements += int(updated and not created_item)
+                image_replacements += int(
+                    updated
+                    and not created_item
+                    and not _direct_base_source_matches(previous_source_id, source_id)
+                )
                 cold_tiles_committed += int(cold_candidate)
                 if updated and int(tile_number) in requested_upserts:
                     committed_upserts.add(int(tile_number))
@@ -520,7 +535,12 @@ class MontageTileLayer:
                     if item_state is not None and item_state.visible:
                         active.add(int(tile_number))
                     continue
-                updated, windowed = self._update_tile_levels(item_state, levels)
+                updated, windowed = self._update_tile_levels(
+                    item_state,
+                    levels,
+                    image=tile_data,
+                    histogram_data=tile_hist,
+                )
                 item_state.world_rect = world_rect
                 self._touch_resident_state(item_state)
                 level_updates += int(existing_item)
@@ -682,7 +702,11 @@ class MontageTileLayer:
                 tile_data = tile_data[:crop_h, :crop_w, ...]
             tile_hist = None if payload.histogram_data is None else np.asarray(payload.histogram_data)[:height, :width]
             base_source_id = near_source_ids.get(int(tile_number), payload.source_id)
-            payload_rgb_already_windowed = _payload_rgb_already_windowed(payload, bool(rgb_already_windowed))
+            payload_rgb_already_windowed = _payload_rgb_already_windowed(
+                payload,
+                bool(rgb_already_windowed),
+                levels=levels,
+            )
             source_id = _direct_payload_source_id(base_source_id, payload)
             hist_id = ("tile-source", source_id) if tile_hist is not None else None
             local_rect = (0, 0, int(crop_w), int(crop_h))
@@ -740,6 +764,7 @@ class MontageTileLayer:
                 rgb_already_windowed=payload_rgb_already_windowed,
             )
             if not matches or tuple(item_state.levels) != levels:
+                previous_source_id = item_state.source_array_id
                 updated, windowed = self._set_tile_data(
                     item_state,
                     tile_data,
@@ -753,7 +778,11 @@ class MontageTileLayer:
                 )
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
-                image_replacements += int(updated and not item_state.source_array_id == 0)
+                image_replacements += int(
+                    updated
+                    and not item_state.source_array_id == 0
+                    and not _direct_base_source_matches(previous_source_id, source_id)
+                )
                 if updated:
                     updated_tiles.append(int(tile_number))
             else:
@@ -1234,21 +1263,84 @@ def _direct_state_key(
     )
 
 
+def _direct_base_source_id(source_id: object) -> object:
+    if (
+        isinstance(source_id, tuple)
+        and len(source_id) >= 2
+        and source_id[1] == "pyqtgraph_display"
+    ):
+        return _direct_payload_semantic_source_token(source_id)
+    return _canonical_direct_base_source_id(source_id)
+
+
+def _canonical_direct_base_source_id(base_source_id: object) -> object:
+    if isinstance(base_source_id, tuple) and "texture_kind" in base_source_id:
+        base_source_id = base_source_id[: base_source_id.index("texture_kind")]
+    if isinstance(base_source_id, tuple) and len(base_source_id) >= 3 and base_source_id[0] == "montage-tile":
+        return ("montage-tile", base_source_id[1], int(base_source_id[2]))
+    if isinstance(base_source_id, tuple) and len(base_source_id) >= 8 and base_source_id[0] == "display_tile":
+        request_key = base_source_id[5]
+        slice_indices = _display_tile_slice_indices(request_key)
+        if slice_indices:
+            return ("display-tile-semantic", base_source_id[1], tuple(int(value) for value in slice_indices))
+    if (
+        isinstance(base_source_id, tuple)
+        and len(base_source_id) >= 2
+        and base_source_id[1] == "pyqtgraph_display"
+    ):
+        return _direct_base_source_id(base_source_id)
+    return base_source_id
+
+
+def _direct_base_source_matches(left: object, right: object) -> bool:
+    return _direct_base_source_id(left) == _direct_base_source_id(right)
+
+
+def _direct_payload_semantic_source_token(source_id: tuple[object, ...]) -> object:
+    try:
+        rgb_marker = source_id.index("rgb_windowed_levels")
+    except ValueError:
+        rgb_marker = len(source_id)
+    # The base key spelling can legitimately change between cache/evaluator
+    # and session-owned identities.  The semantic payload planes are the
+    # ownership boundary for PyQtGraph base replacement accounting.
+    return ("pyqtgraph-semantic-payload", *source_id[2:rgb_marker])
+
+
+def _display_tile_slice_indices(request_key: object) -> tuple[int, ...] | None:
+    if not (isinstance(request_key, tuple) and len(request_key) >= 4 and request_key[0] == "image"):
+        return None
+    for part in reversed(request_key):
+        if not isinstance(part, tuple) or not part:
+            continue
+        try:
+            return tuple(int(value) for value in part)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _direct_payload_source_id(base_source_id: object, payload: DisplayTilePayload) -> tuple[object, ...]:
-    image = payload.image
-    histogram = payload.histogram_data
+    image = payload.semantic_data if payload.semantic_data is not None else payload.image
+    histogram = (
+        payload.semantic_histogram_data
+        if payload.semantic_histogram_data is not None
+        else payload.histogram_data
+    )
     texture_kind = getattr(payload, "texture_kind", None)
     return (
         base_source_id,
         "pyqtgraph_display",
-        payload.shape,
-        payload.dtype,
+        tuple(int(value) for value in np.shape(image)),
+        np.asarray(image).dtype,
         id(image),
         None if histogram is None else tuple(int(value) for value in histogram.shape),
         None if histogram is None else np.dtype(histogram.dtype),
         None if histogram is None else id(histogram),
         "texture_kind",
         None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
+        "rgb_windowed_levels",
+        getattr(payload, "rgb_windowed_levels", None),
     )
 
 
@@ -1287,7 +1379,10 @@ def _direct_tile_order(
                     tile_payloads[int(tile)],
                     tile_states=tile_states,
                     tile_source_ids=tile_source_ids,
-                    rgb_already_windowed=_payload_rgb_already_windowed(tile_payloads[int(tile)], bool(rgb_already_windowed)),
+                    rgb_already_windowed=_payload_rgb_already_windowed(
+                        tile_payloads[int(tile)],
+                        bool(rgb_already_windowed),
+                    ),
                 )
             )
         )

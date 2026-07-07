@@ -223,7 +223,8 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "LOD: native-only level=0 desired=4(4, 2) applied=1(1, 1) texpp=(8.00,3.00)" in text
     assert "LOD reason: desired LOD is deferred until asynchronous multi-resolution residency exists" in text
     assert "Lifecycle: presented=0 parked=0 evaluating=0 dangling_claims=0 mismatches=0" in text
-    assert "Queues: completed=0 upserts=0 removals=0" in text
+    assert "Kernel" in text
+    assert "Queues: upserts=0 removals=0 level_scan=0 flush=no final=no" in text
     assert "Reusable stage: stage=3 hit repeated_per_tile=no" in text
     assert "Compute: cache_hit=3 stage_backed=4 direct=1 waiting_stage=2 lead_direct=1" in text
     assert "Plan (ms): viewport=0.5 cache_resolve=1.5 stage_plan=0.8 setup=2.2 first_commit=3.5" in text

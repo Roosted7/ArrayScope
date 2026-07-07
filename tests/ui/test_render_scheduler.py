@@ -151,7 +151,7 @@ def test_histogram_background_work_uses_histogram_priority_not_prefetch(qtbot, m
         win.close()
 
 
-def test_stale_tile_result_does_not_clear_updating_overlay(qtbot, monkeypatch):
+def test_stale_tile_result_does_not_clear_updating_overlay(qtbot):
     """A result for a superseded render must not clear the updating overlay.
 
     Visible rendering flows through the montage tile lane; the stale path is
@@ -163,7 +163,6 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot, monkeypatch):
 
     win = ArrayScopeWindow(np.arange(8 * 9 * 10, dtype=float).reshape(8, 9, 10))
     qtbot.addWidget(win)
-    calls = []
     try:
         _process_events(qtbot, count=20)
         qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
@@ -174,15 +173,9 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot, monkeypatch):
         payloads = getattr(getattr(frame, "value_source", None), "payloads", None)
         if isinstance(payloads, dict):
             payloads.clear()
-        monkeypatch.setattr(
-            win.montage_tile_evaluation_controller,
-            "start_latest",
-            lambda _fn, **kwargs: calls.append(kwargs) or len(calls),
-        )
         win.update_image_view()
-        assert calls
-        stale = calls[0]
-        stale["on_slow"]()
+        stale_session = win._montage_session
+        win.renderer.show_montage_session_slow_overlay(stale_session)
         assert win.img_view._evaluation_overlay is not None
         assert win.img_view._evaluation_overlay.isVisible()
 
@@ -190,8 +183,8 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot, monkeypatch):
         win._set_view_state(win.view_state.with_slice(2, 2))
         win.update_image_view()
         win.img_view.setEvaluationOverlay(True, "Updating image frame...")
-        stale["on_slow"]()
-        stale["on_stale"]()
+        win.renderer.show_montage_session_slow_overlay(stale_session)
+        win.renderer._settle_montage_visible_plan_if_complete(stale_session)
 
         assert win.img_view._evaluation_overlay.isVisible()
     finally:

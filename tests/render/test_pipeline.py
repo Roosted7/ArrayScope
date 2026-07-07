@@ -24,8 +24,12 @@ class StubEffects:
         self.prepared = []
         self.dropped = []
         self.deps = {}
+        self.last_intent = None
+        self.last_demand = None
 
     def evaluate_rung(self, intent, step):
+        self.last_intent = intent
+
         def run(_token=None, step=step):
             self.evaluated.append((step.tile_number, int(step.rung), step.level))
             return ("payload", step.tile_number, step.level)
@@ -35,27 +39,30 @@ class StubEffects:
     def apply_commit(self, batch):
         self.batches.append(batch)
 
-    def tile_states(self, _intent, _demand):
+    def tile_states(self, intent, demand):
+        self.last_intent = intent
+        self.last_demand = demand
         return tuple(
             self.states.get(number, TileLodState(tile_number=number))
             for number in range(self.tiles)
         )
 
     def prepare_rung(self, intent, step):
-        _intent = intent
         # Mirror the real effects' in-flight/admitted dedupe: an identical
         # (tile, rung, level) is prepared at most once per target — that is
         # the guard that makes camera-only replans free.
-        marker = (_intent.semantic_key, step.tile_number, int(step.rung), step.level)
+        marker = (intent.semantic_key, step.tile_number, int(step.rung), step.level)
         if marker in self.prepared:
             return False
         self.prepared.append(marker)
         return True
 
-    def rung_deps(self, _intent, step):
+    def rung_deps(self, intent, step):
+        self.last_intent = intent
         return tuple(self.deps.get(step.tile_number, ()))
 
-    def rung_dropped(self, _intent, step):
+    def rung_dropped(self, intent, step):
+        self.last_intent = intent
         self.dropped.append((step.tile_number, int(step.rung), step.level))
 
 

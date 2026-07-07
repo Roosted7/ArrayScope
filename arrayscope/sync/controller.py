@@ -31,7 +31,7 @@ prefer_pyside6()
 import pyqtgraph.Qt as Qt
 
 from arrayscope.core.view_session import roi_from_mapping, roi_to_mapping
-from arrayscope.core.window_levels import normalize_bounds
+from arrayscope.core.window_levels import LevelSourceRank, normalize_bounds
 from arrayscope.operations.recipes import recipe_from_steps, steps_from_recipe
 from arrayscope.sync.bus import SyncBus
 from arrayscope.sync.messages import (
@@ -62,6 +62,7 @@ class WindowSyncController(Qt.QtCore.QObject):
         self.window_id = uuid4().hex
         self.bus = bus if bus is not None else SyncBus(server_name=server_name, parent=self)
         self.bus.messageReceived.connect(self._on_message)
+        self.bus.peerCountChanged.connect(self._on_peer_count_changed)
         self._enabled = {facet: False for facet in FACETS}
         self._revisions = {facet: 0 for facet in FACETS}
         self._last_applied = {}  # facet -> (origin, revision)
@@ -70,6 +71,8 @@ class WindowSyncController(Qt.QtCore.QObject):
         self._publish_timers: dict[str, Qt.QtCore.QTimer] = {}
         self._last_publish_monotonic: dict[str, float] = {}
         self._pending_requests = set()
+        self._ignore_join_state = set()
+        self._pending_peer_publishes = set()
         self._connect_window_signals()
 
     # ------------------------------------------------------------------
@@ -87,6 +90,7 @@ class WindowSyncController(Qt.QtCore.QObject):
         self._enabled[facet] = enabled
         if not enabled:
             self._last_payload.pop(facet, None)
+            self._pending_peer_publishes.discard(facet)
             if not any(self._enabled.values()):
                 self.bus.stop()
             return
@@ -94,6 +98,7 @@ class WindowSyncController(Qt.QtCore.QObject):
             self.bus.start()
         # Joining pulls the group's current state instead of pushing ours:
         # enabling sync must not stomp what the group is already looking at.
+        self._pending_requests.add(facet)
         self.bus.publish(request_message(facet, self.window_id))
 
     def shutdown(self) -> None:
@@ -135,21 +140,39 @@ class WindowSyncController(Qt.QtCore.QObject):
             self._publish_timers[facet] = timer
         timer.start(PUBLISH_COALESCE_MS)
 
-    def _publish_now(self, facet: str, *, force: bool = False) -> None:
+    def _publish_now(self, facet: str, *, force: bool = False) -> bool:
         if not self.facet_enabled(facet) or not self.bus.is_running():
-            return
+            return False
         try:
             payload = self._build_payload(facet)
         except Exception:
-            return
+            return False
         if payload is None:
-            return
+            return False
         if not force and self._last_payload.get(facet) == payload:
-            return
+            return True
+        broker_without_peers = (
+            getattr(self.bus, "role", None) == "broker"
+            and int(getattr(self.bus, "peer_count", 0) or 0) == 0
+        )
+        if broker_without_peers:
+            self._pending_peer_publishes.add(facet)
+        revision = self._revisions[facet] + 1
+        sent = self.bus.publish(state_message(facet, self.window_id, revision, payload))
+        if not sent and not broker_without_peers:
+            return False
+        if sent:
+            self._pending_peer_publishes.discard(facet)
         self._last_payload[facet] = payload
-        self._revisions[facet] += 1
+        self._revisions[facet] = revision
         self._last_publish_monotonic[facet] = monotonic()
-        self.bus.publish(state_message(facet, self.window_id, self._revisions[facet], payload))
+        return True
+
+    def _on_peer_count_changed(self, count: int) -> None:
+        if int(count) <= 0:
+            return
+        for facet in tuple(self._pending_peer_publishes):
+            self._publish_now(facet, force=True)
 
     def _build_payload(self, facet: str):
         if facet == FACET_LEVELS:
@@ -189,6 +212,11 @@ class WindowSyncController(Qt.QtCore.QObject):
             return
         if message.get("kind") != KIND_STATE:
             return
+        if facet in self._ignore_join_state:
+            self._ignore_join_state.discard(facet)
+            self._pending_requests.discard(facet)
+            return
+        self._pending_requests.discard(facet)
         key = (origin, int(message.get("revision", 0)))
         if self._last_applied.get(facet) == key:
             return
@@ -227,7 +255,11 @@ class WindowSyncController(Qt.QtCore.QObject):
         current = normalize_bounds(win.img_view.getLevels())
         if current == levels:
             return
-        win.renderer._apply_display_level_override(levels, emit_user=False)
+        win.renderer._apply_display_level_override(
+            levels,
+            emit_user=False,
+            source_rank=LevelSourceRank.EXPLICIT_USER,
+        )
 
     def _apply_dims(self, payload) -> None:
         win = self.win

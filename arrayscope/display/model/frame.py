@@ -41,6 +41,7 @@ class DisplayTilePayload:
     shader_mapping: ShaderMapping | None = None
     level_data: np.ndarray | None = None
     level_stats: object | None = None
+    rgb_windowed_levels: tuple[float, float] | None = None
     quality: str = "exact"
 
     def __post_init__(self) -> None:
@@ -90,6 +91,12 @@ class DisplayTilePayload:
             object.__setattr__(self, "histogram_data", np.asarray(self.histogram_data))
         if self.level_data is not None:
             object.__setattr__(self, "level_data", np.asarray(self.level_data))
+        if self.rgb_windowed_levels is not None:
+            try:
+                low, high = self.rgb_windowed_levels
+                object.__setattr__(self, "rgb_windowed_levels", (float(low), float(high)))
+            except Exception as exc:
+                raise ValueError("rgb_windowed_levels must be a 2-tuple of finite levels") from exc
 
     @property
     def shape(self) -> tuple[int, ...]:

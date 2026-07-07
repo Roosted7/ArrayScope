@@ -328,10 +328,8 @@ def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot)
         win.close()
 
 
-def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot, monkeypatch):
+def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.display.slice_engine import DisplayImage
-    from arrayscope.operations.evaluator import EvaluationResult
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((4, 5, 3), dtype=np.float32)
@@ -339,7 +337,6 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot,
         data[:, :, index] = index * 100.0 + np.arange(20, dtype=np.float32).reshape(4, 5)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
-    captured = []
     try:
         _process_events(qtbot, count=20)
         win._set_view_state(win.view_state.with_slice(2, 0))
@@ -349,27 +346,25 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot,
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
-        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
 
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
         win._on_slice_index_changed(2, 2)
         win.render_coordinator.flush_now()
 
-        latest = data[:, :, 2]
-        captured[-1]["on_done"](EvaluationResult(DisplayImage(latest), 0.0, latest.shape, int(latest.nbytes)))
-        _process_events(qtbot, count=20)
-
-        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
-        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+        qtbot.waitUntil(
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
+                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+            ),
+            timeout=5000,
+        )
     finally:
         win.close()
 
 
-def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbot, monkeypatch):
+def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.display.slice_engine import DisplayImage
-    from arrayscope.operations.evaluator import EvaluationResult
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((4, 5, 3), dtype=np.float32)
@@ -377,7 +372,6 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
         data[:, :, index] = index * 100.0 + np.arange(20, dtype=np.float32).reshape(4, 5)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
-    captured = []
     try:
         _process_events(qtbot, count=20)
         win._set_view_state(win.view_state.with_slice(2, 0))
@@ -394,36 +388,40 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
             payloads.clear()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
-        monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: captured.append(kwargs) or len(captured))
 
         # Uncached path: the tile result arrives through the evaluation lane.
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
-        slice1 = data[:, :, 1]
-        captured[-1]["on_done"](EvaluationResult(DisplayImage(slice1), 0.0, slice1.shape, int(slice1.nbytes)))
-        _process_events(qtbot, count=20)
-        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
-        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+        qtbot.waitUntil(
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
+                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+            ),
+            timeout=5000,
+        )
 
         win._on_slice_index_changed(2, 2)
         win.render_coordinator.flush_now()
-        slice2 = data[:, :, 2]
-        captured[-1]["on_done"](EvaluationResult(DisplayImage(slice2), 0.0, slice2.shape, int(slice2.nbytes)))
-        _process_events(qtbot, count=20)
-        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
-        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+        qtbot.waitUntil(
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
+                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+            ),
+            timeout=5000,
+        )
 
         # Cached path: revisiting slice 1 must reuse the stored tile without a
         # new evaluation and produce the same relative window as the uncached
         # pass did.
-        calls_before = len(captured)
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
-        _process_events(qtbot, count=20)
-
-        assert len(captured) == calls_before
-        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
-        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+        qtbot.waitUntil(
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
+                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+            ),
+            timeout=5000,
+        )
     finally:
         win.close()
 

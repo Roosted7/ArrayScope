@@ -4,22 +4,30 @@ Rule 5 of the [ground rules](README.md): window/display tests may only be
 red if listed here with the plan step that fixes or deletes them. Qt-free
 suites are never allowed red.
 
-**Status 2026-07 (post R2 stabilization pass):** suite 1642 passed / 8 red,
-GPU harness 7/7 green. R2 is **code-complete but NOT closed** — its exit
-gate (benchmark bars) has not been met and must be re-measured after the
-root-cause fixes in 4464a6e4. Do not weaken the gate to match results
-(that happened once on this branch; the gate text is restored and binding).
+**Status 2026-07-07 (R2b stabilization closure):** the focused 8-test R2b
+ledger is green after moving the tests onto the live pipeline/kernel path and
+closing the payload-windowing/sync seams. R2 is **code-complete but NOT
+closed** — the benchmark, manual onscreen workflow, and GPU harness gates
+still require fresh evidence. Do not weaken the benchmark gate to match
+results (that happened once on this branch; the gate text is restored and
+binding).
 
 ## Active red tests
 
 | test | cause | resolved by |
 |---|---|---|
-| `test_relative_window_levels_survive_fast_scroll_with_render_in_flight`, `test_relative_window_levels_match_for_cached_and_uncached_display_tiles`, `test_window_levels_sync_between_windows` | one cluster: relative window-level semantics broke when R2 moved the levels/auto-window flow into `montage_commit`/`montage_level_stats` (pre-existing on the R2-step commits, NOT caused by the gate fixes) | R2b item 1 — triage as ONE root cause in the level-source flow |
-| `test_stale_tile_result_does_not_clear_updating_overlay` | overlay lifecycle vs. the new admission path (stale results now classified by the kernel; the overlay-clear condition still assumes the old controller path) | R2b item 2 |
-| `test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder` | ROI sampling reads a placeholder while the gate defers the first commit by one loop turn | R2b item 2 |
-| `test_format_runtime_diagnostics_includes_all_major_sections` | diagnostics formatter still expects deleted R1 controller sections | R2b item 3 (trivial: update the formatter/test to kernel sections) |
-| `test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots` | pins an unimplemented optimization: skip redundant re-window when an exact payload arrives already windowed at the commit levels, with LAZY rgb_base rebuild on the first level change. The WIP dtype-sniff faked it and broke the rewindow contract. NOTE (0ab0bf25): the windowing rule itself is now settled — only histogram-less RGB planes are immutable; planes with reduced histograms rewindow (fixed the saturated resident-LOD complex tiles). Only the skip-redundant optimization remains open | R2b item 4 — implement via payload evaluation-levels metadata, or move the test to R3 and delete the optimization claim |
-| `test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_image_item` | one image replacement sneaks into a level drag on large complex montages (same windowing seam as above) | R2b item 4 |
+| _none in the focused R2b ledger_ | The former 8-test ledger is resolved by R2b stabilization. | Keep R3 scroll-scrub/lost-wakeup work below; do not mark R2 closed until benchmark/manual/GPU gates pass. |
+
+Resolved by R2b stabilization:
+
+- `test_relative_window_levels_survive_fast_scroll_with_render_in_flight`
+- `test_relative_window_levels_match_for_cached_and_uncached_display_tiles`
+- `test_window_levels_sync_between_windows`
+- `test_stale_tile_result_does_not_clear_updating_overlay`
+- `test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder`
+- `test_format_runtime_diagnostics_includes_all_major_sections`
+- `test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots`
+- `test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_image_item`
 
 ## Scroll-scrub convergence stall (fast index retarget) — PRIORITY
 

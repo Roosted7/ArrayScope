@@ -816,7 +816,7 @@ def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):
 
     order = []
 
-    def update_levels(state, levels):
+    def update_levels(state, levels, **_payload_metadata):
         order.append(int(state.tile_number))
         state.levels = levels
         return False, False

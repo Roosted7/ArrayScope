@@ -179,6 +179,17 @@ def test_window_levels_sync_between_windows(qtbot, make_window):
     win_b = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
     win_a.display_toolbar.sync_window_action.setChecked(True)
     win_b.display_toolbar.sync_window_action.setChecked(True)
+    _settled(
+        qtbot,
+        lambda: (
+            win_a.sync_controller.bus.role == "broker"
+            and win_a.sync_controller.bus.peer_count >= 1
+        )
+        or (
+            win_b.sync_controller.bus.role == "broker"
+            and win_b.sync_controller.bus.peer_count >= 1
+        ),
+    )
 
     win_a.renderer._apply_display_level_override((10.0, 90.0), emit_user=True)
     _settled(

@@ -58,7 +58,9 @@ class MontagePipelineEffects:
         # family stales the old instance.
         self._pending_previews: dict[tuple[int, int], int] = {}
 
-    def evaluate_rung(self, _intent, step):
+    def evaluate_rung(self, intent, step):
+        if not self._session_is_current(intent):
+            return lambda _token=None: None
         session = self.session
         tile = self._tile_for_step(step)
         if tile is None:
@@ -96,12 +98,14 @@ class MontagePipelineEffects:
 
         return evaluate_exact
 
-    def tile_states(self, _intent, demand):
+    def tile_states(self, intent, demand):
+        if not self._session_is_current(intent):
+            return ()
         return render_effects.tile_lod_states(self.session, demand)
 
-    def prepare_rung(self, _intent, step) -> bool:
+    def prepare_rung(self, intent, step) -> bool:
         tile = self._tile_for_step(step)
-        if tile is None or not self._session_is_current():
+        if tile is None or not self._session_is_current(intent):
             return False
         tile_number = int(tile.montage_index)
         if step.rung in (Rung.FLOOR, Rung.PREVIEW):
@@ -119,14 +123,18 @@ class MontagePipelineEffects:
             self.session.active_tile_requests.add(tile_number)
         return True
 
-    def rung_deps(self, _intent, step) -> tuple[object, ...]:
+    def rung_deps(self, intent, step) -> tuple[object, ...]:
+        if not self._session_is_current(intent):
+            return ()
         tile_number = int(step.tile_number)
         stage_key = self.session.stage_fan_in.tile_stage_keys.get(tile_number)
         if stage_key is None or stage_key in self.session.stage_fan_in.values:
             return ()
         return (stage_key,)
 
-    def rung_dropped(self, _intent, step) -> None:
+    def rung_dropped(self, intent, step) -> None:
+        if not self._intent_matches_session(intent):
+            return
         tile = self._tile_for_step(step)
         if tile is None:
             return
@@ -190,7 +198,7 @@ class MontagePipelineEffects:
 
         return self._admit_evaluation_result(tile, result)
 
-    def submit_shared_transform_floor(self, intent) -> int:
+    def submit_shared_transform_floor(self) -> int:
         """Pass 1 for non-commuting pipelines (FFT…): one batch task.
 
         The ladder deliberately plans no per-tile pre-native rungs when
@@ -200,7 +208,6 @@ class MontagePipelineEffects:
         montage stack, fanned out as floor planes for every cold tile.
         """
 
-        del intent
         session = self.session
         renderer = self.renderer
         demand = session.ingest_lod_demand()
@@ -910,7 +917,16 @@ class MontagePipelineEffects:
                 return tile
         return None
 
-    def _session_is_current(self) -> bool:
+    def _intent_matches_session(self, intent) -> bool:
+        return (
+            intent is None
+            or getattr(intent, "semantic_key", getattr(self.session, "key", None))
+            == getattr(self.session, "key", None)
+        )
+
+    def _session_is_current(self, intent=None) -> bool:
+        if not self._intent_matches_session(intent):
+            return False
         predicate = getattr(self.renderer, "_montage_session_is_current", None)
         if callable(predicate):
             return bool(predicate(self.session))
