@@ -25,7 +25,8 @@ root-cause fixes in 4464a6e4. Do not weaken the gate to match results
 
 | symptom | evidence | resolved by |
 |---|---|---|
-| R2 benchmark numbers pre-fix: PyQtGraph FFT full ~5.2–5.4 s with 2.1–3.9 s event-loop gaps; VisPy native-only ~6.8 s (5.2 s gap); VisPy resident FFT ~42.8 s (22.8 s gap) — measured BEFORE 4464a6e4; root causes (commit storm, camera churn, dep parking, per-tile native FFT floors) are fixed there | `tests/artifacts/r2-profile-montage-workflow-*.jsonl` | **Re-measure** (Thomas runs the onscreen benchmark) and compare against the R2 gate bars: within ±10% of pre-R2, warm scrub ≤ 15 ms, heartbeat gap ≤ 16 ms. R2 does not close until this passes |
+| Re-measured after 76860b4b (gate-signature + replan-coalescing fixes): pyqtgraph raw settled 1.87 s (max gap 693 ms), FFT 3.23 s (gap 760 ms), level refinement 3.57 s (gap 107 ms); vispy raw 2.27 s (gap 485 ms — pre-R2 parity), FFT 6.08 s (gap 586 ms, was 42.8 s / 22.8 s), level refinement 1.64 s (gap 127 ms). STALL 0 both backends | `tests/artifacts/r2b-postfix2-{pyqtgraph,vispy}-resident.jsonl` | Remaining gaps are the initial session build + first commit (~0.5–0.8 s single block; `_montage_viewport_plan_ms` ≈ 570 ms is one known piece) and per-commit fixed cost. Still above the 16 ms heartbeat bar → R2b item 5 continues; the *wedges* and multi-second storms are gone |
+| VisPy level refinement is 1.6 s where main's uniform-only path did a 272-tile level drag in ~0.26 s | same JSONLs | R3 (level values into the lifecycle machine; uniform-only fast path must not regress through the generic commit) |
 
 Resolved on this branch (for the record):
 
