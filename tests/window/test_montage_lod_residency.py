@@ -9,7 +9,6 @@ from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.presentation import ClaimOwner, LevelPhase
-from arrayscope.presentation.dispatch import derive_montage_dispatch
 from arrayscope.window.montage_session import (
     admit_preview_reduction,
     MontageRenderSession,
@@ -1367,7 +1366,6 @@ def test_orphaned_loading_tiles_are_requeued_for_evaluation():
 
     session = _session(pyramid=PyramidCache(max_bytes=1 << 20))
     # Simulate a lost evaluation: dequeued, marked loading, work vanished.
-    lost = session.plan.tiles[1]
     del session.rendered_tiles[1]
     session.dirty_payloads.pop(1, None)
     session.loading_tiles.add(1)
@@ -1578,10 +1576,10 @@ def test_shared_preview_floor_is_presented_before_exact_refinement():
     _acknowledge(session, preview_delta)
     session.mark_presented(tuple(preview_delta.upserts))
 
-    plan = derive_montage_dispatch(session)
-    assert set(plan.preview_refinements) == set()
+    preview_refinements = session.unrefined_preview_tiles()
+    assert set(preview_refinements) == set()
     assert set(session.dirty_payloads) == {0, 1}
-    session.mark_preview_refinements_dirty(plan.preview_refinements)
+    session.mark_preview_refinements_dirty(preview_refinements)
     assert set(session.dirty_payloads) == {0, 1}
 
     _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
@@ -1608,7 +1606,7 @@ def test_preview_floor_does_not_complete_full_refinement():
     assert session.visible_plan_complete()
     assert not session.is_complete()
 
-    session.mark_preview_refinements_dirty(derive_montage_dispatch(session).preview_refinements)
+    session.mark_preview_refinements_dirty(session.unrefined_preview_tiles())
     _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
     _acknowledge(session, exact_delta)
     session.mark_presented(tuple(exact_delta.upserts))
@@ -1806,7 +1804,7 @@ def test_lod_debug_pass_marker_mirrors_final_payload_only(monkeypatch):
     _state, preview_delta = session.build_tile_presentation({}, max_upserts=1)
     _acknowledge(session, preview_delta)
     session.mark_presented(tuple(preview_delta.upserts))
-    session.mark_preview_refinements_dirty(derive_montage_dispatch(session).preview_refinements)
+    session.mark_preview_refinements_dirty(session.unrefined_preview_tiles())
     _state, exact_delta = session.build_tile_presentation({}, max_upserts=1)
 
     assert np.array_equal(preview_delta.upserts[0].texture_data, preview)

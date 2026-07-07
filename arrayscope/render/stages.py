@@ -35,6 +35,14 @@ class RenderIntent:
     viewport_shape: tuple[int, int] | None
     interactive: bool = False
 
+    @staticmethod
+    def semantic_key_for_montage(document_key, view_state, viewport_plan, colormap_lut):
+        """Return the montage session key used for pipeline supersession."""
+
+        from arrayscope.window.montage_viewport import montage_session_key
+
+        return montage_session_key(document_key, view_state, viewport_plan, colormap_lut)
+
 
 @dataclass(frozen=True)
 class TileWork:

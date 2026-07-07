@@ -68,6 +68,18 @@ class PipelineEffects(Protocol):
         """
         ...
 
+    def prepare_rung(self, intent: RenderIntent, step: RungStep) -> bool:
+        """Claim lifecycle state before a rung task is submitted."""
+        ...
+
+    def rung_deps(self, intent: RenderIntent, step: RungStep) -> tuple[object, ...]:
+        """Kernel task keys this rung waits for."""
+        ...
+
+    def rung_dropped(self, intent: RenderIntent, step: RungStep) -> None:
+        """Release lifecycle state when a submitted rung cannot deliver."""
+        ...
+
 
 @dataclass(frozen=True)
 class _RungKey:
@@ -137,6 +149,7 @@ class MontagePipeline:
         for step in steps:
             if self._submit_step(intent, step):
                 submitted += 1
+        self._flush_ready()
         return submitted
 
     def close(self) -> None:
@@ -149,6 +162,8 @@ class MontagePipeline:
         return f"{self.SCOPE}:{semantic_key!r}"
 
     def _submit_step(self, intent: RenderIntent, step: RungStep) -> bool:
+        if not self.effects.prepare_rung(intent, step):
+            return False
         key = _RungKey(
             semantic_key=intent.semantic_key,
             tile_number=step.tile_number,
@@ -161,6 +176,7 @@ class MontagePipeline:
             lane=step.lane,
             priority=step.priority,
             scope=self._scope(intent.semantic_key),
+            deps=self.effects.rung_deps(intent, step),
             # Latest-only per tile+rung: a viewport/demand change replaces
             # the level target; reusable results may still land in caches.
             supersession=Supersession(
@@ -168,6 +184,7 @@ class MontagePipeline:
                 value=(intent.viewport_key, int(step.level)),
             ),
             reusable=True,
+            pass_token=True,
         )
         handle = self.kernel.submit(
             spec,
@@ -178,6 +195,7 @@ class MontagePipeline:
         if handle is not None:
             self.counters.tasks_submitted += 1
             return True
+        self.effects.rung_dropped(intent, step)
         return False
 
     # Handlers run on the GUI thread (kernel bridge drain).
@@ -191,11 +209,14 @@ class MontagePipeline:
     def _on_rung_reusable(self, step: RungStep, payload) -> None:
         # Stale-but-reusable: cache only, never commit.
         # TODO(redesign R2): store into PyramidCache/RetainedTiledPayloadStore.
-        del step, payload
+        if self._current_intent is not None:
+            self.effects.rung_dropped(self._current_intent, step)
 
     def _on_rung_error(self, step: RungStep, exc: BaseException) -> None:
         # TODO(redesign R2): route through app error handling + lifecycle
         # `level_failed` so the machine can re-plan; silence is forbidden.
+        if self._current_intent is not None:
+            self.effects.rung_dropped(self._current_intent, step)
         raise exc
 
     def _flush_ready(self) -> None:
@@ -210,11 +231,19 @@ class MontagePipeline:
             upserts=tuple(batch_items),
             max_items=self._commit_max_items,
         )
-        if not batch.empty:
+        while not batch.empty:
             self.counters.commit_batches += 1
             self.effects.apply_commit(batch)
-        # Remaining items flush on the next drain (bounded per callback);
-        # the kernel bridge fires capacity waiters, so no timer is needed.
+            if not self._ready_upserts:
+                break
+            batch_items = self._ready_upserts[: self._commit_max_items]
+            del self._ready_upserts[: len(batch_items)]
+            batch = CommitBatch(
+                semantic_key=intent.semantic_key,
+                presentation_key=intent.presentation_key,
+                upserts=tuple(batch_items),
+                max_items=self._commit_max_items,
+            )
 
 
 __all__ = ["MontagePipeline", "PipelineEffects"]

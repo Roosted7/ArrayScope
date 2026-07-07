@@ -9,7 +9,7 @@ redesign R2 (see pipeline.py TODOs).
 from __future__ import annotations
 
 from arrayscope.display.lod import LodDemand
-from arrayscope.kernel import InlineWorkerBackend, Kernel
+from arrayscope.kernel import InlineWorkerBackend, Kernel, Lane, TaskSpec
 from arrayscope.render.ladder import LadderPolicy, LodLadder, TileLodState
 from arrayscope.render.pipeline import MontagePipeline
 from arrayscope.render.stages import RenderIntent
@@ -21,9 +21,12 @@ class StubEffects:
         self.evaluated = []
         self.batches = []
         self.states = {}
+        self.prepared = []
+        self.dropped = []
+        self.deps = {}
 
     def evaluate_rung(self, intent, step):
-        def run(step=step):
+        def run(_token=None, step=step):
             self.evaluated.append((step.tile_number, int(step.rung), step.level))
             return ("payload", step.tile_number, step.level)
 
@@ -37,6 +40,16 @@ class StubEffects:
             self.states.get(number, TileLodState(tile_number=number))
             for number in range(self.tiles)
         )
+
+    def prepare_rung(self, _intent, step):
+        self.prepared.append((step.tile_number, int(step.rung), step.level))
+        return True
+
+    def rung_deps(self, _intent, step):
+        return tuple(self.deps.get(step.tile_number, ()))
+
+    def rung_dropped(self, _intent, step):
+        self.dropped.append((step.tile_number, int(step.rung), step.level))
 
 
 def make_pipeline(tiles=2, **policy_kwargs):
@@ -141,3 +154,17 @@ def test_counters_track_pipeline_activity():
     assert counts["intents"] == 1
     assert counts["tasks_submitted"] >= 3
     assert counts["commit_batches"] >= 1
+
+
+def test_rung_dependencies_park_tasks_until_stage_key_completes():
+    kernel, effects, pipeline = make_pipeline(tiles=1)
+    effects.deps[0] = ("stage-key",)
+
+    assert pipeline.retarget(intent(), demand(1)) == 3
+    assert effects.evaluated == []
+    assert kernel.diagnostics().parked_deps == 3
+
+    kernel.submit(TaskSpec(key="stage-key", fn=lambda: "stage", lane=Lane.STAGE_MATERIALIZATION))
+    drain(kernel)
+
+    assert len(effects.evaluated) == 3

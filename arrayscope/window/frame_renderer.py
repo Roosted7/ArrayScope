@@ -42,6 +42,8 @@ from arrayscope.operations.slabs import (
     request_for_image,
 )
 from arrayscope.render import effects as render_effects
+from arrayscope.render.pipeline import MontagePipeline
+from arrayscope.render.stages import RenderIntent
 from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_backend import choose_montage_backend
@@ -54,7 +56,6 @@ from arrayscope.display.model.montage_levels import (
 )
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level
 from arrayscope.presentation import ClaimOwner
-from arrayscope.presentation.dispatch import derive_montage_dispatch
 from arrayscope.display.pyramid import PyramidCache, preview_level_for_tile_shape
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
@@ -72,7 +73,6 @@ from arrayscope.window.montage_viewport import (
     montage_tile_semantic_key,
     montage_viewport_intent,
     montage_viewport_retarget_policy,
-    montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
     prioritize_montage_tiles,
     remap_montage_roi_selections,
     retarget_montage_viewport_plan,
@@ -144,19 +144,17 @@ class FrameRenderMixin:
             return False
         frame = getattr(self.win, "_committed_display_frame", None)
         frame_key = None if frame is None else getattr(frame, "key", None)
-        return getattr(frame_key, "request_key", None) != self._montage_session_key_for_view(view_state)
-
-    def _montage_session_key_for_view(self, view_state):
         capabilities = image_view_backend_capabilities(self.win.img_view)
         shader_display = bool(capabilities.shader_windowing)
         colormap_lut = self._evaluation_colormap_lut(view_state, shader_display=shader_display)
         viewport_plan = self._montage_viewport_plan(view_state)
-        return montage_session_key(
+        semantic_key = RenderIntent.semantic_key_for_montage(
             _document_key(self.win.document),
             view_state,
             viewport_plan,
             colormap_lut,
         )
+        return getattr(frame_key, "request_key", None) != semantic_key
 
     def _montage_frame_planner(self) -> FramePlanner:
         provider = getattr(self, "_frame_planner", None)
@@ -712,7 +710,7 @@ class FrameRenderMixin:
             self._schedule_deferred_montage_planning(session)
         else:
             self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-            self._schedule_montage_tiles(session)
+            self._retarget_montage_pipeline(session)
 
     def _maybe_retarget_montage_session(
         self,
@@ -1155,7 +1153,7 @@ class FrameRenderMixin:
             if presentation_changed or lod_swap_ready:
                 self._schedule_montage_presentation_commit(session, force=False)
             if session.pending_tiles and not _viewport_interaction_active(self):
-                self._schedule_montage_tiles(session)
+                self._retarget_montage_pipeline(session)
                 return True
             if session.pending_tiles:
                 return True
@@ -1240,7 +1238,7 @@ class FrameRenderMixin:
         )
         self._schedule_montage_session_slow_overlay(session)
         self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-        self._dispatch_montage_work(session)
+        self._retarget_montage_pipeline(session)
         return True
 
     def _prune_stale_montage_tile_work(self, session: MontageRenderSession) -> None:
@@ -1833,19 +1831,7 @@ class FrameRenderMixin:
         }
 
     def _schedule_deferred_montage_planning(self, session, *, delay_ms: int = 0) -> None:
-        """Arm the deferred planning continuation for an interaction-burst session.
-
-        Receiver-scoped single shot (architecture guard: 3-arg form) so a
-        closed window cancels the chain; supersession is checked in the
-        completion, and a superseded session simply never plans — it took no
-        stage claims, so there is nothing to balance.
-        """
-
-        Qt.QtCore.QTimer.singleShot(
-            int(delay_ms),
-            self.win,
-            lambda session=session: self._complete_deferred_montage_planning(session),
-        )
+        self._complete_deferred_montage_planning(session)
 
     def _complete_deferred_montage_planning(self, session) -> None:
         if not self._montage_session_is_current(session):
@@ -1853,9 +1839,9 @@ class FrameRenderMixin:
         if not bool(getattr(session, "stage_planning_deferred", False)):
             return
         if _viewport_interaction_active(self):
-            # Still mid-burst: floors are carrying the screen; re-arm and let
-            # the next scrub step supersede this session instead.
-            self._schedule_deferred_montage_planning(session, delay_ms=80)
+            # Still mid-burst: floors are carrying the screen. The viewport
+            # quiet edge retargets the pipeline and completes this planning.
+            self.win._montage_viewport_update_pending = True
             return
         self._plan_deferred_montage_stages_now(session)
 
@@ -1885,8 +1871,7 @@ class FrameRenderMixin:
         session.retained_stage_decision = stage_plan["retained_stage_decision"]
         session.repeated_expensive_stage_per_tile = stage_plan["repeated_expensive_stage_per_tile"]
         self._schedule_montage_stage_jobs(session, stage_plan["stage_requests"])
-        self._schedule_montage_tiles(session)
-        self._dispatch_montage_work(session)
+        self._retarget_montage_pipeline(session)
 
     def _schedule_montage_stage_jobs(self, session, stage_requests) -> None:
         if not self._montage_session_is_current(session):
@@ -1948,7 +1933,7 @@ class FrameRenderMixin:
                 self._montage_stage_admission_declined = (
                     int(getattr(self, "_montage_stage_admission_declined", 0) or 0) + 1
                 )
-                self._dispatch_montage_work(session)
+                self._retarget_montage_pipeline(session)
 
     def _on_montage_stage_stale(self, key) -> None:
         self.win.operation_evaluator.stage_materializer.cancel(key)
@@ -1956,7 +1941,7 @@ class FrameRenderMixin:
         if session is not None:
             session.stage_fan_in.active_requests.discard(key)
             self._release_stage_dependent_tiles_to_direct(session, key)
-            self._dispatch_montage_work(session)
+            self._retarget_montage_pipeline(session)
 
     def _on_montage_stage_done(self, session_id, key, value) -> None:
         session = getattr(self, "_montage_session", None)
@@ -1968,7 +1953,7 @@ class FrameRenderMixin:
         session.stage_fan_in.active_requests.discard(key)
         session.stage_fan_in.attached_requests.discard(key)
         session.stage_fan_in.values[key] = value
-        self._dispatch_montage_work(session)
+        self._retarget_montage_pipeline(session)
 
     def _release_stage_dependent_tiles_to_direct(self, session, key) -> None:
         queued = set(session.pending_tile_numbers())
@@ -2002,7 +1987,7 @@ class FrameRenderMixin:
                 session.mark_skipped(session.plan.tiles[tile_number])
         session.stage_fan_in.fail(key)
         show_status_message(self.win, f"Montage stage update failed: {exc}", timeout=4000)
-        self._dispatch_montage_work(session, force=True)
+        self._retarget_montage_pipeline(session, force_commit=True)
 
     def _warn_montage_tiles_skipped(self, *, skipped_count: int, tile_bytes: int, budget_bytes: int, tile_shape) -> None:
         message = (
@@ -2020,596 +2005,6 @@ class FrameRenderMixin:
             Qt.QtWidgets.QMessageBox.warning(self.win, "Montage tiles skipped", message)
         except Exception as exc:
             handle_ui_exception("montage skipped warning", exc)
-
-    def _schedule_montage_tiles(self, session: MontageRenderSession) -> None:
-        if not self._montage_session_is_current(session):
-            return
-        if hasattr(self.win, "_apply_resource_governor_decisions"):
-            self.win._apply_resource_governor_decisions()
-        controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
-        max_workers = max(1, int(controller.diagnostics().max_workers))
-        while len(session.active_tile_requests) < max_workers:
-            scheduled = self._schedule_next_montage_tile(session)
-            if not scheduled:
-                break
-
-    def _schedule_next_montage_tile(self, session: MontageRenderSession) -> bool:
-        if not self._montage_session_is_current(session):
-            return False
-        tile = session.next_tile()
-        if tile is None:
-            if session.active_tile_requests or session.loading_tiles:
-                return False
-            if session.stage_fan_in.active_requests:
-                return False
-            self._schedule_montage_presentation_commit(session, force=True)
-            if session.pending_tiles:
-                return self._schedule_next_montage_tile(session)
-            if self._finish_montage_session_if_complete(session):
-                if _should_defer_montage_side_panels(self, session):
-                    self.win._deferred_side_panel_refresh_pending = True
-                else:
-                    self.win._update_operation_dock()
-            return False
-
-        # Reduce-at-ingest (ADR 0050): capture the demand as an immutable
-        # snapshot now; the worker reduces the finished tile to that level so
-        # its first presentation never uploads a native texture.  A demand
-        # change while the tile is in flight is corrected by the ordinary
-        # streaming materialization path, not by special cases here.
-        ingest_demand = session.ingest_lod_demand()
-        ingest_pyramid = getattr(session, "lod_pyramid", None) if ingest_demand is not None else None
-        # Semantic identity captured at schedule time: the worker must key the
-        # pyramid without touching the live session (ADR 0050 key contract).
-        ingest_semantic_id = (
-            session.tile_semantic_source_id(tile.source_index) if ingest_pyramid is not None else None
-        )
-        ingest_state = {"admitted": False}
-        preview_pyramid = getattr(session, "lod_preview_pyramid", None)
-        preview_level = int(getattr(session, "lod_preview_level", 0) or 0)
-        preview_semantic_id = (
-            session.tile_semantic_source_id(tile.source_index)
-            if preview_pyramid is not None and preview_level > 0 and ingest_semantic_id is None
-            else ingest_semantic_id
-        )
-        session_id = int(session.session_id)
-        montage_axis = session.montage_axis
-        document = session.document
-        colormap_lut = session.colormap_lut
-        shader_display = bool(getattr(session, "shader_display", False))
-
-        def evaluate(token):
-            context = self.win._evaluation_context(ComputeLane.MONTAGE_TILE, token)
-            eval_start = perf_counter()
-            result = render_effects.evaluate_exact_tile(
-                session,
-                tile,
-                stage_cache=self.win.operation_evaluator.stage_cache,
-                stage_materializer=self.win.operation_evaluator.stage_materializer,
-                cancellation_token=token,
-                evaluation_context=context,
-            )
-            self._last_montage_tile_eval_ms = (perf_counter() - eval_start) * 1000.0
-            if getattr(result, "value", None) is None:
-                return result
-            rendered_for_lod = None
-            reduced = None
-            if ingest_pyramid is not None:
-                rendered_for_lod = _rendered_tile_from_evaluation_result(tile, result)
-                reduced = _admit_ingest_reduction(
-                    ingest_pyramid,
-                    ingest_demand,
-                    rendered_for_lod,
-                    semantic_source_id=ingest_semantic_id,
-                    shader_display=shader_display,
-                )
-                ingest_state["admitted"] = reduced is not None
-            if preview_pyramid is not None and preview_level > 0:
-                # Retained preview level (ADR 0050): every evaluated tile
-                # leaves a coarse copy in the pinned preview cache, so any
-                # index ever computed re-presents instantly through the
-                # floor for the lifetime of the dataset view.
-                if rendered_for_lod is None:
-                    rendered_for_lod = _rendered_tile_from_evaluation_result(tile, result)
-                _admit_preview_reduction(
-                    preview_pyramid,
-                    rendered_for_lod,
-                    semantic_source_id=preview_semantic_id,
-                    preview_level=preview_level,
-                    reduced=reduced,
-                    reduced_level=None if ingest_demand is None else int(ingest_demand.desired_level),
-                    shader_display=shader_display,
-                )
-            return result
-
-        def done(result):
-            if ingest_state["admitted"]:
-                self._montage_lod_ingest_reductions = (
-                    int(getattr(self, "_montage_lod_ingest_reductions", 0) or 0) + 1
-                )
-                if str(getattr(result, "compute_path", "direct") or "direct") == "stage_backed":
-                    # A cached/shared stage output served this tile's reduced
-                    # display payload: the expensive pipeline stage was not
-                    # re-run for a display-LOD demand (ADR 0050).
-                    self._montage_lod_stage_hits_serving_derivations = (
-                        int(getattr(self, "_montage_lod_stage_hits_serving_derivations", 0) or 0) + 1
-                    )
-            current = getattr(self, "_montage_session", None)
-            if current is None or not self._is_current_montage_session(session_id, session.key):
-                self._store_reusable_montage_tile_result(
-                    tile,
-                    result,
-                    document=document,
-                    montage_axis=montage_axis,
-                    colormap_lut=colormap_lut,
-                    shader_display=shader_display,
-                )
-                return
-            if not self._is_current_render_generation(current.render_generation):
-                self._store_reusable_montage_tile_result(
-                    tile,
-                    result,
-                    document=document,
-                    montage_axis=montage_axis,
-                    colormap_lut=colormap_lut,
-                    shader_display=shader_display,
-                )
-                return
-            fan_in_start = perf_counter()
-            first_vispy_display = bool(
-                montage_commit.persistent_tile_residency_backend(self, current)
-                and not getattr(current, "display_committed", False)
-            )
-            byte_count = MontagePipelineEffects(self, current).admit_tile_result(tile, result)
-            elapsed_ms = (perf_counter() - fan_in_start) * 1000.0
-            self._last_montage_tile_result_fan_in_ms = elapsed_ms
-            self._last_montage_tile_result_fan_in_count = 1
-            _complete_inline_work(
-                self,
-                WorkItem(
-                    key=("montage_tile_result_fan_in", current.key, int(current.session_id), (int(tile.montage_index),)),
-                    lane=WorkLane.GUI_FAN_IN,
-                    frame_target=current.frame_plan.target,
-                    supersession_key=("montage-fan-in", current.key),
-                    supersession_value=int(current.session_id),
-                    estimated_cpu_ms=float(elapsed_ms),
-                    estimated_bytes=int(byte_count),
-                ),
-            )
-            first_visible_committed = False
-            if first_vispy_display and (getattr(current, "dirty_tiles", None) or getattr(current, "dirty_payloads", None)):
-                self._commit_montage_session_presentation(current, force=False)
-                first_visible_committed = bool(getattr(current, "display_committed", False))
-            self._schedule_montage_cached_level_stats(current)
-            if current.pending_tiles:
-                self._schedule_montage_tiles(current)
-            force = not current.pending_tiles and not current.active_tile_requests
-            if first_visible_committed:
-                pass
-            elif force:
-                self._schedule_montage_presentation_commit(current, force=True)
-            else:
-                self._schedule_montage_ready_display_commit(current)
-            self._dispatch_montage_work(current)
-
-        def error(exc):
-            current = getattr(self, "_montage_session", None)
-            if current is None or not self._is_current_montage_session(session_id, session.key):
-                return
-            if not self._is_current_render_generation(current.render_generation):
-                return
-            current.mark_skipped(tile)
-            show_status_message(self.win, f"Montage tile update failed: {exc}", timeout=4000)
-            self._dispatch_montage_work(current, force=True)
-
-        preview_started = self._schedule_montage_preview_tile(
-            session,
-            tile,
-            demand=ingest_demand,
-            pyramid=ingest_pyramid,
-            semantic_source_id=ingest_semantic_id,
-            shader_display=shader_display,
-        )
-        if preview_started or _preview_floor_blocks_exact_submission(session, tile):
-            session.active_tile_requests.discard(int(tile.montage_index))
-            session.loading_tiles.discard(int(tile.montage_index))
-            _enqueue_session_pending_tile(session, tile)
-            return False
-        controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
-        stage_key = session.stage_fan_in.tile_stage_keys.get(int(tile.montage_index))
-        dependency_keys = (
-            ()
-            if stage_key is None or stage_key in session.stage_fan_in.values
-            else (stage_key,)
-        )
-        started = controller.start_latest(
-            evaluate,
-            key=("montage_tile", session.key, int(tile.montage_index)),
-            priority=EvalPriority.VISIBLE_IMAGE,
-            replace_group=f"montage-tile:{session_id}:{int(tile.montage_index)}",
-            frame_target=session.frame_plan.target,
-            supersession_key=("montage-tile", int(tile.montage_index)),
-            supersession_value=(session.key, session_id),
-            work_item=WorkItem(
-                key=("montage_tile_materialization", session.key, session_id, int(tile.montage_index)),
-                lane=WorkLane.VISIBLE_MATERIALIZATION,
-                frame_target=session.frame_plan.target,
-                quality=session.frame_plan.target.quality,
-                supersession_key=("montage-tile", int(tile.montage_index)),
-                supersession_value=(session.key, session_id),
-                estimated_bytes=int(estimate_display_image_bytes(session.frame_plan.tile_shape, dtype=session.output_dtype, rgb=session.rgb)),
-                dependency_keys=dependency_keys,
-                reusable_output=True,
-            ),
-            on_done=done,
-            on_error=error,
-            on_stale=lambda tile=tile: self._on_montage_tile_dependency_stale(session_id, session.key, tile),
-            on_slow=lambda: self._on_montage_tile_slow(session_id),
-            slow_ms=100,
-            pass_token=True,
-        )
-        if started is None:
-            # Admission declined (visible-lane backpressure): the tile was
-            # already dequeued and marked loading, and dropping it here left
-            # it "loading" forever with no pending work — the visible plan
-            # could then never complete and auto-levels retried commits in a
-            # timer loop at idle.  Revert the bookkeeping, requeue, and stop
-            # the drain — but NEVER without a wakeup: if this was the last
-            # in-flight work for the session, no completion of ours will
-            # ever call the pump again (the 2026-07-05 dead-pump field
-            # freeze: pending=35, loading=60, active=0).  The capacity
-            # waiter re-derives dispatch when any tracked work finishes.
-            session.active_tile_requests.discard(int(tile.montage_index))
-            session.loading_tiles.discard(int(tile.montage_index))
-            _enqueue_session_pending_tile(session, tile)
-            self._montage_tile_admission_declined = (
-                int(getattr(self, "_montage_tile_admission_declined", 0) or 0) + 1
-            )
-            controller.notify_when_capacity(
-                ("montage-tiles", session.key),
-                lambda: self._dispatch_montage_work(getattr(self, "_montage_session", None)),
-            )
-            return False
-        return True
-
-    def _on_montage_tile_dependency_stale(self, session_id, session_key, tile) -> None:
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session_id, session_key):
-            return
-        tile_number = int(tile.montage_index)
-        session.active_tile_requests.discard(tile_number)
-        session.loading_tiles.discard(tile_number)
-        stage_key = session.stage_fan_in.tile_stage_keys.pop(tile_number, None)
-        if stage_key is None:
-            return
-        if tile_number not in session.rendered_tiles and tile_number not in session.skipped_tiles:
-            _enqueue_session_pending_tile(session, tile)
-        self._dispatch_montage_work(session)
-
-    def _schedule_montage_preview_tile(
-        self,
-        session: MontageRenderSession,
-        tile,
-        *,
-        demand,
-        pyramid,
-        semantic_source_id,
-        shader_display: bool,
-    ) -> bool:
-        """Schedule reduced-input preview work for a cold exact tile.
-
-        The exact request keeps owning loading/refinement.  Preview work only
-        admits a drawable plane into the existing pyramid and lets the
-        presentation floor show it while exact content is still absent.
-        """
-
-        if demand is None or pyramid is None or semantic_source_id is None:
-            return False
-        if int(getattr(demand, "desired_level", 0) or 0) <= 0:
-            return False
-        tile_number = int(tile.montage_index)
-        if tile_number in session.rendered_tiles:
-            return False
-        existing = session.display_tile_payloads.get(tile_number)
-        if existing is not None:
-            return False
-        upload_preview_useful = bool(
-            montage_commit.persistent_gpu_tile_residency_backend(self, session)
-            and int(getattr(demand, "desired_level", 0) or 0) > 0
-        )
-        if render_effects.shared_preview_is_useful(
-            session,
-            tile,
-            demand,
-            upload_preview_useful=upload_preview_useful,
-        ):
-            return self._schedule_montage_shared_preview_batch(
-                session,
-                tile,
-                demand=demand,
-                shader_display=shader_display,
-                upload_preview_useful=upload_preview_useful,
-            )
-        if not render_effects.preview_is_useful(
-            session,
-            tile,
-            demand,
-            upload_preview_useful=upload_preview_useful,
-        ):
-            return False
-
-        session_id = int(session.session_id)
-        session_key = session.key
-        preview_target = replace(session.frame_plan.target, quality="preview-visible")
-        preview_key = render_effects.preview_claim_key(
-            session,
-            tile,
-            demand=demand,
-            semantic_source_id=semantic_source_id,
-            shader_display=shader_display,
-        )
-        if not _claim_preview_floor(session, tile_number, preview_key):
-            return False
-        mark_scope = getattr(session, "mark_preview_floor_scope", None)
-        if callable(mark_scope):
-            mark_scope(
-                getattr(session, "_last_planned_tiles", ())
-                or (int(candidate.montage_index) for candidate in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()))
-            )
-
-        def evaluate(token):
-            return render_effects.evaluate_preview_tile(
-                session,
-                tile,
-                demand=demand,
-                semantic_source_id=semantic_source_id,
-                cancellation_token=token,
-                shader_display=shader_display,
-                evaluation_context=self.win._evaluation_context(ComputeLane.MONTAGE_TILE, token),
-            )
-
-        def done(preview):
-            current = getattr(self, "_montage_session", None)
-            if current is None or not self._is_current_montage_session(session_id, session_key):
-                session.release_preview_claim(tile_number, preview_key)
-                return
-            if preview is None:
-                current.release_preview_claim(tile_number, preview_key)
-                return
-            key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = montage_commit.preview_payload_parts(preview)
-            if key != preview_key:
-                current.release_preview_claim(tile_number, preview_key)
-            current.admit_preview_plane(
-                tile_number,
-                key,
-                plane,
-                histogram,
-                shader_mapping=shader_mapping,
-                texture_kind=texture_kind,
-                level_data=level_data,
-                level_stats=level_stats,
-            )
-            current.lod_preview_presentations = int(getattr(current, "lod_preview_presentations", 0) or 0) + 1
-            current._ensure_floor_payloads((tile_number,))
-            if tile_number in current.pending_payload_upserts:
-                self._schedule_montage_presentation_commit(current, force=False)
-                self._dispatch_montage_work(current)
-
-        def error(_exc):
-            session.release_preview_claim(tile_number, preview_key)
-            self._montage_preview_reduced_failures = (
-                int(getattr(self, "_montage_preview_reduced_failures", 0) or 0) + 1
-            )
-
-        controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
-        started = controller.start_latest(
-            evaluate,
-            key=("montage_preview_tile", session.key, session_id, tile_number),
-            priority=EvalPriority.VISIBLE_IMAGE,
-            replace_group=f"montage-preview:{session_id}:{tile_number}",
-            frame_target=preview_target,
-            supersession_key=("montage-preview-tile", tile_number),
-            supersession_value=(session.key, session_id),
-            work_item=WorkItem(
-                key=("montage_preview_materialization", session.key, session_id, tile_number),
-                lane=WorkLane.DISPLAY_PREVIEW,
-                frame_target=preview_target,
-                quality="preview-visible",
-                supersession_key=("montage-preview-tile", tile_number),
-                supersession_value=(session.key, session_id),
-                estimated_bytes=int(
-                    estimate_display_image_bytes(
-                        _preview_tile_shape(session, demand),
-                        dtype=session.output_dtype,
-                        rgb=session.rgb,
-                    )
-                ),
-                reusable_output=False,
-            ),
-            on_done=done,
-            on_error=error,
-            on_stale=lambda: session.release_preview_claim(tile_number, preview_key),
-            pass_token=True,
-        )
-        if started is None:
-            session.release_preview_claim(tile_number, preview_key)
-            self._montage_preview_reduced_blocked = (
-                int(getattr(self, "_montage_preview_reduced_blocked", 0) or 0) + 1
-            )
-            return False
-        self._montage_preview_reduced_scheduled = (
-            int(getattr(self, "_montage_preview_reduced_scheduled", 0) or 0) + 1
-        )
-        return True
-
-    def _schedule_montage_shared_preview_batch(
-        self,
-        session: MontageRenderSession,
-        tile,
-        *,
-        demand,
-        shader_display: bool,
-        upload_preview_useful: bool = False,
-    ) -> bool:
-        """Schedule one reduced-volume preview for a non-display transform window."""
-
-        if not render_effects.shared_preview_is_useful(
-            session,
-            tile,
-            demand,
-            upload_preview_useful=upload_preview_useful,
-        ):
-            return False
-
-        batch_key = _shared_preview_batch_key(session, tile, demand)
-        active = getattr(session, "_active_preview_batches", None)
-        if active is None:
-            active = set()
-            session._active_preview_batches = active
-        if batch_key in active:
-            return False
-        candidate_tiles = tuple(_shared_preview_candidate_tiles(session))
-        if not candidate_tiles:
-            return False
-        claim_rows = tuple(
-            (
-                int(candidate.montage_index),
-                render_effects.preview_claim_key(
-                    session,
-                    candidate,
-                    demand=demand,
-                    semantic_source_id=session.tile_semantic_source_id(candidate.source_index),
-                    shader_display=shader_display,
-                ),
-            )
-            for candidate in candidate_tiles
-        )
-        claimed_rows = tuple(
-            (tile_number, key)
-            for tile_number, key in claim_rows
-            if _claim_preview_floor(session, tile_number, key)
-        )
-        if not claimed_rows:
-            return False
-        mark_scope = getattr(session, "mark_preview_floor_scope", None)
-        if callable(mark_scope):
-            mark_scope(tile_number for tile_number, _key in claimed_rows)
-        active.add(batch_key)
-        session_id = int(session.session_id)
-        session_key = session.key
-        preview_target = replace(session.frame_plan.target, quality="preview-visible")
-        claimed_keys = {int(tile_number): key for tile_number, key in claimed_rows}
-        claimed_candidates = tuple(
-            candidate for candidate in candidate_tiles if int(candidate.montage_index) in claimed_keys
-        )
-
-        def evaluate(token):
-            return render_effects.evaluate_shared_preview(
-                session,
-                tile,
-                claimed_candidates,
-                demand=demand,
-                cancellation_token=token,
-                shader_display=shader_display,
-                evaluation_context=self.win._evaluation_context(ComputeLane.MONTAGE_TILE, token),
-            )
-
-        def done(previews):
-            current = getattr(self, "_montage_session", None)
-            if current is None or not self._is_current_montage_session(session_id, session_key):
-                for tile_number, key in claimed_rows:
-                    session.release_preview_claim(tile_number, key)
-                return
-            getattr(current, "_active_preview_batches", set()).discard(batch_key)
-            admitted = 0
-            upserted = False
-            preview_rows = tuple(previews or ())
-            seen_tiles: set[int] = set()
-            for row in preview_rows:
-                tile_number, key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = (
-                    montage_commit.preview_row_parts(row)
-                )
-                tile_number = int(tile_number)
-                expected_key = claimed_keys.get(tile_number)
-                if expected_key is not None and expected_key != key:
-                    current.release_preview_claim(tile_number, expected_key)
-                current.admit_preview_plane(
-                    tile_number,
-                    key,
-                    plane,
-                    histogram,
-                    shader_mapping=shader_mapping,
-                    texture_kind=texture_kind,
-                    level_data=level_data,
-                    level_stats=level_stats,
-                )
-                current._ensure_floor_payloads((tile_number,))
-                admitted += 1
-                seen_tiles.add(tile_number)
-                upserted = upserted or tile_number in current.pending_payload_upserts
-            for tile_number, key in claimed_rows:
-                if int(tile_number) not in seen_tiles:
-                    current.release_preview_claim(tile_number, key)
-            if admitted:
-                current.lod_preview_presentations = int(getattr(current, "lod_preview_presentations", 0) or 0) + admitted
-                if upserted:
-                    self._schedule_montage_presentation_commit(current, force=False)
-                    self._dispatch_montage_work(current)
-
-        def error(_exc):
-            getattr(session, "_active_preview_batches", set()).discard(batch_key)
-            for tile_number, key in claimed_rows:
-                session.release_preview_claim(tile_number, key)
-            self._montage_preview_reduced_failures = (
-                int(getattr(self, "_montage_preview_reduced_failures", 0) or 0) + 1
-            )
-
-        controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
-        started = controller.start_latest(
-            evaluate,
-            key=("montage_preview_batch", session.key, session_id, batch_key),
-            priority=EvalPriority.VISIBLE_IMAGE,
-            replace_group=f"montage-preview-batch:{session_id}:{hash(batch_key)}",
-            frame_target=preview_target,
-            supersession_key=("montage-preview-batch", batch_key),
-            supersession_value=(session.key, session_id),
-            work_item=WorkItem(
-                key=("montage_preview_batch_materialization", session.key, session_id, batch_key),
-                lane=WorkLane.DISPLAY_PREVIEW,
-                frame_target=preview_target,
-                quality="preview-visible",
-                supersession_key=("montage-preview-batch", batch_key),
-                supersession_value=(session.key, session_id),
-                estimated_bytes=int(
-                    estimate_display_image_bytes(
-                        _preview_tile_shape(session, demand),
-                        dtype=session.output_dtype,
-                        rgb=session.rgb,
-                    )
-                    * max(1, len(candidate_tiles))
-                ),
-                reusable_output=False,
-            ),
-            on_done=done,
-            on_error=error,
-            on_stale=lambda: (
-                getattr(session, "_active_preview_batches", set()).discard(batch_key),
-                tuple(session.release_preview_claim(tile_number, key) for tile_number, key in claimed_rows),
-            ),
-            pass_token=True,
-        )
-        if started is None:
-            active.discard(batch_key)
-            for tile_number, key in claimed_rows:
-                session.release_preview_claim(tile_number, key)
-            self._montage_preview_reduced_blocked = (
-                int(getattr(self, "_montage_preview_reduced_blocked", 0) or 0) + 1
-            )
-            return False
-        self._montage_preview_reduced_scheduled = (
-            int(getattr(self, "_montage_preview_reduced_scheduled", 0) or 0) + 1
-        )
-        return True
 
     def _retargeted_montage_viewport_plan(
         self,
@@ -2703,34 +2098,10 @@ class FrameRenderMixin:
         self._show_montage_session_loading_overlay(session)
 
     def _schedule_montage_session_slow_overlay(self, session):
-        timer = self._ensure_montage_session_slow_timer()
-        self._montage_session_slow_key = (int(session.session_id), session.key)
-        timer.start(100)
-
-    def _ensure_montage_session_slow_timer(self):
-        timer = getattr(self, "_montage_session_slow_timer", None)
-        if timer is None:
-            # User-visible timeout. The session key check in the callback
-            # prevents stale overlays; remove only if progress UI becomes tied
-            # to explicit scheduler deadline events.
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._on_montage_session_slow_timer)
-            self._montage_session_slow_timer = timer
-        return timer
+        self._show_montage_session_loading_overlay_if_current(int(session.session_id), session.key)
 
     def _stop_montage_session_slow_overlay(self):
-        timer = getattr(self, "_montage_session_slow_timer", None)
-        if timer is not None:
-            timer.stop()
         self._montage_session_slow_key = None
-
-    def _on_montage_session_slow_timer(self):
-        key = getattr(self, "_montage_session_slow_key", None)
-        if key is None:
-            return
-        session_id, session_key = key
-        self._show_montage_session_loading_overlay_if_current(session_id, session_key)
 
     def _show_montage_session_loading_overlay_if_current(self, session_id, key):
         session = getattr(self, "_montage_session", None)
@@ -2786,49 +2157,65 @@ class FrameRenderMixin:
     def _montage_lod_preview_pyramid(self) -> PyramidCache:
         return montage_lod.preview_pyramid(self)
 
+    def _montage_render_intent(self, session) -> RenderIntent:
+        return RenderIntent(
+            semantic_key=session.key,
+            viewport_key=session.view_range,
+            presentation_key=(
+                str(session.window_mode),
+                normalize_bounds(getattr(session, "user_levels_override", None)),
+                bool(getattr(session, "force_auto", False)),
+            ),
+            view_range=session.view_range,
+            viewport_shape=tuple(session.viewport_shape),
+            interactive=_interactive_active(self),
+        )
+
+    def _montage_pipeline_for_session(self, session) -> MontagePipeline:
+        pipeline = getattr(session, "pipeline", None)
+        if pipeline is None:
+            pipeline = MontagePipeline(
+                self.win.kernel,
+                MontagePipelineEffects(self, session),
+                commit_max_items=8,
+            )
+            session.pipeline = pipeline
+        self._montage_pipeline = pipeline
+        return pipeline
+
+    def _retarget_montage_pipeline(self, session, *, force_commit: bool = False) -> int:
+        if session is None or not self._montage_session_is_current(session):
+            return 0
+        if bool(getattr(session, "stage_planning_deferred", False)) and not _viewport_interaction_active(self):
+            self._plan_deferred_montage_stages_now(session)
+            return 0
+        montage_lod.selected_lod_factor(session)
+        intent = self._montage_render_intent(session)
+        pipeline = self._montage_pipeline_for_session(session)
+        submitted = pipeline.retarget(intent, session.lod_policy_decision.demand)
+        if getattr(session, "pending_lod_requests", None):
+            self._schedule_montage_lod_materializations(session)
+        if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
+            self._schedule_montage_cached_level_stats(session)
+        if force_commit or session.flush_pending or session.final_commit_pending:
+            self._schedule_montage_ready_display_commit(session)
+        if not submitted:
+            self._finish_montage_session_if_complete(session)
+        unsettled = bool(
+            getattr(session, "pending_tiles", None)
+            or getattr(session, "active_tile_requests", None)
+            or getattr(session, "loading_tiles", None)
+            or getattr(session.stage_fan_in, "active_requests", None)
+            or getattr(session.stage_fan_in, "attached_requests", None)
+            or getattr(session, "dirty_payloads", None)
+            or getattr(session, "pending_payload_upserts", None)
+        )
+        if unsettled:
+            self._ensure_montage_watchdog()
+        return int(submitted)
+
     def _schedule_montage_lod_materializations(self, session) -> None:
         return montage_lod.schedule_materializations(self, session)
-
-    # -- machine-derived dispatch (ADR 0051 P2) -------------------------------
-
-    def _dispatch_montage_work(self, session, *, force: bool = False) -> None:
-        """The single montage pump: schedule everything the records imply.
-
-        Every montage event edge (tile done/error, stage done/stale/error,
-        LOD level ready, admission-decline wakeup, watchdog
-        assertion) ends here.  `derive_montage_dispatch` is the one decision
-        site; the schedulers below are idempotent and coalesced, so redundant
-        dispatch is cheap.  A state mutation that does NOT end in dispatch is
-        the ADR 0051 lost-wakeup defect — the watchdog assertion reports it.
-        """
-
-        if session is None or not self._montage_session_is_current(session):
-            return
-        plan = derive_montage_dispatch(session)
-        if plan.requeue_orphans:
-            requeued = session.requeue_orphaned_loading_tiles()
-            if requeued:
-                self._montage_orphaned_tiles_repaired = (
-                    int(getattr(self, "_montage_orphaned_tiles_repaired", 0) or 0) + int(requeued)
-                )
-                plan = derive_montage_dispatch(session)
-        if plan.preview_refinements:
-            session.mark_preview_refinements_dirty(plan.preview_refinements)
-            plan = derive_montage_dispatch(session)
-        if plan.deferred_planning:
-            self._schedule_deferred_montage_planning(session)
-        if plan.schedule_tiles:
-            self._schedule_montage_tiles(session)
-        if plan.lod_materializations:
-            self._schedule_montage_lod_materializations(session)
-        if plan.level_evidence:
-            self._schedule_montage_cached_level_stats(session)
-        if plan.commit or force:
-            self._schedule_montage_presentation_commit(
-                session, force=bool(plan.force_commit or force)
-            )
-        if plan.unsettled:
-            self._ensure_montage_watchdog()
 
     # -- stall assertion probe (ADR 0051) -------------------------------------
     # The live render path must make lost wakeups impossible by construction.
@@ -2953,66 +2340,7 @@ class FrameRenderMixin:
     def _schedule_montage_presentation_commit(self, session, *, force=False) -> None:
         if not self._montage_session_is_current(session):
             return
-        self._montage_commit_token = _montage_work_token(session, "commit")
-        interval_ms = self._montage_commit_interval_ms(session, force=force)
-        elapsed_ms = (monotonic() - float(session.last_commit_monotonic or 0.0)) * 1000.0
-        needs_initial_commit = not bool(getattr(session, "display_committed", False))
-        needs_final_dirty_commit = bool(
-            force
-            and not session.pending_tiles
-            and not session.active_tile_requests
-            and (
-                getattr(session, "dirty_payloads", None)
-                or getattr(session, "pending_payload_upserts", None)
-                or getattr(session, "pending_removals", None)
-                or (session.has_pending_level_update() and session.has_stale_level_presentations())
-            )
-        )
-        if _viewport_interaction_active(self) and not needs_initial_commit:
-            session.final_commit_pending = True
-            session.flush_pending = True
-            self._start_montage_commit_timer(max(1, int(interval_ms)))
-            return
-        if needs_initial_commit or needs_final_dirty_commit or force and not session.flush_pending or elapsed_ms >= interval_ms:
-            self._commit_montage_session_presentation(session, force=force)
-            return
-        session.final_commit_pending = True
-        session.flush_pending = True
-        self._montage_coalesced_commits = int(getattr(self, "_montage_coalesced_commits", 0) or 0) + 1
-        self._start_montage_commit_timer(max(1, int(interval_ms - elapsed_ms)))
-
-    def _start_montage_commit_timer(self, interval_ms: int) -> None:
-        timer = getattr(self, "_montage_commit_timer", None)
-        if timer is None:
-            # Bounded continuation guarded by `_montage_commit_token`.
-            # Commit spacing comes from feedback/resource policy; remove when
-        # backend commits are recorded directly in kernel diagnostics.
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._flush_montage_presentation_commit)
-            self._montage_commit_timer = timer
-        if not timer.isActive():
-            timer.start(max(1, int(interval_ms)))
-
-    def _montage_commit_interval_ms(self, session, *, force: bool) -> int:
-        if force:
-            if not session.pending_tiles and not session.loading_tiles and not session.active_tile_requests:
-                return _montage_commit_interval_ms(self, force=True)
-        interval = _montage_commit_interval_ms(self, force=False)
-        if montage_commit.persistent_tile_layer_fast_drain_enabled(self, session):
-            return min(int(interval), 8)
-        return interval
-
-    @Qt.QtCore.Slot()
-    def _flush_montage_presentation_commit(self):
-        self._montage_presentation_commit_flush_queued = False
-        session = getattr(self, "_montage_session", None)
-        if session is None or not session.final_commit_pending:
-            return
-        token = getattr(self, "_montage_commit_token", None)
-        if not _montage_work_token_is_current(session, token, "commit"):
-            return
-        self._commit_montage_session_presentation(session, force=False)
+        self._commit_montage_session_presentation(session, force=force)
         if (
             getattr(session, "show_loading_overlays", False)
             and not session.visible_plan_complete()
@@ -3042,43 +2370,9 @@ class FrameRenderMixin:
         )
         if not has_commit_work:
             return
-        self._montage_commit_token = _montage_work_token(session, "commit")
-        if bool(getattr(session, "display_committed", False)):
-            if montage_commit.persistent_tile_layer_fast_drain_enabled(self, session):
-                session.final_commit_pending = True
-                session.flush_pending = True
-                if self._queue_montage_presentation_commit_flush():
-                    return
-            self._schedule_montage_presentation_commit(session, force=False)
-            return
         session.final_commit_pending = True
         session.flush_pending = True
-        if montage_commit.persistent_tile_layer_fast_drain_enabled(self, session) and self._queue_montage_presentation_commit_flush():
-            return
-        try:
-            # Qt event-turn barrier guarded by `_montage_commit_token`; the
-            # fallback timer exists only for bindings that reject the
-            # receiver-context singleShot overload.
-            Qt.QtCore.QTimer.singleShot(0, self, self._flush_montage_presentation_commit)
-        except Exception:
-            self._start_montage_commit_timer(1)
-
-    def _queue_montage_presentation_commit_flush(self) -> bool:
-        if bool(getattr(self, "_montage_presentation_commit_flush_queued", False)):
-            return True
-        self._montage_presentation_commit_flush_queued = True
-        try:
-            queued = Qt.QtCore.QMetaObject.invokeMethod(
-                self,
-                "_flush_montage_presentation_commit",
-                Qt.QtCore.Qt.ConnectionType.QueuedConnection,
-            )
-        except Exception:
-            queued = False
-        if queued:
-            return True
-        self._montage_presentation_commit_flush_queued = False
-        return False
+        self._commit_montage_session_presentation(session, force=False)
 
     def _finish_montage_session_if_complete(self, session) -> bool:
         if not self._montage_session_is_current(session):
@@ -3566,17 +2860,7 @@ class FrameRenderMixin:
             return
         session = getattr(self, "_montage_session", None)
         self._montage_viewport_update_token = None if session is None else _montage_work_token(session, "viewport_update")
-        timer = getattr(self, "_montage_viewport_update_timer", None)
-        if timer is None:
-            # Bounded continuation. The callback only retargets the current
-            # montage session/viewport token; it does not establish semantic
-            # order between sessions or payload revisions.
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._run_montage_viewport_update)
-            self._montage_viewport_update_timer = timer
-        interval = _montage_viewport_update_delay_ms(self) if delay_ms is None else max(0, int(delay_ms))
-        timer.start(interval)
+        self._run_montage_viewport_update()
 
     def _schedule_montage_priority_retarget_from_hover(self) -> None:
         if getattr(self.win, "_closing", False):
@@ -3589,18 +2873,8 @@ class FrameRenderMixin:
         if not session.pending_tiles:
             return
         self._montage_priority_retarget_token = _montage_work_token(session, "priority_retarget")
-        timer = getattr(self, "_montage_priority_retarget_timer", None)
-        if timer is None:
-            # Bounded continuation guarded by `_montage_priority_retarget_token`.
-            # Hover retargeting updates queue metadata in batches; remove when
-            # tile priority updates are admitted as scheduler work items.
-            timer = Qt.QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._run_montage_priority_retarget)
-            self._montage_priority_retarget_timer = timer
         self._montage_priority_retarget_pending = True
-        if not timer.isActive():
-            timer.start(_montage_priority_retarget_delay_ms(self))
+        self._run_montage_priority_retarget()
 
     def _refresh_montage_priority_targets(self, session) -> int:
         """Rebuild tile-queue priorities from the live viewport.
@@ -3685,7 +2959,7 @@ class FrameRenderMixin:
         self._last_montage_priority_retarget_pending = len(session.pending_tiles)
         self._record_gui_budget(budget)
         if session.pending_tiles:
-            self._schedule_montage_tiles(session)
+            self._retarget_montage_pipeline(session)
 
     def _run_montage_viewport_update(self) -> None:
         if getattr(self.win, "_closing", False):
@@ -3724,9 +2998,8 @@ class FrameRenderMixin:
             self._montage_viewport_update_running = False
         if getattr(self.win, "_montage_viewport_update_pending", False):
             self.win._montage_viewport_update_pending = False
-            delay = 0 if getattr(self, "_montage_viewport_continue_immediately", False) else _montage_viewport_chunk_delay_ms(self)
             self._montage_viewport_continue_immediately = False
-            self._schedule_montage_viewport_update(delay_ms=delay)
+            self._schedule_montage_viewport_update(delay_ms=0)
 
     def _montage_tile_shape(self, view_state):
         primary_axis, secondary_axis = view_state.image_axes
@@ -3904,26 +3177,6 @@ def _montage_viewport_addition_batch_limit(window, *, interactive: bool) -> int:
     return 8 if interactive else 16
 
 
-def _montage_viewport_chunk_delay_ms(window) -> int:
-    decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
-        "montage_viewport_update",
-        interactive=_interactive_active(window),
-    )
-    if decision is not None:
-        return max(1, min(16, int(decision.interval_ms)))
-    return 1
-
-
-def _montage_priority_retarget_delay_ms(window) -> int:
-    decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
-        "montage_priority_retarget",
-        interactive=True,
-    )
-    if decision is not None:
-        return max(1, min(64, int(decision.interval_ms)))
-    return 32
-
-
 def _montage_priority_retarget_batch_limit(window, *, interactive: bool) -> int:
     decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
         "montage_priority_retarget",
@@ -4077,26 +3330,6 @@ def _claim_preview_floor(session, tile_number: int, key) -> bool:
     session.lifecycle.level_claimed(tile_number, key, ClaimOwner.PREVIEW, request=("preview-floor", key))
     session.lifecycle.level_materializing(tile_number, key)
     return True
-
-
-def _montage_commit_interval_ms(window, *, force: bool) -> int:
-    decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
-        "montage_commit",
-        interactive=_interactive_active(window),
-    )
-    session = getattr(window, "_montage_session", None)
-    if session is not None and _visible_cpu_tile_layer_backlog_pending(window, session):
-        feedback = _latency_feedback(window)
-        min_interval = 8 if feedback is None else int(feedback.tuning.min_interval_ms)
-        if decision is not None:
-            return max(1, min(int(decision.interval_ms), int(min_interval)))
-        return max(1, int(min_interval))
-    if decision is not None:
-        return int(8 if force else max(1, decision.interval_ms))
-    feedback = _latency_feedback(window)
-    if feedback is None:
-        return 8 if force else 16
-    return int(feedback.commit_interval_ms("montage_commit", force=force, interactive=_interactive_active(window)))
 
 
 def _visible_cpu_tile_layer_backlog_pending(window, session) -> bool:

@@ -8,6 +8,7 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS
+from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
@@ -46,13 +47,13 @@ class MontagePipelineEffects:
         session = self.session
         tile = self._tile_for_step(step)
         if tile is None:
-            return lambda: None
+            return lambda _token=None: None
 
         if step.rung in (Rung.FLOOR, Rung.PREVIEW):
             demand = session.ingest_lod_demand()
             semantic_source_id = session.tile_semantic_source_id(tile.source_index) if demand is not None else None
 
-            def evaluate_preview():
+            def evaluate_preview(token=None):
                 if demand is None or semantic_source_id is None:
                     return None
                 return render_effects.evaluate_preview_tile(
@@ -60,23 +61,56 @@ class MontagePipelineEffects:
                     tile,
                     demand=demand,
                     semantic_source_id=semantic_source_id,
+                    cancellation_token=token,
                     shader_display=bool(getattr(session, "shader_display", False)),
+                    evaluation_context=self.renderer.win._evaluation_context(ComputeLane.MONTAGE_TILE, token),
                 )
 
             return evaluate_preview
 
-        def evaluate_exact():
+        def evaluate_exact(token=None):
             return render_effects.evaluate_exact_tile(
                 session,
                 tile,
                 stage_cache=self.renderer.win.operation_evaluator.stage_cache,
                 stage_materializer=self.renderer.win.operation_evaluator.stage_materializer,
+                cancellation_token=token,
+                evaluation_context=self.renderer.win._evaluation_context(ComputeLane.MONTAGE_TILE, token),
             )
 
         return evaluate_exact
 
     def tile_states(self, _intent, demand):
         return render_effects.tile_lod_states(self.session, demand)
+
+    def prepare_rung(self, _intent, step) -> bool:
+        tile = self._tile_for_step(step)
+        if tile is None or not self._session_is_current():
+            return False
+        tile_number = int(tile.montage_index)
+        if step.rung in (Rung.DESIRED, Rung.EXACT):
+            if tile_number in self.session.rendered_tiles or tile_number in self.session.skipped_tiles:
+                return False
+            self.session.mark_loading(tile)
+            self.session.active_tile_requests.add(tile_number)
+        return True
+
+    def rung_deps(self, _intent, step) -> tuple[object, ...]:
+        tile_number = int(step.tile_number)
+        stage_key = self.session.stage_fan_in.tile_stage_keys.get(tile_number)
+        if stage_key is None or stage_key in self.session.stage_fan_in.values:
+            return ()
+        return (stage_key,)
+
+    def rung_dropped(self, _intent, step) -> None:
+        tile = self._tile_for_step(step)
+        if tile is None:
+            return
+        tile_number = int(tile.montage_index)
+        if step.rung in (Rung.DESIRED, Rung.EXACT):
+            self.session.active_tile_requests.discard(tile_number)
+            self.session.loading_tiles.discard(tile_number)
+            self.session.lifecycle.evaluation_declined(tile_number)
 
     def apply_commit(self, batch: CommitBatch) -> None:
         if batch.semantic_key is not None and batch.semantic_key != getattr(self.session, "key", batch.semantic_key):

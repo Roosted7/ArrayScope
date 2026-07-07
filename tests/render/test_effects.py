@@ -247,7 +247,7 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
         for state in effects.tile_lod_states(session, demand, tile_numbers=(tile.montage_index,))
     }[int(tile.montage_index)]
 
-    assert state.resident_levels == (1,)
+    assert state.resident_levels == (0, 1)
     assert state.floor_available is True
 
 

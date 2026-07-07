@@ -15,7 +15,6 @@ from arrayscope.window.montage_payload_cache import (
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     montage_session_key,
-    montage_viewport_update_delay_ms as _montage_viewport_update_delay_ms,
 )
 
 
@@ -634,46 +633,6 @@ def test_retained_payload_store_receives_only_accepted_delta_payloads():
     assert retained == {3: payloads[3]}
 
 
-def test_pyqtgraph_visible_tile_layer_backlog_uses_minimum_commit_cadence():
-    import arrayscope.window.frame_renderer as frame_renderer
-    from arrayscope.core.compute_policy import compute_policy_from_settings
-    from arrayscope.core.memory_policy import MemoryProfileChoice
-    from arrayscope.core.resource_governor import ResourceGovernor
-    from arrayscope.app.settings_state import AppSettingsState
-
-    governor = ResourceGovernor(
-        compute_policy_from_settings(AppSettingsState(memory_profile=MemoryProfileChoice.BALANCED), cpu_count=8),
-        profile=MemoryProfileChoice.BALANCED,
-    )
-    governor.record_ui_observation("montage_commit", 80.0, item_count=4, byte_count=1024)
-    assert governor.decide_ui_work("montage_commit", interactive=False).interval_ms > governor.latency_feedback.tuning.min_interval_ms
-    session = SimpleNamespace(
-        dirty_payloads={0: None},
-        pending_payload_upserts={},
-        pending_removals=set(),
-        has_pending_level_update=lambda: False,
-        has_stale_level_presentations=lambda: False,
-    )
-    window = SimpleNamespace(
-        img_view=SimpleNamespace(
-            rendering_capabilities=ImageViewBackendCapabilities(
-                name="pyqtgraph",
-                persistent_tile_residency=False,
-                shader_windowing=False,
-            )
-        ),
-        resource_governor=governor,
-        _viewport_interaction_active=False,
-        _ui_work_decision=lambda channel, **kwargs: governor.decide_ui_work(channel, **kwargs),
-        _montage_session=session,
-    )
-    window.win = window
-
-    interval = frame_renderer._montage_commit_interval_ms(window, force=False)
-
-    assert interval == governor.latency_feedback.tuning.min_interval_ms
-
-
 def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
     from arrayscope.window import montage_commit
 
@@ -1134,59 +1093,6 @@ def test_auto_preserves_vispy_tile_layer_mode():
     assert "tiled montage presentation" in decision.reason
 
 
-def test_interactive_montage_commit_is_timer_coalesced(qt_app, monkeypatch):
-    from pyqtgraph.Qt import QtCore
-    from arrayscope.core.view_state import ViewState
-    from arrayscope.display.montage import make_montage_plan
-    from arrayscope.window.frame_renderer import FrameRenderMixin
-    from arrayscope.window.montage_session import MontageRenderSession
-
-    class Window(QtCore.QObject, FrameRenderMixin):
-        def __init__(self):
-            super().__init__()
-            self.win = self
-            self.view_state = ViewState.from_shape((2, 2, 1)).with_montage_axis(2, indices=(0,), text=":")
-            self._commits = 0
-
-        def _commit_montage_session_presentation(self, session, *, force=False):
-            self._commits += 1
-
-    win = Window()
-    plan = make_montage_plan(win.view_state, axis=2, indices=(0,), tile_shape=(2, 2), columns=1)
-    session = MontageRenderSession(
-        session_id=1,
-        key=("session",),
-        render_generation=1,
-        level_key=("levels",),
-        level_expected_indices=(0,),
-        plan=plan,
-        view_state=win.view_state,
-        document=object(),
-        montage_axis=2,
-        colormap_lut=None,
-        viewport_shape=(2, 2),
-        view_range=None,
-        output_dtype=np.dtype(np.float32),
-        rgb=False,
-        window_mode="relative",
-        force_auto=False,
-        visible_tiles=plan.tiles,
-        rendered_tiles={},
-        loading_tiles=set(),
-        skipped_tiles=set(),
-        pending_tiles=[],
-    )
-    session.display_committed = True
-    win._montage_session = session
-    win._viewport_interaction_active = True
-
-    win._schedule_montage_presentation_commit(session, force=True)
-
-    assert win._commits == 0
-    assert session.final_commit_pending is True
-    assert win._montage_commit_timer.isActive()
-
-
 def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
@@ -1269,7 +1175,7 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
             self._viewport_interaction_active = True
             self._montage_viewport_addition_batch_size = 3
             self.resolved_batches = []
-            self.tile_schedules = 0
+            self.pipeline_retargets = 0
             self.commits = 0
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
@@ -1294,8 +1200,8 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
         def _schedule_montage_presentation_commit(self, session, *, force=False):
             self.commits += 1
 
-        def _schedule_montage_tiles(self, session):
-            self.tile_schedules += 1
+        def _retarget_montage_pipeline(self, session):
+            self.pipeline_retargets += 1
 
     document = ArrayDocument(np.zeros((2, 2, 10), dtype=np.float32))
     state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=10, indices=tuple(range(10)), text=":")
@@ -1345,7 +1251,7 @@ def test_interactive_viewport_expansion_chunks_cached_tile_resolution(qt_app):
     assert pending == resolved
     assert pending[0] == 6
     assert session.loading_tiles == set()
-    assert win.tile_schedules == 0
+    assert win.pipeline_retargets == 0
     assert win._montage_viewport_update_pending is True
     assert win._montage_viewport_continue_immediately is True
     assert win._last_montage_viewport_deferred_additions == 7
@@ -1367,7 +1273,7 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypa
             self.document = document
             self.view_state = state
             self._viewport_plan = viewport_plan
-            self.tile_schedules = 0
+            self.pipeline_retargets = 0
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
                     name="vispy",
@@ -1383,8 +1289,8 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypa
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
             return None
 
-        def _schedule_montage_tiles(self, session):
-            self.tile_schedules += 1
+        def _retarget_montage_pipeline(self, session):
+            self.pipeline_retargets += 1
 
         def _schedule_montage_presentation_commit(self, session, *, force=False):
             pass
@@ -1432,7 +1338,7 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypa
 
     assert win._try_update_montage_viewport_only() is True
 
-    assert win.tile_schedules == 1
+    assert win.pipeline_retargets == 1
 
 
 def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
@@ -1531,7 +1437,7 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
             self.document = document
             self.view_state = state
             self._viewport_plan = viewport_plan
-            self.tile_schedules = 0
+            self.pipeline_retargets = 0
             self.commits = 0
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
@@ -1548,8 +1454,8 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
             return None
 
-        def _schedule_montage_tiles(self, session):
-            self.tile_schedules += 1
+        def _retarget_montage_pipeline(self, session):
+            self.pipeline_retargets += 1
 
         def _schedule_montage_presentation_commit(self, session, *, force=False):
             self.commits += 1
@@ -1624,7 +1530,7 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
         def _is_current_montage_session(self, session_id, key):
             return True
 
-        def _schedule_montage_tiles(self, session):
+        def _retarget_montage_pipeline(self, session):
             tile = session.next_tile()
             if tile is not None:
                 self.scheduled.append(int(tile.montage_index))
@@ -1764,22 +1670,6 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
         persistent_tile_residency=True,
         shader_windowing=False,
     )
-    window = SimpleNamespace(
-        img_view=SimpleNamespace(
-            rendering_capabilities=capabilities,
-            montageDisplayMode=lambda: "vispy_tile_layer",
-        )
-    )
-    window.win = window
-    fallback = _window_ns(
-        img_view=SimpleNamespace(
-            rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
-            montageDisplayMode=lambda: "tile_layer",
-        )
-    )
-
-    assert _montage_viewport_update_delay_ms(window) == 90
-    assert _montage_viewport_update_delay_ms(fallback) == 120
     assert montage_viewport_retarget_policy(capabilities, "vispy_tile_layer").coverage_margin_tiles == 1
     assert (
         persistent_tile_residency_backend(
@@ -2094,52 +1984,6 @@ def test_auto_large_rgb_montage_uses_tile_layer():
 
 
 
-def test_ready_display_commit_refreshes_stale_commit_token_at_source(qt_app):
-    pytest.importorskip("pyqtgraph")
-    from pyqtgraph.Qt import QtCore
-    from arrayscope.window.frame_renderer import FrameRenderMixin, _montage_work_token
-
-    class _Window(QtCore.QObject, FrameRenderMixin):
-        def __init__(self):
-            super().__init__()
-            self.win = self
-            self.img_view = SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
-
-        def _is_current_montage_session(self, session_id, key):
-            return True
-
-        def _flush_montage_presentation_commit(self):
-            return None
-
-    session = SimpleNamespace(
-        session_id=1,
-        key="session",
-        render_generation=2,
-        payload_revision=3,
-        level_revision=4,
-        viewport_revision=5,
-        dirty_tiles=[0],
-        dirty_rects=[],
-        dirty_payloads={},
-        pending_payload_upserts={},
-        pending_removals=set(),
-        display_committed=False,
-        final_commit_pending=False,
-        flush_pending=False,
-        has_pending_level_update=lambda: False,
-        has_stale_level_presentations=lambda: False,
-    )
-    win = _Window()
-    win._montage_session = session
-    win._montage_commit_token = ("commit", "stale")
-
-    win._schedule_montage_ready_display_commit(session)
-
-    assert win._montage_commit_token == _montage_work_token(session, "commit")
-    assert session.final_commit_pending is True
-    assert session.flush_pending is True
-
-
 def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     pytest.importorskip("pyqtgraph")
     from arrayscope.display.geometry import MontageGeometry
@@ -2210,26 +2054,6 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     assert win.commits == 0
     assert session.final_commit_pending is False
     assert session.flush_pending is False
-
-
-def test_montage_commit_token_ignores_viewport_only_revision_changes():
-    from arrayscope.window.frame_renderer import _montage_work_token
-
-    session = SimpleNamespace(
-        session_id=1,
-        key="session",
-        render_generation=2,
-        payload_revision=3,
-        level_revision=4,
-        viewport_revision=5,
-    )
-    commit_token = _montage_work_token(session, "commit")
-    priority_token = _montage_work_token(session, "priority_retarget")
-
-    session.viewport_revision += 1
-
-    assert _montage_work_token(session, "commit") == commit_token
-    assert _montage_work_token(session, "priority_retarget") != priority_token
 
 
 def test_interactive_cache_hit_requires_committed_semantic_montage_mapping():

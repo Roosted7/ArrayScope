@@ -544,17 +544,15 @@ class ArrayScopeWindow(
         if getattr(self, "_montage_viewport_update_pending", False) and getattr(self.view_state, "montage_axis", None) is not None:
             self._montage_viewport_update_pending = False
             self._schedule_montage_viewport_update()
-        # Machine-derived dispatch (ADR 0051 P2): records deferred during the
-        # gesture (rule 4) must be re-derived the moment interaction quiets —
-        # this edge is where the 2026-07-05 zoom-back dead pump formed when
-        # the update-pending flag raced its consumer.
+        # Records deferred during the gesture retarget the pipeline the moment
+        # interaction quiets.
         renderer = getattr(self, "renderer", None)
         if renderer is not None:
             from arrayscope.window.montage_session import MontageRenderSession
 
             session = getattr(renderer, "_montage_session", None)
             if isinstance(session, MontageRenderSession):
-                renderer._dispatch_montage_work(session)
+                renderer._retarget_montage_pipeline(session)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

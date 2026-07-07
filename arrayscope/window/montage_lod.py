@@ -1256,7 +1256,7 @@ def retry_blocked_materializations(renderer) -> None:
     """Capacity-waiter wakeup for blocked LOD admissions (ADR 0051 P2).
 
     Re-evaluates the live demand (re-claiming any released levels into
-    ``pending_lod_requests``) and re-derives dispatch.  Cheap and safe to
+    ``pending_lod_requests``) and retargets the pipeline.  Cheap and safe to
     run spuriously: demand math plus pyramid peeks, then idempotent
     scheduling.
     """
@@ -1266,7 +1266,7 @@ def retry_blocked_materializations(renderer) -> None:
         return
     if session.refresh_lod_for_viewport():
         renderer._schedule_montage_presentation_commit(session, force=False)
-    renderer._dispatch_montage_work(session)
+    renderer._retarget_montage_pipeline(session)
 
 
 def on_level_ready(renderer, session_id, session_key, tile_number) -> None:
@@ -1281,6 +1281,6 @@ def on_level_ready(renderer, session_id, session_key, tile_number) -> None:
     session.lod_materializations_completed = int(getattr(session, "lod_materializations_completed", 0) or 0) + 1
     if int(tile_number) in session.rendered_tiles:
         session.dirty_payloads[int(tile_number)] = None
-    # Machine-derived dispatch (ADR 0051 P2): a completed level is backend
-    # evidence with its own consumer — re-derive instead of hand-picking.
-    renderer._dispatch_montage_work(session)
+    # A completed level is backend evidence with its own consumer: retarget
+    # the pipeline so the ladder can swap resident levels and finish commits.
+    renderer._retarget_montage_pipeline(session)

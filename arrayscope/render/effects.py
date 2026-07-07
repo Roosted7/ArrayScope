@@ -384,9 +384,15 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
         tile_number = int(tile.montage_index)
         if allowed is not None and tile_number not in allowed:
             continue
+        if tile_number in set(getattr(session, "skipped_tiles", ()) or ()):
+            continue
+        if tile_number in set(getattr(session, "active_tile_requests", ()) or ()):
+            continue
         record = session.lifecycle.peek(tile_number)
         resident_levels = set(_resident_levels_from_lifecycle(record))
         rendered = rendered_tiles.get(tile_number)
+        if rendered is not None:
+            resident_levels.add(0)
         if rendered is not None and demand is not None:
             resident_levels.update(_resident_levels_from_pyramid(session, rendered, demand=demand))
         payload = payloads.get(tile_number)
