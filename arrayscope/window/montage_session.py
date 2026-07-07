@@ -1684,6 +1684,19 @@ class MontageRenderSession:
             if int(tile) in current_payloads or int(tile) in source_ids
         }
 
+        # A tile that has a fresh payload to upsert is, by definition,
+        # present — it must NOT also be removed in the same delta (the delta
+        # forbids it). This resolves the coalescing race where a tile was
+        # queued for removal (skip/out-of-plan) and then resurrected by a
+        # late LOD-level completion before the removal committed: the upsert
+        # wins here, and the tile drops out of the pending-removal queue so a
+        # future build does not re-remove the now-present tile.
+        if removals and upserts:
+            conflicting = {int(tile) for tile in removals if int(tile) in upserts}
+            if conflicting:
+                removals = tuple(tile for tile in removals if int(tile) not in conflicting)
+                self.pending_removals.difference_update(conflicting)
+
         force_refresh = False
         clear_reason = ""
 
