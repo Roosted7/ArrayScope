@@ -1,21 +1,15 @@
-"""Qt-free scheduler request and diagnostics models."""
+"""Qt-free scheduler request and diagnostics models.
+
+Canonical priority vocabulary lives in the kernel (redesign R0). This module
+keeps a compatibility alias only until the legacy controllers are deleted at
+the end of R1; new code imports `Priority` from `arrayscope.kernel`.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
 
-
-class EvalPriority(IntEnum):
-    INTERACTIVE = 0
-    VISIBLE_IMAGE = 10
-    HOVER = 20
-    HISTOGRAM = 30
-    LIVE_PROFILE = 40
-    SELECTED_ROI = 50
-    VISIBLE_ROI = 60
-    HIDDEN_ROI = 70
-    PREFETCH = 80
+from arrayscope.kernel.task import Priority as EvalPriority  # noqa: F401
 
 
 @dataclass(frozen=True)

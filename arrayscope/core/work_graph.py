@@ -8,41 +8,14 @@ was superseded, and how admitted work completed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from time import perf_counter_ns
 
 from arrayscope.core.scheduler import FrameTarget
 
-
-class WorkLane(str, Enum):
-    """String-valued lane enum (kept 3.10-compatible; behaves like ``StrEnum``)."""
-
-    __str__ = str.__str__
-    __format__ = str.__format__
-
-    VISIBLE_PLANNING = "visible_planning"
-    VISIBLE_MATERIALIZATION = "visible_materialization"
-    DISPLAY_PREVIEW = "display_preview"
-    DISPLAY_PREPARATION = "display_preparation"
-    BACKEND_COMMIT = "backend_commit"
-    GUI_FAN_IN = "gui_fan_in"
-    HISTOGRAM_REFINEMENT = "histogram_refinement"
-    PROFILE_ROI_HOVER = "profile_roi_hover"
-    STAGE_MATERIALIZATION = "stage_materialization"
-    SPECULATIVE_RESIDENCY = "speculative_residency"
-
-
-VISIBLE_LANES = frozenset(
-    {
-        WorkLane.VISIBLE_PLANNING,
-        WorkLane.VISIBLE_MATERIALIZATION,
-        WorkLane.DISPLAY_PREVIEW,
-        WorkLane.DISPLAY_PREPARATION,
-        WorkLane.BACKEND_COMMIT,
-        WorkLane.GUI_FAN_IN,
-        WorkLane.STAGE_MATERIALIZATION,
-    }
-)
+# Canonical lane vocabulary lives in the kernel (redesign R0). This module
+# keeps compatibility aliases only until it is deleted at the end of R1;
+# new code imports `Lane`/`VISIBLE_LANES` from `arrayscope.kernel`.
+from arrayscope.kernel.task import Lane as WorkLane, VISIBLE_LANES  # noqa: F401
 
 
 @dataclass(frozen=True)
