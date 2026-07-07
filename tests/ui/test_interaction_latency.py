@@ -217,7 +217,7 @@ def test_tile_layer_level_change_uses_governed_presentation_batches(qtbot, monke
         qtbot.waitUntil(lambda: len(tuple(win._montage_session.presented_tiles)) == 3, timeout=_WAIT_TIMEOUT_MS)
 
         decision = SimpleNamespace(batch_limit=1, budget_ms=100.0, interval_ms=1000, byte_cap=0)
-        monkeypatch.setattr(win, "_ui_work_decision", lambda _channel, *, interactive=False: decision)
+        monkeypatch.setattr(win, "_ui_work_decision", lambda _channel, *, interactive=False, **_signature_kwargs: decision)
         win._montage_session.last_commit_monotonic = 0.0
 
         win.img_view.setLevels(0.5, 4.0)
@@ -300,7 +300,7 @@ def test_scalar_tile_layer_level_change_uses_governed_batches_without_image_repl
         qtbot.waitUntil(lambda: len(tuple(win._montage_session.presented_tiles)) == 3, timeout=_WAIT_TIMEOUT_MS)
 
         decision = SimpleNamespace(batch_limit=1, budget_ms=100.0, interval_ms=1000, byte_cap=1)
-        monkeypatch.setattr(win, "_ui_work_decision", lambda _channel, *, interactive=False: decision)
+        monkeypatch.setattr(win, "_ui_work_decision", lambda _channel, *, interactive=False, **_signature_kwargs: decision)
         win._montage_session.last_commit_monotonic = 0.0
 
         win.img_view.setLevels(0.5, 4.0)

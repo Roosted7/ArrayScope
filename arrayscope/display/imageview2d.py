@@ -1004,6 +1004,8 @@ class ImageViewShell(QtWidgets.QWidget):
         self._start_upload_timing("full")
         previous_shape = None if self.image is None else tuple(self.image.shape[:2])
         try:
+            # Normal-image commit: content extent is the image again.
+            self.setViewportContentExtent(None)
             self.hide_tiled_presentation("normal-image-commit")
             self.image = img
             self.imageDisp = None
@@ -1769,9 +1771,27 @@ class ImageViewShell(QtWidgets.QWidget):
                 self._viewport_applying = False
             self._after_viewport_camera_change()
 
+    def setViewportContentExtent(self, extent) -> None:
+        """Set the semantic (height, width) the viewport treats as content.
+
+        Layout geometry is semantic: montage/tiled planners call this at plan
+        time so camera policy (fit, unlock, 1:1) never depends on whether any
+        physical tile commit has landed yet. ``None`` restores image-derived
+        content. Regression guard: without this, unlocking fit while commits
+        were still gated re-fit the camera around the stale single-slice
+        shape (first bad commit 2995d039).
+        """
+
+        self._viewport_content_extent = (
+            None if extent is None else (max(1, int(extent[0])), max(1, int(extent[1])))
+        )
+
     def _viewport_content_shape(self):
         """(height, width) the viewport controller should treat as content."""
 
+        extent = getattr(self, "_viewport_content_extent", None)
+        if extent is not None:
+            return extent
         return self.image.shape[:2]
 
     def _after_viewport_camera_change(self) -> None:
@@ -2458,6 +2478,11 @@ class ImageViewShell(QtWidgets.QWidget):
     def _current_image_viewport_rect(self):
         if self.image is None:
             return None
+        extent = getattr(self, "_viewport_content_extent", None)
+        if extent is not None:
+            # Semantic content extent (montage/tiled plan) outranks the
+            # possibly-stale single-image item; plans anchor at the origin.
+            return _viewport_rect_for_shape(extent, (0.0, 0.0))
         pos = self.imageItem.pos()
         return _viewport_rect_for_shape(self.image.shape[:2], (float(pos.x()), float(pos.y())))
 

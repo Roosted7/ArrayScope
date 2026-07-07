@@ -453,6 +453,7 @@ class FrameRenderMixin:
             viewport_shape = viewport_plan.viewport_shape
             tile_shape = viewport_plan.tile_shape
             plan = viewport_plan.plan
+        self._publish_montage_content_extent(plan)
         self._montage_live_layout_reflow = False
         previous_session_plan = getattr(getattr(self, "_montage_session", None), "plan", None)
         self._remap_montage_rois_for_layout_reflow(previous_session_plan, plan)
@@ -4072,6 +4073,26 @@ class FrameRenderMixin:
         schedule_roi_refresh = getattr(self.win, "_schedule_file_session_roi_refresh", None)
         if callable(schedule_roi_refresh):
             schedule_roi_refresh("montage-semantic-commit")
+
+    def _publish_montage_content_extent(self, plan) -> None:
+        """Publish the semantic montage extent as the viewport content shape.
+
+        Layout geometry is known at plan time; camera policy (fit/unlock/1:1)
+        must never wait for — or trust — physical tile commits. Without this,
+        unlocking fit while commits are still gated (preview-floor first
+        fill) re-fits the camera around the stale single-slice shape.
+        """
+
+        geometry = getattr(plan, "geometry", plan)
+        montage = getattr(geometry, "montage", geometry)
+        set_extent = getattr(self.win.img_view, "setViewportContentExtent", None)
+        if not callable(set_extent):
+            return
+        if montage is None or not getattr(montage, "indices", ()):
+            set_extent(None)
+            return
+        (x0, x1), (y0, y1) = _montage_full_view_range(montage)
+        set_extent((max(1, int(round(y1 - y0))), max(1, int(round(x1 - x0)))))
 
     def _maybe_auto_fit_montage_tiles(self, plan_or_geometry) -> bool:
         if bool(getattr(self, "_montage_live_layout_reflow", False)):

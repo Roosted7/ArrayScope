@@ -1219,7 +1219,18 @@ class VisPyImageView2D(ImageViewShell):
         self._vispy_profile_hover_part = part
         self._sync_vispy_profile_marker()
 
+    def setViewportContentExtent(self, extent) -> None:
+        super().setViewportContentExtent(extent)
+        if extent is not None:
+            # Keep the scene bounds item in step: the ViewBox aspect-relock
+            # on fit-unlock ranges around children bounds, which otherwise
+            # still hold the pre-plan single-slice rect until a commit lands.
+            self._sync_vispy_bounds(extent)
+
     def _viewport_content_shape(self):
+        extent = getattr(self, "_viewport_content_extent", None)
+        if extent is not None:
+            return extent
         return getattr(self, "_vispy_display_shape", None) or self.image.shape[:2]
 
     def _after_viewport_camera_change(self) -> None:
