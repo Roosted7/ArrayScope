@@ -33,9 +33,9 @@ first-class via capabilities, core-green test bar with a known-red ledger.
 |---|---|---|
 | Execution kernel | **Driving the app** | `arrayscope/kernel/`: real priorities/deps/staleness, lane quotas, one GUI fan-in bridge; R1 routes the former controller submissions through this scheduler. |
 | Modular pipeline | **Driving montage** | `arrayscope/render/`: typed stage contracts, kernel-backed MontagePipeline, Qt-free evaluation effects, tile-state snapshots, stage deps, and commit effects route the live montage render path. |
-| Unified LOD ladder | **New, tested** | `render/ladder.py`: FLOOR→PREVIEW→DESIRED→EXACT pure planner; replaces four scattered decision sites at R3. |
+| Unified LOD ladder | **Adopted in montage** | `render/ladder.py`: FLOOR→PREVIEW→DESIRED→EXACT pure planner now feeds montage through the pipeline; demanded-level convergence wakes via lifecycle/pipeline completions instead of a side request list. |
 | Tile lifecycle | Unchanged owner | ADR 0051 machine stays; the pipeline feeds it rung and backend-ack events instead of frame_renderer result pumps. |
-| Legacy orchestration | **Dissolving** | WorkGraph is deleted and `window/evaluation_controller.py` is import-only. `frame_renderer.py` is below the R2 gate (1,888 lines) with clusters B/C/E moved out or deleted; `montage_lod.py` and level-stats timers remain R3/R4 deletion targets with a [method-by-method map](redesign/frame-renderer-map.md). |
+| Legacy orchestration | **Dissolving** | WorkGraph is deleted and `window/evaluation_controller.py` is import-only. `frame_renderer.py` is below the R2 gate (1,888 lines) with clusters B/C/E moved out or deleted; `window/montage_lod.py` is deleted, and level-stat maintenance now lives under `render/level_stats.py` while timer removal remains an R4 target. |
 | Vocabulary | Canonical in kernel | `WorkLane`/`EvalPriority` are compat aliases of kernel `Lane`/`Priority`. |
 | Hygiene | Done (first pass) | Kill switches, P3 fallbacks, tmp_probes deleted; 3 probes live in `tools/probes/`. |
 | Baseline health | 8 ledgered red tests; benchmarks await re-measure | Full suite 1642 passed / 8 red (all in [known-red.md](redesign/known-red.md) with R2b owners); GPU harness 7/7 incl. FFT-preview. The pre-fix workflow JSONLs (multi-second event-loop gaps, 42.8 s VisPy resident FFT) predate 4464a6e4 — re-measure before quoting them. |

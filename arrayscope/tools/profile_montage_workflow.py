@@ -42,7 +42,7 @@ def run_profile_montage_workflow(
     load_mode: str = "app",
     profiler_type: str = "plain",
     profiler_artifact_paths: tuple[str | Path, ...] = (),
-    montage_lod_policy: str = "native-only",
+    montage_quality_policy: str = "native-only",
     screenshot_dir: str | Path | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Run raw full montage, then FFT/shift/iFFT-over-montage-axis montage.
@@ -121,7 +121,7 @@ def run_profile_montage_workflow(
             win.app_settings,
             backend=backend,
             image_choice=ImageRenderingBackendChoice,
-            montage_lod_policy=montage_lod_policy,
+            montage_quality_policy=montage_quality_policy,
         )
         apply_theme = getattr(win, "_apply_theme_choice", None)
         if callable(apply_theme):
@@ -977,41 +977,41 @@ def _phase_record(
         "image_backend_actual": str(snapshot.image_rendering_backend_actual),
         "montage_display_mode": str(montage.display_mode),
         "montage_backend_chosen": str(montage.backend_chosen),
-        "montage_lod_desired_factor": int(montage.tile_lod_desired_factor),
-        "montage_lod_applied_factor": int(montage.tile_lod_applied_factor),
-        "montage_lod_desired_factor_xy": tuple(int(value) for value in montage.tile_lod_desired_factor_xy),
-        "montage_lod_applied_factor_xy": tuple(int(value) for value in montage.tile_lod_applied_factor_xy),
-        "montage_lod_source_texels_per_pixel_xy": tuple(float(value) for value in montage.tile_lod_source_texels_per_pixel_xy),
-        "montage_lod_policy": str(montage.tile_lod_policy),
-        "montage_lod_reason": str(montage.tile_lod_reason),
-        "montage_lod_applied_level": int(getattr(montage, "tile_lod_applied_level", 0) or 0),
-        "montage_lod_resident_tile_levels": tuple(
+        "montage_quality_desired_factor": int(montage.tile_lod_desired_factor),
+        "montage_quality_applied_factor": int(montage.tile_lod_applied_factor),
+        "montage_quality_desired_factor_xy": tuple(int(value) for value in montage.tile_lod_desired_factor_xy),
+        "montage_quality_applied_factor_xy": tuple(int(value) for value in montage.tile_lod_applied_factor_xy),
+        "montage_quality_source_texels_per_pixel_xy": tuple(float(value) for value in montage.tile_lod_source_texels_per_pixel_xy),
+        "montage_quality_policy": str(montage.tile_lod_policy),
+        "montage_quality_reason": str(montage.tile_lod_reason),
+        "montage_quality_applied_level": int(getattr(montage, "tile_lod_applied_level", 0) or 0),
+        "montage_quality_resident_tile_levels": tuple(
             (int(level), int(count))
             for level, count in tuple(getattr(montage, "tile_lod_resident_tile_levels", ()) or ())
         ),
-        "montage_lod_pyramid_bytes": int(getattr(montage, "tile_lod_pyramid_bytes", 0) or 0),
-        "montage_lod_pyramid_entries": int(getattr(montage, "tile_lod_pyramid_entries", 0) or 0),
-        "montage_lod_pyramid_hits": int(getattr(montage, "tile_lod_pyramid_hits", 0) or 0),
-        "montage_lod_pyramid_misses": int(getattr(montage, "tile_lod_pyramid_misses", 0) or 0),
-        "montage_lod_pyramid_evictions": int(getattr(montage, "tile_lod_pyramid_evictions", 0) or 0),
-        "montage_lod_pending_materializations": int(getattr(montage, "tile_lod_pending_materializations", 0) or 0),
-        "montage_lod_materializations_completed": int(getattr(montage, "tile_lod_materializations_completed", 0) or 0),
-        "montage_lod_ingest_reductions": int(getattr(montage, "tile_lod_ingest_reductions", 0) or 0),
-        "montage_lod_preview_reduced_scheduled": int(
+        "montage_quality_pyramid_bytes": int(getattr(montage, "tile_lod_pyramid_bytes", 0) or 0),
+        "montage_quality_pyramid_entries": int(getattr(montage, "tile_lod_pyramid_entries", 0) or 0),
+        "montage_quality_pyramid_hits": int(getattr(montage, "tile_lod_pyramid_hits", 0) or 0),
+        "montage_quality_pyramid_misses": int(getattr(montage, "tile_lod_pyramid_misses", 0) or 0),
+        "montage_quality_pyramid_evictions": int(getattr(montage, "tile_lod_pyramid_evictions", 0) or 0),
+        "montage_quality_pending_materializations": int(getattr(montage, "tile_lod_pending_materializations", 0) or 0),
+        "montage_quality_materializations_completed": int(getattr(montage, "tile_lod_materializations_completed", 0) or 0),
+        "montage_quality_ingest_reductions": int(getattr(montage, "tile_lod_ingest_reductions", 0) or 0),
+        "montage_quality_preview_reduced_scheduled": int(
             getattr(montage, "tile_lod_preview_reduced_scheduled", 0) or 0
         ),
-        "montage_lod_preview_reduced_blocked": int(
+        "montage_quality_preview_reduced_blocked": int(
             getattr(montage, "tile_lod_preview_reduced_blocked", 0) or 0
         ),
-        "montage_lod_preview_reduced_failures": int(
+        "montage_quality_preview_reduced_failures": int(
             getattr(montage, "tile_lod_preview_reduced_failures", 0) or 0
         ),
-        "montage_lod_preview_presentations": int(getattr(montage, "tile_lod_preview_presentations", 0) or 0),
-        "montage_lod_stats_cross_level_reuses": int(getattr(montage, "tile_lod_stats_cross_level_reuses", 0) or 0),
-        "montage_lod_stats_recomputes": int(getattr(montage, "tile_lod_stats_recomputes", 0) or 0),
-        "montage_lod_cross_level_reductions": int(getattr(montage, "tile_lod_cross_level_reductions", 0) or 0),
-        "montage_lod_pipeline_reruns_avoided": int(getattr(montage, "tile_lod_pipeline_reruns_avoided", 0) or 0),
-        "montage_lod_stage_hits_serving_derivations": int(
+        "montage_quality_preview_presentations": int(getattr(montage, "tile_lod_preview_presentations", 0) or 0),
+        "montage_quality_stats_cross_level_reuses": int(getattr(montage, "tile_lod_stats_cross_level_reuses", 0) or 0),
+        "montage_quality_stats_recomputes": int(getattr(montage, "tile_lod_stats_recomputes", 0) or 0),
+        "montage_quality_cross_level_reductions": int(getattr(montage, "tile_lod_cross_level_reductions", 0) or 0),
+        "montage_quality_pipeline_reruns_avoided": int(getattr(montage, "tile_lod_pipeline_reruns_avoided", 0) or 0),
+        "montage_quality_stage_hits_serving_derivations": int(
             getattr(montage, "tile_lod_stage_hits_serving_derivations", 0) or 0
         ),
         "montage_histogram_lod_swap_recomputes": int(getattr(montage, "tile_histogram_lod_swap_recomputes", 0) or 0),
@@ -1400,17 +1400,17 @@ def _is_nifti(path: Path) -> bool:
     return name.endswith(".nii") or name.endswith(".nii.gz")
 
 
-def _replace_settings(settings, *, backend: str, image_choice, montage_lod_policy: str = "native-only"):
+def _replace_settings(settings, *, backend: str, image_choice, montage_quality_policy: str = "native-only"):
     from dataclasses import replace
 
-    from arrayscope.app.settings_state import normalize_montage_lod_policy_choice
+    from arrayscope.app.settings_state import normalize_montage_quality_policy_choice
     from arrayscope.app.theme import ThemeChoice
 
     return replace(
         settings,
         theme=ThemeChoice.DARK if backend == "vispy" else ThemeChoice.LIGHT,
         image_rendering_backend=image_choice.VISPY if backend == "vispy" else image_choice.PYQTGRAPH,
-        montage_lod_policy=normalize_montage_lod_policy_choice(montage_lod_policy),
+        montage_quality_policy=normalize_montage_quality_policy_choice(montage_quality_policy),
     )
 
 
@@ -2550,10 +2550,12 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     parser.add_argument("--columns", type=int, default=0, help="Montage columns; 0 chooses a near-square layout")
     parser.add_argument("--load-mode", choices=("app", "native"), default="app")
     parser.add_argument(
+        "--montage-quality-policy",
         "--montage-lod-policy",
+        dest="montage_quality_policy",
         choices=("native-only", "resident"),
         default="native-only",
-        help="Tile LOD presentation policy (ADR 0050); resident applies only to the vispy backend",
+        help="Tile quality presentation policy (ADR 0050); resident applies only to the vispy backend",
     )
     parser.add_argument("--print-py-spy-command", action="store_true", help="Print an external py-spy command for this invocation and exit")
     parser.add_argument("--profile-suite", default=None, help="Run plain JSONL, py-spy raw, and perf record into this directory")
@@ -2591,7 +2593,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                 load_mode=args.load_mode,
                 profiler_type=args.profiler_type,
                 profiler_artifact_paths=tuple(args.profiler_artifact or ()),
-                montage_lod_policy=args.montage_lod_policy,
+                montage_quality_policy=args.montage_quality_policy,
                 screenshot_dir=args.screenshot_dir,
             )
         )

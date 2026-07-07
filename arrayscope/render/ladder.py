@@ -1,7 +1,7 @@
 """The unified LOD ladder: one owner for per-tile quality progression.
 
 Pre-redesign, "what quality should this tile get next" was answered in at
-least four places: `window/montage_lod.plan_materialization` (desired LOD),
+least four places: `render.lod.plan_materialization` (desired LOD),
 the preview/floor methods on `FrameRenderMixin` (Plans 04/05), ingest
 reduction admission, and native-only policy checks. They cooperated through
 shared mutable session state and could disagree — the source of the
@@ -76,7 +76,7 @@ class RungStep:
     tile_number: int
     rung: Rung
     level: int
-    # Level to reduce from when ops commute with reduction (None = evaluate
+    # Level to reduce from when reduced input is available with reduction (None = evaluate
     # the full operation pipeline at native, then reduce the output).
     reduce_from_native: bool
     lane: Lane
@@ -96,7 +96,7 @@ class LadderPolicy:
     mode: str = "resident"  # "resident" | "native-only"
     floor_level: int = 4
     preview_level: int = 2
-    ops_commute_with_reduction: bool = True
+    reduced_input_available: bool = True
     levels_authoritative_rung: Rung = Rung.PREVIEW
 
 
@@ -141,15 +141,13 @@ class LodLadder:
             return min(candidates) if candidates else float("inf")
 
         # Pre-native rungs are planned only when they are actually cheap:
-        # commuting operations evaluate on reduced input directly, and a
+        # reduced-input-capable pipelines evaluate on reduced input directly, and a
         # retained floor plane commits with no evaluation at all. For
-        # non-commuting pipelines (FFT and friends) a "preview" would cost a
+        # opaque pipelines (FFT and friends) a per-tile "preview" would cost a
         # FULL native evaluation per tile just to throw resolution away —
-        # twice the work of going native once. Those pipelines go native
-        # once and take reduced levels from ingest reduction; a cheap
-        # transform-preview path is R3's shared-volume queue, not a per-tile
-        # native evaluation.
-        cheap_pre_native = policy.ops_commute_with_reduction or state.floor_available
+        # twice the work of going native once. Their cheap first pass is the
+        # shared transform-preview queue, not a per-tile native evaluation.
+        cheap_pre_native = policy.reduced_input_available or state.floor_available
 
         # 1) FLOOR — only while the tile has nothing committable at all.
         if presented is None and not resident and cheap_pre_native:
@@ -172,7 +170,7 @@ class LodLadder:
         # something at least as fine already exists or DESIRED covers it.
         preview_level = max(policy.preview_level, desired)
         if (
-            policy.ops_commute_with_reduction
+            policy.reduced_input_available
             and preview_level < finest_available()
             and preview_level != desired
         ):
@@ -188,16 +186,19 @@ class LodLadder:
                 )
             )
 
-        # 3) DESIRED — refine to the demanded level unless something at
-        # least as fine already exists. A presented level that fell outside
-        # the acceptable window (deep zoom-in) also plans the refinement.
-        if desired < finest_available():
+        # 3) DESIRED — converge the displayed level to the demanded level.
+        # Native/exact content is a valid source for reduction, but it is
+        # not display-level convergence when the viewport demands a coarser
+        # resident level; otherwise a tile can sit at applied factor 1 while
+        # demand asks for factor 4 with no wakeup left to demote it.
+        desired_resident = desired in resident or presented == desired
+        if not desired_resident and (desired > 0 or desired < finest_available()):
             steps.append(
                 RungStep(
                     tile_number=state.tile_number,
                     rung=Rung.DESIRED,
                     level=desired,
-                    reduce_from_native=not policy.ops_commute_with_reduction,
+                    reduce_from_native=not policy.reduced_input_available,
                     lane=Lane.DISPLAY_PREPARATION,
                     priority=(
                         Priority.VISIBLE_IMAGE

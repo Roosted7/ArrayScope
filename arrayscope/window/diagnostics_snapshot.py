@@ -47,7 +47,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     presentation = _presentation_diagnostics(window)
     lod_decision = None if session is None else getattr(session, "lod_policy_decision", None)
     lod_demand = None if lod_decision is None else getattr(lod_decision, "demand", None)
-    lod_pyramid = None if session is None else getattr(session, "lod_pyramid", None)
+    pyramid_cache = None if session is None else getattr(session, "pyramid_cache", None)
     lod_tile_levels = _montage_payload_level_counts(session)
     presented_lod = _montage_presented_lod(session, lod_decision)
     montage = MontageRuntimeDiagnostics(
@@ -92,19 +92,19 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_reason=_presented_lod_reason(lod_decision, presented_lod),
         tile_lod_applied_level=int(presented_lod[0]),
         tile_lod_resident_tile_levels=lod_tile_levels,
-        tile_lod_pyramid_bytes=0 if lod_pyramid is None else int(getattr(lod_pyramid, "bytes_used", 0) or 0),
-        tile_lod_pyramid_entries=0 if lod_pyramid is None else len(lod_pyramid),
-        tile_lod_pyramid_hits=0 if lod_pyramid is None else int(getattr(lod_pyramid, "hits", 0) or 0),
-        tile_lod_pyramid_misses=0 if lod_pyramid is None else int(getattr(lod_pyramid, "misses", 0) or 0),
-        tile_lod_pyramid_evictions=0 if lod_pyramid is None else int(getattr(lod_pyramid, "evictions", 0) or 0),
+        tile_lod_pyramid_bytes=0 if pyramid_cache is None else int(getattr(pyramid_cache, "bytes_used", 0) or 0),
+        tile_lod_pyramid_entries=0 if pyramid_cache is None else len(pyramid_cache),
+        tile_lod_pyramid_hits=0 if pyramid_cache is None else int(getattr(pyramid_cache, "hits", 0) or 0),
+        tile_lod_pyramid_misses=0 if pyramid_cache is None else int(getattr(pyramid_cache, "misses", 0) or 0),
+        tile_lod_pyramid_evictions=0 if pyramid_cache is None else int(getattr(pyramid_cache, "evictions", 0) or 0),
         tile_lod_pending_materializations=(
             0
             if session is None
-            else len(getattr(session, "pending_lod_requests", ()) or ())
-            + (0 if lod_pyramid is None else int(getattr(lod_pyramid, "pending_count", 0) or 0))
+            else len(getattr(session, "pending_rung_materializations", ()) or ())
+            + (0 if pyramid_cache is None else int(getattr(pyramid_cache, "pending_count", 0) or 0))
         ),
         tile_lod_materializations_completed=0 if session is None else int(getattr(session, "lod_materializations_completed", 0) or 0),
-        tile_lod_ingest_reductions=int(getattr(window.renderer, "_montage_lod_ingest_reductions", 0) or 0),
+        tile_lod_ingest_reductions=int(getattr(window.renderer, "_montage_quality_ingest_reductions", 0) or 0),
         tile_lod_preview_reduced_scheduled=int(getattr(window.renderer, "_montage_preview_reduced_scheduled", 0) or 0),
         tile_lod_preview_reduced_blocked=int(getattr(window.renderer, "_montage_preview_reduced_blocked", 0) or 0),
         tile_lod_preview_reduced_failures=int(getattr(window.renderer, "_montage_preview_reduced_failures", 0) or 0),
@@ -112,9 +112,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_stats_cross_level_reuses=0 if session is None else int(getattr(session, "lod_stats_cross_level_reuses", 0) or 0),
         tile_lod_stats_recomputes=0 if session is None else int(getattr(session, "lod_stats_recomputes", 0) or 0),
         tile_lod_cross_level_reductions=0 if session is None else int(getattr(session, "lod_cross_level_reductions", 0) or 0),
-        tile_lod_pipeline_reruns_avoided=int(getattr(window.renderer, "_montage_lod_pipeline_reruns_avoided", 0) or 0),
+        tile_lod_pipeline_reruns_avoided=int(getattr(window.renderer, "_montage_quality_pipeline_reruns_avoided", 0) or 0),
         tile_lod_stage_hits_serving_derivations=int(
-            getattr(window.renderer, "_montage_lod_stage_hits_serving_derivations", 0) or 0
+            getattr(window.renderer, "_montage_quality_stage_hits_serving_derivations", 0) or 0
         ),
         tile_histogram_lod_swap_recomputes=int(getattr(window.img_view, "tile_histogram_lod_swap_recomputes", 0) or 0),
         tile_histogram_cross_level_reuses=int(getattr(window.img_view, "tile_histogram_cross_level_reuses", 0) or 0),
@@ -427,7 +427,7 @@ def _backend_stale_identities(session) -> int:
 def _montage_presented_lod(session, lod_decision) -> tuple[int, int, tuple[int, int]]:
     """Applied LOD as presented on screen, not as session-wide consensus.
 
-    ``montage_lod_applied_factor`` must describe the payloads the committed
+    ``montage_quality_applied_factor`` must describe the payloads the committed
     presentation actually shows; the session-wide decision reads as native
     while any tile is still streaming its level.
     """

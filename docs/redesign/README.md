@@ -36,7 +36,7 @@ defers to it while the redesign is in flight.
 | Plan | What | Size | Blocked by |
 |---|---|---|---|
 | [R2](r2-pipeline-integration.md) | MontagePipeline live: port evaluation/commit effects, dissolve frame_renderer clusters B/C/E | Done | R1 |
-| [R3](r3-lod-ladder-adoption.md) | Ladder replaces montage_lod planning; one pyramid store; ops once per rung; PyQtGraph parity via capabilities | L | R2 |
+| [R3](r3-lod-ladder-adoption.md) | Ladder replaces montage_lod planning; one pyramid store; ops once per rung; PyQtGraph parity via capabilities | Landed; evidence gates pending | R2 |
 | [R4](r4-timer-and-governor-audit.md) | Every QTimer justified or deleted; governor shrinks to telemetry + two knobs | M | R2 |
 | [R5](r5-test-and-docs-truth-pass.md) | Delete wrong-path tests; docs/current-state truth pass; known-red ledger emptied | M | R3–R4 |
 
@@ -99,7 +99,7 @@ guide us back to the wrong path.
 - **GPU harness** (~20 s, real hardware, asserts `stall_assertions==0`):
   `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland … -m pytest tests/gpu_interaction -n 0`
 - **Workflow benchmark:**
-  `… -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-lod-policy {resident|native-only} [--jsonl FILE]`
+  `… -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-quality-policy {resident|native-only} [--jsonl FILE]`
   `STALL ASSERTION` on stderr must stay 0.
   R2 evidence is saved as
   `tests/artifacts/r2-profile-montage-workflow-{pyqtgraph,vispy}-{resident,native-only}.jsonl`.

@@ -84,7 +84,7 @@ def test_settings_round_trip_defaults_and_values():
             "fft_backend": "pyfftw",
             "fft_workers": "2",
             "image_rendering_backend": "vispy",
-            "montage_lod_policy": "resident",
+            "montage_quality_policy": "resident",
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
         }
@@ -98,7 +98,7 @@ def test_settings_round_trip_defaults_and_values():
         "fft_backend": "pyfftw",
         "fft_workers": "2",
         "image_rendering_backend": "vispy",
-        "montage_lod_policy": "resident",
+        "montage_quality_policy": "resident",
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
     }
@@ -111,11 +111,11 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.memory_profile == settings_state.MemoryProfileChoice.BALANCED
     assert defaults.render_memory_budget_mb == 512
     # ADR 0050: resident LOD is the montage default once validated on hardware.
-    assert defaults.montage_lod_policy == settings_state.MontageLodPolicyChoice.RESIDENT
+    assert defaults.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT
     unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})
     assert unknown.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
-    unknown_lod = settings_state.settings_from_mapping({"montage_lod_policy": "unknown"})
-    assert unknown_lod.montage_lod_policy == settings_state.MontageLodPolicyChoice.RESIDENT
+    unknown_quality = settings_state.settings_from_mapping({"montage_quality_policy": "unknown"})
+    assert unknown_quality.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT
 
 
 def test_performance_settings_normalize_unknowns_and_clamp_budget():

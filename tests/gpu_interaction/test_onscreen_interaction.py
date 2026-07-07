@@ -127,7 +127,7 @@ def test_index_scrub_and_return_shows_no_stale_content_or_wedged_claims(montage_
     h.fit_view()
     h.assert_tile_identity_ramp()
     h.assert_lifecycle_settled()
-    pyramid = h.session.lod_pyramid
+    pyramid = h.session.pyramid_cache
     if pyramid is not None:
         assert int(getattr(pyramid, "pending_count", 0) or 0) == 0, (
             "pyramid singleflight claims wedged after scrub-back"

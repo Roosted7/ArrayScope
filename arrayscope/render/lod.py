@@ -1,9 +1,8 @@
-"""One home for ADR 0050 montage LOD: policy, identity, materialization, floor.
+"""Render-owned ADR 0050 montage LOD helpers.
 
-Qt-free by construction (imported by :mod:`montage_session`).  Session-side
-functions take the ``MontageRenderSession`` as their first argument;
-renderer-side functions take the ``FrameRenderMixin`` host.  The original
-methods remain as delegates so call sites and test names are unchanged.
+Qt-free by construction.  The ladder owns quality progression and the
+pipeline owns scheduling; this module keeps pure identity, policy, cache
+lookup, and payload-construction helpers together.
 
 Contract (the defect class behind every stall/loop this code has had is
 optimistic bookkeeping — these rules are load-bearing):
@@ -13,9 +12,9 @@ optimistic bookkeeping — these rules are load-bearing):
   stale-before-start, on blocked admission (``start_latest`` returning
   ``None``), and on a no-longer-current session.  A leaked claim silently
   blocks that level forever.
-* **Supersession cancels work, never results.**  A superseded item that
-  already admitted its level must still notify (``on_level_ready``), or the
-  tile presents an outdated level until an unrelated event.
+* **Supersession cancels work, never results.**  A rung that admitted its
+  level reports through the pipeline completion path so presentation can
+  converge without waiting for an unrelated event.
 * **Bookkeeping is acknowledge-driven.**  Nothing here marks a tile clean or
   a request satisfied because work was *submitted*; only completions and
   acknowledged commits advance state.  Dirty marks for non-active tiles are
@@ -30,8 +29,6 @@ from typing import NamedTuple
 
 import numpy as np
 
-from arrayscope.core.scheduler import EvalPriority
-from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
     LOD_REASON_NATIVE_POLICY,
@@ -172,7 +169,7 @@ def histogram_key_for_level_key(key: PyramidLevelKey) -> PyramidLevelKey:
 
 
 def resident_lod_active(session) -> bool:
-    return str(session.lod_policy_mode) == LOD_POLICY_RESIDENT and session.lod_pyramid is not None
+    return str(session.lod_policy_mode) == LOD_POLICY_RESIDENT and session.pyramid_cache is not None
 
 
 def selected_lod_factor(session) -> int:
@@ -218,7 +215,7 @@ def tile_resident_levels(session, rendered: RenderedTile, *, demand) -> tuple[in
     eviction, resize, and clear.
     """
 
-    pyramid = session.lod_pyramid
+    pyramid = session.pyramid_cache
     memo = getattr(session, "_lod_resident_levels_memo", None)
     if memo is None:
         memo = {}
@@ -340,7 +337,7 @@ def ingest_lod_demand(session) -> object | None:
 # --------------------------------------------------------------------------
 
 
-class LodMaterializationRequest(NamedTuple):
+class RungMaterializationRequest(NamedTuple):
     """One demanded-but-missing pyramid level for background reduction.
 
     ``source`` is the array the worker reduces (native texture plane or an
@@ -375,7 +372,7 @@ def plan_materialization(
     level: int,
     key: PyramidLevelKey,
     native_source: np.ndarray | None = None,
-) -> LodMaterializationRequest:
+) -> RungMaterializationRequest:
     """Plan the cheapest deterministic level ladder ending at ``level``.
 
     ADR 0050 level-chaining: the worker starts from the finest
@@ -404,13 +401,13 @@ def plan_materialization(
     tile_number = int(rendered.tile.montage_index)
     factor_x, factor_y = (int(value) for value in key.factor_xy)
     native_shape = tuple(int(value) for value in np.shape(native_source)[:2])
-    pyramid = session.lod_pyramid
+    pyramid = session.pyramid_cache
     if (
         pyramid is None
         or native_shape[0] % factor_y
         or native_shape[1] % factor_x
     ):
-        return LodMaterializationRequest(tile_number, key, native_source, (factor_x, factor_y))
+        return RungMaterializationRequest(tile_number, key, native_source, (factor_x, factor_y))
     best = None
     for candidate in demand.acceptable_levels:
         candidate = int(candidate)
@@ -457,13 +454,13 @@ def plan_materialization(
             steps.append((step_key if pyramid.begin_pending(step_key) else None, rel))
         prev_x, prev_y = lvl_x, lvl_y
     if not steps:
-        return LodMaterializationRequest(tile_number, key, native_source, (factor_x, factor_y))
+        return RungMaterializationRequest(tile_number, key, native_source, (factor_x, factor_y))
     claimed_intermediates = sum(1 for step_key, _rel in steps[:-1] if step_key is not None)
     if claimed_intermediates:
         session.lod_chain_planned = int(getattr(session, "lod_chain_planned", 0) or 0) + claimed_intermediates
     if best is not None:
         session.lod_cross_level_reductions += 1
-    return LodMaterializationRequest(
+    return RungMaterializationRequest(
         tile_number,
         key,
         source,
@@ -473,7 +470,7 @@ def plan_materialization(
     )
 
 
-def refresh_lod_for_viewport(session) -> bool:
+def mark_ladder_swaps_for_viewport(session) -> bool:
     """Re-evaluate LOD demand after a camera-only retarget (ADR 0050).
 
     Camera changes never restart evaluation, but they do change which
@@ -506,7 +503,7 @@ def refresh_lod_for_viewport(session) -> bool:
         session.lod_target_revision += 1
     selected_lod_factor(session)
     demand = session.lod_policy_decision.demand
-    pyramid = session.lod_pyramid
+    pyramid = session.pyramid_cache
     desired = int(demand.desired_level)
     commit_needed = False
     visible_by_number = {int(t.montage_index): t for t in tuple(session.visible_tiles)}
@@ -536,12 +533,8 @@ def refresh_lod_for_viewport(session) -> bool:
             # keep it eligible even when the pyramid cache dropped it so a
             # transient cache miss never forces a native down-swap.
             resident.add(presented_level)
-        if desired > 0 and desired not in resident:
-            desired_key = pyramid_key_for(session, rendered, demand=demand, level=desired)
-            if pyramid.begin_pending(desired_key):
-                session.pending_lod_requests.append(
-                    plan_materialization(session, rendered, demand=demand, level=desired, key=desired_key)
-                )
+        # Missing levels are scheduled by the ladder's DESIRED rung. This
+        # viewport pass only marks immediately swappable resident levels.
         if payload is None:
             continue
         if str(getattr(payload, "quality", "exact")) != "exact":
@@ -566,61 +559,7 @@ def refresh_lod_for_viewport(session) -> bool:
 # --------------------------------------------------------------------------
 
 
-def admit_ingest_reduction(
-    pyramid,
-    demand,
-    rendered: RenderedTile,
-    *,
-    semantic_source_id,
-    shader_display: bool = True,
-) -> bool:
-    """Reduce a freshly computed tile to the demanded level, worker-side.
-
-    Runs on the evaluation worker as part of tile materialization (ADR 0041
-    gate 1 forbids commit-callback reduction, not worker reduction), so a cold
-    tile's first presentation can select the reduced level and never upload a
-    native texture.  Exact/semantic/histogram sources stay native; only the
-    display texture plane is reduced.  The singleflight claim keeps this from
-    duplicating a concurrently scheduled post-hoc materialization.
-
-    Returns the admitted reduced plane (truthy) or None, so the retained
-    preview level can derive from it instead of re-reducing native.
-    """
-
-    if pyramid is None or demand is None:
-        return None
-    level = int(demand.desired_level)
-    if level <= 0:
-        return None
-    shader_display = bool(shader_display)
-    key = pyramid_key_for_rendered(
-        rendered,
-        demand=demand,
-        level=level,
-        semantic_source_id=semantic_source_id,
-        shader_display=shader_display,
-    )
-    if not pyramid.begin_pending(key):
-        return None
-    try:
-        source, histogram, _texture_kind = texture_source_for_rendered(rendered, shader_display=shader_display)
-        reduced = pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
-        if histogram is not None:
-            hist_key = histogram_key_for_level_key(key)
-            if pyramid.begin_pending(hist_key):
-                try:
-                    pyramid.admit(hist_key, reduce_box_mean(histogram, hist_key.factor_xy))
-                except Exception:
-                    pyramid.end_pending(hist_key)
-        return reduced
-    except Exception:
-        # LOD is a display optimization: a failed reduction must not fail the
-        # tile result.  Release the claim so a later commit can retry.
-        pyramid.end_pending(key)
-        return None
-
-
-def admit_preview_reduction(
+def admit_retained_preview_level(
     preview_pyramid,
     rendered: RenderedTile,
     *,
@@ -632,12 +571,11 @@ def admit_preview_reduction(
 ) -> bool:
     """Admit the retained preview level for a freshly computed tile.
 
-    Worker-side and opportunistic (ADR 0050 retained preview level): every
-    evaluated tile leaves a coarse copy in the pinned preview cache, so any
-    index ever computed re-presents instantly through the floor forever.
-    When the ingest reduction already produced a finer level whose shape
-    divides evenly, the preview derives from it (relative_factor**2 fewer
-    texels); otherwise it reduces the native plane once.
+    Worker-side and opportunistic (ADR 0050 retained preview level): prefetch
+    can pin a coarse copy in the shared pyramid cache, so any index ever
+    computed re-presents instantly through the floor. When a finer resident
+    plane is available and composes cleanly, the preview derives from it;
+    otherwise it reduces the native plane once.
     """
 
     if preview_pyramid is None or int(preview_level) <= 0:
@@ -699,7 +637,7 @@ def floor_component_tags(session) -> tuple[str, ...]:
 def best_floor_key(session, source_index: int, *, tile_number: int | None = None):
     """Best resident pyramid key for one tile: nearest demand, finer ties."""
 
-    pyramid = session.lod_pyramid
+    pyramid = session.pyramid_cache
     demand = session.lod_policy_decision.demand
     desired = int(demand.desired_level)
     semantic_id = session.tile_semantic_source_id(int(source_index))
@@ -712,7 +650,7 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
                     continue
                 if getattr(key, "source_id", None) != semantic_id or int(getattr(key, "tile_id", -1)) != int(source_index):
                     continue
-                cache = session.cache_for_floor_key(key)
+                cache = session.pyramid_cache
                 if cache is None or cache.peek(key) is None:
                     continue
                 level = max(int(key.level_xy[0]), int(key.level_xy[1]))
@@ -733,7 +671,7 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
                 break
         if best is not None:
             return (best[1], best[2], pyramid)
-    preview = session.lod_preview_pyramid
+    preview = session.pyramid_cache
     level = int(session.lod_preview_level)
     if preview is None or level <= 0:
         return None
@@ -790,7 +728,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
 
     if not tile_numbers or not resident_lod_active(session):
         return
-    cache = session.preview_floor_cache()
+    cache = session.pyramid_cache
     if cache is None:
         return
     by_number = {
@@ -917,17 +855,12 @@ def resident_texture_for_rendered_tile(
     source_shape = tuple(int(value) for value in source.shape[:2])
     native_lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
     demand = session.lod_policy_decision.demand
-    pyramid = session.lod_pyramid
+    pyramid = session.pyramid_cache
     resident_levels = tile_resident_levels(session, rendered, demand=demand)
     desired = int(demand.desired_level)
-    if desired > 0 and desired not in resident_levels:
-        desired_key = pyramid_key_for(session, rendered, demand=demand, level=desired)
-        if pyramid.begin_pending(desired_key):
-            session.pending_lod_requests.append(
-                plan_materialization(
-                    session, rendered, demand=demand, level=desired, key=desired_key, native_source=source
-                )
-            )
+    # Missing demanded levels are planned by LodLadder. Texture selection is
+    # lookup-only so a presentation build cannot create a hidden scheduling
+    # queue with its own wakeup rules.
     applied = choose_resident_level(demand, resident_levels)
     if applied <= 0:
         return source, histogram, native_lod
@@ -1027,9 +960,9 @@ def _release_request_claims(session, request, pyramid) -> bool:
     for step_key, _rel in _request_chain(request):
         if step_key is not None and pyramid is not None and pyramid.peek(step_key) is not None:
             admitted = True
-    # `pending_lod_requests` is always the lifecycle-backed view (ADR 0051
+    # `pending_rung_materializations` is always the lifecycle-backed view (ADR 0051
     # P3); the pre-P3 chain fallback was deleted in the redesign.
-    _apply_release_effects(pyramid, session.pending_lod_requests.release(request))
+    _apply_release_effects(pyramid, session.pending_rung_materializations.release(request))
     if admitted:
         for step_key, _rel in _request_chain(request):
             if step_key is not None and pyramid is not None and pyramid.peek(step_key) is not None:
@@ -1061,19 +994,19 @@ def release_session_claims(session) -> int:
 
     if session is None:
         return 0
-    pyramid = getattr(session, "lod_pyramid", None)
+    pyramid = getattr(session, "pyramid_cache", None)
     lifecycle = getattr(session, "lifecycle", None)
     if lifecycle is not None:
         released = 0
         for effect in lifecycle.session_replaced():
-            cache = session.preview_floor_cache() if effect.owner is ClaimOwner.PREVIEW else pyramid
+            cache = session.pyramid_cache if effect.owner is ClaimOwner.PREVIEW else pyramid
             if cache is not None:
                 cache.end_pending(effect.level_key)
                 released += 1
             if effect.owner is ClaimOwner.PREVIEW:
                 getattr(session, "lod_preview_metadata", {}).pop(effect.level_key, None)
         return released
-    requests = list(getattr(session, "pending_lod_requests", ()) or ())
+    requests = list(getattr(session, "pending_rung_materializations", ()) or ())
     if pyramid is None:
         return 0
     released = 0
@@ -1082,7 +1015,7 @@ def release_session_claims(session) -> int:
             if step_key is not None:
                 pyramid.end_pending(step_key)
                 released += 1
-    session.pending_lod_requests.clear()
+    session.pending_rung_materializations.clear()
     return released
 
 
@@ -1099,7 +1032,7 @@ def policy_mode_for_renderer(renderer) -> str:
     capabilities, not in policy downgrades.
     """
 
-    choice = getattr(getattr(renderer.win, "app_settings", None), "montage_lod_policy", None)
+    choice = getattr(getattr(renderer.win, "app_settings", None), "montage_quality_policy", None)
     value = str(getattr(choice, "value", choice) or LOD_POLICY_NATIVE_ONLY)
     if value != LOD_POLICY_RESIDENT:
         return LOD_POLICY_NATIVE_ONLY
@@ -1114,15 +1047,15 @@ def native_policy_reason_for_renderer(renderer) -> str:
     verbatim when a desired factor > 1 goes unapplied.
     """
 
-    choice = getattr(getattr(renderer.win, "app_settings", None), "montage_lod_policy", None)
+    choice = getattr(getattr(renderer.win, "app_settings", None), "montage_quality_policy", None)
     value = str(getattr(choice, "value", choice) or LOD_POLICY_NATIVE_ONLY)
     if value != LOD_POLICY_RESIDENT:
         return LOD_REASON_NATIVE_POLICY
     return LOD_REASON_NATIVE_POLICY
 
 
-def shared_pyramid(renderer) -> PyramidCache:
-    pyramid = getattr(renderer, "_montage_lod_pyramid_cache", None)
+def pyramid_cache_for_renderer(renderer) -> PyramidCache:
+    pyramid = getattr(renderer, "_montage_pyramid_cache_store", None)
     if not isinstance(pyramid, PyramidCache):
         # Zero re-upload zoom cycles (ADR 0050 gate 6) require the CPU
         # pyramid to actually retain the working set across threshold
@@ -1138,172 +1071,5 @@ def shared_pyramid(renderer) -> PyramidCache:
             int(renderer._memory_policy().display_cache_budget_bytes) // 2,
         )
         pyramid = PyramidCache(max_bytes=budget)
-        renderer._montage_lod_pyramid_cache = pyramid
+        renderer._montage_pyramid_cache_store = pyramid
     return pyramid
-
-
-def preview_pyramid(renderer) -> PyramidCache:
-    """Pinned whole-stack preview cache (ADR 0050 retained preview level).
-
-    Separate instance = structural eviction exemption: display-churn in
-    the main pyramid can never push preview planes out.  At preview
-    levels a full 272-tile stack is a few megabytes, so the cap is a
-    formality.
-    """
-
-    pyramid = getattr(renderer, "_montage_lod_preview_cache", None)
-    if not isinstance(pyramid, PyramidCache):
-        pyramid = PyramidCache(max_bytes=64 * 1024 * 1024)
-        renderer._montage_lod_preview_cache = pyramid
-    return pyramid
-
-
-def schedule_materializations(renderer, session) -> None:
-    """Drain demanded-but-missing pyramid levels into background work.
-
-    Reduction never runs in this GUI path: each request becomes a
-    low-priority worker item on the montage tile controller, superseded
-    per tile by viewport identity.  Completion admits into the pyramid
-    cache from the worker and re-enters presentation through the same
-    dirty-payload commit path a late tile result uses.
-    """
-
-    # Always the lifecycle-backed view (ADR 0051 P3); the pre-P3 plain
-    # collection fallback was deleted in the redesign.
-    requests = list(session.pending_lod_requests.drain())
-    if not requests:
-        return
-    pyramid = getattr(session, "lod_pyramid", None)
-    if pyramid is None:
-        return
-    if not renderer._montage_session_is_current(session):
-        for request in requests:
-            _release_request_claims(session, request, pyramid)
-        return
-    controller = getattr(renderer.win, "montage_tile_evaluation_controller", renderer.win.visible_evaluation_controller)
-    session_id = int(session.session_id)
-    session_key = session.key
-    supersession_value = (session_key, session_id, int(getattr(session, "lod_target_revision", 0) or 0))
-    blocked_any = False
-    for request in requests:
-        tile_number = int(request[0])
-        key = request[1]
-        source = request[2]
-        reduce_factor_xy = tuple(int(value) for value in (request[3] if len(request) > 3 else key.factor_xy))
-        chain = _request_chain(request)
-
-        def evaluate(chain=chain, source=source, pyramid=pyramid):
-            # Level-chaining (ADR 0050): each step reduces the previous
-            # plane, so producing the target's neighbors costs a fraction
-            # of one native reduction instead of one native read each.
-            plane = source
-            try:
-                for step_key, rel in chain:
-                    plane = reduce_box_mean(plane, rel)
-                    if step_key is not None:
-                        plane = pyramid.admit(step_key, plane)
-                return plane
-            except BaseException:
-                _release_chain_claims(pyramid, chain)
-                raise
-
-        def done(_result, request=request, tile_number=tile_number, session_id=session_id, session_key=session_key):
-            _finish_request_claims(session, request, pyramid)
-            on_level_ready(renderer, session_id, session_key, tile_number)
-
-        def release(request=request, pyramid=pyramid, tile_number=tile_number, session_id=session_id, session_key=session_key):
-            # Supersession cancels stale *work*, never a completed
-            # result: the worker may have admitted levels before the
-            # item went stale, and dropping the notification leaves the
-            # tile presenting an outdated level until an unrelated event
-            # (user-visible as tiles stuck mid-zoom).  Admitted levels
-            # notify; unstarted ones release their singleflight claims.
-            if _release_request_claims(session, request, pyramid):
-                on_level_ready(renderer, session_id, session_key, tile_number)
-
-        started = controller.start_latest(
-            evaluate,
-            key=("montage_lod_level", session_key, tile_number, key.level_xy),
-            priority=EvalPriority.PREFETCH,
-            replace_group=f"montage-lod:{tile_number}",
-            on_done=done,
-            on_error=lambda _exc, request=request, pyramid=pyramid: _release_request_claims(session, request, pyramid),
-            on_stale=release,
-            supersession_key=("montage-lod", tile_number),
-            supersession_value=supersession_value,
-            work_item=WorkItem(
-                key=("montage_lod_materialization", session_key, session_id, tile_number, key.level_xy),
-                lane=WorkLane.SPECULATIVE_RESIDENCY,
-                quality="preview",
-                supersession_key=("montage-lod", tile_number),
-                supersession_value=supersession_value,
-                estimated_bytes=max(
-                    1,
-                    int(getattr(source, "nbytes", 0) or 0)
-                    // max(1, int(reduce_factor_xy[0]) * int(reduce_factor_xy[1])),
-                ),
-            ),
-        )
-        if started is None:
-            # Admission blocked (bounded speculative lane yielding to
-            # visible work): release every singleflight claim immediately,
-            # or the next refresh can never re-request these levels and the
-            # tile is stuck at its old LOD until the demand changes.
-            _release_request_claims(session, request, pyramid)
-            renderer._montage_lod_materializations_blocked = (
-                int(getattr(renderer, "_montage_lod_materializations_blocked", 0) or 0) + 1
-            )
-            blocked_any = True
-        else:
-            renderer._montage_lod_materializations_scheduled = (
-                int(getattr(renderer, "_montage_lod_materializations_scheduled", 0) or 0) + 1
-            )
-    if blocked_any:
-        # A blocked admission must leave a wakeup armed (ADR 0051 P2 —
-        # before this, released levels waited for an unrelated pan/zoom to
-        # trigger the next presentation build; field report 2026-07-05:
-        # tiles stuck on a coarser LOD at idle, healed only by panning).
-        # When any tracked work finishes, re-derive the demand: the refresh
-        # re-claims the released levels and dispatch drains them.
-        controller.notify_when_capacity(
-            ("montage-lod", session_key),
-            lambda: retry_blocked_materializations(renderer),
-        )
-
-
-def retry_blocked_materializations(renderer) -> None:
-    """Capacity-waiter wakeup for blocked LOD admissions (ADR 0051 P2).
-
-    Re-evaluates the live demand (re-claiming any released levels into
-    ``pending_lod_requests``) and retargets the pipeline.  Cheap and safe to
-    run spuriously: demand math plus pyramid peeks, then idempotent
-    scheduling.
-    """
-
-    session = getattr(renderer, "_montage_session", None)
-    if session is None or not renderer._montage_session_is_current(session):
-        return
-    if session.refresh_lod_for_viewport():
-        renderer.apply_montage_presentation(session)
-    renderer.retarget_montage_pipeline(session)
-
-
-def on_level_ready(renderer, session_id, session_key, tile_number) -> None:
-    renderer._montage_lod_materializations_completed = (
-        int(getattr(renderer, "_montage_lod_materializations_completed", 0) or 0) + 1
-    )
-    session = getattr(renderer, "_montage_session", None)
-    if session is None or not renderer._is_current_montage_session(session_id, session_key):
-        return
-    if not renderer._is_current_render_generation(session.render_generation):
-        return
-    session.lod_materializations_completed = int(getattr(session, "lod_materializations_completed", 0) or 0) + 1
-    if int(tile_number) in session.rendered_tiles:
-        session.dirty_payloads[int(tile_number)] = None
-        session.flush_pending = True
-        session.final_commit_pending = True
-    # A completed level is backend evidence with its own consumer — but a
-    # full replan per completed level was the O(N²) freeze (272 levels x
-    # 272-tile snapshots). Mark bounded state above; one coalesced replan
-    # per loop turn swaps resident levels and finishes commits.
-    renderer.request_montage_replan(session)

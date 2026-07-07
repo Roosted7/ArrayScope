@@ -24,7 +24,8 @@ from arrayscope.render.ladder import LadderPolicy, LodLadder
 from arrayscope.render.pipeline import MontagePipeline
 from arrayscope.render.stages import RenderIntent
 from arrayscope.ui.toasts import show_revert_action
-from arrayscope.window import montage_commit, montage_lod
+from arrayscope.render import lod as render_lod
+from arrayscope.window import montage_commit
 from arrayscope.window.montage_commit import MontagePipelineEffects
 from arrayscope.window.montage_viewport import prioritize_montage_tiles, square_montage_fit_view_range
 from arrayscope.window.render_contract import (
@@ -97,14 +98,11 @@ class MontageRuntimeMixin:
             controller.note_stale_reused()
         return stored
 
-    def _montage_lod_policy_mode(self) -> str:
-        return montage_lod.policy_mode_for_renderer(self)
+    def _montage_quality_policy_mode(self) -> str:
+        return render_lod.policy_mode_for_renderer(self)
 
-    def _montage_lod_pyramid(self) -> PyramidCache:
-        return montage_lod.shared_pyramid(self)
-
-    def _montage_lod_preview_pyramid(self) -> PyramidCache:
-        return montage_lod.preview_pyramid(self)
+    def _montage_pyramid_cache(self) -> PyramidCache:
+        return render_lod.pyramid_cache_for_renderer(self)
 
     def _montage_render_intent(self, session) -> RenderIntent:
         return RenderIntent(
@@ -124,7 +122,7 @@ class MontageRuntimeMixin:
         pipeline = getattr(session, "pipeline", None)
         if pipeline is None:
             seed_tile = next(iter(tuple(getattr(session.plan, "tiles", ()) or ())), None)
-            ops_commute = bool(
+            reduced_input_available = bool(
                 seed_tile is not None
                 and render_effects.preview_pipeline_commutes_for_display_lod(session, seed_tile)
             )
@@ -136,11 +134,10 @@ class MontageRuntimeMixin:
                         mode=str(getattr(session, "lod_policy_mode", "native-only") or "native-only"),
                         floor_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
                         preview_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
-                        # Non-commuting pipelines (FFT…) must not pay a full
-                        # native evaluation per tile for pre-native rungs;
-                        # they go native once + ingest reduction (R3 owns the
-                        # shared transform-preview queue).
-                        ops_commute_with_reduction=ops_commute,
+                        # Opaque pipelines (FFT…) must not pay a full native
+                        # evaluation per tile for pre-native rungs; their
+                        # preview path is the shared transform floor.
+                        reduced_input_available=reduced_input_available,
                     )
                 ),
                 commit_max_items=2,
@@ -180,13 +177,11 @@ class MontageRuntimeMixin:
             return 0
         if montage_commit.complete_deferred_stage_fan_in(self, session):
             return 0
-        montage_lod.selected_lod_factor(session)
+        render_lod.selected_lod_factor(session)
         intent = self._montage_render_intent(session)
         pipeline = self._montage_pipeline_for_session(session)
         submitted = pipeline.retarget(intent, session.lod_policy_decision.demand)
         submitted += pipeline.effects.submit_shared_transform_floor()
-        if getattr(session, "pending_lod_requests", None):
-            self.materialize_montage_lod(session)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)
         if force_commit or session.flush_pending or session.final_commit_pending:
@@ -205,9 +200,6 @@ class MontageRuntimeMixin:
         if unsettled:
             self._ensure_montage_watchdog()
         return int(submitted)
-
-    def materialize_montage_lod(self, session) -> None:
-        return montage_lod.schedule_materializations(self, session)
 
     # -- stall assertion probe (ADR 0051) -------------------------------------
     # The live render path must make lost wakeups impossible by construction.
@@ -254,7 +246,7 @@ class MontageRuntimeMixin:
         active = len(session.active_tile_requests)
         dirty = len(session.dirty_payloads)
         upserts = len(session.pending_payload_upserts)
-        lod_pending = len(getattr(session, "pending_lod_requests", ()) or ())
+        lod_pending = len(getattr(session, "pending_rung_materializations", ()) or ())
         planning_deferred = bool(getattr(session, "stage_planning_deferred", False))
         level_evidence = len(getattr(session, "pending_level_tiles", ()) or ()) + int(
             getattr(session, "level_scan_remaining_tiles", 0) or 0

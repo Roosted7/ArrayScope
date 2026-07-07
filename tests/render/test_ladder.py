@@ -59,19 +59,20 @@ def test_zoom_in_refines_progressively():
     assert steps[1].priority == Priority.VISIBLE_IMAGE  # visibly wrong level
 
 
-def test_resident_finer_level_prevents_recompute():
+def test_native_source_still_plans_demanded_display_level():
     ladder = LodLadder()
-    # Native already acknowledged resident: nothing coarser is ever computed.
+    # Native exact content is a source for reduction, not proof that the
+    # demanded display level was applied.
     state = TileLodState(tile_number=0, resident_levels=(0,))
     steps = ladder.plan_tile(state, demand(2))
-    assert steps == ()
+    assert rungs(steps) == [(Rung.DESIRED, 2)]
 
 
-def test_zoom_out_plans_only_the_coarser_desired_level():
+def test_zoom_out_demotes_native_to_the_demanded_display_level():
     ladder = LodLadder(LadderPolicy(preview_level=2))
     state = TileLodState(tile_number=0, presented_level=0, resident_levels=(0,))
     steps = ladder.plan_tile(state, demand(3, acceptable=(2, 3, 4)))
-    assert steps == ()  # finer-than-needed is acceptable; no forced demotion
+    assert rungs(steps) == [(Rung.DESIRED, 3)]
 
 
 def test_native_demand_ends_exact_without_duplicate_step():
@@ -96,8 +97,8 @@ def test_native_only_policy_collapses_ladder():
     assert ladder.plan_tile(TileLodState(tile_number=0, presented_level=0), demand(3)) == ()
 
 
-def test_non_commuting_ops_reduce_from_native():
-    ladder = LodLadder(LadderPolicy(ops_commute_with_reduction=False))
+def test_without_reduced_input_pre_native_rungs_reduce_from_native():
+    ladder = LodLadder(LadderPolicy(reduced_input_available=False))
     steps = ladder.plan_tile(TileLodState(tile_number=0), demand(1))
     assert all(step.reduce_from_native for step in steps)
 

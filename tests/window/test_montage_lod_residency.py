@@ -9,11 +9,14 @@ from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.presentation import ClaimOwner, LevelPhase
+from arrayscope.render import effects as render_effects
+from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung
+from arrayscope.window.montage_commit import MontagePipelineEffects
+from arrayscope.render.lod import admit_retained_preview_level, histogram_key_for_level_key
 from arrayscope.window.montage_session import (
-    admit_preview_reduction,
     MontageRenderSession,
-    admit_ingest_reduction,
     pyramid_key_for_rendered,
+    texture_source_for_rendered,
 )
 
 TILE = 64
@@ -73,7 +76,7 @@ def _session(*, mode=LOD_POLICY_RESIDENT, pyramid=None, view_range=ZOOMED_OUT_RA
         skipped_tiles=set(),
         pending_tiles=[],
         lod_policy_mode=mode,
-        lod_pyramid=pyramid,
+        pyramid_cache=pyramid,
     )
     for index, tile in enumerate(tiles):
         image = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE) + index
@@ -92,34 +95,80 @@ def _session(*, mode=LOD_POLICY_RESIDENT, pyramid=None, view_range=ZOOMED_OUT_RA
 def _materialize(session, request):
     """Run one request the way the worker does: walk the chain, admit each step."""
 
-    if hasattr(session.pending_lod_requests, "mark_started"):
-        session.pending_lod_requests.mark_started(request)
+    if hasattr(session.pending_rung_materializations, "mark_started"):
+        session.pending_rung_materializations.mark_started(request)
     plane = request.source
     admitted = None
     steps = tuple(getattr(request, "chain", ()) or ()) or ((request.key, request.reduce_factor_xy),)
     for step_key, rel in steps:
         plane = reduce_box_mean(plane, rel)
         if step_key is not None:
-            plane = session.lod_pyramid.admit(step_key, plane)
+            plane = session.pyramid_cache.admit(step_key, plane)
             if step_key == request.key:
                 admitted = plane
-    if hasattr(session.pending_lod_requests, "mark_resident"):
-        session.pending_lod_requests.mark_resident(request)
+    if hasattr(session.pending_rung_materializations, "mark_resident"):
+        session.pending_rung_materializations.mark_resident(request)
     return request.key, admitted
 
 
 def _release(session, request):
     """Drop one request the way every non-run scheduling path must: all claims."""
 
-    from arrayscope.window.montage_lod import _apply_release_effects
+    from arrayscope.render.lod import _apply_release_effects
 
-    if hasattr(session.pending_lod_requests, "release"):
-        _apply_release_effects(session.lod_pyramid, session.pending_lod_requests.release(request))
+    if hasattr(session.pending_rung_materializations, "release"):
+        _apply_release_effects(session.pyramid_cache, session.pending_rung_materializations.release(request))
 
 
 def _claim_preview_resident(session, tile_number: int, key) -> None:
     session.lifecycle.level_claimed(int(tile_number), key, ClaimOwner.PREVIEW, request=("test-preview", key))
     session.lifecycle.level_resident(int(tile_number), key)
+
+
+def _admit_demand_level_for_test(pyramid, demand, rendered, *, semantic_source_id):
+    level = int(demand.desired_level)
+    if pyramid is None or level <= 0:
+        return None
+    key = pyramid_key_for_rendered(rendered, demand=demand, level=level, semantic_source_id=semantic_source_id)
+    if not pyramid.begin_pending(key):
+        return None
+    try:
+        source, histogram, _kind = texture_source_for_rendered(rendered)
+        reduced = pyramid.admit(key, reduce_box_mean(source, key.factor_xy))
+        if histogram is not None:
+            hist_key = histogram_key_for_level_key(key)
+            if pyramid.begin_pending(hist_key):
+                try:
+                    pyramid.admit(hist_key, reduce_box_mean(histogram, hist_key.factor_xy))
+                except Exception:
+                    pyramid.end_pending(hist_key)
+        return reduced
+    except Exception:
+        pyramid.end_pending(key)
+        raise
+
+
+class _RungPrepareRenderer:
+    def _montage_session_is_current(self, session) -> bool:
+        return True
+
+    def request_montage_replan(self, session) -> None:
+        session._test_replan_requested = True
+
+
+def _plan_rung_materializations(session) -> tuple:
+    demand = session.lod_policy_decision.demand
+    policy = LadderPolicy(
+        mode=session.lod_policy_mode,
+        floor_level=max(1, int(getattr(session, "lod_preview_level", 0) or 4)),
+        preview_level=max(1, int(getattr(session, "lod_preview_level", 0) or 2)),
+        reduced_input_available=True,
+    )
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+    for step in LodLadder(policy).plan(render_effects.tile_lod_states(session, demand), demand):
+        if step.rung == Rung.DESIRED:
+            effects.prepare_rung(None, step)
+    return tuple(effects._pending_materializations.values())
 
 
 def test_native_only_mode_is_unchanged_by_default():
@@ -129,7 +178,7 @@ def test_native_only_mode_is_unchanged_by_default():
     assert session.lod_policy_mode == LOD_POLICY_NATIVE_ONLY
     assert session.lod_policy_decision.policy == "native-only"
     assert session.lod_policy_decision.applied_factor == 1
-    assert session.pending_lod_requests == []
+    assert session.pending_rung_materializations == []
     for payload in delta.upserts.values():
         assert payload.lod.level == 0
         assert payload.texture_data.shape[:2] == (TILE, TILE)
@@ -138,6 +187,7 @@ def test_native_only_mode_is_unchanged_by_default():
 def test_resident_mode_falls_back_to_native_and_records_missing_levels():
     session = _session(pyramid=PyramidCache(max_bytes=1 << 20))
     state, delta = session.build_tile_presentation({})
+    requests = list(_plan_rung_materializations(session))
 
     decision = session.lod_policy_decision
     assert decision.policy == "resident"
@@ -148,26 +198,28 @@ def test_resident_mode_falls_back_to_native_and_records_missing_levels():
         assert payload.lod.level == 0
         assert payload.texture_data.shape[:2] == (TILE, TILE)
     # Every tile recorded its demanded-but-missing level exactly once.
-    assert len(session.pending_lod_requests) == 2
-    tiles = sorted(request[0] for request in session.pending_lod_requests)
+    assert len(requests) == 2
+    tiles = sorted(request[0] for request in requests)
     assert tiles == [0, 1]
-    for request in session.pending_lod_requests:
+    for request in requests:
         assert isinstance(request.key, PyramidLevelKey)
         assert request.key.factor_xy == (4, 4)
         assert request.reduce_factor_xy == (4, 4)
         assert request.source.shape == (TILE, TILE)
+    assert len(session.lifecycle.dangling_claims()) == 4
 
 
 def test_duplicate_materialization_requests_coalesce():
     session = _session(pyramid=PyramidCache(max_bytes=1 << 20))
     session.build_tile_presentation({})
-    first = list(session.pending_lod_requests)
+    first = list(_plan_rung_materializations(session))
 
     # A second commit while requests are pending must not re-claim them.
     session.dirty_payloads.update({0: None, 1: None})
     session.build_tile_presentation({})
 
-    assert list(session.pending_lod_requests) == first
+    assert list(_plan_rung_materializations(session)) == []
+    assert len(first) == 2
 
 
 def test_materialization_chains_through_the_missing_finer_level():
@@ -182,8 +234,8 @@ def test_materialization_chains_through_the_missing_finer_level():
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
     session.build_tile_presentation({})
-    requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     assert len(requests) == 2
     for request in requests:
         chain = tuple(request.chain)
@@ -203,7 +255,7 @@ def test_materialization_chains_through_the_missing_finer_level():
     session.dirty_payloads.update({0: None, 1: None})
     session.build_tile_presentation({})
     assert session.lod_policy_decision.applied_level == 1
-    assert session.pending_lod_requests == []
+    assert session.pending_rung_materializations == []
 
 
 def test_chain_derives_from_the_resident_finer_level_source():
@@ -212,8 +264,8 @@ def test_chain_derives_from_the_resident_finer_level_source():
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, view_range=((0.0, 3.0 * 2 * TILE), (0.0, 3.0 * TILE)))
     session.build_tile_presentation({})
-    requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     for request in requests:
         assert tuple(step_key.level_xy for step_key, _rel in request.chain) == ((1, 1),)
         _materialize(session, request)
@@ -224,8 +276,8 @@ def test_chain_derives_from_the_resident_finer_level_source():
     session.view_range = ((0.0, 5.0 * 2 * TILE), (0.0, 5.0 * TILE))
     session.dirty_payloads.update({0: None, 1: None})
     session.build_tile_presentation({})
-    requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     assert len(requests) == 2
     for request in requests:
         assert request.cross_level is True
@@ -251,8 +303,8 @@ def test_chain_passes_through_an_intermediate_claimed_elsewhere():
     assert pyramid.begin_pending(foreign)
 
     session.build_tile_presentation({})
-    requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     assert len(requests) == 1
     chain = tuple(requests[0].chain)
     # Pass-through step: reduce through level 1 without admitting it.
@@ -271,8 +323,8 @@ def test_admitted_level_streams_in_with_distinct_identity_and_shape():
     state, delta = session.build_tile_presentation({})
     native_ids = {tile: payload.source_id for tile, payload in delta.upserts.items()}
 
-    requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     for request in requests:
         _materialize(session, request)
 
@@ -292,15 +344,15 @@ def test_admitted_level_streams_in_with_distinct_identity_and_shape():
         assert payload.semantic_data.shape[:2] == (TILE, TILE)
         # Exact semantic sources are untouched by display LOD.
         assert payload.semantic_histogram_data.shape[:2] == (TILE, TILE)
-    assert session.pending_lod_requests == []
+    assert session.pending_rung_materializations == []
 
 
 def test_mixed_residency_applies_per_tile_and_reports_common_level():
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
     session.build_tile_presentation({})
-    requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     # Materialize the demanded level for tile 0 only.
     for request in requests:
         if request[0] == 0:
@@ -326,8 +378,8 @@ def test_threshold_recrossing_hits_the_pyramid_cache_without_new_requests():
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
     session.build_tile_presentation({})
-    requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     for request in requests:
         _materialize(session, request)
     session.dirty_payloads.update({0: None, 1: None})
@@ -347,7 +399,7 @@ def test_threshold_recrossing_hits_the_pyramid_cache_without_new_requests():
     session.build_tile_presentation({})
 
     assert session.lod_policy_decision.applied_level == 2
-    assert session.pending_lod_requests == []
+    assert session.pending_rung_materializations == []
     assert pyramid.hits > hits_before
     assert pyramid.pending_count == 0
 
@@ -398,11 +450,11 @@ def test_worker_ingest_reduction_presents_demanded_level_first():
     # Worker side: the native tile is computed, then reduced and admitted as
     # part of the same materialization, before the result reaches the GUI.
     rendered = _rendered(session.plan.tiles[0])
-    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index)) is not None
+    assert _admit_demand_level_for_test(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index)) is not None
     assert len(pyramid) == 2
     assert pyramid.pending_count == 0
     # Singleflight: the level is resident, a second admission is a no-op.
-    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index)) is None
+    assert _admit_demand_level_for_test(pyramid, demand, rendered, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index)) is None
 
     # GUI side: the first presentation build selects the reduced level.  No
     # native payload is ever emitted for the tile and nothing is re-requested.
@@ -417,7 +469,7 @@ def test_worker_ingest_reduction_presents_demanded_level_first():
     # Exact semantic sources stay native.
     assert payload.semantic_data.shape[:2] == (TILE, TILE)
     assert payload.semantic_histogram_data.shape[:2] == (TILE, TILE)
-    assert session.pending_lod_requests == []
+    assert session.pending_rung_materializations == []
 
 
 def test_native_only_and_native_scale_sessions_have_no_ingest_demand():
@@ -441,20 +493,20 @@ def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
 
     # The worker still completes against its scheduling-time snapshot.
     rendered = _rendered(session.plan.tiles[0])
-    assert admit_ingest_reduction(pyramid, demand, rendered, semantic_source_id=("test-tile", rendered.tile.source_index)) is not None
+    assert _admit_demand_level_for_test(pyramid, demand, rendered, semantic_source_id=("test-tile", rendered.tile.source_index)) is not None
 
     # No special cases: presentation never over-reduces with the stale level;
     # it falls back and the ordinary streaming path materializes level 1.
     session.mark_materialized(rendered)
     _state, delta = session.build_tile_presentation({})
+    requests = list(_plan_rung_materializations(session))
     assert session.lod_policy_decision.demand.desired_level == 1
     assert delta.upserts[0].lod.level == 0
-    assert len(session.pending_lod_requests) == 1
-    request = session.pending_lod_requests[0]
+    assert len(requests) == 1
+    request = requests[0]
     assert request.tile_number == 0
     assert request.key.factor_xy == (2, 2)
 
-    request = session.pending_lod_requests.pop()
     _materialize(session, request)
     session.dirty_payloads[0] = None
     _state, delta = session.build_tile_presentation({})
@@ -477,8 +529,8 @@ def test_presented_lod_summary_reports_plurality_of_presented_payloads():
     assert session.presented_lod_summary() == (0, 1, (1, 1))
 
     session.build_tile_presentation({})
-    requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     for request in requests:
         if request[0] in (0, 1):
             _materialize(session, request)
@@ -499,8 +551,8 @@ def test_presented_lod_summary_tie_prefers_the_finer_level():
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, count=2)
     session.build_tile_presentation({})
-    requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     for request in requests:
         if request[0] == 0:
             _materialize(session, request)
@@ -522,7 +574,7 @@ def _present_native(session):
     _state, delta = session.build_tile_presentation({})
     _acknowledge(session, delta)
     session.mark_presented(tuple(delta.upserts))
-    session.pending_lod_requests.clear()
+    session.pending_rung_materializations.clear()
     return delta
 
 
@@ -530,7 +582,7 @@ def _admit_zoomed_out_levels(session, level=2):
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
     for rendered in session.rendered_tiles.values():
         key = pyramid_key_for_rendered(rendered, demand=demand, level=level, semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index))
-        session.lod_pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+        session.pyramid_cache.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
 
 
 def test_camera_only_retarget_swaps_to_cached_level_without_pan_or_slice_change():
@@ -547,10 +599,10 @@ def test_camera_only_retarget_swaps_to_cached_level_without_pan_or_slice_change(
     # must request a presentation commit that swaps payload identities.
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     revision_before = int(session.viewport_revision)
-    swap_ready = session.refresh_lod_for_viewport()
+    swap_ready = session.mark_ladder_swaps_for_viewport()
 
     assert swap_ready is True
-    assert session.pending_lod_requests == [], "cached levels must not be re-requested"
+    assert session.pending_rung_materializations == [], "cached levels must not be re-requested"
     assert sorted(session.dirty_payloads) == [0, 1]
 
     hits_before = pyramid.hits
@@ -565,7 +617,7 @@ def test_camera_only_retarget_swaps_to_cached_level_without_pan_or_slice_change(
 
     # A second refresh with the same viewport is a no-op (no revision creep,
     # no commit request, no dirty tiles).
-    assert session.refresh_lod_for_viewport() is False
+    assert session.mark_ladder_swaps_for_viewport() is False
     assert int(session.viewport_revision) >= revision_before
 
 
@@ -576,13 +628,14 @@ def test_camera_only_retarget_requests_missing_levels_with_new_lod_revision():
     revision_before = int(session.lod_target_revision)
 
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
-    swap_ready = session.refresh_lod_for_viewport()
+    swap_ready = session.mark_ladder_swaps_for_viewport()
+    requests = list(_plan_rung_materializations(session))
 
     # Nothing resident yet: no swap commit, but materializations are queued
     # under a fresh LOD target revision so stale zoom targets supersede.
     assert swap_ready is False
-    assert sorted(request[0] for request in session.pending_lod_requests) == [0, 1]
-    for request in session.pending_lod_requests:
+    assert sorted(request[0] for request in requests) == [0, 1]
+    for request in requests:
         assert request.key.factor_xy == (4, 4)
         assert request.source.shape == (TILE, TILE)
     assert int(session.lod_target_revision) > revision_before
@@ -591,16 +644,16 @@ def test_camera_only_retarget_requests_missing_levels_with_new_lod_revision():
     assert all(payload.lod.level == 0 for payload in session.tile_presentation_state.payloads.values())
 
     # Requests are singleflighted across refreshes during a zoom gesture.
-    assert session.refresh_lod_for_viewport() is False
-    assert sorted(request[0] for request in session.pending_lod_requests) == [0, 1]
+    assert session.mark_ladder_swaps_for_viewport() is False
+    assert list(_plan_rung_materializations(session)) == []
 
 
 def test_refresh_is_native_only_noop():
     session = _session(mode=LOD_POLICY_NATIVE_ONLY, pyramid=None, view_range=ZOOMED_IN_RANGE)
     _present_native(session)
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
-    assert session.refresh_lod_for_viewport() is False
-    assert session.pending_lod_requests == []
+    assert session.mark_ladder_swaps_for_viewport() is False
+    assert session.pending_rung_materializations == []
     assert not session.dirty_payloads
 
 
@@ -619,7 +672,7 @@ def test_level_only_change_replaces_payload_atomically_and_deferral_keeps_old():
     assert set(native_payloads) == {0, 1}
     _admit_zoomed_out_levels(session)
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
-    assert session.refresh_lod_for_viewport() is True
+    assert session.mark_ladder_swaps_for_viewport() is True
 
     # Budget admits only one swap this commit.
     state, delta = session.build_tile_presentation({}, max_upserts=1)
@@ -682,7 +735,7 @@ def test_seeding_new_session_keeps_stale_level_payload_presented():
 
     # The refresh accepts the presented level as resident evidence: no
     # down-swap churn to native while the demanded level rematerializes.
-    assert replacement.refresh_lod_for_viewport() is False
+    assert replacement.mark_ladder_swaps_for_viewport() is False
     assert not replacement.dirty_payloads or set(replacement.dirty_payloads) == {0, 1}
 
 # --- Zero redundant histogram/level work across LOD levels (ADR 0050) ---
@@ -710,11 +763,11 @@ def test_level_swap_carries_native_stats_and_recomputes_nothing():
     assert session.lod_stats_recomputes == 0
 
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
-    session.refresh_lod_for_viewport()
-    for request in list(session.pending_lod_requests):
+    session.mark_ladder_swaps_for_viewport()
+    for request in list(_plan_rung_materializations(session)):
         _materialize(session, request)
-    session.pending_lod_requests.clear()
-    assert session.refresh_lod_for_viewport() is True
+    session.pending_rung_materializations.clear()
+    assert session.mark_ladder_swaps_for_viewport() is True
     _state, delta = session.build_tile_presentation({})
 
     for tile_number, payload in delta.upserts.items():
@@ -731,7 +784,7 @@ def test_level_swap_carries_native_stats_and_recomputes_nothing():
 
     # Moving finer (level 2 -> native) reuses the same stats objects too.
     session.retarget_viewport(view_range=ZOOMED_IN_RANGE, viewport_shape=VIEWPORT)
-    session.refresh_lod_for_viewport()
+    session.mark_ladder_swaps_for_viewport()
     _state, delta = session.build_tile_presentation({})
     for tile_number, payload in delta.upserts.items():
         rendered = session.rendered_tiles[int(tile_number)]
@@ -753,11 +806,11 @@ def test_level_swap_keeps_semantic_histogram_identity():
     native_payloads = dict(session.tile_presentation_state.payloads)
 
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
-    session.refresh_lod_for_viewport()
-    for request in list(session.pending_lod_requests):
+    session.mark_ladder_swaps_for_viewport()
+    for request in list(_plan_rung_materializations(session)):
         _materialize(session, request)
-    session.pending_lod_requests.clear()
-    session.refresh_lod_for_viewport()
+    session.pending_rung_materializations.clear()
+    session.mark_ladder_swaps_for_viewport()
     _state, delta = session.build_tile_presentation({})
     swapped_payloads = {**native_payloads, **dict(delta.upserts)}
     assert any(payload.lod.level == 2 for payload in swapped_payloads.values())
@@ -788,17 +841,17 @@ def test_coarser_level_derives_from_finest_resident_level():
     pyramid = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=LEVEL1_RANGE)
     session.build_tile_presentation({})
-    level1_requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    level1_requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     assert {request.key.level for request in level1_requests} == {1}
     for request in level1_requests:
         assert request.cross_level is False
         _materialize(session, request)
 
     session.retarget_viewport(view_range=FAR_OUT_RANGE, viewport_shape=VIEWPORT)
-    session.refresh_lod_for_viewport()
-    level2_requests = list(session.pending_lod_requests)
-    session.pending_lod_requests.clear()
+    session.mark_ladder_swaps_for_viewport()
+    level2_requests = list(_plan_rung_materializations(session))
+    session.pending_rung_materializations.clear()
     assert {request.key.level for request in level2_requests} == {2}
     for request in level2_requests:
         # Derived level-from-level: the reduction source is the resident
@@ -827,13 +880,13 @@ def test_uneven_tiles_fall_back_to_native_reduction_source():
         image = np.asarray(rendered.image)[:tile, :tile].copy()
         session.rendered_tiles[index] = dc_replace(rendered, image=image, histogram_data=image)
     session.build_tile_presentation({})
-    for request in list(session.pending_lod_requests):
+    for request in list(_plan_rung_materializations(session)):
         _materialize(session, request)
-    session.pending_lod_requests.clear()
+    session.pending_rung_materializations.clear()
 
     session.retarget_viewport(view_range=FAR_OUT_RANGE, viewport_shape=VIEWPORT)
-    session.refresh_lod_for_viewport()
-    requests = list(session.pending_lod_requests)
+    session.mark_ladder_swaps_for_viewport()
+    requests = list(_plan_rung_materializations(session))
     assert requests, "the coarser level must still be requested"
     for request in requests:
         assert request.cross_level is False
@@ -930,9 +983,9 @@ def test_floors_survive_index_window_changes_via_semantic_key():
     del session_b.rendered_tiles[1]
     session_b.dirty_payloads.pop(1, None)
 
-    from arrayscope.window import montage_lod
+    from arrayscope.render import lod as render_lod
 
-    best = montage_lod.best_floor_key(session_b, 1)
+    best = render_lod.best_floor_key(session_b, 1)
     assert best is not None, "floor computed under window A must be resident under window B"
     assert best[1] == 2
 
@@ -1169,20 +1222,21 @@ def test_refresh_replans_missing_desired_level_at_unchanged_viewport():
     identity must still re-request the missing demanded level, or tiles
     wedge on a coarser resident level until the next pan."""
 
-    from arrayscope.window import montage_lod
+    from arrayscope.render import lod as render_lod
 
     session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
-    assert session.refresh_lod_for_viewport() is not None
-    first = list(session.pending_lod_requests)
+    assert session.mark_ladder_swaps_for_viewport() is not None
+    first = list(_plan_rung_materializations(session))
     assert first, "zoomed-out demand plans materializations for the missing level"
 
     # Simulate supersession/session churn dropping the planned work.
-    released = montage_lod.release_session_claims(session)
+    released = render_lod.release_session_claims(session)
     assert released == sum(1 for request in first for step_key, _rel in request.chain if step_key is not None)
-    assert not session.pending_lod_requests
+    assert not session.pending_rung_materializations
 
-    session.refresh_lod_for_viewport()
-    assert session.pending_lod_requests, (
+    session.mark_ladder_swaps_for_viewport()
+    replanned = list(_plan_rung_materializations(session))
+    assert replanned, (
         "idle refresh must re-plan the demanded level after its claims were released"
     )
 
@@ -1265,7 +1319,7 @@ def test_floor_tile_with_native_demand_settles_instead_of_spinning():
 
     # A camera-only refresh may request commits but must never mark the
     # unrendered tile dirty...
-    session.refresh_lod_for_viewport()
+    session.mark_ladder_swaps_for_viewport()
     assert 1 not in session.dirty_payloads
 
     # ...and repeated builds settle: nothing dirty, nothing pending, the
@@ -1319,11 +1373,11 @@ def test_lod_refresh_owns_its_supersession_counter_not_viewport_revision():
     session = _session(pyramid=pyramid)
     before_viewport = int(session.viewport_revision)
     before_lod = int(getattr(session, "lod_target_revision", 0))
-    session.refresh_lod_for_viewport()
+    session.mark_ladder_swaps_for_viewport()
     assert int(session.viewport_revision) == before_viewport
     assert int(session.lod_target_revision) == before_lod + 1
     # Unchanged viewport: no further bumps.
-    session.refresh_lod_for_viewport()
+    session.mark_ladder_swaps_for_viewport()
     assert int(session.lod_target_revision) == before_lod + 1
 
 
@@ -1422,7 +1476,7 @@ def test_preview_reduction_fills_pinned_cache_from_native_and_from_reduced():
     rendered = session.rendered_tiles[0]
     semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
 
-    assert admit_preview_reduction(
+    assert admit_retained_preview_level(
         preview, rendered, semantic_source_id=semantic_id, preview_level=3
     )
     key = next(iter(preview.resident_keys_for(semantic_id, rendered.tile.source_index, "scalar")))
@@ -1434,7 +1488,7 @@ def test_preview_reduction_fills_pinned_cache_from_native_and_from_reduced():
     # Derive-from-reduced: level 1 plane divides evenly into level 3.
     preview2 = PyramidCache(max_bytes=1 << 20)
     reduced = reduce_box_mean(np.asarray(rendered.image), (2, 2))
-    assert admit_preview_reduction(
+    assert admit_retained_preview_level(
         preview2, rendered, semantic_source_id=semantic_id, preview_level=3,
         reduced=reduced, reduced_level=1,
     )
@@ -1442,7 +1496,7 @@ def test_preview_reduction_fills_pinned_cache_from_native_and_from_reduced():
     assert np.allclose(preview2.peek(key2), expected, atol=1e-4)
 
     # Singleflight: second admission is a no-op.
-    assert not admit_preview_reduction(
+    assert not admit_retained_preview_level(
         preview, rendered, semantic_source_id=semantic_id, preview_level=3
     )
 
@@ -1454,12 +1508,12 @@ def test_floor_presents_from_pinned_preview_when_main_pyramid_lost_the_level():
     main = PyramidCache(max_bytes=1 << 20)
     preview = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=main, count=2)
-    session.lod_preview_pyramid = preview
+    session.pyramid_cache = preview
     session.lod_preview_level = 3
 
     rendered = session.rendered_tiles[1]
     semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
-    assert admit_preview_reduction(
+    assert admit_retained_preview_level(
         preview, rendered, semantic_source_id=semantic_id, preview_level=3
     )
     # Tile 1 loses its rendered result and has nothing in the MAIN pyramid.
@@ -1481,7 +1535,7 @@ def test_rgb_floor_from_pinned_preview_carries_display_histogram():
     main = PyramidCache(max_bytes=1 << 20)
     preview = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=main, count=1)
-    session.lod_preview_pyramid = preview
+    session.pyramid_cache = preview
     session.lod_preview_level = 2
     session.rgb = True
 
@@ -1498,7 +1552,7 @@ def test_rgb_floor_from_pinned_preview_carries_display_histogram():
         slab_nbytes=rgb.nbytes,
     )
     semantic_id = session.tile_semantic_source_id(tile.source_index)
-    assert admit_preview_reduction(
+    assert admit_retained_preview_level(
         preview,
         rendered,
         semantic_source_id=semantic_id,
@@ -1551,7 +1605,7 @@ def test_preview_payload_at_acceptable_level_still_refines_to_exact():
 
     # Camera refresh must dirty the preview tile even though its level (2)
     # is inside acceptable_levels, and the next build must go exact.
-    session.refresh_lod_for_viewport()
+    session.mark_ladder_swaps_for_viewport()
     assert 1 in session.dirty_payloads
     _state, _delta = session.build_tile_presentation({})
     assert session.display_tile_payloads[1].quality == "exact"
@@ -1642,7 +1696,7 @@ def test_preview_floor_scope_defers_exact_until_scoped_tiles_are_covered():
     pyramid = PyramidCache(max_bytes=1 << 24)
     preview = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=4)
-    session.lod_preview_pyramid = preview
+    session.pyramid_cache = preview
     session.lod_preview_level = 4
     session.mark_preview_floor_scope(range(4))
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
@@ -1732,12 +1786,12 @@ def test_preview_floor_claim_release_unblocks_exact_payload():
 
 
 def test_replaced_session_releases_preview_floor_claims_from_preview_cache():
-    from arrayscope.window.montage_lod import release_session_claims
+    from arrayscope.render.lod import release_session_claims
 
     pyramid = PyramidCache(max_bytes=1 << 24)
     preview = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=1)
-    session.lod_preview_pyramid = preview
+    session.pyramid_cache = preview
     session.lod_preview_level = 4
     rendered = session.rendered_tiles[0]
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
@@ -1760,7 +1814,7 @@ def test_preview_floor_target_prefers_preview_cache_over_requested_level():
     pyramid = PyramidCache(max_bytes=1 << 24)
     preview = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=1)
-    session.lod_preview_pyramid = preview
+    session.pyramid_cache = preview
     session.lod_preview_level = 4
     rendered = session.rendered_tiles[0]
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
@@ -1822,35 +1876,38 @@ def test_replaced_session_releases_undrained_request_claims():
     regression of 2026-07-04).
     """
 
-    from arrayscope.window.montage_lod import release_session_claims
+    from arrayscope.render.lod import release_session_claims
 
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
     session.build_tile_presentation({})
-    assert len(session.pending_lod_requests) == 2
+    requests = list(_plan_rung_materializations(session))
+    assert len(requests) == 2
     assert pyramid.pending_count > 0
 
     released = release_session_claims(session)
 
     assert released == 4
-    assert session.pending_lod_requests == []
+    assert session.pending_rung_materializations == []
     assert pyramid.pending_count == 0
     # The same slice revisited (equal session key) can claim its levels again.
     replacement = _session(pyramid=pyramid)
     replacement.build_tile_presentation({})
-    assert len(replacement.pending_lod_requests) == 2
+    replacement_requests = list(_plan_rung_materializations(replacement))
+    assert len(replacement_requests) == 2
 
 
 def test_pending_lod_request_view_clear_releases_pyramid_claims():
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
     session.build_tile_presentation({})
-    assert len(session.pending_lod_requests) == 2
+    requests = list(_plan_rung_materializations(session))
+    assert len(requests) == 2
     assert pyramid.pending_count == 4
 
-    session.pending_lod_requests.clear()
+    from arrayscope.render.lod import release_session_claims
 
-    assert session.pending_lod_requests == []
+    assert release_session_claims(session) == 4
     assert pyramid.pending_count == 0
     assert session.lifecycle.dangling_claims() == ()
 
@@ -2036,7 +2093,7 @@ def test_reduced_complex_base_keeps_a_level_matched_magnitude_histogram():
     native magnitude to the texture's shape and cache it.
     """
 
-    from arrayscope.window import montage_lod
+    from arrayscope.render import lod as render_lod
 
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, view_range=((0.0, 3.0 * 2 * TILE), (0.0, 3.0 * TILE)))
@@ -2060,12 +2117,12 @@ def test_reduced_complex_base_keeps_a_level_matched_magnitude_histogram():
     assert applied >= 1
     # Make only the reduced *texture* resident (as the level worker does),
     # deliberately WITHOUT its histogram.
-    level_key = montage_lod.pyramid_key_for(session, rendered, demand=demand, level=applied)
+    level_key = render_lod.pyramid_key_for(session, rendered, demand=demand, level=applied)
     factor_x, factor_y = level_key.factor_xy
     reduced_rgb = reduce_box_mean(rgb_base.astype(np.float32), (factor_x, factor_y)).astype(np.uint8)
     pyramid.admit(level_key, reduced_rgb)
 
-    texture, texture_histogram, lod = montage_lod.resident_texture_for_rendered_tile(
+    texture, texture_histogram, lod = render_lod.resident_texture_for_rendered_tile(
         session, rendered, source=rgb_base, histogram=magnitude
     )
 
@@ -2076,4 +2133,4 @@ def test_reduced_complex_base_keeps_a_level_matched_magnitude_histogram():
     assert texture_histogram.shape[:2] == texture.shape[:2]
     assert float(texture_histogram.max()) > float(texture_histogram.min())
     # And it is cached so later reads/level system stay level-consistent.
-    assert pyramid.lookup(montage_lod.histogram_key_for(session, rendered, demand=demand, level=applied)) is not None
+    assert pyramid.lookup(render_lod.histogram_key_for(session, rendered, demand=demand, level=applied)) is not None

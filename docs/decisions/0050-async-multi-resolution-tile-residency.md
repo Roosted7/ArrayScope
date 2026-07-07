@@ -1,13 +1,14 @@
 # 0050 — Asynchronous multi-resolution tile residency
 
 **Status:** Accepted and implemented for VisPy montage/tiled scenes (2026-07-04); default
-policy is `resident` on VisPy (Performance → Montage LOD), `native-only` elsewhere. The
-retained preview level below is implemented (pinned preview pyramid cache, worker-side
-opportunistic fill, background preview walk). The first preview-then-refine consumer for
-`lod-commuting` tiled montage pipelines landed on 2026-07-06; transforming/opaque input-LOD
-routes and PyQtGraph default enablement remain evidence-gated. The defect inventory from these
-landings motivated [ADR 0051](0051-single-owner-tile-lifecycle.md), which now owns the tile
-lifecycle.
+policy is `resident` on VisPy (Performance → Montage LOD), `native-only` elsewhere. R3
+(2026-07-07) made the LOD ladder first-class: `render/ladder.py` owns FLOOR → PREVIEW →
+DESIRED → EXACT planning, `window/montage_lod.py` is deleted, montage residency uses one
+`PyramidCache`, and demanded-level completion wakes the pipeline through lifecycle events instead
+of a side pending-request list. The retained preview level below is implemented in the shared
+pyramid cache. Transforming/opaque input-LOD routes and PyQtGraph default enablement remain
+evidence-gated. The defect inventory from these landings motivated
+[ADR 0051](0051-single-owner-tile-lifecycle.md), which now owns the tile lifecycle.
 
 ## Context
 

@@ -164,9 +164,9 @@ def test_memory_stress_actions_adjust_profile_budget_and_policy(qtbot):
         win.close()
 
 
-def test_montage_lod_policy_menu_defaults_and_switches(qtbot):
+def test_montage_quality_policy_menu_defaults_and_switches(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageLodPolicyChoice
+    from arrayscope.app.settings_state import MontageQualityPolicyChoice
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
@@ -176,29 +176,29 @@ def test_montage_lod_policy_menu_defaults_and_switches(qtbot):
         resident = _submenu_action(win, "Performance", "Montage LOD", "Resident (multi-resolution)")
         native = _submenu_action(win, "Performance", "Montage LOD", "Native only")
         # ADR 0050: resident is the default and the menu reflects it.
-        assert win.app_settings.montage_lod_policy == MontageLodPolicyChoice.RESIDENT
+        assert win.app_settings.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
         assert resident.isChecked()
         assert not native.isChecked()
 
         native.trigger()
         _process_events(qtbot)
-        assert win.app_settings.montage_lod_policy == MontageLodPolicyChoice.NATIVE_ONLY
-        assert win._settings.value("montage_lod_policy") == "native-only"
+        assert win.app_settings.montage_quality_policy == MontageQualityPolicyChoice.NATIVE_ONLY
+        assert win._settings.value("montage_quality_policy") == "native-only"
         assert native.isChecked() and not resident.isChecked()
 
         resident.trigger()
         _process_events(qtbot)
-        assert win.app_settings.montage_lod_policy == MontageLodPolicyChoice.RESIDENT
-        assert win._settings.value("montage_lod_policy") == "resident"
+        assert win.app_settings.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
+        assert win._settings.value("montage_quality_policy") == "resident"
     finally:
         win.close()
 
 
-def test_montage_lod_policy_change_applies_to_next_montage_session(qtbot):
+def test_montage_quality_policy_change_applies_to_next_montage_session(qtbot):
     """A policy switch must take effect without an application restart."""
 
     _clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageLodPolicyChoice
+    from arrayscope.app.settings_state import MontageQualityPolicyChoice
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.zeros((3, 4, 5), dtype=np.float32))
@@ -207,7 +207,7 @@ def test_montage_lod_policy_change_applies_to_next_montage_session(qtbot):
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, indices=(0, 1, 2), text=":"))
         _process_events(qtbot)
-        expected = win.renderer._montage_lod_policy_mode()
+        expected = win.renderer._montage_quality_policy_mode()
         session = getattr(win.renderer, "_montage_session", None)
         if session is not None:
             assert str(session.lod_policy_mode) == expected
@@ -215,7 +215,7 @@ def test_montage_lod_policy_change_applies_to_next_montage_session(qtbot):
         _submenu_action(win, "Performance", "Montage LOD", "Native only").trigger()
         _process_events(qtbot)
         session = getattr(win.renderer, "_montage_session", None)
-        assert win.renderer._montage_lod_policy_mode() == "native-only"
+        assert win.renderer._montage_quality_policy_mode() == "native-only"
         if session is not None:
             # The menu change replaced the session so the new policy is live.
             assert str(session.lod_policy_mode) == "native-only"

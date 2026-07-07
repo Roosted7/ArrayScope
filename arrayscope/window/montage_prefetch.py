@@ -275,7 +275,7 @@ def _busy(window, session=None) -> bool:
         or getattr(session, "pending_removals", None)
         # Demanded-but-missing LOD levels of *visible* tiles outrank the
         # walk for lane capacity: speculation waits until they are drained.
-        or getattr(session, "pending_lod_requests", None)
+        or getattr(session, "pending_rung_materializations", None)
         or session.stage_fan_in.active_requests
     ):
         return True
@@ -368,7 +368,7 @@ def _invite_walk_continuation(window, *, delay_ms: int = 80) -> None:
 
 def _preview_cache_active(session) -> bool:
     return (
-        getattr(session, "lod_preview_pyramid", None) is not None
+        getattr(session, "pyramid_cache", None) is not None
         and int(getattr(session, "lod_preview_level", 0) or 0) > 0
     )
 
@@ -376,12 +376,12 @@ def _preview_cache_active(session) -> bool:
 def _preview_resident(session, tile) -> bool:
     """True when the pinned preview cache already holds this tile's plane."""
 
-    preview = getattr(session, "lod_preview_pyramid", None)
+    preview = getattr(session, "pyramid_cache", None)
     level = int(getattr(session, "lod_preview_level", 0) or 0)
     if preview is None or level <= 0:
         return False
     from arrayscope.display.pyramid import PyramidLevelKey
-    from arrayscope.window.montage_lod import floor_component_tags
+    from arrayscope.render.lod import floor_component_tags
 
     semantic_id = session.tile_semantic_source_id(int(tile.source_index))
     for component in floor_component_tags(session):
@@ -405,17 +405,17 @@ def _admit_walk_preview(session, tile, result) -> bool:
     index never duplicates the reduction.
     """
 
-    preview = getattr(session, "lod_preview_pyramid", None)
+    preview = getattr(session, "pyramid_cache", None)
     level = int(getattr(session, "lod_preview_level", 0) or 0)
     if preview is None or level <= 0:
         return False
     try:
         from arrayscope.window.frame_renderer import _rendered_tile_from_evaluation_result
-        from arrayscope.window.montage_lod import admit_preview_reduction
+        from arrayscope.render.lod import admit_retained_preview_level
 
         rendered = _rendered_tile_from_evaluation_result(tile, result)
         return bool(
-            admit_preview_reduction(
+            admit_retained_preview_level(
                 preview,
                 rendered,
                 semantic_source_id=session.tile_semantic_source_id(int(tile.source_index)),

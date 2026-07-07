@@ -40,11 +40,9 @@ from arrayscope.display.model.tile_priority import (
     prioritize_tile_numbers,
     tile_numbers,
 )
-from arrayscope.window import montage_lod
-from arrayscope.window.montage_lod import (  # noqa: F401  (re-exports; canonical home is montage_lod)
-    LodMaterializationRequest,
-    admit_ingest_reduction,
-    admit_preview_reduction,
+from arrayscope.render import lod as render_lod
+from arrayscope.render.lod import (  # noqa: F401  (re-exports; canonical home is render_lod)
+    RungMaterializationRequest,
     pyramid_key_for_rendered,
     texture_source_for_rendered,
     viewport_identity as _viewport_identity,
@@ -286,8 +284,8 @@ class LifecycleSkippedTiles(_LifecycleTileSetView):
         self._lifecycle.tile_unskipped(index)
 
 
-class LifecyclePendingLodRequests:
-    """List-like view over lifecycle-owned LOD residency claims.
+class LifecycleRungMaterializations:
+    """List-like view over lifecycle-owned rung residency claims.
 
     The request object carries worker input (source plane and reduction chain),
     but its existence is not a second truth source: the lifecycle record owns
@@ -356,7 +354,7 @@ class LifecyclePendingLodRequests:
         return bool(self._snapshot())
 
     def __eq__(self, other) -> bool:
-        if isinstance(other, LifecyclePendingLodRequests):
+        if isinstance(other, LifecycleRungMaterializations):
             return self._snapshot() == other._snapshot()
         if isinstance(other, (list, tuple)):
             return list(self._snapshot()) == list(other)
@@ -366,7 +364,7 @@ class LifecyclePendingLodRequests:
         return f"{type(self).__name__}({list(self._snapshot())!r})"
 
     def _apply_release_effects(self, effects) -> None:
-        pyramid = getattr(self._session, "lod_pyramid", None)
+        pyramid = getattr(self._session, "pyramid_cache", None)
         if pyramid is None:
             return
         for effect in tuple(effects or ()):
@@ -526,11 +524,11 @@ class MontageRenderSession:
     # Why native-only applies when the desired factor exceeds 1 (user policy
     # choice vs. resident LOD not yet adopted on the active backend).
     lod_native_reason: str | None = None
-    lod_pyramid: object | None = None
-    # List-like view over lifecycle-owned LOD materialization claims.  Filled
+    pyramid_cache: object | None = None
+    # List-like view over lifecycle-owned rung materialization claims.  Filled
     # only under the "resident" policy after a singleflight claim on the
     # pyramid cache; the lifecycle record, not this attribute, owns truth.
-    pending_lod_requests: list = field(default_factory=list)
+    pending_rung_materializations: list = field(default_factory=list)
     lod_materializations_completed: int = 0
     acknowledged_source_ids: set = field(default_factory=set)
     lod_floor_presentations: int = 0
@@ -550,7 +548,6 @@ class MontageRenderSession:
     # Bounded retry state for identity reconciliation:
     # tile -> ((shown_identity, wanted_identity), attempts).
     _reconcile_attempts: dict = field(default_factory=dict)
-    lod_preview_pyramid: object | None = None
     lod_preview_level: int = 0
     lod_preview_metadata: dict[object, PreviewFloorMetadata] = field(default_factory=dict)
     lod_preview_floor_scope: set[int] = field(default_factory=set)
@@ -631,8 +628,8 @@ class MontageRenderSession:
         )
         self.rendered_tiles = LifecycleRenderedTiles(self.lifecycle, self.rendered_tiles)
         self.attach_stage_fan_in(self.stage_fan_in)
-        self.pending_lod_requests = LifecyclePendingLodRequests(
-            self, self.pending_lod_requests
+        self.pending_rung_materializations = LifecycleRungMaterializations(
+            self, self.pending_rung_materializations
         )
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)
@@ -835,7 +832,7 @@ class MontageRenderSession:
         self.update_level_presentation_scope()
         # Re-decide LOD demands for the new sources; resident floors from the
         # window-agnostic pyramid identity re-present immediately.
-        self.refresh_lod_for_viewport()
+        self.mark_ladder_swaps_for_viewport()
         return {
             "hits": int(hits),
             "misses": int(misses),
@@ -1184,28 +1181,28 @@ class MontageRenderSession:
         )
 
     def _selected_lod_factor(self) -> int:
-        return montage_lod.selected_lod_factor(self)
+        return render_lod.selected_lod_factor(self)
 
     def _resident_lod_active(self) -> bool:
-        return montage_lod.resident_lod_active(self)
+        return render_lod.resident_lod_active(self)
 
     def presented_lod_summary(self) -> tuple[int, int, tuple[int, int]]:
-        """Plurality-presented (level, factor, factor_xy); see :mod:`montage_lod`."""
+        """Plurality-presented (level, factor, factor_xy); see :mod:`render_lod`."""
 
-        return montage_lod.presented_lod_summary(self)
+        return render_lod.presented_lod_summary(self)
 
     def ingest_lod_demand(self) -> object | None:
-        """Demand snapshot for worker-side reduce-at-ingest; see :mod:`montage_lod`."""
+        """Demand snapshot for worker-side reduce-at-ingest; see :mod:`render_lod`."""
 
-        return montage_lod.ingest_lod_demand(self)
+        return render_lod.ingest_lod_demand(self)
 
-    def refresh_lod_for_viewport(self) -> bool:
-        """Re-evaluate LOD demand after a camera-only retarget; see :mod:`montage_lod`."""
+    def mark_ladder_swaps_for_viewport(self) -> bool:
+        """Re-evaluate LOD demand after a camera-only retarget; see :mod:`render_lod`."""
 
-        return montage_lod.refresh_lod_for_viewport(self)
+        return render_lod.mark_ladder_swaps_for_viewport(self)
 
     def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
-        return montage_lod.session_resident_levels(self, previous_factor)
+        return render_lod.session_resident_levels(self, previous_factor)
 
     def tile_semantic_source_id(self, source_index) -> tuple[object, ...]:
         """Semantic content identity of one montage tile (ADR 0050).
@@ -1222,7 +1219,7 @@ class MontageRenderSession:
         return ("montage-tile", base, int(source_index))
 
     def _pyramid_key_for(self, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
-        return montage_lod.pyramid_key_for(self, rendered, demand=demand, level=level)
+        return render_lod.pyramid_key_for(self, rendered, demand=demand, level=level)
 
     def _lod_materialization_request(
         self,
@@ -1232,31 +1229,22 @@ class MontageRenderSession:
         level: int,
         key: PyramidLevelKey,
         native_source: np.ndarray | None = None,
-    ) -> LodMaterializationRequest:
-        return montage_lod.plan_materialization(
+    ) -> RungMaterializationRequest:
+        return render_lod.plan_materialization(
             self, rendered, demand=demand, level=level, key=key, native_source=native_source
         )
 
     def _floor_component_tags(self) -> tuple[str, ...]:
-        return montage_lod.floor_component_tags(self)
+        return render_lod.floor_component_tags(self)
 
     def _best_floor_key(self, source_index: int, *, tile_number: int | None = None):
-        return montage_lod.best_floor_key(self, source_index, tile_number=tile_number)
+        return render_lod.best_floor_key(self, source_index, tile_number=tile_number)
 
     def _floor_can_progress(self, tile_number: int, tile=None) -> bool:
-        return montage_lod.floor_can_progress(self, tile_number, tile=tile)
+        return render_lod.floor_can_progress(self, tile_number, tile=tile)
 
     def _ensure_floor_payloads(self, tile_numbers, *, max_count: int | None = None) -> None:
-        return montage_lod.ensure_floor_payloads(self, tile_numbers, max_count=max_count)
-
-    def preview_floor_cache(self):
-        return self.lod_preview_pyramid if self.lod_preview_pyramid is not None else self.lod_pyramid
-
-    def cache_for_floor_key(self, key):
-        preview = self.lod_preview_pyramid
-        if preview is not None and preview.peek(key) is not None:
-            return preview
-        return self.lod_pyramid
+        return render_lod.ensure_floor_payloads(self, tile_numbers, max_count=max_count)
 
     def preview_floor_metadata(self, key) -> PreviewFloorMetadata | None:
         return self.lod_preview_metadata.get(key)
@@ -1273,12 +1261,12 @@ class MontageRenderSession:
         level_data=None,
         level_stats=None,
     ) -> bool:
-        cache = self.preview_floor_cache()
+        cache = self.pyramid_cache
         if cache is None:
             return False
         cache.admit(key, plane)
         if histogram is not None:
-            cache.admit(montage_lod.histogram_key_for_level_key(key), histogram)
+            cache.admit(render_lod.histogram_key_for_level_key(key), histogram)
         metadata = PreviewFloorMetadata(
             shader_mapping=shader_mapping,
             texture_kind=texture_kind,
@@ -1298,7 +1286,7 @@ class MontageRenderSession:
         self.lod_preview_floor_scope.update(int(tile) for tile in tuple(tile_numbers or ()))
 
     def release_preview_claim(self, tile_number: int, key) -> None:
-        cache = self.preview_floor_cache()
+        cache = self.pyramid_cache
         effects = self.lifecycle.level_declined(int(tile_number), key)
         if cache is not None:
             for effect in effects:
@@ -1350,7 +1338,7 @@ class MontageRenderSession:
         source: np.ndarray,
         histogram: np.ndarray | None,
     ) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
-        return montage_lod.resident_texture_for_rendered_tile(self, rendered, source=source, histogram=histogram)
+        return render_lod.resident_texture_for_rendered_tile(self, rendered, source=source, histogram=histogram)
 
     def _texture_for_rendered_tile(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
         source, histogram, _texture_kind = self._texture_source_for(rendered)
@@ -1911,7 +1899,7 @@ class MontageRenderSession:
         requeued = 0
         for index in sorted(orphaned):
             tile = by_number.get(int(index))
-            # Orphan requeue is an evaluation repair only.  LOD residency
+            # Orphan requeue is an evaluation repair only.  rung residency
             # claims release through the materialization/session-replacement
             # paths; never silently drop an unexpected effect here.
             if self.lifecycle.evaluation_declined(int(index)):

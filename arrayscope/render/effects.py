@@ -9,7 +9,6 @@ the legacy methods while keeping all Qt/backend work out of the module.
 from __future__ import annotations
 
 from dataclasses import replace
-import os
 from time import perf_counter
 from types import SimpleNamespace
 
@@ -47,7 +46,7 @@ from arrayscope.operations.slabs import (
 from arrayscope.operations.source_read import read_base_region
 from arrayscope.presentation import LevelPhase
 from arrayscope.render.ladder import TileLodState
-from arrayscope.window import montage_lod
+from arrayscope.render import lod as render_lod
 
 
 def evaluate_exact_tile(
@@ -215,14 +214,14 @@ def evaluate_preview_tile(
         tile,
         replace(result, value=value, compute_path="preview_reduced_input"),
     )
-    key = montage_lod.pyramid_key_for_rendered(
+    key = render_lod.pyramid_key_for_rendered(
         rendered,
         demand=demand,
         level=level,
         semantic_source_id=semantic_source_id,
         shader_display=bool(shader_display),
     )
-    source, _histogram, _kind = montage_lod.texture_source_for_rendered(
+    source, _histogram, _kind = render_lod.texture_source_for_rendered(
         rendered,
         shader_display=bool(shader_display),
     )
@@ -342,14 +341,14 @@ def evaluate_shared_preview(
             level_data=getattr(value, "level_data", None),
             level_stats=getattr(value, "level_stats", None),
         )
-        key = montage_lod.pyramid_key_for_rendered(
+        key = render_lod.pyramid_key_for_rendered(
             rendered,
             demand=demand,
             level=level,
             semantic_source_id=session.tile_semantic_source_id(tile.source_index),
             shader_display=bool(shader_display),
         )
-        source, _histogram, _kind = montage_lod.texture_source_for_rendered(
+        source, _histogram, _kind = render_lod.texture_source_for_rendered(
             rendered,
             shader_display=bool(shader_display),
         )
@@ -383,10 +382,7 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
     rendered_tiles = dict(getattr(session, "rendered_tiles", {}) or {})
     visible_numbers = set(getattr(session, "visible_tile_numbers", ()) or ())
     focus = _viewport_focus(getattr(session, "view_range", None))
-    preview_cache = None
-    preview_cache_fn = getattr(session, "preview_floor_cache", None)
-    if callable(preview_cache_fn):
-        preview_cache = preview_cache_fn()
+    preview_cache = getattr(session, "pyramid_cache", None)
     for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
         tile_number = int(tile.montage_index)
         if allowed is not None and tile_number not in allowed:
@@ -829,14 +825,14 @@ def _evaluate_tile_native_output_preview(
         tile,
         replace(result, value=value, compute_path="preview_native_output_reduction"),
     )
-    key = montage_lod.pyramid_key_for_rendered(
+    key = render_lod.pyramid_key_for_rendered(
         rendered,
         demand=demand,
         level=level,
         semantic_source_id=semantic_source_id,
         shader_display=bool(shader_display),
     )
-    source, _histogram, _kind = montage_lod.texture_source_for_rendered(
+    source, _histogram, _kind = render_lod.texture_source_for_rendered(
         rendered,
         shader_display=bool(shader_display),
     )
@@ -896,15 +892,9 @@ def _display_axis_region_for_preview(view_state, axis: int, size: int) -> AxisRe
 
 
 def _shared_transform_preview_enabled() -> bool:
-    """Default ON (decision 2026-07): the shared floor is pass 1 for
-    non-commuting pipelines — ONE reduced-volume evaluation fanned out to
-    every tile, restoring the two-pass fill FFT users expect at ~1/N of the
-    per-tile-native cost that was removed from the ladder. Env var is a
-    temporary opt-out for A/B only; delete the fork in R3 with the numbers.
-    """
+    """Shared transform preview is an R3 pipeline path, not a runtime fork."""
 
-    value = str(os.environ.get("ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW", "")).strip().lower()
-    return value not in {"0", "false", "no", "off"}
+    return True
 
 
 def _shared_preview_axis_override(session, tiles):

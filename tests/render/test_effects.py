@@ -60,8 +60,7 @@ def _session(data=None):
         lifecycle=TileLifecycle(),
         rendered_tiles={},
         tile_presentation_state=SimpleNamespace(payloads={}),
-        lod_pyramid=None,
-        lod_preview_pyramid=None,
+        pyramid_cache=None,
         tile_semantic_source_id=lambda source_index: ("semantic", int(source_index)),
     )
 
@@ -235,8 +234,8 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
     session = _session()
     demand = _demand(1)
     tile = session.plan.tiles[2]
-    session.lod_pyramid = PyramidCache(max_entries=8)
-    session.lod_preview_pyramid = PyramidCache(max_entries=8)
+    session.pyramid_cache = PyramidCache(max_entries=8)
+    session.pyramid_cache = PyramidCache(max_entries=8)
     rendered = effects.rendered_tile_from_evaluation_result(
         tile,
         effects.evaluate_exact_tile(
@@ -248,13 +247,13 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
         ),
     )
     session.rendered_tiles[int(tile.montage_index)] = rendered
-    level_key = effects.montage_lod.pyramid_key_for(
+    level_key = effects.render_lod.pyramid_key_for(
         session,
         rendered,
         demand=demand,
         level=1,
     )
-    session.lod_pyramid.admit(level_key, np.ones((2, 3), dtype=np.float32))
+    session.pyramid_cache.admit(level_key, np.ones((2, 3), dtype=np.float32))
     preview_key = effects.preview_claim_key(
         session,
         tile,
@@ -262,8 +261,8 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
         semantic_source_id=session.tile_semantic_source_id(tile.source_index),
         shader_display=False,
     )
-    session.lod_preview_pyramid.admit(preview_key, np.ones((2, 3), dtype=np.float32))
-    session.preview_floor_cache = lambda: session.lod_preview_pyramid
+    session.pyramid_cache.admit(preview_key, np.ones((2, 3), dtype=np.float32))
+    session.preview_floor_cache = lambda: session.pyramid_cache
 
     state = {
         state.tile_number: state

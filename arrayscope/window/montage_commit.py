@@ -18,6 +18,7 @@ from arrayscope.display.model.commit import CommitKind, DisplayPayload, Presenta
 from arrayscope.display.model.frame import TiledValueSource
 from arrayscope.display.montage import montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
+from arrayscope.display.pyramid import reduce_box_mean
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.chunked_stage import (
@@ -57,6 +58,7 @@ class MontagePipelineEffects:
         # purpose). A *different* level is allowed through: the supersession
         # family stales the old instance.
         self._pending_previews: dict[tuple[int, int], int] = {}
+        self._pending_materializations: dict[tuple[int, int, int], object] = {}
 
     def evaluate_rung(self, intent, step):
         if not self._session_is_current(intent):
@@ -86,6 +88,23 @@ class MontagePipelineEffects:
 
             return evaluate_preview
 
+        materialization_key = (int(step.tile_number), int(step.rung), int(step.level))
+        request = self._pending_materializations.get(materialization_key)
+        if step.rung == Rung.DESIRED and request is not None:
+            pyramid = getattr(session, "pyramid_cache", None)
+
+            def evaluate_materialization(token=None, request=request, pyramid=pyramid):
+                if pyramid is None:
+                    return None
+                plane = request.source
+                for level_key, rel in tuple(getattr(request, "chain", ()) or ((request.key, request.reduce_factor_xy),)):
+                    plane = reduce_box_mean(plane, rel)
+                    if level_key is not None:
+                        plane = pyramid.admit(level_key, plane)
+                return ("materialized", request)
+
+            return evaluate_materialization
+
         def evaluate_exact(token=None):
             return render_effects.evaluate_exact_tile(
                 session,
@@ -113,6 +132,31 @@ class MontagePipelineEffects:
             if self._pending_previews.get(pending_key) == int(step.level):
                 return False  # identical rung already in flight
             self._pending_previews[pending_key] = int(step.level)
+            return True
+        if step.rung == Rung.DESIRED and int(step.level) > 0 and tile_number in self.session.rendered_tiles:
+            materialization_key = (tile_number, int(step.rung), int(step.level))
+            if materialization_key in self._pending_materializations:
+                return False
+            pyramid = getattr(self.session, "pyramid_cache", None)
+            if pyramid is None:
+                return False
+            rendered = self.session.rendered_tiles.get(tile_number)
+            demand = self.session.lod_policy_decision.demand
+            level_key = self.session._pyramid_key_for(rendered, demand=demand, level=int(step.level))
+            if pyramid.peek(level_key) is not None:
+                self.session.lifecycle.level_resident(tile_number, level_key)
+                return False
+            if not pyramid.begin_pending(level_key):
+                return False
+            request = self.session._lod_materialization_request(
+                rendered,
+                demand=demand,
+                level=int(step.level),
+                key=level_key,
+            )
+            self.session.pending_rung_materializations.append(request)
+            self.session.pending_rung_materializations.mark_started(request)
+            self._pending_materializations[materialization_key] = request
             return True
         if step.rung in (Rung.DESIRED, Rung.EXACT):
             if tile_number in self.session.rendered_tiles or tile_number in self.session.skipped_tiles:
@@ -144,6 +188,14 @@ class MontagePipelineEffects:
             if self._pending_previews.get(pending_key) == int(step.level):
                 self._pending_previews.pop(pending_key, None)
             return
+        if step.rung == Rung.DESIRED:
+            materialization_key = (tile_number, int(step.rung), int(step.level))
+            request = self._pending_materializations.pop(materialization_key, None)
+            if request is not None:
+                self.session.pending_rung_materializations._apply_release_effects(
+                    self.session.pending_rung_materializations.release(request)
+                )
+                return
         if step.rung in (Rung.DESIRED, Rung.EXACT):
             self.session.active_tile_requests.discard(tile_number)
             self.session.loading_tiles.discard(tile_number)
@@ -371,6 +423,14 @@ class MontagePipelineEffects:
             step, payload = row
             if payload is None:
                 continue
+            if (
+                step.rung == Rung.DESIRED
+                and isinstance(payload, tuple)
+                and len(payload) == 2
+                and payload[0] == "materialized"
+            ):
+                self._admit_materialized_rung(step, payload[1])
+                continue
             tile = self._tile_for_step(step)
             if tile is None:
                 continue
@@ -381,6 +441,20 @@ class MontagePipelineEffects:
             if self._pending_previews.get(pending_key) == int(step.level):
                 self._pending_previews.pop(pending_key, None)
             self._admit_preview_payload(int(step.tile_number), payload)
+
+    def _admit_materialized_rung(self, step, request) -> None:
+        tile_number = int(step.tile_number)
+        materialization_key = (tile_number, int(step.rung), int(step.level))
+        self._pending_materializations.pop(materialization_key, None)
+        self.session.pending_rung_materializations.mark_resident(request)
+        self.session.lod_materializations_completed = (
+            int(getattr(self.session, "lod_materializations_completed", 0) or 0) + 1
+        )
+        if tile_number in self.session.rendered_tiles:
+            self.session.dirty_payloads[tile_number] = None
+            self.session.flush_pending = True
+            self.session.final_commit_pending = True
+        self.renderer.request_montage_replan(self.session)
 
     def _admit_evaluation_result(self, tile, result) -> int:
         session = self.session
@@ -481,7 +555,7 @@ class MontagePipelineEffects:
                 if previous_payloads:
                     session.seed_display_tile_payloads(previous_payloads, tile_source_ids, tile_numbers=tuple(session.dirty_payloads))
                     if reuse_any_lod:
-                        session.refresh_lod_for_viewport()
+                        session.mark_ladder_swaps_for_viewport()
             base_tile_state = session.tile_presentation_state
             fast_drain = persistent_tile_layer_fast_drain_enabled(renderer, session)
             renderer._persistent_tile_layer_fast_drain_last_enabled = bool(fast_drain)
@@ -508,7 +582,7 @@ class MontagePipelineEffects:
                 session.final_commit_pending = False
                 session.flush_pending = False
                 renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-                renderer.materialize_montage_lod(session)
+                renderer.request_montage_replan(session)
                 return
             if self._empty_progressive_commit_settled(first_display_commit, explicit_auto, tile_delta):
                 session.final_commit_pending = False
@@ -791,7 +865,7 @@ class MontagePipelineEffects:
     def _finish_commit(self, report, tile_state, *, commit_start: float) -> None:
         renderer = self.renderer
         session = self.session
-        renderer.materialize_montage_lod(session)
+        renderer.request_montage_replan(session)
         identity_start = perf_counter()
         identity_mismatches = session.backend_identity_mismatch_tiles()
         renderer._last_montage_tile_identity_check_ms = (perf_counter() - identity_start) * 1000.0
@@ -907,7 +981,7 @@ class MontagePipelineEffects:
             from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 
             schedule_near_viewport_montage_prefetch(self.renderer, session)
-        self.renderer.materialize_montage_lod(session)
+        self.renderer.request_montage_replan(session)
         self.renderer._retry_live_profile_after_montage_tile()
 
     def _tile_for_step(self, step):

@@ -15,9 +15,10 @@ The main rules are:
 orchestration described in parts of this document. New execution goes
 through `arrayscope/kernel` (one scheduler: priorities, dependencies, lanes,
 supersession, one GUI fan-in) and `arrayscope/render` (typed pipeline
-stages, the unified LOD ladder, MontagePipeline). `RenderOrchestrator`,
-`FrameRenderMixin`, and `montage_lod` remain deletion targets; WorkGraph and
-the controller internals were removed in R1. See
+stages, the unified LOD ladder, MontagePipeline). `window/montage_lod.py` is
+deleted by R3; `RenderOrchestrator` / `FrameRenderMixin` slimming and
+level-stat timer cleanup remain redesign targets. WorkGraph and the
+controller internals were removed in R1. See
 [ADR 0053](decisions/0053-execution-kernel-and-modular-pipeline.md) and the
 [redesign plans](redesign/README.md). Sections below describing remaining
 legacy orchestration are accurate for `main` and are rewritten in plan R5.
@@ -281,8 +282,8 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 
 ## Known architectural debt
 
-The dominant debt — split scheduling, GUI-thread fan-in, and the
-frame_renderer/montage_lod god-modules — is being retired by the redesign
+The dominant debt — split scheduling, GUI-thread fan-in, and the former
+frame-renderer LOD god-module shape — is being retired by the redesign
 plans ([R1–R5](redesign/README.md)); track it there, not here. Debt that
 survives the redesign:
 

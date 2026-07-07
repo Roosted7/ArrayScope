@@ -1,9 +1,4 @@
-"""Montage histogram and level-stat maintenance for the renderer.
-
-This is the one intentional R2/R3 temporary dual path: presentation now flows
-through the render pipeline, while level metadata still uses the existing
-semantic evidence tracker until LevelStatsService lands in R3.
-"""
+"""Montage histogram and level-stat maintenance for the render pipeline."""
 
 from __future__ import annotations
 
@@ -36,7 +31,7 @@ MONTAGE_LEVEL_STATS_BACKGROUND_BATCH = 4
 MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS = 4.0
 
 
-class MontageLevelStatsMixin:
+class LevelStatsService:
     def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
         return montage_level_key(
             _document_key(document),

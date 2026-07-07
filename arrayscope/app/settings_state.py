@@ -36,7 +36,7 @@ class ImageRenderingBackendChoice(Enum):
     VISPY = "vispy"
 
 
-class MontageLodPolicyChoice(Enum):
+class MontageQualityPolicyChoice(Enum):
     NATIVE_ONLY = "native-only"
     RESIDENT = "resident"
 
@@ -49,7 +49,7 @@ class AppSettingsState:
     fft_backend: FFTBackendChoice = FFTBackendChoice.AUTO
     fft_workers: FFTWorkersChoice = FFTWorkersChoice.AUTO
     image_rendering_backend: ImageRenderingBackendChoice = ImageRenderingBackendChoice.AUTO
-    montage_lod_policy: MontageLodPolicyChoice = MontageLodPolicyChoice.RESIDENT
+    montage_quality_policy: MontageQualityPolicyChoice = MontageQualityPolicyChoice.RESIDENT
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
 
@@ -63,7 +63,7 @@ def settings_from_mapping(values) -> AppSettingsState:
         fft_backend=normalize_fft_backend_choice(values.get("fft_backend")),
         fft_workers=normalize_fft_workers_choice(values.get("fft_workers")),
         image_rendering_backend=normalize_image_rendering_backend_choice(values.get("image_rendering_backend")),
-        montage_lod_policy=normalize_montage_lod_policy_choice(values.get("montage_lod_policy")),
+        montage_quality_policy=normalize_montage_quality_policy_choice(values.get("montage_quality_policy")),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(values.get("render_memory_budget_mb", 512)),
     )
@@ -77,7 +77,7 @@ def settings_to_mapping(settings: AppSettingsState):
         "fft_backend": settings.fft_backend.value,
         "fft_workers": settings.fft_workers.value,
         "image_rendering_backend": settings.image_rendering_backend.value,
-        "montage_lod_policy": settings.montage_lod_policy.value,
+        "montage_quality_policy": settings.montage_quality_policy.value,
         "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
     }
@@ -121,17 +121,17 @@ def normalize_image_rendering_backend_choice(value) -> ImageRenderingBackendChoi
     except Exception:
         return ImageRenderingBackendChoice.AUTO
 
-def normalize_montage_lod_policy_choice(value) -> MontageLodPolicyChoice:
-    if isinstance(value, MontageLodPolicyChoice):
+def normalize_montage_quality_policy_choice(value) -> MontageQualityPolicyChoice:
+    if isinstance(value, MontageQualityPolicyChoice):
         return value
     value = getattr(value, "value", value)
     try:
-        return MontageLodPolicyChoice(str(value))
+        return MontageQualityPolicyChoice(str(value))
     except Exception:
         # ADR 0050: resident is the montage default; native-only remains the
         # explicit fallback policy (and the effective one on non-VisPy
         # backends via the frame renderer capability gate).
-        return MontageLodPolicyChoice.RESIDENT
+        return MontageQualityPolicyChoice.RESIDENT
 
 
 def normalize_render_memory_budget_mb(value) -> int:

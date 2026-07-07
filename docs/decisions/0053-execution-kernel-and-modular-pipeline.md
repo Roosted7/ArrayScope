@@ -75,14 +75,17 @@ R2 ports the live montage path into this contract: Qt-free evaluation
 effects, lifecycle-backed tile-state snapshots, stage fan-in as kernel
 dependencies, commit batches applied through `present_tiled`, and the
 diagnostics-only stall assertion probe. `frame_renderer.py` is below the R2
-line gate (1,888 lines). The remaining planned dual path is montage
-level-stat publication, which R3 replaces with a LevelStatsService.
+line gate (1,888 lines). R3 moved LOD convergence into the pipeline ladder,
+deleted `window/montage_lod.py`, collapsed montage residency to one
+`PyramidCache`, and moved montage level-stat maintenance to
+`render/level_stats.py`; R4 owns the remaining timer-to-kernel cleanup for
+level-stat publication.
 
 ### Unified LOD ladder (`render/ladder.py`)
 
-FLOOR → PREVIEW → DESIRED → EXACT, one pure planner replacing the four
-scattered answers (montage_lod planning, frame_renderer preview/floor
-methods, ingest-reduction admission, native-only checks). Invariants:
+FLOOR → PREVIEW → DESIRED → EXACT, one pure planner replacing the former
+scattered answers (materialization planning, preview/floor methods,
+ingest-reduction admission, native-only checks). Invariants:
 coarse before fine within and across tiles (floor-first fill generalized),
 nothing committable is recomputed, resident levels come only from
 acknowledged lifecycle claims, exact inspection always native, operations
@@ -103,9 +106,10 @@ waiter.
 
 `core/work_graph.py`, `core/scheduler.py` (compat aliases already point at
 the kernel), `window/evaluation_controller.py` (after R1),
-`window/frame_renderer.py` and `window/montage_lod.py` dissolved per the
+`window/frame_renderer.py` dissolved per the
 [method map](../redesign/frame-renderer-map.md) (R2/R3; R2 clusters B/C/E
-complete, R3 owns the remaining LOD/level-stats split), pacing-governor
+complete, R3 deleted `window/montage_lod.py` and moved level stats to
+`render/level_stats.py`), pacing-governor
 batch machinery reduced to governor-as-telemetry (R4). Tests pinning
 deleted machinery are deleted with it (R5) — a test asserting timer pacing
 of work the kernel now schedules is a wrong-path signpost, not coverage.

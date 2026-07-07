@@ -1,7 +1,7 @@
 """The modular rendering pipeline (redesign R2/R3).
 
 This package replaces the monolithic `window/frame_renderer.py` +
-`window/montage_lod.py` orchestration with modular chunks, each owning one
+legacy window-level LOD orchestration with modular chunks, each owning one
 well-defined task and its state:
 
 - `render.stages`   — typed boundaries between pipeline stages. Data only.

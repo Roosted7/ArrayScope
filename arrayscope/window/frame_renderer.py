@@ -47,7 +47,7 @@ from arrayscope.window.montage_payload_cache import (
 )
 from arrayscope.window import montage_commit
 from arrayscope.window.montage_commit import MontagePipelineEffects
-from arrayscope.window.montage_level_stats import MontageLevelStatsMixin
+from arrayscope.render.level_stats import LevelStatsService
 from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.montage_runtime import MontageRuntimeMixin
 from arrayscope.window.montage_viewport import (
@@ -60,7 +60,7 @@ from arrayscope.window.montage_viewport import (
     remap_montage_roi_selections,
     retarget_montage_viewport_plan,
 )
-from arrayscope.window import montage_lod
+from arrayscope.render import lod as render_lod
 from arrayscope.window.montage_session import MontageRenderSession
 from arrayscope.window.render_contract import (
     session_token_is_current as _session_token_is_current,
@@ -70,7 +70,7 @@ from arrayscope.display.planning import LevelSourceRank, fallback_level_source, 
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
 MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
-class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
+class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
     def _interactive_frame_cache_hit(self) -> bool:
         view_state = getattr(self.win, "view_state", None)
         if view_state is None or view_state.image_axes is None:
@@ -349,9 +349,8 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
             memory_policy=self._memory_policy() if hasattr(self, "_memory_policy") else None,
             montage_plan=viewport_plan.plan,
         )
-        lod_swap_ready = session.refresh_lod_for_viewport()
-        if getattr(session, "pending_lod_requests", None):
-            self.materialize_montage_lod(session)
+        lod_swap_ready = session.mark_ladder_swaps_for_viewport()
+        self.retarget_montage_pipeline(session)
         if presentation_changed or lod_swap_ready:
             self._commit_montage_resize_presentation_retarget(session)
         return True
@@ -499,7 +498,7 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
         defer_stage_planning = bool(
             missing_tiles
             and _viewport_interaction_active(self)
-            and self._montage_lod_policy_mode() == LOD_POLICY_RESIDENT
+            and self._montage_quality_policy_mode() == LOD_POLICY_RESIDENT
             and previous_session is not None
             # Only a predecessor that actually committed montage content can
             # carry the screen through the burst (floors/retained payloads).
@@ -538,9 +537,9 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
         )
         session_id = int(getattr(self, "_montage_session_id", 0)) + 1
         self._montage_session_id = session_id
-        lod_policy_mode = self._montage_lod_policy_mode()
+        lod_policy_mode = self._montage_quality_policy_mode()
         lod_preview_level = (
-            preview_level_for_tile_shape(plan.tile_shape, min_level=montage_lod.PREVIEW_FLOOR_MIN_LEVEL)
+            preview_level_for_tile_shape(plan.tile_shape, min_level=render_lod.PREVIEW_FLOOR_MIN_LEVEL)
             if lod_policy_mode == LOD_POLICY_RESIDENT
             else 0
         )
@@ -587,11 +586,10 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
             repeated_expensive_stage_per_tile=stage_plan["repeated_expensive_stage_per_tile"],
             priority_focus=viewport_plan.priority_focus,
             lod_policy_mode=lod_policy_mode,
-            lod_native_reason=montage_lod.native_policy_reason_for_renderer(self),
-            lod_preview_pyramid=(self._montage_lod_preview_pyramid() if lod_preview_level else None),
+            lod_native_reason=render_lod.native_policy_reason_for_renderer(self),
             lod_preview_level=lod_preview_level,
-            lod_pyramid=(
-                self._montage_lod_pyramid() if lod_policy_mode == LOD_POLICY_RESIDENT else None
+            pyramid_cache=(
+                self._montage_pyramid_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
             ),
         )
         session.shader_display = bool(shader_display)
@@ -601,7 +599,7 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
         # singleflight claims in the shared pyramid; scrubbing back to the
         # same slice would find those levels permanently claimed (stale
         # wrong-LOD tiles).  Balance them before the replacement takes over.
-        montage_lod.release_session_claims(getattr(self, "_montage_session", None))
+        render_lod.release_session_claims(getattr(self, "_montage_session", None))
         # Backend slots outlive sessions (persistent tile residency), so the
         # identity ground truth from the last report stays valid — but a fresh
         # session started with last_presented_identities EMPTY, blind to
@@ -741,7 +739,7 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
             return _reject("skipped-tiles")
         if _document_key(session.document) != _document_key(document):
             return _reject("document")
-        if session.lod_policy_mode != self._montage_lod_policy_mode():
+        if session.lod_policy_mode != self._montage_quality_policy_mode():
             return _reject("lod-policy")
         if session.window_mode != window_mode:
             return _reject("window-mode")
@@ -864,7 +862,7 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
         # Undrained pyramid claims from the old window are balanced exactly as
         # on a rebirth; source identities are window-agnostic, so re-plans
         # re-claim cheaply.
-        montage_lod.release_session_claims(session)
+        render_lod.release_session_claims(session)
         session_id = int(getattr(self, "_montage_session_id", 0)) + 1
         self._montage_session_id = session_id
         setup_start = perf_counter()
@@ -959,7 +957,7 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
         # already on screen, which is what read as black/placeholder flashes
         # during LOD transitions.  The session re-selects the presented level
         # from live demand and streams the swap.
-        reuse_any_lod = self._montage_lod_policy_mode() == LOD_POLICY_RESIDENT
+        reuse_any_lod = self._montage_quality_policy_mode() == LOD_POLICY_RESIDENT
         retained_store = self._retained_tiled_payload_store()
         previous_payloads = retained_store.payloads_by_base_source(
             lod_factor=None if reuse_any_lod else selected_lod_factor
@@ -1013,8 +1011,8 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
         if cached_tiles and reuse_any_lod:
             # Each cached resolve under the resident LOD policy is a pipeline
             # evaluation a display-LOD-driven rebuild did not have to run.
-            self._montage_lod_pipeline_reruns_avoided = int(
-                getattr(self, "_montage_lod_pipeline_reruns_avoided", 0) or 0
+            self._montage_quality_pipeline_reruns_avoided = int(
+                getattr(self, "_montage_quality_pipeline_reruns_avoided", 0) or 0
             ) + len(cached_tiles)
         return cached_tiles, missing_tiles
 
@@ -1086,9 +1084,8 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
         # already-resident levels swap on the next commit and missing levels
         # are scheduled now, superseded by the new viewport revision (ADR
         # 0050).  Demand math only; reduction stays on worker lanes.
-        lod_swap_ready = session.refresh_lod_for_viewport()
-        if getattr(session, "pending_lod_requests", None):
-            self.materialize_montage_lod(session)
+        lod_swap_ready = session.mark_ladder_swaps_for_viewport()
+        self.retarget_montage_pipeline(session)
         additions = viewport_plan.prioritize_tiles(additions)
         self._prune_stale_montage_tile_work(session)
         if not additions:
@@ -1303,9 +1300,6 @@ class FrameRenderMixin(MontageRuntimeMixin, MontageLevelStatsMixin):
         schedule_refresh = getattr(self.win, "_schedule_refresh_inspection_dock", None)
         if callable(schedule_refresh):
             schedule_refresh("montage-layout-reflow")
-
-    def _on_montage_lod_level_ready(self, session_id, session_key, tile_number) -> None:
-        return montage_lod.on_level_ready(self, session_id, session_key, tile_number)
 
     def apply_montage_presentation(self, session) -> None:
         if not self._montage_session_is_current(session):
@@ -1735,7 +1729,7 @@ def _preview_floor_blocks_exact_submission(session, tile) -> bool:
 
 
 def _claim_preview_floor(session, tile_number: int, key) -> bool:
-    cache = session.preview_floor_cache()
+    cache = getattr(session, "pyramid_cache", None)
     if cache is None:
         return False
     tile_number = int(tile_number)

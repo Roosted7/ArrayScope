@@ -325,6 +325,30 @@ def test_production_lod_has_no_synchronous_pyramid_entrypoints():
     assert offenders == []
 
 
+def test_r3_lod_ladder_deletes_legacy_montage_lod_path():
+    assert not (ROOT / "arrayscope" / "window" / "montage_lod.py").exists()
+    assert not (ROOT / "arrayscope" / "window" / "montage_level_stats.py").exists()
+    forbidden = (
+        "montage_lod",
+        "_montage_lod_",
+        "pending_lod_requests",
+        "lod_preview_pyramid",
+        "ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW",
+        "admit_ingest_reduction",
+        "admit_preview_reduction",
+    )
+    offenders = []
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(ROOT)
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in text:
+                offenders.append(f"{rel}:{token}")
+    assert offenders == []
+
+
 def test_image_view_graphics_items_are_added_only_by_layer_owner():
     offenders = []
     allowed = {Path("arrayscope/display/layers.py")}
