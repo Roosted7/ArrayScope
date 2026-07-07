@@ -249,3 +249,23 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
 
     assert state.resident_levels == (1,)
     assert state.floor_available is True
+
+
+def test_pipeline_effects_tile_states_uses_lifecycle_snapshot():
+    from arrayscope.window.montage_commit import MontagePipelineEffects
+
+    session = _session()
+    level_key = PyramidLevelKey(
+        source_id=("semantic", 0),
+        tile_id=0,
+        component="scalar",
+        level_xy=(2, 2),
+    )
+    session.lifecycle.level_claimed(0, level_key, ClaimOwner.EVALUATION)
+    session.lifecycle.level_resident(0, level_key)
+    bridge = MontagePipelineEffects(SimpleNamespace(win=SimpleNamespace()), session)
+
+    states = bridge.tile_states(None, _demand(2))
+
+    by_tile = {state.tile_number: state for state in states}
+    assert by_tile[0].resident_levels == (2,)
