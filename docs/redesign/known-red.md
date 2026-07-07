@@ -21,6 +21,40 @@ root-cause fixes in 4464a6e4. Do not weaken the gate to match results
 | `test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots` | pins an unimplemented optimization: skip redundant re-window when an exact payload arrives already windowed at the commit levels, with LAZY rgb_base rebuild on the first level change. The WIP dtype-sniff faked it and broke the rewindow contract. NOTE (0ab0bf25): the windowing rule itself is now settled — only histogram-less RGB planes are immutable; planes with reduced histograms rewindow (fixed the saturated resident-LOD complex tiles). Only the skip-redundant optimization remains open | R2b item 4 — implement via payload evaluation-levels metadata, or move the test to R3 and delete the optimization claim |
 | `test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_image_item` | one image replacement sneaks into a level drag on large complex montages (same windowing seam as above) | R2b item 4 |
 
+## Scroll-scrub convergence stall (fast index retarget) — PRIORITY
+
+**Repro (offscreen, deterministic):** `profile_montage_workflow`
+`montage_scroll_scrub` phase — `scroll_fast_settled=False`: a full-window
+index jump (100:150 → 150:200) does not settle in 20 s. User-visible as the
+"hang with wrong levels, one stuck tile, then all tiles glitch" report and
+the single un-converged tile in the 2026-07 screenshot.
+
+**Root cause (traced, not guessed):** the index-scrub fast path
+`MontageRenderSession.retarget_index_window` REUSES the session for the new
+index window and demotes every tile whose new content isn't cached
+(`rendered_tiles.pop` + `loading_tiles.add` + `pending_removals` +
+`dirty`, montage_index is grid position so all 50 slots turn over). It then
+relies on fresh evaluations to re-materialize them. Under the R2 async
+pipeline those evaluations complete in the kernel (`display_preparation`
+lane: 50 completed) but do NOT re-enter `mark_materialized` for the reused
+session — the tiles stay in `loading` with `rendered_tiles` emptied,
+`active_tile_requests=0`, nothing in flight: a lost-wakeup at the
+retarget↔pipeline seam. This is the same optimization that used to carry the
+`ARRAYSCOPE_DISABLE_SCRUB_FASTPATH` kill switch (removed in redesign
+hygiene); its interaction with the pipeline is the defect.
+
+**Fix owner: R3** (viewport/index-scoped retarget through the pipeline). Two
+candidate approaches, decide with the benchmark: (a) route index-window
+changes through a full session rebuild (correct, slower — measure the cost
+on the scroll stage), or (b) make `retarget_index_window` submit its demoted
+tiles through `pipeline.retarget` and gate loading→presented on the pipeline
+acks like the fresh-session path does. Do NOT reinstate a kill switch.
+
+**Also present (smaller, same class):** even without scrubbing, ~1/120 tiles
+can reach a resident demanded level but stay presented at native with no
+dirty flag; a forced retarget does not converge it (level-completion
+lost-wakeup). Likely the same seam; fix together in R3.
+
 ## Known-slow / wedge evidence (not test failures)
 
 | symptom | evidence | resolved by |
