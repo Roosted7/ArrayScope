@@ -86,18 +86,12 @@ presentation, residency, backend defaults, and multi-resolution policy evidence-
 devices. The ordered gates and active LOD queue live in the [roadmap](roadmap.md); detailed
 history and rationale live in ADR 0050 and ADR 0051.
 
-Inside X5, montage tiled scenes now have resident asynchronous LOD on VisPy and a single-owner
-tile lifecycle for presentation, semantic identity, and demanded-level residency claims.
-PyQtGraph resident LOD is implemented but remains opt-in: it makes level changes more than
-2x faster, while cold settle still needs measured proof before it can become a default. The
-first preview-quality reduced display/evaluation slice now evaluates `lod-commuting` tiled
-montage work on reduced input and presents an honest `quality="preview"` payload with exact
-semantic planes absent; native `quality="exact"` payloads still refine through the ordinary
-lifecycle. RGB preview floors now retain display histogram planes for level re-windowing. The
-axis-aware and opaque preview evaluator pieces exist, but shared non-display transform previews are
-default-off (`ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW`) because the measured path competed with exact
-FFT work. PyQtGraph cold tile-layer commits and level-only re-windowing now use the dynamic
-priority/chunking path instead of all-at-once or tile-id row/column presentation. Progressive
-PyQtGraph tile commits no longer rebuild aggregate histogram samples after the first display commit;
-visible Wayland evidence on 2026-07-06 put scalar first-visible-to-full-visible fill back ahead of
-FFT (`~0.71 s` vs `~1.12 s`) while keeping final histogram/level semantics on the side paths.
+Inside X5, montage tiled scenes have resident asynchronous LOD on VisPy and a single-owner
+tile lifecycle for presentation, semantic identity, and demanded-level residency claims
+(ADR 0051 P1–P3). Preview-quality reduced display/evaluation is partially landed and is the
+active thread; PyQtGraph resident LOD (level changes >2× faster, cold settle still regressed)
+and shared transform previews stay opt-in pending it. The per-item implementation status,
+evidence, and next steps live in the roadmap's X5 "Active LOD queue" and
+[Plan 04](plans/lod-remaining-work/04-preview-reduce-before-display.md) /
+[Plan 05](plans/lod-remaining-work/05-preview-floor-machine.md) — this file intentionally
+stays at this altitude.

@@ -166,6 +166,17 @@ The Lifecycle diagnostics line classifies any stale-presentation report; check i
    rescue is a bug report (a completion path exited without rescheduling), not a fix;
    machine-derived dispatch (P2) deletes the class and demotes the watchdog to an assertion.
 
+### Design-review rule (recorded 2026-07-06)
+
+Every recurrence of the defect class since this ADR was accepted — the auto-levels wait, the
+preview-floor counters in the VisPy preview work (Plan 05), arguably the pacing cold-start
+side dict (ADR 0052) — had the same shape: **a counter or flag on the session (or another
+component) that must be "finished" by a later event**. The review question for any new state
+is therefore mechanical: *what event ends this, and what happens if that event never fires?*
+If the answer is not "a lifecycle record's terminal path or the dispatch derivation", the
+state belongs in the machine. Claims with owners (P3) exist precisely so "pending" is always
+a record with terminal paths, never a number that only ratchets up.
+
 ## Phases
 
 - **P1 (landed 2026-07-04):** `arrayscope/presentation/tile_lifecycle.py` machine + exhaustive

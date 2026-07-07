@@ -1,7 +1,10 @@
 # Plan 04 — Preview-quality reduced display/evaluation, then exact refinement
 
 **Status:** partially implemented and evidence-updated on 2026-07-06. Read `README.md`
-ground rules first.
+ground rules first. **The active continuation is
+[Plan 05](05-preview-floor-machine.md)** — the VisPy preview floor, done through the lifecycle
+machine (the in-flight session-counter approach is the ADR 0051 defect class; Plan 05 §"The
+root cause to fix").
 
 Implemented so far: the preview payload quality contract, reduced-input evaluation for
 `lod-commuting` tiled montage pipelines, RGB preview histogram planes for PyQtGraph re-windowing,
@@ -134,3 +137,14 @@ devices:
 - Feedback-governor diagnostics now include branch details and per-batch renderer-stage details
   (`payload`, `prepare`, `apply`, `ack`, `geometry`, `overlay`, etc.) so future oscillations can be
   attributed to the actual hot-path stage instead of guessed from total elapsed time.
+- The pacing unification in "Stabilize PyQtGraph LOD tile pacing" silently dropped the
+  resident-retarget bypass: routing everything through `TileAdmissionQueue.admit` made
+  `max_items` cap zero-cost retargets too (`test_resident_retarget_upserts_bypass_cold_priority_cap`
+  regressed while the commit's own new pacing test asserted the opposite). Resolved 2026-07-06 as
+  backend truth: remaps never charge the byte budget, and whether they bypass the ITEM cap is
+  declared by the caller — instant on persistent GPU-residency backends (`free_fn`, VisPy atlas
+  remap, default), paced in priority order where re-level rebuilds items
+  (`pace_resident_retargets=True`, the PyQtGraph tile-layer limits). Lesson: when a bypass is
+  replaced by a unified path, the invariant it enforced must move into the unified path's
+  contract explicitly — and two tests asserting opposite semantics must name whose backend
+  truth they pin.

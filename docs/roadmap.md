@@ -134,44 +134,53 @@ Ordered gates:
    images and source-provided pyramids, which land only after the acknowledged-residency,
    viewport-retarget, region-first materialization, and compatible-residency contracts are proven.
 
-Active LOD queue inside X5:
+Active LOD queue inside X5 (**this list is the one "current and next steps" list**; details
+live in the linked plans and ADRs, "perhaps later" material lives in [ideas.md](ideas.md)):
 
-1. **Preview-quality reduced display/evaluation, then exact refinement.** This is the next LOD
-   implementation item and the PyQtGraph adoption route. If exact work cannot produce a visible
-   tile within the interaction budget, present a reduced `quality="preview"` display payload
-   instead of black tiles or placeholders. Preview payloads draw pixels only: exact planes are
-   explicitly absent, exact consumers refuse them, and native `quality="exact"` payloads supersede
-   preview through the ordinary backend-acknowledged lifecycle. `lod-commuting` display pipelines
-   may evaluate reduced input; `lod-opaque` pipelines still compute the transform at native
-   resolution and reduce the output for display. See
-   [Plan 04](plans/lod-remaining-work/04-preview-reduce-before-display.md) and ADR 0050's
-   reduce-before-ops note. **Implementation status (2026-07-06):** commuting tiled-montage
-   previews evaluate reduced input, RGB preview floors carry display histogram planes for
-   re-windowing, exact refinement remains native, and the evaluator can classify axis-aware
-   non-display transforms and native-output-reduced opaque previews. The benchmark tool now reports
-   first payload, first complete fill, and settled frame separately. PyQtGraph cold tile-layer
-   commits and level-only re-windowing are governed by the same priority/chunking system as exact
-   tile work; they must not fall back to tile-id row/column order. Aggregate histogram sample
-   construction is excluded from progressive PyQtGraph tile commits after the first display commit;
-   the 2026-07-06 visible Wayland run reported scalar visible fill at ~0.71 s versus FFT visible
-   fill at ~1.12 s. The current scheduler intentionally launches previews only for pipelines that remove work today. Shared non-display transform
-   previews exist behind `ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW`, but traces showed the default path
-   was slower when that work competed with exact FFT tiles. Remaining work is a separate/batched
-   transform-preview queue and the measured PyQtGraph default decision.
-2. **Level-value convergence in the lifecycle machine.** Presentation, semantic identity, and
+1. **NOW — VisPy preview floor through the lifecycle machine.** Finish the in-flight VisPy
+   preview-then-refine work by first moving its floor bookkeeping into the machine:
+   [Plan 05](plans/lod-remaining-work/05-preview-floor-machine.md) (claims with
+   `owner=PREVIEW`, derived floor-first-fill phase, refinement as a dispatch fact, one
+   preview-cache seam, named `min_level` constant). Then iterate the benchmark loop from
+   Plan 04 §Verification (screenshots + `ARRAYSCOPE_LOD_DEBUG_PASS_MARKER`) until the
+   preview floor demonstrably beats the pre-preview first-fill numbers without hurting
+   settle or heartbeat. Prior status and 2026-07-06 evidence: Plan 04's status header and
+   "2026-07-06 conclusions".
+2. **Transform-preview queue, then the two waiting default decisions.** Give non-display
+   transform previews their own lower-priority preview queue/controller so they cannot
+   compete with exact visible fills (Plan 04 step 2/conclusions), then re-decide
+   `ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW` and the PyQtGraph resident-LOD default on fresh
+   A/Bs.
+3. **Pacing-governor design pass.** Execute [ADR 0052](decisions/0052-ui-work-pacing-governor.md)
+   G1–G2 (channel registry, per-channel state, staged decision pipeline, invariant property
+   tests); G3 re-benchmarks before any behavior change.
+4. **Level-value convergence in the lifecycle machine.** Presentation, semantic identity, and
    demanded-level residency are machine-owned; per-tile level values still live in
    `PresentationGenerationTracker`. Move convergence evidence and values into the same lifecycle
    model so level progress has one owner.
-3. **P4 — per-slot derived-state tracking.** Track mip validity per backend slot, then re-enable
+5. **P4 — per-slot derived-state tracking.** Track mip validity per backend slot, then re-enable
    atlas mipmaps by default only when previous-occupant defects are impossible and memory
    accounting is explicit.
-4. **P5/X5e — PyQtGraph effects and benchmark matrix.** Make the PyQtGraph tiled backend consume
+6. **P5/X5e — PyQtGraph effects and benchmark matrix.** Make the PyQtGraph tiled backend consume
    the same machine effects as VisPy where physical mechanics allow it, then run the backend/LOD
    matrix across Linux X11/Wayland, Windows, and macOS.
-5. **Harness and probe hardening.** Reproduce the reported two blank tiles at zoom-back settle with
+7. **Harness and probe hardening.** Reproduce the reported two blank tiles at zoom-back settle with
    analytic per-tile content assertions before touching code; un-xfail the wrongly-scaled-on-open
    GPU test if it continues to XPASS; add a scripted zoom-across-threshold content test; refine
    `[DESYNC!]`/stuck-scan probe reporting if it still produces false positives.
+
+Simplification/hygiene lane (small, safe to interleave; each is one commit):
+
+- Delete the transitional `hasattr(view, "release")`/`drain` fallbacks in `montage_lod` now
+  that `pending_lod_requests` is always the lifecycle-backed view.
+- Collapse the preview-cache seam (Plan 05 step 5) and hoist `PREVIEW_FLOOR_MIN_LEVEL`.
+- Gate the governor decision-ring dump out of default benchmark JSONL (ADR 0052 item 5).
+- Retire proven kill switches after a field-verify window (`ARRAYSCOPE_DISABLE_SCRUB_FASTPATH`,
+  `ARRAYSCOPE_DISABLE_SESSION_RETARGET`); each removal deletes a policy fork.
+- Fold the useful `tmp_probes/` + `/tmp/lod-baseline/` scripts into `tools/` or
+  `tests/gpu_interaction`; delete the rest.
+- Commit messages: return to the what+why+numbers house style (the recent bodyless commits
+  made this review measurably harder).
 
 Policy constraints:
 
