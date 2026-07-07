@@ -271,6 +271,7 @@ def test_noop_scalar_vispy_preview_schedules_before_exact_for_upload_reduction()
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _cold_session(pyramid=pyramid)
     data = np.zeros((TILE, TILE, 2), dtype=np.float32)
+    data[..., 1] = 100.0
     state = (
         ViewState.from_shape(data.shape)
         .with_image_axes(0, 1)
@@ -301,13 +302,21 @@ def test_noop_scalar_vispy_preview_schedules_before_exact_for_upload_reduction()
     session.pending_tiles.append(session.plan.tiles[0])
     renderer = _tile_worker_renderer(session, evaluated=[], capabilities=VISPY_CAPABILITIES)
 
-    assert renderer._schedule_next_montage_tile(session) is True
+    assert renderer._schedule_next_montage_tile(session) is False
 
     calls = renderer.montage_tile_evaluation_controller.calls
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert calls[0]["work_item"].lane == WorkLane.DISPLAY_PREVIEW
-    assert calls[1]["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
     assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 1
+    assert sorted(session.display_tile_payloads) == [0, 1]
+    payload0 = session.display_tile_payloads[0]
+    payload1 = session.display_tile_payloads[1]
+    assert payload0.quality == "preview"
+    assert payload1.quality == "preview"
+    assert payload0.level_data is not None
+    assert payload1.level_data is not None
+    assert float(np.mean(payload0.texture_data)) == 0.0
+    assert float(np.mean(payload1.texture_data)) == 100.0
 
 
 def test_noop_scalar_preview_is_skipped_when_preview_level_matches_demand():
@@ -448,13 +457,12 @@ def test_non_display_transform_preview_can_schedule_once_for_experimental_shared
     session.pending_tiles.append(session.plan.tiles[0])
     renderer = _tile_worker_renderer(session, evaluated=[])
 
-    assert renderer._schedule_next_montage_tile(session) is True
+    assert renderer._schedule_next_montage_tile(session) is False
 
     calls = renderer.montage_tile_evaluation_controller.calls
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert calls[0]["work_item"].lane == WorkLane.DISPLAY_PREVIEW
     assert calls[0]["key"][0] == "montage_preview_batch"
-    assert calls[1]["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
     assert source.reads == [(slice(None, None, None), slice(None, None, None), slice(None, None, None))]
     assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 1
     assert session.lod_preview_presentations == 2
@@ -473,10 +481,9 @@ def test_non_display_transform_preview_can_schedule_once_for_experimental_shared
     }
 
     session.pending_tiles.append(session.plan.tiles[1])
-    assert renderer._schedule_next_montage_tile(session) is True
+    assert renderer._schedule_next_montage_tile(session) is False
 
-    assert len(calls) == 3
-    assert calls[2]["key"][0] == "montage_tile"
+    assert len(calls) == 1
     assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 1
 
 
@@ -489,10 +496,10 @@ def test_non_display_transform_preview_uses_shader_texture_for_vispy_path(monkey
     session.pending_tiles.append(session.plan.tiles[0])
     renderer = _tile_worker_renderer(session, evaluated=[])
 
-    assert renderer._schedule_next_montage_tile(session) is True
+    assert renderer._schedule_next_montage_tile(session) is False
 
     calls = renderer.montage_tile_evaluation_controller.calls
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert calls[0]["key"][0] == "montage_preview_batch"
     assert source.reads == [(slice(None, None, None), slice(None, None, None), slice(None, None, None))]
     assert sorted(session.display_tile_payloads) == [0, 1]

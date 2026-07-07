@@ -105,6 +105,19 @@ Preview-plane availability is residency-axis data; the machine already owns it s
 - VisPy scalar/no-op montage also uses preview when preview LOD is coarser than the target LOD,
   because the reduced first pass lowers GPU upload/commit pressure even without operations.
   Native-scale or equal-preview-level cases skip preview.
+- The shared preview evaluator was consolidated after a scalar bug: reusing the non-display
+  transform path for scalar/no-op preview originally fanned out the seed slice to every montage
+  tile and lost provisional level samples. Shared preview now reads all candidate source indices
+  when the pipeline commutes for display LOD, maps each tile to its own reduced slice, and emits
+  the same shader/level metadata contract as per-tile preview.
+- Exact target work is gated behind the preview floor so FFT/ops do not compete with the first
+  visible preview fill. Once the floor is visible, exact admission continues through the normal
+  controller/feedback path rather than serializing one tile at a time.
+- Pacing reset ownership was split: `TileLifecycle.feedback_signature(...)` owns the lifecycle
+  phase/class part of the signature, the tile presentation model owns physical texture/cost
+  shape, and `ResourceGovernor` owns detecting opaque signature changes, resetting that channel,
+  and fast relearning. The lifecycle signature deliberately ignores progress counts; including
+  counts caused reset churn during FFT exact fill.
 
 Visible Wayland evidence (battery state not controlled; do not treat as a backend A/B):
 
@@ -115,13 +128,29 @@ Visible Wayland evidence (battery state not controlled; do not treat as a backen
 - `tests/artifacts/x5-item1-refinement-rearm-vispy.jsonl`: scalar/no-op preview floor fully
   filled at ~1.92 s and final exact at ~1.94 s (`final_exact_payload_count=272`,
   `final_preview_payload_count=0`); FFT preview floor at ~1.17 s and final exact at ~4.64 s.
+- `tests/artifacts/x5-item1-preview-unified-screenshot-vispy.jsonl`: after the scalar shared
+  preview fix, scalar preview floor was visible and filled at ~0.75 s, scalar final at ~4.02 s;
+  FFT preview floor at ~0.98 s, final at ~5.40 s. The screenshots captured the floor event but
+  can include early mirrored exact tiles because draw synchronization itself lets refinement
+  progress.
+- `tests/artifacts/x5-item1-preview-lifecycle-feedback2-vispy.jsonl`: after lifecycle-owned
+  feedback signatures stopped resetting on progress-count changes, scalar preview floor filled
+  at ~1.82 s and final at ~4.45 s; FFT preview floor filled at ~1.04 s and final at ~6.11 s.
+  FFT exact remained stage-backed (`montage_tile_compute_stage_backed=272`, stage-backed total
+  ~1.35 s), so the remaining tail is stage/fan-in/presentation pacing rather than repeated FFTs
+  per tile.
 
 Follow-up that belongs to roadmap item 2, not this plan:
 
 - Unify preview and desired-LOD compute as one reduced-input ladder: preview LOD 4 is the first
   display rung, desired LOD is the refinement rung, and both should use the same operation-aware
-  reduced-input machinery where operations permit it. Today desired LOD and preview LOD still
+  reduced-input machinery where operations permit it. Operation work should run once per LOD
+  rung and feed every tile/presentation at that rung. Today desired LOD and preview LOD still
   travel partly separate paths.
+- Consider a `stage_lifecycle` for the unified ladder. Stage cache/fan-in already has the same
+  shape as tile levels — claimed, materializing, resident, served, released, failed/stale — and
+  desired-LOD operation outputs will need one authoritative owner when they stop using full-size
+  operation inputs.
 - Reuse preview-derived level samples for the first display and avoid per-tile exact level churn;
   after the desired LOD is fully shown, sample higher-quality histogram/levels once as a
   coordinated refinement.
@@ -132,5 +161,6 @@ Follow-up that belongs to roadmap item 2, not this plan:
 
 ## Docs afterwards
 
-ADR 0051: note PREVIEW owner + the recorded rule above. Plan 04: mark the VisPy floor slice
-landed with numbers. Roadmap X5 queue: advance item 1. Memory: new numbers + tip.
+ADR 0051: PREVIEW owner and lifecycle-signature rule are recorded in code/tests; consider a
+short ADR addendum only if `stage_lifecycle` becomes a durable API. Plan 04: mark the VisPy
+floor slice landed with numbers. Roadmap X5 queue: item 1 is done; item 2 is next.

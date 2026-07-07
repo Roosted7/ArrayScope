@@ -629,6 +629,16 @@ def _wait_for_montage_complete(
                 and preview_floor_delta >= preview_floor_target
             ):
                 first_preview_floor_fill_ms = (perf_counter() - start) * 1000.0
+                if preview_floor_screenshot_path is not None and preview_floor_screenshot_saved is None:
+                    _wait_for_vispy_tile_draw(win, app, QtCore)
+                    try:
+                        preview_floor_screenshot_saved = _save_view_screenshot(
+                            win,
+                            preview_floor_screenshot_path,
+                        )
+                    except Exception as exc:  # pragma: no cover - diagnostic path
+                        preview_floor_screenshot_saved = False
+                        preview_floor_screenshot_error = repr(exc)
             if first_display_payload_ms is None and payload_state["display_payload_count"] > 0:
                 first_display_payload_ms = (perf_counter() - start) * 1000.0
             if first_preview_payload_ms is None and payload_state["preview_payload_count"] > 0:

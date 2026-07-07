@@ -696,18 +696,13 @@ def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
     assert frame_renderer._direct_montage_tile_delta_commit_enabled(window, session) is False
 
 
-def test_pyqtgraph_tile_layer_feedback_resets_on_complex_cost_class_change():
+def test_pyqtgraph_tile_layer_feedback_passes_cost_class_signature():
     import arrayscope.window.frame_renderer as frame_renderer
 
-    resets = []
     decisions = []
 
-    class Governor:
-        def reset_ui_work_feedback(self, channel, *, conservative_start=False):
-            resets.append((channel, bool(conservative_start)))
-
-    def decide(channel, **_kwargs):
-        decisions.append(str(channel))
+    def decide(channel, **kwargs):
+        decisions.append((str(channel), kwargs.get("work_signature"), bool(kwargs.get("conservative_start"))))
         return SimpleNamespace(batch_limit=2, byte_cap=4096, budget_ms=2.0)
 
     window = SimpleNamespace(
@@ -718,7 +713,6 @@ def test_pyqtgraph_tile_layer_feedback_resets_on_complex_cost_class_change():
                 shader_windowing=False,
             )
         ),
-        resource_governor=Governor(),
         _viewport_interaction_active=False,
         _ui_work_decision=decide,
     )
@@ -737,20 +731,23 @@ def test_pyqtgraph_tile_layer_feedback_resets_on_complex_cost_class_change():
     session.rendered_tiles = {0: SimpleNamespace(image=np.zeros((8, 8), dtype=np.complex64))}
     frame_renderer._tile_layer_upsert_limits(window, session)
 
-    assert decisions == ["tile_layer_commit", "tile_layer_commit"]
-    assert resets == [("tile_layer_commit", True)]
+    assert [channel for channel, _signature, _conservative in decisions] == [
+        "tile_layer_commit",
+        "tile_layer_commit",
+    ]
+    assert decisions[0][1].cost_class == "scalar"
+    assert decisions[0][2] is False
+    assert decisions[1][1].cost_class == "rgb_or_complex"
+    assert decisions[1][2] is True
 
 
-def test_vispy_persistent_feedback_resets_on_complex_cost_class_change():
+def test_vispy_persistent_feedback_passes_cost_class_signature():
     import arrayscope.window.frame_renderer as frame_renderer
 
-    resets = []
+    decisions = []
 
-    class Governor:
-        def reset_ui_work_feedback(self, channel, *, conservative_start=False):
-            resets.append((channel, bool(conservative_start)))
-
-    def decide(channel, **_kwargs):
+    def decide(channel, **kwargs):
+        decisions.append((str(channel), kwargs.get("work_signature"), bool(kwargs.get("conservative_start"))))
         return SimpleNamespace(batch_limit=8, byte_cap=8 * 1024 * 1024, budget_ms=8.0)
 
     window = SimpleNamespace(
@@ -761,7 +758,6 @@ def test_vispy_persistent_feedback_resets_on_complex_cost_class_change():
                 shader_windowing=True,
             )
         ),
-        resource_governor=Governor(),
         _viewport_interaction_active=False,
         _ui_work_decision=decide,
     )
@@ -778,11 +774,23 @@ def test_vispy_persistent_feedback_resets_on_complex_cost_class_change():
     session.output_dtype = np.dtype("complex64")
     frame_renderer._persistent_tile_upsert_limits(window, session)
 
-    assert resets == [
-        ("montage_present_total", True),
-        ("montage_cold_commit", True),
-        ("montage_commit", False),
-        ("tile_layer_commit", True),
+    assert [channel for channel, _signature, _conservative in decisions] == [
+        "montage_present_total",
+        "montage_cold_commit",
+        "montage_present_total",
+        "montage_cold_commit",
+    ]
+    assert [signature.cost_class for _channel, signature, _conservative in decisions] == [
+        "scalar",
+        "scalar",
+        "rgb_or_complex",
+        "rgb_or_complex",
+    ]
+    assert [conservative for _channel, _signature, conservative in decisions] == [
+        False,
+        False,
+        True,
+        True,
     ]
 
 

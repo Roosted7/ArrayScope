@@ -169,6 +169,46 @@ class TileLifecycle:
     def __iter__(self) -> Iterator[TileRecord]:
         return iter(self._records.values())
 
+    def feedback_signature(self, tile_numbers: Iterable[int] = ()) -> tuple[tuple[object, ...], ...]:
+        """Compact lifecycle-owned work signature for feedback reuse.
+
+        The governor should reset learned pacing when the presentation work
+        changes class.  Texture shape and bytes belong to the display layer,
+        but preview/exact ownership, level phase, and presented/emitted state
+        are lifecycle facts; expose them here so callers do not rediscover the
+        machine state through parallel counters.
+        """
+
+        scope = {int(tile) for tile in tile_numbers}
+        records = (
+            (self._records.get(tile) for tile in sorted(scope))
+            if scope
+            else tuple(self._records.get(tile) for tile in sorted(self._records))
+        )
+        groups: set[tuple[object, ...]] = set()
+        for rec in records:
+            if rec is None:
+                continue
+            level_groups = tuple(
+                sorted(
+                    (
+                        str(entry.owner.value),
+                        str(entry.phase.value),
+                        getattr(key, "component", None),
+                        tuple(getattr(key, "level_xy", ()) or ()),
+                    )
+                    for key, entry in rec.levels.items()
+                    if entry.phase is not LevelPhase.RELEASED
+                )
+            )
+            group = (
+                str(rec.semantic.value),
+                str(rec.presentation.value),
+                level_groups,
+            )
+            groups.add(group)
+        return tuple(sorted(groups, key=repr))
+
     # -- semantic axis -----------------------------------------------------
 
     def plan_applied(self, tile_numbers: Iterable[int]) -> None:

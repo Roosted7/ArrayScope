@@ -94,6 +94,27 @@ def test_tile_layer_commit_reset_can_start_conservative_until_feedback():
     assert still_guarded.batch_limit <= governor.latency_feedback.tuning.min_batch + 1
 
 
+def test_ui_work_signature_change_resets_feedback_and_conservative_start():
+    governor = ResourceGovernor(_policy(MemoryProfileChoice.BALANCED), profile=MemoryProfileChoice.BALANCED)
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+    governor.record_ui_observation("tile_layer_commit", 2.0, item_count=1, byte_count=4096)
+    assert governor.decide_ui_work(
+        "tile_layer_commit",
+        interactive=False,
+        work_signature=("pyqtgraph", "scalar", "lod2"),
+    ).batch_limit > 1
+
+    changed = governor.decide_ui_work(
+        "tile_layer_commit",
+        interactive=False,
+        work_signature=("pyqtgraph", "complex", "lod2"),
+        conservative_start=True,
+    )
+
+    assert changed.batch_limit == governor.latency_feedback.tuning.min_batch
+    assert any("conservative cold start" in detail for detail in changed.details)
+
+
 def test_tile_layer_zero_byte_presentation_observation_is_diagnostics_only():
     governor = ResourceGovernor(_policy(MemoryProfileChoice.BALANCED), profile=MemoryProfileChoice.BALANCED)
     governor.update_telemetry(_snapshot(_memory()), _memory())

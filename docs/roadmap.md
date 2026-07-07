@@ -137,23 +137,31 @@ Ordered gates:
 Active LOD queue inside X5 (**this list is the one "current and next steps" list**; details
 live in the linked plans and ADRs, "perhaps later" material lives in [ideas.md](ideas.md)):
 
-1. **NOW — Close Plan 05 validation and cleanup.** The VisPy preview floor now runs through
-   lifecycle `owner=PREVIEW` claims, a derived floor-first-fill phase, one preview-cache seam
-   carrying shader metadata, and acknowledge-driven exact refinement. Finish doc cleanup and
-   one final validation/commit pass from
-   [Plan 05](plans/lod-remaining-work/05-preview-floor-machine.md), then move to item 2.
-2. **Transform-preview queue, unified LOD ladder, then default decisions.** Give non-display
+1. **DONE 2026-07-07 — Plan 05 preview floor validation and cleanup.** The VisPy preview
+   floor now runs through lifecycle `owner=PREVIEW` claims, a derived floor-first-fill phase,
+   one preview-cache seam carrying shader/level metadata, and acknowledge-driven exact
+   refinement. Scalar/no-op preview uses the same batch/floor path as transform preview; the
+   final validation and ownership notes are in
+   [Plan 05](plans/lod-remaining-work/05-preview-floor-machine.md).
+2. **NOW — Transform-preview queue, unified LOD ladder, then default decisions.** Give non-display
    transform previews their own lower-priority preview queue/controller so they cannot
    compete with exact visible fills (Plan 04 step 2/conclusions). In the same design pass,
    unify preview and desired-LOD compute as one reduced-input ladder: preview LOD is the
    first display rung, desired LOD is the refinement rung, preview-derived level samples stay
-   authoritative until a coordinated higher-quality histogram/level pass, and retained
-   preview planes can later feed bounded offscreen GPU warming. Then re-decide
+   authoritative until a coordinated higher-quality histogram/level pass, operations run once
+   per LOD rung, and retained preview planes can later feed bounded offscreen GPU warming.
+   Introduce a stage lifecycle if the stage cache/fan-in keeps needing the same
+   claimed/materializing/resident/served/released ownership guarantees as tile LOD levels;
+   this is the likely home for desired-LOD operation outputs once desired LOD is computed on
+   reduced input instead of only preview LOD. Then re-decide
    `ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW` and the PyQtGraph resident-LOD default on fresh
    A/Bs.
-3. **Pacing-governor design pass.** Execute [ADR 0052](decisions/0052-ui-work-pacing-governor.md)
-   G1–G2 (channel registry, per-channel state, staged decision pipeline, invariant property
-   tests); G3 re-benchmarks before any behavior change.
+3. **Pacing-governor design pass.** Plan 05 added opaque tile-presentation work signatures:
+   lifecycle owns phase/class, tile presentation owns physical cost, and the governor owns
+   signature-change reset plus fast relearning. Execute
+   [ADR 0052](decisions/0052-ui-work-pacing-governor.md) G1–G2 (channel registry,
+   per-channel state, staged decision pipeline, invariant property tests); G3 re-benchmarks
+   before any further behavior change.
 4. **Level-value convergence in the lifecycle machine.** Presentation, semantic identity, and
    demanded-level residency are machine-owned; per-tile level values still live in
    `PresentationGenerationTracker`. Move convergence evidence and values into the same lifecycle

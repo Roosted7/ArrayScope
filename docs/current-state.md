@@ -88,10 +88,13 @@ history and rationale live in ADR 0050 and ADR 0051.
 
 Inside X5, montage tiled scenes have resident asynchronous LOD on VisPy and a single-owner
 tile lifecycle for presentation, semantic identity, and demanded-level residency claims
-(ADR 0051 P1–P3). Preview-quality reduced display/evaluation is partially landed and is the
-active thread; PyQtGraph resident LOD (level changes >2× faster, cold settle still regressed)
-and shared transform previews stay opt-in pending it. The per-item implementation status,
-evidence, and next steps live in the roadmap's X5 "Active LOD queue" and
+(ADR 0051 P1–P3). Plan 05 closed the lifecycle-owned preview floor: preview claims, shader
+metadata, scalar/no-op preview, exact-refinement gating, and lifecycle-derived feedback
+signatures now land together. The active thread is the transform-preview/unified-LOD ladder:
+operation work should run once per LOD rung, desired-LOD operation outputs likely need a
+stage lifecycle, and PyQtGraph resident LOD/default decisions still need fresh A/B evidence.
+The per-item implementation status, evidence, and next steps live in the roadmap's X5
+"Active LOD queue" and
 [Plan 04](plans/lod-remaining-work/04-preview-reduce-before-display.md) /
 [Plan 05](plans/lod-remaining-work/05-preview-floor-machine.md) — this file intentionally
 stays at this altitude.

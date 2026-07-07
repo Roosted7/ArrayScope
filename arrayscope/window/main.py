@@ -409,10 +409,22 @@ class ArrayScopeWindow(
         if feedback is not None:
             feedback.observe(channel, elapsed_ms, count=count, byte_count=byte_count)
 
-    def _ui_work_decision(self, channel: str, *, interactive: bool = False):
+    def _ui_work_decision(
+        self,
+        channel: str,
+        *,
+        interactive: bool = False,
+        work_signature: object | None = None,
+        conservative_start: bool = False,
+    ):
         governor = getattr(self, "resource_governor", None)
         if governor is not None:
-            return governor.decide_ui_work(channel, interactive=interactive)
+            return governor.decide_ui_work(
+                channel,
+                interactive=interactive,
+                work_signature=work_signature,
+                conservative_start=conservative_start,
+            )
         return None
 
     def _note_viewport_interaction(self, reason: str = "viewport") -> None:

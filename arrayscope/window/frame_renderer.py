@@ -61,6 +61,10 @@ from arrayscope.display.model.montage_levels import (
     provisional_tile_level_stats,
     sample_tile_level_stats,
 )
+from arrayscope.display.model.tile_feedback import (
+    tile_presentation_feedback_conservative_start,
+    tile_presentation_feedback_signature,
+)
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, LodInfo, factor_xy_for_level
 from arrayscope.presentation import ClaimOwner
 from arrayscope.presentation.dispatch import derive_montage_dispatch
@@ -2324,7 +2328,7 @@ class FrameRenderMixin:
         def error(exc):
             self._on_montage_tile_error(session_id, tile, exc)
 
-        self._schedule_montage_preview_tile(
+        preview_started = self._schedule_montage_preview_tile(
             session,
             tile,
             demand=ingest_demand,
@@ -2332,6 +2336,11 @@ class FrameRenderMixin:
             semantic_source_id=ingest_semantic_id,
             shader_display=shader_display,
         )
+        if preview_started or _preview_floor_blocks_exact_submission(session, tile):
+            session.active_tile_requests.discard(int(tile.montage_index))
+            session.loading_tiles.discard(int(tile.montage_index))
+            _enqueue_session_pending_tile(session, tile)
+            return False
         controller = getattr(self.win, "montage_tile_evaluation_controller", self.win.visible_evaluation_controller)
         started = controller.start_latest(
             evaluate,
@@ -2409,17 +2418,23 @@ class FrameRenderMixin:
         existing = session.display_tile_payloads.get(tile_number)
         if existing is not None:
             return False
-        if _shared_preview_removes_work_for_current_scheduler(session, tile):
+        upload_preview_useful = bool(
+            _persistent_gpu_tile_residency_backend(self, session)
+            and int(getattr(demand, "desired_level", 0) or 0) > 0
+        )
+        if _shared_preview_is_useful_for_current_scheduler(
+            session,
+            tile,
+            demand,
+            upload_preview_useful=upload_preview_useful,
+        ):
             return self._schedule_montage_shared_preview_batch(
                 session,
                 tile,
                 demand=demand,
                 shader_display=shader_display,
+                upload_preview_useful=upload_preview_useful,
             )
-        upload_preview_useful = bool(
-            _persistent_gpu_tile_residency_backend(self, session)
-            and int(getattr(demand, "desired_level", 0) or 0) > 0
-        )
         if not _preview_is_useful_for_current_scheduler(
             session,
             tile,
@@ -2539,8 +2554,17 @@ class FrameRenderMixin:
         *,
         demand,
         shader_display: bool,
+        upload_preview_useful: bool = False,
     ) -> bool:
         """Schedule one reduced-volume preview for a non-display transform window."""
+
+        if not _shared_preview_is_useful_for_current_scheduler(
+            session,
+            tile,
+            demand,
+            upload_preview_useful=upload_preview_useful,
+        ):
+            return False
 
         batch_key = _shared_preview_batch_key(session, tile, demand)
         active = getattr(session, "_active_preview_batches", None)
@@ -4940,29 +4964,19 @@ def _preview_is_useful_for_current_scheduler(session, tile, demand, *, upload_pr
         return False
     if _preview_evaluation_level(session, demand) <= int(getattr(demand, "desired_level", 0) or 0):
         return False
-    document = getattr(session, "document", None)
-    operations = tuple(getattr(document, "enabled_operations", ()) or ())
-    base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
-    dtype = getattr(getattr(document, "base_data", None), "dtype", None)
-    compute_preview_useful = pipeline_commutes_for_display_lod(
-        operations,
-        base_shape,
-        dtype,
-    )
-    return bool(compute_preview_useful or upload_preview_useful)
+    return bool(_preview_pipeline_commutes_for_display_lod(session, tile) or upload_preview_useful)
 
 
-def _shared_preview_removes_work_for_current_scheduler(session, tile) -> bool:
-    if not _shared_transform_preview_enabled():
-        return False
+def _shared_preview_is_useful_for_current_scheduler(session, tile, demand, *, upload_preview_useful: bool = False) -> bool:
     if not _can_evaluate_reduced_preview(session, tile):
         return False
-    document = getattr(session, "document", None)
-    base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
-    dtype = getattr(getattr(document, "base_data", None), "dtype", None)
-    if pipeline_commutes_for_display_lod(getattr(document, "enabled_operations", ()), base_shape, dtype):
+    if demand is None:
         return False
-    return True
+    if _preview_evaluation_level(session, demand) <= int(getattr(demand, "desired_level", 0) or 0):
+        return False
+    if _preview_pipeline_commutes_for_display_lod(session, tile):
+        return True
+    return _shared_transform_preview_enabled()
 
 
 def _shared_transform_preview_enabled() -> bool:
@@ -5062,6 +5076,18 @@ def _preview_row_parts(row):
     tile_number = int(values[0])
     key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = _preview_payload_parts(values[1:])
     return tile_number, key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats
+
+
+def _preview_floor_blocks_exact_submission(session, tile) -> bool:
+    if tile is None:
+        return False
+    scope = set(int(value) for value in getattr(session, "lod_preview_floor_scope", set()) or set())
+    tile_number = int(tile.montage_index)
+    if tile_number not in scope:
+        return False
+    payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
+    payload = payloads.get(tile_number)
+    return str(getattr(payload, "quality", "")) not in {"preview", "exact"}
 
 
 def _claim_preview_floor(session, tile_number: int, key) -> bool:
@@ -5179,19 +5205,35 @@ def _evaluate_montage_shared_preview_snapshot(
     cancellation_token,
     shader_display: bool,
     evaluation_context,
+    upload_preview_useful: bool = False,
 ):
     """Evaluate one reduced display volume and fan it out as preview planes."""
 
-    if not _shared_preview_removes_work_for_current_scheduler(session, seed_tile):
+    if not _shared_preview_is_useful_for_current_scheduler(
+        session,
+        seed_tile,
+        demand,
+        upload_preview_useful=upload_preview_useful,
+    ):
         return ()
     level = _preview_evaluation_level(session, demand)
     factor_xy = factor_xy_for_level(demand, level)
+    independent_tiles = _preview_pipeline_commutes_for_display_lod(session, seed_tile)
+    axis_overrides = {}
+    slice_remaps = {}
+    if independent_tiles:
+        override = _shared_preview_axis_override(session, tiles)
+        if override is not None:
+            axis, values, local_indices = override
+            axis_overrides[int(axis)] = values
+            slice_remaps[int(axis)] = local_indices
     reduced_base, _preview_state = _read_reduced_preview_base_and_state(
         session.document,
         seed_tile.view_state,
         factor_xy=factor_xy,
         cancellation_token=cancellation_token,
         evaluation_context=evaluation_context,
+        axis_region_overrides=axis_overrides,
     )
     transformed = _evaluate_reduced_preview_volume(
         session.document,
@@ -5199,16 +5241,19 @@ def _evaluate_montage_shared_preview_snapshot(
         cancellation_token=cancellation_token,
     )
     previews = []
-    preview_document = ArrayDocument(transformed, revision=session.document.revision) if bool(shader_display) else None
+    shader_preview = bool(shader_display) or (
+        not bool(getattr(session, "rgb", False)) and not np.iscomplexobj(transformed)
+    )
+    preview_document = ArrayDocument(transformed, revision=session.document.revision) if shader_preview else None
     for tile in tuple(tiles or ()):
         _check_preview_cancelled(cancellation_token)
         preview_state = _reduced_preview_view_state(
             tile.view_state,
             np.shape(transformed),
             factor_xy=factor_xy,
-            slice_remap=_shared_preview_slice_remap(session, tile),
+            slice_remap=_shared_preview_slice_remap(session, tile, slice_remaps=slice_remaps),
         )
-        if bool(shader_display):
+        if shader_preview:
             result = evaluate_image_snapshot(
                 preview_document,
                 preview_state,
@@ -5217,6 +5262,7 @@ def _evaluate_montage_shared_preview_snapshot(
                 degraded=True,
                 shader_display=True,
                 provisional_histogram=True,
+                evaluation_context=evaluation_context,
             )
             value = result.value
         else:
@@ -5224,8 +5270,8 @@ def _evaluate_montage_shared_preview_snapshot(
         value = replace(
             value,
             semantic_data=None,
-            level_data=None,
-            level_stats=None,
+            level_data=getattr(value, "level_data", None),
+            level_stats=getattr(value, "level_stats", None),
             lod=LodInfo(
                 level=level,
                 factor=max(int(factor_xy[0]), int(factor_xy[1])),
@@ -5273,6 +5319,30 @@ def _evaluate_montage_shared_preview_snapshot(
     return tuple(previews)
 
 
+def _preview_pipeline_commutes_for_display_lod(session, tile) -> bool:
+    document = getattr(session, "document", None)
+    operations = tuple(getattr(document, "enabled_operations", ()) or ())
+    base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
+    dtype = getattr(getattr(document, "base_data", None), "dtype", None)
+    return pipeline_commutes_for_display_lod(operations, base_shape, dtype)
+
+
+def _shared_preview_axis_override(session, tiles):
+    axis = getattr(session, "montage_axis", None)
+    if axis is None:
+        return None
+    values = tuple(
+        dict.fromkeys(
+            int(getattr(tile, "source_index", 0))
+            for tile in tuple(tiles or ())
+        )
+    )
+    if not values:
+        return None
+    local_indices = {int(source_index): int(offset) for offset, source_index in enumerate(values)}
+    return int(axis), values, local_indices
+
+
 def _evaluate_reduced_preview_volume(document, reduced_base, *, cancellation_token):
     _check_preview_cancelled(cancellation_token)
     data = evaluate_pipeline(reduced_base, getattr(document, "enabled_operations", ()))
@@ -5280,11 +5350,14 @@ def _evaluate_reduced_preview_volume(document, reduced_base, *, cancellation_tok
     return data
 
 
-def _shared_preview_slice_remap(session, tile) -> dict[int, int]:
+def _shared_preview_slice_remap(session, tile, *, slice_remaps=None) -> dict[int, int]:
     axis = getattr(session, "montage_axis", None)
     if axis is None:
         return {}
-    return {int(axis): int(tile.source_index)}
+    axis = int(axis)
+    source_index = int(tile.source_index)
+    local_indices = dict((slice_remaps or {}).get(axis, {}) or {})
+    return {axis: int(local_indices.get(source_index, source_index))}
 
 
 def _check_preview_cancelled(cancellation_token) -> None:
@@ -5364,7 +5437,12 @@ def _read_reduced_preview_base_and_state(
     factor_xy: tuple[int, int],
     cancellation_token,
     evaluation_context,
+    axis_region_overrides=None,
 ) -> tuple[np.ndarray, object]:
+    axis_region_overrides = {
+        int(axis): tuple(int(value) for value in tuple(values or ()))
+        for axis, values in dict(axis_region_overrides or {}).items()
+    }
     base_shape = tuple(int(size) for size in np.shape(document.base_data))
     image_axes = tuple(int(axis) for axis in view_state.image_axes)
     reduced_shape = list(base_shape)
@@ -5385,6 +5463,12 @@ def _read_reduced_preview_base_and_state(
         if axis in image_axes:
             read_axes.append(_display_axis_region_for_preview(view_state, axis, size))
             continue
+        if axis in axis_region_overrides:
+            values = axis_region_overrides[axis]
+            read_axes.append(_axis_region_for_preview_indices(values, int(size)))
+            local_indices = {int(value): int(offset) for offset, value in enumerate(values)}
+            slice_remap[axis] = int(local_indices.get(int(view_state.slice_indices[axis]), 0))
+            continue
         read_axis, local_index = _native_preview_axis_region(required.axes[axis], int(view_state.slice_indices[axis]))
         read_axes.append(read_axis)
         slice_remap[axis] = local_index
@@ -5397,6 +5481,19 @@ def _read_reduced_preview_base_and_state(
     reduced = _reduce_array_display_axes(tile_base, image_axes, factor_xy)
     preview_state = _reduced_preview_view_state(view_state, np.shape(reduced), factor_xy=factor_xy, slice_remap=slice_remap)
     return reduced, preview_state
+
+
+def _axis_region_for_preview_indices(values, size: int) -> AxisRegion:
+    indices = tuple(int(value) for value in tuple(values or ()))
+    if not indices:
+        return AxisRegion(AxisRegionKind.SLICE, (0, 0, 1))
+    if indices == tuple(range(int(size))):
+        return AxisRegion(AxisRegionKind.ALL)
+    start = indices[0]
+    stop = indices[-1] + 1
+    if start >= 0 and stop <= int(size) and indices == tuple(range(start, stop)):
+        return AxisRegion(AxisRegionKind.SLICE, (start, stop, 1))
+    return AxisRegion(AxisRegionKind.INDICES, indices)
 
 
 def _native_preview_axis_region(axis_region: AxisRegion, output_index: int) -> tuple[AxisRegion, int]:
@@ -5644,13 +5741,16 @@ def _persistent_gpu_tile_residency_backend(window, session) -> bool:
 def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
     if not _persistent_gpu_tile_residency_backend(window, session):
         return {}
-    _reset_persistent_tile_feedback_if_needed(window, session)
     interactive = _interactive_active(window)
-    decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
+    decision = _tile_presentation_ui_work_decision(
+        window,
+        session,
         "montage_present_total",
         interactive=interactive,
     )
-    upload_decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
+    upload_decision = _tile_presentation_ui_work_decision(
+        window,
+        session,
         "montage_cold_commit",
         interactive=interactive,
     )
@@ -5706,8 +5806,9 @@ def _tile_layer_upsert_limits(window, session) -> dict[str, object]:
     ):
         return {}
     interactive = _interactive_active(window)
-    _reset_tile_layer_feedback_if_needed(window, session)
-    decision = getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
+    decision = _tile_presentation_ui_work_decision(
+        window,
+        session,
         "tile_layer_commit",
         interactive=interactive,
     )
@@ -5758,82 +5859,16 @@ def _presentation_upload_control_budget_ms(window, channel: str, decision, *, in
     return max(float(budget), float(WARNING_THRESHOLD_MS) + float(target))
 
 
-def _tile_layer_feedback_signature(window, session) -> tuple[str, str]:
+def _tile_presentation_ui_work_decision(window, session, channel: str, *, interactive: bool):
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     backend = str(getattr(capabilities, "name", "")).lower()
-    kind = "rgb_or_complex" if _session_tile_layer_cost_is_rgb_or_complex(session) else "scalar"
-    return backend, kind
-
-
-def _session_tile_layer_cost_is_rgb_or_complex(session) -> bool:
-    if bool(getattr(session, "rgb", False)):
-        return True
-    try:
-        if np.issubdtype(np.dtype(getattr(session, "output_dtype", np.float32)), np.complexfloating):
-            return True
-    except TypeError:
-        pass
-    candidates = tuple(
-        dict.fromkeys(
-            (
-                *(int(tile) for tile in getattr(session, "dirty_payloads", ()) or ()),
-                *(int(tile) for tile in getattr(session, "pending_payload_upserts", ()) or ()),
-            )
-        )
+    signature = tile_presentation_feedback_signature(session, backend=backend)
+    return getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
+        channel,
+        interactive=interactive,
+        work_signature=signature,
+        conservative_start=tile_presentation_feedback_conservative_start(signature),
     )
-    rendered_tiles = getattr(session, "rendered_tiles", {}) or {}
-    display_payloads = getattr(session, "display_tile_payloads", {}) or {}
-    for tile in candidates:
-        rendered = rendered_tiles.get(int(tile))
-        image = None if rendered is None else getattr(rendered, "image", None)
-        if image is None:
-            payload = display_payloads.get(int(tile))
-            image = None if payload is None else getattr(payload, "image", None)
-        if _array_requires_cpu_windowed_tile_commit(image):
-            return True
-    return False
-
-
-def _array_requires_cpu_windowed_tile_commit(image) -> bool:
-    if image is None:
-        return False
-    array = np.asarray(image)
-    return bool(np.iscomplexobj(array) or (array.ndim == 3 and array.shape[-1] in (3, 4)))
-
-
-def _reset_tile_layer_feedback_if_needed(window, session) -> None:
-    signature = _tile_layer_feedback_signature(window, session)
-    previous = getattr(window, "_tile_layer_feedback_signature", None)
-    if previous == signature:
-        return
-    window._tile_layer_feedback_signature = signature
-    if signature[0] != "pyqtgraph":
-        return
-    reset = getattr(getattr(window.win, "resource_governor", None), "reset_ui_work_feedback", None)
-    if not callable(reset):
-        return
-    conservative = signature[1] == "rgb_or_complex"
-    if previous is not None or conservative:
-        reset("tile_layer_commit", conservative_start=conservative)
-
-
-def _reset_persistent_tile_feedback_if_needed(window, session) -> None:
-    signature = _tile_layer_feedback_signature(window, session)
-    previous = getattr(window, "_persistent_tile_feedback_signature", None)
-    if previous == signature:
-        return
-    window._persistent_tile_feedback_signature = signature
-    if signature[0] != "vispy":
-        return
-    reset = getattr(getattr(window.win, "resource_governor", None), "reset_ui_work_feedback", None)
-    if not callable(reset):
-        return
-    conservative = signature[1] == "rgb_or_complex"
-    if previous is not None or conservative:
-        reset("montage_present_total", conservative_start=conservative)
-        reset("montage_cold_commit", conservative_start=conservative)
-        reset("montage_commit", conservative_start=False)
-        reset("tile_layer_commit", conservative_start=conservative)
 
 
 def _tile_layer_commit_processed_count(report) -> int:

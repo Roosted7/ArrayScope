@@ -156,6 +156,7 @@ class ResourceGovernor:
     _last_lane_update_monotonic: dict[ComputeLane, float] = field(default_factory=dict)
     _lane_decisions: dict[ComputeLane, LaneWorkerDecision] = field(default_factory=dict)
     _ui_decisions: dict[str, UiWorkDecision] = field(default_factory=dict)
+    _ui_work_signatures: dict[str, object] = field(default_factory=dict)
     _recent_ui_work_decisions: deque[UiWorkDecision] = field(default_factory=lambda: deque(maxlen=4096))
     _feedback_outlier_streak: dict[str, int] = field(default_factory=dict)
     _conservative_cold_start_channels: dict[str, int] = field(default_factory=dict)
@@ -288,8 +289,21 @@ class ResourceGovernor:
         self._lane_decisions[lane] = decision
         return decision
 
-    def decide_ui_work(self, channel: str, *, interactive: bool) -> UiWorkDecision:
+    def decide_ui_work(
+        self,
+        channel: str,
+        *,
+        interactive: bool,
+        work_signature: object | None = None,
+        conservative_start: bool = False,
+    ) -> UiWorkDecision:
         channel = str(channel)
+        if work_signature is not None:
+            self._ensure_ui_work_signature(
+                channel,
+                work_signature,
+                conservative_start=bool(conservative_start),
+            )
         feedback = self.latency_feedback
         budget = float(feedback.work_budget_ms(channel, interactive=interactive))
         control_budget = (
@@ -525,6 +539,15 @@ class ResourceGovernor:
             self._conservative_cold_start_channels[channel] = 4
         else:
             self._conservative_cold_start_channels.pop(channel, None)
+
+    def _ensure_ui_work_signature(self, channel: str, signature: object, *, conservative_start: bool) -> None:
+        channel = str(channel)
+        previous = self._ui_work_signatures.get(channel)
+        if previous == signature:
+            return
+        self._ui_work_signatures[channel] = signature
+        if previous is not None or bool(conservative_start):
+            self.reset_ui_work_feedback(channel, conservative_start=bool(conservative_start))
 
     def _note_ui_work_observation_for_cold_start(
         self,

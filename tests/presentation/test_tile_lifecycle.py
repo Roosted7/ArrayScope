@@ -4,6 +4,8 @@ Each structural rule maps to a fixed ADR 0050 defect; the test names say
 which regression they pin.
 """
 
+from collections import namedtuple
+
 import pytest
 
 from arrayscope.presentation import (
@@ -99,6 +101,27 @@ def test_fresh_evaluation_invalidates_stale_emit_identity(lc):
     rec = lc.record(5)
     assert rec.presentation is Presentation.UNPRESENTED
     assert rec.emitted_source_id is None
+
+
+def test_feedback_signature_tracks_lifecycle_owned_work_class(lc):
+    LevelKey = namedtuple("LevelKey", "component level_xy")
+    preview_key = LevelKey("scalar", (4, 4))
+
+    lc.plan_applied([0])
+    initial = lc.feedback_signature([0])
+    lc.level_claimed(0, preview_key, ClaimOwner.PREVIEW, request=("preview", preview_key))
+    lc.level_resident(0, preview_key)
+    preview = lc.feedback_signature([0])
+    lc.evaluation_started(0)
+    lc.evaluation_completed(0)
+    lc.upsert_emitted(0, source_id=("exact", 0))
+    lc.commit_acknowledged(emitted_tiles=[0], accepted_tiles=[0], active_scope=[0])
+    exact_presented = lc.feedback_signature([0])
+
+    assert initial != preview
+    assert preview != exact_presented
+    assert "preview" in repr(preview)
+    assert "presented" in repr(exact_presented)
 
 
 # -- rule 3: emit-once, park, re-arm ------------------------------------------
