@@ -1,5 +1,12 @@
 # Scheduling and memory
 
+> **Redesign banner (2026-07-07):** execution now belongs to
+> `arrayscope/kernel` — real priorities, dependencies, lane quotas, one
+> staleness arbiter, one GUI fan-in ([ADR 0053](../decisions/0053-execution-kernel-and-modular-pipeline.md)).
+> The `WorkGraph`, per-controller drain, and pacing-governor sections below
+> describe the legacy system being deleted by plans R1/R4; do NOT extend
+> them. The GUI-thread contract and memory-policy sections remain accurate.
+
 ArrayScope must remain responsive when the requested work is larger than one event-loop turn or one safe allocation.
 
 ## Work classes

@@ -8,7 +8,9 @@ Use this order rather than scanning every historical note:
 
 1. `docs/mission.md` for scope and product principles.
 2. `docs/current-state.md` for maturity and known risks.
-3. `docs/roadmap.md` for active work and exit gates.
+3. `docs/roadmap.md` for active work and exit gates. While the redesign is
+   in flight, `docs/redesign/README.md` owns the active queue and ground
+   rules — read it before touching scheduling, rendering, or LOD code.
 4. `docs/architecture.md` for ownership and invariants.
 5. The relevant deep dive in `docs/architecture/`.
 6. `docs/decisions/README.md` and the specific ADR when a decision’s rationale matters.

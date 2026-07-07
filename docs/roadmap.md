@@ -1,297 +1,87 @@
 # Roadmap
 
-This roadmap is ordered by risk reduction, not by feature excitement. A roadmap
-item is complete only when its exit gate is met. "Code exists" is not
-completion.
+Ordered by risk reduction, not feature excitement. An item is complete only
+when its exit gate is met — "code exists" is not completion.
 
-Completed gates N4–N7 (v30 control-plane stabilization) and X1–X4 (frame
-planner, work graph, backend composition, shared pointer capture) are archived
-with their exit criteria and completion notes in
+Completed gates N4–N7 and X1–X4 are archived with their exit criteria in
 [`archive/roadmaps/completed-gates-n4-x4.md`](archive/roadmaps/completed-gates-n4-x4.md).
-The v32 composition change (render orchestration off the window) is recorded in
-[ADR 0045](decisions/0045-render-orchestrator-composition.md) and the
-[v32 audit](reviews/v32-composition-audit.md).
+Y1–Y3 (one generation contract, backend de-duplication, declarative UI
+sync/one cache core) completed 2026-07-02 — see git history and ADR
+0045/0046. The 2026-06/07 LOD and tile-lifecycle landings are recorded in
+ADR 0050/0051 and the archived
+[lod-remaining-work plans](archive/plans/lod-remaining-work/README.md).
 
-## Done — finish ownership after the v32 composition change
+## Now — the redesign (ADR 0053)
 
-### Y1. One generation contract and one admission path
+**One queue, owned by [`docs/redesign/README.md`](redesign/README.md).**
 
-Done (2026-07-02). `window/render_contract.py` owns the staleness
-vocabulary (render generation, session currency, per-kind work tokens);
-orchestrator predicates delegate to it and architecture guards forbid local
-reimplementations and context-free `singleShot` callbacks. The orchestrator
-exposes `work_graph`, fixing silently dropped admission records after the v32
-extraction; montage tile prefetch, level-evidence batches, and
-viewport/priority retargets now record admissions. The redundant
-prefetch-dispatch and frame-viewport-update revision counters were deleted
-(coalescing is structural: one queued flag / one restarted timer).
+The kernel (`arrayscope/kernel/`), the modular pipeline nucleus and unified
+LOD ladder (`arrayscope/render/`), the vocabulary canonicalization, and the
+first hygiene deletions are landed on the `redesign` branch. Remaining, in
+order:
 
-### Y2. Backend de-duplication against the surface contract
+| plan | delivers |
+|---|---|
+| R1 | all execution on the kernel; 8 controllers + WorkGraph deleted |
+| R2 | MontagePipeline live; frame_renderer clusters B/C/E dissolved |
+| R3 | LOD ladder adoption; montage_lod deleted; ops once per rung; PyQtGraph parity decision |
+| R4 | timer/governor audit: no scheduling timers, governor = telemetry + 2 knobs |
+| R5 | test pruning + docs truth pass; known-red ledger emptied |
 
-Done (2026-07-02). Measured reality differed from the audit
-estimate: `ImageView2D` is an empty subclass (the shell *is* the PyQtGraph
-implementation) and the two `tiles.py` files share zero functions — their
-divergence is physical (CPU items vs. GPU atlas), with semantic tile
-bookkeeping already owned above them by `montage_session`, `frame_planner`,
-and `montage_viewport`. What was unified: the shared semantic drivers now
-live once in `ImageViewShell` behind small backend hooks
-(`_apply_preview_levels_to_display`, `_after_viewport_camera_change`,
-`_after_profile_marker_sync`, `_viewport_content_shape`), eleven VisPy
-overrides were deleted, the tile-layer stats contract moved to
-`display/model/tile_stats.py` (deleting `GpuMontageLayerStats`, its
-conversion layer, and the vispy→pyqtgraph import), and
-`tests/display/test_imagesurface_contract.py` runs the surface contract on
-both backends. Two real forks were found and fixed by those tests: VisPy's
-close path had lost `_cancel_interaction`, and VisPy hid tiled presentation
-into a private `"idle"` mode instead of the shared `"none"`.
+Do not start items below this line while a redesign plan is open — they all
+get cheaper after it.
 
-### Y3. Declarative UI sync, tools on production composition, one cache core
+## Next — evidence gates (X5, after the redesign)
 
-Done (2026-07-02).
+X5 remains the evidence-first physical-strategy gate
+([ADR 0046](decisions/0046-evidence-first-performance-strategy.md)).
+X5a (Linux telemetry baseline) and X5b (acknowledged residency for montage
+tiled scenes) are done — see ADR 0047/0051. Remaining, re-expressed against
+the post-redesign modules:
 
-- `ui/state_binding.py` (`ViewStateBinder`) owns ViewState→widget mirroring:
-  each control registers one binding where it is created, applies run with
-  signals blocked and only on value change, and the sync entry points in
-  `state_sync.py` are thin delegates (guarded by an architecture test).
-  Widget-side drift recovery goes through `_reset_controls_to_view_state()`.
-- The profiling tools already drive the production `ArrayScopeWindow`
-  composition (`profile_montage_workflow.py` and `profile_scroll_input.py`
-  construct the real window and call `render()`); the audit's
-  re-implementation claim was resolved before this gate, so the remaining
-  2,000 lines are scenario/measurement code, which is what "thin scripts over
-  production wiring" means here.
-- `core/bounded_cache.py` (`BoundedCache`) is the one eviction/priority
-  implementation: byte/entry budgets, LRU order, and a pluggable
-  `retention_key`. `BoundedArrayCache` (plain LRU), `StageCache`
-  (priority-weighted retention score), and `RetainedTiledPayloadStore`
-  (entry-bounded payload reuse) all build on it, with focused tests in
-  `tests/core/test_bounded_cache.py` and a guard forbidding hand-rolled
-  eviction loops.
-- Idle stage warmup stays removed; if it returns it must be admitted through
-  the `WorkGraph` speculative-residency lane (unchanged policy).
+1. **X5c — Viewport-scoped tiled scenes.** Retarget scheduling keys on
+   tiled-scene/storage checks (not montage-mode checks) so internally tiled
+   normal images get visible-only active regions through the same
+   `RenderIntent`/pipeline path.
+2. **X5d — Region-first materialization + physical strategy policy.**
+   Visible-region reads without a full display image first; measured
+   singleton/direct vs tiled storage choice below `ImageSurface`, without a
+   separate normal-image semantic path.
+3. **X5e — Backend and LOD decision matrix.** Windows/macOS traces join the
+   Linux ones; per-OS backend defaults and source-provided-pyramid handling
+   decided from measurements. Includes P4 (per-slot mip validity before
+   atlas mipmaps default on).
+4. **Probe hardening.** Analytic per-tile content assertions for the
+   blank-tiles-at-zoom-back report; scripted zoom-across-threshold content
+   test.
 
-## Now — evidence-first performance gates
+Exit gates for X5c–X5e are unchanged from the pre-redesign roadmap (full
+list in this file's git history): published benchmark matrix, no fixed
+texture-size assumptions, acknowledged residency everywhere, no full-set
+rebuilds on zoom threshold crossings, exact inspection independent of
+display LOD, documented backend/LOD default evidence.
 
-### X5. Hardware evidence and residency policy
+## Later — product capabilities
 
-**Status:** Active after Y1–Y3; refined by
-[ADR 0046](decisions/0046-evidence-first-performance-strategy.md). This is the evidence and residency
-gate for tiled surfaces and physical strategy selection, not a general performance bucket. VisPy under
-Xvfb/software GL is intermittently unstable; headless GL runs are not evidence for or against the VisPy
-backend — only real-hardware traces count here.
-
-**X5a done for Linux (2026-07-03):** the first real-hardware pass ran the presented-frame
-micro/stress matrix, the production-window montage workflow, and 60 Hz scroll interaction on a live
-Wayland session across Intel iGPU / NVIDIA dGPU and Wayland / XWayland
-([reference traces](reviews/x5a-hardware-telemetry-linux-wayland.md)). It fixed the broken GPU
-device-limit query (every record silently reported a 4096 fallback), two O(n²) VisPy commit costs
-(per-commit histogram concatenation, resident-key recomputation; 272-tile stress submit
-1180 ms → ~130 ms), and the PyQtGraph level-refinement starvation on large montages (a 272-tile
-level drag never converged; now ~4.3 s). [ADR 0047](decisions/0047-auto-image-backend-selection.md)
-adds the resulting `auto` backend choice: VisPy on Linux with hardware GL, PyQtGraph everywhere
-else. **X5b done for montage tiled scenes (2026-07-05)** via
-[ADR 0051](decisions/0051-single-owner-tile-lifecycle.md): presentation state is a machine whose
-only path to `presented` is a backend-acknowledged commit, and acknowledgement is identity-aware
-(backend slot identities vs. emitted payload identities, causally bound reports). ADR 0051 P1-P3
-are landed: presentation, semantic identity, and demanded-level residency claims are machine-owned,
-and the delta-commit walk is within the interaction budget. Plan 02 re-measured PyQtGraph resident
-LOD after the wedge and display-payload fixes: level changes now win by more than 2x, but cold
-settle still regresses, so PyQtGraph resident LOD remains opt-in until the
-preview/reduce-before-display contract lands. Windows/macOS traces and X5c–X5e remain open.
-
-**Goal:** base GPU, backend-default, singleton/direct fast-path, viewport-residency, and
-multi-resolution decisions on real device behavior.
-
-Ordered gates:
-
-1. **X5a — Telemetry baseline.** Record queried texture/format limits, proven allocation outcomes,
-   upload timings, accepted/rejected tile counts, event-loop gaps, RSS, and context-loss/fallback
-   behavior.
-2. **X5b — Acknowledged residency (done for montage, 2026-07-05).** Treat committed tiled-scene
-   residency as backend-acknowledged state only; requested upserts are not resident until accepted
-   by the backend. Delivered by ADR 0051 P1+P2 for montage tiled scenes: identity-aware,
-   causally-bound acknowledgement is the machine invariant, with conformance coverage for partial
-   acceptance, declines, parking, stale reports, and session replacement. Normal-image tiled
-   scenes inherit this when X5c routes them through the same machine. Field verification
-   passed, machine-derived dispatch landed, legacy session sets are machine views, stage fan-in
-   reports through machine events, the P2 delta-commit walk is within budget, and P3 made
-   demanded-level residency claims authoritative. Remaining lifecycle phases are P4/P5 below.
-3. **X5c — Viewport-scoped tiled scenes.** Change viewport retarget scheduling from montage-mode
-   checks to tiled-scene/storage checks before enabling visible-only active regions for internally
-   tiled normal images.
-4. **X5d — Region-first materialization and physical strategy policy.** Introduce region-first display
-   materialization so huge single-plane tiling can read and prepare visible regions without requiring
-   a full display image first. Add a measured physical strategy policy below `ImageSurface`: small or
-   one-region frames may use a singleton/direct surface when measured faster, while large planes and
-   montages use resident or virtual tiled storage. This must not restore the old separate normal-image
-   semantic path.
-5. **X5e — Backend and LOD decisions.** Benchmark huge normal-plane first frame, pan into cold tiles,
-   pan across warm/resident tiles, level-only changes, backend reset/context loss, and allocation
-   fallback on both PyQtGraph and VisPy paths. Build Linux X11/Wayland, Windows, and macOS reference
-   traces on integrated and discrete GPUs. Decide whether/where VisPy becomes default from measured
-   latency, stability, memory, and parity — not theoretical throughput. Montage/tiled scenes
-   already run resident asynchronous LOD (ADR 0050); this gate governs internally tiled normal
-   images and source-provided pyramids, which land only after the acknowledged-residency,
-   viewport-retarget, region-first materialization, and compatible-residency contracts are proven.
-
-Active LOD queue inside X5 (**this list is the one "current and next steps" list**; details
-live in the linked plans and ADRs, "perhaps later" material lives in [ideas.md](ideas.md)):
-
-1. **DONE 2026-07-07 — Plan 05 preview floor validation and cleanup.** The VisPy preview
-   floor now runs through lifecycle `owner=PREVIEW` claims, a derived floor-first-fill phase,
-   one preview-cache seam carrying shader/level metadata, and acknowledge-driven exact
-   refinement. Scalar/no-op preview uses the same batch/floor path as transform preview; the
-   final validation and ownership notes are in
-   [Plan 05](plans/lod-remaining-work/05-preview-floor-machine.md).
-2. **NOW — Transform-preview queue, unified LOD ladder, then default decisions.** Give non-display
-   transform previews their own lower-priority preview queue/controller so they cannot
-   compete with exact visible fills (Plan 04 step 2/conclusions). In the same design pass,
-   unify preview and desired-LOD compute as one reduced-input ladder: preview LOD is the
-   first display rung, desired LOD is the refinement rung, preview-derived level samples stay
-   authoritative until a coordinated higher-quality histogram/level pass, operations run once
-   per LOD rung, and retained preview planes can later feed bounded offscreen GPU warming.
-   Introduce a stage lifecycle if the stage cache/fan-in keeps needing the same
-   claimed/materializing/resident/served/released ownership guarantees as tile LOD levels;
-   this is the likely home for desired-LOD operation outputs once desired LOD is computed on
-   reduced input instead of only preview LOD. Then re-decide
-   `ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW` and the PyQtGraph resident-LOD default on fresh
-   A/Bs.
-3. **Pacing-governor design pass.** Plan 05 added opaque tile-presentation work signatures:
-   lifecycle owns phase/class, tile presentation owns physical cost, and the governor owns
-   signature-change reset plus fast relearning. Execute
-   [ADR 0052](decisions/0052-ui-work-pacing-governor.md) G1–G2 (channel registry,
-   per-channel state, staged decision pipeline, invariant property tests); G3 re-benchmarks
-   before any further behavior change.
-4. **Level-value convergence in the lifecycle machine.** Presentation, semantic identity, and
-   demanded-level residency are machine-owned; per-tile level values still live in
-   `PresentationGenerationTracker`. Move convergence evidence and values into the same lifecycle
-   model so level progress has one owner.
-5. **P4 — per-slot derived-state tracking.** Track mip validity per backend slot, then re-enable
-   atlas mipmaps by default only when previous-occupant defects are impossible and memory
-   accounting is explicit.
-6. **P5/X5e — PyQtGraph effects and benchmark matrix.** Make the PyQtGraph tiled backend consume
-   the same machine effects as VisPy where physical mechanics allow it, then run the backend/LOD
-   matrix across Linux X11/Wayland, Windows, and macOS.
-7. **Harness and probe hardening.** Reproduce the reported two blank tiles at zoom-back settle with
-   analytic per-tile content assertions before touching code; un-xfail the wrongly-scaled-on-open
-   GPU test if it continues to XPASS; add a scripted zoom-across-threshold content test; refine
-   `[DESYNC!]`/stuck-scan probe reporting if it still produces false positives.
-
-Simplification/hygiene lane (small, safe to interleave; each is one commit):
-
-- Delete the transitional `hasattr(view, "release")`/`drain` fallbacks in `montage_lod` now
-  that `pending_lod_requests` is always the lifecycle-backed view.
-- Delete any leftover Plan 05-only probes or debug-marker affordances that are not useful
-  after the final validation pass.
-- Gate the governor decision-ring dump out of default benchmark JSONL (ADR 0052 item 5).
-- Retire proven kill switches after a field-verify window (`ARRAYSCOPE_DISABLE_SCRUB_FASTPATH`,
-  `ARRAYSCOPE_DISABLE_SESSION_RETARGET`); each removal deletes a policy fork.
-- Fold the useful `tmp_probes/` + `/tmp/lod-baseline/` scripts into `tools/` or
-  `tests/gpu_interaction`; delete the rest.
-- Commit messages: return to the what+why+numbers house style (the recent bodyless commits
-  made this review measurably harder).
-
-Policy constraints:
-
-- Separate estimated GPU residency from CPU caches and track eviction/reupload.
-- Keep exact inspection values independent of display LOD.
-- Use separate compatible LOD pages/arrays or virtual textures; retain adjacent levels during
-  transitions when budget allows.
-- Warm/speculative residency must be queue-based, bounded before admission, and superseded by newer
-  visible work. Do not copy the remaining payload map on every timer tick.
-- Do not make every small image pay atlas or quad overhead just because its semantic presentation is
-  tiled; semantic unification and physical storage are different decisions.
-
-Exit gate:
-
-- published benchmark matrix includes request-to-first-visible-tile, request-to-settled-frame,
-  event-loop gap, RSS, residency, upload counters, accepted/rejected tile counts, and LOD transition
-  traces;
-- no fixed assumed max texture size drives policy;
-- committed scene residency always reflects backend acknowledgement, including partial acceptance and
-  context-loss recovery;
-- internally tiled normal images can pan/zoom through viewport-scoped active and near regions without
-  blanking, full-frame rematerialization, or montage-specific assumptions;
-- region-first materialization works for eager array-backed sources and has a clear extension point for
-  memory-mapped/chunked sources;
-- singleton/direct and tiled physical strategies are chosen by measured capability and latency, while
-  sharing the same semantic frame/value/interaction contracts;
-- context loss and allocation failure recover without semantic corruption;
-- repeated zoom threshold crossings do not rebuild/re-upload the full active set;
-- exact inspection values remain independent of display LOD;
-- backend-default and LOD-enable decisions have documented evidence.
-
-See [ADR 0044](decisions/0044-viewport-scoped-tiled-residency.md) and
-[ADR 0046](decisions/0046-evidence-first-performance-strategy.md).
-
-## Later — product capabilities that fit the mission
-
-These are candidates after the foundation gates, not parallel commitments.
-
-### Linked windows and inspection groups
-
-**Status:** First iteration shipped (2026-07-03), [ADR 0048](decisions/0048-linked-window-sync.md).
-Per-facet sync toggles exist for window/level (display toolbar), dimension indexing (dimension
-strip), operation recipes (operations dock), and ROIs (inspection dock). Sync works across
-separately started processes on Linux, macOS, and Windows through per-user Qt local sockets with
-broker-relay topology and re-election (`arrayscope/sync/`). Typed JSON envelopes carry
-origin/revision ids for feedback-loop suppression; dimension indices clamp per axis on shape
-mismatch; incompatible operation recipes are skipped with a status toast. Remaining from the
-original idea: cursor links, viewport links, and named groups beyond the default one (the
-envelope already carries a group field).
-
-Adopt ArrayShow’s useful synchronized-window idea through explicit group objects and typed messages,
-never a global workspace registry. Support selected dimensions, levels, cursor, ROI, or operation
-recipe links independently. Prevent feedback loops with origin/revision IDs.
-
-### Focused compare mode
-
-Provide side-by-side or overlay comparison with shared coordinates/levels and a small set of difference
-views. Keep registration/segmentation pipelines outside the core product unless they become narrow
-inspection adapters.
-
-### Rich axis metadata
-
-Surface axis names, units, coordinates, spacing, and orientation without making every data source
-conform to a medical-imaging model. Continue the `AxisInfo` proposal incrementally.
-
-Progress (2026-07-03): `AxisInfo` carries optional unit/spacing/origin with conservative operation
-propagation, loaders that know axis metadata provide it (NIfTI, DICOM, Philips REC), and the
-dimension strip surfaces labels plus a metadata tooltip. See
-[the AxisInfo proposal](proposals/axis-info.md) for what remains (coordinate arrays, orientation,
-physical cursor readout, session role matching).
-
-### Out-of-core and lazy sources
-
-**Status:** First slice done (2026-07-03), [ADR 0049](decisions/0049-out-of-core-lazy-sources.md).
-`core/array_source.py` defines the source protocol (`ArraySource`, `LazySourceArray`);
-`operations/source_read.read_base_region` is the single budgeted, cancellable base-data read seam
-under slab/stage evaluation; `io/lazy_sources.py` provides memory-mapped `.npy`/`.cfl` adapters and
-`load_path(lazy="auto")` opens large supported files lazily. Remaining: a chunked (Zarr/HDF5-like)
-adapter behind the same protocol, lazy dataset selectors, chunk-aligned planning hints, and UI
-surfacing of budget refusals.
-
-Add a source protocol for memory-mapped/chunked arrays and explicit region reads. Keep request planning,
-cancellation, and memory budgets above the source adapter so “lazy” does not mean unbounded transport
-or decoding.
-
-### Invocation adapters
-
-Improve Jupyter and editor launch routes only when they call one stable semantic API. Avoid duplicating
-a frontend/state machine per host.
-
-Julia and MATLAB launch wrappers exist under `wrappers/` (2026-07-03) and follow this rule: both are
-thin adapters that write a raw `.npy` handoff and invoke the CLI (`--mmap --consume`), re-implementing
-no viewer behavior. The handoff contract is documented in [`invocation.md`](invocation.md) and pinned
-by `tests/io/test_language_handoff.py`.
+- **Linked windows and inspection groups** — first iteration shipped
+  ([ADR 0048](decisions/0048-linked-window-sync.md)); remaining: cursor and
+  viewport links, named groups.
+- **Focused compare mode** — side-by-side/overlay with shared
+  coordinates/levels; registration/segmentation stay out of core.
+- **Rich axis metadata** — `AxisInfo` continues incrementally
+  ([proposal](proposals/axis-info.md): coordinate arrays, orientation,
+  physical cursor readout).
+- **Out-of-core sources** — chunked (Zarr/HDF5-like) adapter behind the
+  ADR 0049 protocol, lazy selectors, chunk-aligned planning hints.
+- **Invocation adapters** — Jupyter/editor routes over the one semantic API
+  (Julia/MATLAB wrappers exist, [`invocation.md`](invocation.md)).
 
 ## Explicitly not now
 
-- General plugin marketplace/layer ecosystem.
-- Broad segmentation, registration, qMRI, or vector-field workbench.
-- Remote multi-user server/collaboration architecture.
-- Destructive workspace-style operations.
-- Re-enabling the old synchronous LOD pyramid path.
-- Re-introducing the removed refuse/degraded/chunked normal-path render decisions or the bespoke
-  idle stage-warmup scheduler (superseded by tile budgets and `WorkGraph` lanes).
-- Another large renderer rewrite without incremental conformance tests and traces.
+- Plugin marketplace/layer ecosystem; broad segmentation/registration/qMRI
+  workbench; remote multi-user collaboration; destructive workspace
+  operations.
+- Re-enabling the synchronous LOD pyramid path; refuse/degrade render
+  decisions; the bespoke idle stage-warmup scheduler.
+- New scheduling systems beside the kernel, new pacing timers, or another
+  parallel tile-state collection (ADR 0053 forbids all three).

@@ -1,0 +1,74 @@
+# R2 — MontagePipeline live (dissolve frame_renderer clusters B/C/E)
+
+**Goal:** the montage render path runs Intent → Ladder → Kernel →
+CommitBatch → Lifecycle-acknowledged presentation, and the corresponding
+frame_renderer clusters are deleted. Follow the
+[dissolution map](frame-renderer-map.md); this plan fixes the order and the
+tricky seams.
+
+## Order of work (one commit each)
+
+1. **Effects: evaluation.** Create `arrayscope/render/effects.py` with the
+   Qt-free rung evaluators ported from frame_renderer:
+   `evaluate_exact_tile(...)` (from `_evaluate_montage_tile_snapshot`),
+   `evaluate_preview_tile(...)` / `evaluate_shared_preview(...)` (from the
+   three preview snapshot evaluators + reduce helpers). They already avoid
+   Qt — the port is mostly de-`self`-ing (pass document, view_state,
+   caches explicitly). Unit-test against small arrays; compare outputs to
+   the old functions before deleting them (golden test in the same commit).
+2. **Effects: tile state snapshot.** Implement
+   `PipelineEffects.tile_states` from `TileLifecycle` records +
+   `PyramidCache` residency (`tile_resident_levels` in montage_lod is the
+   reference; port it, delete the original in R3).
+3. **Effects: commit application.** Implement `apply_commit(CommitBatch)`
+   on top of the existing `setTiledPresentation` delta path (port the
+   batching core of `_commit_montage_session_tile_layer` /
+   `_commit_montage_tile_delta_direct`; keep the identity-aware ack flow —
+   lifecycle `presented` still requires backend acknowledgement, ADR 0051
+   is not renegotiated by this redesign).
+4. **Wire lifecycle events.** `pipeline._on_rung_done` feeds
+   `level_materialized`/residency claims; acknowledgement reports keep
+   flowing from the backend adapters into `TileLifecycle` unchanged.
+   Delete `_on_montage_tile_done/_error`, `_flush_montage_tile_results`,
+   `_apply_montage_tile_result` and their flush timers.
+5. **Stage dependencies.** Port stage planning to kernel tasks with
+   `deps=` (map cluster C); stage results admit into the stage cache from
+   the worker; dependent tile tasks list the stage key in `deps`. Delete
+   the stage-wait pump family.
+6. **Retarget entry.** `update_image_view` montage branch shrinks to:
+   build `RenderIntent` + `LodDemand` (from `display/lod.select_lod_demand`
+   + `viewplan`), call `pipeline.retarget`, publish content extent,
+   auto-fit decision. Delete `_schedule_montage_tiles`,
+   `_schedule_next_montage_tile`, `_dispatch_montage_work`,
+   `derive_montage_dispatch` (its decisions are now ladder+kernel), and the
+   commit/viewport/priority timer families listed in the map.
+7. **Watchdog → assertion probe.** Keep one idle-state consistency check
+   behind the diagnostics dock; delete the rescue behavior.
+
+## Seams to be careful with
+
+- **Session reuse/retarget (`montage_session.py`) stays.** The pipeline's
+  scope key must incorporate the session key exactly as
+  `_montage_session_key_for_view` did, or scrub fast-paths die. Add a
+  `RenderIntent.semantic_key` builder that reuses that function before
+  deleting it.
+- **Histogram/level metadata:** until R3's LevelStatsService lands, keep
+  the existing level-stats calls working by leaving cluster D untouched —
+  the pipeline commits with `level_metadata=None` and the old path still
+  publishes levels. (This is the ONE place a temporary dual path is
+  allowed; it is deleted in R3 and tracked in known-red.md if any test
+  wobbles meanwhile.)
+- **PyQtGraph:** `apply_commit` must route through the shared surface
+  contract (`present_tiled`), not grow a backend fork. Run
+  `tests/display/test_imagesurface_contract.py` after every commit here.
+
+## Exit gate
+
+- Montage workflow benchmark (both backends, resident + native-only):
+  first-payload / first-complete-fill / settled within ±10% of pre-R2, and
+  warm scrub ≤ 15 ms (the Plan 01 bar).
+- GPU harness green, `stall_repairs==0`, `[DESYNC!]` probes quiet.
+- frame_renderer.py shrinks below 2,000 lines with clusters B, C, E gone;
+  every deleted method's tests deleted or rewritten against
+  pipeline/ladder/kernel counters.
+- Zero `QTimer` in the montage data path (grep the remaining file).

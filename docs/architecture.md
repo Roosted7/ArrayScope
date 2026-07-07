@@ -2,9 +2,24 @@
 
 ArrayScope separates **what the user means** from **how pixels are computed and drawn**.
 
-The main rule is:
+The main rules are:
 
 > Qt collects intent and presents results; Qt widgets are not the authoritative source of array-view state.
+
+> The GUI thread is a gateway (ADR 0053): it submits work to the execution
+> kernel, drains bounded completions, and applies bounded commits. All
+> evaluation, reduction, statistics, and planning-heavy work runs on kernel
+> worker threads.
+
+**Redesign note (2026-07-07):** the `redesign` branch replaces the legacy
+orchestration described in parts of this document. New execution goes
+through `arrayscope/kernel` (one scheduler: priorities, dependencies, lanes,
+supersession, one GUI fan-in) and `arrayscope/render` (typed pipeline
+stages, the unified LOD ladder, MontagePipeline). `RenderOrchestrator`,
+`FrameRenderMixin`, `montage_lod`, the eight evaluation controllers, and
+`WorkGraph` are deletion targets — see [ADR 0053](decisions/0053-execution-kernel-and-modular-pipeline.md)
+and the [redesign plans](redesign/README.md). Sections below describing them
+are accurate for `main` and are rewritten in plan R5.
 
 This overview defines ownership and invariants. Implementation details are split into four focused documents:
 
@@ -242,6 +257,10 @@ strategy policy, acknowledged residency, and region-first materialization.
 
 | Change | Primary owner |
 |---|---|
+| Background execution, priorities, staleness | `arrayscope.kernel` (scheduler + `QtKernelBridge`) |
+| Pipeline stage contracts | `render.stages` |
+| Per-tile quality progression (LOD rungs) | `render.ladder` |
+| Montage scheduling/commit batching | `render.pipeline` |
 | Axis/slice/range/channel state | `core.view_state`, `core.slice_selection` |
 | New operation semantics | `operations.pipeline` + declarations/tests |
 | Request expansion/planning | `operations.regions`, `planner`, `slabs` |
@@ -260,22 +279,22 @@ Avoid adding major behavior directly to `window.main`, `window.render`, or a bac
 
 ## Known architectural debt
 
-The Y1–Y3 gates measured in the [v32 audit](reviews/v32-composition-audit.md)
-are complete (see the roadmap for what each delivered). Remaining known debt:
+The dominant debt — split scheduling, GUI-thread fan-in, and the
+frame_renderer/montage_lod god-modules — is being retired by the redesign
+plans ([R1–R5](redesign/README.md)); track it there, not here. Debt that
+survives the redesign:
 
 - Histogram binding still reaches into private PyQtGraph state (isolated in
   the adapter).
 - The two backend view classes still override physical upload/visual paths
   (`setImage`, `setTiledPresentation`, `setupUI`); shared semantics live in
   `ImageViewShell` and are pinned by
-  `tests/display/test_imagesurface_contract.py`.
-- `RenderOrchestrator` is now the right owner but remains a large file. Split
-  it by proven workflow boundaries only: presentation commit, residency,
-  viewport retarget, prefetch/resource policy. Do not perform another broad
-  renderer rewrite without conformance tests and traces.
-- The surface contract intentionally permits different physical strategies for
-  one-region frames, large tiled planes, and montages. Do not reintroduce a
-  separate normal-image semantic path, and do not force every small frame
-  through atlas machinery without X5 evidence.
+  `tests/display/test_imagesurface_contract.py`. This split is by design
+  (CPU items vs GPU atlas) but only semantically covered.
+- The surface contract intentionally permits different physical strategies
+  for one-region frames, large tiled planes, and montages. Do not
+  reintroduce a separate normal-image semantic path, and do not force every
+  small frame through atlas machinery without X5 evidence.
 
-These are tracked observations, not invitations to perform a single broad rewrite. Each migration step must leave at least one runnable backend and retain semantic conformance tests.
+Each migration step must leave at least one runnable backend and retain
+semantic conformance tests.
