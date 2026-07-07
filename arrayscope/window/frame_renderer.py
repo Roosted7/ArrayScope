@@ -7,13 +7,11 @@ region payloads; backends differ only in physical presentation mechanics.
 
 from __future__ import annotations
 
-import os
 import sys
 
 from collections import deque
 from dataclasses import replace
 from time import monotonic, perf_counter
-from types import SimpleNamespace
 
 import numpy as np
 import pyqtgraph.Qt as Qt
@@ -21,7 +19,7 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.core.gui_callback_budget import GuiCallbackBudget, WARNING_THRESHOLD_MS, should_yield_after_item
+from arrayscope.core.gui_callback_budget import GuiCallbackBudget, WARNING_THRESHOLD_MS
 from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ChannelMode
@@ -35,22 +33,17 @@ from arrayscope.display.montage import (
     make_montage_plan,
     montage_rect_for_viewport,
 )
-from arrayscope.display.slice_engine import DisplayImage, make_image, make_image_from_slab, make_shader_image_from_slab
-from arrayscope.display.shader_mapping import TexturePlaneKind, apply_scale as apply_shader_scale, extract_component
+from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportMode, ViewportPolicy, view_ranges_near
 from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.operations.capabilities import pipeline_commutes_for_display_lod, pipeline_supports_reduced_display_lod
-from arrayscope.operations.evaluator import EvaluationResult, _document_key, evaluate_image_snapshot, stage_document_key
-from arrayscope.operations.pipeline import ArrayDocument, evaluate as evaluate_pipeline
-from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec
+from arrayscope.operations.evaluator import _document_key, stage_document_key
 from arrayscope.operations.chunked_stage import materialize_stage_candidate_chunked, stage_materialization_allowed_chunk_axes
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.operations.slabs import (
-    evaluate_slab_from_stage,
     plan_slab,
     request_for_image,
 )
-from arrayscope.operations.source_read import read_base_region
+from arrayscope.render import effects as render_effects
 from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.montage_backend import choose_montage_backend
@@ -65,10 +58,10 @@ from arrayscope.display.model.tile_feedback import (
     tile_presentation_feedback_conservative_start,
     tile_presentation_feedback_signature,
 )
-from arrayscope.display.lod import LOD_POLICY_RESIDENT, LodInfo, factor_xy_for_level
+from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level
 from arrayscope.presentation import ClaimOwner
 from arrayscope.presentation.dispatch import derive_montage_dispatch
-from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, preview_level_for_tile_shape
+from arrayscope.display.pyramid import PyramidCache, preview_level_for_tile_shape
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
     payload_compatible_with_tile as _payload_compatible_with_tile,
@@ -458,7 +451,6 @@ class FrameRenderMixin:
         previous_session_plan = getattr(getattr(self, "_montage_session", None), "plan", None)
         self._remap_montage_rois_for_layout_reflow(previous_session_plan, plan)
         current_range = viewport_plan.view_range
-        canvas_rect = montage_rect_for_viewport(plan, view_range=current_range, viewport_shape=viewport_shape)
         display_tiles = viewport_plan.candidate_tiles(margin_tiles=0)
         candidate_tiles = viewport_plan.candidate_tiles(
             margin_tiles=1 if viewport_plan.persistent_tile_residency else 0,
@@ -1285,7 +1277,6 @@ class FrameRenderMixin:
         }
         if not keep:
             return
-        pending_before = len(session.pending_tiles)
         pruned_pending = session.prune_pending_tiles(keep)
         stale = (set(session.loading_tiles) - set(session.active_tile_requests)) - keep
         if stale:
@@ -1366,7 +1357,7 @@ class FrameRenderMixin:
                 tracker.update_from_stats(level_key, stats, aggregate=False)
                 return
         stats = sample_tile_level_stats(
-            _montage_refined_level_values(rendered),
+            render_effects.montage_refined_level_values(rendered),
             source_index,
             refined=bool(refined),
         )
@@ -1739,7 +1730,7 @@ class FrameRenderMixin:
                 if pending_sources is not None:
                     pending_sources.discard(source_index)
                 continue
-            source = _montage_refined_level_values(rendered)
+            source = render_effects.montage_refined_level_values(rendered)
             key = ("montage_refined_level_stats", session.level_key, source_index)
 
             def evaluate(source=source, source_index=source_index):
@@ -2265,7 +2256,17 @@ class FrameRenderMixin:
         shader_display = bool(getattr(session, "shader_display", False))
 
         def evaluate(token):
-            result = self._evaluate_montage_tile_snapshot(session, tile, token)
+            context = self.win._evaluation_context(ComputeLane.MONTAGE_TILE, token)
+            eval_start = perf_counter()
+            result = render_effects.evaluate_exact_tile(
+                session,
+                tile,
+                stage_cache=self.win.operation_evaluator.stage_cache,
+                stage_materializer=self.win.operation_evaluator.stage_materializer,
+                cancellation_token=token,
+                evaluation_context=context,
+            )
+            self._last_montage_tile_eval_ms = (perf_counter() - eval_start) * 1000.0
             if getattr(result, "value", None) is None:
                 return result
             rendered_for_lod = None
@@ -2417,7 +2418,7 @@ class FrameRenderMixin:
             _persistent_gpu_tile_residency_backend(self, session)
             and int(getattr(demand, "desired_level", 0) or 0) > 0
         )
-        if _shared_preview_is_useful_for_current_scheduler(
+        if render_effects.shared_preview_is_useful(
             session,
             tile,
             demand,
@@ -2430,7 +2431,7 @@ class FrameRenderMixin:
                 shader_display=shader_display,
                 upload_preview_useful=upload_preview_useful,
             )
-        if not _preview_is_useful_for_current_scheduler(
+        if not render_effects.preview_is_useful(
             session,
             tile,
             demand,
@@ -2441,7 +2442,7 @@ class FrameRenderMixin:
         session_id = int(session.session_id)
         session_key = session.key
         preview_target = replace(session.frame_plan.target, quality="preview-visible")
-        preview_key = _preview_claim_key(
+        preview_key = render_effects.preview_claim_key(
             session,
             tile,
             demand=demand,
@@ -2458,7 +2459,7 @@ class FrameRenderMixin:
             )
 
         def evaluate(token):
-            return _evaluate_montage_tile_preview_snapshot(
+            return render_effects.evaluate_preview_tile(
                 session,
                 tile,
                 demand=demand,
@@ -2553,7 +2554,7 @@ class FrameRenderMixin:
     ) -> bool:
         """Schedule one reduced-volume preview for a non-display transform window."""
 
-        if not _shared_preview_is_useful_for_current_scheduler(
+        if not render_effects.shared_preview_is_useful(
             session,
             tile,
             demand,
@@ -2574,7 +2575,7 @@ class FrameRenderMixin:
         claim_rows = tuple(
             (
                 int(candidate.montage_index),
-                _preview_claim_key(
+                render_effects.preview_claim_key(
                     session,
                     candidate,
                     demand=demand,
@@ -2604,7 +2605,7 @@ class FrameRenderMixin:
         )
 
         def evaluate(token):
-            return _evaluate_montage_shared_preview_snapshot(
+            return render_effects.evaluate_shared_preview(
                 session,
                 tile,
                 claimed_candidates,
@@ -2793,83 +2794,6 @@ class FrameRenderMixin:
         schedule_refresh = getattr(self.win, "_schedule_refresh_inspection_dock", None)
         if callable(schedule_refresh):
             schedule_refresh("montage-layout-reflow")
-
-    def _evaluate_montage_tile_snapshot(self, session, tile, token=None):
-        start = perf_counter()
-        context = self.win._evaluation_context(ComputeLane.MONTAGE_TILE, token)
-        try:
-            stage_key = session.stage_fan_in.tile_stage_keys.get(int(tile.montage_index))
-            stage_value = None if stage_key is None else session.stage_fan_in.values.get(stage_key)
-            if stage_value is not None:
-                request = request_for_image(tile.view_state)
-                plan = session.stage_fan_in.tile_stage_plans.get(int(tile.montage_index))
-                candidate = session.stage_fan_in.tile_stage_candidates.get(int(tile.montage_index))
-                if plan is None or candidate is None:
-                    plan = plan_slab(session.document, request)
-                    candidates = tuple(getattr(plan.region_plan, "cache_candidates", ()))
-                    candidate = next(
-                        (
-                            candidate
-                            for candidate in candidates
-                            if self.win.operation_evaluator.stage_materializer.key_for_candidate(stage_document_key(session.document), candidate) == stage_key
-                        ),
-                        None,
-                    )
-                if candidate is not None:
-                    slab = evaluate_slab_from_stage(
-                        session.document,
-                        request,
-                        plan,
-                        stage_value,
-                        candidate,
-                        cancellation_token=token,
-                        evaluation_context=context,
-                    )
-                    if bool(getattr(session, "shader_display", False)):
-                        display_image = make_shader_image_from_slab(
-                            slab,
-                            request,
-                            colormap_lut=session.colormap_lut,
-                            provisional_histogram=True,
-                        )
-                    else:
-                        display_image = make_image_from_slab(slab, request, colormap_lut=session.colormap_lut)
-                    display_image = _attach_montage_tile_level_stats(
-                        display_image,
-                        tile,
-                        refined=not bool(getattr(session, "shader_display", False)),
-                    )
-                    return EvaluationResult(
-                        value=display_image,
-                        eval_ms=(perf_counter() - start) * 1000.0,
-                        slab_shape=tuple(np.shape(slab)),
-                        slab_nbytes=int(getattr(slab, "nbytes", 0)),
-                        region_plan=plan.region_plan,
-                        compute_path="stage_backed",
-                    )
-
-            result = evaluate_image_snapshot(
-                session.document,
-                tile.view_state,
-                colormap_lut=session.colormap_lut,
-                cancellation_token=token,
-                shader_display=bool(getattr(session, "shader_display", False)),
-                provisional_histogram=bool(getattr(session, "shader_display", False)),
-                stage_cache=self.win.operation_evaluator.stage_cache,
-                stage_document_key=stage_document_key(session.document),
-                evaluation_context=context,
-            )
-            result = replace(
-                result,
-                value=_attach_montage_tile_level_stats(
-                    result.value,
-                    tile,
-                    refined=not bool(getattr(session, "shader_display", False)),
-                ),
-            )
-            return result
-        finally:
-            self._last_montage_tile_eval_ms = (perf_counter() - start) * 1000.0
 
     def _on_montage_tile_slow(self, session_id):
         session = getattr(self, "_montage_session", None)
@@ -3120,7 +3044,6 @@ class FrameRenderMixin:
         )
         self._queue_montage_level_refinement(session, rendered)
         session.mark_loaded(rendered)
-        patch_start = perf_counter()
         session.dirty_tiles.append(int(tile.montage_index))
         return _rendered_tile_nbytes(rendered)
 
@@ -4946,65 +4869,8 @@ def _rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
     )
 
 
-def _can_evaluate_preview(session, tile) -> bool:
-    document = getattr(session, "document", None)
-    view_state = getattr(tile, "view_state", None)
-    if document is None or view_state is None or getattr(view_state, "image_axes", None) is None:
-        return False
-    base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
-    if len(base_shape) != int(getattr(view_state, "ndim", len(base_shape))):
-        return False
-    return True
-
-
-def _can_evaluate_reduced_preview(session, tile) -> bool:
-    if not _can_evaluate_preview(session, tile):
-        return False
-    document = getattr(session, "document", None)
-    view_state = getattr(tile, "view_state", None)
-    base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
-    dtype = getattr(getattr(document, "base_data", None), "dtype", None)
-    return pipeline_supports_reduced_display_lod(
-        getattr(document, "enabled_operations", ()),
-        base_shape,
-        dtype,
-        display_axes=tuple(int(axis) for axis in view_state.image_axes),
-    )
-
-
-def _preview_is_useful_for_current_scheduler(session, tile, demand, *, upload_preview_useful: bool = False) -> bool:
-    if not _can_evaluate_preview(session, tile):
-        return False
-    if demand is None:
-        return False
-    if _preview_evaluation_level(session, demand) <= int(getattr(demand, "desired_level", 0) or 0):
-        return False
-    return bool(_preview_pipeline_commutes_for_display_lod(session, tile) or upload_preview_useful)
-
-
-def _shared_preview_is_useful_for_current_scheduler(session, tile, demand, *, upload_preview_useful: bool = False) -> bool:
-    if not _can_evaluate_reduced_preview(session, tile):
-        return False
-    if demand is None:
-        return False
-    if _preview_evaluation_level(session, demand) <= int(getattr(demand, "desired_level", 0) or 0):
-        return False
-    if _preview_pipeline_commutes_for_display_lod(session, tile):
-        return True
-    return _shared_transform_preview_enabled()
-
-
-def _shared_transform_preview_enabled() -> bool:
-    return str(os.environ.get("ARRAYSCOPE_SHARED_TRANSFORM_PREVIEW", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def _shared_preview_batch_key(session, tile, demand) -> tuple:
-    preview_level = _preview_evaluation_level(session, demand)
+    preview_level = render_effects.preview_evaluation_level(session, demand)
     view_state = tile.view_state
     image_axes = tuple(int(axis) for axis in view_state.image_axes)
     display_ranges = tuple(
@@ -5043,33 +4909,9 @@ def _shared_preview_candidate_tiles(session):
 
 
 def _preview_tile_shape(session, demand) -> tuple[int, int]:
-    factor_x, factor_y = factor_xy_for_level(demand, _preview_evaluation_level(session, demand))
+    factor_x, factor_y = factor_xy_for_level(demand, render_effects.preview_evaluation_level(session, demand))
     tile_h, tile_w = (max(1, int(value)) for value in tuple(session.plan.tile_shape)[:2])
     return (max(1, int(np.ceil(tile_h / max(1, factor_y)))), max(1, int(np.ceil(tile_w / max(1, factor_x)))))
-
-
-def _preview_evaluation_level(session, demand) -> int:
-    desired = int(getattr(demand, "desired_level", 0) or 0)
-    preview = int(getattr(session, "lod_preview_level", 0) or 0)
-    return max(desired, preview)
-
-
-def _preview_claim_component(session, *, shader_display: bool) -> str:
-    if bool(shader_display):
-        return str(TexturePlaneKind.COMPLEX_RG32F.value)
-    if not bool(shader_display) and bool(getattr(session, "rgb", False)):
-        return str(TexturePlaneKind.RGB8.value)
-    return "scalar"
-
-
-def _preview_claim_key(session, tile, *, demand, semantic_source_id, shader_display: bool):
-    level = _preview_evaluation_level(session, demand)
-    return PyramidLevelKey(
-        source_id=semantic_source_id,
-        tile_id=int(tile.source_index),
-        component=_preview_claim_component(session, shader_display=shader_display),
-        level_xy=(int(level), int(level)),
-    )
 
 
 def _preview_payload_parts(preview):
@@ -5121,512 +4963,6 @@ def _claim_preview_floor(session, tile_number: int, key) -> bool:
     return True
 
 
-def _evaluate_montage_tile_preview_snapshot(
-    session,
-    tile,
-    *,
-    demand,
-    semantic_source_id,
-    cancellation_token,
-    shader_display: bool,
-    evaluation_context,
-):
-    """Evaluate a display-only preview payload for a cold exact tile.
-
-    The returned plane is display-only.  Exact semantic arrays are deliberately
-    not attached; the exact worker result supersedes this through the normal
-    materialization and acknowledgement path.
-    """
-
-    if not _can_evaluate_preview(session, tile):
-        return None
-    if not _can_evaluate_reduced_preview(session, tile):
-        return _evaluate_montage_tile_native_output_preview_snapshot(
-            session,
-            tile,
-            demand=demand,
-            semantic_source_id=semantic_source_id,
-            cancellation_token=cancellation_token,
-            shader_display=shader_display,
-            evaluation_context=evaluation_context,
-        )
-    level = _preview_evaluation_level(session, demand)
-    factor_xy = factor_xy_for_level(demand, level)
-    reduced_base, preview_state = _read_reduced_preview_base_and_state(
-        session.document,
-        tile.view_state,
-        factor_xy=factor_xy,
-        cancellation_token=cancellation_token,
-        evaluation_context=evaluation_context,
-    )
-    preview_document = ArrayDocument(
-        reduced_base,
-        steps=session.document.steps,
-        revision=session.document.revision,
-    )
-    result = evaluate_image_snapshot(
-        preview_document,
-        preview_state,
-        colormap_lut=session.colormap_lut,
-        cancellation_token=cancellation_token,
-        degraded=True,
-        shader_display=bool(shader_display),
-        provisional_histogram=True,
-        evaluation_context=evaluation_context,
-    )
-    value = replace(
-        result.value,
-        semantic_data=None,
-        level_data=getattr(result.value, "level_data", None),
-        level_stats=getattr(result.value, "level_stats", None),
-        lod=LodInfo(
-            level=level,
-            factor=max(int(factor_xy[0]), int(factor_xy[1])),
-            source_shape=tuple(int(value) for value in session.plan.tile_shape[:2]),
-            texture_shape=tuple(int(value) for value in np.shape(result.value.data)[:2]),
-            gutter=0,
-        ),
-    )
-    rendered = _rendered_tile_from_evaluation_result(
-        tile,
-        replace(result, value=value, compute_path="preview_reduced_input"),
-    )
-    key = montage_lod.pyramid_key_for_rendered(
-        rendered,
-        demand=demand,
-        level=level,
-        semantic_source_id=semantic_source_id,
-        shader_display=bool(shader_display),
-    )
-    source, _histogram, _kind = montage_lod.texture_source_for_rendered(rendered, shader_display=bool(shader_display))
-    histogram = getattr(value, "histogram_data", None)
-    return (
-        key,
-        np.asarray(source),
-        None if histogram is None else np.asarray(histogram),
-        getattr(value, "shader_mapping", None),
-        getattr(value, "texture_kind", None),
-        getattr(value, "level_data", None),
-        getattr(value, "level_stats", None),
-    )
-
-
-def _evaluate_montage_shared_preview_snapshot(
-    session,
-    seed_tile,
-    tiles,
-    *,
-    demand,
-    cancellation_token,
-    shader_display: bool,
-    evaluation_context,
-    upload_preview_useful: bool = False,
-):
-    """Evaluate one reduced display volume and fan it out as preview planes."""
-
-    if not _shared_preview_is_useful_for_current_scheduler(
-        session,
-        seed_tile,
-        demand,
-        upload_preview_useful=upload_preview_useful,
-    ):
-        return ()
-    level = _preview_evaluation_level(session, demand)
-    factor_xy = factor_xy_for_level(demand, level)
-    independent_tiles = _preview_pipeline_commutes_for_display_lod(session, seed_tile)
-    axis_overrides = {}
-    slice_remaps = {}
-    if independent_tiles:
-        override = _shared_preview_axis_override(session, tiles)
-        if override is not None:
-            axis, values, local_indices = override
-            axis_overrides[int(axis)] = values
-            slice_remaps[int(axis)] = local_indices
-    reduced_base, _preview_state = _read_reduced_preview_base_and_state(
-        session.document,
-        seed_tile.view_state,
-        factor_xy=factor_xy,
-        cancellation_token=cancellation_token,
-        evaluation_context=evaluation_context,
-        axis_region_overrides=axis_overrides,
-    )
-    transformed = _evaluate_reduced_preview_volume(
-        session.document,
-        reduced_base,
-        cancellation_token=cancellation_token,
-    )
-    previews = []
-    shader_preview = bool(shader_display) or (
-        not bool(getattr(session, "rgb", False)) and not np.iscomplexobj(transformed)
-    )
-    preview_document = ArrayDocument(transformed, revision=session.document.revision) if shader_preview else None
-    for tile in tuple(tiles or ()):
-        _check_preview_cancelled(cancellation_token)
-        preview_state = _reduced_preview_view_state(
-            tile.view_state,
-            np.shape(transformed),
-            factor_xy=factor_xy,
-            slice_remap=_shared_preview_slice_remap(session, tile, slice_remaps=slice_remaps),
-        )
-        if shader_preview:
-            result = evaluate_image_snapshot(
-                preview_document,
-                preview_state,
-                colormap_lut=session.colormap_lut,
-                cancellation_token=cancellation_token,
-                degraded=True,
-                shader_display=True,
-                provisional_histogram=True,
-                evaluation_context=evaluation_context,
-            )
-            value = result.value
-        else:
-            value = make_image(transformed, preview_state, colormap_lut=session.colormap_lut)
-        value = replace(
-            value,
-            semantic_data=None,
-            level_data=getattr(value, "level_data", None),
-            level_stats=getattr(value, "level_stats", None),
-            lod=LodInfo(
-                level=level,
-                factor=max(int(factor_xy[0]), int(factor_xy[1])),
-                source_shape=tuple(int(value) for value in session.plan.tile_shape[:2]),
-                texture_shape=tuple(int(value) for value in np.shape(value.data)[:2]),
-                gutter=0,
-            ),
-        )
-        rendered = RenderedTile(
-            tile=tile,
-            image=value.data,
-            histogram_data=value.histogram_data,
-            eval_ms=0.0,
-            slab_shape=tuple(np.shape(value.data)),
-            slab_nbytes=int(getattr(np.asarray(value.data), "nbytes", 0) or 0),
-            shader_mapping=getattr(value, "shader_mapping", None),
-            texture_kind=getattr(value, "texture_kind", None),
-            semantic_data=None,
-            semantic_histogram_data=None,
-            lod=getattr(value, "lod", None),
-            level_data=getattr(value, "level_data", None),
-            level_stats=getattr(value, "level_stats", None),
-        )
-        key = montage_lod.pyramid_key_for_rendered(
-            rendered,
-            demand=demand,
-            level=level,
-            semantic_source_id=session.tile_semantic_source_id(tile.source_index),
-            shader_display=bool(shader_display),
-        )
-        source, _histogram, _kind = montage_lod.texture_source_for_rendered(rendered, shader_display=bool(shader_display))
-        histogram = getattr(value, "histogram_data", None)
-        previews.append(
-            (
-                int(tile.montage_index),
-                key,
-                np.asarray(source),
-                None if histogram is None else np.asarray(histogram),
-                getattr(value, "shader_mapping", None),
-                getattr(value, "texture_kind", None),
-                getattr(value, "level_data", None),
-                getattr(value, "level_stats", None),
-            )
-        )
-    return tuple(previews)
-
-
-def _preview_pipeline_commutes_for_display_lod(session, tile) -> bool:
-    document = getattr(session, "document", None)
-    operations = tuple(getattr(document, "enabled_operations", ()) or ())
-    base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
-    dtype = getattr(getattr(document, "base_data", None), "dtype", None)
-    return pipeline_commutes_for_display_lod(operations, base_shape, dtype)
-
-
-def _shared_preview_axis_override(session, tiles):
-    axis = getattr(session, "montage_axis", None)
-    if axis is None:
-        return None
-    values = tuple(
-        dict.fromkeys(
-            int(getattr(tile, "source_index", 0))
-            for tile in tuple(tiles or ())
-        )
-    )
-    if not values:
-        return None
-    local_indices = {int(source_index): int(offset) for offset, source_index in enumerate(values)}
-    return int(axis), values, local_indices
-
-
-def _evaluate_reduced_preview_volume(document, reduced_base, *, cancellation_token):
-    _check_preview_cancelled(cancellation_token)
-    data = evaluate_pipeline(reduced_base, getattr(document, "enabled_operations", ()))
-    _check_preview_cancelled(cancellation_token)
-    return data
-
-
-def _shared_preview_slice_remap(session, tile, *, slice_remaps=None) -> dict[int, int]:
-    axis = getattr(session, "montage_axis", None)
-    if axis is None:
-        return {}
-    axis = int(axis)
-    source_index = int(tile.source_index)
-    local_indices = dict((slice_remaps or {}).get(axis, {}) or {})
-    return {axis: int(local_indices.get(source_index, source_index))}
-
-
-def _check_preview_cancelled(cancellation_token) -> None:
-    if cancellation_token is not None and bool(getattr(cancellation_token, "cancelled", False)):
-        from arrayscope.operations.cancellation import EvaluationCancelled
-
-        raise EvaluationCancelled()
-
-
-def _evaluate_montage_tile_native_output_preview_snapshot(
-    session,
-    tile,
-    *,
-    demand,
-    semantic_source_id,
-    cancellation_token,
-    shader_display: bool,
-    evaluation_context,
-):
-    level = _preview_evaluation_level(session, demand)
-    factor_xy = factor_xy_for_level(demand, level)
-    result = evaluate_image_snapshot(
-        session.document,
-        tile.view_state,
-        colormap_lut=session.colormap_lut,
-        cancellation_token=cancellation_token,
-        degraded=True,
-        shader_display=bool(shader_display),
-        provisional_histogram=True,
-        evaluation_context=evaluation_context,
-    )
-    reduced_data = _reduce_display_payload_axes(result.value.data, factor_xy)
-    histogram = getattr(result.value, "histogram_data", None)
-    reduced_histogram = None if histogram is None else _reduce_display_payload_axes(histogram, factor_xy)
-    value = replace(
-        result.value,
-        data=reduced_data,
-        histogram_data=reduced_histogram,
-        semantic_data=None,
-        level_data=getattr(result.value, "level_data", None),
-        level_stats=getattr(result.value, "level_stats", None),
-        lod=LodInfo(
-            level=level,
-            factor=max(int(factor_xy[0]), int(factor_xy[1])),
-            source_shape=tuple(int(value) for value in session.plan.tile_shape[:2]),
-            texture_shape=tuple(int(value) for value in np.shape(reduced_data)[:2]),
-            gutter=0,
-        ),
-    )
-    rendered = _rendered_tile_from_evaluation_result(
-        tile,
-        replace(result, value=value, compute_path="preview_native_output_reduction"),
-    )
-    key = montage_lod.pyramid_key_for_rendered(
-        rendered,
-        demand=demand,
-        level=level,
-        semantic_source_id=semantic_source_id,
-        shader_display=bool(shader_display),
-    )
-    source, _histogram, _kind = montage_lod.texture_source_for_rendered(rendered, shader_display=bool(shader_display))
-    return (
-        key,
-        np.asarray(source),
-        None if reduced_histogram is None else np.asarray(reduced_histogram),
-        getattr(value, "shader_mapping", None),
-        getattr(value, "texture_kind", None),
-        getattr(value, "level_data", None),
-        getattr(value, "level_stats", None),
-    )
-
-
-def _read_reduced_preview_base_and_state(
-    document,
-    view_state,
-    *,
-    factor_xy: tuple[int, int],
-    cancellation_token,
-    evaluation_context,
-    axis_region_overrides=None,
-) -> tuple[np.ndarray, object]:
-    axis_region_overrides = {
-        int(axis): tuple(int(value) for value in tuple(values or ()))
-        for axis, values in dict(axis_region_overrides or {}).items()
-    }
-    base_shape = tuple(int(size) for size in np.shape(document.base_data))
-    image_axes = tuple(int(axis) for axis in view_state.image_axes)
-    reduced_shape = list(base_shape)
-    reduced_shape[image_axes[0]] = _reduced_axis_length(_display_axis_region_for_preview(view_state, image_axes[0], base_shape[image_axes[0]]), base_shape[image_axes[0]], max(1, int(factor_xy[1])))
-    reduced_shape[image_axes[1]] = _reduced_axis_length(_display_axis_region_for_preview(view_state, image_axes[1], base_shape[image_axes[1]]), base_shape[image_axes[1]], max(1, int(factor_xy[0])))
-    reduced_shape = tuple(int(size) for size in reduced_shape)
-    planning_document = ArrayDocument(
-        np.empty(reduced_shape, dtype=getattr(document.base_data, "dtype", np.float32)),
-        steps=document.steps,
-        revision=document.revision,
-    )
-    planning_state = _reduced_preview_view_state(view_state, reduced_shape, factor_xy=factor_xy)
-    region_plan = plan_slab(planning_document, request_for_image(planning_state)).region_plan
-    required = region_plan.required_input_region
-    read_axes = []
-    slice_remap = {}
-    for axis, size in enumerate(base_shape):
-        if axis in image_axes:
-            read_axes.append(_display_axis_region_for_preview(view_state, axis, size))
-            continue
-        if axis in axis_region_overrides:
-            values = axis_region_overrides[axis]
-            read_axes.append(_axis_region_for_preview_indices(values, int(size)))
-            local_indices = {int(value): int(offset) for offset, value in enumerate(values)}
-            slice_remap[axis] = int(local_indices.get(int(view_state.slice_indices[axis]), 0))
-            continue
-        read_axis, local_index = _native_preview_axis_region(required.axes[axis], int(view_state.slice_indices[axis]))
-        read_axes.append(read_axis)
-        slice_remap[axis] = local_index
-    tile_base = read_base_region(
-        document.base_data,
-        RegionSpec(tuple(read_axes)),
-        cancellation_token=cancellation_token,
-        evaluation_context=evaluation_context,
-    )
-    reduced = _reduce_array_display_axes(tile_base, image_axes, factor_xy)
-    preview_state = _reduced_preview_view_state(view_state, np.shape(reduced), factor_xy=factor_xy, slice_remap=slice_remap)
-    return reduced, preview_state
-
-
-def _axis_region_for_preview_indices(values, size: int) -> AxisRegion:
-    indices = tuple(int(value) for value in tuple(values or ()))
-    if not indices:
-        return AxisRegion(AxisRegionKind.SLICE, (0, 0, 1))
-    if indices == tuple(range(int(size))):
-        return AxisRegion(AxisRegionKind.ALL)
-    start = indices[0]
-    stop = indices[-1] + 1
-    if start >= 0 and stop <= int(size) and indices == tuple(range(start, stop)):
-        return AxisRegion(AxisRegionKind.SLICE, (start, stop, 1))
-    return AxisRegion(AxisRegionKind.INDICES, indices)
-
-
-def _native_preview_axis_region(axis_region: AxisRegion, output_index: int) -> tuple[AxisRegion, int]:
-    kind = AxisRegionKind(axis_region.kind)
-    if kind == AxisRegionKind.POINT:
-        index = int(axis_region.value)
-        return AxisRegion(AxisRegionKind.SLICE, (index, index + 1, 1)), 0
-    if kind == AxisRegionKind.ALL:
-        return axis_region, int(output_index)
-    if kind == AxisRegionKind.SLICE:
-        start, stop, step = axis_region.value
-        values = tuple(range(int(start), int(stop), int(step)))
-        return axis_region, values.index(int(output_index)) if int(output_index) in values else 0
-    if kind == AxisRegionKind.INDICES:
-        values = tuple(int(value) for value in axis_region.value)
-        return axis_region, values.index(int(output_index)) if int(output_index) in values else 0
-    return axis_region, 0
-
-
-def _reduced_axis_length(axis_region: AxisRegion, size: int, factor: int) -> int:
-    if AxisRegionKind(axis_region.kind) == AxisRegionKind.ALL:
-        length = int(size)
-    elif AxisRegionKind(axis_region.kind) == AxisRegionKind.SLICE:
-        start, stop, step = axis_region.value
-        length = len(range(*slice(int(start), int(stop), int(step)).indices(int(size))))
-    elif AxisRegionKind(axis_region.kind) == AxisRegionKind.INDICES:
-        length = len(tuple(axis_region.value))
-    else:
-        length = 1
-    return max(1, int(np.ceil(length / max(1, int(factor)))))
-
-
-def _display_axis_region_for_preview(view_state, axis: int, size: int) -> AxisRegion:
-    indices = view_state.axis_range_indices[int(axis)]
-    if indices is None:
-        return AxisRegion(AxisRegionKind.ALL)
-    values = tuple(int(index) for index in indices)
-    if not values:
-        return AxisRegion(AxisRegionKind.SLICE, (0, 0, 1))
-    start = values[0]
-    stop = values[-1] + 1
-    if start >= 0 and stop <= int(size) and values == tuple(range(start, stop)):
-        return AxisRegion(AxisRegionKind.SLICE, (start, stop, 1))
-    return AxisRegion(AxisRegionKind.INDICES, values)
-
-
-def _reduce_array_display_axes(array, image_axes: tuple[int, int], factor_xy: tuple[int, int]) -> np.ndarray:
-    values = np.asarray(array)
-    y_axis, x_axis = (int(image_axes[0]), int(image_axes[1]))
-    factor_x, factor_y = (max(1, int(factor_xy[0])), max(1, int(factor_xy[1])))
-    reduced = _reduce_nd_axis_mean(values, y_axis, factor_y)
-    reduced = _reduce_nd_axis_mean(reduced, x_axis, factor_x)
-    return reduced
-
-
-def _reduce_nd_axis_mean(values: np.ndarray, axis: int, factor: int) -> np.ndarray:
-    if int(factor) <= 1 or int(values.shape[int(axis)]) <= 1:
-        return values
-    if int(factor) & (int(factor) - 1):
-        raise ValueError("preview reduction factor must be a power of two")
-    axis = int(axis)
-    length = int(values.shape[axis])
-    starts = np.arange(0, length, int(factor))
-    if np.iscomplexobj(values):
-        source = values.astype(np.complex64, copy=False)
-    else:
-        source = values.astype(np.float32, copy=False)
-    sums = np.add.reduceat(source, starts, axis=axis, dtype=source.dtype)
-    counts = np.diff(np.append(starts, length)).astype(np.float32)
-    shape = [1] * sums.ndim
-    shape[axis] = len(starts)
-    reduced = sums / counts.reshape(shape)
-    if np.issubdtype(values.dtype, np.integer):
-        info = np.iinfo(values.dtype)
-        return np.clip(np.rint(reduced), info.min, info.max).astype(values.dtype)
-    if np.iscomplexobj(values):
-        return reduced.astype(np.complex64, copy=False)
-    return reduced.astype(np.float32, copy=False)
-
-
-def _reduce_display_payload_axes(array, factor_xy: tuple[int, int]) -> np.ndarray:
-    values = np.asarray(array)
-    reduced = _reduce_nd_axis_mean(values, 0, max(1, int(factor_xy[1])))
-    reduced = _reduce_nd_axis_mean(reduced, 1, max(1, int(factor_xy[0])))
-    return reduced
-
-
-def _reduced_preview_view_state(view_state, shape, *, factor_xy: tuple[int, int], slice_remap=None):
-    slice_remap = {} if slice_remap is None else dict(slice_remap)
-    shape = tuple(int(size) for size in shape)
-    image_axes = tuple(int(axis) for axis in view_state.image_axes)
-    axis_factors = {image_axes[0]: max(1, int(factor_xy[1])), image_axes[1]: max(1, int(factor_xy[0]))}
-    slice_indices = []
-    axis_ranges = []
-    axis_text = []
-    for axis, size in enumerate(shape):
-        if axis in image_axes:
-            factor = axis_factors[axis]
-            axis_ranges.append(None)
-            axis_text.append(None)
-            slice_indices.append(min(max(0, int(view_state.slice_indices[axis]) // factor), max(0, size - 1)))
-        else:
-            axis_ranges.append(None)
-            axis_text.append(None)
-            slice_indices.append(min(max(0, int(slice_remap.get(axis, view_state.slice_indices[axis]))), max(0, size - 1)))
-    return replace(
-        view_state,
-        shape=shape,
-        slice_indices=tuple(slice_indices),
-        axis_range_indices=tuple(axis_ranges),
-        axis_range_text=tuple(axis_text),
-        montage_axis=None,
-        montage_columns=None,
-        montage_indices=None,
-        montage_text=None,
-    )
-
-
 def _rendered_tile_nbytes(rendered) -> int:
     total = 0
     for name in ("image", "histogram_data", "semantic_data", "semantic_histogram_data", "level_data"):
@@ -5634,61 +4970,6 @@ def _rendered_tile_nbytes(rendered) -> int:
         if value is not None:
             total += int(getattr(np.asarray(value), "nbytes", 0) or 0)
     return int(total)
-
-
-def _montage_refined_level_values(rendered) -> np.ndarray:
-    semantic_histogram = getattr(rendered, "semantic_histogram_data", None)
-    if semantic_histogram is not None:
-        return np.asarray(semantic_histogram)
-    histogram = getattr(rendered, "histogram_data", None)
-    if histogram is not None:
-        return np.asarray(histogram)
-    mapping = getattr(rendered, "shader_mapping", None)
-    semantic = getattr(rendered, "semantic_data", None)
-    if mapping is not None and semantic is not None:
-        values = extract_component(np.asarray(semantic), getattr(mapping, "component", "real"))
-        return apply_shader_scale(
-            values,
-            getattr(mapping, "scale", "linear"),
-            symlog_constant=float(getattr(mapping, "symlog_constant", 0.0) or 0.0),
-        )
-    image = getattr(rendered, "image", None)
-    if image is None:
-        return np.asarray((), dtype=np.float32)
-    image = np.asarray(image)
-    if np.iscomplexobj(image):
-        return np.abs(image).astype(np.float32, copy=False)
-    return image
-
-
-def _attach_montage_tile_level_stats(display_image, tile, *, refined: bool = False):
-    if getattr(display_image, "level_stats", None) is not None:
-        return display_image
-    level_data = getattr(display_image, "level_data", None)
-    if level_data is not None:
-        stats = (
-            sample_tile_level_stats(level_data, int(tile.source_index), refined=True)
-            if refined
-            else provisional_tile_level_stats(level_data, int(tile.source_index))
-        )
-        if stats is not None:
-            return replace(display_image, level_stats=stats)
-    values = _montage_refined_level_values(
-        SimpleNamespace(
-            image=getattr(display_image, "data", None),
-            histogram_data=getattr(display_image, "histogram_data", None),
-            shader_mapping=getattr(display_image, "shader_mapping", None),
-            semantic_data=getattr(display_image, "semantic_data", None),
-        )
-    )
-    stats = (
-        sample_tile_level_stats(values, int(tile.source_index), refined=True)
-        if refined
-        else provisional_tile_level_stats(values, int(tile.source_index))
-    )
-    if stats is not None:
-        return replace(display_image, level_stats=stats)
-    return display_image
 
 
 def _session_requested_levels(session) -> tuple[float, float] | None:

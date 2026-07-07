@@ -45,10 +45,8 @@ class PipelineEffects(Protocol):
     def evaluate_rung(self, intent: RenderIntent, step: RungStep) -> Callable[[], Any]:
         """Return the worker-thread callable producing this rung's payload.
 
-        TODO(redesign R2): port `_evaluate_montage_tile_snapshot`,
-        `_evaluate_montage_tile_preview_snapshot`, and the shared preview
-        batch evaluators from frame_renderer into Qt-free functions living
-        beside the operations evaluator, then return them here.
+        R2 ports exact and preview evaluation into ``render.effects``; the
+        concrete effect bridge selects the callable for this rung.
         """
         ...
 

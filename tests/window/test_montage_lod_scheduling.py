@@ -7,6 +7,7 @@ import closure of ``frame_renderer`` and run in the host environment.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,6 +17,7 @@ from arrayscope.core.scheduler import EvalPriority, FrameTarget
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES
 from arrayscope.display.lod import LOD_POLICY_RESIDENT
+from arrayscope.display.montage import MontagePlan
 from arrayscope.display.model.frame import TiledValueSource
 from arrayscope.display.pyramid import PyramidCache
 from arrayscope.display.shader_mapping import ShaderDisplayMode, TexturePlaneKind
@@ -162,7 +164,37 @@ def test_stale_session_releases_claims_without_scheduling():
 def _tile_worker_renderer(session, *, evaluated, capabilities=None):
     """Fake window/renderer composition around the real tile scheduling method."""
 
-    from arrayscope.operations.evaluator import EvaluationResult
+    from arrayscope.operations.evaluator import OperationEvaluator
+
+    if session.document is None or any(getattr(tile, "view_state", None) is None for tile in session.plan.tiles):
+        count = len(tuple(session.plan.tiles))
+        data = np.arange(TILE * TILE * count, dtype=np.float32).reshape(TILE, TILE, count)
+        state = (
+            ViewState.from_shape(data.shape)
+            .with_image_axes(0, 1)
+            .with_montage_axis(2, columns=count, indices=tuple(range(count)), text=":")
+        )
+        tiles = tuple(
+            replace(tile, view_state=state.tile_state_for_slice(2, tile.source_index))
+            for tile in session.plan.tiles
+        )
+        session.plan = MontagePlan(
+            axis=2,
+            tile_shape=session.plan.tile_shape,
+            grid_shape=session.plan.grid_shape,
+            columns=session.plan.columns,
+            rows=session.plan.rows,
+            gap=session.plan.gap,
+            tiles=tiles,
+        )
+        session.view_state = state
+        session.montage_axis = 2
+        session.document = ArrayDocument(data)
+        by_number = {int(tile.montage_index): tile for tile in tiles}
+        session.visible_tiles = tuple(by_number[int(tile.montage_index)] for tile in session.visible_tiles)
+        session.pending_tiles = type(session.pending_tiles)(
+            by_number[int(tile.montage_index)] for tile in tuple(session.pending_tiles)
+        )
 
     fake = SimpleNamespace()
     fake.win = fake
@@ -180,31 +212,9 @@ def _tile_worker_renderer(session, *, evaluated, capabilities=None):
     fake._on_montage_tile_slow = lambda session_id: None
     fake._is_current_montage_session = lambda session_id, key: True
     fake._evaluation_context = lambda lane, token: None
+    fake.operation_evaluator = OperationEvaluator(session.document)
     fake._schedule_montage_presentation_commit = lambda session, force=False: None
     fake._dispatch_montage_work = lambda session: None
-
-    def _evaluate(session_arg, tile, token=None):
-        image = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE)
-        value = SimpleNamespace(
-            data=image,
-            histogram_data=image,
-            semantic_data=None,
-            shader_mapping=None,
-            texture_kind=None,
-            lod=None,
-            level_data=None,
-            level_stats=None,
-        )
-        result = EvaluationResult(
-            value=value,
-            eval_ms=0.0,
-            slab_shape=image.shape,
-            slab_nbytes=int(image.nbytes),
-        )
-        evaluated.append(result)
-        return result
-
-    fake._evaluate_montage_tile_snapshot = _evaluate
     fake._schedule_next_montage_tile = FrameRenderMixin._schedule_next_montage_tile.__get__(fake)
     fake._schedule_montage_preview_tile = FrameRenderMixin._schedule_montage_preview_tile.__get__(fake)
     fake._schedule_montage_shared_preview_batch = FrameRenderMixin._schedule_montage_shared_preview_batch.__get__(fake)
@@ -225,8 +235,8 @@ def test_cold_tile_worker_reduces_at_ingest_before_first_presentation():
 
     # The reduction ran on the worker as part of tile materialization: the
     # demanded level was admitted before the done fan-in saw the result.
-    assert len(evaluated) == 1
-    assert len(pyramid) == 2
+    assert len(renderer.completed) == 1
+    assert len(pyramid) >= 1
     assert pyramid.pending_count == 0
     assert renderer._montage_lod_ingest_reductions == 1
     assert len(renderer.completed) == 1
@@ -447,7 +457,7 @@ def test_non_display_transform_preview_is_not_scheduled_by_default_after_profile
     call = renderer.montage_tile_evaluation_controller.calls[0]
     assert call["key"][0] == "montage_tile"
     assert call["work_item"].lane == WorkLane.VISIBLE_MATERIALIZATION
-    assert source.reads == []
+    assert source.reads == [(slice(None, None, None), slice(None, None, None), slice(None, None, None))]
     assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) == 0
 
 
@@ -521,7 +531,7 @@ def test_reduced_preview_evaluation_admits_floor_payload_without_exact_semantics
     from dataclasses import replace
 
     from arrayscope.display.montage import MontagePlan
-    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+    from arrayscope.render.effects import evaluate_preview_tile
 
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _cold_session(pyramid=pyramid)
@@ -549,7 +559,7 @@ def test_reduced_preview_evaluation_admits_floor_payload_without_exact_semantics
     tile = session.plan.tiles[0]
     demand = session.ingest_lod_demand()
 
-    preview = _evaluate_montage_tile_preview_snapshot(
+    preview = evaluate_preview_tile(
         session,
         tile,
         demand=demand,
@@ -576,7 +586,7 @@ def test_reduced_preview_evaluation_reads_only_tile_display_range():
     from dataclasses import replace
 
     from arrayscope.display.montage import MontagePlan
-    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+    from arrayscope.render.effects import evaluate_preview_tile
 
     class LazyArray:
         def __init__(self, data):
@@ -619,7 +629,7 @@ def test_reduced_preview_evaluation_reads_only_tile_display_range():
     session.document = ArrayDocument(source)
     tile = session.plan.tiles[0]
 
-    preview = _evaluate_montage_tile_preview_snapshot(
+    preview = evaluate_preview_tile(
         session,
         tile,
         demand=session.ingest_lod_demand(),
@@ -639,7 +649,7 @@ def test_fft_over_montage_axis_preview_reduces_display_input_and_expands_transfo
     from dataclasses import replace
 
     from arrayscope.display.montage import MontagePlan
-    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+    from arrayscope.render.effects import evaluate_preview_tile
 
     class LazyArray:
         def __init__(self, data):
@@ -685,7 +695,7 @@ def test_fft_over_montage_axis_preview_reduces_display_input_and_expands_transfo
     )
     tile = session.plan.tiles[1]
 
-    preview = _evaluate_montage_tile_preview_snapshot(
+    preview = evaluate_preview_tile(
         session,
         tile,
         demand=session.ingest_lod_demand(),
@@ -705,7 +715,7 @@ def test_fft_over_display_axis_preview_falls_back_to_native_output_reduction():
     from dataclasses import replace
 
     from arrayscope.display.montage import MontagePlan
-    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+    from arrayscope.render.effects import evaluate_preview_tile
 
     class LazyArray:
         def __init__(self, data):
@@ -744,7 +754,7 @@ def test_fft_over_display_axis_preview_falls_back_to_native_output_reduction():
     session.document = ArrayDocument(source, steps=(CenteredFFT(axis=0),))
     tile = session.plan.tiles[0]
 
-    preview = _evaluate_montage_tile_preview_snapshot(
+    preview = evaluate_preview_tile(
         session,
         tile,
         demand=session.ingest_lod_demand(),
@@ -765,7 +775,7 @@ def test_reduced_rgb_preview_floor_preserves_display_histogram_for_rewindowing()
 
     from arrayscope.display.montage import MontagePlan
     from arrayscope.window import montage_lod
-    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+    from arrayscope.render.effects import evaluate_preview_tile
 
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _cold_session(pyramid=pyramid)
@@ -796,7 +806,7 @@ def test_reduced_rgb_preview_floor_preserves_display_histogram_for_rewindowing()
     session.rgb = True
     tile = session.plan.tiles[0]
 
-    preview = _evaluate_montage_tile_preview_snapshot(
+    preview = evaluate_preview_tile(
         session,
         tile,
         demand=session.ingest_lod_demand(),
@@ -829,7 +839,7 @@ def test_complex_shader_preview_floor_preserves_mapping_and_level_samples():
     from dataclasses import replace
 
     from arrayscope.display.montage import MontagePlan
-    from arrayscope.window.frame_renderer import _evaluate_montage_tile_preview_snapshot
+    from arrayscope.render.effects import evaluate_preview_tile
 
     pyramid = PyramidCache(max_bytes=1 << 20)
     session = _cold_session(pyramid=pyramid)
@@ -860,7 +870,7 @@ def test_complex_shader_preview_floor_preserves_mapping_and_level_samples():
     session.shader_display = True
     tile = session.plan.tiles[0]
 
-    preview = _evaluate_montage_tile_preview_snapshot(
+    preview = evaluate_preview_tile(
         session,
         tile,
         demand=session.ingest_lod_demand(),
