@@ -553,7 +553,6 @@ class FrameRenderMixin:
             # scrub step.
             and bool(getattr(previous_session, "display_committed", False))
             and getattr(previous_session, "montage_axis", None) == axis
-            and not os.environ.get("ARRAYSCOPE_DISABLE_SCRUB_FASTPATH")
         )
         if defer_stage_planning:
             stage_plan = _deferred_stage_plan_stub()
@@ -770,8 +769,6 @@ class FrameRenderMixin:
         content.  Stage planning for missing tiles always goes through the
         deferred-planning continuation (it runs on the next event-loop turn
         outside a burst).  Returns True when the retarget handled the step.
-
-        Kill switch: ``ARRAYSCOPE_DISABLE_SESSION_RETARGET``.
         """
 
         def _reject(reason: str) -> bool:
@@ -792,8 +789,6 @@ class FrameRenderMixin:
             # layout, not an index-window move.  Only true montage sessions
             # retarget.
             return _reject("no-axis")
-        if os.environ.get("ARRAYSCOPE_DISABLE_SESSION_RETARGET"):
-            return _reject("kill-switch")
         if not bool(getattr(session, "display_committed", False)):
             return _reject("uncommitted")
         if getattr(session, "montage_axis", None) != axis:
@@ -1012,7 +1007,6 @@ class FrameRenderMixin:
             if (
                 _viewport_interaction_active(self)
                 and self._montage_lod_policy_mode() == LOD_POLICY_RESIDENT
-                and not os.environ.get("ARRAYSCOPE_DISABLE_SCRUB_FASTPATH")
             ):
                 # Mid-burst under the resident policy: floors carry the
                 # screen; the landing step plans (deferred continuation).

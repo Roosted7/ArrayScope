@@ -991,11 +991,9 @@ def _release_request_claims(session, request, pyramid) -> bool:
     for step_key, _rel in _request_chain(request):
         if step_key is not None and pyramid is not None and pyramid.peek(step_key) is not None:
             admitted = True
-    view = getattr(session, "pending_lod_requests", None)
-    if view is not None and hasattr(view, "release"):
-        _apply_release_effects(pyramid, view.release(request))
-    else:
-        _release_chain_claims(pyramid, _request_chain(request))
+    # `pending_lod_requests` is always the lifecycle-backed view (ADR 0051
+    # P3); the pre-P3 chain fallback was deleted in the redesign.
+    _apply_release_effects(pyramid, session.pending_lod_requests.release(request))
     if admitted:
         for step_key, _rel in _request_chain(request):
             if step_key is not None and pyramid is not None and pyramid.peek(step_key) is not None:
@@ -1151,13 +1149,9 @@ def schedule_materializations(renderer, session) -> None:
     dirty-payload commit path a late tile result uses.
     """
 
-    pending = getattr(session, "pending_lod_requests", None)
-    if pending is not None and hasattr(pending, "drain"):
-        requests = list(pending.drain())
-    else:
-        requests = list(pending or ())
-        if pending is not None:
-            pending.clear()
+    # Always the lifecycle-backed view (ADR 0051 P3); the pre-P3 plain
+    # collection fallback was deleted in the redesign.
+    requests = list(session.pending_lod_requests.drain())
     if not requests:
         return
     pyramid = getattr(session, "lod_pyramid", None)
