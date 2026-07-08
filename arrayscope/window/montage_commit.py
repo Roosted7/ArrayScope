@@ -498,7 +498,7 @@ class MontagePipelineEffects:
         visible_previews = 0
         for row in tuple(rows or ()):
             tile_number, key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = preview_row_parts(row)
-            session.admit_preview_plane(
+            admitted = session.admit_preview_plane(
                 tile_number,
                 key,
                 plane,
@@ -508,6 +508,8 @@ class MontagePipelineEffects:
                 level_data=level_data,
                 level_stats=level_stats,
             )
+            if not admitted:
+                continue
             session._ensure_floor_payloads((tile_number,))
             preview_upserted = (
                 int(tile_number) in session.pending_payload_upserts
@@ -541,7 +543,7 @@ class MontagePipelineEffects:
             payload_start = perf_counter()
             selected_lod_factor = int(session._selected_lod_factor())
             reuse_any_lod = bool(getattr(session, "_resident_lod_active", lambda: False)())
-            if not getattr(session, "presented_tiles", None):
+            if not session.lifecycle.presented_tiles:
                 previous_payloads = {
                     int(tile): payload
                     for tile, payload in previous_tiled_payloads(getattr(renderer.win, "_committed_display_frame", None)).items()
@@ -606,7 +608,6 @@ class MontagePipelineEffects:
                 session,
                 decision_force_auto,
                 level_stats,
-                active_payloads=active_payloads,
             ):
                 session.final_commit_pending = True
                 session.flush_pending = True
@@ -848,7 +849,7 @@ class MontagePipelineEffects:
             session.set_level_update_pending(False)
         presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)
         session.mark_presented(presented_tiles)
-        session.display_committed = bool(session.presented_tiles)
+        session.display_committed = bool(session.lifecycle.presented_tiles)
         geometry = replace(geometry, montage_tile_states=session.ensure_tile_states())
         renderer._last_montage_tile_state_publish_ms = (perf_counter() - state_start) * 1000.0
         geometry_start = perf_counter()
@@ -1408,16 +1409,14 @@ def safe_tiled_payload_geometry_retarget(previous_geometry, geometry) -> bool:
     )
 
 
-def tile_layer_auto_levels_wait_for_complete_source(window, session, decision_force_auto: bool, level_stats, *, active_payloads=None) -> bool:
+def tile_layer_auto_levels_wait_for_complete_source(window, session, decision_force_auto: bool, level_stats) -> bool:
     if not bool(decision_force_auto):
         return False
     if bool(image_view_backend_capabilities(window.win.img_view).shader_windowing):
         return False
-    if active_payloads:
-        return False
     if level_stats is None:
         return True
-    if level_stats.rank == LevelSourceRank.MONTAGE_SAMPLED_FULL:
+    if level_stats.rank in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
         return False
     return bool(
         getattr(session, "pending_tiles", None)

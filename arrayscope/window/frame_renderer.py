@@ -1865,7 +1865,7 @@ def _tile_layer_auto_levels_wait_for_complete_source(window, session, decision_f
         return False
     if level_stats is None:
         return True
-    if level_stats.rank == LevelSourceRank.MONTAGE_SAMPLED_FULL:
+    if level_stats.rank in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
         return False
     return bool(
         getattr(session, "pending_tiles", None)

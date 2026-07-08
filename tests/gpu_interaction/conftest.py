@@ -109,7 +109,7 @@ class Harness:
             and not s.flush_pending
             and not s.final_commit_pending
             and not s.lifecycle.evaluating_tiles
-            and len(s.presented_tiles) >= len(s.plan.tiles)
+            and len(s.lifecycle.presented_tiles) >= len(s.plan.tiles)
         )
 
     def assert_lifecycle_settled(self) -> None:

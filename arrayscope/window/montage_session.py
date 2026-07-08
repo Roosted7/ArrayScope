@@ -461,7 +461,6 @@ class MontageRenderSession:
     skipped_tiles: set[int]
     pending_tiles: MontageTilePriorityQueue | deque[MontageTile] | list[MontageTile]
     active_tile_requests: set[int] = field(default_factory=set)
-    presented_tiles: set[int] = field(default_factory=set)
     stage_fan_in: StageFanInState = field(default_factory=StageFanInState)
     tile_states: list[MontageTileState] = field(default_factory=list)
     dirty_tiles: list[int] = field(default_factory=list)
@@ -816,7 +815,7 @@ class MontageRenderSession:
                 self.tile_source_ids.pop(index, None)
                 self.display_tile_payloads.pop(index, None)
                 self.level_generation.forget_tile(index)
-                self.presented_tiles.discard(index)
+                self.lifecycle.presentation_discarded(index)
                 self.skipped_tiles.discard(index)
                 self.pending_removals.add(index)
                 self.dirty_payloads[index] = None
@@ -840,13 +839,14 @@ class MontageRenderSession:
         }
 
     def update_level_presentation_scope(self) -> None:
-        if not self.display_tile_payloads and not self.presented_tiles:
+        presented_tiles = self.lifecycle.presented_tiles
+        if not self.display_tile_payloads and not presented_tiles:
             return
         active = frozenset(
             int(tile.montage_index)
             for tile in tuple(self.visible_tiles)
             if int(tile.montage_index) in self.display_tile_payloads
-            and int(tile.montage_index) in self.presented_tiles
+            and int(tile.montage_index) in presented_tiles
             # Preview (floor) payloads carry no semantic level evidence and
             # can never converge; letting them into the scope kept the level
             # target permanently stale, which forced every commit through
@@ -944,7 +944,6 @@ class MontageRenderSession:
         self.active_tile_requests.discard(index)
         self.skipped_tiles.discard(index)
         self.discard_pending_tile(index)
-        self.presented_tiles.discard(index)
         self.loading_tiles.add(index)
         self.lifecycle.evaluation_completed(index)
         self.mark_tile_state(rendered.tile, MontageTileState.LOADING)
@@ -955,16 +954,24 @@ class MontageRenderSession:
         # commit O(n^2) in the tile count.
         level_scope_additions: list[int] = []
         confirmed: list[int] = []
+        shown_identities = dict(getattr(self, "last_presented_identities", None) or {})
         for tile_number in tuple(tile_numbers or ()):
             index = int(tile_number)
             payload = self.display_tile_payloads.get(index)
             preview_presented = payload is not None and str(getattr(payload, "quality", "exact")) == "preview"
             if index not in self.rendered_tiles and not preview_presented:
                 continue
+            if shown_identities and payload is not None and shown_identities.get(index) != payload.source_id:
+                # Backend-active is not the same as current-presented.  PyQtGraph
+                # can keep an item visible while it still holds the previous
+                # payload identity; treating that as presented made scrolls settle
+                # with stale/missing mixed-LOD slots.
+                self.lifecycle.presentation_discarded(index)
+                self.dirty_payloads[index] = None
+                continue
             confirmed.append(index)
-            if index not in self.presented_tiles and len(self.presented_order) < 64:
+            if index not in self.lifecycle.presented_tiles and len(self.presented_order) < 64:
                 self.presented_order.append(index)
-            self.presented_tiles.add(index)
             if index in self.visible_tile_numbers and index in self.display_tile_payloads:
                 level_scope_additions.append(index)
             self.loading_tiles.discard(index)
@@ -1126,7 +1133,7 @@ class MontageRenderSession:
                 continue
             tile_number = int(tile_number)
             previous = self.display_tile_payloads.get(tile_number)
-            owns_committed_presentation = tile_number in self.presented_tiles
+            owns_committed_presentation = tile_number in self.lifecycle.presented_tiles
             if previous is None:
                 base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
                 previous = by_base.get(base_source_id)
@@ -1163,7 +1170,7 @@ class MontageRenderSession:
                 seeded_state,
                 revision=int(getattr(self.tile_presentation_state, "revision", 0)),
             )
-            self.presented_tiles.update(int(tile) for tile in seeded_state)
+            self.lifecycle.presentation_confirmed(int(tile) for tile in seeded_state)
             self.invalidate_tile_states()
 
     def _payload_source_id(self, base_source_id, *, texture_kind, lod: LodInfo, texture_data) -> tuple[object, ...]:
@@ -1263,6 +1270,16 @@ class MontageRenderSession:
     ) -> bool:
         cache = self.pyramid_cache
         if cache is None:
+            return False
+        resolved_kind = texture_kind
+        if resolved_kind is None:
+            try:
+                resolved_kind = render_lod.floor_texture_kind(key.component)
+            except Exception:
+                resolved_kind = None
+        if render_lod.texture_requires_display_histogram(plane, resolved_kind) and not render_lod.display_histogram_matches_texture(
+            histogram, plane
+        ):
             return False
         cache.admit(key, plane)
         if histogram is not None:
@@ -1524,7 +1541,7 @@ class MontageRenderSession:
         presented_preview_tiles = tuple(
             int(tile)
             for tile in planned_numbers
-            if int(tile) in self.presented_tiles
+            if int(tile) in self.lifecycle.presented_tiles
             and str(getattr(self.display_tile_payloads.get(int(tile)), "quality", "exact")) == "preview"
         )
         floor_active_tiles = tuple(
@@ -1653,7 +1670,7 @@ class MontageRenderSession:
         }
         if max_upserts is not None or max_upsert_bytes is not None:
             admitted = set(int(tile) for tile in upserts)
-            admitted.update(int(tile) for tile in self.presented_tiles)
+            admitted.update(int(tile) for tile in self.lifecycle.presented_tiles)
             admitted.update(int(tile) for tile in previous_payloads)
             active = tuple(int(tile) for tile in active if int(tile) in admitted)
         near = tuple(tile for tile in self._near_tile_numbers(margin_tiles=2) if int(tile) not in self.skipped_tiles)
@@ -1965,11 +1982,12 @@ class MontageRenderSession:
             index = int(index)
             if 0 <= index < len(states):
                 states[index] = MontageTileState.SKIPPED
-        for index in set(self.loading_tiles) | (set(self.rendered_tiles) - set(self.presented_tiles)):
+        presented_tiles = set(self.lifecycle.presented_tiles)
+        for index in set(self.loading_tiles) | (set(self.rendered_tiles) - presented_tiles):
             index = int(index)
             if 0 <= index < len(states) and states[index] != MontageTileState.SKIPPED:
                 states[index] = MontageTileState.LOADING
-        for index in set(self.presented_tiles):
+        for index in presented_tiles:
             index = int(index)
             if 0 <= index < len(states):
                 states[index] = MontageTileState.LOADED
@@ -2036,7 +2054,7 @@ class MontageRenderSession:
             return True
         if self.has_stale_level_presentations():
             return False
-        return required.issubset(set(int(tile) for tile in self.presented_tiles))
+        return required.issubset(set(int(tile) for tile in self.lifecycle.presented_tiles))
 
     def has_stale_level_presentations(self) -> bool:
         snapshot = self.level_presentation_snapshot()

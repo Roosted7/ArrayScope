@@ -284,13 +284,15 @@ def montage_rect_for_viewport(plan: MontagePlan, *, view_range=None, viewport_sh
     if full_height <= 0 or full_width <= 0:
         return (0, 0, 1, 1)
     if view_range is None:
-        if viewport_shape is None:
-            width = full_width
-            height = full_height
-        else:
-            height = min(full_height, max(1, int(viewport_shape[0])))
-            width = min(full_width, max(1, int(viewport_shape[1])))
-        rect = (0, 0, max(1, int(width)), max(1, int(height)))
+        # No measured camera yet (e.g. on load before the view is sized, when
+        # `_montage_viewport_plan` falls through to current_range=None).  A
+        # montage defaults to fit-to-window, so the WHOLE montage is visible.
+        # The previous `min(full, viewport_shape)` clamp treated the window's
+        # PIXEL height/width as WORLD extent and cropped the visible set to the
+        # top-left corner — the "on load only ~6 of N tiles appear and the rest
+        # park until you scroll" bug (viewport_shape is pixels; display_shape is
+        # world).  Cover the full montage instead; a real view_range refines it.
+        rect = (0, 0, max(1, int(full_width)), max(1, int(full_height)))
         return _expand_rect_to_tile_bounds(plan, rect)
     rect = _rect_for_view_range(view_range, plan, viewport_shape)
     rect = _intersect_rect(rect, (0, 0, full_width, full_height)) or (0, 0, min(1, full_width), min(1, full_height))

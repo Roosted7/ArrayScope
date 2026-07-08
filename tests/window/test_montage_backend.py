@@ -276,7 +276,7 @@ def test_pyqtgraph_auto_levels_wait_for_complete_semantic_source():
     )
 
     assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, partial) is True
-    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, complete) is True
+    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, complete) is False
     assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, sampled_full) is False
 
 
@@ -726,6 +726,7 @@ def test_vispy_persistent_feedback_passes_cost_class_signature():
         pending_payload_upserts={},
         output_dtype=np.dtype("float32"),
         rgb=False,
+        lifecycle=SimpleNamespace(presented_tiles=frozenset()),
     )
 
     montage_commit._persistent_tile_upsert_limits(window, session)
@@ -968,7 +969,7 @@ def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
 
     state, delta = session.build_tile_presentation({})
     session.tile_presentation_state = state
-    session.presented_tiles = {0}
+    session.lifecycle.presentation_confirmed((0,))
     session.visible_tiles = tiles
 
     _state, delta = session.build_tile_presentation(
@@ -1037,7 +1038,7 @@ def test_tile_presentation_limits_cap_resident_retarget_upserts():
 
     state, delta = session.build_tile_presentation({})
     session.tile_presentation_state = state
-    session.presented_tiles = set(delta.upserts)
+    session.lifecycle.presentation_confirmed(tuple(delta.upserts))
     for tile_number, payload in state.payloads.items():
         session.acknowledged_source_ids.add(payload.source_id)
         session.dirty_payloads[int(tile_number)] = None
@@ -2048,6 +2049,7 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         plan=SimpleNamespace(geometry=geometry, display_shape=(2, 2)),
         view_state=None,
         rgb=False,
+        lifecycle=SimpleNamespace(presented_tiles=frozenset()),
     )
 
     win = _Window()

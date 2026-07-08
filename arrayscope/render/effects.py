@@ -392,7 +392,13 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
         if tile_number in set(getattr(session, "active_tile_requests", ()) or ()):
             continue
         record = session.lifecycle.peek(tile_number)
-        resident_levels = set(_resident_levels_from_lifecycle(record))
+        resident_levels = set(
+            _resident_levels_from_lifecycle(
+                record,
+                source_id=session.tile_semantic_source_id(int(tile.source_index)),
+                tile_id=int(tile.source_index),
+            )
+        )
         rendered = rendered_tiles.get(tile_number)
         if rendered is not None:
             # Native resident. For *planning* this dominates every pyramid
@@ -459,12 +465,24 @@ def rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
     )
 
 
-def _resident_levels_from_lifecycle(record) -> tuple[int, ...]:
+def _resident_levels_from_lifecycle(record, *, source_id=None, tile_id=None) -> tuple[int, ...]:
     if record is None:
         return ()
     levels = []
     for key, entry in dict(getattr(record, "levels", {}) or {}).items():
         if getattr(entry, "phase", None) is not LevelPhase.RESIDENT:
+            continue
+        # Scope residency to the tile's CURRENT source.  After a scroll each
+        # grid position points at a new source, but the lifecycle record keeps
+        # the previous source's resident level entries.  Counting those made
+        # the ladder believe the demanded level was already resident for the
+        # new source and skip its refinement rung — stranding the tile at its
+        # coarse floor (the onscreen-only mixed-LOD scroll stall; offscreen has
+        # no prior-source residency to go stale).  best_floor_key already
+        # filters by source, so the presentation and the ladder now agree.
+        if source_id is not None and getattr(key, "source_id", None) != source_id:
+            continue
+        if tile_id is not None and int(getattr(key, "tile_id", -1)) != int(tile_id):
             continue
         level_xy = tuple(getattr(key, "level_xy", ()) or ())
         if level_xy:

@@ -411,7 +411,7 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
     session = SimpleNamespace(
         visible_tiles=(SimpleNamespace(montage_index=0),),
         skipped_tiles=set(),
-        presented_tiles={0},
+        lifecycle=SimpleNamespace(presented_tiles=frozenset({0})),
         display_committed=True,
         pending_tiles=(),
         loading_tiles=set(),
@@ -558,7 +558,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     session = SimpleNamespace(
         visible_tiles=(SimpleNamespace(montage_index=0), SimpleNamespace(montage_index=1)),
         skipped_tiles=set(),
-        presented_tiles={0, 1},
+        lifecycle=SimpleNamespace(presented_tiles=frozenset({0, 1})),
         display_committed=True,
         pending_tiles=(),
         loading_tiles=set(),

@@ -29,39 +29,50 @@ Resolved by R2b stabilization:
 - `test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots`
 - `test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_image_item`
 
-## Scroll-scrub convergence stall (fast index retarget) — PRIORITY
+## Scroll-scrub convergence stall (fast index retarget) — RESOLVED (2026-07-07)
 
-**Repro (offscreen, deterministic):** `profile_montage_workflow`
-`montage_scroll_scrub` phase — `scroll_fast_settled=False`: a full-window
-index jump (100:150 → 150:200) does not settle in 20 s. User-visible as the
-"hang with wrong levels, one stuck tile, then all tiles glitch" report and
-the single un-converged tile in the 2026-07 screenshot.
+**Repro:** `profile_montage_workflow` `montage_scroll_scrub` phase under the
+**resident** quality policy (`--montage-quality-policy resident`; this is the
+real app default via `normalize_montage_quality_policy_choice`, but the profile
+CLI defaults to `native-only`, which does NOT exercise the LOD ladder — always
+pass `resident` to reproduce). User-visible as coarse/pixelated tiles among
+sharp neighbours after slow scrolls (mixed LODs), and earlier as holes.
 
-**Root cause (traced, not guessed):** the index-scrub fast path
-`MontageRenderSession.retarget_index_window` REUSES the session for the new
-index window and demotes every tile whose new content isn't cached
-(`rendered_tiles.pop` + `loading_tiles.add` + `pending_removals` +
-`dirty`, montage_index is grid position so all 50 slots turn over). It then
-relies on fresh evaluations to re-materialize them. Under the R2 async
-pipeline those evaluations complete in the kernel (`display_preparation`
-lane: 50 completed) but do NOT re-enter `mark_materialized` for the reused
-session — the tiles stay in `loading` with `rendered_tiles` emptied,
-`active_tile_requests=0`, nothing in flight: a lost-wakeup at the
-retarget↔pipeline seam. This is the same optimization that used to carry the
-`ARRAYSCOPE_DISABLE_SCRUB_FASTPATH` kill switch (removed in redesign
-hygiene); its interaction with the pipeline is the defect.
+**Actual root cause (traced by introspection, NOT the seam hypothesised
+below):** `render/effects._resident_levels_from_lifecycle` returned every
+RESIDENT level in a tile's lifecycle record **without filtering by the tile's
+current source**. `montage_index` is a grid position, so after a scroll each
+position points at a new source, but the record still holds the *previous*
+source's resident level entries. The ladder (`tile_lod_states` → `LodLadder`)
+counted those stale levels, computed `desired_resident=True`, and emitted **no
+refinement rung** — while `best_floor_key` (which *does* filter by source) only
+found the coarse floor level. Presentation and ladder disagreed: the tile
+floored coarse and the ladder believed it converged, so it stuck with no work
+in flight (`pending>0, active=0`). Onscreen-only because the residency that
+goes stale comes from prior views; the offscreen cold cache had none, so the
+ladder always emitted the rung and the scroll settled — which is why the
+earlier "retarget↔pipeline `mark_materialized`" hypothesis looked right
+offscreen but was wrong: introspection at the stall showed the shared stage
+value present (`n_stranded=0`) and the tiles' *current-source* residency was
+only the coarse floor level.
 
-**Fix owner: R3** (viewport/index-scoped retarget through the pipeline). Two
-candidate approaches, decide with the benchmark: (a) route index-window
-changes through a full session rebuild (correct, slower — measure the cost
-on the scroll stage), or (b) make `retarget_index_window` submit its demoted
-tiles through `pipeline.retarget` and gate loading→presented on the pipeline
-acks like the fresh-session path does. Do NOT reinstate a kill switch.
+**Fix (landed):** scope `_resident_levels_from_lifecycle` to the tile's current
+`source_id`/`tile_id` so the ladder and `best_floor_key` agree. Supporting
+hardening in the same change: `best_floor_key` now skips floor levels that
+cannot actually be drawn (complex/RGB level whose display histogram is not
+resident) so a missing finer histogram falls back to a presentable coarser
+level instead of a hole; and `request_montage_replan`'s coalesced `fire()`
+replans the *current* session rather than bailing when the session id/key
+changed under scroll churn (a dropped-wakeup race the busier onscreen event
+loop lost). Verified: 5× pyqtgraph + 2× vispy resident scroll-scrub runs settle
+(`scroll_fast_settled=True`, `slow_unsettled=0`, 50/50 presented, `stale=0`),
+uniform-LOD screenshot, no stall-guard trips.
 
-**Also present (smaller, same class):** even without scrubbing, ~1/120 tiles
-can reach a resident demanded level but stay presented at native with no
-dirty flag; a forced retarget does not converge it (level-completion
-lost-wakeup). Likely the same seam; fix together in R3.
+**Harness:** the montage waits now fail fast — a montage that is not settled
+with no kernel work in flight (a lost wakeup) aborts after a short grace window
+with the stall signature instead of hanging the full timeout; post-fast-jump
+and initial-montage waits were shortened. Use this to catch regressions of this
+class quickly.
 
 ## Known-slow / wedge evidence (not test failures)
 

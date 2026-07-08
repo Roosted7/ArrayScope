@@ -236,8 +236,9 @@ class TileLifecycle:
         # next commit will carry, and the backend has not seen the new one.
         # Resignations are per stale pair — a new result gets fresh chances.
         self._unpark(rec)
-        if rec.presentation is not Presentation.PRESENTED:
-            rec.presentation = Presentation.UNPRESENTED
+        self._presented.discard(rec.tile_number)
+        rec.presentation = Presentation.UNPRESENTED
+        rec.presented_source_id = None
         rec.emitted_source_id = None
         rec.resigned.clear()
 
@@ -629,6 +630,15 @@ class TileLifecycle:
             self._presented.add(rec.tile_number)
             if rec.semantic is Semantic.EVALUATED:
                 self._load_cleared(rec)
+
+    def presentation_discarded(self, tile_number: int) -> None:
+        rec = self._records.get(int(tile_number))
+        if rec is None:
+            return
+        self._presented.discard(rec.tile_number)
+        if rec.presentation is Presentation.PRESENTED:
+            rec.presentation = Presentation.UNPRESENTED
+        rec.presented_source_id = None
 
     def rearm_for_scope(self, active_scope: Iterable[int]) -> tuple[int, ...]:
         """Rule 3 re-arm: parked tiles entering the active scope want an upsert.

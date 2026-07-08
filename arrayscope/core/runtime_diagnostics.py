@@ -163,7 +163,6 @@ class MontageRuntimeDiagnostics:
     # ADR 0051: single-owner tile lifecycle machine.
     lifecycle_parked: int = 0
     lifecycle_evaluating: int = 0
-    lifecycle_presented: int = 0
     lifecycle_dangling_claims: int = 0
     # Migration parity: legacy collections that disagree with the machine's
     # mirrored semantic axis (must trend to 0 before P2 deletes them).
@@ -876,7 +875,6 @@ _MONTAGE_COVERED = frozenset(
         "pending_tiles",
         "pending_level_tiles",
         "skipped_tiles",
-        "lifecycle_presented",
         "lifecycle_parked",
         "lifecycle_evaluating",
         "lifecycle_dangling_claims",
@@ -1040,8 +1038,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         ),
         (
             "Lifecycle: "
-            f"presented={montage.lifecycle_presented} parked={montage.lifecycle_parked} "
-            f"evaluating={montage.lifecycle_evaluating} "
+            f"parked={montage.lifecycle_parked} evaluating={montage.lifecycle_evaluating} "
             f"dangling_claims={montage.lifecycle_dangling_claims} "
             f"mismatches={montage.lifecycle_semantic_mismatches} "
             f"identity_rejections={montage.lifecycle_identity_rejections} "

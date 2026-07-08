@@ -731,7 +731,7 @@ def test_seeding_new_session_keeps_stale_level_payload_presented():
     assert {
         payload.lod.level for payload in replacement.tile_presentation_state.payloads.values()
     } == {2}
-    assert replacement.presented_tiles == {0, 1}
+    assert replacement.lifecycle.presented_tiles == frozenset({0, 1})
 
     # The refresh accepts the presented level as resident evidence: no
     # down-swap churn to native while the demanded level rematerializes.
@@ -1178,6 +1178,36 @@ def test_report_bound_to_an_older_delta_acknowledges_nothing():
     assert not session.dirty_payloads
 
 
+def test_mark_presented_rejects_backend_active_tile_with_stale_identity():
+    """A backend-visible slot is not current presentation unless its identity
+    matches the session payload.  PyQtGraph can keep old items visible during
+    a bounded retarget; those tiles must stay dirty instead of making the
+    session appear settled."""
+
+    from dataclasses import replace as dc_replace
+
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
+    _state, delta = session.build_tile_presentation({})
+    report = TileCommitReport(presented_tiles=(0, 1), committed_upserts=(0, 1))
+    session.acknowledge_tile_presentation(delta, report)
+    session.mark_presented((0, 1))
+    assert session.lifecycle.presented_tiles == frozenset({0, 1})
+
+    old_identity = session.display_tile_payloads[1].source_id
+    session.display_tile_payloads[1] = dc_replace(session.display_tile_payloads[1], source_id=("fresh", 1))
+    session.dirty_payloads.clear()
+    session.last_presented_identities = {
+        0: session.display_tile_payloads[0].source_id,
+        1: old_identity,
+    }
+
+    session.mark_presented((0, 1))
+
+    assert 0 in session.lifecycle.presented_tiles
+    assert 1 not in session.lifecycle.presented_tiles
+    assert 1 in session.dirty_payloads
+
+
 def test_drawn_tile_with_outdated_acknowledged_identity_represents_and_rejoins_active():
     """Field defect 2026-07-05 (JSONL 110937, sid=81): level-2 swap upserts
     for near-scope tiles were declined and parked while the backend kept
@@ -1573,6 +1603,40 @@ def test_rgb_floor_from_pinned_preview_carries_display_histogram():
     assert payload.histogram_data.shape == (TILE // 4, TILE // 4)
     assert payload.semantic_data is None
     assert payload.semantic_histogram_data is None
+
+
+def test_rgb_preview_without_display_histogram_is_not_floor_presented():
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=1)
+    session.rgb = True
+
+    tile = session.plan.tiles[0]
+    rgb = np.zeros((TILE, TILE, 3), dtype=np.uint8)
+    rendered = RenderedTile(
+        tile=tile,
+        image=rgb,
+        histogram_data=None,
+        eval_ms=0.0,
+        slab_shape=rgb.shape,
+        slab_nbytes=rgb.nbytes,
+    )
+    semantic_id = session.tile_semantic_source_id(tile.source_index)
+
+    assert not admit_retained_preview_level(
+        pyramid,
+        rendered,
+        semantic_source_id=semantic_id,
+        preview_level=2,
+        shader_display=False,
+    )
+    del session.rendered_tiles[0]
+    session.display_tile_payloads.clear()
+    session.dirty_payloads.clear()
+
+    _state, delta = session.build_tile_presentation({})
+
+    assert not delta.upserts
+    assert not session.display_tile_payloads
 
 
 def test_preview_payload_at_acceptable_level_still_refines_to_exact():
@@ -1998,7 +2062,7 @@ def test_retarget_index_window_remaps_hits_misses_and_unchanged():
         columns=2, rows=1, gap=0, tiles=tuple(plan_tiles),
     )
     session.tile_source_ids = {0: ("src", 0), 1: ("src", 1)}
-    session.presented_tiles.update({0, 1})
+    session.lifecycle.presentation_confirmed((0, 1))
     session.loading_tiles.clear()
     session.dirty_payloads.clear()
     backend_truth = {0: ("shown", 0), 1: ("shown", 1)}
@@ -2023,13 +2087,13 @@ def test_retarget_index_window_remaps_hits_misses_and_unchanged():
     assert session.key == ("test", "retargeted")
     assert session.session_id == 2
     # Unchanged tile: still presented, not re-marked dirty.
-    assert 0 in session.presented_tiles
+    assert 0 in session.lifecycle.presented_tiles
     assert 0 not in session.dirty_payloads
     assert 0 in session.rendered_tiles
     # Changed tile went through the ordinary materialization seam.
     assert session.rendered_tiles[1] is hit
     assert 1 in session.dirty_payloads
-    assert 1 not in session.presented_tiles
+    assert 1 not in session.lifecycle.presented_tiles
     assert 1 in session.loading_tiles
     # Backend acknowledgement ground truth survives the retarget.
     assert session.last_presented_identities == backend_truth
@@ -2041,7 +2105,7 @@ def test_retarget_index_window_demotes_misses_without_blanking():
     session = _session(count=2)
     plan = _shifted_plan(count=2, offset=5)
     session.tile_source_ids = {0: ("src", 0), 1: ("src", 1)}
-    session.presented_tiles.update({0, 1})
+    session.lifecycle.presentation_confirmed((0, 1))
     payload_sentinel = object()
     session.display_tile_payloads = {0: payload_sentinel, 1: payload_sentinel}
 
@@ -2134,3 +2198,34 @@ def test_reduced_complex_base_keeps_a_level_matched_magnitude_histogram():
     assert float(texture_histogram.max()) > float(texture_histogram.min())
     # And it is cached so later reads/level system stay level-consistent.
     assert pyramid.lookup(render_lod.histogram_key_for(session, rendered, demand=demand, level=applied)) is not None
+
+
+def test_reduced_rgb_resident_without_magnitude_histogram_falls_back_to_native():
+    from arrayscope.render import lod as render_lod
+
+    pyramid = PyramidCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, view_range=((0.0, 3.0 * 2 * TILE), (0.0, 3.0 * TILE)))
+    tile = session.plan.tiles[0]
+    rgb_base = np.zeros((TILE, TILE, 3), dtype=np.uint8)
+    rendered = RenderedTile(
+        tile=tile,
+        image=rgb_base,
+        histogram_data=None,
+        eval_ms=0.0,
+        slab_shape=rgb_base.shape,
+        slab_nbytes=rgb_base.nbytes,
+    )
+
+    demand = session.lod_policy_decision.demand
+    applied = int(demand.desired_level)
+    assert applied >= 1
+    level_key = render_lod.pyramid_key_for(session, rendered, demand=demand, level=applied)
+    pyramid.admit(level_key, reduce_box_mean(rgb_base.astype(np.float32), level_key.factor_xy).astype(np.uint8))
+
+    texture, texture_histogram, lod = render_lod.resident_texture_for_rendered_tile(
+        session, rendered, source=rgb_base, histogram=None
+    )
+
+    assert lod.level == 0
+    assert texture is rgb_base
+    assert texture_histogram is None

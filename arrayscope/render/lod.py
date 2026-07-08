@@ -50,6 +50,20 @@ from arrayscope.presentation import ClaimOwner, LevelPhase
 PREVIEW_FLOOR_MIN_LEVEL = 4
 
 
+def texture_requires_display_histogram(texture, texture_kind) -> bool:
+    kind = None if texture_kind is None else str(getattr(texture_kind, "value", texture_kind))
+    if kind in {TexturePlaneKind.RGB8.value, TexturePlaneKind.COMPLEX_RG32F.value}:
+        return True
+    shape = tuple(getattr(texture, "shape", ()) or ())
+    return len(shape) == 3 and int(shape[-1]) in (3, 4)
+
+
+def display_histogram_matches_texture(histogram, texture) -> bool:
+    if histogram is None:
+        return False
+    return tuple(np.shape(histogram)[:2]) == tuple(np.shape(texture)[:2])
+
+
 # --------------------------------------------------------------------------
 # Identity
 # --------------------------------------------------------------------------
@@ -593,7 +607,10 @@ def admit_retained_preview_level(
         return False
     try:
         factor = 1 << level
-        source, histogram, _kind = texture_source_for_rendered(rendered, shader_display=shader_display)
+        source, histogram, kind = texture_source_for_rendered(rendered, shader_display=shader_display)
+        if texture_requires_display_histogram(source, kind) and histogram is None:
+            preview_pyramid.end_pending(key)
+            return False
         if reduced is not None and reduced_level is not None and int(reduced_level) == level:
             # The ingest reduction already produced exactly the preview
             # level: pin the same plane, zero extra reduction or copy.
@@ -634,8 +651,36 @@ def floor_component_tags(session) -> tuple[str, ...]:
     return (str(TexturePlaneKind.RGB8.value), "scalar", str(TexturePlaneKind.COMPLEX_RG32F.value))
 
 
+def _floor_key_presentable(session, key, cache) -> bool:
+    """A floor level is usable only if it can actually be drawn.
+
+    The plane must be resident and, for texture kinds that need a display
+    histogram (complex / RGB), a matching histogram must be resident too.
+    Returning a level whose histogram is missing makes ensure_floor_payloads
+    skip the tile — leaving a hole instead of falling back to a coarser level
+    that IS presentable (the single-tile complex-floor hole after a scroll).
+    """
+
+    if cache is None:
+        return False
+    plane = cache.peek(key)
+    if plane is None:
+        return False
+    texture_kind = None
+    metadata_fn = getattr(session, "preview_floor_metadata", None)
+    if callable(metadata_fn):
+        texture_kind = getattr(metadata_fn(key), "texture_kind", None)
+    if texture_kind is None:
+        texture_kind = floor_texture_kind(key.component)
+    if texture_requires_display_histogram(plane, texture_kind):
+        histogram = cache.peek(histogram_key_for_level_key(key))
+        if not display_histogram_matches_texture(histogram, plane):
+            return False
+    return True
+
+
 def best_floor_key(session, source_index: int, *, tile_number: int | None = None):
-    """Best resident pyramid key for one tile: nearest demand, finer ties."""
+    """Best *presentable* resident pyramid key: nearest demand, finer ties."""
 
     pyramid = session.pyramid_cache
     demand = session.lod_policy_decision.demand
@@ -651,7 +696,7 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
                 if getattr(key, "source_id", None) != semantic_id or int(getattr(key, "tile_id", -1)) != int(source_index):
                     continue
                 cache = session.pyramid_cache
-                if cache is None or cache.peek(key) is None:
+                if not _floor_key_presentable(session, key, cache):
                     continue
                 level = max(int(key.level_xy[0]), int(key.level_xy[1]))
                 rank = (abs(level - desired), level)
@@ -663,6 +708,8 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
         best = None
         for component in floor_component_tags(session):
             for key in pyramid.resident_keys_for(semantic_id, int(source_index), component):
+                if not _floor_key_presentable(session, key, pyramid):
+                    continue
                 level = max(int(key.level_xy[0]), int(key.level_xy[1]))
                 rank = (abs(level - desired), level)
                 if best is None or rank < best[0]:
@@ -774,7 +821,9 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             metadata = metadata_fn(key)
         texture_kind = getattr(metadata, "texture_kind", None)
         if texture_kind is None:
-            texture_kind = _floor_texture_kind(key.component)
+            texture_kind = floor_texture_kind(key.component)
+        if texture_requires_display_histogram(plane, texture_kind) and not display_histogram_matches_texture(histogram, plane):
+            continue
         factor_x = 1 << int(key.level_xy[0])
         factor_y = 1 << int(key.level_xy[1])
         tile_shape = tuple(int(value) for value in session.plan.tile_shape)
@@ -805,7 +854,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         built += 1
 
 
-def _floor_texture_kind(component: object) -> TexturePlaneKind:
+def floor_texture_kind(component: object) -> TexturePlaneKind:
     value = str(getattr(component, "value", component))
     if value == "scalar":
         return TexturePlaneKind.SCALAR_R32F
@@ -895,6 +944,10 @@ def resident_texture_for_rendered_tile(
                 texture_histogram = np.asarray(histogram)
         else:
             texture_histogram = None
+    if texture_requires_display_histogram(texture, getattr(rendered, "texture_kind", None)) and not display_histogram_matches_texture(
+        texture_histogram, texture
+    ):
+        return source, histogram, native_lod
     lod = LodInfo(
         level=applied,
         factor=max(int(factor_xy[0]), int(factor_xy[1])),

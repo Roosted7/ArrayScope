@@ -160,13 +160,23 @@ class MontageRuntimeMixin:
         if bool(getattr(self, "_montage_replan_gate_armed", False)):
             return
         self._montage_replan_gate_armed = True
-        session_id = int(session.session_id)
-        session_key = session.key
 
         def fire() -> None:
             self._montage_replan_gate_armed = False
+            # Replan whatever session is current when the gate fires — NOT the
+            # one captured when it was armed.  During scroll churn the session
+            # is reused/superseded between arm and fire (retarget_index_window
+            # bumps session_id/key on the same object).  Gating on the captured
+            # identity dropped the replan for the *new* current session: that
+            # session's own request_montage_replan had already no-opped against
+            # the still-armed gate, and this fire then bailed as "stale", so
+            # freshly demoted tiles sat at their coarse floor with no wakeup
+            # left (the onscreen-only mixed-LOD scroll stall — a timing race the
+            # busier onscreen event loop loses and the offscreen one wins).
+            # retarget_montage_pipeline re-validates the session and is
+            # idempotent, so replanning the current session is always safe.
             current = getattr(self, "_montage_session", None)
-            if current is None or not self._is_current_montage_session(session_id, session_key):
+            if current is None or not self._montage_session_is_current(current):
                 return
             self.retarget_montage_pipeline(current)
 
@@ -297,7 +307,7 @@ class MontageRuntimeMixin:
             lod_pending,
             level_evidence,
             level_stale,
-            len(session.presented_tiles),
+            len(session.lifecycle.presented_tiles),
             len(session.rendered_tiles),
         )
         previous = getattr(self, "_montage_watchdog_state", None)
@@ -317,6 +327,7 @@ class MontageRuntimeMixin:
             file=sys.stderr,
             flush=True,
         )
+
     def _update_montage_tile_overlays_for_plan(self, plan, tile_states, viewport_rect) -> None:
         if not hasattr(self.win.img_view, "setMontageTileOverlays"):
             return
@@ -332,7 +343,7 @@ class MontageRuntimeMixin:
                 candidates.update(
                     int(tile)
                     for tile in set(getattr(session, "rendered_tiles", {}) or {})
-                    - set(getattr(session, "presented_tiles", ()) or ())
+                    - set(session.lifecycle.presented_tiles)
                 )
             candidate_numbers = tuple(sorted(candidates))
             key = (
@@ -619,9 +630,23 @@ class MontageRuntimeMixin:
         finally:
             self._montage_viewport_update_running = False
         if getattr(self.win, "_montage_viewport_update_pending", False):
-            self.win._montage_viewport_update_pending = False
-            self._montage_viewport_continue_immediately = False
-            self.retarget_montage_viewport()
+            if getattr(self, "_montage_viewport_continue_immediately", False):
+                # Budgeted additions remained when the apply yielded mid-batch
+                # (frame_renderer armed continue_immediately): drain them now.
+                # Bounded by the addition count, so this cannot run away.
+                self.win._montage_viewport_update_pending = False
+                self._montage_viewport_continue_immediately = False
+                self.retarget_montage_viewport()
+            # Otherwise the pending flag was armed by an interaction-defer:
+            # missing tiles enqueued while the user is still panning, or a
+            # deferred stage fan-in that keeps deferring while
+            # viewport_interaction_active stays True.  Continuing synchronously
+            # here re-arms the flag on every apply and recurses until the stack
+            # overflows (retarget_montage_viewport <-> apply_montage_viewport_
+            # retarget, seen once the ladder correctly makes scrolled-in tiles
+            # stage-backed).  Leave it pending: _on_viewport_interaction_quiet
+            # drains it 120 ms after the gesture settles, and any further range
+            # change supersedes it in the meantime.
 
     def _publish_montage_content_extent(self, plan) -> None:
         """Publish the semantic montage extent as the viewport content shape.

@@ -95,7 +95,7 @@ def test_montage_render_session_materialized_tile_stays_loading_until_presented(
     session.mark_presented((tile.montage_index,))
 
     assert int(tile.montage_index) not in session.loading_tiles
-    assert int(tile.montage_index) in session.presented_tiles
+    assert int(tile.montage_index) in session.lifecycle.presented_tiles
 
 
 def test_montage_render_session_keeps_skipped_separate_from_pending():
@@ -315,7 +315,7 @@ def test_montage_render_session_visible_plan_ignores_deferred_offscreen_work():
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0],)
     session.visible_tile_numbers = frozenset({0})
-    session.presented_tiles = {0}
+    session.lifecycle.presentation_confirmed((0,))
     session.pending_tiles.append(session.plan.tiles[2])
     session.loading_tiles.add(3)
 
@@ -329,7 +329,7 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
     session.visible_tile_numbers = frozenset({0, 1})
-    session.presented_tiles = {0}
+    session.lifecycle.presentation_confirmed((0,))
 
     assert not session.visible_plan_complete()
 
@@ -339,7 +339,7 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
     session.loading_tiles.add(1)
     assert not session.visible_plan_complete()
     session.loading_tiles.clear()
-    session.presented_tiles.add(1)
+    session.lifecycle.presentation_confirmed((1,))
 
     assert session.visible_plan_complete()
 
@@ -350,7 +350,7 @@ def test_montage_render_session_replacement_materialization_reopens_visible_plan
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0],)
     session.visible_tile_numbers = frozenset({0})
-    session.presented_tiles = {0}
+    session.lifecycle.presentation_confirmed((0,))
 
     session.mark_materialized(
         RenderedTile(
@@ -363,7 +363,7 @@ def test_montage_render_session_replacement_materialization_reopens_visible_plan
         )
     )
 
-    assert 0 not in session.presented_tiles
+    assert 0 not in session.lifecycle.presented_tiles
     assert not session.visible_plan_complete()
 
 
@@ -1101,7 +1101,7 @@ def test_level_scope_growth_reopens_pending_target_for_new_active_tile():
     session = _session()
     session.visible_tiles = (session.plan.tiles[0],)
     session.display_tile_payloads = {0: object()}
-    session.presented_tiles = {0}
+    session.lifecycle.presentation_confirmed((0,))
     session.level_generation.set_active_tiles((0,))
 
     assert session.begin_level_presentation_update((2.0, 4.0)) is True
@@ -1114,7 +1114,7 @@ def test_level_scope_growth_reopens_pending_target_for_new_active_tile():
 
     session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
     session.display_tile_payloads[1] = object()
-    session.presented_tiles.add(1)
+    session.lifecycle.presentation_confirmed((1,))
     session.update_level_presentation_scope()
 
     assert session.has_pending_level_update() is True
@@ -1176,7 +1176,7 @@ def test_level_snapshot_tracks_active_set_changes_during_convergence():
     session = _session()
     session.level_revision = 4
     session.visible_tile_numbers = frozenset({0, 1, 2})
-    session.presented_tiles = {0, 1, 2}
+    session.lifecycle.presentation_confirmed((0, 1, 2))
     session.display_tile_payloads = {index: object() for index in range(3)}
     session.level_generation.tile_values = {
         0: (0.0, 1.0),
@@ -1209,7 +1209,7 @@ def test_level_snapshot_tracks_tile_entering_active_set_during_convergence():
     session = _session()
     session.level_revision = 4
     session.visible_tile_numbers = frozenset({0})
-    session.presented_tiles = {0, 1}
+    session.lifecycle.presentation_confirmed((0, 1))
     session.display_tile_payloads = {0: object(), 1: object()}
     session.level_generation.tile_values = {
         0: (2.0, 4.0),
@@ -1338,7 +1338,7 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
         TileCommitReport(presented_tiles=next_state.active_payloads(next_delta)),
     )
     assert 0 not in shifted.pending_payload_upserts
-    assert 0 in shifted.presented_tiles
+    assert 0 in shifted.lifecycle.presented_tiles
 
 
 def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(monkeypatch):

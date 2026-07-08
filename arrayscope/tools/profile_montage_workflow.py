@@ -292,10 +292,11 @@ def _apply_scroll_scrub(win, *, montage_axis, columns, tile_count, probe=None, a
     first_start = max(0, min(100, tile_count - 2 * size))
     fast_start = max(0, min(first_start + size, tile_count - size))
 
-    # 1) Fitted mid-range window with auto levels.
+    # 1) Fitted mid-range window with auto levels.  A settled small montage is
+    # quick; the stall guard bails fast if it freezes, so the budget stays low.
     _scroll_montage_window(win, montage_axis=montage_axis, columns=columns, start=first_start, size=size)
     if app is not None and QtCore is not None:
-        _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=15.0)
+        _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=8.0)
     auto = getattr(win, "auto_window_levels", None) or getattr(getattr(win, "renderer", None), "auto_window_levels", None)
     if callable(auto):
         auto()
@@ -316,9 +317,12 @@ def _apply_scroll_scrub(win, *, montage_axis, columns, tile_count, probe=None, a
         }
 
     # 2) One fast jump (scroll a full window forward), as fast as the GUI allows.
+    # Shorter budget than the initial fill: after a warm fitted window a full
+    # retarget should converge quickly, and the stall guard bails fast on a
+    # freeze rather than making the benchmark hang.
     fast = _step(
         lambda: _scroll_montage_window(win, montage_axis=montage_axis, columns=columns, start=fast_start, size=size),
-        budget_s=20.0,
+        budget_s=8.0,
     )
 
     # 3) Ten slow single-index scrolls, ~0.1 s of GUI time between each.
@@ -347,18 +351,89 @@ def _apply_scroll_scrub(win, *, montage_axis, columns, tile_count, probe=None, a
     }
 
 
-def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float) -> bool:
-    """Pump the loop up to budget_s, return whether the montage settled."""
+def _montage_settled(session) -> bool:
+    return bool(
+        session is not None
+        and session.is_complete()
+        and not bool(getattr(session, "flush_pending", False))
+        and not bool(getattr(session, "final_commit_pending", False))
+        and not bool(getattr(session, "dirty_payloads", None))
+        and not bool(getattr(session, "pending_payload_upserts", None))
+    )
+
+
+def _montage_work_in_flight(session) -> bool:
+    """True when real computation is still running (kernel tasks in flight).
+
+    A montage that is not settled but has work in flight is *progressing*; a
+    montage that is not settled with nothing in flight is a lost wakeup — the
+    signature the stall guard uses to bail fast instead of waiting the full
+    budget.
+    """
+
+    if session is None:
+        return False
+    fan = getattr(session, "stage_fan_in", None)
+    # Only kernel-submitted work counts as in flight.  ``attached_requests`` are
+    # stage keys bound to the fan-in but not necessarily running; an attached
+    # stage that never activates while nothing else progresses is precisely the
+    # stall the guard must catch, so it is deliberately excluded here.
+    return bool(
+        getattr(session, "active_tile_requests", None)
+        or getattr(session, "pending_rung_materializations", None)
+        or (fan is not None and getattr(fan, "active_requests", None))
+    )
+
+
+def _montage_stall_signature(session):
+    if session is None:
+        return None
+    fan = getattr(session, "stage_fan_in", None)
+    return (
+        int(getattr(session, "session_id", -1)),
+        len(getattr(session, "loading_tiles", ()) or ()),
+        len(session.pending_tile_numbers()) if hasattr(session, "pending_tile_numbers") else 0,
+        len(getattr(session, "active_tile_requests", ()) or ()),
+        len(getattr(session, "dirty_payloads", {}) or {}),
+        0 if fan is None else len(getattr(fan, "tile_stage_keys", {}) or {}),
+        0 if fan is None else len(getattr(fan, "values", {}) or {}),
+        len(getattr(session, "pending_rung_materializations", ()) or ()),
+        len(session.lifecycle.presented_tiles),
+        len(getattr(session, "rendered_tiles", {}) or {}),
+    )
+
+
+def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float, stall_grace_s: float = 2.5) -> bool:
+    """Pump the loop up to budget_s; return whether the montage settled.
+
+    Bails early with False when the montage is *clearly frozen*: the stall
+    signature holds constant for ``stall_grace_s`` while no kernel work is in
+    flight (a lost wakeup — waiting the full budget would only stare at a dead
+    session).  A montage still computing keeps the full budget.
+    """
 
     deadline = perf_counter() + float(budget_s)
+    stall_since = None
+    last_sig = None
     while perf_counter() < deadline:
         app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
         session = getattr(win, "_montage_session", None)
-        if session is not None and session.is_complete() and not bool(getattr(session, "flush_pending", False)) \
-                and not bool(getattr(session, "final_commit_pending", False)) \
-                and not bool(getattr(session, "dirty_payloads", None)) \
-                and not bool(getattr(session, "pending_payload_upserts", None)):
+        if _montage_settled(session):
             return True
+        sig = _montage_stall_signature(session)
+        if _montage_work_in_flight(session):
+            stall_since = None  # genuine progress possible; keep waiting
+        elif sig != last_sig:
+            stall_since = perf_counter()  # state changed; restart the grace window
+        elif stall_since is not None and perf_counter() - stall_since >= float(stall_grace_s):
+            print(
+                f"[profile] STALL GUARD: montage frozen (no work in flight) — "
+                f"signature stable {stall_grace_s:.1f}s: {sig}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+        last_sig = sig
     return False
 
 
@@ -712,15 +787,34 @@ def _wait_for_montage_complete(
     final_visibility_state: dict[str, object] = {}
     final_level_state: dict[str, object] = {}
     final_payload_state: dict[str, object] = {}
+    stall_since = None
+    stall_last_sig = None
+    stall_grace_s = 4.0
+    stalled = False
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
         session = getattr(win, "_montage_session", None)
+        # Fail-fast stall guard: a montage that is not settled with no kernel
+        # work in flight is a lost wakeup — bail after a short grace window
+        # instead of staring at a dead session until the full timeout.
+        if not _montage_settled(session):
+            sig = _montage_stall_signature(session)
+            if _montage_work_in_flight(session):
+                stall_since = None
+            elif sig != stall_last_sig:
+                stall_since = time.monotonic()
+            elif stall_since is not None and time.monotonic() - stall_since >= stall_grace_s:
+                stalled = True
+                break
+            stall_last_sig = sig
+        else:
+            stall_since = None
         mode = getattr(win.img_view, "montageDisplayMode", lambda: "")()
         vispy_tiled = str(mode) == "vispy_tile_layer" and _vispy_canvas_visible(win)
         if session is not None:
             if first_materialized_tile_ms is None and bool(getattr(session, "rendered_tiles", None)):
                 first_materialized_tile_ms = (perf_counter() - start) * 1000.0
-            if first_presented_tile_ms is None and bool(getattr(session, "presented_tiles", ())):
+            if first_presented_tile_ms is None and bool(session.lifecycle.presented_tiles):
                 first_presented_tile_ms = (perf_counter() - start) * 1000.0
             if first_display_committed_ms is None and bool(getattr(session, "display_committed", False)):
                 first_display_committed_ms = (perf_counter() - start) * 1000.0
@@ -862,9 +956,14 @@ def _wait_for_montage_complete(
     snapshot = win.collect_runtime_diagnostics()
     session = getattr(win, "_montage_session", None)
     fan_in = None if session is None else getattr(session, "stage_fan_in", None)
+    _stall_prefix = (
+        f"STALL GUARD: montage frozen (no work in flight) after {stall_grace_s:.1f}s: "
+        if stalled
+        else "timed out waiting for montage completion: "
+    )
     raise TimeoutError(
-        "timed out waiting for montage completion: "
-        f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
+        _stall_prefix
+        + f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
         f"loading={snapshot.montage.loading_tiles} "
         f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
         f"stage_active={0 if fan_in is None else len(getattr(fan_in, 'active_requests', ()) or ())} "
@@ -932,7 +1031,7 @@ def _montage_level_presentation_state(win) -> dict[str, object]:
         "pending_tiles": max(0, stale) if pending else 0,
         "active_level_value_count": len(counts),
         "active_tile_count": len(tuple(getattr(session, "visible_tiles", ()) or ())),
-        "active_presented_tile_count": len(tuple(getattr(session, "presented_tiles", ()) or ())),
+        "active_presented_tile_count": len(tuple(session.lifecycle.presented_tiles)),
     }
 
 
@@ -1217,7 +1316,7 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
     expected = set(_expected_requested_montage_tiles(session))
     if not expected:
         expected = set(active)
-    presented = {int(tile) for tile in tuple(getattr(session, "presented_tiles", ()) or ())}
+    presented = {int(tile) for tile in tuple(session.lifecycle.presented_tiles)}
     vispy = _vispy_presentation_diagnostics(win)
     overlay_count = _montage_overlay_count(win)
     overlays_above_tiles = bool(vispy.get("overlays_above_tiles", False))
