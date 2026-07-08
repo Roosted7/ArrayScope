@@ -76,6 +76,54 @@ refine toward exact only after visible correctness work is admitted.
 bridge budget uses. `compute_policy` lane worker counts become the initial
 lane quotas.
 
+## LOD / preview production policy (R3 field feedback, 2026-07-08)
+
+R1–R3 land the *mechanism* — degraded-preview first-pixels (shown whenever a
+tile would otherwise be black, even at native scale, labelled `quality=
+"preview"`, replaced by target work without being cleared) and rough → hold →
+refined level/histogram phasing. They keep a **fixed** preview LOD level and a
+**static** preview-vs-target choice. R4 owns the adaptive policy at the same
+admission boundary:
+
+- **Backlog-driven preview choice.** Showing coarser-than-target pixels is a
+  data-availability + latency decision, never "the viewport demanded reduced":
+  - target-quality data already producible (a resident finer level to
+    downsample, or ops staged) **and not running behind** (≤1 tile missing) →
+    present target directly, no preview detour;
+  - **running behind** (≥2 tiles missing) → downsample the operation output —
+    even from higher-quality data — to blanket-fill fast;
+  - **caught up** (≤1 behind) → stop downsampling and upgrade quality,
+    **oldest low-quality tiles first**.
+  "Behind" is the backlog the drain/commit budget already tracks; wire it in
+  rather than inventing a new counter.
+- **Never downgrade LOD.** A committed/uploaded tile is always kept (prefer
+  target, then finer, then coarser); a presented tile is never swapped to a
+  *lower* LOD except under memory pressure, and even then only as the last
+  eviction choice when no other resident can be freed (extends the eviction
+  ranking above). Zoom-in retains the coarser data as correct first-pixels and
+  treats the newly-needed detail as *new* tiles (so if preview LOD still beats
+  target and we are behind, preview shows first).
+- **Never downgrade levels/histogram.** Level/histogram evidence is never
+  replaced by lower-quality evidence, and is not re-sampled (rough or refined)
+  when equal-or-better evidence already exists — the R1–R3 `has_source`/refined
+  guards enforce this; R4 preserves it while moving refinement scheduling into
+  kernel admission (drop stale side work at the owner, not in `level_stats`).
+- **Dynamic preview level.** Until R4 the preview LOD level is a renderer-local
+  constant; R4 makes it dynamic from viewport demand, tile shape, op
+  cost/capabilities, staged availability, cache budget, and memory pressure
+  (see the dynamic-preview-level paragraph above). The op cost/capabilities
+  input, and the reduced-input eligibility gaps it must reason about, are
+  audited in [`op-reduced-input-compat.md`](op-reduced-input-compat.md).
+
+Deferred to a focused follow-up (not strictly R4): the **PyQtGraph
+2-quality-level** presentation. Because PyQtGraph bakes levels into pixels at
+commit, its auto-levels currently crawl tile-by-tile as bounds grow, re-baking
+tiles through the fill. It should instead capture a full-coverage *rough* level
+estimate before the first CPU-LUT commit, show the preview-LOD tiles at those
+stable rough levels, then apply one *refined* level update for the final-LOD
+tiles. VisPy already does rough → hold → refined because its levels are a cheap
+late GPU uniform.
+
 ## Exit gate
 
 - Timer allowlist test green; grep shows no scheduling-category timers.

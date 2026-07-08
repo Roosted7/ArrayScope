@@ -1449,6 +1449,13 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         if not session.is_complete():
             return False
         self._settle_montage_visible_plan_if_complete(session)
+        # Montage level phasing: rough → hold → refined. Rough sampled stats are
+        # captured and applied during the first render pass (commit + cached
+        # scan); the per-source `has_source` guard then HOLDS them across the
+        # target pass so level work never competes with target-tile rendering.
+        # Only here, once the montage has settled, is the refined pass scheduled
+        # — so final/target tiles appear first and accurate levels/histogram
+        # follow. (R4 moves this scheduling into kernel admission.)
         self._schedule_montage_refined_level_stats(session)
         return True
 

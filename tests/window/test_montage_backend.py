@@ -337,6 +337,50 @@ def test_preview_level_evidence_is_not_promoted_to_refined_when_pyqtgraph_waits(
     assert exact_stats.refined is True
 
 
+def test_preview_level_evidence_promotes_to_refined_on_shader_backend():
+    from types import SimpleNamespace
+    from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.montage_levels import MontageLevelTracker
+    from arrayscope.render.level_stats import _rendered_tile_from_previous_payload
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class Window(FrameRenderMixin):
+        def __init__(self):
+            self.win = self
+            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
+            self._tracker = MontageLevelTracker()
+
+        def _montage_level_tracker(self):
+            return self._tracker
+
+    tile = SimpleNamespace(montage_index=0, source_index=7)
+    preview = DisplayTilePayload(
+        0,
+        7,
+        np.asarray([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32),
+        np.asarray([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32),
+        ("preview", 7),
+        level_data=np.asarray([10.0, 40.0], dtype=np.float32),
+        quality="preview",
+    )
+    win = Window()
+    key = ("levels", "preview-refined-vispy")
+
+    # On a shader-windowing backend a preview tile's refined-sampled stats DO
+    # promote to refined: "refined" is sample density of the shown quality, and
+    # VisPy applies the resulting levels as a cheap GPU update in place.
+    win._update_montage_level_bounds_from_rendered(
+        key,
+        _rendered_tile_from_previous_payload(tile, preview),
+        expected_indices=(7,),
+        refined=True,
+    )
+    stats = win._tracker.summary_for(key)
+    assert stats.refined is True
+    assert stats.bounds == (10.0, 40.0)
+
+
 def test_preview_payloads_do_not_count_as_semantic_commits():
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.window.montage_commit import tiled_payloads_include_semantics
