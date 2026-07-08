@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, select_lod_demand
-from arrayscope.display.model.frame import TileCommitReport
+from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, LodInfo, select_lod_demand
+from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.kernel import Lane, Priority
@@ -2013,8 +2013,8 @@ def test_diagnostics_lod_reason_follows_the_presented_level():
     """The reason text must describe the screen, not the last policy run."""
 
     from arrayscope.display.lod import (
-        LOD_REASON_RESIDENT_FINER,
         LOD_REASON_RESIDENT_MATCH,
+        LOD_REASON_RESIDENT_NATIVE_FALLBACK,
     )
     from arrayscope.window.diagnostics_snapshot import _presented_lod_reason
 
@@ -2024,8 +2024,8 @@ def test_diagnostics_lod_reason_follows_the_presented_level():
     decision = session.lod_policy_decision
     assert decision.demand.desired_level == 2
 
-    # Nothing presented at the demanded level yet: finer-while-materializing.
-    assert _presented_lod_reason(decision, (0, 1, (1, 1))) == LOD_REASON_RESIDENT_FINER
+    # Nothing presented at the demanded level yet: native is an explicit fallback.
+    assert _presented_lod_reason(decision, (0, 1, (1, 1))) == LOD_REASON_RESIDENT_NATIVE_FALLBACK
     # The screen converged (ingest-presented level 2) without a policy rerun:
     # the stale decision must not keep reporting "materializes".
     assert _presented_lod_reason(decision, (2, 4, (4, 4))) == LOD_REASON_RESIDENT_MATCH
@@ -2292,16 +2292,11 @@ def test_stale_commit_batch_releases_prepared_active_claim_after_key_retarget():
     assert session._test_replan_requested is True
 
 
-def test_stale_desired_drop_releases_materialization_and_evaluation_claims():
-    """DESIRED can mean chain materialization or cold evaluation; drop both.
-
-    Fast index-window retargeting can leave an old resident-level chain keyed
-    by the same tile/rung/level as the cold evaluation prepared for the new
-    source.  Releasing the chain must not return before clearing the active
-    evaluation claim, or the session idles forever with no kernel work left.
-    """
+def test_non_native_desired_without_retained_source_does_not_create_native_claim():
+    """DESIRED display targets must not fall back to per-tile native ops."""
 
     session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.lod_preview_level = 6
     renderer = _RungPrepareRenderer()
     effects = MontagePipelineEffects(renderer, session)
     intent = _pipeline_intent_for(session, viewport_key="old")
@@ -2326,9 +2321,9 @@ def test_stale_desired_drop_releases_materialization_and_evaluation_claims():
     del session.rendered_tiles[0]
     session.dirty_payloads.pop(0, None)
 
-    assert effects.prepare_rung(intent, step)
-    assert 0 in session.active_tile_requests
-    assert 0 in session.loading_tiles
+    assert not effects.prepare_rung(intent, step)
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
     assert session.pending_rung_materializations
 
     effects.rung_dropped(intent, step)
@@ -2337,7 +2332,99 @@ def test_stale_desired_drop_releases_materialization_and_evaluation_claims():
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
     assert session.lifecycle.evaluating_tiles == frozenset()
-    assert session._test_replan_requested is True
+
+
+def test_non_native_desired_with_retained_source_stays_shared_only_for_cold_tile():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    stage_key = ("stage", "retained")
+    session.stage_fan_in.tile_stage_keys[0] = stage_key
+    session.stage_fan_in.values[stage_key] = object()
+    renderer = _RungPrepareRenderer()
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session, viewport_key="old")
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
+    )
+    del session.rendered_tiles[0]
+    session.dirty_payloads.pop(0, None)
+
+    assert not effects.prepare_rung(intent, step)
+
+    assert effects._pending_previews == {}
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+
+
+def test_shared_target_in_flight_blocks_per_tile_desired_after_coarse_preview():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    tile = session.plan.tiles[0]
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.display_tile_payloads[0] = DisplayTilePayload(
+        0,
+        0,
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        session.tile_semantic_source_id(tile.source_index),
+        lod=LodInfo(level=6, factor=64, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="preview",
+    )
+    stage_key = ("stage", "retained")
+    session.stage_fan_in.tile_stage_keys[0] = stage_key
+    session.stage_fan_in.values[stage_key] = object()
+    session._shared_floor_tiles = (0,)
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
+    )
+
+    assert not effects.prepare_rung(_pipeline_intent_for(session), step)
+
+    assert effects._pending_previews == {}
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+
+
+def test_shared_target_waits_for_presented_preview_before_higher_quality():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.lod_preview_level = 6
+    tile = session.plan.tiles[0]
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    source_id = session.tile_semantic_source_id(tile.source_index)
+    preview = DisplayTilePayload(
+        0,
+        0,
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        source_id,
+        lod=LodInfo(level=6, factor=64, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="preview",
+    )
+    session.display_tile_payloads[0] = preview
+    demand = session.lod_policy_decision.demand
+    desired = int(demand.desired_level)
+    assert desired < 6
+
+    assert render_effects.shared_transform_target_level(session, demand) > desired
+
+    session.tile_presentation_state.payloads[0] = preview
+    session.lifecycle.backend_presented_snapshot({0: source_id})
+    session.lifecycle.presentation_confirmed((0,))
+
+    assert render_effects.shared_transform_target_level(session, demand) == desired
 
 
 def test_source_changed_active_claim_does_not_block_retargeted_prepare():
@@ -2390,8 +2477,8 @@ def test_source_changed_active_claim_does_not_block_retargeted_prepare():
     assert 0 not in session.loading_tiles
 
 
-def test_stale_materialized_desired_admission_releases_conflicting_evaluation_claim():
-    """A stale resident-level result must not strand the cold DESIRED claim."""
+def test_stale_materialized_desired_admission_does_not_invent_native_claim():
+    """A resident-level result may complete without any semantic eval claim."""
 
     session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
     renderer = _RungPrepareRenderer()
@@ -2418,8 +2505,8 @@ def test_stale_materialized_desired_admission_releases_conflicting_evaluation_cl
     del session.rendered_tiles[0]
     session.dirty_payloads.pop(0, None)
 
-    assert effects.prepare_rung(intent, step)
-    assert 0 in session.active_tile_requests
+    assert not effects.prepare_rung(intent, step)
+    assert 0 not in session.active_tile_requests
 
     effects._admit_ready_payloads(((step, ("materialized", request)),))
 

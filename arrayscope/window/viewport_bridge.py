@@ -35,6 +35,15 @@ def _range_change_has_pointer_gesture() -> bool:
 
 
 def _owner_has_tiled_scene(owner) -> bool:
+    if getattr(getattr(owner.win, "view_state", None), "montage_axis", None) is not None:
+        session = getattr(owner, "_montage_session", None)
+        if session is not None and (
+            bool(getattr(session, "display_committed", False))
+            or bool(getattr(session, "display_tile_payloads", None))
+            or bool(getattr(getattr(session, "tile_presentation_state", None), "payloads", None))
+            or bool(getattr(getattr(session, "lifecycle", None), "presented_tiles", None))
+        ):
+            return True
     frame = getattr(owner.win, "_committed_display_frame", None)
     scene = getattr(frame, "scene", None)
     value_source = getattr(frame, "value_source", None)

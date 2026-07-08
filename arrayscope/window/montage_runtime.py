@@ -136,7 +136,7 @@ class MontageRuntimeMixin:
                         preview_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
                         # Opaque pipelines (FFT…) must not pay a full native
                         # evaluation per tile for pre-native rungs; their
-                        # preview path is the shared transform floor.
+                        # preview/target path is the shared transform pass.
                         reduced_input_available=reduced_input_available,
                     )
                 ),
@@ -185,12 +185,12 @@ class MontageRuntimeMixin:
     def retarget_montage_pipeline(self, session, *, force_commit: bool = False) -> int:
         if session is None or not self._montage_session_is_current(session):
             return 0
-        if montage_commit.complete_deferred_stage_fan_in(self, session):
-            return 0
         render_lod.selected_lod_factor(session)
         intent = self._montage_render_intent(session)
         pipeline = self._montage_pipeline_for_session(session)
         submitted = pipeline.effects.submit_shared_transform_floor()
+        if montage_commit.complete_deferred_stage_fan_in(self, session):
+            return submitted
         submitted += pipeline.retarget(intent, session.lod_policy_decision.demand)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)
@@ -639,52 +639,55 @@ class MontageRuntimeMixin:
             self.retarget_montage_pipeline(session)
 
     def apply_montage_viewport_retarget(self) -> None:
-        if getattr(self.win, "_closing", False):
-            return
-        session = getattr(self, "_montage_session", None)
-        token = getattr(self, "_montage_viewport_update_token", None)
-        if token is not None and (session is None or not _montage_work_token_is_current(session, token, "viewport_update")):
-            return
-        if getattr(self, "_montage_viewport_update_running", False):
-            self.win._montage_viewport_update_pending = True
-            return
-        self._montage_viewport_update_running = True
-        self.win._montage_viewport_update_pending = False
-        try:
-            if self._try_update_montage_viewport_only():
-                retargeted = getattr(self, "_montage_session", None)
-                if retargeted is not None:
-                    _complete_inline_work(
-                        self,
-                        WorkItem(
-                            key=(
-                                "montage_viewport_retarget",
-                                retargeted.key,
-                                int(retargeted.session_id),
-                                int(getattr(retargeted, "viewport_revision", 0) or 0),
+        while True:
+            if getattr(self.win, "_closing", False):
+                return
+            session = getattr(self, "_montage_session", None)
+            token = getattr(self, "_montage_viewport_update_token", None)
+            if token is not None and (
+                session is None or not _montage_work_token_is_current(session, token, "viewport_update")
+            ):
+                return
+            if getattr(self, "_montage_viewport_update_running", False):
+                self.win._montage_viewport_update_pending = True
+                return
+            self._montage_viewport_update_running = True
+            self.win._montage_viewport_update_pending = False
+            try:
+                if self._try_update_montage_viewport_only():
+                    retargeted = getattr(self, "_montage_session", None)
+                    if retargeted is not None:
+                        _complete_inline_work(
+                            self,
+                            WorkItem(
+                                key=(
+                                    "montage_viewport_retarget",
+                                    retargeted.key,
+                                    int(retargeted.session_id),
+                                    int(getattr(retargeted, "viewport_revision", 0) or 0),
+                                ),
+                                lane=WorkLane.DISPLAY_PREPARATION,
+                                quality="retained",
+                                supersession_key=("montage-viewport-retarget", retargeted.key),
+                                supersession_value=int(retargeted.session_id),
                             ),
-                            lane=WorkLane.DISPLAY_PREPARATION,
-                            quality="retained",
-                            supersession_key=("montage-viewport-retarget", retargeted.key),
-                            supersession_value=int(retargeted.session_id),
-                        ),
-                    )
-            else:
-                self.update_image_view()
-        finally:
-            self._montage_viewport_update_running = False
-        if getattr(self.win, "_montage_viewport_update_pending", False):
-            if getattr(self, "_montage_viewport_continue_immediately", False):
-                # Budgeted additions remained when the apply yielded mid-batch
-                # (frame_renderer armed continue_immediately): drain them now.
-                # Bounded by the addition count, so this cannot run away.
-                self.win._montage_viewport_update_pending = False
-                self._montage_viewport_continue_immediately = False
-                self.retarget_montage_viewport()
-            # Otherwise the flag means a viewport retarget was requested while
-            # this bounded apply was already running. Tile correctness work is
-            # submitted through the kernel from the active retarget path; this
-            # flag is not a "quiet will fix it later" queue.
+                        )
+                else:
+                    self.update_image_view()
+            finally:
+                self._montage_viewport_update_running = False
+            if not getattr(self.win, "_montage_viewport_update_pending", False):
+                return
+            if not getattr(self, "_montage_viewport_continue_immediately", False):
+                # A new viewport retarget arrived while this bounded apply was
+                # running. The active retarget path already submitted current
+                # correctness work; this flag is not a delayed drain queue.
+                return
+            # Budgeted additions remained when the apply yielded mid-batch.
+            # Continue in this stack frame instead of re-entering through
+            # retarget_montage_viewport(), which calls this method again.
+            self.win._montage_viewport_update_pending = False
+            self._montage_viewport_continue_immediately = False
 
     def _publish_montage_content_extent(self, plan) -> None:
         """Publish the semantic montage extent as the viewport content shape.
@@ -882,6 +885,11 @@ class MontageRuntimeMixin:
                     )
         return dict(source_ids)
     def _classify_visible_montage_tiles(self, session) -> None:
+        if not render_lod.native_missing_tile_queue_required(
+            str(getattr(session, "lod_policy_mode", "")),
+            getattr(getattr(session, "lod_policy_decision", None), "demand", None),
+        ):
+            return
         rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
         pending = set(session.pending_tile_numbers())
         newly_pending = []

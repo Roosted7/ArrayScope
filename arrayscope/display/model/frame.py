@@ -130,6 +130,10 @@ class DisplayTilePayload:
         return total
 
 
+def display_tile_payload_has_semantics(payload) -> bool:
+    """Return whether a tiled payload can update committed semantic state."""
+
+    return str(getattr(payload, "quality", "exact") or "exact") == "exact"
 
 
 @dataclass(frozen=True)

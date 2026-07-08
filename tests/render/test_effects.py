@@ -82,17 +82,21 @@ def _assert_preview_rows_equal(left, right):
     assert left[6] == right[6]
 
 
-def test_evaluate_exact_tile_returns_native_tile_payload():
+def test_evaluate_target_tile_level_zero_returns_native_tile_payload():
     session = _session()
     tile = session.plan.tiles[1]
     evaluator = OperationEvaluator(session.document)
 
-    result = effects.evaluate_exact_tile(
+    result = effects.evaluate_target_tile(
         session,
         tile,
+        level=0,
+        demand=_demand(0),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
         stage_cache=evaluator.stage_cache,
         stage_materializer=evaluator.stage_materializer,
         cancellation_token=None,
+        shader_display=False,
         evaluation_context=None,
     )
 
@@ -106,7 +110,7 @@ def test_evaluate_exact_tile_returns_native_tile_payload():
     assert result.value.level_stats is not None
 
 
-def test_evaluate_exact_tile_uses_cached_stage_without_waiting_binding(monkeypatch):
+def test_evaluate_target_tile_level_zero_uses_cached_stage_without_waiting_binding(monkeypatch):
     session = _session()
     tile = session.plan.tiles[1]
     stage_key = ("stage", "cached")
@@ -138,12 +142,16 @@ def test_evaluate_exact_tile_uses_cached_stage_without_waiting_binding(monkeypat
 
     monkeypatch.setattr(effects, "evaluate_slab_from_stage", fake_evaluate_slab_from_stage)
 
-    result = effects.evaluate_exact_tile(
+    result = effects.evaluate_target_tile(
         session,
         tile,
+        level=0,
+        demand=_demand(0),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
         stage_cache=Cache(),
         stage_materializer=Materializer(),
         cancellation_token=None,
+        shader_display=False,
         evaluation_context=None,
     )
 
@@ -151,6 +159,31 @@ def test_evaluate_exact_tile_uses_cached_stage_without_waiting_binding(monkeypat
     assert result.compute_path == "stage_backed"
     np.testing.assert_allclose(result.value.data, np.full((4, 6), 7.0, dtype=np.float32))
     assert session.stage_fan_in.tile_stage_keys == {}
+
+
+def test_evaluate_target_tile_non_native_returns_display_payload_not_native_result():
+    session = _session()
+    tile = session.plan.tiles[1]
+    evaluator = OperationEvaluator(session.document)
+    demand = _demand(1)
+
+    payload = effects.evaluate_target_tile(
+        session,
+        tile,
+        level=1,
+        demand=demand,
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        stage_cache=evaluator.stage_cache,
+        stage_materializer=evaluator.stage_materializer,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert not hasattr(payload, "value")
+    key, plane, _histogram, _mapping, _kind, _level_data, _level_stats = payload
+    assert key.level_xy == (1, 1)
+    assert plane.shape == (2, 3)
 
 
 def test_evaluate_preview_tile_returns_display_only_payload():
@@ -236,6 +269,73 @@ def test_evaluate_shared_preview_fans_out_display_only_payloads():
         assert level_stats is None
 
 
+def test_shared_preview_runs_at_demanded_display_lod():
+    session = _session()
+    session.lod_preview_level = 1
+    demand = _demand(1)
+    tiles = session.plan.tiles[:2]
+
+    previews = effects.evaluate_shared_preview(
+        session,
+        tiles[0],
+        tiles,
+        demand=demand,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert len(previews) == 2
+    assert {row[1].level_xy for row in previews} == {(1, 1)}
+
+
+def test_reduced_preview_base_samples_display_axes_before_operation_input():
+    session = _session()
+    demand = _demand(1)
+    factor_xy = effects.factor_xy_for_level(demand, 1)
+
+    reduced, preview_state = effects.read_reduced_preview_base_and_state(
+        session.document,
+        session.plan.tiles[0].view_state,
+        factor_xy=factor_xy,
+        axis_region_overrides={2: (0, 1, 2)},
+        sample_display_axes=True,
+    )
+
+    expected = np.asarray(session.document.base_data)[::2, ::2, :]
+    np.testing.assert_array_equal(reduced, expected)
+    assert reduced.shape == (2, 3, 3)
+    assert preview_state.shape == reduced.shape
+
+
+def test_shared_complex_preview_rows_include_display_histogram():
+    data = (
+        np.arange(4 * 6 * 3, dtype=np.float32).reshape(4, 6, 3)
+        + 1j * np.ones((4, 6, 3), dtype=np.float32)
+    ).astype(np.complex64)
+    session = _session(data)
+    session.shader_display = True
+    demand = _demand(1)
+    tiles = session.plan.tiles[:2]
+
+    rows = effects.evaluate_shared_preview(
+        session,
+        tiles[0],
+        tiles,
+        demand=demand,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+
+    assert len(rows) == 2
+    for row in rows:
+        _tile_number, _key, plane, histogram, *_rest = row
+        assert np.iscomplexobj(plane)
+        assert histogram is not None
+        assert np.shape(histogram) == np.shape(plane)
+
+
 def test_reduce_nd_axis_mean_handles_integer_edges():
     values = np.arange(10, dtype=np.uint8)
     reduced = effects.reduce_nd_axis_mean(values, axis=0, factor=4)
@@ -317,14 +417,17 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
     demand = _demand(1)
     tile = session.plan.tiles[2]
     session.pyramid_cache = PyramidCache(max_entries=8)
-    session.pyramid_cache = PyramidCache(max_entries=8)
     rendered = effects.rendered_tile_from_evaluation_result(
         tile,
-        effects.evaluate_exact_tile(
+        effects.evaluate_target_tile(
             session,
             tile,
+            level=0,
+            demand=_demand(0),
+            semantic_source_id=session.tile_semantic_source_id(tile.source_index),
             stage_cache=None,
             stage_materializer=None,
+            shader_display=False,
             evaluation_context=None,
         ),
     )
@@ -351,11 +454,9 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
         for state in effects.tile_lod_states(session, demand, tile_numbers=(tile.montage_index,))
     }[int(tile.montage_index)]
 
-    # Rendered => native (0) resident, which dominates planning; pyramid
-    # levels are deliberately NOT probed here anymore (per-replan pyramid
-    # probing was part of the O(N^2) replan storm). Lifecycle-acknowledged
-    # levels still appear via _resident_levels_from_lifecycle.
-    assert state.resident_levels == (0,)
+    # Rendered native tiles are reduction sources, not resident/presented LOD
+    # evidence. Lifecycle acknowledgements are the ladder's resident truth.
+    assert state.resident_levels == ()
     assert state.floor_available is True
 
 

@@ -469,17 +469,26 @@ def _presented_lod_reason(lod_decision, presented_lod) -> str:
         LOD_REASON_RESIDENT_COARSER,
         LOD_REASON_RESIDENT_FINER,
         LOD_REASON_RESIDENT_MATCH,
+        LOD_REASON_RESIDENT_NATIVE_FALLBACK,
     )
 
     if str(getattr(lod_decision, "policy", "")) != LOD_POLICY_RESIDENT:
         return reason
-    if reason not in (LOD_REASON_RESIDENT_MATCH, LOD_REASON_RESIDENT_FINER, LOD_REASON_RESIDENT_COARSER, LOD_REASON_NATIVE_SCALE):
+    if reason not in (
+        LOD_REASON_RESIDENT_MATCH,
+        LOD_REASON_RESIDENT_NATIVE_FALLBACK,
+        LOD_REASON_RESIDENT_FINER,
+        LOD_REASON_RESIDENT_COARSER,
+        LOD_REASON_NATIVE_SCALE,
+    ):
         return reason
     demand = getattr(lod_decision, "demand", None)
     desired = int(getattr(demand, "desired_level", 0) or 0)
     presented_level = int(presented_lod[0])
     if presented_level == desired:
         return LOD_REASON_RESIDENT_MATCH if presented_level > 0 else LOD_REASON_NATIVE_SCALE
+    if presented_level == 0:
+        return LOD_REASON_RESIDENT_NATIVE_FALLBACK
     if presented_level < desired:
         return LOD_REASON_RESIDENT_FINER
     return LOD_REASON_RESIDENT_COARSER

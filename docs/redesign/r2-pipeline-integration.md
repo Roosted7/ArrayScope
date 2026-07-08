@@ -10,7 +10,7 @@ tricky seams.
 
 1. **Effects: evaluation.** Create `arrayscope/render/effects.py` with the
    Qt-free rung evaluators ported from frame_renderer:
-   `evaluate_exact_tile(...)` (from `_evaluate_montage_tile_snapshot`),
+   `evaluate_target_tile(...)` (level 0 is the native target),
    `evaluate_preview_tile(...)` / `evaluate_shared_preview(...)` (from the
    three preview snapshot evaluators + reduce helpers). They already avoid
    Qt — the port is mostly de-`self`-ing (pass document, view_state,

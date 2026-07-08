@@ -193,9 +193,12 @@ class LodLadder:
         # command to replace already-presented finer data. Demotion belongs to
         # memory/eviction policy; the ladder must keep camera-only zooms from
         # churning materialization and presentation.
-        desired_resident = (desired in resident and not presented_preview) or (
-            presented == desired and not presented_preview
+        preview_satisfies_display_demand = bool(
+            presented_preview and desired > 0 and presented == desired
         )
+        desired_resident = preview_satisfies_display_demand or (
+            desired in resident and not presented_preview
+        ) or (presented == desired and not presented_preview)
         if presented is not None and int(presented) <= desired and not presented_preview:
             desired_resident = True
         if not desired_resident and (desired > 0 or desired < finest_available()):

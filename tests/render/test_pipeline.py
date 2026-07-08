@@ -287,7 +287,7 @@ def test_zoom_out_over_presented_native_submits_no_display_demotions():
     assert effects.batches == []
 
 
-def test_preview_at_demand_level_replans_exact_refinement_later():
+def test_preview_at_non_native_demand_level_satisfies_display_demand():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     effects.states[0] = TileLodState(
         tile_number=0,
@@ -296,10 +296,10 @@ def test_preview_at_demand_level_replans_exact_refinement_later():
         presented_quality="preview",
     )
 
-    assert pipeline.retarget(intent(interactive=False), demand(3)) == 1
+    assert pipeline.retarget(intent(interactive=False), demand(3)) == 0
     drain(kernel)
 
-    assert effects.evaluated == [(0, 2, 3)]
+    assert effects.evaluated == []
 
 
 def test_stale_done_from_previous_semantic_is_dropped_not_committed():

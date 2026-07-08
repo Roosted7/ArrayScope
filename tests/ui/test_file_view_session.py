@@ -800,6 +800,35 @@ def test_tiled_single_scene_range_change_schedules_frame_viewport_update(qt_app,
     assert scheduled == ["frame"]
 
 
+def test_preview_first_montage_range_change_schedules_viewport_retarget(qt_app, monkeypatch):
+    from pyqtgraph.Qt import QtCore
+
+    import arrayscope.window.viewport_bridge as viewport_bridge
+    from arrayscope.window.viewport_bridge import ViewportBridge
+
+    scheduled = []
+    owner = SimpleNamespace(
+        img_view=SimpleNamespace(_viewport_applying=False),
+        _release_viewport_continuity=lambda: None,
+        _note_viewport_interaction=lambda _reason: None,
+        _update_display_group_title=lambda: None,
+        _committed_display_frame=None,
+        _montage_session=SimpleNamespace(display_committed=True),
+        _schedule_frame_viewport_update=lambda: scheduled.append("montage"),
+        view_state=SimpleNamespace(montage_axis=2),
+    )
+    monkeypatch.setattr(
+        viewport_bridge.Qt.QtWidgets.QApplication,
+        "mouseButtons",
+        lambda: QtCore.Qt.MouseButton.NoButton,
+    )
+
+    owner.win = owner
+    ViewportBridge(owner).on_view_range_changed()
+
+    assert scheduled == ["montage"]
+
+
 def test_restored_viewport_waits_until_frame_committed(qt_app, monkeypatch):
     import arrayscope.window.file_view_session as file_view_session
     from arrayscope.core.view_session import ViewportSession

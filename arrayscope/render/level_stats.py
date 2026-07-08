@@ -63,6 +63,18 @@ class LevelStatsService:
             return 2
         return 1
 
+    def _preview_evidence_can_refine(self) -> bool:
+        """Whether a preview tile's stats may count as refined for this backend.
+
+        Shader-windowing backends (VisPy) apply levels as a cheap GPU update,
+        so a preview tile's better-sampled stats refine the shown level in
+        place. CPU-LUT backends (PyQtGraph) bake levels into pixels at commit
+        and must wait for the final native/target evidence, so preview evidence
+        stays provisional there.
+        """
+
+        return bool(image_view_backend_capabilities(getattr(self.win, "img_view", None)).shader_windowing)
+
     def _update_montage_level_bounds_from_rendered(self, level_key, rendered, *, expected_indices=None, refined: bool = False) -> None:
         if expected_indices is None:
             previous_stats = self._montage_level_tracker().stats_for(level_key)
@@ -70,6 +82,15 @@ class LevelStatsService:
         tracker = self._montage_level_tracker()
         tracker.ensure_expected(level_key, expected_indices)
         source_index = int(rendered.tile.source_index)
+        # "Refined" describes how densely the *shown* quality was sampled, not
+        # whether the data is native — so on a shader-windowing backend a
+        # reduced-input preview tile refines the stats of the level it presents
+        # just like an exact tile does. A CPU-LUT backend bakes levels into
+        # pixels and must wait for the final (native/target) evidence, so
+        # preview evidence must not promote to refined there.
+        if refined and _rendered_tile_is_preview(rendered) and not self._preview_evidence_can_refine():
+            refined = False
+        refined = bool(refined)
         level_stats = getattr(rendered, "level_stats", None)
         existing_refined = tracker.has_source(level_key, source_index, refined=True)
         existing_any = existing_refined or tracker.has_source(level_key, source_index)
@@ -110,6 +131,8 @@ class LevelStatsService:
         tracker = self._montage_level_tracker()
         tracker.ensure_expected(level_key, expected_indices)
         source_index = int(rendered.tile.source_index)
+        if bool(require_refined) and _rendered_tile_is_preview(rendered) and not self._preview_evidence_can_refine():
+            return False
         if tracker.has_source(level_key, source_index, refined=bool(require_refined)):
             return True
         if require_refined and tracker.has_source(level_key, source_index):
@@ -131,6 +154,8 @@ class LevelStatsService:
         return False
 
     def _queue_montage_level_refinement(self, session, rendered) -> None:
+        if _rendered_tile_is_preview(rendered) and not self._preview_evidence_can_refine():
+            return
         tracker = self._montage_level_tracker()
         source_index = int(rendered.tile.source_index)
         if tracker.has_source(session.level_key, source_index, refined=True):
@@ -539,7 +564,12 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         lod=getattr(payload, "lod", None),
         level_data=getattr(payload, "level_data", None),
         level_stats=getattr(payload, "level_stats", None),
+        quality=str(getattr(payload, "quality", "exact") or "exact"),
     )
+
+
+def _rendered_tile_is_preview(rendered) -> bool:
+    return str(getattr(rendered, "quality", "exact") or "exact") == "preview"
 
 
 def _interactive_active(window) -> bool:

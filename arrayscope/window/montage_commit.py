@@ -15,7 +15,7 @@ from arrayscope.kernel import Lane as WorkLane, Priority, Supersession, TaskSpec
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
 from arrayscope.display.model.commit import CommitKind, DisplayPayload, PresentationInput
-from arrayscope.display.model.frame import TiledValueSource
+from arrayscope.display.model.frame import TiledValueSource, display_tile_payload_has_semantics
 from arrayscope.display.montage import montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
 from arrayscope.display.pyramid import reduce_box_mean
@@ -31,6 +31,7 @@ from arrayscope.operations.regions import region_contains
 from arrayscope.operations.slabs import plan_slab, request_for_image, stage_key_for_candidate
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.render import effects as render_effects
+from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import Rung
 from arrayscope.render.stages import CommitBatch
 from arrayscope.ui.toasts import show_status_message
@@ -109,8 +110,18 @@ class MontagePipelineEffects:
         if tile is None:
             return lambda _token=None: None
 
-        if step.rung in (Rung.FLOOR, Rung.PREVIEW):
+        if self._step_evaluates_reduced_display_payload(step, tile):
+            # FLOOR/PREVIEW are degraded first-pixel rungs: whenever the tile
+            # has nothing presentable yet, they must hand back their coarse
+            # level so it is not left black — even at native scale (desired 0).
+            # ingest_lod_demand() withholds a demand at native scale only to
+            # keep cold *native* workers from reducing-at-ingest, so fall back
+            # to the current policy demand. The payload is labeled
+            # quality="preview": it never satisfies the native target, and
+            # DESIRED/EXACT still follow and replace it without being cleared.
             demand = session.ingest_lod_demand()
+            if demand is None:
+                demand = getattr(getattr(session, "lod_policy_decision", None), "demand", None)
             semantic_source_id = session.tile_semantic_source_id(tile.source_index) if demand is not None else None
 
             def evaluate_preview(token=None):
@@ -146,17 +157,22 @@ class MontagePipelineEffects:
 
             return evaluate_materialization
 
-        def evaluate_exact(token=None):
-            return render_effects.evaluate_exact_tile(
+        def evaluate_target(token=None):
+            demand = session.lod_policy_decision.demand
+            return render_effects.evaluate_target_tile(
                 session,
                 tile,
+                level=int(step.level),
+                demand=demand,
+                semantic_source_id=session.tile_semantic_source_id(tile.source_index),
                 stage_cache=self.renderer.win.operation_evaluator.stage_cache,
                 stage_materializer=self.renderer.win.operation_evaluator.stage_materializer,
                 cancellation_token=token,
+                shader_display=bool(getattr(session, "shader_display", False)),
                 evaluation_context=self.renderer.win._evaluation_context(ComputeLane.MONTAGE_TILE, token),
             )
 
-        return evaluate_exact
+        return evaluate_target
 
     def tile_states(self, intent, demand):
         if not self._session_is_current(intent):
@@ -168,7 +184,20 @@ class MontagePipelineEffects:
         if tile is None or not self._session_is_current(intent):
             return False
         tile_number = int(tile.montage_index)
-        if step.rung in (Rung.FLOOR, Rung.PREVIEW):
+        if (
+            step.rung in (Rung.FLOOR, Rung.PREVIEW, Rung.DESIRED)
+            and tile_number not in self.session.rendered_tiles
+            and tile_number in set(getattr(self.session, "_shared_floor_tiles", ()) or ())
+        ):
+            return False
+        if (
+            step.rung == Rung.DESIRED
+            and int(step.level) > 0
+            and bool(getattr(step, "reduce_from_native", True))
+            and tile_number not in self.session.rendered_tiles
+        ):
+            return False
+        if self._step_evaluates_reduced_display_payload(step, tile):
             pending_key = (tile_number, int(step.rung))
             if self._pending_previews.get(pending_key) == int(step.level):
                 return False  # identical rung already in flight
@@ -215,12 +244,22 @@ class MontagePipelineEffects:
             self._pending_evaluations[tile_number] = self._evaluation_claim(intent, step, tile)
         return True
 
+    def _step_evaluates_reduced_display_payload(self, step, tile) -> bool:
+        if step.rung in (Rung.FLOOR, Rung.PREVIEW):
+            return True
+        tile_number = int(getattr(tile, "montage_index", getattr(step, "tile_number", -1)))
+        if tile_number in getattr(self.session, "rendered_tiles", {}):
+            return False
+        return bool(step.rung == Rung.DESIRED and int(step.level) > 0)
+
     def _shared_floor_covers_cold_tile(self, tile_number: int) -> bool:
         if int(tile_number) in self.session.rendered_tiles:
             return False
+        if int(tile_number) in set(getattr(self.session, "_shared_floor_tiles", ()) or ()):
+            return True
         if self.session.display_tile_payloads.get(int(tile_number)) is not None:
             return False
-        return int(tile_number) in set(getattr(self.session, "_shared_floor_tiles", ()) or ())
+        return False
 
     def rung_deps(self, intent, step) -> tuple[object, ...]:
         if not self._session_is_current(intent):
@@ -371,7 +410,7 @@ class MontagePipelineEffects:
         self.commit_pending_session()
 
     def admit_tile_result(self, tile, result) -> int:
-        """Admit one exact tile result into session/lifecycle state.
+        """Admit one native target result into session/lifecycle state.
 
         Kernel bridge callbacks are already bounded; the old
         frame_renderer-side result deque/timer was a second fan-in queue.
@@ -380,13 +419,12 @@ class MontagePipelineEffects:
         return self._admit_evaluation_result(tile, result)
 
     def submit_shared_transform_floor(self) -> int:
-        """Pass 1 for non-commuting pipelines (FFT…): one batch task.
+        """Shared display-target pass for reduced-input pipelines.
 
-        The ladder deliberately plans no per-tile pre-native rungs when
-        operations do not commute with reduction (a per-tile "preview" costs
-        a full native evaluation). Symmetry with the scalar two-pass fill
-        comes from here instead: ONE reduced-volume evaluation of the whole
-        montage stack, fanned out as floor planes for every cold tile.
+        FFT-over-montage-axis and similar pipelines can evaluate one reduced
+        display volume and fan it out to every montage tile. That is both the
+        first-pixel floor and the demanded target pass; per-tile native output
+        is reserved for true level-0 semantic targets.
         """
 
         session = self.session
@@ -399,14 +437,14 @@ class MontagePipelineEffects:
             return 0
         seed = plan_tiles[0]
         if render_effects.preview_pipeline_commutes_for_display_lod(session, seed):
-            return 0  # commuting pipelines get per-tile FLOOR rungs instead
+            return 0  # commuting pipelines get per-tile FLOOR/DESIRED rungs.
         if not render_effects.shared_preview_is_useful(session, seed, demand):
             return 0
-        level = int(render_effects.preview_evaluation_level(session, demand))
-        tiles = tuple(_shared_floor_candidate_tiles(session))
+        level = int(render_effects.shared_transform_target_level(session, demand))
+        tiles = tuple(render_effects.shared_transform_candidate_tiles(session, level=level))
         if not tiles:
             return 0
-        marker = (level, len(tiles))
+        marker = (level, tuple(int(tile.montage_index) for tile in tiles))
         if getattr(session, "_shared_floor_marker", None) == marker:
             return 0  # identical batch already in flight or admitted
         session._shared_floor_marker = marker
@@ -427,6 +465,9 @@ class MontagePipelineEffects:
             )
 
         def done(rows):
+            if getattr(session, "_shared_floor_marker", None) == marker:
+                session._shared_floor_marker = None
+                session._shared_floor_tiles = ()
             if not rows or not self._session_is_current():
                 return
             self._admit_preview_payload(int(rows[0][0]), tuple(rows))
@@ -439,18 +480,18 @@ class MontagePipelineEffects:
 
         handle = renderer.win.kernel.submit(
             TaskSpec(
-                key=("shared-floor", session.key, level),
+                key=("shared-target", session.key, level),
                 fn=evaluate,
-                lane=WorkLane.DISPLAY_PREVIEW,
-                priority=Priority.INTERACTIVE,
+                lane=WorkLane.DISPLAY_PREVIEW if level > int(demand.desired_level) else WorkLane.DISPLAY_PREPARATION,
+                priority=Priority.INTERACTIVE if level > int(demand.desired_level) else Priority.VISIBLE_IMAGE,
                 scope=f"montage:{session.key!r}",
-                supersession=Supersession(("shared-floor", session.key), (level,)),
+                supersession=Supersession(("shared-target", session.key), (level,)),
                 reusable=True,
                 pass_token=True,
             ),
             on_done=done,
             on_stale=dropped,
-            on_error=lambda exc: (dropped(), handle_ui_exception("shared transform floor", exc)),
+            on_error=lambda exc: (dropped(), handle_ui_exception("shared transform target", exc)),
         )
         if handle is None:
             dropped()
@@ -737,7 +778,7 @@ class MontagePipelineEffects:
             prepare_stats_start = perf_counter()
             level_stats = renderer._montage_level_stats_for_session(session)
             renderer._last_montage_tile_prepare_stats_ms = (perf_counter() - prepare_stats_start) * 1000.0
-            semantic_commit = bool(active_payloads)
+            semantic_commit = tiled_payloads_include_semantics(active_payloads)
             decision_force_auto = bool(explicit_auto and semantic_commit)
             if tile_layer_auto_levels_wait_for_complete_source(
                 renderer,
@@ -1009,7 +1050,10 @@ class MontagePipelineEffects:
         geometry = replace(geometry, montage_tile_states=session.ensure_tile_states())
         renderer._last_montage_tile_state_publish_ms = (perf_counter() - state_start) * 1000.0
         geometry_start = perf_counter()
-        renderer._sync_committed_montage_geometry(geometry, semantic_commit=bool(active_payloads))
+        renderer._sync_committed_montage_geometry(
+            geometry,
+            semantic_commit=tiled_payloads_include_semantics(active_payloads),
+        )
         renderer._last_montage_tile_geometry_sync_ms = (perf_counter() - geometry_start) * 1000.0
         if not bool(getattr(session, "display_committed", False)):
             renderer.refresh_montage_priority_targets(session)
@@ -1174,6 +1218,7 @@ def _shared_floor_candidate_tiles(session):
         if getattr(session, "display_tile_payloads", {}).get(tile_number) is not None:
             continue
         yield candidate
+
 
 
 def plan_stage_fan_in_candidates(document, missing_tiles, *, cancellation_token=None) -> dict[str, object]:
@@ -1398,12 +1443,16 @@ def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
             candidate_plan=candidate_plan,
         )
         merge_stage_fan_in_plan(current, stage_plan)
-        queued = set(current.pending_tile_numbers())
-        for tile in missing_tiles:
-            index = int(tile.montage_index)
-            if index not in queued and index not in current.rendered_tiles and index not in current.skipped_tiles:
-                current.enqueue_pending_tile(tile)
-                queued.add(index)
+        if render_lod.native_missing_tile_queue_required(
+            str(getattr(current, "lod_policy_mode", "")),
+            getattr(getattr(current, "lod_policy_decision", None), "demand", None),
+        ):
+            queued = set(current.pending_tile_numbers())
+            for tile in missing_tiles:
+                index = int(tile.montage_index)
+                if index not in queued and index not in current.rendered_tiles and index not in current.skipped_tiles:
+                    current.enqueue_pending_tile(tile)
+                    queued.add(index)
         submit_stage_tasks(renderer, current, stage_plan["stage_requests"])
         renderer.retarget_montage_pipeline(current)
 
@@ -1951,6 +2000,10 @@ def _looks_like_shared_preview_rows(payload) -> bool:
     )
 
 
+def tiled_payloads_include_semantics(payloads) -> bool:
+    return any(display_tile_payload_has_semantics(payload) for payload in dict(payloads or {}).values())
+
+
 def _call(target, name: str, *args, **kwargs):
     fn = getattr(target, name, None)
     if callable(fn):
@@ -1974,5 +2027,6 @@ __all__ = [
     "session_requested_levels",
     "tile_layer_commit_processed_count",
     "tile_layer_upsert_limits",
+    "tiled_payloads_include_semantics",
     "viewport_interaction_active",
 ]

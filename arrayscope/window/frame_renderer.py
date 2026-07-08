@@ -37,7 +37,7 @@ from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
 )
-from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level
+from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level, select_lod_demand
 from arrayscope.presentation import ClaimOwner
 from arrayscope.display.pyramid import preview_level_for_tile_shape
 from arrayscope.window.montage_payload_cache import (
@@ -58,8 +58,10 @@ from arrayscope.window.montage_viewport import (
     montage_tile_semantic_key,
     montage_viewport_intent,
     montage_viewport_retarget_policy,
+    plan_full_view_range,
     remap_montage_roi_selections,
     retarget_montage_viewport_plan,
+    square_montage_fit_view_range,
 )
 from arrayscope.render import lod as render_lod
 from arrayscope.window.montage_session import MontageRenderSession
@@ -174,12 +176,27 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
                 pending_restore_range = active_restore() if callable(active_restore) else None
             pending_columns = getattr(self.win, "_pending_viewport_continuity_columns", None)
             pending_restore_columns = pending_columns() if callable(pending_columns) else None
+        # The live Qt camera range is only trustworthy once this montage owns
+        # the viewport. Entering montage mode from a single plane (or a montage
+        # on a different axis), and the whole first fill before the initial
+        # commit rescales the camera, leave the camera on the *previous* view —
+        # a tiny single-plane range that reads as native scale (desired_level
+        # 0). Seeding the plan from that stale range makes the first montage
+        # render evaluate native tiles instead of the cheap reduced fit LOD.
+        # When the camera is not yet on this montage, fall through to the fit
+        # extent (`_initial_montage_planning_view_range`) below.
+        current_session = getattr(self, "_montage_session", None)
+        camera_on_montage = bool(
+            current_session is not None
+            and getattr(current_session, "montage_axis", None) == axis
+            and getattr(current_session, "display_committed", False)
+        )
         current_range = view_range if view_range is not None else (
             pending_restore_range
             if pending_restore_range is not None
             else (
                 self._current_montage_global_view_range()
-                if getattr(self.win.img_view, "image", None) is not None
+                if getattr(self.win.img_view, "image", None) is not None and camera_on_montage
                 else None
             )
         )
@@ -199,6 +216,12 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             columns=columns,
             viewport_shape=viewport_shape,
         )
+        if current_range is None:
+            current_range = _initial_montage_planning_view_range(
+                plan,
+                viewport_shape,
+                getattr(self.win.img_view, "viewport_controller", None),
+            )
         priority_focus = _montage_priority_focus(self, current_range)
         capabilities = image_view_backend_capabilities(self.win.img_view)
         return MontageViewportPlan(
@@ -488,7 +511,12 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         ):
             return
         render_generation = self._capture_render_generation()
-        stage_plan_start = perf_counter()
+        lod_policy_mode = self._montage_quality_policy_mode()
+        initial_demand = select_lod_demand(
+            current_range,
+            viewport_shape,
+            plan.tile_shape,
+        )
         # Interaction fast path (ADR 0051 rule 4 at the architecture level):
         # during a scrub/pan burst, stage planning is *deferred, superseded
         # work* — mid-burst steps present pyramid floors and cached tiles
@@ -512,7 +540,17 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             and bool(getattr(previous_session, "display_committed", False))
             and getattr(previous_session, "montage_axis", None) == axis
         )
-        if defer_stage_planning:
+        queue_native_missing_tiles = bool(
+            not defer_stage_planning
+            and render_lod.native_missing_tile_queue_required(
+                lod_policy_mode,
+                initial_demand,
+            )
+        )
+        stage_plan_start = perf_counter()
+        if missing_tiles and not queue_native_missing_tiles and not defer_stage_planning:
+            stage_plan = montage_commit.deferred_stage_fan_in_plan()
+        elif defer_stage_planning:
             stage_plan = montage_commit.hot_cached_stage_fan_in_plan(
                 self,
                 document,
@@ -527,7 +565,7 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             stage_plan = montage_commit.build_stage_fan_in_plan(self, document, missing_tiles)
         self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
         session_setup_start = perf_counter()
-        pending_tiles = [] if defer_stage_planning else list(missing_tiles)
+        pending_tiles = list(missing_tiles) if queue_native_missing_tiles else []
         session_key = montage_session_key(_document_key(document), view_state, viewport_plan, colormap_lut)
         level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
         frame_plan = self._montage_frame_planner().plan(
@@ -547,7 +585,6 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         )
         session_id = int(getattr(self, "_montage_session_id", 0)) + 1
         self._montage_session_id = session_id
-        lod_policy_mode = self._montage_quality_policy_mode()
         lod_preview_level = (
             preview_level_for_tile_shape(plan.tile_shape, min_level=render_lod.PREVIEW_FLOOR_MIN_LEVEL)
             if lod_policy_mode == LOD_POLICY_RESIDENT
@@ -576,7 +613,7 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             force_auto=force_auto,
             visible_tiles=tuple(display_tiles),
             rendered_tiles={int(rendered.tile.montage_index): rendered for rendered in cached_tiles},
-            loading_tiles={int(tile.montage_index) for tile in missing_tiles},
+            loading_tiles=set(),
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
             pending_tiles=list(pending_tiles),
             stage_fan_in=montage_commit.stage_fan_in_state(stage_plan),
@@ -604,9 +641,13 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             ),
         )
         session.shader_display = bool(shader_display)
-        session.stage_planning_deferred = bool(defer_stage_planning)
+        stage_planning_deferred = bool(
+            defer_stage_planning
+            or (missing_tiles and not queue_native_missing_tiles)
+        )
+        session.stage_planning_deferred = stage_planning_deferred
         session.stage_planning_async = False
-        session.deferred_missing_tiles = tuple(missing_tiles) if defer_stage_planning else ()
+        session.deferred_missing_tiles = tuple(missing_tiles) if stage_planning_deferred else ()
         # The dying session's planned-but-undrained LOD requests hold
         # singleflight claims in the shared pyramid; scrubbing back to the
         # same slice would find those levels permanently claimed (stale
@@ -1167,7 +1208,11 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         self._record_gui_budget(budget)
         remaining_additions = max(0, len(additions_to_process) - int(processed_additions))
         self._last_montage_viewport_deferred_additions = int(remaining_additions)
-        if remaining_additions:
+        queue_native_additions = render_lod.native_missing_tile_queue_required(
+            str(getattr(session, "lod_policy_mode", "")),
+            getattr(getattr(session, "lod_policy_decision", None), "demand", None),
+        )
+        if remaining_additions and queue_native_additions:
             self.win._montage_viewport_update_pending = True
             self._montage_viewport_continue_immediately = True
         session.tile_compute_cache_hits += len(cached_tiles)
@@ -1186,6 +1231,15 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             schedule_near_viewport_montage_prefetch(self, session)
             return True
         missing_tiles = viewport_plan.prioritize_tiles(missing_tiles)
+        if not queue_native_additions:
+            self.win._montage_viewport_update_pending = False
+            self._montage_viewport_continue_immediately = False
+            session.stage_planning_deferred = bool(missing_tiles)
+            session.stage_planning_async = False
+            session.deferred_missing_tiles = tuple(missing_tiles)
+            montage_commit.submit_deferred_stage_fan_in_plan(self, session, missing_tiles)
+            self.retarget_montage_pipeline(session)
+            return True
 
         if _viewport_interaction_active(self):
             stage_plan = montage_commit.hot_cached_stage_fan_in_plan(self, session.document, missing_tiles)
@@ -1444,7 +1498,13 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         # allowed to move.  Publishing better semantic stats lets absolute mode
         # update the histogram while preserving numeric levels, and lets
         # relative mode remap through WindowLevelController.
-        if not session.rendered_tiles:
+        #
+        # Reduced-input display montages (opaque/FFT and reduced-LOD scalar
+        # fits) present entirely through preview payloads and never populate
+        # `rendered_tiles`, so gating on it alone left them stranded at default
+        # (0, 1) levels with an empty histogram.  Their rough sampled stats are
+        # the correct first-pass source; refinement improves them later.
+        if not session.rendered_tiles and not getattr(session, "display_tile_payloads", None):
             return False
         bounds = stats.bounds
         bounds = normalize_bounds(bounds)
@@ -1530,6 +1590,17 @@ def _montage_full_view_range(montage):
     height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(montage.gap)
     width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(montage.gap)
     return ((0.0, float(max(1, width))), (0.0, float(max(1, height))))
+
+
+def _initial_montage_planning_view_range(plan, viewport_shape, viewport_controller):
+    """Measure startup LOD from layout intent before a backend image exists."""
+
+    if plan is None:
+        return None
+    intent = montage_viewport_intent(viewport_controller, None)
+    if intent.fit_locked:
+        return plan_full_view_range(plan)
+    return square_montage_fit_view_range(plan, viewport_shape)
 
 
 def _visible_montage_tile_count(montage, view_range) -> int:
@@ -1668,6 +1739,7 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         lod=getattr(payload, "lod", None),
         level_data=getattr(payload, "level_data", None),
         level_stats=getattr(payload, "level_stats", None),
+        quality=str(getattr(payload, "quality", "exact") or "exact"),
     )
 
 
@@ -1692,6 +1764,7 @@ def _rendered_tile_from_cached_display(tile, cached) -> RenderedTile:
         lod=getattr(cached, "lod", None),
         level_data=getattr(cached, "level_data", None),
         level_stats=getattr(cached, "level_stats", None),
+        quality=str(getattr(cached, "quality", "exact") or "exact"),
     )
 
 
@@ -1711,6 +1784,7 @@ def _rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
         lod=getattr(value, "lod", None),
         level_data=getattr(value, "level_data", None),
         level_stats=getattr(value, "level_stats", None),
+        quality=str(getattr(value, "quality", "exact") or "exact"),
     )
 
 

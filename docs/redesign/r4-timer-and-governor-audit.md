@@ -63,6 +63,14 @@ payloads to already-resident lower LOD. Ordinary camera zoom is not pressure;
 it must not schedule lower-quality DESIRED materializations or wrapper swaps
 while exact/finer current payloads fit.
 
+Preview-level selection should become dynamic at the same owner boundary,
+not a renderer-local constant. Inputs should include viewport demand, tile
+shape, operation cost/capabilities, staged/intermediate availability, cache
+budget, and memory pressure. The ladder still decides which rung is useful;
+kernel admission decides what can run now. Startup/far-zoomed montages should
+therefore request the cheapest correct first pixels, while spare capacity can
+refine toward exact only after visible correctness work is admitted.
+
 `core/gui_callback_budget.py` stays — it is the drain bound vocabulary.
 `core/latency_feedback.py` shrinks to the EWMA + outlier suppression the
 bridge budget uses. `compute_policy` lane worker counts become the initial

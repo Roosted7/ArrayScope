@@ -175,6 +175,7 @@ def native_lod_policy(
 
 LOD_POLICY_RESIDENT = "resident"
 LOD_REASON_RESIDENT_MATCH = "demanded LOD level is resident and presented"
+LOD_REASON_RESIDENT_NATIVE_FALLBACK = "native fallback shown while the demanded LOD materializes"
 LOD_REASON_RESIDENT_FINER = "finer resident level presented while the demanded level materializes"
 LOD_REASON_RESIDENT_COARSER = "coarser resident level presented while the demanded level materializes"
 
@@ -261,6 +262,8 @@ def resident_lod_policy(
     applied_level = choose_resident_level(demand, resident_levels)
     if applied_level == demand.desired_level:
         reason = LOD_REASON_RESIDENT_MATCH if applied_level > 0 else LOD_REASON_NATIVE_SCALE
+    elif applied_level == 0:
+        reason = LOD_REASON_RESIDENT_NATIVE_FALLBACK
     elif applied_level < demand.desired_level:
         reason = LOD_REASON_RESIDENT_FINER
     else:
@@ -379,6 +382,7 @@ __all__ = [
     "LOD_REASON_INVALID_VIEW",
     "LOD_POLICY_RESIDENT",
     "LOD_REASON_RESIDENT_MATCH",
+    "LOD_REASON_RESIDENT_NATIVE_FALLBACK",
     "LOD_REASON_RESIDENT_FINER",
     "LOD_REASON_RESIDENT_COARSER",
     "select_lod_demand",

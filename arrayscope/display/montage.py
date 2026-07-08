@@ -195,6 +195,7 @@ class RenderedTilePayload:
     lod: LodInfo | None = None
     level_data: np.ndarray | None = None
     level_stats: object | None = None
+    quality: str = "exact"
 
     def nbytes(self) -> int:
         total = int(self.image.nbytes)
@@ -227,6 +228,7 @@ class RenderedTilePayload:
             lod=self.lod,
             level_data=self.level_data,
             level_stats=self.level_stats,
+            quality=self.quality,
         )
 
 
@@ -245,6 +247,7 @@ class RenderedTile:
     lod: LodInfo | None = None
     level_data: np.ndarray | None = None
     level_stats: object | None = None
+    quality: str = "exact"
 
     def nbytes(self) -> int:
         total = int(self.image.nbytes)
@@ -276,6 +279,7 @@ class RenderedTile:
             lod=self.lod,
             level_data=self.level_data,
             level_stats=self.level_stats,
+            quality=self.quality,
         )
 
 

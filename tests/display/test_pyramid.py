@@ -11,6 +11,7 @@ from arrayscope.display.lod import (
     LOD_REASON_RESIDENT_COARSER,
     LOD_REASON_RESIDENT_FINER,
     LOD_REASON_RESIDENT_MATCH,
+    LOD_REASON_RESIDENT_NATIVE_FALLBACK,
     choose_resident_level,
     factor_xy_for_level,
     resident_lod_policy,
@@ -253,7 +254,7 @@ class TestResidentLodPolicy:
         assert decision.applied_level == 0
         assert decision.applied_factor == 1
         assert decision.applied_factor_xy == (1, 1)
-        assert decision.reason == LOD_REASON_RESIDENT_FINER
+        assert decision.reason == LOD_REASON_RESIDENT_NATIVE_FALLBACK
 
     def test_applies_demanded_level_when_resident(self):
         decision = resident_lod_policy(ZOOMED_OUT_4X, VIEWPORT, TILE, resident_levels=(2,))
@@ -278,7 +279,7 @@ class TestResidentLodPolicy:
         assert coarser.applied_level == 3
         assert coarser.reason == LOD_REASON_RESIDENT_COARSER
         assert way_too_coarse.applied_level == 0
-        assert way_too_coarse.reason == LOD_REASON_RESIDENT_FINER
+        assert way_too_coarse.reason == LOD_REASON_RESIDENT_NATIVE_FALLBACK
 
     def test_invalid_view_selects_native(self):
         decision = resident_lod_policy(None, VIEWPORT, TILE, resident_levels=(1, 2))
@@ -339,7 +340,7 @@ class TestResidentLodPolicy:
         )
 
         assert decision.applied_level == 0
-        assert decision.reason == LOD_REASON_RESIDENT_FINER
+        assert decision.reason == LOD_REASON_RESIDENT_NATIVE_FALLBACK
 
 
 class TestResidentSelectionHelpers:
