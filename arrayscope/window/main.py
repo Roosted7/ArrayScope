@@ -425,6 +425,13 @@ class ArrayScopeWindow(
         if getattr(self, "_closing", False):
             return
         active = self._interaction_active_now()
+        previous_active = getattr(self, "_last_interaction_active_state", None)
+        self._last_interaction_active_state = active
+        if previous_active is True and not active:
+            renderer = getattr(self, "renderer", None)
+            replan = getattr(renderer, "replan_deferred_interactive_native_quality", None)
+            if callable(replan):
+                replan()
         if active == bool(getattr(self, "_governor_interactive_applied", None)):
             return
         self._apply_resource_governor_decisions(refresh_telemetry=False)

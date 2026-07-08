@@ -100,6 +100,30 @@ def test_interaction_stop_edge_restores_idle_budgets_immediately(qtbot):
         win.close()
 
 
+def test_interaction_stop_edge_replans_deferred_native_montage_quality(qtbot, monkeypatch):
+    clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
+    qtbot.addWidget(win)
+    calls = []
+    try:
+        process_events(qtbot)
+        qtbot.waitUntil(lambda: not win._interaction_active_now(), timeout=5000)
+        monkeypatch.setattr(
+            win.renderer,
+            "replan_deferred_interactive_native_quality",
+            lambda: calls.append("replan") or True,
+        )
+
+        win._last_interaction_active_state = True
+        win._note_interaction_state_changed()
+
+        assert calls == ["replan"]
+    finally:
+        win.close()
+
+
 def test_runtime_diagnostics_lists_kernel_bridge_drain_channel(qtbot):
     clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

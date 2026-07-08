@@ -128,13 +128,14 @@ def drain(kernel):
         kernel.dispatch_event(event)
 
 
-def intent(semantic="doc-v1", viewport="vp-1"):
+def intent(semantic="doc-v1", viewport="vp-1", *, interactive=False):
     return RenderIntent(
         semantic_key=semantic,
         viewport_key=viewport,
         presentation_key="pres-1",
         view_range=((0.0, 10.0), (0.0, 10.0)),
         viewport_shape=(100, 100),
+        interactive=bool(interactive),
     )
 
 
@@ -223,6 +224,34 @@ def test_demand_level_change_supersedes_stale_rung_targets():
     )
     assert committed == [1, 2, 4]
     assert (0, 2, 2) in effects.dropped
+
+
+def test_interactive_native_demand_defers_native_rung_until_quiet_replan():
+    kernel, effects, pipeline = make_pipeline(tiles=1)
+
+    assert pipeline.retarget(intent(interactive=True), demand(0)) == 2
+    drain(kernel)
+
+    # Native demand plans FLOOR, PREVIEW, DESIRED(0); only the native-quality
+    # DESIRED rung is deferred while the target is moving.
+    assert effects.evaluated == [(0, 0, 4), (0, 1, 2)]
+    assert pipeline.counters.interactive_native_deferred == 1
+
+    assert pipeline.retarget(intent(interactive=False), demand(0)) == 1
+    drain(kernel)
+    assert (0, 2, 0) in effects.evaluated
+
+
+def test_interactive_opaque_desired_rung_defers_reduce_from_native_work():
+    kernel, effects, pipeline = make_pipeline(tiles=1, reduced_input_available=False)
+
+    assert pipeline.retarget(intent(interactive=True), demand(1)) == 0
+    assert effects.evaluated == []
+    assert pipeline.counters.interactive_native_deferred == 1
+
+    assert pipeline.retarget(intent(interactive=False), demand(1)) == 1
+    drain(kernel)
+    assert effects.evaluated == [(0, 2, 1)]
 
 
 def test_stale_done_from_previous_semantic_is_dropped_not_committed():

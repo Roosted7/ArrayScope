@@ -211,6 +211,21 @@ class MontageRuntimeMixin:
             self._ensure_montage_watchdog()
         return int(submitted)
 
+    def replan_deferred_interactive_native_quality(self) -> bool:
+        """Admit native-quality rungs deferred while an interaction was active."""
+
+        session = getattr(self, "_montage_session", None)
+        if session is None or not self._montage_session_is_current(session):
+            return False
+        pipeline = getattr(session, "pipeline", None)
+        counters = getattr(pipeline, "counters", None)
+        deferred = int(getattr(counters, "interactive_native_deferred", 0) or 0)
+        if deferred <= int(getattr(self, "_montage_native_deferred_replanned", 0) or 0):
+            return False
+        self._montage_native_deferred_replanned = deferred
+        self.retarget_montage_pipeline(session)
+        return True
+
     # -- stall assertion probe (ADR 0051) -------------------------------------
     # The live render path must make lost wakeups impossible by construction.
     # This probe is diagnostics-only: when the diagnostics dialog is visible it

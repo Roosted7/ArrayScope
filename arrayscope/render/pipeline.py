@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from arrayscope.kernel import Kernel, Supersession, TaskSpec
-from arrayscope.render.ladder import LodLadder, RungStep, TileLodState
+from arrayscope.render.ladder import LodLadder, Rung, RungStep, TileLodState
 from arrayscope.render.stages import CommitBatch, PipelineCounters, RenderIntent
 
 
@@ -155,6 +155,12 @@ class MontagePipeline:
         # NEVER express ordering through `deps`: dependencies fail-propagate,
         # so a skipped floor would park its tile's exact work forever.
         for step in steps:
+            if self._defer_native_quality_during_interaction(
+                intent,
+                step,
+            ):
+                self.counters.interactive_native_deferred += 1
+                continue
             if self._submit_step(intent, step, step_key=self._rung_key(intent, step)):
                 submitted += 1
         self._flush_ready()
@@ -176,6 +182,31 @@ class MontagePipeline:
             rung=int(step.rung),
             level=int(step.level),
         )
+
+    def _defer_native_quality_during_interaction(
+        self,
+        intent: RenderIntent,
+        step: RungStep,
+    ) -> bool:
+        """Keep active gestures on correctness rungs; admit native on quiet replan.
+
+        Native evaluation is the expensive quality rung in both spellings:
+        explicit EXACT, and DESIRED(level=0) when the viewport is zoomed to
+        native.  For opaque pipelines, DESIRED(reduce_from_native=True) also
+        means "run native, then reduce".  During active viewport movement,
+        those tasks are usually superseded before they can present; floor,
+        preview, resident remaps, and already-presented payloads are the
+        correctness path.  The existing quiet interaction replan admits the
+        deferred native work once the target stops moving.
+        """
+
+        if not bool(getattr(intent, "interactive", False)):
+            return False
+        if step.rung == Rung.EXACT:
+            return True
+        if step.rung != Rung.DESIRED:
+            return False
+        return int(step.level) <= 0 or bool(step.reduce_from_native)
 
     def _submit_step(
         self,

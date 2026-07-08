@@ -102,6 +102,7 @@ class PipelineCounters:
     intents: int = 0
     ladder_plans: int = 0
     tasks_submitted: int = 0
+    interactive_native_deferred: int = 0
     commit_batches: int = 0
     acks_confirmed: int = 0
     acks_rejected_stale: int = 0
