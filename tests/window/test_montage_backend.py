@@ -650,6 +650,8 @@ def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
     window.win = window
 
     assert montage_commit.direct_montage_tile_delta_commit_enabled(window, session) is True
+    window._viewport_interaction_active = True
+    assert montage_commit.direct_montage_tile_delta_commit_enabled(window, session) is True
     session.display_committed = False
     assert montage_commit.direct_montage_tile_delta_commit_enabled(window, session) is False
 

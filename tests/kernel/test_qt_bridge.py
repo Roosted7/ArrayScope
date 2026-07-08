@@ -10,6 +10,8 @@ from __future__ import annotations
 import threading
 import time
 
+from pyqtgraph.Qt import QtCore
+
 from arrayscope.kernel import Kernel, Supersession, TaskSpec, ThreadWorkerBackend
 from arrayscope.kernel.qt_bridge import QtKernelBridge
 
@@ -101,6 +103,26 @@ def test_capacity_waiters_fire_after_processed_completions(qt_app):
         kernel.submit(TaskSpec(key="a", fn=lambda: 1))
         assert _process_until(qt_app, lambda: bool(fired))
         assert fired == [True]  # one-shot: cleared after firing
+    finally:
+        bridge.close()
+        kernel.shutdown()
+
+
+def test_completion_drain_notifies_parent_for_event_driven_governor_updates(qt_app):
+    class Parent(QtCore.QObject):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def _note_kernel_completion_drain(self):
+            self.calls.append(True)
+
+    parent = Parent()
+    kernel, bridge = _make(qt_app, parent=parent)
+    try:
+        kernel.submit(TaskSpec(key="a", fn=lambda: 1))
+        assert _process_until(qt_app, lambda: bool(parent.calls))
+        assert parent.calls == [True]
     finally:
         bridge.close()
         kernel.shutdown()

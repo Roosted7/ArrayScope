@@ -226,7 +226,8 @@ class Kernel:
         """Set or clear the maximum concurrent tasks for one lane.
 
         The thread backend supplies physical workers; lane quotas shape which
-        ready records those workers may pull. ``None`` clears the hint.
+        ready records those workers may pull. ``0`` parks the lane; ``None``
+        clears the hint.
         """
 
         lane = Lane(str(lane))
@@ -234,7 +235,7 @@ class Kernel:
             if quota is None:
                 self._lane_quotas.pop(lane, None)
             else:
-                self._lane_quotas[lane] = max(1, int(quota))
+                self._lane_quotas[lane] = max(0, int(quota))
             self._release_parked_quota_locked()
             self._cond.notify_all()
         self._backend.wake()

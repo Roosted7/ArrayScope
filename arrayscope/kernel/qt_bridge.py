@@ -122,6 +122,10 @@ class QtKernelBridge(Qt.QtCore.QObject):
             )
             if callable(recorder):
                 recorder(budget.observation())
+        if processed:
+            notifier = getattr(self.parent(), "_note_kernel_completion_drain", None)
+            if callable(notifier):
+                notifier()
         if not queue.empty():
             self._notify_from_worker()
             self._schedule_fallback()

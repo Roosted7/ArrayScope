@@ -140,7 +140,7 @@ class MontageRuntimeMixin:
                         reduced_input_available=reduced_input_available,
                     )
                 ),
-                commit_max_items=2,
+                commit_max_items=8,
             )
             session.pipeline = pipeline
         self._montage_pipeline = pipeline

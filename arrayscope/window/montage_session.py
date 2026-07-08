@@ -805,11 +805,10 @@ class MontageRenderSession:
                 self.mark_materialized(rendered)
                 hits += 1
             else:
-                # Demote: the drawn slot keeps its (now stale) content until
-                # the floor or a fresh evaluation replaces it.  Do not queue a
-                # backend removal here: retained pixels are stale, not absent,
-                # and the replacement commit must be the thing that changes
-                # the slot.
+                # Demote: the semantic slot is active for a new source, while
+                # the backend may still hold the previous source's pixels.
+                # Queue a cheap removal immediately; a same-cycle correct
+                # resident/floor/exact upsert can still win in the delta.
                 self.rendered_tiles.pop(index, None)
                 self.tile_source_ids.pop(index, None)
                 self.display_tile_payloads.pop(index, None)
@@ -817,6 +816,7 @@ class MontageRenderSession:
                 self.lifecycle.presentation_discarded(index)
                 self.skipped_tiles.discard(index)
                 self.dirty_payloads[index] = None
+                self.pending_removals.add(index)
                 if 0 <= index < len(plan.tiles):
                     self.mark_tile_state(plan.tiles[index], MontageTileState.UNLOADED)
                 misses += 1
@@ -1451,6 +1451,7 @@ class MontageRenderSession:
         # backend that cannot converge (e.g. atlas capacity) never turns
         # this into an idle commit loop.
         stale_drawn: list[int] = []
+        stale_identity_removals: set[int] = set()
         backend_identities = dict(self.lifecycle.backend_presented_identities)
         if backend_identities:
             for tile_number, shown_identity in backend_identities.items():
@@ -1467,6 +1468,7 @@ class MontageRenderSession:
                 if current is None and acknowledged_stale_for_plan:
                     self._reconcile_attempts.pop(int(tile_number), None)
                     self.lifecycle.presentation_discarded(int(tile_number))
+                    stale_identity_removals.add(int(tile_number))
                     if int(tile_number) in self.rendered_tiles:
                         self.display_tile_payloads.pop(int(tile_number), None)
                         self.dirty_payloads[int(tile_number)] = None
@@ -1493,6 +1495,8 @@ class MontageRenderSession:
                 if attempts >= 3:
                     continue
                 self._reconcile_attempts[int(tile_number)] = (pair, attempts + 1)
+                self.lifecycle.presentation_discarded(int(tile_number))
+                stale_identity_removals.add(int(tile_number))
                 stale_drawn.append(int(tile_number))
         else:
             for tile_number, acknowledged in previous_payloads.items():
@@ -1500,6 +1504,8 @@ class MontageRenderSession:
                 if current is None or current is acknowledged:
                     continue
                 if current.source_id != acknowledged.source_id:
+                    self.lifecycle.presentation_discarded(int(tile_number))
+                    stale_identity_removals.add(int(tile_number))
                     stale_drawn.append(int(tile_number))
         if stale_drawn:
             for tile_number in sorted(stale_drawn):
@@ -1514,17 +1520,59 @@ class MontageRenderSession:
         active_scope = set(active)
         for tile_number in self.lifecycle.rearm_for_scope(active_scope):
             self.dirty_payloads[int(tile_number)] = None
+        missing_payload_tiles = tuple(
+            int(tile)
+            for tile in active
+            if int(tile) not in self.display_tile_payloads
+        )
+        for tile_number in missing_payload_tiles:
+            self.dirty_payloads[int(tile_number)] = None
+        correctness_priority_tiles = tuple(
+            dict.fromkeys(
+                (
+                    *missing_payload_tiles,
+                    *(int(tile) for tile in stale_drawn),
+                    *(
+                        int(tile)
+                        for tile in active
+                        if int(tile) not in self.lifecycle.presented_tiles
+                    ),
+                )
+            )
+        )
+        priority_context = self._tile_priority_context()
+        if correctness_priority_tiles:
+            priority_context = replace(
+                priority_context,
+                priority_tiles=tuple(
+                    dict.fromkeys(
+                        (
+                            *correctness_priority_tiles,
+                            *tuple(getattr(priority_context, "priority_tiles", ()) or ()),
+                        )
+                    )
+                ),
+            )
+
+        def prioritize(tiles) -> tuple[int, ...]:
+            return prioritize_tile_numbers(
+                tiles,
+                plan_tiles=tuple(getattr(self.plan, "tiles", ()) or ()),
+                context=priority_context,
+            )
+
         dirty_payload_tiles = tuple(
             dict.fromkeys(
                 (
                     *(int(tile) for tile in self.dirty_payloads),
                     *(int(tile) for tile in self.pending_payload_upserts),
+                    *missing_payload_tiles,
                     *stale_level_tiles,
                 )
             )
         )
         if max_upserts is not None or max_upsert_bytes is not None or stale_level_tiles:
-            dirty_payload_tiles = self._prioritized_tile_numbers(dirty_payload_tiles)
+            dirty_payload_tiles = prioritize(dirty_payload_tiles)
         # Payload construction is bounded by the same admission budget that
         # caps uploads: a retarget/scrub step marks every tile dirty, and
         # building all N wrappers synchronously before admitting 4 of them
@@ -1539,7 +1587,7 @@ class MontageRenderSession:
         if floor_first_fill_active:
             floor_payload_tiles = tuple(planned_numbers)
             if max_upserts is not None:
-                floor_payload_tiles = self._prioritized_tile_numbers(floor_payload_tiles)
+                floor_payload_tiles = prioritize(floor_payload_tiles)
             self._ensure_floor_payloads(floor_payload_tiles, max_count=build_limit)
         built = 0
         for tile_number in dirty_payload_tiles:
@@ -1555,9 +1603,23 @@ class MontageRenderSession:
             floor_payload_tiles = tuple(planned_numbers - set(current_loaded))
             floor_build_limit = None
             if max_upserts is not None:
-                floor_payload_tiles = self._prioritized_tile_numbers(floor_payload_tiles)
+                floor_payload_tiles = prioritize(floor_payload_tiles)
                 floor_build_limit = build_limit
             self._ensure_floor_payloads(floor_payload_tiles, max_count=floor_build_limit)
+        unpresented_active_tiles = tuple(
+            int(tile)
+            for tile in active
+            if int(tile) not in self.lifecycle.presented_tiles
+            and _force_unpresented_upsert(
+                self,
+                int(tile),
+                previous_payloads=previous_payloads,
+                backend_identities=backend_identities,
+            )
+        )
+        for tile_number in unpresented_active_tiles:
+            self.dirty_payloads[int(tile_number)] = None
+            self.pending_payload_upserts[int(tile_number)] = None
         dirty_payload_tiles = tuple(
             dict.fromkeys(
                 (
@@ -1567,7 +1629,7 @@ class MontageRenderSession:
             )
             )
         if max_upserts is not None or max_upsert_bytes is not None or stale_level_tiles:
-            dirty_payload_tiles = self._prioritized_tile_numbers(dirty_payload_tiles)
+            dirty_payload_tiles = prioritize(dirty_payload_tiles)
         presented_preview_tiles = tuple(
             int(tile)
             for tile in planned_numbers
@@ -1582,6 +1644,17 @@ class MontageRenderSession:
         )
         if floor_active_tiles or presented_preview_tiles:
             active = tuple(dict.fromkeys((*active, *presented_preview_tiles, *floor_active_tiles)))
+        for tile_number in tuple(self.pending_payload_upserts):
+            payload = self.display_tile_payloads.get(int(tile_number))
+            previous = previous_payloads.get(int(tile_number))
+            if (
+                payload is not None
+                and previous is payload
+                and not backend_identities
+                and int(tile_number) not in stale_identity_removals
+                and payload.source_id not in self.acknowledged_source_ids
+            ):
+                self.pending_payload_upserts.pop(int(tile_number), None)
         # Progress guarantee: a pending upsert is payload-backed.  A retained
         # stale backend slot may be visibly present while the replacement exact
         # tile is still evaluating, but without a current desired payload there
@@ -1600,6 +1673,8 @@ class MontageRenderSession:
                 int(tile_number) not in self.rendered_tiles
                 and int(tile_number) not in self.display_tile_payloads
             ):
+                if self._floor_can_progress(int(tile_number)):
+                    continue
                 self.dirty_payloads.pop(int(tile_number), None)
         current_payloads = self.display_tile_payloads
         valid_tile_count = len(tuple(getattr(self.plan, "tiles", ()) or ()))
@@ -1609,7 +1684,9 @@ class MontageRenderSession:
                     int(tile)
                     for tile in previous_payloads
                     if int(tile) < 0 or int(tile) >= valid_tile_count or int(tile) in self.skipped_tiles
-                }.union(int(tile) for tile in self.pending_removals)
+                }
+                .union(int(tile) for tile in self.pending_removals)
+                .union(int(tile) for tile in stale_identity_removals)
             )
         )
         upserts: dict[int, DisplayTilePayload] = {}
@@ -1670,7 +1747,7 @@ class MontageRenderSession:
         }
         all_candidate_upserts = dict(upserts)
         free_retarget_tiles = frozenset() if pace_resident_retargets else frozenset(resident_retarget_tiles)
-        admission = TileAdmissionQueue(self._tile_priority_context()).admit(
+        admission = TileAdmissionQueue(priority_context).admit(
             tuple(all_candidate_upserts),
             retained=(),
             free_fn=(lambda tile: int(tile) in free_retarget_tiles) if free_retarget_tiles else None,
@@ -2496,6 +2573,27 @@ def _base_source_id(source_id) -> object:
             return None
         return prefix[0] if len(prefix) == 1 else prefix
     return source_id
+
+
+def _force_unpresented_upsert(session, tile_number: int, *, previous_payloads, backend_identities) -> bool:
+    """Whether an unpresented active slot needs an emitted payload now."""
+
+    tile_number = int(tile_number)
+    payload = session.display_tile_payloads.get(tile_number)
+    if payload is None:
+        return False
+    previous = dict(previous_payloads or {}).get(tile_number)
+    shown_map = dict(backend_identities or {})
+    if shown_map:
+        shown = shown_map.get(tile_number)
+        if shown == payload.source_id:
+            return False
+        if shown is not None:
+            rec = session.lifecycle.peek(tile_number)
+            if rec is not None and (payload.source_id, shown) in rec.resigned:
+                return False
+        return True
+    return previous is None
 
 
 def _diag_identity(value, *, limit: int = 180) -> str:

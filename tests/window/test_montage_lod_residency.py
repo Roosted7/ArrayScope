@@ -2118,8 +2118,8 @@ def test_retarget_index_window_remaps_hits_misses_and_unchanged():
     assert session.lifecycle.backend_presented_identities == backend_truth
 
 
-def test_retarget_index_window_demotes_misses_without_blanking():
-    """A miss keeps the drawn slot's payload until floor/eval replaces it."""
+def test_retarget_index_window_demotes_misses_with_immediate_invalidation():
+    """A miss must remove stale pixels; only current-source payloads may show."""
 
     session = _session(count=2)
     old_sources = {0: ("src", 0), 1: ("src", 1)}
@@ -2158,8 +2158,54 @@ def test_retarget_index_window_demotes_misses_without_blanking():
     assert not session.lifecycle.evaluating_tiles
 
     _state, replacement_delta = session.build_tile_presentation({0: ("src", 5), 1: ("src", 6)})
-    assert replacement_delta.removals == ()
+    assert replacement_delta.removals == (0, 1)
     assert not session.visible_plan_complete()
+
+
+def test_stale_backend_identity_removes_when_correct_upsert_is_budgeted_out():
+    session = _session(count=2)
+    old_sources = {0: ("src", 0), 1: ("src", 1)}
+    old_state, old_delta = session.build_tile_presentation(old_sources)
+    session.acknowledge_tile_presentation(
+        old_delta,
+        TileCommitReport(
+            presented_tiles=frozenset(old_delta.upserts),
+            committed_upserts=frozenset(old_delta.upserts),
+            presented_identities={
+                int(tile): payload.source_id
+                for tile, payload in old_delta.upserts.items()
+            },
+        ),
+    )
+    session.mark_presented(old_delta.upserts)
+
+    plan = _shifted_plan(count=2, offset=5)
+    cached = {}
+    for tile in plan.tiles:
+        image = np.full((TILE, TILE), float(tile.source_index), dtype=np.float32)
+        cached[int(tile.montage_index)] = RenderedTile(
+            tile=tile,
+            image=image,
+            histogram_data=None,
+            eval_ms=0.0,
+            slab_shape=(TILE, TILE),
+            slab_nbytes=TILE * TILE * 4,
+        )
+    _retarget(
+        session,
+        plan,
+        new_source_ids={0: ("src", 5), 1: ("src", 6)},
+        cached_tiles=cached,
+    )
+
+    _state, delta = session.build_tile_presentation(
+        {0: ("src", 5), 1: ("src", 6)},
+        max_upserts=1,
+    )
+
+    assert len(delta.upserts) == 1
+    assert set(delta.upserts).isdisjoint(delta.removals)
+    assert set(delta.upserts).union(delta.removals) == {0, 1}
 
 
 def test_retarget_index_window_clears_active_work_without_completion_queue():

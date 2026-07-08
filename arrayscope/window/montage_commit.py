@@ -1398,16 +1398,12 @@ def session_requested_levels(session) -> tuple[float, float] | None:
 
 
 def persistent_tile_layer_fast_drain_enabled(window, session) -> bool:
-    if viewport_interaction_active(window):
-        return False
     if not bool(getattr(session, "display_committed", False)):
         return False
     return persistent_gpu_tile_residency_backend(window, session)
 
 
 def direct_montage_tile_delta_commit_enabled(window, session) -> bool:
-    if viewport_interaction_active(window):
-        return False
     if not bool(getattr(session, "display_committed", False)):
         return False
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))

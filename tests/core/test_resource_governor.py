@@ -211,6 +211,26 @@ def test_ui_pressure_reduces_batch_and_workers():
     assert worker_decision.target_workers < worker_decision.max_workers
 
 
+def test_histogram_workers_park_only_behind_runnable_visible_work():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0)
+
+    busy = governor.decide_lane_workers(
+        ComputeLane.HISTOGRAM,
+        interactive=True,
+        busy_state=SchedulerBusyState(montage_busy=True, result_backlog=2),
+    )
+    between_bursts = governor.decide_lane_workers(
+        ComputeLane.HISTOGRAM,
+        interactive=True,
+        busy_state=SchedulerBusyState(),
+    )
+
+    assert busy.target_workers == 0
+    assert busy.min_workers == 0
+    assert "runnable user-visible rendering" in busy.reason
+    assert between_bursts.target_workers == between_bursts.max_workers
+
+
 def test_governor_retains_over_warning_callback_observation_details():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
     observation = GuiCallbackObservation(

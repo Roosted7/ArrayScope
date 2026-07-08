@@ -425,6 +425,21 @@ def test_lane_quota_limits_and_releases_same_lane_work():
     assert fourth.spec.key == "d"
 
 
+def test_zero_lane_quota_parks_and_releases_lane_work():
+    kernel, backend = make_manual()
+    lane = Lane.HISTOGRAM_REFINEMENT
+    kernel.set_lane_quota(lane, 0)
+    kernel.submit(TaskSpec(key="hist", fn=lambda: "hist", lane=lane))
+
+    assert backend.take() is None
+    assert kernel.diagnostics().lanes[str(lane)]["blocked_by_quota"] == 1
+
+    kernel.set_lane_quota(lane, 1)
+    record = backend.take()
+    assert record is not None
+    assert record.spec.key == "hist"
+
+
 def test_expired_deadline_drops_optional_but_runs_visible():
     kernel, backend = make_manual()
     ran = []

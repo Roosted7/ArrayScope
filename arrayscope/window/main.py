@@ -432,6 +432,11 @@ class ArrayScopeWindow(
         if timer is not None and active:
             timer.start(250)
 
+    def _note_kernel_completion_drain(self) -> None:
+        if getattr(self, "_closing", False):
+            return
+        self._apply_resource_governor_decisions(refresh_telemetry=False)
+
     def _apply_resource_governor_decisions(self, *, refresh_telemetry: bool = True) -> None:
         governor = getattr(self, "resource_governor", None)
         if governor is None:

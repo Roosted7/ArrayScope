@@ -279,9 +279,21 @@ class ResourceGovernor:
             if interactive or busy_state.visible_busy or busy_state.montage_busy:
                 desired = 1
                 reasons.append("prefetch kept narrow while user-visible work is active")
-        elif lane in {ComputeLane.VISIBLE, ComputeLane.STAGE, ComputeLane.HISTOGRAM, ComputeLane.PROFILE, ComputeLane.ROI, ComputeLane.PIXEL}:
+        elif lane == ComputeLane.HISTOGRAM:
+            if (
+                busy_state.visible_busy
+                or busy_state.montage_busy
+                or busy_state.stage_busy
+                or busy_state.result_backlog > 0
+            ):
+                min_workers = 0
+                desired = 0
+                reasons.append("histogram parked behind runnable user-visible rendering")
+            else:
+                desired = min(desired, max_workers)
+        elif lane in {ComputeLane.VISIBLE, ComputeLane.STAGE, ComputeLane.PROFILE, ComputeLane.ROI, ComputeLane.PIXEL}:
             desired = min(desired, max_workers)
-        if pressure.cpu_headroom < 0.15 and lane not in {ComputeLane.VISIBLE, ComputeLane.STAGE}:
+        if desired > 0 and pressure.cpu_headroom < 0.15 and lane not in {ComputeLane.VISIBLE, ComputeLane.STAGE}:
             desired = min(desired, max(1, self._lane_targets.get(lane, max_workers) - 1))
             reasons.append("low CPU headroom")
         target = self._damped_lane_target(lane, _clamp_int(desired, min_workers, max_workers))
@@ -715,9 +727,19 @@ class ResourceGovernor:
         return ResourcePressure.NORMAL
 
     def _damped_lane_target(self, lane: ComputeLane, desired: int) -> int:
-        current = max(1, int(self._lane_targets.get(lane, self.compute_policy.workers_for_lane(lane))))
+        desired = max(0, int(desired))
+        if desired == 0:
+            self._lane_targets[lane] = 0
+            self._last_lane_update_monotonic[lane] = monotonic()
+            return 0
+        current = max(0, int(self._lane_targets.get(lane, self.compute_policy.workers_for_lane(lane))))
         now = monotonic()
         last = float(self._last_lane_update_monotonic.get(lane, 0.0))
+        if current == 0:
+            target = min(desired, self.max_worker_step)
+            self._lane_targets[lane] = int(target)
+            self._last_lane_update_monotonic[lane] = now
+            return int(target)
         if (now - last) * 1000.0 < self.min_worker_update_interval_ms:
             return current
         if desired < current:
