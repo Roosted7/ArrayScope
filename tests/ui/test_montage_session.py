@@ -5,7 +5,7 @@ import numpy as np
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.montage import MontageTileState, RenderedTile, make_montage_plan
-from arrayscope.display.model.frame import TileCommitReport
+from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, ShaderScale, TexturePlaneKind
 from arrayscope.window.montage_session import MontageRenderSession
 
@@ -96,6 +96,53 @@ def test_montage_render_session_materialized_tile_stays_loading_until_presented(
 
     assert int(tile.montage_index) not in session.loading_tiles
     assert int(tile.montage_index) in session.lifecycle.presented_tiles
+
+
+def test_stale_committed_state_payload_is_not_complete_after_retarget():
+    session = _session()
+    tile = session.plan.tiles[0]
+    image = np.ones((2, 2), dtype=np.float32)
+    rendered = RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
+    session.rendered_tiles[0] = rendered
+    session.visible_tiles = (tile,)
+    session.visible_tile_numbers = frozenset({0})
+    old_payload = DisplayTilePayload(
+        tile_number=0,
+        source_index=1,
+        image=image + 1,
+        histogram_data=image + 1,
+        source_id=("src", 1, "lod", 2),
+    )
+    session.tile_presentation_state = TilePresentationState({0: old_payload}, revision=1)
+    session.lifecycle.backend_presented_snapshot({0: old_payload.source_id})
+    session.lifecycle.presentation_confirmed((0,))
+
+    assert not session.visible_plan_complete()
+    assert session.backend_identity_mismatch_tiles() == (0,)
+
+    _state, delta = session.build_tile_presentation({0: ("src", 0)}, max_upserts=4)
+
+    assert delta.removals == ()
+    assert 0 in delta.upserts
+    assert delta.upserts[0].source_index == 0
+    assert 0 in delta.active_tiles
+    assert 0 not in session.lifecycle.presented_tiles
+
+
+def test_unrendered_tile_without_payload_cannot_keep_pending_upsert_marker():
+    session = _session()
+    session.pending_tiles.clear()
+    session.rendered_tiles.clear()
+    session.visible_tiles = (session.plan.tiles[0],)
+    session.visible_tile_numbers = frozenset({0})
+    session.dirty_payloads[0] = None
+    session.pending_payload_upserts[0] = None
+
+    _state, delta = session.build_tile_presentation({0: ("src", 0)}, max_upserts=4)
+
+    assert delta.upserts == {}
+    assert 0 not in session.dirty_payloads
+    assert 0 not in session.pending_payload_upserts
 
 
 def test_montage_render_session_keeps_skipped_separate_from_pending():
@@ -1395,7 +1442,63 @@ def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(mon
     )
 
     assert shifted.display_tile_payloads[0].source_index == 2
+    assert 0 not in shifted.tile_presentation_state.payloads
+    assert 0 in shifted.pending_payload_upserts
+    assert 0 not in shifted.lifecycle.presented_tiles
+
+
+def test_seeded_payloads_only_confirm_when_backend_identity_matches():
+    original = _session()
+    tile = original.plan.tiles[2]
+    image = np.full((2, 2), 2, dtype=np.float32)
+    rendered = RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
+    original.mark_materialized(rendered)
+    state, delta = original.build_tile_presentation({2: ("tile-source", 2)})
+    original.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(presented_tiles=state.active_payloads(delta)),
+    )
+    original.mark_presented(state.active_payloads(delta))
+
+    shifted_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(2, 3), text="2:4")
+    shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2)
+    shifted = MontageRenderSession(
+        session_id=2,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        level_expected_indices=(2, 3),
+        plan=shifted_plan,
+        view_state=shifted_state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(10, 10),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=shifted_plan.tiles,
+        rendered_tiles={
+            0: RenderedTile(shifted_plan.tiles[0], image, image, 0.0, image.shape, image.nbytes)
+        },
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+    payload = state.payloads[2]
+    shifted.lifecycle.backend_presented_snapshot({0: payload.source_id})
+
+    shifted.seed_display_tile_payloads(
+        state.payloads,
+        {0: ("tile-source", 2)},
+        tile_numbers=(0,),
+    )
+
     assert shifted.tile_presentation_state.payloads[0] is shifted.display_tile_payloads[0]
+    assert 0 not in shifted.pending_payload_upserts
+    assert 0 in shifted.lifecycle.presented_tiles
 
 
 def test_resident_retarget_upserts_bypass_cold_priority_cap():

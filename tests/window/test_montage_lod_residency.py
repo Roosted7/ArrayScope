@@ -8,11 +8,13 @@ from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, 
 from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
+from arrayscope.kernel import Lane, Priority
 from arrayscope.presentation import ClaimOwner, LevelPhase
 from arrayscope.render import effects as render_effects
-from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung
+from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep
 from arrayscope.window.montage_commit import MontagePipelineEffects
 from arrayscope.render.lod import admit_retained_preview_level, histogram_key_for_level_key
+from arrayscope.render.stages import CommitBatch, RenderIntent
 from arrayscope.window.montage_session import (
     MontageRenderSession,
     pyramid_key_for_rendered,
@@ -154,6 +156,28 @@ class _RungPrepareRenderer:
 
     def request_montage_replan(self, session) -> None:
         session._test_replan_requested = True
+
+
+def _pipeline_intent_for(session, *, semantic_key=None, viewport_key="vp"):
+    return RenderIntent(
+        semantic_key=getattr(session, "key", None) if semantic_key is None else semantic_key,
+        viewport_key=viewport_key,
+        presentation_key="presentation",
+        view_range=getattr(session, "view_range", None),
+        viewport_shape=getattr(session, "viewport_shape", None),
+    )
+
+
+def _exact_step(tile_number=0):
+    return RungStep(
+        tile_number=int(tile_number),
+        rung=Rung.EXACT,
+        level=0,
+        reduce_from_native=False,
+        lane=Lane.VISIBLE_MATERIALIZATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="test",
+    )
 
 
 def _plan_rung_materializations(session) -> tuple:
@@ -700,12 +724,12 @@ def test_level_only_change_replaces_payload_atomically_and_deferral_keeps_old():
     assert state.payloads[swapped].lod.level == 2
 
 
-def test_seeding_new_session_keeps_stale_level_payload_presented():
+def test_seeding_new_session_keeps_stale_level_payload_ready_for_identity_ack():
     """Session replacement must reuse a resident payload at the *old* level.
 
     When the pyramid no longer holds the seeded level, the tile keeps
-    presenting the stale-level payload (its texture is materialized by
-    construction) instead of flashing through unpresented/native.
+    the stale-level payload ready for an identity-checked remap instead of
+    rebuilding it from native.
     """
 
     pyramid = PyramidCache(max_bytes=1 << 24)
@@ -725,15 +749,15 @@ def test_seeding_new_session_keeps_stale_level_payload_presented():
         replacement.dirty_payloads[int(index)] = None
     replacement.seed_display_tile_payloads(previous_payloads, {})
 
-    # Both tiles are presented immediately, still at level 2, with no
-    # placeholder window (they own committed presentation state).
-    assert set(replacement.tile_presentation_state.payloads) == {0, 1}
-    assert {
-        payload.lod.level for payload in replacement.tile_presentation_state.payloads.values()
-    } == {2}
-    assert replacement.lifecycle.presented_tiles == frozenset({0, 1})
+    # Both tiles are retained as desired payloads, still at level 2.  They do
+    # not enter committed presentation state until backend identity truth says
+    # those slots actually hold the retained payloads.
+    assert set(replacement.display_tile_payloads) == {0, 1}
+    assert {payload.lod.level for payload in replacement.display_tile_payloads.values()} == {2}
+    assert set(replacement.pending_payload_upserts) == {0, 1}
+    assert replacement.lifecycle.presented_tiles == frozenset()
 
-    # The refresh accepts the presented level as resident evidence: no
+    # The refresh accepts the retained level as resident evidence: no
     # down-swap churn to native while the demanded level rematerializes.
     assert replacement.mark_ladder_swaps_for_viewport() is False
     assert not replacement.dirty_payloads or set(replacement.dirty_payloads) == {0, 1}
@@ -1104,7 +1128,7 @@ def test_settled_mismatch_is_queryable_for_followup_commit():
 
 def test_inherited_identities_heal_on_a_rebuilt_session():
     """A rebuilt session (scrub step) inherits backend slots — and now also
-    the identity ground truth (renderer seeds last_presented_identities from
+    the identity ground truth (renderer seeds lifecycle backend identities from
     the dying session).  Its first build must repair inherited stale slots
     instead of settling blind on top of them (sid-68 wedge, JSONL 131233)."""
 
@@ -1112,10 +1136,11 @@ def test_inherited_identities_heal_on_a_rebuilt_session():
     _state, delta = session.build_tile_presentation({})
     # Fresh session, fresh machine: only the inherited map knows slot 1 is
     # stale.  (The renderer copies this dict across replacement.)
-    session.last_presented_identities = {
+    backend_truth = {
         int(tile): payload.source_id for tile, payload in dict(delta.upserts).items()
     }
-    session.last_presented_identities[1] = ("previous-session-level", 5)
+    backend_truth[1] = ("previous-session-level", 5)
+    session.lifecycle.backend_presented_snapshot(backend_truth)
     session.dirty_payloads.clear()
     session.pending_payload_upserts.clear()
     assert session.backend_identity_mismatch_tiles() == (1,)
@@ -1135,7 +1160,7 @@ def test_resigned_pair_stops_convergence_but_new_result_rearms():
     wanted = dict(delta.upserts)[1].source_id
     rec = session.lifecycle.record(1)
     rec.resigned.add((wanted, ("stuck", 6)))
-    session.last_presented_identities = {1: ("stuck", 6)}
+    session.lifecycle.backend_presented_snapshot({1: ("stuck", 6)})
     session.dirty_payloads.clear()
     session.pending_payload_upserts.clear()
     assert session.backend_identity_mismatch_tiles() == ()
@@ -1196,10 +1221,10 @@ def test_mark_presented_rejects_backend_active_tile_with_stale_identity():
     old_identity = session.display_tile_payloads[1].source_id
     session.display_tile_payloads[1] = dc_replace(session.display_tile_payloads[1], source_id=("fresh", 1))
     session.dirty_payloads.clear()
-    session.last_presented_identities = {
+    session.lifecycle.backend_presented_snapshot({
         0: session.display_tile_payloads[0].source_id,
         1: old_identity,
-    }
+    })
 
     session.mark_presented((0, 1))
 
@@ -1216,10 +1241,6 @@ def test_drawn_tile_with_outdated_acknowledged_identity_represents_and_rejoins_a
     acknowledged identity differs from the session's current payload must
     re-present and join the delta's active scope so the backend accepts it."""
 
-    from dataclasses import replace as dc_replace
-
-    from arrayscope.display.model.frame import TilePresentationState
-
     session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
     _state, delta = session.build_tile_presentation({})
     report = TileCommitReport(presented_tiles=(0, 1), committed_upserts=(0, 1))
@@ -1229,10 +1250,8 @@ def test_drawn_tile_with_outdated_acknowledged_identity_represents_and_rejoins_a
     # Tile 1 leaves the viewport-derived scope but its slot stays drawn.
     session.visible_tiles = (session.plan.tiles[0],)
     # The backend still shows an OLDER identity than the session now holds.
-    stale = dc_replace(session.tile_presentation_state.payloads[1], source_id=("stale", 6))
-    session.tile_presentation_state = TilePresentationState(
-        {**dict(session.tile_presentation_state.payloads), 1: stale},
-        revision=session.tile_presentation_state.revision,
+    session.lifecycle.backend_presented_snapshot(
+        {0: session.display_tile_payloads[0].source_id, 1: ("stale", 6)}
     )
 
     _state2, delta2 = session.build_tile_presentation({})
@@ -2066,7 +2085,7 @@ def test_retarget_index_window_remaps_hits_misses_and_unchanged():
     session.loading_tiles.clear()
     session.dirty_payloads.clear()
     backend_truth = {0: ("shown", 0), 1: ("shown", 1)}
-    session.last_presented_identities = dict(backend_truth)
+    session.lifecycle.backend_presented_snapshot(backend_truth)
 
     hit = RenderedTile(
         tile=plan.tiles[1],
@@ -2096,18 +2115,31 @@ def test_retarget_index_window_remaps_hits_misses_and_unchanged():
     assert 1 not in session.lifecycle.presented_tiles
     assert 1 in session.loading_tiles
     # Backend acknowledgement ground truth survives the retarget.
-    assert session.last_presented_identities == backend_truth
+    assert session.lifecycle.backend_presented_identities == backend_truth
 
 
 def test_retarget_index_window_demotes_misses_without_blanking():
     """A miss keeps the drawn slot's payload until floor/eval replaces it."""
 
     session = _session(count=2)
+    old_sources = {0: ("src", 0), 1: ("src", 1)}
+    for tile in session.plan.tiles:
+        image = np.full((TILE, TILE), float(tile.source_index), dtype=np.float32)
+        session.mark_materialized(
+            RenderedTile(
+                tile=tile,
+                image=image,
+                histogram_data=None,
+                eval_ms=0.0,
+                slab_shape=(TILE, TILE),
+                slab_nbytes=TILE * TILE * 4,
+            )
+        )
+    state, delta = session.build_tile_presentation(old_sources)
+    session.acknowledge_tile_presentation(delta, TileCommitReport(presented_tiles=state.active_payloads(delta)))
+    session.mark_presented(state.active_payloads(delta))
+
     plan = _shifted_plan(count=2, offset=5)
-    session.tile_source_ids = {0: ("src", 0), 1: ("src", 1)}
-    session.lifecycle.presentation_confirmed((0, 1))
-    payload_sentinel = object()
-    session.display_tile_payloads = {0: payload_sentinel, 1: payload_sentinel}
 
     stats = _retarget(
         session,
@@ -2119,11 +2151,15 @@ def test_retarget_index_window_demotes_misses_without_blanking():
     assert stats["misses"] == 2 and stats["hits"] == 0
     for index in (0, 1):
         assert index not in session.rendered_tiles
-        assert index in session.loading_tiles
+        assert index not in session.loading_tiles
         assert index in session.dirty_payloads
         assert index not in session.tile_source_ids
     # Lifecycle semantic axis demoted (no longer evaluated).
     assert not session.lifecycle.evaluating_tiles
+
+    _state, replacement_delta = session.build_tile_presentation({0: ("src", 5), 1: ("src", 6)})
+    assert replacement_delta.removals == ()
+    assert not session.visible_plan_complete()
 
 
 def test_retarget_index_window_clears_active_work_without_completion_queue():
@@ -2143,6 +2179,223 @@ def test_retarget_index_window_clears_active_work_without_completion_queue():
 
     assert stats["misses"] == 2
     assert not session.active_tile_requests
+
+
+def test_stale_rung_drop_releases_its_prepared_active_claim_after_retarget():
+    """Cleanup is owned by the prepared rung, not by the live semantic key."""
+
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    renderer = _RungPrepareRenderer()
+    effects = MontagePipelineEffects(renderer, session)
+    old_intent = _pipeline_intent_for(session, viewport_key="old")
+    step = _exact_step(0)
+
+    assert effects.prepare_rung(old_intent, step)
+    assert 0 in session.active_tile_requests
+    assert 0 in session.loading_tiles
+    assert session.lifecycle.evaluating_tiles == frozenset({0})
+
+    session.key = ("retargeted",)
+    effects.rung_dropped(old_intent, step)
+
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.lifecycle.evaluating_tiles == frozenset()
+    assert session._test_replan_requested is True
+
+
+def test_stale_commit_batch_releases_prepared_active_claim_after_key_retarget():
+    """A completion between session key mutation and pipeline replan must drop."""
+
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    renderer = _RungPrepareRenderer()
+    effects = MontagePipelineEffects(renderer, session)
+    old_intent = _pipeline_intent_for(session, viewport_key="old")
+    step = _exact_step(0)
+
+    assert effects.prepare_rung(old_intent, step)
+    session.key = ("retargeted",)
+
+    effects.apply_commit(
+        CommitBatch(
+            semantic_key=old_intent.semantic_key,
+            presentation_key=old_intent.presentation_key,
+            upserts=((step, object()),),
+        )
+    )
+
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.lifecycle.evaluating_tiles == frozenset()
+    assert session._test_replan_requested is True
+
+
+def test_stale_desired_drop_releases_materialization_and_evaluation_claims():
+    """DESIRED can mean chain materialization or cold evaluation; drop both.
+
+    Fast index-window retargeting can leave an old resident-level chain keyed
+    by the same tile/rung/level as the cold evaluation prepared for the new
+    source.  Releasing the chain must not return before clearing the active
+    evaluation claim, or the session idles forever with no kernel work left.
+    """
+
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    renderer = _RungPrepareRenderer()
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session, viewport_key="old")
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
+    )
+    level_key = PyramidLevelKey(("old-source",), ("tile", 0), "texture", (2, 2))
+    request = session._lod_materialization_request(
+        session.rendered_tiles[0],
+        demand=session.ingest_lod_demand(),
+        level=2,
+        key=level_key,
+    )
+    session.pending_rung_materializations.append(request)
+    effects._pending_materializations[(0, int(Rung.DESIRED), 2)] = request
+    del session.rendered_tiles[0]
+    session.dirty_payloads.pop(0, None)
+
+    assert effects.prepare_rung(intent, step)
+    assert 0 in session.active_tile_requests
+    assert 0 in session.loading_tiles
+    assert session.pending_rung_materializations
+
+    effects.rung_dropped(intent, step)
+
+    assert not session.pending_rung_materializations
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.lifecycle.evaluating_tiles == frozenset()
+    assert session._test_replan_requested is True
+
+
+def test_source_changed_active_claim_does_not_block_retargeted_prepare():
+    """Active request dedupe is source-aware, not montage-slot-only."""
+
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    renderer = _RungPrepareRenderer()
+    effects = MontagePipelineEffects(renderer, session)
+    old_intent = _pipeline_intent_for(session, viewport_key="old")
+    step = _exact_step(0)
+
+    assert effects.prepare_rung(old_intent, step)
+    assert 0 in session.active_tile_requests
+
+    new_tile = MontageTile(
+        montage_index=0,
+        source_index=9,
+        row=0,
+        col=0,
+        x0=0,
+        y0=0,
+        width=TILE,
+        height=TILE,
+        view_state=None,
+    )
+    session.plan = MontagePlan(
+        axis=0,
+        tile_shape=(TILE, TILE),
+        grid_shape=(1, 1),
+        columns=1,
+        rows=1,
+        gap=0,
+        tiles=(new_tile,),
+    )
+    session.key = ("retargeted",)
+    new_intent = _pipeline_intent_for(session, viewport_key="new")
+
+    assert effects.prepare_rung(new_intent, step)
+    assert 0 in session.active_tile_requests
+    assert 0 in session.loading_tiles
+    assert effects._pending_evaluations[0].source_index == 9
+
+    effects.rung_dropped(old_intent, step)
+    assert 0 in session.active_tile_requests
+    assert effects._pending_evaluations[0].source_index == 9
+
+    effects.rung_dropped(new_intent, step)
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+
+
+def test_stale_materialized_desired_admission_releases_conflicting_evaluation_claim():
+    """A stale resident-level result must not strand the cold DESIRED claim."""
+
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    renderer = _RungPrepareRenderer()
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
+    )
+    level_key = PyramidLevelKey(("old-source",), ("tile", 0), "texture", (2, 2))
+    request = session._lod_materialization_request(
+        session.rendered_tiles[0],
+        demand=session.ingest_lod_demand(),
+        level=2,
+        key=level_key,
+    )
+    session.pending_rung_materializations.append(request)
+    effects._pending_materializations[(0, int(Rung.DESIRED), 2)] = request
+    del session.rendered_tiles[0]
+    session.dirty_payloads.pop(0, None)
+
+    assert effects.prepare_rung(intent, step)
+    assert 0 in session.active_tile_requests
+
+    effects._admit_ready_payloads(((step, ("materialized", request)),))
+
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.lifecycle.evaluating_tiles == frozenset()
+    assert session._test_replan_requested is True
+
+
+def test_stale_rung_drop_does_not_clear_newer_active_claim_for_same_slot():
+    """A stale drop may clean up only the intent marker it created."""
+
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+    old_intent = _pipeline_intent_for(session, viewport_key="old")
+    new_intent = _pipeline_intent_for(session, semantic_key=("retargeted",), viewport_key="new")
+    step = _exact_step(0)
+
+    assert effects.prepare_rung(old_intent, step)
+    session.active_tile_requests.clear()
+    session.loading_tiles.clear()
+    session.lifecycle.evaluation_declined(0)
+
+    session.key = ("retargeted",)
+    assert effects.prepare_rung(new_intent, step)
+    effects.rung_dropped(old_intent, step)
+
+    assert 0 in session.active_tile_requests
+    assert 0 in session.loading_tiles
+    assert session.lifecycle.evaluating_tiles == frozenset({0})
+
+    effects.rung_dropped(new_intent, step)
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.lifecycle.evaluating_tiles == frozenset()
 
 
 def test_reduced_complex_base_keeps_a_level_matched_magnitude_histogram():

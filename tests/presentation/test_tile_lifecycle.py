@@ -270,7 +270,26 @@ def test_removal_clears_presentation_and_park(lc):
     rec = lc.record(9)
     assert rec.presentation is Presentation.UNPRESENTED
     assert rec.presented_source_id is None
+    assert rec.backend_source_id is None
     assert 9 not in lc.presented_tiles
+
+
+def test_backend_presented_snapshot_is_lifecycle_owned(lc):
+    lc.backend_presented_snapshot({4: "old"})
+    assert lc.backend_presented_identities == {4: "old"}
+    assert lc.record(4).presentation is not Presentation.PRESENTED
+
+    _evaluated(lc, 4)
+    lc.upsert_emitted(4, source_id="new")
+    accepted = lc.commit_acknowledged(
+        emitted_tiles=[4],
+        accepted_tiles=[4],
+        active_scope=[4],
+        presented_identities={4: "old"},
+    )
+    assert accepted == frozenset()
+    assert lc.backend_presented_identities == {4: "old"}
+    assert lc.record(4).presentation is Presentation.EMITTED
 
 
 def test_presentation_confirmed_is_the_resident_retarget_ack(lc):

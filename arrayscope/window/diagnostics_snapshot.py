@@ -55,6 +55,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         session_id=None if session is None else int(session.session_id),
         loaded_tiles=0 if session is None else len(session.rendered_tiles),
         loading_tiles=0 if session is None else len(session.loading_tiles),
+        active_tile_requests=0 if session is None else len(getattr(session, "active_tile_requests", ())),
         pending_tiles=0 if session is None else len(session.pending_tiles),
         pending_payload_upserts=0 if session is None else len(getattr(session, "pending_payload_upserts", ())),
         pending_removals=0 if session is None else len(getattr(session, "pending_removals", ())),
@@ -143,6 +144,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         last_stall_signature=tuple(
             int(value) for value in (getattr(window.renderer, "_montage_watchdog_last_stall", ()) or ())
         ),
+        tile_identity_probe=()
+        if session is None
+        else tuple(getattr(session, "diagnostic_tile_identity_rows", lambda **_kwargs: ())()),
         presented_order_sample=() if session is None else tuple(int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]),
     )
 
@@ -411,7 +415,8 @@ def _backend_stale_identities(session) -> int:
 
     if session is None:
         return 0
-    identities = dict(getattr(session, "last_presented_identities", None) or {})
+    lifecycle = getattr(session, "lifecycle", None)
+    identities = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
     if not identities:
         return 0
     payloads = getattr(session, "display_tile_payloads", {}) or {}

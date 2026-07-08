@@ -222,7 +222,7 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "Backend reason: pyqtgraph supports direct tiled montage payloads" in text
     assert "LOD: native-only level=0 desired=4(4, 2) applied=1(1, 1) texpp=(8.00,3.00)" in text
     assert "LOD reason: desired LOD is deferred until asynchronous multi-resolution residency exists" in text
-    assert "Lifecycle: presented=0 parked=0 evaluating=0 dangling_claims=0 mismatches=0" in text
+    assert "Lifecycle: parked=0 evaluating=0 dangling_claims=0 mismatches=0 identity_rejections=0 dirty=0 BACKEND_STALE=0" in text
     assert "Kernel" in text
     assert "Queues: upserts=0 removals=0 level_scan=0 flush=no final=no" in text
     assert "Reusable stage: stage=3 hit repeated_per_tile=no" in text

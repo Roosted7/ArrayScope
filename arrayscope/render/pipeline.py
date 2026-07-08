@@ -141,6 +141,9 @@ class MontagePipeline:
         if previous is not None and previous.semantic_key != intent.semantic_key:
             # Semantic change: everything under the old target is stale.
             self.kernel.clear_scope(self._scope(previous.semantic_key))
+            for queued_intent, step, _payload in tuple(self._ready_upserts):
+                if queued_intent.semantic_key != intent.semantic_key:
+                    self.effects.rung_dropped(queued_intent, step)
             self._ready_upserts.clear()
 
         states = self.effects.tile_states(intent, demand)
@@ -203,9 +206,10 @@ class MontagePipeline:
         )
         handle = self.kernel.submit(
             spec,
-            on_done=lambda payload, step=step: self._on_rung_done(step, payload),
-            on_error=lambda exc, step=step: self._on_rung_error(step, exc),
-            on_reuse=lambda payload, step=step: self._on_rung_reusable(step, payload),
+            on_done=lambda payload, intent=intent, step=step: self._on_rung_done(intent, step, payload),
+            on_error=lambda exc, intent=intent, step=step: self._on_rung_error(intent, step, exc),
+            on_stale=lambda intent=intent, step=step: self._on_rung_stale(intent, step),
+            on_reuse=lambda payload, intent=intent, step=step: self._on_rung_reusable(intent, step, payload),
         )
         if handle is not None:
             self.counters.tasks_submitted += 1
@@ -215,18 +219,28 @@ class MontagePipeline:
 
     # Handlers run on the GUI thread (kernel bridge drain).
 
-    def _on_rung_done(self, step: RungStep, payload) -> None:
-        self._ready_upserts.append((step, payload))
+    def _on_rung_done(self, intent: RenderIntent, step: RungStep, payload) -> None:
+        current = self._current_intent
+        if current is None or intent.semantic_key != current.semantic_key:
+            self.effects.rung_dropped(intent, step)
+            return
+        if payload is None:
+            self.effects.rung_dropped(intent, step)
+            return
+        self._ready_upserts.append((intent, step, payload))
         self._flush_ready()
 
-    def _on_rung_reusable(self, step: RungStep, payload) -> None:
-        # Stale-but-reusable: cache only, never commit.
-        if self._current_intent is not None:
-            self.effects.rung_dropped(self._current_intent, step)
+    def _on_rung_reusable(self, intent: RenderIntent, step: RungStep, payload) -> None:
+        # Stale-but-reusable: worker side may have populated caches, but this
+        # rung must never commit. It still owns lifecycle claims from
+        # prepare_rung(), so release those with the preparing intent.
+        self.effects.rung_dropped(intent, step)
 
-    def _on_rung_error(self, step: RungStep, exc: BaseException) -> None:
-        if self._current_intent is not None:
-            self.effects.rung_dropped(self._current_intent, step)
+    def _on_rung_stale(self, intent: RenderIntent, step: RungStep) -> None:
+        self.effects.rung_dropped(intent, step)
+
+    def _on_rung_error(self, intent: RenderIntent, step: RungStep, exc: BaseException) -> None:
+        self.effects.rung_dropped(intent, step)
         raise exc
 
     def _flush_ready(self) -> None:
@@ -241,7 +255,15 @@ class MontagePipeline:
         intent = self._current_intent
         if intent is None or not self._ready_upserts:
             return
-        batch_items, self._ready_upserts = self._ready_upserts, []
+        queued, self._ready_upserts = self._ready_upserts, []
+        batch_items = []
+        for queued_intent, step, payload in queued:
+            if queued_intent.semantic_key == intent.semantic_key:
+                batch_items.append((step, payload))
+            else:
+                self.effects.rung_dropped(queued_intent, step)
+        if not batch_items:
+            return
         batch = CommitBatch(
             semantic_key=intent.semantic_key,
             presentation_key=intent.presentation_key,

@@ -50,12 +50,22 @@ class StageFanInState:
         self.active_requests.discard(key)
         self.attached_requests.discard(key)
         self.values[key] = value
-        return StageActivationBatch(key=key, tiles=(), complete=True)
+        activated = tuple(
+            tile for tile, stage_key in tuple(self.tile_stage_keys.items()) if stage_key == key
+        )
+        for tile in activated:
+            self.tile_stage_keys.pop(_tile_index(tile), None)
+        return StageActivationBatch(key=key, tiles=activated, complete=True)
 
     def release_missing(self, key, *, max_items: int | None = None) -> StageReleaseBatch:
         self.active_requests.discard(key)
         self.attached_requests.discard(key)
-        return StageReleaseBatch(key=key, tiles=(), complete=True)
+        released = tuple(
+            tile for tile, stage_key in tuple(self.tile_stage_keys.items()) if stage_key == key
+        )
+        for tile in released:
+            self.tile_stage_keys.pop(_tile_index(tile), None)
+        return StageReleaseBatch(key=key, tiles=released, complete=True)
 
     def fail(self, key) -> tuple[object, ...]:
         self.active_requests.discard(key)

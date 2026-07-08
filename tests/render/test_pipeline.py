@@ -15,6 +15,26 @@ from arrayscope.render.pipeline import MontagePipeline
 from arrayscope.render.stages import RenderIntent
 
 
+class ManualBackend:
+    workers = 4
+
+    def attach(self, kernel) -> None:
+        self.kernel = kernel
+
+    def wake(self) -> None:
+        pass
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        pass
+
+    def run_next(self) -> bool:
+        record = self.kernel._take_next(block=False)
+        if record is None:
+            return False
+        self.kernel._execute(record)
+        return True
+
+
 class StubEffects:
     def __init__(self, tiles=2):
         self.tiles = tiles
@@ -23,6 +43,7 @@ class StubEffects:
         self.states = {}
         self.prepared = []
         self.dropped = []
+        self.drop_intents = []
         self.deps = {}
         self.last_intent = None
         self.last_demand = None
@@ -63,6 +84,7 @@ class StubEffects:
 
     def rung_dropped(self, intent, step):
         self.last_intent = intent
+        self.drop_intents.append(intent)
         self.dropped.append((step.tile_number, int(step.rung), step.level))
 
 
@@ -74,13 +96,24 @@ def make_pipeline(tiles=2, **policy_kwargs):
     return kernel, effects, pipeline
 
 
+def make_manual_pipeline(tiles=2, **policy_kwargs):
+    backend = ManualBackend()
+    kernel = Kernel(backend, handler_error_hook=lambda ctx, exc: None)
+    effects = StubEffects(tiles=tiles)
+    ladder = LodLadder(LadderPolicy(**policy_kwargs)) if policy_kwargs else LodLadder()
+    pipeline = MontagePipeline(kernel, effects, ladder)
+    return kernel, backend, effects, pipeline
+
+
 class CaptureKernel:
     def __init__(self):
         self.specs = []
+        self.callbacks = []
         self.cleared_scopes = []
 
-    def submit(self, spec, **_callbacks):
+    def submit(self, spec, **callbacks):
         self.specs.append(spec)
+        self.callbacks.append(callbacks)
         return object()
 
     def clear_scope(self, scope):
@@ -189,6 +222,53 @@ def test_demand_level_change_supersedes_stale_rung_targets():
         step.level for batch in effects.batches for (step, _payload) in batch.upserts
     )
     assert committed == [1, 2, 4]
+    assert (0, 2, 2) in effects.dropped
+
+
+def test_stale_done_from_previous_semantic_is_dropped_not_committed():
+    kernel = CaptureKernel()
+    effects = StubEffects(tiles=1)
+    pipeline = MontagePipeline(kernel, effects, LodLadder())
+
+    pipeline.retarget(intent(semantic="window-1"), demand(1))
+    old_done = kernel.callbacks[0]["on_done"]
+    old_step = kernel.specs[0].key
+
+    pipeline.retarget(intent(semantic="window-2"), demand(1))
+    old_done(("payload", old_step.tile_number, old_step.level))
+
+    assert effects.batches == []
+    assert any(drop.semantic_key == "window-1" for drop in effects.drop_intents)
+    assert (old_step.tile_number, old_step.rung, old_step.level) in effects.dropped
+
+
+def test_none_completion_releases_prepared_rung_claim():
+    kernel = CaptureKernel()
+    effects = StubEffects(tiles=1)
+    pipeline = MontagePipeline(kernel, effects, LodLadder())
+
+    pipeline.retarget(intent(semantic="window-1"), demand(1))
+    done = kernel.callbacks[0]["on_done"]
+    step = kernel.specs[0].key
+
+    done(None)
+
+    assert effects.batches == []
+    assert any(drop.semantic_key == "window-1" for drop in effects.drop_intents)
+    assert (step.tile_number, step.rung, step.level) in effects.dropped
+
+
+def test_dropped_queued_rung_releases_prepared_state():
+    kernel, _backend, effects, pipeline = make_manual_pipeline(tiles=1)
+    assert pipeline.retarget(intent(viewport="vp-1"), demand(2)) == 2
+
+    # Supersede the queued desired-level rung before it can run.  The effects
+    # already prepared lifecycle ownership; the drop callback must release it.
+    assert pipeline.retarget(intent(viewport="vp-2"), demand(1)) == 2
+    drain(kernel)
+
+    assert (0, 2, 2) in effects.dropped
+    assert any(drop.viewport_key == "vp-1" for drop in effects.drop_intents)
 
 
 def test_counters_track_pipeline_activity():

@@ -106,6 +106,53 @@ def test_evaluate_exact_tile_returns_native_tile_payload():
     assert result.value.level_stats is not None
 
 
+def test_evaluate_exact_tile_uses_cached_stage_without_waiting_binding(monkeypatch):
+    session = _session()
+    tile = session.plan.tiles[1]
+    stage_key = ("stage", "cached")
+    stage_value = object()
+    candidate = object()
+    plan = SimpleNamespace(region_plan=SimpleNamespace(cache_candidates=(candidate,)))
+    session.stage_fan_in = StageFanInState(
+        values={stage_key: stage_value},
+        tile_stage_plans={int(tile.montage_index): plan},
+        tile_stage_candidates={int(tile.montage_index): candidate},
+    )
+
+    class Materializer:
+        def key_for_candidate(self, _document_key, _candidate):
+            assert _candidate is candidate
+            return stage_key
+
+    class Cache:
+        def get(self, key):
+            assert key == stage_key
+            return stage_value
+
+    seen = {}
+
+    def fake_evaluate_slab_from_stage(_document, _request, _plan, value, _candidate, **_kwargs):
+        seen["value"] = value
+        seen["candidate"] = _candidate
+        return np.full((4, 6), 7.0, dtype=np.float32)
+
+    monkeypatch.setattr(effects, "evaluate_slab_from_stage", fake_evaluate_slab_from_stage)
+
+    result = effects.evaluate_exact_tile(
+        session,
+        tile,
+        stage_cache=Cache(),
+        stage_materializer=Materializer(),
+        cancellation_token=None,
+        evaluation_context=None,
+    )
+
+    assert seen == {"value": stage_value, "candidate": candidate}
+    assert result.compute_path == "stage_backed"
+    np.testing.assert_allclose(result.value.data, np.full((4, 6), 7.0, dtype=np.float32))
+    assert session.stage_fan_in.tile_stage_keys == {}
+
+
 def test_evaluate_preview_tile_returns_display_only_payload():
     session = _session()
     tile = session.plan.tiles[2]
@@ -203,8 +250,17 @@ def test_tile_lod_states_reads_lifecycle_and_presented_payload_level():
         component="scalar",
         level_xy=(2, 2),
     )
+    stale_level_key = PyramidLevelKey(
+        source_id=("semantic", 99),
+        tile_id=99,
+        component="scalar",
+        level_xy=(3, 3),
+    )
     session.lifecycle.level_claimed(0, level_key, ClaimOwner.PREVIEW)
     session.lifecycle.level_resident(0, level_key)
+    session.lifecycle.level_claimed(0, stale_level_key, ClaimOwner.PREVIEW)
+    session.lifecycle.level_resident(0, stale_level_key)
+    session.lifecycle.presentation_confirmed((1,))
     session.tile_presentation_state = SimpleNamespace(
         payloads={
             1: DisplayTilePayload(
@@ -228,6 +284,32 @@ def test_tile_lod_states_reads_lifecycle_and_presented_payload_level():
     by_tile = {state.tile_number: state for state in states}
     assert by_tile[0].resident_levels == (2,)
     assert by_tile[1].presented_level == 1
+
+
+def test_tile_lod_states_ignores_stale_presented_payload_after_slot_retarget():
+    session = _session()
+    stale_payload = DisplayTilePayload(
+        1,
+        99,
+        np.ones((2, 3), dtype=np.float32),
+        None,
+        ("payload", "old-source"),
+        lod=LodInfo(
+            level=0,
+            factor=1,
+            source_shape=(4, 6),
+            texture_shape=(4, 6),
+        ),
+    )
+    session.tile_presentation_state = SimpleNamespace(payloads={1: stale_payload})
+    session.lifecycle.backend_presented_snapshot({1: stale_payload.source_id})
+    session.lifecycle.presentation_confirmed((1,))
+
+    states = effects.tile_lod_states(session, _demand(0), tile_numbers=(1,))
+
+    assert len(states) == 1
+    assert states[0].presented_level is None
+    assert states[0].resident_levels == ()
 
 
 def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():

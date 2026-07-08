@@ -10,15 +10,15 @@ def test_stage_fanin_records_stage_value_and_clears_request_sets():
 
     batch = state.activate_value("stage", object(), max_items=1)
 
-    assert batch.tiles == ()
+    assert batch.tiles == (0, 1)
     assert batch.complete is True
     assert state.active_requests == set()
     assert state.attached_requests == set()
     assert "stage" in state.values
-    assert state.tile_stage_keys == {0: "stage", 1: "stage"}
+    assert state.tile_stage_keys == {}
 
 
-def test_stage_fanin_release_missing_clears_request_sets_without_tile_queue():
+def test_stage_fanin_release_missing_clears_request_sets_and_waiting_tiles():
     state = StageFanInState(
         active_requests={"stage"},
         attached_requests={"stage"},
@@ -27,11 +27,11 @@ def test_stage_fanin_release_missing_clears_request_sets_without_tile_queue():
 
     batch = state.release_missing("stage")
 
-    assert batch.tiles == ()
+    assert batch.tiles == (3,)
     assert batch.complete is True
     assert state.active_requests == set()
     assert state.attached_requests == set()
-    assert state.tile_stage_keys == {3: "stage"}
+    assert state.tile_stage_keys == {}
 
 
 def test_stage_fanin_failure_returns_bound_tile_numbers_and_clears_requests():

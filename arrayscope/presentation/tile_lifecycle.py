@@ -94,6 +94,8 @@ class TileRecord:
     emitted_source_id: object = None
     #: payload identity the backend acknowledged as shown.
     presented_source_id: object = None
+    #: payload identity the backend most recently reported for this slot.
+    backend_source_id: object = None
     parked_reason: str = ""
     levels: dict = field(default_factory=dict)  # level_key -> _LevelEntry
     #: (wanted_identity, backend_identity) pairs the machine gave up on after
@@ -149,6 +151,16 @@ class TileLifecycle:
         """Acks refused because the backend slot held a different identity."""
 
         return int(self._identity_rejections)
+
+    @property
+    def backend_presented_identities(self) -> dict[int, object]:
+        """Latest backend slot identity snapshot, owned by the lifecycle."""
+
+        return {
+            int(rec.tile_number): rec.backend_source_id
+            for rec in self._records.values()
+            if rec.backend_source_id is not None
+        }
 
     # -- record access -----------------------------------------------------
 
@@ -503,6 +515,23 @@ class TileLifecycle:
         rec.presentation = Presentation.EMITTED
         rec.emitted_source_id = source_id
 
+    def backend_presented_snapshot(self, identities) -> None:
+        """Record the backend's latest drawn-slot identities.
+
+        This does not by itself make a tile semantically presented.  It only
+        stores physical truth in the lifecycle so convergence can compare that
+        truth with the current desired payload without a parallel session map.
+        """
+
+        if identities is None:
+            return
+        normalized = {int(tile): identity for tile, identity in dict(identities).items()}
+        for rec in self._records.values():
+            if int(rec.tile_number) not in normalized:
+                rec.backend_source_id = None
+        for tile, identity in normalized.items():
+            self.record(tile).backend_source_id = identity
+
     def commit_acknowledged(
         self,
         *,
@@ -544,6 +573,8 @@ class TileLifecycle:
             if presented_identities is None
             else {int(tile): identity for tile, identity in dict(presented_identities).items()}
         )
+        if identities is not None:
+            self.backend_presented_snapshot(identities)
         confirmed: set[int] = set()
         for tile_number in emitted_tiles:
             index = int(tile_number)
@@ -579,6 +610,7 @@ class TileLifecycle:
                 self._unpark(rec)
                 rec.presentation = Presentation.PRESENTED
                 rec.presented_source_id = presented_identity
+                rec.backend_source_id = presented_identity
                 self._presented.add(index)
                 confirmed.add(index)
                 if rec.semantic is Semantic.EVALUATED:
@@ -610,6 +642,7 @@ class TileLifecycle:
             rec.presentation = Presentation.UNPRESENTED
             rec.presented_source_id = None
             rec.emitted_source_id = None
+            rec.backend_source_id = None
         return frozenset(confirmed)
 
     def presentation_confirmed(self, tile_numbers: Iterable[int]) -> None:
@@ -627,6 +660,8 @@ class TileLifecycle:
             rec.presentation = Presentation.PRESENTED
             if rec.emitted_source_id is not None:
                 rec.presented_source_id = rec.emitted_source_id
+            elif rec.backend_source_id is not None:
+                rec.presented_source_id = rec.backend_source_id
             self._presented.add(rec.tile_number)
             if rec.semantic is Semantic.EVALUATED:
                 self._load_cleared(rec)

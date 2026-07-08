@@ -89,6 +89,7 @@ class MontageRuntimeDiagnostics:
     session_id: int | None = None
     loaded_tiles: int = 0
     loading_tiles: int = 0
+    active_tile_requests: int = 0
     pending_tiles: int = 0
     pending_payload_upserts: int = 0
     pending_removals: int = 0
@@ -178,6 +179,7 @@ class MontageRuntimeDiagnostics:
     # observational only and never schedules or mutates render work.
     stall_assertions: int = 0
     last_stall_signature: tuple[int, ...] = ()
+    tile_identity_probe: tuple[dict[str, object], ...] = ()
     # ADR 0051 rule 1 ground truth: drawn tiles whose backend-reported slot
     # identity differs from the session's current payload — nonzero at idle
     # means visibly stale tiles (the entire 2026-07-05 defect family).

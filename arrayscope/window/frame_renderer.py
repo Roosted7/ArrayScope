@@ -602,17 +602,15 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         render_lod.release_session_claims(getattr(self, "_montage_session", None))
         # Backend slots outlive sessions (persistent tile residency), so the
         # identity ground truth from the last report stays valid — but a fresh
-        # session started with last_presented_identities EMPTY, blind to
-        # inherited stale slots until its own first report, whose repairs only
-        # ran on the commit AFTER that (field defect 2026-07-05 #3: sid 68
-        # rebuilt on top of 29 stale slots and settled without healing them).
-        # Inherit the map; tiles absent from the new plan fall out naturally
-        # (no current payload → mismatch scan skips them).
+        # lifecycle starts without backend slot truth, blind to inherited
+        # stale slots until its own first report.  Inherit the backend snapshot
+        # into the new lifecycle; tiles absent from the new plan fall out
+        # naturally (no current payload → mismatch scan skips them).
         dying_session = getattr(self, "_montage_session", None)
         if dying_session is not None:
-            inherited = getattr(dying_session, "last_presented_identities", None)
+            inherited = getattr(dying_session.lifecycle, "backend_presented_identities", None)
             if inherited:
-                session.last_presented_identities = dict(inherited)
+                session.lifecycle.backend_presented_snapshot(inherited)
         self._montage_session = session
         # A viewport-update token armed for the dying session would make every
         # later apply_montage_viewport_retarget bail as stale — a dead
@@ -1157,9 +1155,6 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
                     queued.add(index)
             self.win._montage_viewport_update_pending = True
             return True
-
-        for tile in missing_tiles:
-            session.mark_loading(tile)
 
         stage_plan = montage_commit.build_stage_fan_in_plan(self, session.document, missing_tiles)
         montage_commit.merge_stage_fan_in_plan(session, stage_plan)

@@ -66,15 +66,19 @@ def evaluate_exact_tile(
     """
 
     start = perf_counter()
-    stage_key = session.stage_fan_in.tile_stage_keys.get(int(tile.montage_index))
+    tile_number = int(tile.montage_index)
+    stage_key = session.stage_fan_in.tile_stage_keys.get(tile_number)
+    plan = session.stage_fan_in.tile_stage_plans.get(tile_number)
+    candidate = session.stage_fan_in.tile_stage_candidates.get(tile_number)
+    if stage_key is None and candidate is not None and stage_materializer is not None:
+        document_key = stage_document_key(session.document)
+        stage_key = stage_materializer.key_for_candidate(document_key, candidate)
     stage_value = None if stage_key is None else session.stage_fan_in.values.get(stage_key)
     if stage_value is None and stage_key is not None and stage_cache is not None:
         getter = stage_cache.get_containing if hasattr(stage_cache, "get_containing") else stage_cache.get
         stage_value = getter(stage_key)
     if stage_value is not None:
         request = request_for_image(tile.view_state)
-        plan = session.stage_fan_in.tile_stage_plans.get(int(tile.montage_index))
-        candidate = session.stage_fan_in.tile_stage_candidates.get(int(tile.montage_index))
         if plan is None or candidate is None:
             plan = plan_slab(session.document, request)
             candidates = tuple(getattr(plan.region_plan, "cache_candidates", ()))
@@ -409,6 +413,15 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
             # commit path, which reads the pyramid directly.
             resident_levels.add(0)
         payload = payloads.get(tile_number)
+        payload_current = False
+        if payload is not None and int(getattr(payload, "source_index", -1)) == int(tile.source_index):
+            backend_identities = dict(getattr(session.lifecycle, "backend_presented_identities", {}) or {})
+            if backend_identities:
+                payload_current = backend_identities.get(tile_number) == getattr(payload, "source_id", None)
+            else:
+                payload_current = tile_number in set(getattr(session.lifecycle, "presented_tiles", ()) or ())
+        if not payload_current:
+            payload = None
         lod = None if payload is None else getattr(payload, "lod", None)
         presented_level = None if lod is None else int(getattr(lod, "level", 0) or 0)
         ranked.append(

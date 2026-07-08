@@ -316,6 +316,32 @@ class MontageRuntimeMixin:
             return  # work is progressing; stay armed.
         self._montage_stall_assertions = int(getattr(self, "_montage_stall_assertions", 0) or 0) + 1
         self._montage_watchdog_last_stall = signature
+        kernel = getattr(self.win, "kernel", None)
+        kernel_diag = None if kernel is None else kernel.diagnostics()
+        completion_queue = None if kernel is None else getattr(kernel, "completions", None)
+        kernel_idle = bool(
+            kernel_diag is not None
+            and int(getattr(kernel_diag, "queued", 0) or 0) == 0
+            and int(getattr(kernel_diag, "running", 0) or 0) == 0
+            and int(getattr(kernel_diag, "active", 0) or 0) == 0
+            and int(getattr(kernel_diag, "parked_deps", 0) or 0) == 0
+            and int(getattr(kernel_diag, "parked_quota", 0) or 0) == 0
+            and (completion_queue is None or completion_queue.empty())
+        )
+        if kernel_idle and active:
+            pipeline = getattr(session, "pipeline", None)
+            effects = getattr(pipeline, "effects", None)
+            release = getattr(effects, "release_idle_evaluation_claims", None)
+            released = 0 if release is None else int(release(session.active_tile_requests))
+            if released:
+                print(
+                    "[arrayscope] STALL REPAIR: "
+                    f"released_idle_evaluation_claims={released}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self._montage_watchdog_state = None
+                return
         print(
             "[arrayscope] STALL ASSERTION PROBE FIRED (ADR 0051): "
             f"signature={signature} "
@@ -327,6 +353,9 @@ class MontageRuntimeMixin:
             file=sys.stderr,
             flush=True,
         )
+        probe = getattr(session, "diagnostic_tile_identity_rows", lambda **_kwargs: ())()
+        for row in tuple(probe)[:20]:
+            print(f"[arrayscope] STALL TILE PROBE: {row}", file=sys.stderr, flush=True)
 
     def _update_montage_tile_overlays_for_plan(self, plan, tile_states, viewport_rect) -> None:
         if not hasattr(self.win.img_view, "setMontageTileOverlays"):
@@ -854,9 +883,7 @@ class MontageRuntimeMixin:
                 continue
             if index in session.rendered_tiles or index in session.loading_tiles or index in session.skipped_tiles:
                 continue
-            if index in pending:
-                session.mark_loading(tile)
-            else:
+            if index not in pending:
                 newly_pending.append(tile)
                 pending.add(index)
         for tile in prioritize_montage_tiles(
@@ -865,7 +892,8 @@ class MontageRuntimeMixin:
             focus=_montage_priority_focus(self, session.view_range),
         ):
             _enqueue_session_pending_tile(session, tile)
-            session.mark_loading(tile)
+        if newly_pending:
+            self.request_montage_replan(session)
 
 
 

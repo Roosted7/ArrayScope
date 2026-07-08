@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from time import perf_counter
 
 import numpy as np
@@ -39,6 +39,34 @@ from arrayscope.window.montage_payload_cache import (
 )
 
 
+class _StaleBatchIntent:
+    def __init__(self, semantic_key) -> None:
+        self.semantic_key = semantic_key
+
+
+@dataclass(frozen=True)
+class _EvaluationClaim:
+    semantic_key: object
+    rung: int
+    level: int
+    source_index: int
+    source_id: object
+
+    def matches_step(self, intent, step) -> bool:
+        return (
+            self.semantic_key == getattr(intent, "semantic_key", None)
+            and self.rung == int(step.rung)
+            and self.level == int(step.level)
+        )
+
+    def matches_tile(self, intent, step, tile, source_id) -> bool:
+        return (
+            self.matches_step(intent, step)
+            and self.source_index == int(tile.source_index)
+            and self.source_id == source_id
+        )
+
+
 class MontagePipelineEffects:
     """Concrete pipeline effects for one live ``MontageRenderSession``.
 
@@ -59,6 +87,17 @@ class MontagePipelineEffects:
         # family stales the old instance.
         self._pending_previews: dict[tuple[int, int], int] = {}
         self._pending_materializations: dict[tuple[int, int, int], object] = {}
+        self._pending_evaluations: dict[int, _EvaluationClaim] = {}
+
+    def _evaluation_claim(self, intent, step, tile) -> _EvaluationClaim:
+        source_index = int(tile.source_index)
+        return _EvaluationClaim(
+            semantic_key=getattr(intent, "semantic_key", getattr(self.session, "key", None)),
+            rung=int(step.rung),
+            level=int(step.level),
+            source_index=source_index,
+            source_id=self.session.tile_semantic_source_id(source_index),
+        )
 
     def evaluate_rung(self, intent, step):
         if not self._session_is_current(intent):
@@ -162,9 +201,14 @@ class MontagePipelineEffects:
             if tile_number in self.session.rendered_tiles or tile_number in self.session.skipped_tiles:
                 return False
             if tile_number in self.session.active_tile_requests:
-                return False  # identical rung already in flight
+                claim = self._pending_evaluations.get(tile_number)
+                current_claim = self._evaluation_claim(intent, step, tile)
+                if claim is not None and claim.matches_tile(intent, step, tile, current_claim.source_id):
+                    return False  # identical rung already in flight
+                self._release_evaluation_claim(tile_number, marker=claim, request_replan=False)
             self.session.mark_loading(tile)
             self.session.active_tile_requests.add(tile_number)
+            self._pending_evaluations[tile_number] = self._evaluation_claim(intent, step, tile)
         return True
 
     def rung_deps(self, intent, step) -> tuple[object, ...]:
@@ -177,8 +221,6 @@ class MontagePipelineEffects:
         return (stage_key,)
 
     def rung_dropped(self, intent, step) -> None:
-        if not self._intent_matches_session(intent):
-            return
         tile = self._tile_for_step(step)
         if tile is None:
             return
@@ -195,11 +237,56 @@ class MontagePipelineEffects:
                 self.session.pending_rung_materializations._apply_release_effects(
                     self.session.pending_rung_materializations.release(request)
                 )
-                return
         if step.rung in (Rung.DESIRED, Rung.EXACT):
-            self.session.active_tile_requests.discard(tile_number)
-            self.session.loading_tiles.discard(tile_number)
-            self.session.lifecycle.evaluation_declined(tile_number)
+            marker = self._evaluation_claim(intent, step, tile)
+            self._release_evaluation_claim(tile_number, marker=marker, request_replan=True)
+
+    def _release_evaluation_claim(self, tile_number: int, *, marker=None, request_replan: bool = True) -> bool:
+        tile_number = int(tile_number)
+        claim = self._pending_evaluations.get(tile_number)
+        if marker is not None:
+            if isinstance(marker, _EvaluationClaim):
+                matched = (
+                    claim is not None
+                    and claim.semantic_key == marker.semantic_key
+                    and claim.rung == marker.rung
+                    and claim.level == marker.level
+                )
+            else:
+                matched = claim == marker
+            if not matched:
+                return False
+        elif claim is None and tile_number not in self.session.active_tile_requests:
+            return False
+        self._pending_evaluations.pop(tile_number, None)
+        self.session.active_tile_requests.discard(tile_number)
+        self.session.loading_tiles.discard(tile_number)
+        if tile_number not in self.session.rendered_tiles and tile_number not in self.session.display_tile_payloads:
+            self.session.dirty_payloads.pop(tile_number, None)
+            self.session.pending_payload_upserts.pop(tile_number, None)
+        self.session.lifecycle.evaluation_declined(tile_number)
+        if request_replan and self._session_is_current():
+            self.renderer.request_montage_replan(self.session)
+        return True
+
+    def release_idle_evaluation_claims(self, tile_numbers=None) -> int:
+        """Diag-gated repair: release active claims whose kernel work is gone."""
+
+        scope = None if tile_numbers is None else {int(tile) for tile in tuple(tile_numbers or ())}
+        released = 0
+        for tile_number, marker in tuple(self._pending_evaluations.items()):
+            if scope is not None and int(tile_number) not in scope:
+                continue
+            released += int(
+                self._release_evaluation_claim(
+                    int(tile_number),
+                    marker=marker,
+                    request_replan=False,
+                )
+            )
+        if released and self._session_is_current():
+            self.renderer.request_montage_replan(self.session)
+        return released
 
     def apply_commit(self, batch: CommitBatch) -> None:
         """Admit ready rung payloads; presentation happens through the gate.
@@ -213,6 +300,11 @@ class MontagePipelineEffects:
         """
 
         if batch.semantic_key is not None and batch.semantic_key != getattr(self.session, "key", batch.semantic_key):
+            stale_intent = _StaleBatchIntent(batch.semantic_key)
+            for row in tuple(batch.upserts or ()):
+                if isinstance(row, tuple) and len(row) == 2:
+                    step, _payload = row
+                    self.rung_dropped(stale_intent, step)
             return
         self._admit_ready_payloads(batch.upserts)
         if not self._session_is_current():
@@ -454,12 +546,17 @@ class MontagePipelineEffects:
             self.session.dirty_payloads[tile_number] = None
             self.session.flush_pending = True
             self.session.final_commit_pending = True
+        else:
+            claim = self._pending_evaluations.get(tile_number)
+            if claim is not None and claim.rung == int(step.rung) and claim.level == int(step.level):
+                self._release_evaluation_claim(tile_number, marker=claim, request_replan=False)
         self.renderer.request_montage_replan(self.session)
 
     def _admit_evaluation_result(self, tile, result) -> int:
         session = self.session
         if not self._session_is_current():
             return 0
+        self._pending_evaluations.pop(int(tile.montage_index), None)
         rendered = self.renderer.win.operation_evaluator.store_montage_tile_result(
             tile,
             montage_axis=session.montage_axis,
@@ -1065,7 +1162,6 @@ def build_stage_fan_in_plan(renderer, document, missing_tiles) -> dict[str, obje
         if result.decision == "hit":
             stage_values[key] = result.value
             for tile in tiles:
-                tile_stage_keys[int(tile.montage_index)] = key
                 tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
                 tile_stage_candidates[int(tile.montage_index)] = candidate
             continue
@@ -1209,9 +1305,7 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
                 return
             if not renderer._is_current_render_generation(current.render_generation):
                 return
-            current.stage_fan_in.active_requests.discard(key)
-            current.stage_fan_in.attached_requests.discard(key)
-            current.stage_fan_in.values[key] = value
+            current.stage_fan_in.activate_value(key, value)
             # Per-completion: coalesced replan, never a direct O(tiles) one.
             renderer.request_montage_replan(current)
 
@@ -1280,7 +1374,6 @@ def release_stage_dependents_to_direct(session, key) -> None:
         if 0 <= tile_number < len(session.plan.tiles) and tile_number not in queued:
             tile = session.plan.tiles[tile_number]
             session.enqueue_pending_tile(tile)
-            session.mark_loading(tile)
             queued.add(tile_number)
             released += 1
     session.stage_fan_in.detach_unbound_requests()
