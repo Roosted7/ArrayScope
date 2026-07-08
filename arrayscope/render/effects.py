@@ -654,17 +654,39 @@ def shared_transform_target_level(session, demand) -> int:
     return desired
 
 
-def shared_transform_candidate_tiles(session, *, level: int):
-    """Tiles whose shared reduced-volume target would improve presentation."""
+def shared_transform_candidate_tiles(
+    session,
+    *,
+    level: int,
+    include_missing: bool = True,
+    require_presented_preview: bool = False,
+):
+    """Tiles whose shared reduced-volume target would improve presentation.
+
+    ``include_missing`` is the first-pixel path: blank planned tiles should get
+    the cheap shared preview even while finer work is also possible elsewhere.
+    ``require_presented_preview`` is the quality path: only upgrade tiles whose
+    current preview is acknowledged on screen, so finer shared work cannot race
+    ahead of the first visible fill and leave black/pending slots behind.
+    """
 
     target_level = int(level)
     for candidate in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
         tile_number = int(candidate.montage_index)
         if tile_number in getattr(session, "rendered_tiles", {}):
             continue
+        if require_presented_preview:
+            payload = presented_preview_payload(session, tile_number)
+            if payload is None:
+                continue
+            payload_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+            if payload_level > target_level:
+                yield candidate
+            continue
         payload = getattr(session, "display_tile_payloads", {}).get(tile_number)
         if payload is None:
-            yield candidate
+            if include_missing:
+                yield candidate
             continue
         if str(getattr(payload, "quality", "exact")) != "preview":
             continue

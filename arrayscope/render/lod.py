@@ -196,6 +196,14 @@ def selected_lod_factor(session) -> int:
             previous_factor=previous,
             resident_levels=session_resident_levels(session, previous),
         )
+        base_preview = int(
+            getattr(session, "lod_preview_min_level", 0)
+            or getattr(session, "lod_preview_level", 0)
+            or 0
+        )
+        if base_preview > 0:
+            desired_level = int(getattr(session.lod_policy_decision.demand, "desired_level", 0) or 0)
+            session.lod_preview_level = max(base_preview, desired_level)
     else:
         session.lod_policy_decision = native_lod_policy(
             session.view_range,

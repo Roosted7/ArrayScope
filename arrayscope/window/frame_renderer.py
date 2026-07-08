@@ -635,6 +635,7 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             lod_policy_mode=lod_policy_mode,
             lod_native_reason=render_lod.native_policy_reason_for_renderer(self),
             lod_preview_level=lod_preview_level,
+            lod_preview_min_level=lod_preview_level,
             tile_residency_budget_bytes=tile_residency_budget_bytes(policy),
             pyramid_cache=(
                 self._montage_pyramid_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None

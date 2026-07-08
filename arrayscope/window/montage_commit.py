@@ -440,8 +440,63 @@ class MontagePipelineEffects:
             return 0  # commuting pipelines get per-tile FLOOR/DESIRED rungs.
         if not render_effects.shared_preview_is_useful(session, seed, demand):
             return 0
-        level = int(render_effects.shared_transform_target_level(session, demand))
-        tiles = tuple(render_effects.shared_transform_candidate_tiles(session, level=level))
+        desired = int(getattr(demand, "desired_level", 0) or 0)
+        preview_level = int(render_effects.preview_evaluation_level(session, demand))
+        submitted = 0
+        if preview_level > desired:
+            preview_tiles = tuple(
+                render_effects.shared_transform_candidate_tiles(
+                    session,
+                    level=preview_level,
+                    include_missing=True,
+                    require_presented_preview=False,
+                )
+            )
+            submitted += self._submit_shared_transform_target(
+                demand=demand,
+                level=preview_level,
+                tiles=preview_tiles,
+                priority=Priority.INTERACTIVE,
+                lane=WorkLane.DISPLAY_PREVIEW,
+            )
+            if desired > 0:
+                target_tiles = tuple(
+                    render_effects.shared_transform_candidate_tiles(
+                        session,
+                        level=desired,
+                        include_missing=False,
+                        require_presented_preview=True,
+                    )
+                )
+                submitted += self._submit_shared_transform_target(
+                    demand=demand,
+                    level=desired,
+                    tiles=target_tiles,
+                    priority=Priority.VISIBLE_IMAGE,
+                    lane=WorkLane.DISPLAY_PREPARATION,
+                )
+            return submitted
+        tiles = tuple(
+            render_effects.shared_transform_candidate_tiles(
+                session,
+                level=desired,
+                include_missing=True,
+                require_presented_preview=False,
+            )
+        )
+        return self._submit_shared_transform_target(
+            demand=demand,
+            level=desired,
+            tiles=tiles,
+            priority=Priority.VISIBLE_IMAGE,
+            lane=WorkLane.DISPLAY_PREPARATION,
+        )
+
+    def _submit_shared_transform_target(self, *, demand, level: int, tiles, priority, lane) -> int:
+        session = self.session
+        renderer = self.renderer
+        level = int(level)
+        tiles = tuple(tiles or ())
         if not tiles:
             return 0
         shader_display = bool(getattr(session, "shader_display", False))
@@ -492,12 +547,12 @@ class MontagePipelineEffects:
 
         handle = renderer.win.kernel.submit(
             TaskSpec(
-                key=("shared-target", session.key, level),
+                key=("shared-target", marker),
                 fn=evaluate,
-                lane=WorkLane.DISPLAY_PREVIEW if level > int(demand.desired_level) else WorkLane.DISPLAY_PREPARATION,
-                priority=Priority.INTERACTIVE if level > int(demand.desired_level) else Priority.VISIBLE_IMAGE,
+                lane=lane,
+                priority=priority,
                 scope=f"montage:{session.key!r}",
-                supersession=Supersession(("shared-target", session.key), (level,)),
+                supersession=Supersession(("shared-target", session.key, level), marker),
                 reusable=True,
                 pass_token=True,
             ),

@@ -547,6 +547,7 @@ class MontageRenderSession:
     # tile -> ((shown_identity, wanted_identity), attempts).
     _reconcile_attempts: dict = field(default_factory=dict)
     lod_preview_level: int = 0
+    lod_preview_min_level: int = 0
     tile_residency_budget_bytes: int = 0
     lod_preview_metadata: dict[object, PreviewFloorMetadata] = field(default_factory=dict)
     lod_preview_floor_scope: set[int] = field(default_factory=set)
@@ -709,12 +710,13 @@ class MontageRenderSession:
         near_numbers = tuple(int(tile.montage_index) for tile in near)
         planned_numbers = tuple(int(tile.montage_index) for tile in plan_tiles)
         previous_visible_numbers = tuple(int(tile.montage_index) for tile in self.visible_tiles)
-        presentation_changed = (
+        has_presented_payloads = bool(
+            getattr(self.tile_presentation_state, "payloads", None)
+            or self.lifecycle.presented_tiles
+        )
+        presentation_changed = bool(
             layout_changed
-            or viewport_changed
-            or active_numbers != previous_visible_numbers
-            or near_numbers != self._last_near_tiles
-            or planned_numbers != self._last_planned_tiles
+            or (not has_presented_payloads and active_numbers != previous_visible_numbers)
         )
         self.visible_tiles = active
         self.visible_tile_numbers = frozenset(active_numbers)
@@ -1488,6 +1490,38 @@ class MontageRenderSession:
                 self.tile_presentation_state = previous_state
             if confirmed_from_backend:
                 self.lifecycle.presentation_confirmed(confirmed_from_backend)
+        # A capped follow-up commit must never shrink the active payload set
+        # when the backend has already reported the current identity on
+        # screen.  The previous reconciliation block handles the common
+        # revision split before dirty/upsert classification; this second pass
+        # also consumes stale pending-upsert markers so an already-presented
+        # coarse/startup floor is retained instead of trickled back through
+        # the cold upload cap (field trace 2026-07-09: 272 presented dropped
+        # to 28/47/88 during startup).
+        if backend_identities:
+            retained_payloads = None
+            retained_tiles: list[int] = []
+            for tile_number in planned_numbers:
+                current = self.display_tile_payloads.get(int(tile_number))
+                if current is None:
+                    continue
+                if backend_identities.get(int(tile_number)) != current.source_id:
+                    continue
+                if previous_payloads.get(int(tile_number)) is not current:
+                    if retained_payloads is None:
+                        retained_payloads = dict(previous_payloads)
+                    retained_payloads[int(tile_number)] = current
+                    previous_payloads[int(tile_number)] = current
+                retained_tiles.append(int(tile_number))
+            for tile_number in retained_tiles:
+                self.pending_payload_upserts.pop(int(tile_number), None)
+            if retained_payloads is not None:
+                previous_state = TilePresentationState(
+                    retained_payloads,
+                    revision=int(getattr(previous_state, "revision", 0)),
+                )
+                self.tile_presentation_state = previous_state
+                self.lifecycle.presentation_confirmed(retained_tiles)
         if backend_identities:
             for tile_number, shown_identity in backend_identities.items():
                 current = self.display_tile_payloads.get(int(tile_number))
@@ -1778,17 +1812,6 @@ class MontageRenderSession:
             and int(tile) not in stale_level_tiles
             and previous_payloads.get(int(tile)) is payload
         )
-        if not pace_resident_retargets:
-            # Preview/floor payloads are the correctness path for persistent
-            # residency backends: the reduced plane is already materialized,
-            # and exact/native refinement remains budgeted separately.  Do not
-            # let the item cap turn a full resident lower-LOD fill into black
-            # holes that only clear after scrolling stops.
-            resident_retarget_tiles.update(
-                int(tile)
-                for tile, payload in upserts.items()
-                if str(getattr(payload, "quality", "exact")) == "preview"
-            )
         cold_upserts = {
             int(tile): payload
             for tile, payload in upserts.items()
@@ -1875,9 +1898,7 @@ class MontageRenderSession:
         viewport_changed = viewport_identity != self._last_viewport_identity
         presentation_geometry_changed = bool(
             getattr(self, "_layout_geometry_changed_pending", False)
-            or viewport_changed
             or planned != self._last_planned_tiles
-            or near != self._last_near_tiles
         )
         self.presentation_geometry_changed = presentation_geometry_changed
         self._layout_geometry_changed_pending = False

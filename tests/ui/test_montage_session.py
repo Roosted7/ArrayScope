@@ -167,6 +167,33 @@ def test_backend_confirmed_current_payload_rehydrates_active_state():
     assert 0 not in session.dirty_payloads
 
 
+def test_backend_confirmed_current_payloads_do_not_trickle_through_upsert_cap():
+    session = _session()
+    session.pending_tiles.clear()
+    source_ids = {}
+    for tile in session.plan.tiles[:3]:
+        index = int(tile.montage_index)
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[index] = ("tile", index)
+    payloads = session.snapshot_display_tile_payloads(source_ids)
+    session.display_tile_payloads.update(payloads)
+    session.tile_presentation_state = TilePresentationState()
+    session.lifecycle.backend_presented_snapshot({tile: payload.source_id for tile, payload in payloads.items()})
+    for tile in payloads:
+        session.pending_payload_upserts[int(tile)] = None
+        session.dirty_payloads[int(tile)] = None
+
+    state, delta = session.build_tile_presentation(source_ids, max_upserts=1)
+
+    assert delta.upserts == {}
+    assert delta.active_tiles == (0, 1, 2)
+    assert set(state.active_payloads(delta)) == {0, 1, 2}
+    assert session.pending_payload_upserts == {}
+    assert session.dirty_payloads == {}
+    assert set(session.lifecycle.presented_tiles) >= {0, 1, 2}
+
+
 def test_montage_render_session_keeps_skipped_separate_from_pending():
     session = _session()
     session.mark_skipped(session.plan.tiles[1])
@@ -315,7 +342,7 @@ def test_level_snapshot_keeps_deferred_visible_upsert_pending_until_acknowledged
     assert snapshot.settled is True
 
 
-def test_montage_render_session_caps_active_tiles_with_upsert_admission():
+def test_montage_render_session_caps_upserts_without_clipping_active_scope():
     session = _session()
     source_ids = {}
     for tile in session.plan.tiles[:3]:
@@ -326,14 +353,16 @@ def test_montage_render_session_caps_active_tiles_with_upsert_admission():
     first_state, first_delta = session.build_tile_presentation(source_ids, max_upserts=1)
 
     assert tuple(first_delta.upserts) == (0,)
-    assert first_delta.active_tiles == (0,)
+    assert first_delta.active_tiles == (0, 1, 2)
+    assert first_state.active_payloads(first_delta) == {0: first_delta.upserts[0]}
     session.acknowledge_tile_presentation(first_delta, TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)))
     session.mark_presented(first_state.active_payloads(first_delta))
 
     second_state, second_delta = session.build_tile_presentation(source_ids, max_upserts=1)
 
     assert tuple(second_delta.upserts) == (1,)
-    assert second_delta.active_tiles == (0, 1)
+    assert second_delta.active_tiles == (0, 1, 2)
+    assert set(second_state.active_payloads(second_delta)) == {0, 1}
     assert session.ensure_tile_states()[2] == MontageTileState.LOADING
     assert 2 in session.dirty_payloads
 
@@ -354,9 +383,10 @@ def test_montage_render_session_capped_upserts_preserve_ready_priority_order():
     second_state, second_delta = session.build_tile_presentation(source_ids, max_upserts=1)
 
     assert tuple(first_delta.upserts) == (2,)
-    assert first_delta.active_tiles == (2,)
+    assert first_delta.active_tiles == (0, 1, 2)
     assert tuple(second_delta.upserts) == (0,)
-    assert second_delta.active_tiles == (0, 2)
+    assert second_delta.active_tiles == (0, 1, 2)
+    assert set(second_state.active_payloads(second_delta)) == {0, 2}
     assert 1 in session.dirty_payloads
 
 
@@ -733,7 +763,7 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
     assert state.active_payloads(delta) == {}
 
 
-def test_retarget_viewport_range_change_with_same_tiles_is_presentation_change():
+def test_retarget_viewport_range_change_with_same_tiles_is_camera_only():
     state = ViewState.from_shape((2, 2, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8)
     session = MontageRenderSession(
@@ -794,12 +824,12 @@ def test_retarget_viewport_range_change_with_same_tiles_is_presentation_change()
 
     assert additions == ()
     assert tuple(int(tile.montage_index) for tile in session.visible_tiles) == first_active
-    assert changed
+    assert not changed
     _state, delta = session.build_tile_presentation(source_ids)
     assert delta.upserts == {}
     assert delta.active_tiles == first_active
     assert delta.viewport_revision == first_viewport_revision + 1
-    assert session.presentation_geometry_changed
+    assert not session.presentation_geometry_changed
 
 
 def test_temporary_materialization_gap_does_not_remove_committed_payloads():

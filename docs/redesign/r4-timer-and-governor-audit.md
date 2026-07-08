@@ -114,6 +114,15 @@ admission boundary:
   (see the dynamic-preview-level paragraph above). The op cost/capabilities
   input, and the reduced-input eligibility gaps it must reason about, are
   audited in [`op-reduced-input-compat.md`](op-reduced-input-compat.md).
+- **Move the R3 level-stats bridge into kernel admission.** The 2026-07-08
+  VisPy stabilization keeps startup/reload levels correct by seeding rough
+  evidence from currently displayed payloads at montage completion, keeps
+  preview evidence provisional, and queues exact/current payloads for refined
+  stats after visible completion. That bridge belongs to R4's owner model:
+  the kernel should admit current semantic level evidence and refined
+  histogram work as supersedable side work, with visible presentation deps
+  outranking it, instead of `LevelStatsService` discovering displayed payloads
+  from session completion.
 
 Deferred to a focused follow-up (not strictly R4): the **PyQtGraph
 2-quality-level** presentation. Because PyQtGraph bakes levels into pixels at

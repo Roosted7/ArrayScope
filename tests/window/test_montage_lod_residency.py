@@ -208,6 +208,18 @@ def test_native_only_mode_is_unchanged_by_default():
         assert payload.texture_data.shape[:2] == (TILE, TILE)
 
 
+def test_preview_level_tracks_coarser_viewport_demand():
+    far_zoom = ((0.0, 32.0 * 2 * TILE), (0.0, 32.0 * TILE))
+    session = _session(pyramid=PyramidCache(max_bytes=1 << 24), view_range=far_zoom)
+    session.lod_preview_min_level = 4
+    session.lod_preview_level = 4
+
+    session._selected_lod_factor()
+
+    assert session.lod_policy_decision.demand.desired_level >= 5
+    assert session.lod_preview_level == session.lod_policy_decision.demand.desired_level
+
+
 def test_resident_mode_falls_back_to_native_and_records_missing_levels():
     session = _session(pyramid=PyramidCache(max_bytes=1 << 20))
     state, delta = session.build_tile_presentation({})
@@ -1789,7 +1801,7 @@ def test_preview_floor_commit_activates_every_planned_preview_tile_before_exact(
     assert {payload.quality for payload in preview_delta.upserts.values()} == {"preview"}
 
 
-def test_preview_floor_bypasses_item_cap_on_instant_residency_path():
+def test_cold_preview_floor_uploads_obey_item_cap():
     pyramid = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=4)
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
@@ -1801,9 +1813,12 @@ def test_preview_floor_bypasses_item_cap_on_instant_residency_path():
 
     _state, preview_delta = session.build_tile_presentation({}, max_upserts=1)
 
-    assert set(preview_delta.upserts) == {0, 1, 2, 3}
+    admitted = set(preview_delta.upserts)
+    assert len(admitted) == 1
     assert set(preview_delta.active_tiles) == {0, 1, 2, 3}
-    assert {payload.quality for payload in preview_delta.upserts.values()} == {"preview"}
+    admitted_tile = next(iter(admitted))
+    assert preview_delta.upserts[admitted_tile].quality == "preview"
+    assert set(session.pending_payload_upserts) == {0, 1, 2, 3}
 
 
 def test_preview_floor_scope_defers_exact_until_scoped_tiles_are_covered():
@@ -2538,6 +2553,105 @@ def test_shared_target_waits_for_presented_preview_before_higher_quality():
     session.lifecycle.presentation_confirmed((0,))
 
     assert render_effects.shared_transform_target_level(session, demand) == desired
+
+
+def test_shared_target_upgrade_does_not_wait_for_unrelated_blank_tiles():
+    session = _session(count=3, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.lod_preview_level = 4
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    demand = session.lod_policy_decision.demand
+    desired = int(demand.desired_level)
+    assert desired == 2
+
+    tile = session.plan.tiles[0]
+    source_id = session.tile_semantic_source_id(tile.source_index)
+    preview = DisplayTilePayload(
+        0,
+        0,
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        source_id,
+        lod=LodInfo(level=4, factor=16, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="preview",
+    )
+    session.display_tile_payloads[0] = preview
+    session.tile_presentation_state.payloads[0] = preview
+    session.lifecycle.backend_presented_snapshot({0: source_id})
+    session.lifecycle.presentation_confirmed((0,))
+
+    preview_tiles = tuple(
+        render_effects.shared_transform_candidate_tiles(
+            session,
+            level=session.lod_preview_level,
+            include_missing=True,
+            require_presented_preview=False,
+        )
+    )
+    target_tiles = tuple(
+        render_effects.shared_transform_candidate_tiles(
+            session,
+            level=desired,
+            include_missing=False,
+            require_presented_preview=True,
+        )
+    )
+
+    assert [int(tile.montage_index) for tile in preview_tiles] == [1, 2]
+    assert [int(tile.montage_index) for tile in target_tiles] == [0]
+
+
+def test_shared_transform_kernel_key_uses_full_semantic_marker():
+    from types import SimpleNamespace
+
+    from arrayscope.window import montage_commit
+
+    class CaptureKernel:
+        def __init__(self):
+            self.specs = []
+
+        def submit(self, spec, **_callbacks):
+            self.specs.append(spec)
+            return object()
+
+    session = _session(count=2, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    demand = session.lod_policy_decision.demand
+    kernel = CaptureKernel()
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(kernel=kernel),
+        _montage_session_is_current=lambda _session: True,
+    )
+    effects = MontagePipelineEffects(renderer, session)
+
+    assert effects._submit_shared_transform_target(
+        demand=demand,
+        level=2,
+        tiles=(session.plan.tiles[0],),
+        priority=Priority.VISIBLE_IMAGE,
+        lane=Lane.DISPLAY_PREPARATION,
+    )
+    first_key = kernel.specs[-1].key
+    assert effects._submit_shared_transform_target(
+        demand=demand,
+        level=2,
+        tiles=(session.plan.tiles[1],),
+        priority=Priority.VISIBLE_IMAGE,
+        lane=Lane.DISPLAY_PREPARATION,
+    )
+    second_key = kernel.specs[-1].key
+
+    assert first_key != second_key
+    assert first_key[0] == "shared-target"
+    assert first_key[1] == montage_commit._shared_transform_marker(
+        session,
+        demand=demand,
+        level=2,
+        tiles=(session.plan.tiles[0],),
+        shader_display=False,
+    )
+    assert kernel.specs[-1].supersession.value == second_key[1]
 
 
 def test_source_changed_active_claim_does_not_block_retargeted_prepare():
