@@ -487,18 +487,15 @@ def plan_materialization(
 def mark_ladder_swaps_for_viewport(session) -> bool:
     """Re-evaluate LOD demand after a camera-only retarget (ADR 0050).
 
-    Camera changes never restart evaluation, but they do change which
-    pyramid level visible tiles should present.  Demand selection is
-    otherwise refreshed only inside presentation builds, so a zoom that
-    leaves the active tile set and payload identities untouched would
-    keep the old level on screen until an unrelated pan or slice change
-    dirtied a payload.  This recomputes the decision from the current
-    ``view_range``/``viewport_shape`` (demand math plus pyramid peeks;
-    never reduction or other bulk work), queues singleflight
-    materializations for the demanded-but-missing level of visible
-    rendered tiles, and dirties tiles whose closest resident level
-    differs from the payload they currently present so the next commit
-    swaps them by payload identity alone.
+    Camera changes never restart evaluation. They only request presentation
+    work when the current payload is too coarse for the new demand, still a
+    preview, or absent. A coarser demand does not demote an already-presented
+    exact/finer payload: zoom must remain a camera transform once correct
+    pixels are on screen. This recomputes the decision from the current
+    ``view_range``/``viewport_shape`` (demand math plus pyramid peeks; never
+    reduction or other bulk work), queues singleflight materializations for
+    missing display payloads, and dirties tiles only when a swap improves
+    correctness rather than merely matching a coarser preference.
 
     Returns True when at least one visible tile can present a different
     resident level right now, i.e. a presentation commit is worthwhile
@@ -521,6 +518,7 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
     desired = int(demand.desired_level)
     commit_needed = False
     visible_by_number = {int(t.montage_index): t for t in tuple(session.visible_tiles)}
+    residency_pressure_demote = _visible_residency_pressure_demands_demote(session, demand)
     # Priority order, not row order: materializations start immediately
     # for the demanded level, and whatever the workers complete before a
     # newer viewport supersedes the rest is the work nearest the
@@ -561,11 +559,41 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
             session.dirty_payloads[int(tile_number)] = None
             commit_needed = True
             continue
+        if presented_level <= desired and not residency_pressure_demote:
+            continue
         applied = int(choose_resident_level(demand, tuple(sorted(resident))))
         if presented_level != applied:
             session.dirty_payloads[int(tile_number)] = None
             commit_needed = True
     return commit_needed
+
+
+def _visible_residency_pressure_demands_demote(session, demand) -> bool:
+    """Return True when exact/finer active payloads exceed GPU residency budget.
+
+    Demand by itself is not pressure: a fully resident native montage should
+    zoom as a camera transform.  This predicate is the explicit escape hatch
+    for wider zoomed-out views that reveal enough tiles that keeping active
+    exact/finer payloads would exceed the presentation residency budget.
+    """
+
+    budget = int(getattr(session, "tile_residency_budget_bytes", 0) or 0)
+    desired = int(getattr(demand, "desired_level", 0) or 0)
+    if budget <= 0 or desired <= 0:
+        return False
+    total = 0
+    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    for tile_number in tuple(getattr(session, "visible_tile_numbers", ()) or ()):
+        payload = payloads.get(int(tile_number))
+        if payload is None:
+            continue
+        level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+        if level > desired:
+            continue
+        total += int(getattr(payload, "nbytes", 0) or 0)
+        if total > budget:
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------

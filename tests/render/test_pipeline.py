@@ -269,6 +269,18 @@ def test_interactive_retained_native_source_is_correctness_work():
     assert pipeline.counters.interactive_native_deferred == 0
 
 
+def test_zoom_out_over_presented_native_submits_no_display_demotions():
+    kernel, effects, pipeline = make_pipeline(tiles=1)
+    effects.states[0] = TileLodState(tile_number=0, presented_level=0, resident_levels=(0,))
+
+    assert pipeline.retarget(intent(interactive=True), demand(6)) == 0
+    assert pipeline.retarget(intent(interactive=False), demand(6)) == 0
+    drain(kernel)
+
+    assert effects.evaluated == []
+    assert effects.batches == []
+
+
 def test_stale_done_from_previous_semantic_is_dropped_not_committed():
     kernel = CaptureKernel()
     effects = StubEffects(tiles=1)

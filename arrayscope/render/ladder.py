@@ -186,12 +186,14 @@ class LodLadder:
                 )
             )
 
-        # 3) DESIRED — converge the displayed level to the demanded level.
-        # Native/exact content is a valid source for reduction, but it is
-        # not display-level convergence when the viewport demands a coarser
-        # resident level; otherwise a tile can sit at applied factor 1 while
-        # demand asks for factor 4 with no wakeup left to demote it.
+        # 3) DESIRED — fill or refine only when the displayed tile is below
+        # the demand. A coarser demand is a minimum acceptable quality, not a
+        # command to replace already-presented finer data. Demotion belongs to
+        # memory/eviction policy; the ladder must keep camera-only zooms from
+        # churning materialization and presentation.
         desired_resident = desired in resident or presented == desired
+        if presented is not None and int(presented) <= desired:
+            desired_resident = True
         if not desired_resident and (desired > 0 or desired < finest_available()):
             steps.append(
                 RungStep(

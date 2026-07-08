@@ -59,20 +59,20 @@ def test_zoom_in_refines_progressively():
     assert steps[1].priority == Priority.VISIBLE_IMAGE  # visibly wrong level
 
 
-def test_native_source_still_plans_demanded_display_level():
+def test_unpresented_native_source_still_plans_demanded_display_level():
     ladder = LodLadder()
-    # Native exact content is a source for reduction, not proof that the
-    # demanded display level was applied.
+    # Resident source data alone is not proof that the backend is presenting
+    # anything current; a black slot still needs a display payload.
     state = TileLodState(tile_number=0, resident_levels=(0,))
     steps = ladder.plan_tile(state, demand(2))
     assert rungs(steps) == [(Rung.DESIRED, 2)]
 
 
-def test_zoom_out_demotes_native_to_the_demanded_display_level():
+def test_zoom_out_keeps_presented_finer_level():
     ladder = LodLadder(LadderPolicy(preview_level=2))
     state = TileLodState(tile_number=0, presented_level=0, resident_levels=(0,))
     steps = ladder.plan_tile(state, demand(3, acceptable=(2, 3, 4)))
-    assert rungs(steps) == [(Rung.DESIRED, 3)]
+    assert steps == ()
 
 
 def test_native_demand_ends_exact_without_duplicate_step():

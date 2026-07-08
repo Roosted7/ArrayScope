@@ -609,8 +609,8 @@ def _admit_zoomed_out_levels(session, level=2):
         session.pyramid_cache.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
 
 
-def test_camera_only_retarget_swaps_to_cached_level_without_pan_or_slice_change():
-    """ADR 0050 defect: zoom must retarget LOD without any payload dirtying."""
+def test_camera_only_retarget_keeps_presented_finer_level_without_swap_churn():
+    """Zoom over already-correct finer payloads must not churn presentation."""
 
     pyramid = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
@@ -619,30 +619,53 @@ def test_camera_only_retarget_swaps_to_cached_level_without_pan_or_slice_change(
     _admit_zoomed_out_levels(session)
 
     # Camera-only zoom out: retarget alone, no pan, no dimension scroll, no
-    # tile results.  The demanded level is already resident, so the refresh
-    # must request a presentation commit that swaps payload identities.
+    # tile results.  Native pixels are already current and finer than the
+    # demand; cached coarser levels must not force wrapper/atlas swaps.
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     revision_before = int(session.viewport_revision)
     swap_ready = session.mark_ladder_swaps_for_viewport()
 
-    assert swap_ready is True
+    assert swap_ready is False
     assert session.pending_rung_materializations == [], "cached levels must not be re-requested"
-    assert sorted(session.dirty_payloads) == [0, 1]
+    assert not session.dirty_payloads
 
     hits_before = pyramid.hits
     _state, delta = session.build_tile_presentation({})
-    assert set(delta.upserts) == {0, 1}
-    for payload in delta.upserts.values():
-        assert payload.lod.level == 2
-        assert payload.texture_data.shape[:2] == (TILE // 4, TILE // 4)
-    assert pyramid.hits > hits_before
-    # No removals: the swap replaces mappings, it never un-presents a tile.
+    assert delta.upserts == {}
     assert delta.removals == ()
+    assert pyramid.hits == hits_before
 
     # A second refresh with the same viewport is a no-op (no revision creep,
     # no commit request, no dirty tiles).
     assert session.mark_ladder_swaps_for_viewport() is False
     assert int(session.viewport_revision) >= revision_before
+
+
+def test_camera_only_retarget_demotes_finer_level_under_residency_pressure():
+    """Visible quality demotion is a memory-pressure decision, not zoom churn."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
+    _present_native(session)
+    _admit_zoomed_out_levels(session)
+    native_bytes = sum(
+        int(np.asarray(payload.texture_data).nbytes)
+        for payload in session.tile_presentation_state.payloads.values()
+    )
+    session.tile_residency_budget_bytes = native_bytes - 1
+
+    session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
+    assert session.mark_ladder_swaps_for_viewport() is True
+    assert sorted(session.dirty_payloads) == [0, 1]
+
+    _state, delta = session.build_tile_presentation({})
+    assert set(delta.upserts) == {0, 1}
+    assert delta.removals == ()
+    assert {payload.lod.level for payload in delta.upserts.values()} == {2}
+    assert all(
+        payload.texture_data.shape[:2] == (TILE // 4, TILE // 4)
+        for payload in delta.upserts.values()
+    )
 
 
 def test_camera_only_retarget_requests_missing_levels_with_new_lod_revision():
@@ -655,19 +678,16 @@ def test_camera_only_retarget_requests_missing_levels_with_new_lod_revision():
     swap_ready = session.mark_ladder_swaps_for_viewport()
     requests = list(_plan_rung_materializations(session))
 
-    # Nothing resident yet: no swap commit, but materializations are queued
-    # under a fresh LOD target revision so stale zoom targets supersede.
+    # Native payloads are already current and finer than the demand, so zoom
+    # does not schedule coarser materialization or swap commits.
     assert swap_ready is False
-    assert sorted(request[0] for request in requests) == [0, 1]
-    for request in requests:
-        assert request.key.factor_xy == (4, 4)
-        assert request.source.shape == (TILE, TILE)
+    assert requests == []
     assert int(session.lod_target_revision) > revision_before
-    # Native payloads stay presented untouched while levels materialize.
+    # Native payloads stay presented untouched.
     assert not session.dirty_payloads
     assert all(payload.lod.level == 0 for payload in session.tile_presentation_state.payloads.values())
 
-    # Requests are singleflighted across refreshes during a zoom gesture.
+    # Refreshes across the same zoom gesture remain no-ops.
     assert session.mark_ladder_swaps_for_viewport() is False
     assert list(_plan_rung_materializations(session)) == []
 
@@ -696,7 +716,7 @@ def test_level_only_change_replaces_payload_atomically_and_deferral_keeps_old():
     assert set(native_payloads) == {0, 1}
     _admit_zoomed_out_levels(session)
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
-    assert session.mark_ladder_swaps_for_viewport() is True
+    session.dirty_payloads.update({0: None, 1: None})
 
     # Budget admits only one swap this commit.
     state, delta = session.build_tile_presentation({}, max_upserts=1)
@@ -787,11 +807,8 @@ def test_level_swap_carries_native_stats_and_recomputes_nothing():
     assert session.lod_stats_recomputes == 0
 
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
-    session.mark_ladder_swaps_for_viewport()
-    for request in list(_plan_rung_materializations(session)):
-        _materialize(session, request)
-    session.pending_rung_materializations.clear()
-    assert session.mark_ladder_swaps_for_viewport() is True
+    _admit_zoomed_out_levels(session)
+    session.dirty_payloads.update({0: None, 1: None})
     _state, delta = session.build_tile_presentation({})
 
     for tile_number, payload in delta.upserts.items():
@@ -830,11 +847,8 @@ def test_level_swap_keeps_semantic_histogram_identity():
     native_payloads = dict(session.tile_presentation_state.payloads)
 
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
-    session.mark_ladder_swaps_for_viewport()
-    for request in list(_plan_rung_materializations(session)):
-        _materialize(session, request)
-    session.pending_rung_materializations.clear()
-    session.mark_ladder_swaps_for_viewport()
+    _admit_zoomed_out_levels(session)
+    session.dirty_payloads.update({0: None, 1: None})
     _state, delta = session.build_tile_presentation({})
     swapped_payloads = {**native_payloads, **dict(delta.upserts)}
     assert any(payload.lod.level == 2 for payload in swapped_payloads.values())

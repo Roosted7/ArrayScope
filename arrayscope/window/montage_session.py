@@ -547,6 +547,7 @@ class MontageRenderSession:
     # tile -> ((shown_identity, wanted_identity), attempts).
     _reconcile_attempts: dict = field(default_factory=dict)
     lod_preview_level: int = 0
+    tile_residency_budget_bytes: int = 0
     lod_preview_metadata: dict[object, PreviewFloorMetadata] = field(default_factory=dict)
     lod_preview_floor_scope: set[int] = field(default_factory=set)
     # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but

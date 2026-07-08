@@ -32,6 +32,7 @@ from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
 from arrayscope.render.stages import RenderIntent
 from arrayscope.ui.toasts import show_status_message
+from arrayscope.window.display_presenter import tile_residency_budget_bytes
 from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
@@ -330,6 +331,7 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             priority_focus=viewport_plan.priority_focus,
             priority_retarget_limit=1,
         )
+        memory_policy = self._memory_policy() if hasattr(self, "_memory_policy") else None
         session.frame_plan = self._montage_frame_planner().plan(
             target=FrameTarget(
                 semantic_key=session.key,
@@ -346,9 +348,11 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             backend_capabilities=capabilities,
             viewport_shape=viewport_plan.viewport_shape,
             view_range=viewport_plan.view_range,
-            memory_policy=self._memory_policy() if hasattr(self, "_memory_policy") else None,
+            memory_policy=memory_policy,
             montage_plan=viewport_plan.plan,
         )
+        if memory_policy is not None:
+            session.tile_residency_budget_bytes = tile_residency_budget_bytes(memory_policy)
         lod_swap_ready = session.mark_ladder_swaps_for_viewport()
         self.retarget_montage_pipeline(session)
         if presentation_changed or lod_swap_ready:
@@ -594,6 +598,7 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             lod_policy_mode=lod_policy_mode,
             lod_native_reason=render_lod.native_policy_reason_for_renderer(self),
             lod_preview_level=lod_preview_level,
+            tile_residency_budget_bytes=tile_residency_budget_bytes(policy),
             pyramid_cache=(
                 self._montage_pyramid_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
             ),
@@ -889,6 +894,7 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             },
             visible_tiles=tuple(display_tiles),
         )
+        session.tile_residency_budget_bytes = tile_residency_budget_bytes(policy)
         session.force_auto = bool(force_auto)
         session.user_levels_override = user_levels
         interaction_active = _viewport_interaction_active(self)
@@ -1111,10 +1117,12 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             memory_policy=memory_policy,
             montage_plan=viewport_plan.plan,
         )
+        if memory_policy is not None:
+            session.tile_residency_budget_bytes = tile_residency_budget_bytes(memory_policy)
         # Camera-only changes must retarget the LOD decision immediately:
-        # already-resident levels swap on the next commit and missing levels
-        # are scheduled now, superseded by the new viewport revision (ADR
-        # 0050).  Demand math only; reduction stays on worker lanes.
+        # black/too-coarse tiles improve immediately, while already-presented
+        # finer tiles stay put unless visible residency pressure requires a
+        # quality demotion. Demand math only; reduction stays on worker lanes.
         lod_swap_ready = session.mark_ladder_swaps_for_viewport()
         self.retarget_montage_pipeline(session)
         additions = viewport_plan.prioritize_tiles(additions)

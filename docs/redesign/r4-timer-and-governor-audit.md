@@ -55,6 +55,14 @@ work between bursts; histogram tasks may run in idle gaps, but once a
 newer visible target supersedes them, kernel ownership should drop them
 before they can occupy workers for seconds.
 
+Eviction/admission ranking should become one shared policy instead of
+parallel backend and LOD guesses. The priority order is: stale semantic
+targets first, then offscreen/out-of-index residents, then farthest near-ring
+residents, and only under visible residency pressure demote active exact/finer
+payloads to already-resident lower LOD. Ordinary camera zoom is not pressure;
+it must not schedule lower-quality DESIRED materializations or wrapper swaps
+while exact/finer current payloads fit.
+
 `core/gui_callback_budget.py` stays — it is the drain bound vocabulary.
 `core/latency_feedback.py` shrinks to the EWMA + outlier suppression the
 bridge budget uses. `compute_policy` lane worker counts become the initial
