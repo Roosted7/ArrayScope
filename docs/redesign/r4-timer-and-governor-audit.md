@@ -44,6 +44,17 @@ conservative starts), decision rings in benchmark JSONL, and
 edge timing needed). Keep the observation records (they feed the
 benchmark tooling) and the interaction-state input.
 
+R4 must also make kernel admission prune stale side work at the owner,
+not in `level_stats` or via timers. The 2026-07-08 VisPy trace
+(`arrayscope-diagnostics-20260708-151620.jsonl`) shows correct/presented
+montage tiles at the slow scroll tail, but queued/running workers are
+dominated by superseded `display_preparation`, `display_preview`,
+`histogram_refinement`, and ROI/profile hover tasks. Visible presentation
+and current-source preview work must preempt or cancel stale refinement
+work between bursts; histogram tasks may run in idle gaps, but once a
+newer visible target supersedes them, kernel ownership should drop them
+before they can occupy workers for seconds.
+
 `core/gui_callback_budget.py` stays — it is the drain bound vocabulary.
 `core/latency_feedback.py` shrinks to the EWMA + outlier suppression the
 bridge budget uses. `compute_policy` lane worker counts become the initial

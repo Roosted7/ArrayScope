@@ -26,7 +26,9 @@ from arrayscope.operations.chunked_stage import (
     stage_materialization_allowed_chunk_axes,
 )
 from arrayscope.operations.evaluator import _document_key, stage_document_key
-from arrayscope.operations.slabs import plan_slab, request_for_image
+from arrayscope.operations.planner import final_region_for_request
+from arrayscope.operations.regions import region_contains
+from arrayscope.operations.slabs import plan_slab, request_for_image, stage_key_for_candidate
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.render import effects as render_effects
 from arrayscope.render.ladder import Rung
@@ -1163,28 +1165,112 @@ def _shared_floor_candidate_tiles(session):
         yield candidate
 
 
-def build_stage_fan_in_plan(renderer, document, missing_tiles, *, existing_only: bool = False) -> dict[str, object]:
+def plan_stage_fan_in_candidates(document, missing_tiles, *, cancellation_token=None) -> dict[str, object]:
     document_key = stage_document_key(document)
     groups: dict[object, dict[str, object]] = {}
     tile_stage_plans = {}
     tile_stage_candidates = {}
     for tile in tuple(missing_tiles):
-        try:
-            request = request_for_image(tile.view_state)
-            plan = plan_slab(document, request)
-        except Exception as exc:
-            handle_ui_exception("montage stage planning", exc)
-            continue
+        if bool(getattr(cancellation_token, "cancelled", False)):
+            return {"groups": {}, "tile_stage_plans": {}, "tile_stage_candidates": {}}
+        request = request_for_image(tile.view_state)
+        plan = plan_slab(document, request)
         candidates = tuple(getattr(plan.region_plan, "cache_candidates", ()))
         retained = tuple(candidate for candidate in candidates if getattr(candidate, "retain", True))
         if not retained:
             continue
         candidate = retained[-1]
-        key = renderer.win.operation_evaluator.stage_materializer.key_for_candidate(document_key, candidate)
+        key = stage_key_for_candidate(document_key, candidate)
         groups.setdefault(key, {"candidate": candidate, "tiles": [], "plan": plan})
         groups[key]["tiles"].append(tile)
         tile_stage_plans[int(tile.montage_index)] = plan
         tile_stage_candidates[int(tile.montage_index)] = candidate
+    return {
+        "groups": groups,
+        "tile_stage_plans": tile_stage_plans,
+        "tile_stage_candidates": tile_stage_candidates,
+    }
+
+
+def hot_cached_stage_fan_in_plan(renderer, document, missing_tiles) -> dict[str, object]:
+    """Attach already-resident stage values without GUI-thread slab planning."""
+
+    missing_tiles = tuple(missing_tiles or ())
+    stage_cache = getattr(getattr(renderer.win, "operation_evaluator", None), "stage_cache", None)
+    resident_items = getattr(stage_cache, "resident_items", None)
+    if not missing_tiles or not callable(resident_items):
+        return deferred_stage_fan_in_plan()
+    document_key = stage_document_key(document)
+    entries = []
+    for key, value in resident_items():
+        if getattr(key, "document_key", None) != document_key:
+            continue
+        if bool(getattr(value, "prefetch_only", False)):
+            continue
+        if not bool(getattr(value, "visible_reuse", True)):
+            continue
+        entries.append((key, value))
+    if not entries:
+        return deferred_stage_fan_in_plan()
+    entries.sort(
+        key=lambda item: (
+            len(tuple(getattr(item[0], "operation_prefix", ()) or ())),
+            int(getattr(item[1], "stage_index", -1) or -1),
+            int(getattr(item[1], "nbytes", 0) or 0),
+        ),
+        reverse=True,
+    )
+    tile_stage_keys = {}
+    stage_values = {}
+    for tile in missing_tiles:
+        tile_number = int(tile.montage_index)
+        try:
+            final_region = final_region_for_request(document.current_shape, request_for_image(tile.view_state))
+        except Exception:
+            continue
+        for key, value in entries:
+            if tuple(getattr(key, "shape", ()) or ()) != tuple(int(size) for size in document.current_shape):
+                continue
+            try:
+                contains = region_contains(value.region, final_region, key.shape)
+            except Exception:
+                contains = False
+            if not contains:
+                continue
+            tile_stage_keys[tile_number] = key
+            stage_values[key] = value
+            break
+    if not tile_stage_keys:
+        return deferred_stage_fan_in_plan()
+    return {
+        "tile_stage_keys": tile_stage_keys,
+        "tile_stage_plans": {},
+        "tile_stage_candidates": {},
+        "stage_values": stage_values,
+        "lead_stage_warmups": {},
+        "stage_requests": [],
+        "attached_stage_keys": set(),
+        "waiting_indices": set(),
+        "lead_direct_tiles": 0,
+        "retained_stage_index": max(
+            (int(getattr(value, "stage_index", -1) or -1) for value in stage_values.values()),
+            default=None,
+        ),
+        "retained_stage_decision": "cached-hot-stage",
+        "repeated_expensive_stage_per_tile": False,
+    }
+
+
+def build_stage_fan_in_plan(renderer, document, missing_tiles, *, existing_only: bool = False, candidate_plan=None) -> dict[str, object]:
+    document_key = stage_document_key(document)
+    candidate_plan = (
+        plan_stage_fan_in_candidates(document, missing_tiles)
+        if candidate_plan is None
+        else dict(candidate_plan or {})
+    )
+    groups: dict[object, dict[str, object]] = dict(candidate_plan.get("groups", {}) or {})
+    tile_stage_plans = dict(candidate_plan.get("tile_stage_plans", {}) or {})
+    tile_stage_candidates = dict(candidate_plan.get("tile_stage_candidates", {}) or {})
 
     tile_stage_keys = {}
     stage_values = {}
@@ -1269,6 +1355,75 @@ def build_stage_fan_in_plan(renderer, document, missing_tiles, *, existing_only:
     }
 
 
+def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
+    missing_tiles = tuple(missing_tiles or ())
+    if not missing_tiles or not renderer._montage_session_is_current(session):
+        return False
+    kernel = getattr(renderer.win, "kernel", None)
+    if kernel is None:
+        return False
+    if bool(getattr(session, "stage_planning_async", False)):
+        return True
+    session.stage_planning_deferred = True
+    session.stage_planning_async = True
+    session.deferred_missing_tiles = missing_tiles
+
+    def plan(token=None):
+        return plan_stage_fan_in_candidates(session.document, missing_tiles, cancellation_token=token)
+
+    def done(candidate_plan, session_id=session.session_id, session_key=session.key):
+        current = getattr(renderer, "_montage_session", None)
+        if current is None or not renderer._is_current_montage_session(session_id, session_key):
+            return
+        if not renderer._is_current_render_generation(current.render_generation):
+            return
+        current.stage_planning_async = False
+        current.stage_planning_deferred = False
+        current.deferred_missing_tiles = ()
+        stage_plan = build_stage_fan_in_plan(
+            renderer,
+            current.document,
+            (),
+            candidate_plan=candidate_plan,
+        )
+        merge_stage_fan_in_plan(current, stage_plan)
+        queued = set(current.pending_tile_numbers())
+        for tile in missing_tiles:
+            index = int(tile.montage_index)
+            if index not in queued and index not in current.rendered_tiles and index not in current.skipped_tiles:
+                current.enqueue_pending_tile(tile)
+                queued.add(index)
+        submit_stage_tasks(renderer, current, stage_plan["stage_requests"])
+        renderer.retarget_montage_pipeline(current)
+
+    def stale(session_id=session.session_id, session_key=session.key):
+        current = getattr(renderer, "_montage_session", None)
+        if current is not None and renderer._is_current_montage_session(session_id, session_key):
+            current.stage_planning_async = False
+
+    handle = kernel.submit(
+        TaskSpec(
+            key=("montage-stage-plan", session.key, int(session.session_id)),
+            fn=plan,
+            lane=WorkLane.VISIBLE_PLANNING,
+            priority=Priority.INTERACTIVE,
+            scope=f"montage-stage-plan:{session.key!r}",
+            supersession=Supersession(
+                ("montage-stage-plan", id(renderer)),
+                (session.key, int(session.session_id)),
+            ),
+            pass_token=True,
+        ),
+        on_done=done,
+        on_stale=stale,
+        on_error=lambda exc: (stale(), handle_ui_exception("montage stage planning", exc)),
+    )
+    if handle is None:
+        stale()
+        return False
+    return True
+
+
 def deferred_stage_fan_in_plan() -> dict[str, object]:
     return {
         "tile_stage_keys": {},
@@ -1331,10 +1486,13 @@ def complete_deferred_stage_fan_in(renderer, session) -> bool:
         return False
     if not bool(getattr(session, "stage_planning_deferred", False)):
         return False
-    if viewport_interaction_active(renderer):
-        renderer.win._montage_viewport_update_pending = True
+    if bool(getattr(session, "stage_planning_async", False)):
         return False
     missing_tiles = tuple(getattr(session, "deferred_missing_tiles", ()) or ())
+    if submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles):
+        return False
+    if viewport_interaction_active(renderer):
+        return False
     session.stage_planning_deferred = False
     session.deferred_missing_tiles = ()
     stage_plan_start = perf_counter()

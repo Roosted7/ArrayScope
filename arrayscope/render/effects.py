@@ -37,7 +37,7 @@ from arrayscope.operations.capabilities import (
 )
 from arrayscope.operations.evaluator import evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.pipeline import ArrayDocument, evaluate as evaluate_pipeline
-from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec
+from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec, region_contains
 from arrayscope.operations.slabs import (
     evaluate_slab_from_stage,
     plan_slab,
@@ -92,6 +92,23 @@ def evaluate_exact_tile(
                     ),
                     None,
                 )
+            if candidate is None and stage_key is not None:
+                for item in candidates:
+                    if tuple(getattr(item, "operation_prefix", ()) or ()) != tuple(
+                        getattr(stage_key, "operation_prefix", ()) or ()
+                    ):
+                        continue
+                    if str(getattr(item, "dtype", "")) != str(getattr(stage_key, "dtype", "")):
+                        continue
+                    if tuple(getattr(item, "shape", ()) or ()) != tuple(getattr(stage_key, "shape", ()) or ()):
+                        continue
+                    try:
+                        contains = region_contains(stage_value.region, item.region, stage_key.shape)
+                    except Exception:
+                        contains = False
+                    if contains:
+                        candidate = item
+                        break
         if candidate is not None:
             slab = evaluate_slab_from_stage(
                 session.document,

@@ -681,16 +681,10 @@ class MontageRuntimeMixin:
                 self.win._montage_viewport_update_pending = False
                 self._montage_viewport_continue_immediately = False
                 self.retarget_montage_viewport()
-            # Otherwise the pending flag was armed by an interaction-defer:
-            # missing tiles enqueued while the user is still panning, or a
-            # deferred stage fan-in that keeps deferring while
-            # viewport_interaction_active stays True.  Continuing synchronously
-            # here re-arms the flag on every apply and recurses until the stack
-            # overflows (retarget_montage_viewport <-> apply_montage_viewport_
-            # retarget, seen once the ladder correctly makes scrolled-in tiles
-            # stage-backed).  Leave it pending: _on_viewport_interaction_quiet
-            # drains it 120 ms after the gesture settles, and any further range
-            # change supersedes it in the meantime.
+            # Otherwise the flag means a viewport retarget was requested while
+            # this bounded apply was already running. Tile correctness work is
+            # submitted through the kernel from the active retarget path; this
+            # flag is not a "quiet will fix it later" queue.
 
     def _publish_montage_content_extent(self, plan) -> None:
         """Publish the semantic montage extent as the viewport content shape.

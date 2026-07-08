@@ -509,11 +509,10 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             and getattr(previous_session, "montage_axis", None) == axis
         )
         if defer_stage_planning:
-            stage_plan = montage_commit.build_stage_fan_in_plan(
+            stage_plan = montage_commit.hot_cached_stage_fan_in_plan(
                 self,
                 document,
                 missing_tiles,
-                existing_only=True,
             )
             if not montage_commit.stage_fan_in_plan_has_existing_sources(stage_plan):
                 stage_plan = montage_commit.deferred_stage_fan_in_plan()
@@ -601,6 +600,7 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         )
         session.shader_display = bool(shader_display)
         session.stage_planning_deferred = bool(defer_stage_planning)
+        session.stage_planning_async = False
         session.deferred_missing_tiles = tuple(missing_tiles) if defer_stage_planning else ()
         # The dying session's planned-but-undrained LOD requests hold
         # singleflight claims in the shared pyramid; scrubbing back to the
@@ -676,6 +676,7 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             self.show_montage_session_slow_overlay(session)
         self._schedule_montage_cached_level_stats(session)
         if defer_stage_planning:
+            montage_commit.submit_deferred_stage_fan_in_plan(self, session, missing_tiles)
             self.retarget_montage_pipeline(session)
         else:
             montage_commit.submit_stage_tasks(self, session, stage_plan["stage_requests"])
@@ -707,13 +708,12 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
     ) -> bool:
         """Retarget the live session to a new index window instead of a rebirth.
 
-        ADR 0051 P2 (session-rebirth cost): an index-window scrub step with
-        identical layout geometry, viewport, and presentation inputs reuses
-        the session object — the backend acknowledgement state and drawn
-        payloads survive, and the budgeted flush machinery converges the
-        content.  Stage planning for missing tiles always goes through the
-        deferred-planning continuation (it runs on the next event-loop turn
-        outside a burst).  Returns True when the retarget handled the step.
+        ADR 0051 P2 (session-rebirth cost): index-window scrubs and
+        camera-only viewport changes reuse the session object. Backend
+        acknowledgement state and drawn payloads survive; missing stage
+        planning is either attached from retained source data immediately or
+        submitted as kernel-owned supersedable work. Returns True when the
+        retarget handled the step.
         """
 
         def _reject(reason: str) -> bool:
@@ -779,13 +779,20 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             or len(previous_geometry.indices) != len(geometry.indices)
         ):
             return _reject("geometry")
-        if tuple(session.viewport_shape) != tuple(viewport_shape):
-            return _reject("viewport-shape")
-        if session.view_range != current_range:
-            return _reject("view-range")
         session_key = montage_session_key(
             _document_key(document), view_state, viewport_plan, colormap_lut
         )
+        viewport_changed = (
+            tuple(session.viewport_shape) != tuple(viewport_shape)
+            or session.view_range != current_range
+        )
+        if session_key == session.key and viewport_changed:
+            if self._try_update_montage_viewport_only():
+                self._montage_session_reuses = (
+                    int(getattr(self, "_montage_session_reuses", 0) or 0) + 1
+                )
+                return True
+            return _reject("viewport-retarget")
         if session_key == session.key:
             # Same montage identity with every presentation input equal: the
             # live session already represents this render request.  A rebirth
@@ -804,11 +811,6 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             self._ensure_montage_watchdog()
             reuse_commit_start = perf_counter()
             try:
-                # Only genuinely pending presentation work commits here; the
-                # flush/level continuations own their own pacing, and a
-                # settled re-render must stay a true no-op (zero item
-                # updates) exactly like a rebirth that reseeds identical
-                # payloads.
                 # Only genuinely pending presentation work commits here; the
                 # flush/level continuations own their own pacing, and a
                 # settled re-render must stay a true no-op.
@@ -889,19 +891,26 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         )
         session.force_auto = bool(force_auto)
         session.user_levels_override = user_levels
-        if missing_tiles:
+        interaction_active = _viewport_interaction_active(self)
+        if missing_tiles and interaction_active:
+            hot_stage_plan = montage_commit.hot_cached_stage_fan_in_plan(
+                self,
+                session.document,
+                missing_tiles,
+            )
+            if not montage_commit.stage_fan_in_plan_has_existing_sources(hot_stage_plan):
+                hot_stage_plan = montage_commit.deferred_stage_fan_in_plan()
+        elif missing_tiles:
             hot_stage_plan = montage_commit.build_stage_fan_in_plan(
                 self,
                 session.document,
                 missing_tiles,
-                existing_only=True,
             )
-            if not montage_commit.stage_fan_in_plan_has_existing_sources(hot_stage_plan):
-                hot_stage_plan = montage_commit.deferred_stage_fan_in_plan()
         else:
             hot_stage_plan = montage_commit.deferred_stage_fan_in_plan()
         session.attach_stage_fan_in(montage_commit.stage_fan_in_state(hot_stage_plan))
-        session.stage_planning_deferred = bool(missing_tiles)
+        session.stage_planning_deferred = bool(missing_tiles and interaction_active)
+        session.stage_planning_async = False
         session.deferred_missing_tiles = tuple(missing_tiles)
         session.tile_compute_cache_hits = int(stats["hits"])
         session.tile_compute_waiting_for_stage = len(hot_stage_plan["waiting_indices"])
@@ -912,7 +921,7 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             hot_stage_plan["retained_stage_decision"] or "deferred-retarget"
         )
         session.repeated_expensive_stage_per_tile = bool(hot_stage_plan["repeated_expensive_stage_per_tile"])
-        if missing_tiles:
+        if missing_tiles and interaction_active:
             self._montage_stage_plans_deferred = (
                 int(getattr(self, "_montage_stage_plans_deferred", 0) or 0) + 1
             )
@@ -952,7 +961,11 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             self.win._deferred_side_panel_refresh_pending = True
         else:
             self.win._update_operation_dock()
-        if session.stage_planning_deferred:
+        if missing_tiles:
+            if session.stage_planning_deferred:
+                montage_commit.submit_deferred_stage_fan_in_plan(self, session, missing_tiles)
+            else:
+                montage_commit.submit_stage_tasks(self, session, hot_stage_plan["stage_requests"])
             self.retarget_montage_pipeline(session)
         return True
 
@@ -1167,22 +1180,20 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         missing_tiles = viewport_plan.prioritize_tiles(missing_tiles)
 
         if _viewport_interaction_active(self):
-            hot_stage_plan = montage_commit.build_stage_fan_in_plan(
-                self,
-                session.document,
-                missing_tiles,
-                existing_only=True,
-            )
-            if montage_commit.stage_fan_in_plan_has_existing_sources(hot_stage_plan):
-                montage_commit.merge_stage_fan_in_plan(session, hot_stage_plan)
-                self.retarget_montage_pipeline(session)
+            stage_plan = montage_commit.hot_cached_stage_fan_in_plan(self, session.document, missing_tiles)
+            if montage_commit.stage_fan_in_plan_has_existing_sources(stage_plan):
+                montage_commit.merge_stage_fan_in_plan(session, stage_plan)
             queued = set(session.pending_tile_numbers())
             for tile in missing_tiles:
                 index = int(tile.montage_index)
                 if index not in queued:
                     _enqueue_session_pending_tile(session, tile)
                     queued.add(index)
-            self.win._montage_viewport_update_pending = True
+            session.stage_planning_deferred = True
+            session.stage_planning_async = False
+            session.deferred_missing_tiles = tuple(missing_tiles)
+            montage_commit.submit_deferred_stage_fan_in_plan(self, session, missing_tiles)
+            self.retarget_montage_pipeline(session)
             return True
 
         stage_plan = montage_commit.build_stage_fan_in_plan(self, session.document, missing_tiles)

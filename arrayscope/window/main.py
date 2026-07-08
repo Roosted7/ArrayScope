@@ -541,8 +541,9 @@ class ArrayScopeWindow(
         self._viewport_interaction_active = True
         timer = getattr(self, "_viewport_interaction_quiet_timer", None)
         if timer is None:
-            # User-interaction quiet detector. It only releases deferred
-            # viewport work after resize/range activity settles.
+            # User-interaction quiet detector for side-panel refresh and
+            # in-progress viewport continuations. Montage tile correctness is
+            # submitted through the kernel by the active retarget path.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._on_viewport_interaction_quiet)
@@ -556,16 +557,6 @@ class ArrayScopeWindow(
         if getattr(self, "_montage_viewport_update_pending", False) and getattr(self.view_state, "montage_axis", None) is not None:
             self._montage_viewport_update_pending = False
             self.retarget_montage_viewport()
-        # Records deferred during the gesture retarget the pipeline the moment
-        # interaction quiets.
-        renderer = getattr(self, "renderer", None)
-        if renderer is not None:
-            from arrayscope.window.montage_session import MontageRenderSession
-
-            session = getattr(renderer, "_montage_session", None)
-            if isinstance(session, MontageRenderSession):
-                renderer.retarget_montage_pipeline(session)
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._note_viewport_interaction("resize")

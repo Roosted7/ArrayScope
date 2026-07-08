@@ -491,6 +491,9 @@ class MontageRenderSession:
     retained_stage_index: int | None = None
     retained_stage_decision: str = ""
     repeated_expensive_stage_per_tile: bool = False
+    stage_planning_deferred: bool = False
+    stage_planning_async: bool = False
+    deferred_missing_tiles: tuple[MontageTile, ...] = ()
     frame_plan: object | None = None
     tile_source_ids: dict[int, object] = field(default_factory=dict)
     display_tile_payloads: dict[int, DisplayTilePayload] = field(default_factory=dict)

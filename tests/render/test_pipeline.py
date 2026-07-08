@@ -230,7 +230,7 @@ def test_demand_level_change_supersedes_stale_rung_targets():
     assert (0, 2, 2) in effects.dropped
 
 
-def test_interactive_native_demand_defers_native_rung_until_quiet_replan():
+def test_interactive_native_demand_defers_cold_native_until_noninteractive_replan():
     kernel, effects, pipeline = make_pipeline(tiles=1)
 
     assert pipeline.retarget(intent(interactive=True), demand(0)) == 2

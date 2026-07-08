@@ -160,6 +160,18 @@ class StageCache:
             self.last_lookup_ms = (perf_counter() - start) * 1000.0
             return None
 
+    def resident_items(self) -> tuple[tuple[StageKey, StageValue], ...]:
+        """Snapshot resident stage entries for GUI-side hot reuse checks.
+
+        This is intentionally read-only. Callers that need exact region
+        matching should use ``get_containing`` with a planned key; hot montage
+        retargets use this only to reattach already-resident stage truth without
+        running per-tile planning on the GUI thread.
+        """
+
+        with self._lock:
+            return tuple((key, value) for key, value in self._cache.items())
+
     def begin_compute(self, key: StageKey) -> bool:
         """Claim the in-flight computation for ``key``.
 

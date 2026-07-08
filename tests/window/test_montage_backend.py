@@ -1249,13 +1249,14 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     assert controller.groups == []
 
 
-def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_batches(qt_app):
+def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_batches(qt_app, monkeypatch):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
     from arrayscope.operations.pipeline import ArrayDocument
     from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window import montage_commit
     from arrayscope.window.montage_session import MontageRenderSession
 
     class Window(QtCore.QObject, FrameRenderMixin):
@@ -1334,6 +1335,16 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
     )
     win = Window(document, state, viewport_plan)
     win._montage_session = session
+    submitted_stage_plans = []
+    monkeypatch.setattr(
+        montage_commit,
+        "build_stage_fan_in_plan",
+        lambda *_args, **_kwargs: pytest.fail("interactive viewport update must not plan stage fan-in"),
+    )
+    monkeypatch.setattr(
+        "arrayscope.window.frame_renderer.montage_commit.submit_deferred_stage_fan_in_plan",
+        lambda _renderer, _session, tiles: submitted_stage_plans.append(tuple(tiles)) or True,
+    )
 
     assert win._try_update_montage_viewport_only() is True
 
@@ -1344,13 +1355,15 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
     assert pending == resolved
     assert pending[0] == 6
     assert session.loading_tiles == set()
-    assert win.pipeline_retargets == 1
-    assert win._montage_viewport_update_pending is True
+    assert win.pipeline_retargets == 2
+    assert submitted_stage_plans == [tuple(session.pending_tiles)]
+    assert session.stage_planning_deferred is True
+    assert not getattr(win, "_montage_viewport_update_pending", False)
     assert not hasattr(win, "_montage_viewport_continue_immediately")
     assert win._last_montage_viewport_deferred_additions == 0
 
 
-def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypatch):
+def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_app, monkeypatch):
     from pyqtgraph.Qt import QtCore, QtWidgets
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
@@ -1432,6 +1445,249 @@ def test_quiet_viewport_update_schedules_deferred_missing_tiles(qt_app, monkeypa
     assert win._try_update_montage_viewport_only() is True
 
     assert win.pipeline_retargets == 2
+
+
+def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(qt_app, monkeypatch):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.operations.evaluator import _document_key
+    from arrayscope.operations.pipeline import ArrayDocument
+    from arrayscope.window import montage_commit
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    class Planner:
+        def plan(self, **kwargs):
+            return SimpleNamespace(target=kwargs["target"])
+
+    class Evaluator:
+        def montage_tile_key_batch(self, **_kwargs):
+            def key_for(view_state):
+                return ("src", int(view_state.slice_indices[2]))
+
+            return key_for
+
+    class Window(QtCore.QObject, FrameRenderMixin):
+        def __init__(self, document, old_state):
+            super().__init__()
+            self.win = self
+            self.document = document
+            self.view_state = old_state
+            self.operation_evaluator = Evaluator()
+            self.img_view = SimpleNamespace(
+                rendering_capabilities=ImageViewBackendCapabilities(
+                    name="vispy",
+                    persistent_tile_residency=True,
+                    shader_windowing=True,
+                )
+            )
+            self._viewport_interaction_active = True
+            self.pipeline_retargets = 0
+            self.commits = 0
+            self._last_montage_viewport_plan_ms = 0.0
+            self._last_montage_cache_resolve_ms = 0.0
+
+        def _montage_frame_planner(self):
+            return Planner()
+
+        def _montage_quality_policy_mode(self):
+            return self._montage_session.lod_policy_mode
+
+        def _capture_render_generation(self):
+            return 2
+
+        def _ensure_montage_watchdog(self):
+            pass
+
+        def _ensure_montage_level_stats(self, *_args, **_kwargs):
+            pass
+
+        def _queue_montage_cached_level_stats(self, *_args, **_kwargs):
+            pass
+
+        def commit_montage_session_presentation(self, session):
+            assert session is self._montage_session
+            self.commits += 1
+
+        def retarget_montage_pipeline(self, session):
+            assert session is self._montage_session
+            self.pipeline_retargets += 1
+
+    document = ArrayDocument(np.zeros((2, 2, 6), dtype=np.float32))
+    old_state = ViewState.from_shape(document.current_shape).with_montage_axis(
+        2, columns=2, indices=(0, 1), text="0:2"
+    )
+    new_state = ViewState.from_shape(document.current_shape).with_montage_axis(
+        2, columns=2, indices=(1, 2), text="1:3"
+    )
+    old_plan = make_montage_plan(old_state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
+    new_plan = make_montage_plan(new_state, axis=2, indices=(1, 2), tile_shape=(2, 2), columns=2)
+    old_viewport = MontageViewportPlan(
+        2, (0, 1), (4, 8), (2, 2), old_plan, ((0.0, 4.0), (0.0, 2.0)), True, True
+    )
+    new_viewport = MontageViewportPlan(
+        2, (1, 2), (4, 8), (2, 2), new_plan, ((0.0, 4.0), (0.0, 2.0)), True, True
+    )
+    session = MontageRenderSession(
+        session_id=1,
+        key=montage_session_key(_document_key(document), old_state, old_viewport, None),
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=(0, 1),
+        plan=old_plan,
+        view_state=old_state,
+        document=document,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(4, 8),
+        view_range=old_viewport.view_range,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=old_plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+        display_committed=True,
+    )
+    session.shader_display = True
+    win = Window(document, old_state)
+    win._montage_session = session
+    submitted_stage_plans = []
+    monkeypatch.setattr(
+        montage_commit,
+        "build_stage_fan_in_plan",
+        lambda *_args, **_kwargs: pytest.fail("active index-window retarget must not plan stage fan-in"),
+    )
+    monkeypatch.setattr(
+        "arrayscope.window.frame_renderer.montage_commit.submit_deferred_stage_fan_in_plan",
+        lambda _renderer, _session, tiles: submitted_stage_plans.append(tuple(tiles)) or True,
+    )
+
+    handled = win._maybe_retarget_montage_session(
+        session,
+        document=document,
+        axis=2,
+        view_state=new_state,
+        viewport_plan=new_viewport,
+        plan=new_plan,
+        policy=None,
+        colormap_lut=None,
+        window_mode="relative",
+        force_auto=False,
+        user_levels=None,
+        output_dtype=np.dtype(np.float32),
+        shader_display=True,
+        cached_tiles=(),
+        missing_tiles=(new_plan.tiles[1],),
+        skipped_tiles=(),
+        all_indices=(1, 2),
+        display_tiles=new_plan.tiles,
+        current_range=new_viewport.view_range,
+        viewport_shape=(4, 8),
+    )
+
+    assert handled is True
+    assert session.stage_planning_deferred is True
+    assert session.stage_planning_async is False
+    assert session.deferred_missing_tiles == (new_plan.tiles[1],)
+    assert session.retained_stage_decision == "deferred-interaction"
+    assert submitted_stage_plans == [(new_plan.tiles[1],)]
+    assert win.commits == 1
+    assert win.pipeline_retargets == 1
+
+
+def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(qt_app):
+    from pyqtgraph.Qt import QtCore
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.operations.evaluator import _document_key
+    from arrayscope.operations.pipeline import ArrayDocument
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.montage_session import MontageRenderSession
+
+    class Window(QtCore.QObject, FrameRenderMixin):
+        def __init__(self, document):
+            super().__init__()
+            self.win = self
+            self.document = document
+            self.viewport_retargets = 0
+
+        def _montage_quality_policy_mode(self):
+            return self._montage_session.lod_policy_mode
+
+        def _try_update_montage_viewport_only(self):
+            self.viewport_retargets += 1
+            return True
+
+    document = ArrayDocument(np.zeros((2, 2, 6), dtype=np.float32))
+    state = ViewState.from_shape(document.current_shape).with_montage_axis(
+        2, columns=3, indices=tuple(range(6)), text=":"
+    )
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=3)
+    old_viewport = MontageViewportPlan(
+        2, tuple(range(6)), (4, 12), (2, 2), plan, ((0.0, 6.0), (0.0, 4.0)), True, True
+    )
+    new_viewport = MontageViewportPlan(
+        2, tuple(range(6)), (4, 12), (2, 2), plan, ((1.0, 3.0), (0.5, 2.5)), True, True
+    )
+    session = MontageRenderSession(
+        session_id=1,
+        key=montage_session_key(_document_key(document), state, old_viewport, None),
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=tuple(range(6)),
+        plan=plan,
+        view_state=state,
+        document=document,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=old_viewport.viewport_shape,
+        view_range=old_viewport.view_range,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+        display_committed=True,
+    )
+    session.shader_display = True
+    win = Window(document)
+    win._montage_session = session
+
+    handled = win._maybe_retarget_montage_session(
+        session,
+        document=document,
+        axis=2,
+        view_state=state,
+        viewport_plan=new_viewport,
+        plan=plan,
+        policy=None,
+        colormap_lut=None,
+        window_mode="relative",
+        force_auto=False,
+        user_levels=None,
+        output_dtype=np.dtype(np.float32),
+        shader_display=True,
+        cached_tiles=(),
+        missing_tiles=(),
+        skipped_tiles=(),
+        all_indices=tuple(range(6)),
+        display_tiles=plan.tiles,
+        current_range=new_viewport.view_range,
+        viewport_shape=new_viewport.viewport_shape,
+    )
+
+    assert handled is True
+    assert win.viewport_retargets == 1
+    assert getattr(win, "_montage_session_retarget_last_reject", "") != "view-range"
 
 
 def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):

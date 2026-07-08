@@ -192,16 +192,17 @@ class MontagePipeline:
         intent: RenderIntent,
         step: RungStep,
     ) -> bool:
-        """Keep active gestures on correctness rungs; admit native on quiet replan.
+        """Keep active gestures on correctness rungs; admit native with proof.
 
         Native evaluation is the expensive quality rung in both spellings:
         explicit EXACT, and DESIRED(level=0) when the viewport is zoomed to
         native.  For opaque pipelines, DESIRED(reduce_from_native=True) also
         means "run native, then reduce".  During active viewport movement,
-        those tasks are usually superseded before they can present; floor,
-        preview, resident remaps, and already-presented payloads are the
-        correctness path.  The existing quiet interaction replan admits the
-        deferred native work once the target stops moving.
+        cold native tasks are usually superseded before they can present.
+        Floor, preview, resident remaps, already-presented payloads, and
+        stage-backed extraction from retained source data are the correctness
+        path; cold stage planning is submitted through the kernel and
+        superseded by newer retargets.
         """
 
         if not bool(getattr(intent, "interactive", False)):
