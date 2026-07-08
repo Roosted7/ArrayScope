@@ -12,6 +12,7 @@ from arrayscope.kernel import Lane, Priority
 from arrayscope.presentation import ClaimOwner, LevelPhase
 from arrayscope.render import effects as render_effects
 from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep
+from arrayscope.window import montage_commit
 from arrayscope.window.montage_commit import MontagePipelineEffects
 from arrayscope.render.lod import admit_retained_preview_level, histogram_key_for_level_key
 from arrayscope.render.stages import CommitBatch, RenderIntent
@@ -2652,6 +2653,94 @@ def test_shared_transform_kernel_key_uses_full_semantic_marker():
         shader_display=False,
     )
     assert kernel.specs[-1].supersession.value == second_key[1]
+
+
+def test_deferred_stage_completion_does_not_enqueue_native_tiles_for_reduced_lod(monkeypatch):
+    from types import SimpleNamespace
+
+    session = _session(count=4, pyramid=PyramidCache(max_bytes=1 << 20))
+    assert session.lod_policy_mode == LOD_POLICY_RESIDENT
+    assert session.lod_policy_decision.demand.desired_level > 0
+    session.pending_tiles.clear()
+    session.stage_planning_deferred = True
+    session.stage_planning_async = False
+    session.deferred_missing_tiles = tuple(session.plan.tiles)
+    session.rendered_tiles.clear()
+
+    monkeypatch.setattr(
+        montage_commit,
+        "submit_deferred_stage_fan_in_plan",
+        lambda _renderer, _session, _missing: False,
+    )
+    monkeypatch.setattr(
+        montage_commit,
+        "build_stage_fan_in_plan",
+        lambda _renderer, _document, _missing: montage_commit.deferred_stage_fan_in_plan(),
+    )
+
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(_viewport_interaction_active=False),
+        _montage_session_is_current=lambda current: current is session,
+        _last_montage_stage_plan_ms=0.0,
+        retarget_montage_pipeline=lambda current: setattr(current, "_test_retargeted", True),
+    )
+
+    assert montage_commit.complete_deferred_stage_fan_in(renderer, session)
+    assert session.pending_tile_numbers() == ()
+    assert getattr(session, "_test_retargeted", False) is True
+
+
+def test_preview_payloads_bypass_item_cap_but_keep_byte_budget():
+    session = _session(mode=LOD_POLICY_NATIVE_ONLY, count=4, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.pending_payload_upserts.clear()
+    for tile in session.plan.tiles:
+        tile_number = int(tile.montage_index)
+        image = np.full((4, 4), float(tile_number), dtype=np.float32)
+        session.display_tile_payloads[tile_number] = DisplayTilePayload(
+            tile_number=tile_number,
+            source_index=int(tile.source_index),
+            image=image,
+            histogram_data=None,
+            source_id=("preview", tile_number),
+            lod=LodInfo(level=4, factor=16, source_shape=(TILE, TILE), texture_shape=image.shape),
+            quality="preview",
+        )
+        session.pending_payload_upserts[tile_number] = None
+
+    _state, delta = session.build_tile_presentation(
+        {},
+        max_upserts=1,
+        max_upsert_bytes=sum(payload.nbytes for payload in session.display_tile_payloads.values()),
+        upsert_cost_fn=lambda payload: payload.nbytes,
+        item_free_upsert_fn=lambda payload: str(getattr(payload, "quality", "")) == "preview",
+        max_item_free_upserts=2,
+    )
+
+    assert len(delta.upserts) == 2
+    assert set(delta.active_tiles) == {0, 1, 2, 3}
+
+
+def test_visible_parked_payload_rearms_instead_of_settling_missing():
+    session = _session(count=4, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.build_tile_presentation({})
+    session.dirty_payloads.clear()
+    session.pending_payload_upserts.clear()
+    session.lifecycle.evaluation_completed(2)
+    session.lifecycle.upsert_emitted(2, session.display_tile_payloads[2].source_id)
+    session.lifecycle.commit_acknowledged(
+        emitted_tiles=(2,),
+        accepted_tiles=(),
+        active_scope=(),
+        presented_identities={},
+    )
+
+    rearmed = session.rearm_visible_parked_payloads()
+
+    assert rearmed == (2,)
+    assert 2 in session.dirty_payloads
+    assert 2 not in session.lifecycle.parked_tiles
 
 
 def test_source_changed_active_claim_does_not_block_retargeted_prepare():

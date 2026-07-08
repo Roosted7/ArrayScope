@@ -142,13 +142,10 @@ class LodLadder:
             candidates.extend(float(step.level) for step in steps)
             return min(candidates) if candidates else float("inf")
 
-        # Pre-native rungs are planned only when they are actually cheap:
-        # reduced-input-capable pipelines evaluate on reduced input directly, and a
-        # retained floor plane commits with no evaluation at all. For
-        # opaque pipelines (FFT and friends) a per-tile "preview" would cost a
-        # FULL native evaluation per tile just to throw resolution away —
-        # twice the work of going native once. Their cheap first pass is the
-        # shared transform-preview queue, not a per-tile native evaluation.
+        # Pre-native rungs are planned only when they are actually cheap.
+        # Per-tile reduced input is valid only for display-LOD-commuting
+        # pipelines; non-commuting but reduced-input-suitable transforms use
+        # the shared transform-preview path outside this ladder.
         cheap_pre_native = policy.reduced_input_available or state.floor_available
 
         # 1) FLOOR — only while the tile has nothing committable at all.

@@ -12,7 +12,7 @@ from arrayscope.display.montage import make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey
 from arrayscope.operations.evaluator import OperationEvaluator
-from arrayscope.operations.pipeline import ArrayDocument
+from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import ClaimOwner, TileLifecycle
 from arrayscope.render import effects
@@ -306,6 +306,16 @@ def test_reduced_preview_base_samples_display_axes_before_operation_input():
     np.testing.assert_array_equal(reduced, expected)
     assert reduced.shape == (2, 3, 3)
     assert preview_state.shape == reduced.shape
+
+
+def test_fft_preview_is_shared_reduced_input_not_per_tile_ladder_input():
+    session = _session()
+    session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=2),))
+    tile = session.plan.tiles[0]
+
+    assert effects.can_evaluate_reduced_preview(session, tile) is True
+    assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is False
+    assert effects.shared_preview_is_useful(session, tile, _demand(1)) is True
 
 
 def test_shared_complex_preview_rows_include_display_histogram():

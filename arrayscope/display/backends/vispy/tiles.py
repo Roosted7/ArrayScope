@@ -593,15 +593,7 @@ class TextureAtlasPool:
         )
         active_set = set(active_tiles)
         removed_tiles = {int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ())}
-        retained_active_keys = {
-            int(tile): self.tile_resident_keys[int(tile)]
-            for tile in active_set
-            if int(tile) not in removed_tiles
-            and int(tile) not in payload_map
-            and int(tile) in self.tile_resident_keys
-            and self.tile_resident_keys[int(tile)] in self.source_ids
-            and int(tile) in self.tile_slots
-        }
+        retained_active_keys: dict[int, object] = {}
         raw_payload_items = tuple(
             (int(tile), payload_map[int(tile)])
             for tile in active_tiles
@@ -618,6 +610,18 @@ class TextureAtlasPool:
             if _payload_supported_by_storage_mode(payload, storage_mode, rgb_already_windowed=rgb_already_windowed)
         )
         unsupported_items = len(raw_payload_items) - len(payload_items)
+        supported_payload_tiles = {int(tile) for tile, _payload in payload_items}
+        retained_active_keys.update(
+            {
+                int(tile): self.tile_resident_keys[int(tile)]
+                for tile in active_set
+                if int(tile) not in removed_tiles
+                and int(tile) not in supported_payload_tiles
+                and int(tile) in self.tile_resident_keys
+                and self.tile_resident_keys[int(tile)] in self.source_ids
+                and int(tile) in self.tile_slots
+            }
+        )
         base_class_items = sum(
             1
             for _tile_number, item_payload in payload_items
@@ -794,9 +798,12 @@ class TextureAtlasPool:
             )
         )
         presented_set = set(presented_tiles)
-        for tile in active_set:
-            if int(tile) not in presented_set and int(tile) not in capacity_skipped_tiles:
-                self._clear_tile_mapping(int(tile))
+        # A bounded commit may include only the first few replacement
+        # payloads while many active tiles still have a valid older LOD
+        # mapping.  Absence from this commit's payload map is not a removal:
+        # keep the old mapping until an explicit removal or an acknowledged
+        # replacement arrives.  Otherwise zoom/retarget drains replace
+        # correct lower-quality pixels with black holes.
         level_swaps_zero_upload = 0
         level_swaps_with_upload = 0
         for tile in payload_presented_tiles:

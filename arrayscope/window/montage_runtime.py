@@ -134,9 +134,10 @@ class MontageRuntimeMixin:
                         mode=str(getattr(session, "lod_policy_mode", "native-only") or "native-only"),
                         floor_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
                         preview_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
-                        # Opaque pipelines (FFT…) must not pay a full native
-                        # evaluation per tile for pre-native rungs; their
-                        # preview/target path is the shared transform pass.
+                        # Per-tile preview rungs are cheap only for pipelines
+                        # whose display-LOD result is independently tileable.
+                        # Non-commuting but reduced-input-suitable pipelines
+                        # such as FFT use the shared transform-preview path.
                         reduced_input_available=reduced_input_available,
                     )
                 ),

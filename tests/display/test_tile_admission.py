@@ -11,6 +11,38 @@ def test_tile_admission_respects_item_cap_and_retained_active():
     assert decision.active == (9, 0)
 
 
+def test_tile_admission_item_free_entries_bypass_item_cap_but_pay_bytes():
+    queue = TileAdmissionQueue(TilePriorityContext.from_tiles(visible_tiles=(0, 1, 2)))
+
+    decision = queue.admit(
+        (0, 1, 2),
+        cost_fn=lambda tile: 10,
+        item_free_fn=lambda tile: int(tile) in {0, 1},
+        max_items=1,
+        max_bytes=25,
+    )
+
+    assert decision.admitted == (0, 1)
+    assert decision.deferred == (2,)
+    assert decision.admitted_bytes == 20
+
+
+def test_tile_admission_item_free_entries_respect_burst_cap():
+    queue = TileAdmissionQueue(TilePriorityContext.from_tiles(visible_tiles=(0, 1, 2, 3)))
+
+    decision = queue.admit(
+        (0, 1, 2, 3),
+        cost_fn=lambda tile: 1,
+        item_free_fn=lambda _tile: True,
+        max_item_free=2,
+        max_items=1,
+        max_bytes=10,
+    )
+
+    assert decision.admitted == (0, 1)
+    assert decision.deferred == (2, 3)
+
+
 def test_tile_admission_respects_byte_cap_after_first_item():
     queue = TileAdmissionQueue(TilePriorityContext.from_tiles(visible_tiles=(0, 1, 2)))
 

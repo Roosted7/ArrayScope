@@ -90,16 +90,15 @@ def pipeline_commutes_for_display_lod(operations, base_shape, base_dtype=None) -
 def pipeline_supports_reduced_display_lod(operations, base_shape, base_dtype=None, *, display_axes=()) -> bool:
     """True when display axes may be reduced before evaluating this pipeline.
 
-    This is broader than ``pipeline_commutes_for_display_lod``.  Pointwise
-    operations may touch display axes only when they declare ``lod_commuting``;
-    non-commuting operations are still compatible when their affected axes are
-    completely outside the display axes (for example an FFT over a montage
-    axis while x/y are the display axes).
+    This is broader than ``pipeline_commutes_for_display_lod``.  It answers a
+    display-quality question: may the operation run on reduced input to produce
+    a lower-LOD presentation?  Shape-preserving transforms such as FFT are
+    allowed even though they do not mathematically commute with box reduction;
+    exact/native consumers still use the native pipeline.
     """
 
     shape = tuple(int(size) for size in base_shape)
     dtype = base_dtype
-    display = set(_normalize_axes(display_axes, ndim=len(shape)))
     for operation in tuple(operations or ()):
         capabilities = getattr(operation, "capabilities", None)
         output_shape = getattr(operation, "output_shape", None)
@@ -109,10 +108,8 @@ def pipeline_supports_reduced_display_lod(operations, base_shape, base_dtype=Non
         if next_shape != shape:
             return False
         caps = normalize_capabilities(capabilities(shape, dtype), ndim=len(shape))
-        if not bool(caps.lod_commuting):
-            touched = set(caps.blocking_axes) | set(caps.expands_request_axes) | set(_operation_declared_axes(operation))
-            if touched & display:
-                return False
+        if caps.kind is OperationKind.REDUCTION:
+            return False
         output_dtype = getattr(operation, "output_dtype", None)
         if callable(output_dtype):
             dtype = output_dtype(dtype)

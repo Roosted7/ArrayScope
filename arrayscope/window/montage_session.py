@@ -579,6 +579,25 @@ class MontageRenderSession:
 
         return self.lifecycle.parked_tiles
 
+    def rearm_visible_parked_payloads(self) -> tuple[int, ...]:
+        """Re-arm parked tiles that are visible and have something to present."""
+
+        planned = {
+            int(tile.montage_index)
+            for tile in tuple(getattr(self, "visible_tiles", ()) or ())
+            if int(tile.montage_index) not in self.skipped_tiles
+        }
+        presentable = {
+            int(tile)
+            for tile in planned
+            if int(tile) in self.display_tile_payloads or int(tile) in self.rendered_tiles
+        }
+        rearmed = self.lifecycle.rearm_for_scope(presentable)
+        for tile_number in rearmed:
+            if int(tile_number) in self.display_tile_payloads or int(tile_number) in self.rendered_tiles:
+                self.dirty_payloads[int(tile_number)] = None
+        return tuple(rearmed)
+
     @property
     def level_revision(self) -> int:
         return int(self.level_generation.revision)
@@ -1391,6 +1410,8 @@ class MontageRenderSession:
         max_upserts: int | None = None,
         max_upsert_bytes: int | None = None,
         upsert_cost_fn=None,
+        item_free_upsert_fn=None,
+        max_item_free_upserts: int | None = None,
         pace_resident_retargets: bool = False,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         source_ids = dict(source_ids or {})
@@ -1427,7 +1448,12 @@ class MontageRenderSession:
             for tile in tuple(self.visible_tiles)
             if int(tile.montage_index) not in self.skipped_tiles
         )
-        active = tuple(int(tile) for tile in planned if int(tile) in current_loaded)
+        payload_backed = set(int(tile) for tile in self.display_tile_payloads)
+        active = tuple(
+            int(tile)
+            for tile in planned
+            if int(tile) in current_loaded or int(tile) in payload_backed
+        )
         stale_level_tiles = ()
         if self.has_pending_level_update():
             # Filter before prioritizing: ordering every active tile per commit
@@ -1823,6 +1849,12 @@ class MontageRenderSession:
             tuple(all_candidate_upserts),
             retained=(),
             free_fn=(lambda tile: int(tile) in free_retarget_tiles) if free_retarget_tiles else None,
+            item_free_fn=(
+                (lambda tile: bool(item_free_upsert_fn(all_candidate_upserts[int(tile)])))
+                if item_free_upsert_fn is not None
+                else None
+            ),
+            max_item_free=max_item_free_upserts,
             cost_fn=(
                 (
                     lambda tile: (

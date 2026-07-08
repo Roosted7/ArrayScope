@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -1373,6 +1374,33 @@ def test_reduced_class_budget_exhaustion_retains_previous_mapping():
     assert stats.presented_tiles == (0,)
     assert dict(pool.tile_slots) == native_mapping
     assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
+
+
+def test_unsupported_replacement_retains_previous_mapping():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    original = {0: payload(0, 1.0)}
+    pool.update_payloads(
+        original,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+    )
+    original_mapping = dict(pool.tile_slots)
+    incompatible = replace(payload(0, 2.0), texture_kind=TexturePlaneKind.RGB8)
+
+    _uvs, stats = pool.update_payloads(
+        {0: incompatible},
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+    )
+
+    assert stats.items_skipped == 1
+    assert stats.presented_tiles == (0,)
+    assert dict(pool.tile_slots) == original_mapping
+    assert pool.presented_identities()[0] == original[0].source_id
 
 
 def test_cold_fill_at_reduced_level_performs_zero_native_uploads():

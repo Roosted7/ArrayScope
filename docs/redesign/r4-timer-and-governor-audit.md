@@ -96,6 +96,14 @@ admission boundary:
     **oldest low-quality tiles first**.
   "Behind" is the backlog the drain/commit budget already tracks; wire it in
   rather than inventing a new counter.
+- **Preview batch sizing belongs to kernel/backend admission, not montage
+  session state.** Larger chunks for preview production may be the right
+  latency/throughput tradeoff, especially for shared reduced-input passes, but
+  R4 must express that as kernel-owned admission and backend-owned upload
+  capacity. Do not reintroduce a session-local deferred preview-row queue or a
+  replan loop that stores already-produced preview rows outside the lifecycle;
+  that duplicates priority state and can leave visible slots black while no
+  worker is actually blocked.
 - **Never downgrade LOD.** A committed/uploaded tile is always kept (prefer
   target, then finer, then coarser); a presented tile is never swapped to a
   *lower* LOD except under memory pressure, and even then only as the last

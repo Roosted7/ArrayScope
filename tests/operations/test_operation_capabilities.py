@@ -139,3 +139,21 @@ def test_pipeline_commutes_for_display_lod_requires_every_stage_to_commute():
     # Capability-less callables are conservatively non-commuting.
     assert pipeline_commutes_for_display_lod((object(),), shape, np.float32) is False
     assert pipeline_commutes_for_display_lod((), shape, np.float32) is True
+
+
+def test_fft_pipeline_is_reduced_input_suitable_without_lod_commuting():
+    from arrayscope.operations.capabilities import (
+        pipeline_commutes_for_display_lod,
+        pipeline_supports_reduced_display_lod,
+    )
+
+    shape = (4, 8, 16)
+    operations = (CenteredFFT(axis=1),)
+
+    assert pipeline_commutes_for_display_lod(operations, shape, np.float32) is False
+    assert pipeline_supports_reduced_display_lod(
+        operations,
+        shape,
+        np.float32,
+        display_axes=(0, 1),
+    ) is True

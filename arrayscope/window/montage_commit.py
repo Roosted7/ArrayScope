@@ -1144,6 +1144,7 @@ class MontagePipelineEffects:
             renderer._montage_identity_repair_commits = int(getattr(renderer, "_montage_identity_repair_commits", 0) or 0) + 1
             session.final_commit_pending = True
             session.flush_pending = True
+        rearmed_parked = tuple(getattr(session, "rearm_visible_parked_payloads", lambda: ())() or ())
         renderer._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
         complete_inline_work(
             renderer,
@@ -1163,6 +1164,7 @@ class MontagePipelineEffects:
             or getattr(session, "pending_removals", None)
             or getattr(session, "pending_payload_upserts", None)
             or (session.has_pending_level_update() and session.has_stale_level_presentations())
+            or rearmed_parked
         )
         followup_start = perf_counter()
         session.note_committed()
@@ -1686,8 +1688,12 @@ def complete_deferred_stage_fan_in(renderer, session) -> bool:
     stage_plan = build_stage_fan_in_plan(renderer, session.document, missing_tiles)
     renderer._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
     attach_stage_fan_in_plan(session, stage_plan)
-    for tile in missing_tiles:
-        session.enqueue_pending_tile(tile)
+    if render_lod.native_missing_tile_queue_required(
+        str(getattr(session, "lod_policy_mode", "")),
+        getattr(getattr(session, "lod_policy_decision", None), "demand", None),
+    ):
+        for tile in missing_tiles:
+            session.enqueue_pending_tile(tile)
     submit_stage_tasks(renderer, session, stage_plan["stage_requests"])
     renderer.retarget_montage_pipeline(session)
     return True
@@ -1994,7 +2000,7 @@ def vispy_payload_upload_nbytes(payload) -> int:
     return max(1, int(total))
 
 
-def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
+def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
     if not persistent_gpu_tile_residency_backend(window, session):
         return {}
     interactive = interactive_active(window)
@@ -2014,7 +2020,33 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, int]:
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
         "upsert_cost_fn": vispy_payload_upload_nbytes,
+        "item_free_upsert_fn": vispy_preview_payload_item_free,
+        "max_item_free_upserts": preview_payload_burst_limit(batch_limit),
     }
+
+
+def preview_payload_burst_limit(batch_limit: int) -> int:
+    """Bound VisPy preview/floor first-fill bursts.
+
+    Preview payloads are cheaper than exact/native uploads and should not be
+    limited to the cold item cap one-by-one. They still have per-item GUI and
+    atlas bookkeeping cost, so the burst is finite and follows the existing
+    feedback batch size instead of introducing a second pacing system.
+    """
+
+    return max(8, min(64, max(1, int(batch_limit)) * 16))
+
+
+def vispy_preview_payload_item_free(payload) -> bool:
+    """Preview/floor pixels are byte-budgeted, not item-budgeted, on VisPy.
+
+    Persistent GPU presentation pays real upload bytes for these payloads, but
+    the per-item cap is the wrong limiter for a first-pixel fill made of many
+    tiny reduced-LOD tiles.  Native/exact uploads still count as ordinary
+    items, so refinement remains paced.
+    """
+
+    return str(getattr(payload, "quality", "exact") or "exact") == "preview"
 
 
 def _tile_presentation_ui_work_decision(window, session, channel: str, *, interactive: bool):
