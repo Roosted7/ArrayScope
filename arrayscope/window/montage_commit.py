@@ -803,7 +803,22 @@ class MontagePipelineEffects:
         renderer = self.renderer
         session = self.session
         apply_start = perf_counter()
-        if first_display_commit:
+        if first_display_commit and self._commit_direct_delta(
+            display_image,
+            geometry,
+            tile_state=tile_state,
+            base_tile_state=base_tile_state,
+            tile_delta=tile_delta,
+            semantic_source=semantic_source,
+            applied_level_source=applied_level_source,
+            histogram_plot_data=histogram_plot_data,
+            explicit_auto=explicit_auto,
+            requested_levels=requested_levels,
+            semantic_commit=semantic_commit,
+            allow_uncommitted_persistent=True,
+        ):
+            pass
+        elif first_display_commit:
             renderer._apply_full_display_image(
                 display_image,
                 geometry=geometry,
@@ -880,10 +895,15 @@ class MontagePipelineEffects:
         explicit_auto: bool,
         requested_levels,
         semantic_commit: bool,
+        allow_uncommitted_persistent: bool = False,
     ) -> bool:
         renderer = self.renderer
         session = self.session
-        if not direct_montage_tile_delta_commit_enabled(renderer, session):
+        if not direct_montage_tile_delta_commit_enabled(
+            renderer,
+            session,
+            allow_uncommitted_persistent=allow_uncommitted_persistent,
+        ):
             return False
         previous_frame = getattr(renderer.win, "_committed_display_frame", None)
         if previous_frame is None or not isinstance(getattr(previous_frame, "value_source", None), TiledValueSource):
@@ -1455,10 +1475,12 @@ def persistent_tile_layer_fast_drain_enabled(window, session) -> bool:
     return persistent_gpu_tile_residency_backend(window, session)
 
 
-def direct_montage_tile_delta_commit_enabled(window, session) -> bool:
-    if not bool(getattr(session, "display_committed", False)):
-        return False
+def direct_montage_tile_delta_commit_enabled(window, session, *, allow_uncommitted_persistent: bool = False) -> bool:
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
+    if not bool(getattr(session, "display_committed", False)) and not (
+        bool(allow_uncommitted_persistent) and bool(capabilities.persistent_tile_residency)
+    ):
+        return False
     return bool(capabilities.persistent_tile_residency or not capabilities.shader_windowing)
 
 

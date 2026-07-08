@@ -656,6 +656,33 @@ def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
     assert montage_commit.direct_montage_tile_delta_commit_enabled(window, session) is False
 
 
+def test_vispy_persistent_tile_layer_can_direct_delta_first_session_commit():
+    from arrayscope.window import montage_commit
+
+    session = SimpleNamespace(display_committed=False)
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="vispy",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            )
+        ),
+        _viewport_interaction_active=False,
+    )
+    window.win = window
+
+    assert (
+        montage_commit.direct_montage_tile_delta_commit_enabled(
+            window,
+            session,
+            allow_uncommitted_persistent=True,
+        )
+        is True
+    )
+    assert montage_commit.direct_montage_tile_delta_commit_enabled(window, session) is False
+
+
 def test_pyqtgraph_tile_layer_feedback_passes_cost_class_signature():
     from arrayscope.window import montage_commit
 
