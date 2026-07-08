@@ -1872,7 +1872,7 @@ def _requested_direct_payload_tiles(tile_payloads, tile_delta) -> set[int]:
     if tile_delta is None:
         return payload_tiles
     active_tiles = set(int(tile) for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ()))
-    return payload_tiles.intersection(active_tiles)
+    return active_tiles
 
 
 def _shader_mapping_key(mapping):

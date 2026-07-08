@@ -592,6 +592,16 @@ class TextureAtlasPool:
             else tuple(sorted(payload_map))
         )
         active_set = set(active_tiles)
+        removed_tiles = {int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ())}
+        retained_active_keys = {
+            int(tile): self.tile_resident_keys[int(tile)]
+            for tile in active_set
+            if int(tile) not in removed_tiles
+            and int(tile) not in payload_map
+            and int(tile) in self.tile_resident_keys
+            and self.tile_resident_keys[int(tile)] in self.source_ids
+            and int(tile) in self.tile_slots
+        }
         raw_payload_items = tuple(
             (int(tile), payload_map[int(tile)])
             for tile in active_tiles
@@ -642,11 +652,17 @@ class TextureAtlasPool:
         )
         active = {int(tile_number) for tile_number, _payload in payload_items}
         active_keys = {_resident_key(payload) for _tile_number, payload in payload_items}
+        active_keys.update(retained_active_keys.values())
         self.active_resident_keys = set(active_keys)
         self.active_base_source_ids = {
             _lod_invariant_source_id(payload.source_id) for _tile_number, payload in payload_items
         }
-        for tile_number in tuple(getattr(tile_delta, "removals", ()) or ()):
+        self.active_base_source_ids.update(
+            _lod_invariant_source_id(self.source_ids[key])
+            for key in retained_active_keys.values()
+            if key in self.source_ids
+        )
+        for tile_number in tuple(removed_tiles):
             self._clear_tile_mapping(int(tile_number))
         near = {int(tile) for tile in tuple(near_tiles or ())}
         near_keys = self._near_resident_keys(near_tile_source_ids)
@@ -749,11 +765,33 @@ class TextureAtlasPool:
             self.source_ids[resident_key] = payload.source_id
             updated += 1
 
-        presented_tiles = tuple(
+        payload_presented_tiles = tuple(
             int(tile_number)
             for tile_number, payload in payload_items
             if int(tile_number) in active_tile_slots
             and self.source_ids.get(_resident_key(payload)) == payload.source_id
+        )
+        presented_tiles = tuple(
+            dict.fromkeys(
+                (
+                    *payload_presented_tiles,
+                    *(
+                        int(tile)
+                        for tile, key in sorted(retained_active_keys.items())
+                        if int(tile) not in removed_tiles
+                        and key in self.source_ids
+                        and int(tile) in self.tile_slots
+                    ),
+                    *(
+                        int(tile)
+                        for tile in sorted(capacity_skipped_tiles)
+                        if int(tile) not in removed_tiles
+                        and int(tile) in self.tile_resident_keys
+                        and self.tile_resident_keys[int(tile)] in self.source_ids
+                        and int(tile) in self.tile_slots
+                    ),
+                )
+            )
         )
         presented_set = set(presented_tiles)
         for tile in active_set:
@@ -761,7 +799,7 @@ class TextureAtlasPool:
                 self._clear_tile_mapping(int(tile))
         level_swaps_zero_upload = 0
         level_swaps_with_upload = 0
-        for tile in presented_tiles:
+        for tile in payload_presented_tiles:
             new_key = active_tile_keys[int(tile)]
             previous_key = self.tile_resident_keys.get(int(tile))
             if (
@@ -813,11 +851,11 @@ class TextureAtlasPool:
             texture_prepare_ms=texture_prepare_ms,
             texture_submit_ms=texture_submit_ms,
             page_count=len(self.pages),
-            active_pages=len({self.tile_slots[int(tile)][0] for tile in active if int(tile) in self.tile_slots}),
+            active_pages=len({self.tile_slots[int(tile)][0] for tile in presented_set if int(tile) in self.tile_slots}),
             device_max_texture_size=self.max_texture_size,
             budget_bytes=self.budget_bytes,
             near_resident_items=len(near_keys.intersection(self.source_ids)),
-            warm_resident_items=max(0, self.resident_count - len(active)),
+            warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
             evicted_near_items=self.evicted_near_count - evicted_near_before,
             lod_level=_max_payload_lod_level(payload_map),
             lod_factor=_max_payload_lod_factor(payload_map),
@@ -1421,8 +1459,15 @@ class GpuMontageLayer:
         page_payloads_by_index: list[dict[int, DisplayTilePayload]] = [{} for _page in self._pool.pages]
         active = {int(tile) for tile in tuple(presented_tiles or ())}
         payload_map = {int(tile): payload for tile, payload in dict(payloads or {}).items()}
+        previous_payloads = {
+            int(tile): payload
+            for page_payloads in tuple(self._page_payloads_by_index or ())
+            for tile, payload in dict(page_payloads or {}).items()
+        }
         for tile in sorted(active):
             payload = payload_map.get(int(tile))
+            if payload is None:
+                payload = previous_payloads.get(int(tile))
             if payload is None:
                 continue
             page_index, _slot = self._pool.tile_slots.get(int(tile), (-1, -1))

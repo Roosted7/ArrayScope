@@ -444,12 +444,20 @@ class MontagePipelineEffects:
         tiles = tuple(render_effects.shared_transform_candidate_tiles(session, level=level))
         if not tiles:
             return 0
-        marker = (level, tuple(int(tile.montage_index) for tile in tiles))
-        if getattr(session, "_shared_floor_marker", None) == marker:
-            return 0  # identical batch already in flight or admitted
-        session._shared_floor_marker = marker
-        session._shared_floor_tiles = tuple(int(tile.montage_index) for tile in tiles)
         shader_display = bool(getattr(session, "shader_display", False))
+        marker = _shared_transform_marker(
+            session,
+            demand=demand,
+            level=level,
+            tiles=tiles,
+            shader_display=shader_display,
+        )
+        if getattr(session, "_shared_floor_inflight_marker", None) == marker:
+            return 0  # identical batch already in flight
+        if getattr(session, "_shared_floor_admitted_marker", None) == marker:
+            return 0  # identical batch already in flight or admitted
+        session._shared_floor_inflight_marker = marker
+        session._shared_floor_tiles = tuple(int(tile.montage_index) for tile in tiles)
 
         def evaluate(token=None, tiles=tiles, level=level):
             return render_effects.evaluate_shared_preview(
@@ -465,18 +473,22 @@ class MontagePipelineEffects:
             )
 
         def done(rows):
-            if getattr(session, "_shared_floor_marker", None) == marker:
-                session._shared_floor_marker = None
+            if getattr(session, "_shared_floor_inflight_marker", None) == marker:
+                session._shared_floor_inflight_marker = None
                 session._shared_floor_tiles = ()
             if not rows or not self._session_is_current():
                 return
-            self._admit_preview_payload(int(rows[0][0]), tuple(rows))
-            self.request_presentation()
+            admitted = self._admit_preview_payload(int(rows[0][0]), tuple(rows))
+            if admitted:
+                session._shared_floor_admitted_marker = marker
+                self.request_presentation()
 
         def dropped():
-            if getattr(session, "_shared_floor_marker", None) == marker:
-                session._shared_floor_marker = None
+            if getattr(session, "_shared_floor_inflight_marker", None) == marker:
+                session._shared_floor_inflight_marker = None
                 session._shared_floor_tiles = ()
+            if getattr(session, "_shared_floor_admitted_marker", None) == marker:
+                session._shared_floor_admitted_marker = None
 
         handle = renderer.win.kernel.submit(
             TaskSpec(
@@ -666,12 +678,13 @@ class MontagePipelineEffects:
         session.dirty_tiles.append(int(tile.montage_index))
         return rendered_tile_nbytes(rendered)
 
-    def _admit_preview_payload(self, tile_number: int, payload) -> None:
+    def _admit_preview_payload(self, tile_number: int, payload) -> bool:
         session = self.session
         if not self._session_is_current():
-            return
+            return False
         rows = payload if _looks_like_shared_preview_rows(payload) else ((int(tile_number), *payload),)
         upserted = False
+        admitted_any = False
         visible_previews = 0
         for row in tuple(rows or ()):
             tile_number, key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = preview_row_parts(row)
@@ -687,6 +700,7 @@ class MontagePipelineEffects:
             )
             if not admitted:
                 continue
+            admitted_any = True
             session._ensure_floor_payloads((tile_number,))
             preview_upserted = (
                 int(tile_number) in session.pending_payload_upserts
@@ -701,6 +715,7 @@ class MontagePipelineEffects:
         if upserted:
             session.flush_pending = True
             session.final_commit_pending = True
+        return bool(admitted_any)
 
     # ------------------------------------------------------------------ commit
 
@@ -770,8 +785,9 @@ class MontagePipelineEffects:
                 session.note_committed()
                 self._finish_after_noop_commit()
                 return
-            level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
-            renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
+            if _commit_should_queue_level_stats(renderer, first_display_commit=first_display_commit):
+                level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
+                renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
             rendered_geometry = replace(rendered_geometry, montage_tile_states=session.ensure_tile_states())
             renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
             prepare_apply_start = perf_counter()
@@ -1066,7 +1082,6 @@ class MontagePipelineEffects:
     def _finish_commit(self, report, tile_state, *, commit_start: float) -> None:
         renderer = self.renderer
         session = self.session
-        renderer.request_montage_replan(session)
         identity_start = perf_counter()
         identity_mismatches = session.backend_identity_mismatch_tiles()
         renderer._last_montage_tile_identity_check_ms = (perf_counter() - identity_start) * 1000.0
@@ -1100,6 +1115,12 @@ class MontagePipelineEffects:
         if upload_backlog:
             session.final_commit_pending = True
             session.flush_pending = True
+        if (
+            upload_backlog
+            or identity_mismatches
+            or _commit_report_accepted_preview_payload(report, tile_state)
+        ):
+            renderer.request_montage_replan(session)
         renderer._settle_montage_visible_plan_if_complete(session)
         renderer._finish_montage_session_if_complete(session)
         if not upload_backlog:
@@ -1218,6 +1239,57 @@ def _shared_floor_candidate_tiles(session):
         if getattr(session, "display_tile_payloads", {}).get(tile_number) is not None:
             continue
         yield candidate
+
+
+def _shared_transform_marker(session, *, demand, level: int, tiles, shader_display: bool) -> tuple:
+    """Identity of one shared reduced-display batch.
+
+    Montage slot numbers alone are not stable content: index-window retargets
+    intentionally reuse slots for different source indices.  The marker must
+    therefore include the current semantic source for each covered tile, plus
+    the demand fields that affect the pyramid key.
+    """
+
+    desired_level = int(getattr(demand, "desired_level", 0) or 0)
+    desired_factor_xy = tuple(int(value) for value in tuple(getattr(demand, "desired_factor_xy", ()) or ()))
+    acceptable_levels = tuple(int(value) for value in tuple(getattr(demand, "acceptable_levels", ()) or ()))
+    tile_identity = tuple(
+        (
+            int(tile.montage_index),
+            int(tile.source_index),
+            session.tile_semantic_source_id(tile.source_index),
+        )
+        for tile in tuple(tiles or ())
+    )
+    return (
+        "shared-transform",
+        getattr(session, "semantic_key", None),
+        int(level),
+        desired_level,
+        desired_factor_xy,
+        acceptable_levels,
+        bool(shader_display),
+        tile_identity,
+    )
+
+
+def _commit_report_accepted_preview_payload(report, tile_state) -> bool:
+    committed = getattr(report, "committed_upserts", None)
+    if not committed:
+        return False
+    payloads = dict(getattr(tile_state, "payloads", {}) or {})
+    for tile_number in tuple(committed or ()):
+        payload = payloads.get(int(tile_number))
+        if payload is not None and str(getattr(payload, "quality", "exact")) == "preview":
+            return True
+    return False
+
+
+def _commit_should_queue_level_stats(renderer, *, first_display_commit: bool) -> bool:
+    capabilities = image_view_backend_capabilities(renderer.win.img_view)
+    if str(getattr(capabilities, "name", "")).lower() != "vispy":
+        return True
+    return bool(first_display_commit)
 
 
 

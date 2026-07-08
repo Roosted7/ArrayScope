@@ -223,6 +223,50 @@ def test_dirty_resident_payload_reuses_uploaded_source_when_source_id_matches():
     assert len(pool.scalar_texture.updates) == clean_texture_updates
 
 
+def test_bounded_active_commit_retains_existing_presented_mappings():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    payloads = {index: payload(index, float(index)) for index in range(4)}
+    delta = SimpleNamespace(
+        upserts=payloads,
+        removals=(),
+        active_tiles=(0, 1, 2, 3),
+        planned_tiles=(0, 1, 2, 3),
+        near_tiles=(0, 1, 2, 3),
+        near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+    )
+    pool.update_payloads(
+        payloads,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=4,
+        tile_delta=delta,
+    )
+    retained_keys = dict(pool.tile_resident_keys)
+
+    _uvs, stats = pool.update_payloads(
+        {0: payloads[0]},
+        tile_shape=(2, 2),
+        dirty_tiles=(0,),
+        rgb_already_windowed=False,
+        reserve_count=4,
+        tile_delta=SimpleNamespace(
+            upserts={0: payloads[0]},
+            removals=(),
+            active_tiles=(0, 1, 2, 3),
+            planned_tiles=(0, 1, 2, 3),
+            near_tiles=(0, 1, 2, 3),
+            near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+        ),
+    )
+
+    assert set(stats.presented_tiles) == {0, 1, 2, 3}
+    assert stats.committed_upserts == (0,)
+    assert {tile: pool.tile_resident_keys[tile] for tile in (1, 2, 3)} == {
+        tile: retained_keys[tile] for tile in (1, 2, 3)
+    }
+
+
 def test_allocated_slot_without_uploaded_source_is_not_treated_clean():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     payloads = {0: payload(0, 1.0)}
@@ -466,6 +510,63 @@ def test_new_atlas_page_inherits_current_levels_without_reuploading_old_geometry
     assert layer._visuals_by_page[1].levels[-1] == (10.0, 20.0)
     assert first_visual.geometry_calls == 1
     assert layer._visuals_by_page[1].geometry_calls == 1
+
+
+def test_bounded_gpu_layer_commit_keeps_retained_tile_geometry():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=8),
+    )
+    montage = SimpleNamespace(
+        indices=tuple(range(4)),
+        tile_width=2,
+        tile_height=2,
+        columns=4,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",) * 4)
+    payloads = {index: payload(index, float(index)) for index in range(4)}
+    first_delta = SimpleNamespace(
+        upserts=payloads,
+        removals=(),
+        active_tiles=(0, 1, 2, 3),
+        planned_tiles=(0, 1, 2, 3),
+        near_tiles=(0, 1, 2, 3),
+        near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+    )
+    layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=first_delta,
+    )
+
+    bounded = layer.update(
+        payloads={0: payloads[0]},
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=(0,),
+        rgb_already_windowed=False,
+        tile_delta=SimpleNamespace(
+            upserts={0: payloads[0]},
+            removals=(),
+            active_tiles=(0, 1, 2, 3),
+            planned_tiles=(0, 1, 2, 3),
+            near_tiles=(0, 1, 2, 3),
+            near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+        ),
+    )
+
+    assert set(bounded.presented_tiles) == {0, 1, 2, 3}
+    assert len(layer._page_payloads_by_index[0]) == 4
+    assert layer._visuals_by_page[0].visible
 
 
 def test_mapping_only_update_is_uniform_across_pages_without_texture_or_vertex_uploads():
@@ -1269,7 +1370,7 @@ def test_reduced_class_budget_exhaustion_retains_previous_mapping():
 
     # No budget headroom for a second shape class: the reduced payload is
     # skipped and the native mapping stays presented rather than clearing.
-    assert stats.presented_tiles == ()
+    assert stats.presented_tiles == (0,)
     assert dict(pool.tile_slots) == native_mapping
     assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
 

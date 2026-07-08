@@ -2662,7 +2662,11 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     payloads = dict(tile_payloads or {})
     backend_presented = getattr(stats, "presented_tiles", None)
     if backend_presented is not None:
-        presented = frozenset(int(tile) for tile in tuple(backend_presented or ()) if int(tile) in payloads)
+        # Backend-reported presentation is physical truth, not limited to the
+        # payload subset carried by this bounded delta.  Restricting it to
+        # ``payloads`` made lifecycle presentation collapse during progressive
+        # LOD commits even though resident backend slots remained visible.
+        presented = frozenset(int(tile) for tile in tuple(backend_presented or ()))
     else:
         visible_items = int(getattr(stats, "visible_items", len(payloads)) or 0)
         if visible_items < len(payloads):

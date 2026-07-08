@@ -64,16 +64,13 @@ class LevelStatsService:
         return 1
 
     def _preview_evidence_can_refine(self) -> bool:
-        """Whether a preview tile's stats may count as refined for this backend.
+        """Whether preview evidence may close the refined level pass."""
 
-        Shader-windowing backends (VisPy) apply levels as a cheap GPU update,
-        so a preview tile's better-sampled stats refine the shown level in
-        place. CPU-LUT backends (PyQtGraph) bake levels into pixels at commit
-        and must wait for the final native/target evidence, so preview evidence
-        stays provisional there.
-        """
-
-        return bool(image_view_backend_capabilities(getattr(self.win, "img_view", None)).shader_windowing)
+        # Preview/reduced tiles are useful first-display evidence, including on
+        # shader-windowing backends where levels can be applied cheaply. They
+        # must still remain provisional: promoting them to refined can suppress
+        # the final target-quality histogram/window-level pass.
+        return False
 
     def _update_montage_level_bounds_from_rendered(self, level_key, rendered, *, expected_indices=None, refined: bool = False) -> None:
         if expected_indices is None:
@@ -82,12 +79,6 @@ class LevelStatsService:
         tracker = self._montage_level_tracker()
         tracker.ensure_expected(level_key, expected_indices)
         source_index = int(rendered.tile.source_index)
-        # "Refined" describes how densely the *shown* quality was sampled, not
-        # whether the data is native — so on a shader-windowing backend a
-        # reduced-input preview tile refines the stats of the level it presents
-        # just like an exact tile does. A CPU-LUT backend bakes levels into
-        # pixels and must wait for the final (native/target) evidence, so
-        # preview evidence must not promote to refined there.
         if refined and _rendered_tile_is_preview(rendered) and not self._preview_evidence_can_refine():
             refined = False
         refined = bool(refined)
@@ -172,6 +163,73 @@ class LevelStatsService:
             return
         pending.append(rendered)
         pending_sources.add(source_index)
+
+    def _rendered_tile_for_current_payload(self, session, tile_number: int, payload) -> RenderedTile | None:
+        rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
+        if rendered is not None:
+            return rendered
+        plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        if 0 <= int(tile_number) < len(plan_tiles):
+            tile = plan_tiles[int(tile_number)]
+            if int(getattr(tile, "montage_index", int(tile_number))) == int(tile_number):
+                if int(getattr(payload, "source_index", -1)) != int(getattr(tile, "source_index", -2)):
+                    return None
+                return _rendered_tile_from_previous_payload(tile, payload)
+        for offset, tile in enumerate(plan_tiles):
+            if int(getattr(tile, "montage_index", offset)) != int(tile_number):
+                continue
+            if int(getattr(payload, "source_index", -1)) != int(getattr(tile, "source_index", -2)):
+                return None
+            return _rendered_tile_from_previous_payload(tile, payload)
+        return None
+
+    def _queue_montage_current_level_evidence(self, session) -> int:
+        """Seed rough/full semantic level evidence from currently displayed payloads."""
+
+        tracker = self._montage_level_tracker()
+        expected = self._montage_level_expected_indices(session)
+        tracker.ensure_expected(session.level_key, expected)
+        summary = tracker.summary_for(session.level_key)
+        complete = summary is not None and summary.rank in {
+            LevelSourceRank.MONTAGE_COMPLETE,
+            LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        }
+        if complete:
+            return 0
+        payloads = {
+            int(tile): payload
+            for tile, payload in (getattr(session, "display_tile_payloads", {}) or {}).items()
+            if self._rendered_tile_for_current_payload(session, int(tile), payload) is not None
+        }
+        if not payloads:
+            return 0
+        return self._queue_montage_level_stats_for_payloads(session, payloads)
+
+    def _queue_montage_final_level_refinements(self, session) -> None:
+        """Queue settled final/target payloads for refined stats.
+
+        First-display preview stats are deliberately provisional. Once the
+        montage itself is complete, exact target payloads can feed the refined
+        histogram/window-level pass without competing with visible rendering.
+        """
+
+        queued_tiles: set[int] = set()
+        for tile_number, rendered in tuple((getattr(session, "rendered_tiles", {}) or {}).items()):
+            if _rendered_tile_is_preview(rendered):
+                continue
+            queued_tiles.add(int(tile_number))
+            self._queue_montage_level_refinement(session, rendered)
+
+        for tile_number, payload in tuple((getattr(session, "display_tile_payloads", {}) or {}).items()):
+            tile_number = int(tile_number)
+            if tile_number in queued_tiles:
+                continue
+            if str(getattr(payload, "quality", "exact") or "exact") == "preview":
+                continue
+            rendered = self._rendered_tile_for_current_payload(session, tile_number, payload)
+            if rendered is None:
+                continue
+            self._queue_montage_level_refinement(session, rendered)
 
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
         expected = self._montage_level_expected_indices(session)
@@ -355,6 +413,10 @@ class LevelStatsService:
         inspected = 0
         while remaining > 0 and inspected < int(budget.item_cap):
             rendered = getattr(session, "rendered_tiles", {}).get(cursor)
+            if rendered is None:
+                payload = (getattr(session, "display_tile_payloads", {}) or {}).get(cursor)
+                if payload is not None:
+                    rendered = self._rendered_tile_for_current_payload(session, cursor, payload)
             cursor = (cursor + 1) % tile_count
             remaining -= 1
             inspected += 1

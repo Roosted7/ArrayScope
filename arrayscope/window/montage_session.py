@@ -1623,7 +1623,10 @@ class MontageRenderSession:
             floor_payload_tiles = tuple(planned_numbers)
             if max_upserts is not None:
                 floor_payload_tiles = prioritize(floor_payload_tiles)
-            self._ensure_floor_payloads(floor_payload_tiles, max_count=build_limit)
+            self._ensure_floor_payloads(
+                floor_payload_tiles,
+                max_count=build_limit if pace_resident_retargets else None,
+            )
         built = 0
         for tile_number in dirty_payload_tiles:
             if build_limit is not None and built >= build_limit:
@@ -1639,7 +1642,7 @@ class MontageRenderSession:
             floor_build_limit = None
             if max_upserts is not None:
                 floor_payload_tiles = prioritize(floor_payload_tiles)
-                floor_build_limit = build_limit
+                floor_build_limit = build_limit if pace_resident_retargets else None
             self._ensure_floor_payloads(floor_payload_tiles, max_count=floor_build_limit)
         unpresented_active_tiles = tuple(
             int(tile)
@@ -1775,6 +1778,17 @@ class MontageRenderSession:
             and int(tile) not in stale_level_tiles
             and previous_payloads.get(int(tile)) is payload
         )
+        if not pace_resident_retargets:
+            # Preview/floor payloads are the correctness path for persistent
+            # residency backends: the reduced plane is already materialized,
+            # and exact/native refinement remains budgeted separately.  Do not
+            # let the item cap turn a full resident lower-LOD fill into black
+            # holes that only clear after scrolling stops.
+            resident_retarget_tiles.update(
+                int(tile)
+                for tile, payload in upserts.items()
+                if str(getattr(payload, "quality", "exact")) == "preview"
+            )
         cold_upserts = {
             int(tile): payload
             for tile, payload in upserts.items()
@@ -1817,11 +1831,6 @@ class MontageRenderSession:
             for tile, payload in upserts.items()
             if int(tile) in capped_upserts
         }
-        if max_upserts is not None or max_upsert_bytes is not None:
-            admitted = set(int(tile) for tile in upserts)
-            admitted.update(int(tile) for tile in self.lifecycle.presented_tiles)
-            admitted.update(int(tile) for tile in previous_payloads)
-            active = tuple(int(tile) for tile in active if int(tile) in admitted)
         near = tuple(tile for tile in self._near_tile_numbers(margin_tiles=2) if int(tile) not in self.skipped_tiles)
         # Residency is keyed by the complete texture-content identity carried
         # by DisplayTilePayload.source_id, not the evaluator's base tile key.

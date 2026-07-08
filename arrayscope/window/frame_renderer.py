@@ -1456,6 +1456,8 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         # Only here, once the montage has settled, is the refined pass scheduled
         # — so final/target tiles appear first and accurate levels/histogram
         # follow. (R4 moves this scheduling into kernel admission.)
+        self._queue_montage_current_level_evidence(session)
+        self._queue_montage_final_level_refinements(session)
         self._schedule_montage_refined_level_stats(session)
         return True
 

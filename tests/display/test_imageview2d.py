@@ -315,6 +315,37 @@ def test_tile_commit_report_uses_backend_presented_tile_ids_for_middle_holes():
     assert report.presented_tiles == frozenset({0, 2})
 
 
+def test_tile_commit_report_preserves_backend_presented_ids_outside_delta_payloads():
+    from types import SimpleNamespace
+
+    from arrayscope.display.imageview2d import _tile_commit_report
+    from arrayscope.display.model.tile_stats import TileLayerUpdateStats
+
+    payloads = {0: object()}
+    delta = SimpleNamespace(upserts={0: object()}, removals=(), base_revision=4, target_revision=5)
+    stats = TileLayerUpdateStats(
+        visible_items=3,
+        presented_tiles=(0, 1, 2),
+        committed_upserts=(0,),
+    )
+
+    report = _tile_commit_report(payloads, delta, stats)
+
+    assert report.presented_tiles == frozenset({0, 1, 2})
+    assert report.committed_upserts == frozenset({0})
+
+
+def test_vispy_requested_presented_tiles_use_active_scope_not_delta_subset():
+    from types import SimpleNamespace
+
+    from arrayscope.display.vispy_imageview2d import _requested_direct_payload_tiles
+
+    payloads = {0: object()}
+    delta = SimpleNamespace(active_tiles=(0, 1, 2), upserts=payloads)
+
+    assert _requested_direct_payload_tiles(payloads, delta) == {0, 1, 2}
+
+
 def test_pyqtgraph_tile_commit_report_counts_distinct_updated_tiles():
     from types import SimpleNamespace
 

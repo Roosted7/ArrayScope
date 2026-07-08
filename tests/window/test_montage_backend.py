@@ -337,7 +337,7 @@ def test_preview_level_evidence_is_not_promoted_to_refined_when_pyqtgraph_waits(
     assert exact_stats.refined is True
 
 
-def test_preview_level_evidence_promotes_to_refined_on_shader_backend():
+def test_preview_level_evidence_stays_provisional_on_shader_backend_until_exact():
     from types import SimpleNamespace
     from arrayscope.display.backend_contract import VISPY_CAPABILITIES
     from arrayscope.display.model.frame import DisplayTilePayload
@@ -367,18 +367,176 @@ def test_preview_level_evidence_promotes_to_refined_on_shader_backend():
     win = Window()
     key = ("levels", "preview-refined-vispy")
 
-    # On a shader-windowing backend a preview tile's refined-sampled stats DO
-    # promote to refined: "refined" is sample density of the shown quality, and
-    # VisPy applies the resulting levels as a cheap GPU update in place.
     win._update_montage_level_bounds_from_rendered(
         key,
         _rendered_tile_from_previous_payload(tile, preview),
         expected_indices=(7,),
         refined=True,
     )
-    stats = win._tracker.summary_for(key)
-    assert stats.refined is True
-    assert stats.bounds == (10.0, 40.0)
+    preview_stats = win._tracker.summary_for(key)
+
+    exact = DisplayTilePayload(
+        0,
+        7,
+        np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.asarray([[100.0, 200.0], [300.0, 400.0]], dtype=np.float32),
+        ("exact", 7),
+        semantic_data=np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        semantic_histogram_data=np.asarray([[100.0, 200.0], [300.0, 400.0]], dtype=np.float32),
+        level_data=np.asarray([100.0, 400.0], dtype=np.float32),
+    )
+    win._update_montage_level_bounds_from_rendered(
+        key,
+        _rendered_tile_from_previous_payload(tile, exact),
+        expected_indices=(7,),
+        refined=True,
+    )
+    exact_stats = win._tracker.summary_for(key)
+
+    assert preview_stats.refined is False
+    assert preview_stats.bounds == (10.0, 40.0)
+    assert exact_stats.refined is True
+    assert exact_stats.bounds == (100.0, 400.0)
+
+
+def test_finish_complete_montage_queues_exact_payloads_for_refined_levels():
+    from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.montage_levels import MontageLevelTracker
+    from arrayscope.render.level_stats import _rendered_tile_from_previous_payload
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class Window(FrameRenderMixin):
+        def __init__(self):
+            self.win = self
+            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
+            self._tracker = MontageLevelTracker()
+            self.scheduled = 0
+
+        def _montage_level_tracker(self):
+            return self._tracker
+
+        def _montage_session_is_current(self, session):
+            return True
+
+        def _settle_montage_visible_plan_if_complete(self, session):
+            return True
+
+        def _schedule_montage_refined_level_stats(self, session):
+            self.scheduled += 1
+
+    tile = SimpleNamespace(montage_index=0, source_index=7)
+    preview = DisplayTilePayload(
+        0,
+        7,
+        np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        ("preview", 7),
+        level_data=np.asarray([1.0, 4.0], dtype=np.float32),
+        quality="preview",
+    )
+    exact = DisplayTilePayload(
+        0,
+        7,
+        np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.asarray([[100.0, 200.0], [300.0, 400.0]], dtype=np.float32),
+        ("exact", 7),
+        semantic_data=np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        semantic_histogram_data=np.asarray([[100.0, 200.0], [300.0, 400.0]], dtype=np.float32),
+        level_data=np.asarray([100.0, 400.0], dtype=np.float32),
+    )
+    session = SimpleNamespace(
+        level_key=("levels", "finish-refined"),
+        level_expected_indices=(7,),
+        plan=SimpleNamespace(tiles=(tile,)),
+        rendered_tiles={},
+        display_tile_payloads={0: exact},
+        pending_refined_level_tiles=deque(),
+        pending_refined_level_sources=set(),
+        is_complete=lambda: True,
+    )
+    win = Window()
+    win._update_montage_level_bounds_from_rendered(
+        session.level_key,
+        _rendered_tile_from_previous_payload(tile, preview),
+        expected_indices=(7,),
+        refined=True,
+    )
+
+    assert win._finish_montage_session_if_complete(session) is True
+
+    stats = win._tracker.summary_for(session.level_key)
+    assert stats.refined is False
+    assert len(session.pending_refined_level_tiles) == 1
+    assert session.pending_refined_level_tiles[0].quality == "exact"
+    assert win.scheduled == 1
+
+
+def test_finish_complete_montage_seeds_rough_levels_from_display_payloads():
+    from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.montage_levels import MontageLevelTracker
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class Window(FrameRenderMixin):
+        def __init__(self):
+            self.win = self
+            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
+            self._tracker = MontageLevelTracker()
+            self.cached_schedules = 0
+            self.refined_schedules = 0
+
+        def _montage_level_tracker(self):
+            return self._tracker
+
+        def _montage_session_is_current(self, session):
+            return True
+
+        def _settle_montage_visible_plan_if_complete(self, session):
+            return True
+
+        def _schedule_montage_cached_level_stats(self, session):
+            self.cached_schedules += 1
+
+        def _schedule_montage_refined_level_stats(self, session):
+            self.refined_schedules += 1
+
+    tile = SimpleNamespace(montage_index=0, source_index=7)
+    preview = DisplayTilePayload(
+        0,
+        7,
+        np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        ("preview", 7),
+        level_data=np.asarray([1.0, 4.0], dtype=np.float32),
+        quality="preview",
+    )
+    session = SimpleNamespace(
+        level_key=("levels", "finish-current"),
+        level_expected_indices=(7,),
+        plan=SimpleNamespace(tiles=(tile,)),
+        rendered_tiles={},
+        display_tile_payloads={0: preview},
+        pending_level_tiles=deque(),
+        pending_level_sources=set(),
+        pending_refined_level_tiles=deque(),
+        pending_refined_level_sources=set(),
+        level_scan_cursor=0,
+        level_scan_remaining_tiles=0,
+        force_auto=True,
+        is_complete=lambda: True,
+    )
+    win = Window()
+
+    assert win._finish_montage_session_if_complete(session) is True
+
+    stats = win._tracker.summary_for(session.level_key)
+    assert stats.bounds == (1.0, 4.0)
+    assert stats.refined is False
+    assert stats.source_indices == frozenset({7})
+    assert session.pending_refined_level_tiles == deque()
+    assert win.cached_schedules == 1
+    assert win.refined_schedules == 1
 
 
 def test_preview_payloads_do_not_count_as_semantic_commits():

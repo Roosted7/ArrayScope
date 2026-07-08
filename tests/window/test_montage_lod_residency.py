@@ -1789,6 +1789,23 @@ def test_preview_floor_commit_activates_every_planned_preview_tile_before_exact(
     assert {payload.quality for payload in preview_delta.upserts.values()} == {"preview"}
 
 
+def test_preview_floor_bypasses_item_cap_on_instant_residency_path():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=4)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    for rendered in tuple(session.rendered_tiles.values()):
+        semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+        key = pyramid_key_for_rendered(rendered, demand=demand, level=2, semantic_source_id=semantic_id)
+        pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+        _claim_preview_resident(session, rendered.tile.montage_index, key)
+
+    _state, preview_delta = session.build_tile_presentation({}, max_upserts=1)
+
+    assert set(preview_delta.upserts) == {0, 1, 2, 3}
+    assert set(preview_delta.active_tiles) == {0, 1, 2, 3}
+    assert {payload.quality for payload in preview_delta.upserts.values()} == {"preview"}
+
+
 def test_preview_floor_scope_defers_exact_until_scoped_tiles_are_covered():
     pyramid = PyramidCache(max_bytes=1 << 24)
     preview = PyramidCache(max_bytes=1 << 24)
@@ -2395,6 +2412,102 @@ def test_shared_target_in_flight_blocks_per_tile_desired_after_coarse_preview():
     assert effects._pending_previews == {}
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
+
+
+def test_shared_target_marker_is_source_identity_aware():
+    from arrayscope.window import montage_commit
+
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    demand = session.lod_policy_decision.demand
+    old_tile = session.plan.tiles[0]
+    retargeted_tile = MontageTile(
+        montage_index=old_tile.montage_index,
+        source_index=old_tile.source_index + 9,
+        row=old_tile.row,
+        col=old_tile.col,
+        x0=old_tile.x0,
+        y0=old_tile.y0,
+        width=old_tile.width,
+        height=old_tile.height,
+        view_state=old_tile.view_state,
+    )
+
+    old_marker = montage_commit._shared_transform_marker(
+        session,
+        demand=demand,
+        level=6,
+        tiles=(old_tile,),
+        shader_display=False,
+    )
+    retargeted_marker = montage_commit._shared_transform_marker(
+        session,
+        demand=demand,
+        level=6,
+        tiles=(retargeted_tile,),
+        shader_display=False,
+    )
+
+    assert old_marker != retargeted_marker
+    session._shared_floor_admitted_marker = old_marker
+    assert session._shared_floor_admitted_marker != retargeted_marker
+
+
+def test_preview_commit_ack_is_actionable_for_target_followup_replan():
+    from types import SimpleNamespace
+
+    from arrayscope.window import montage_commit
+
+    preview = DisplayTilePayload(
+        0,
+        0,
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        ("preview", 0),
+        lod=LodInfo(level=6, factor=64, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="preview",
+    )
+    exact = DisplayTilePayload(
+        1,
+        1,
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        ("exact", 1),
+        lod=LodInfo(level=2, factor=4, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="exact",
+    )
+    tile_state = SimpleNamespace(payloads={0: preview, 1: exact})
+
+    assert montage_commit._commit_report_accepted_preview_payload(
+        TileCommitReport(presented_tiles=(0, 1), committed_upserts=(0,)),
+        tile_state,
+    )
+    assert not montage_commit._commit_report_accepted_preview_payload(
+        TileCommitReport(presented_tiles=(0, 1), committed_upserts=(1,)),
+        tile_state,
+    )
+
+
+def test_vispy_level_stats_queue_only_on_first_display_commit():
+    from types import SimpleNamespace
+
+    from arrayscope.display.backend_contract import ImageViewBackendCapabilities
+    from arrayscope.window import montage_commit
+
+    vispy = SimpleNamespace(
+        win=SimpleNamespace(
+            img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="vispy"))
+        )
+    )
+    pyqtgraph = SimpleNamespace(
+        win=SimpleNamespace(
+            img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
+        )
+    )
+
+    assert montage_commit._commit_should_queue_level_stats(vispy, first_display_commit=True)
+    assert not montage_commit._commit_should_queue_level_stats(vispy, first_display_commit=False)
+    assert montage_commit._commit_should_queue_level_stats(pyqtgraph, first_display_commit=True)
+    assert montage_commit._commit_should_queue_level_stats(pyqtgraph, first_display_commit=False)
 
 
 def test_shared_target_waits_for_presented_preview_before_higher_quality():
