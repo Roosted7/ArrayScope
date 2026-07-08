@@ -241,6 +241,32 @@ class MontagePipelineEffects:
             marker = self._evaluation_claim(intent, step, tile)
             self._release_evaluation_claim(tile_number, marker=marker, request_replan=True)
 
+    def retained_native_source_available(self, intent, step) -> bool:
+        if not self._session_is_current(intent):
+            return False
+        if step.rung not in (Rung.DESIRED, Rung.EXACT):
+            return False
+        if step.rung == Rung.DESIRED and int(step.level) > 0 and not bool(step.reduce_from_native):
+            return False
+        tile = self._tile_for_step(step)
+        if tile is None:
+            return False
+        tile_number = int(tile.montage_index)
+        stage_key = self.session.stage_fan_in.tile_stage_keys.get(tile_number)
+        candidate = self.session.stage_fan_in.tile_stage_candidates.get(tile_number)
+        if stage_key is None and candidate is not None:
+            stage_key = self.renderer.win.operation_evaluator.stage_materializer.key_for_candidate(
+                stage_document_key(self.session.document),
+                candidate,
+            )
+        if stage_key is None:
+            return False
+        if stage_key in self.session.stage_fan_in.values:
+            return True
+        stage_cache = self.renderer.win.operation_evaluator.stage_cache
+        getter = stage_cache.get_containing if hasattr(stage_cache, "get_containing") else stage_cache.get
+        return getter(stage_key) is not None
+
     def _release_evaluation_claim(self, tile_number: int, *, marker=None, request_replan: bool = True) -> bool:
         tile_number = int(tile_number)
         claim = self._pending_evaluations.get(tile_number)
@@ -1117,7 +1143,7 @@ def _shared_floor_candidate_tiles(session):
         yield candidate
 
 
-def build_stage_fan_in_plan(renderer, document, missing_tiles) -> dict[str, object]:
+def build_stage_fan_in_plan(renderer, document, missing_tiles, *, existing_only: bool = False) -> dict[str, object]:
     document_key = stage_document_key(document)
     groups: dict[object, dict[str, object]] = {}
     tile_stage_plans = {}
@@ -1157,11 +1183,33 @@ def build_stage_fan_in_plan(renderer, document, missing_tiles) -> dict[str, obje
         estimated = int(getattr(candidate, "estimated_nbytes", 0) or 0)
         if len(tiles) < 2 and estimated < 16 * 1024 * 1024:
             continue
+        if existing_only:
+            stage_cache = renderer.win.operation_evaluator.stage_cache
+            getter = stage_cache.get_containing if hasattr(stage_cache, "get_containing") else stage_cache.get
+            value = getter(key)
+            if value is not None:
+                stage_values[key] = value
+                for tile in tiles:
+                    tile_stage_keys[int(tile.montage_index)] = key
+                    tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
+                    tile_stage_candidates[int(tile.montage_index)] = candidate
+                continue
+            in_flight = getattr(renderer.win.operation_evaluator.stage_materializer, "_in_flight", {})
+            request = in_flight.get(key)
+            if request is not None:
+                attached_stage_keys.add(key)
+                for tile in tiles:
+                    tile_stage_keys[int(tile.montage_index)] = key
+                    tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
+                    tile_stage_candidates[int(tile.montage_index)] = candidate
+                    waiting_indices.add(int(tile.montage_index))
+            continue
         result = renderer.win.operation_evaluator.stage_materializer.request_stage(document_key, candidate)
         retained_stage_decision = result.decision
         if result.decision == "hit":
             stage_values[key] = result.value
             for tile in tiles:
+                tile_stage_keys[int(tile.montage_index)] = key
                 tile_stage_plans[int(tile.montage_index)] = tile_stage_plans.get(int(tile.montage_index), group["plan"])
                 tile_stage_candidates[int(tile.montage_index)] = candidate
             continue
@@ -1216,6 +1264,10 @@ def deferred_stage_fan_in_plan() -> dict[str, object]:
         "retained_stage_decision": "deferred-interaction",
         "repeated_expensive_stage_per_tile": False,
     }
+
+
+def stage_fan_in_plan_has_existing_sources(stage_plan) -> bool:
+    return bool(stage_plan.get("stage_values") or stage_plan.get("attached_stage_keys"))
 
 
 def merge_stage_fan_in_plan(session, stage_plan) -> None:

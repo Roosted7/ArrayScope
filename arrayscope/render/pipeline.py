@@ -75,6 +75,10 @@ class PipelineEffects(Protocol):
         """Release lifecycle state when a submitted rung cannot deliver."""
         ...
 
+    def retained_native_source_available(self, intent: RenderIntent, step: RungStep) -> bool:
+        """Return whether a native rung can use retained/staged source data."""
+        ...
+
 
 @dataclass(frozen=True)
 class _RungKey:
@@ -155,9 +159,9 @@ class MontagePipeline:
         # NEVER express ordering through `deps`: dependencies fail-propagate,
         # so a skipped floor would park its tile's exact work forever.
         for step in steps:
-            if self._defer_native_quality_during_interaction(
-                intent,
-                step,
+            if (
+                self._defer_native_quality_during_interaction(intent, step)
+                and not self.effects.retained_native_source_available(intent, step)
             ):
                 self.counters.interactive_native_deferred += 1
                 continue

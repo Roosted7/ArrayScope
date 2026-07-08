@@ -45,6 +45,7 @@ class StubEffects:
         self.dropped = []
         self.drop_intents = []
         self.deps = {}
+        self.retained_native = set()
         self.last_intent = None
         self.last_demand = None
 
@@ -86,6 +87,9 @@ class StubEffects:
         self.last_intent = intent
         self.drop_intents.append(intent)
         self.dropped.append((step.tile_number, int(step.rung), step.level))
+
+    def retained_native_source_available(self, intent, step):
+        return int(step.tile_number) in self.retained_native
 
 
 def make_pipeline(tiles=2, **policy_kwargs):
@@ -252,6 +256,17 @@ def test_interactive_opaque_desired_rung_defers_reduce_from_native_work():
     assert pipeline.retarget(intent(interactive=False), demand(1)) == 1
     drain(kernel)
     assert effects.evaluated == [(0, 2, 1)]
+
+
+def test_interactive_retained_native_source_is_correctness_work():
+    kernel, effects, pipeline = make_pipeline(tiles=1, reduced_input_available=False)
+    effects.retained_native.add(0)
+
+    assert pipeline.retarget(intent(interactive=True), demand(1)) == 1
+    drain(kernel)
+
+    assert effects.evaluated == [(0, 2, 1)]
+    assert pipeline.counters.interactive_native_deferred == 0
 
 
 def test_stale_done_from_previous_semantic_is_dropped_not_committed():

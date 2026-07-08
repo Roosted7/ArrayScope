@@ -509,7 +509,14 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             and getattr(previous_session, "montage_axis", None) == axis
         )
         if defer_stage_planning:
-            stage_plan = montage_commit.deferred_stage_fan_in_plan()
+            stage_plan = montage_commit.build_stage_fan_in_plan(
+                self,
+                document,
+                missing_tiles,
+                existing_only=True,
+            )
+            if not montage_commit.stage_fan_in_plan_has_existing_sources(stage_plan):
+                stage_plan = montage_commit.deferred_stage_fan_in_plan()
             self._montage_stage_plans_deferred = (
                 int(getattr(self, "_montage_stage_plans_deferred", 0) or 0) + 1
             )
@@ -882,16 +889,29 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         )
         session.force_auto = bool(force_auto)
         session.user_levels_override = user_levels
-        session.attach_stage_fan_in(montage_commit.stage_fan_in_state(montage_commit.deferred_stage_fan_in_plan()))
+        if missing_tiles:
+            hot_stage_plan = montage_commit.build_stage_fan_in_plan(
+                self,
+                session.document,
+                missing_tiles,
+                existing_only=True,
+            )
+            if not montage_commit.stage_fan_in_plan_has_existing_sources(hot_stage_plan):
+                hot_stage_plan = montage_commit.deferred_stage_fan_in_plan()
+        else:
+            hot_stage_plan = montage_commit.deferred_stage_fan_in_plan()
+        session.attach_stage_fan_in(montage_commit.stage_fan_in_state(hot_stage_plan))
         session.stage_planning_deferred = bool(missing_tiles)
         session.deferred_missing_tiles = tuple(missing_tiles)
         session.tile_compute_cache_hits = int(stats["hits"])
-        session.tile_compute_waiting_for_stage = 0
-        session.stage_backed_tiles_pending = 0
+        session.tile_compute_waiting_for_stage = len(hot_stage_plan["waiting_indices"])
+        session.stage_backed_tiles_pending = len(hot_stage_plan["waiting_indices"])
         session.lead_direct_tiles = 0
-        session.retained_stage_index = None
-        session.retained_stage_decision = "deferred-retarget"
-        session.repeated_expensive_stage_per_tile = False
+        session.retained_stage_index = hot_stage_plan["retained_stage_index"]
+        session.retained_stage_decision = (
+            hot_stage_plan["retained_stage_decision"] or "deferred-retarget"
+        )
+        session.repeated_expensive_stage_per_tile = bool(hot_stage_plan["repeated_expensive_stage_per_tile"])
         if missing_tiles:
             self._montage_stage_plans_deferred = (
                 int(getattr(self, "_montage_stage_plans_deferred", 0) or 0) + 1
@@ -1147,6 +1167,15 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         missing_tiles = viewport_plan.prioritize_tiles(missing_tiles)
 
         if _viewport_interaction_active(self):
+            hot_stage_plan = montage_commit.build_stage_fan_in_plan(
+                self,
+                session.document,
+                missing_tiles,
+                existing_only=True,
+            )
+            if montage_commit.stage_fan_in_plan_has_existing_sources(hot_stage_plan):
+                montage_commit.merge_stage_fan_in_plan(session, hot_stage_plan)
+                self.retarget_montage_pipeline(session)
             queued = set(session.pending_tile_numbers())
             for tile in missing_tiles:
                 index = int(tile.montage_index)
