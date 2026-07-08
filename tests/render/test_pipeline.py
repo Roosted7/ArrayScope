@@ -114,6 +114,7 @@ class CaptureKernel:
         self.specs = []
         self.callbacks = []
         self.cleared_scopes = []
+        self.superseded = []
 
     def submit(self, spec, **callbacks):
         self.specs.append(spec)
@@ -122,6 +123,9 @@ class CaptureKernel:
 
     def clear_scope(self, scope):
         self.cleared_scopes.append(scope)
+
+    def supersede(self, family, value):
+        self.superseded.append((family, value))
 
 
 def drain(kernel):
@@ -157,15 +161,16 @@ def demand(level: int) -> LodDemand:
 def test_retarget_submits_ladder_work_and_commits_batches():
     kernel, effects, pipeline = make_pipeline(tiles=2)
     submitted = pipeline.retarget(intent(), demand(1))
-    assert submitted == 6  # 2 tiles x (floor, preview, desired)
+    assert submitted == 4  # 2 tiles x (floor, preview); desired waits for first pixels
     drain(kernel)
-    assert len(effects.evaluated) == 6
+    assert len(effects.evaluated) == 4
     # Floor-first across tiles: both floors evaluated before any preview.
     assert [entry[1] for entry in effects.evaluated[:2]] == [0, 0]
     assert effects.batches, "ready results must flush as commit batches"
     total_upserts = sum(len(batch.upserts) for batch in effects.batches)
-    assert total_upserts == 6
+    assert total_upserts == 4
     assert all(len(batch.upserts) <= batch.max_items for batch in effects.batches)
+    assert pipeline.counters.first_pixel_quality_deferred == 2
 
 
 def test_converged_retarget_submits_nothing():
@@ -210,6 +215,7 @@ def test_camera_only_retarget_never_invalidates_rung_work():
 
 def test_demand_level_change_supersedes_stale_rung_targets():
     kernel, effects, pipeline = make_pipeline(tiles=1)
+    effects.states[0] = TileLodState(tile_number=0, presented_level=4, resident_levels=(4,))
     pipeline.retarget(intent(viewport="vp-1"), demand(2))
     # Before the GUI drains, the demand moves to a finer level.
     pipeline.retarget(intent(viewport="vp-2"), demand(1))
@@ -220,13 +226,12 @@ def test_demand_level_change_supersedes_stale_rung_targets():
         for counters in lanes.values()
     )
     assert invalidated >= 1, "older level targets must not survive"
-    # Only current-level payloads were committed: floor 4, preview 2,
-    # desired 1 — exactly once each. The desired-level-2 result existed but
-    # was classified stale at dispatch and diverted to reuse.
+    # The old desired-level-2 target existed but was classified stale even
+    # though the new desired-level-1 refinement is deferred behind preview.
     committed = sorted(
         step.level for batch in effects.batches for (step, _payload) in batch.upserts
     )
-    assert committed == [1, 2, 4]
+    assert committed == [2]
     assert (0, 2, 2) in effects.dropped
 
 
@@ -236,11 +241,12 @@ def test_interactive_native_demand_defers_cold_native_until_noninteractive_repla
     assert pipeline.retarget(intent(interactive=True), demand(0)) == 2
     drain(kernel)
 
-    # Native demand plans FLOOR, PREVIEW, DESIRED(0); only the native-quality
-    # DESIRED rung is deferred while the target is moving.
+    # Native demand plans FLOOR, PREVIEW, DESIRED(0); DESIRED waits until the
+    # first-pixel rungs have had a chance to present.
     assert effects.evaluated == [(0, 0, 4), (0, 1, 2)]
-    assert pipeline.counters.interactive_native_deferred == 1
+    assert pipeline.counters.first_pixel_quality_deferred == 1
 
+    effects.states[0] = TileLodState(tile_number=0, presented_level=2, resident_levels=(2,), presented_quality="preview")
     assert pipeline.retarget(intent(interactive=False), demand(0)) == 1
     drain(kernel)
     assert (0, 2, 0) in effects.evaluated
@@ -281,6 +287,21 @@ def test_zoom_out_over_presented_native_submits_no_display_demotions():
     assert effects.batches == []
 
 
+def test_preview_at_demand_level_replans_exact_refinement_later():
+    kernel, effects, pipeline = make_pipeline(tiles=1)
+    effects.states[0] = TileLodState(
+        tile_number=0,
+        presented_level=3,
+        resident_levels=(3,),
+        presented_quality="preview",
+    )
+
+    assert pipeline.retarget(intent(interactive=False), demand(3)) == 1
+    drain(kernel)
+
+    assert effects.evaluated == [(0, 2, 3)]
+
+
 def test_stale_done_from_previous_semantic_is_dropped_not_committed():
     kernel = CaptureKernel()
     effects = StubEffects(tiles=1)
@@ -316,11 +337,12 @@ def test_none_completion_releases_prepared_rung_claim():
 
 def test_dropped_queued_rung_releases_prepared_state():
     kernel, _backend, effects, pipeline = make_manual_pipeline(tiles=1)
-    assert pipeline.retarget(intent(viewport="vp-1"), demand(2)) == 2
+    effects.states[0] = TileLodState(tile_number=0, presented_level=4, resident_levels=(4,))
+    assert pipeline.retarget(intent(viewport="vp-1"), demand(2)) == 1
 
     # Supersede the queued desired-level rung before it can run.  The effects
     # already prepared lifecycle ownership; the drop callback must release it.
-    assert pipeline.retarget(intent(viewport="vp-2"), demand(1)) == 2
+    assert pipeline.retarget(intent(viewport="vp-2"), demand(1)) == 1
     drain(kernel)
 
     assert (0, 2, 2) in effects.dropped
@@ -333,7 +355,7 @@ def test_counters_track_pipeline_activity():
     drain(kernel)
     counts = pipeline.counters.as_dict()
     assert counts["intents"] == 1
-    assert counts["tasks_submitted"] >= 3
+    assert counts["tasks_submitted"] >= 2
     assert counts["commit_batches"] >= 1
 
 
@@ -341,14 +363,14 @@ def test_rung_dependencies_park_tasks_until_stage_key_completes():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     effects.deps[0] = ("stage-key",)
 
-    assert pipeline.retarget(intent(), demand(1)) == 3
+    assert pipeline.retarget(intent(), demand(1)) == 2
     assert effects.evaluated == []
-    assert kernel.diagnostics().parked_deps == 3
+    assert kernel.diagnostics().parked_deps == 2
 
     kernel.submit(TaskSpec(key="stage-key", fn=lambda: "stage", lane=Lane.STAGE_MATERIALIZATION))
     drain(kernel)
 
-    assert len(effects.evaluated) == 3
+    assert len(effects.evaluated) == 2
 
 
 def test_pipeline_never_expresses_rung_ordering_through_deps():
@@ -360,7 +382,7 @@ def test_pipeline_never_expresses_rung_ordering_through_deps():
     effects = StubEffects(tiles=2)
     pipeline = MontagePipeline(kernel, effects, LodLadder())
 
-    assert pipeline.retarget(intent(), demand(1)) == 6
+    assert pipeline.retarget(intent(), demand(1)) == 4
 
     assert all(spec.deps == () for spec in kernel.specs)
     # Coarse rungs are submitted before fine rungs across all tiles.

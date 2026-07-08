@@ -154,11 +154,20 @@ class MontagePipeline:
         steps = self.ladder.plan(states, demand)
         self.counters.ladder_plans += 1
         submitted = 0
+        first_pixel_tiles = {
+            int(step.tile_number)
+            for step in steps
+            if step.rung in (Rung.FLOOR, Rung.PREVIEW)
+        }
         # Cross-rung/cross-tile ordering comes from priorities plus this
         # submission order (the kernel heap is FIFO within equal priority).
         # NEVER express ordering through `deps`: dependencies fail-propagate,
         # so a skipped floor would park its tile's exact work forever.
         for step in steps:
+            if self._defer_quality_behind_first_pixel(step, first_pixel_tiles):
+                self._supersede_deferred_step(intent, step)
+                self.counters.first_pixel_quality_deferred += 1
+                continue
             if (
                 self._defer_native_quality_during_interaction(intent, step)
                 and not self.effects.retained_native_source_available(intent, step)
@@ -213,6 +222,21 @@ class MontagePipeline:
             return False
         return int(step.level) <= 0 or bool(step.reduce_from_native)
 
+    def _defer_quality_behind_first_pixel(
+        self,
+        step: RungStep,
+        first_pixel_tiles: set[int],
+    ) -> bool:
+        """Do not race exact/native quality against this plan's first pixels."""
+
+        if int(step.tile_number) not in first_pixel_tiles:
+            return False
+        if step.rung == Rung.EXACT:
+            return True
+        if step.rung != Rung.DESIRED:
+            return False
+        return True
+
     def _submit_step(
         self,
         intent: RenderIntent,
@@ -252,6 +276,14 @@ class MontagePipeline:
             return True
         self.effects.rung_dropped(intent, step)
         return False
+
+    def _supersede_deferred_step(self, intent: RenderIntent, step: RungStep) -> None:
+        """Invalidate older work for a rung we intentionally delay."""
+
+        self.kernel.supersede(
+            ("rung", intent.semantic_key, step.tile_number, int(step.rung)),
+            ("deferred", int(step.level), int(self.counters.intents)),
+        )
 
     # Handlers run on the GUI thread (kernel bridge drain).
 

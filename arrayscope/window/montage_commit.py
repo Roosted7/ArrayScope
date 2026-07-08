@@ -200,6 +200,8 @@ class MontagePipelineEffects:
             self._pending_materializations[materialization_key] = request
             return True
         if step.rung in (Rung.DESIRED, Rung.EXACT):
+            if self._shared_floor_covers_cold_tile(tile_number):
+                return False
             if tile_number in self.session.rendered_tiles or tile_number in self.session.skipped_tiles:
                 return False
             if tile_number in self.session.active_tile_requests:
@@ -212,6 +214,13 @@ class MontagePipelineEffects:
             self.session.active_tile_requests.add(tile_number)
             self._pending_evaluations[tile_number] = self._evaluation_claim(intent, step, tile)
         return True
+
+    def _shared_floor_covers_cold_tile(self, tile_number: int) -> bool:
+        if int(tile_number) in self.session.rendered_tiles:
+            return False
+        if self.session.display_tile_payloads.get(int(tile_number)) is not None:
+            return False
+        return int(tile_number) in set(getattr(self.session, "_shared_floor_tiles", ()) or ())
 
     def rung_deps(self, intent, step) -> tuple[object, ...]:
         if not self._session_is_current(intent):
@@ -401,6 +410,7 @@ class MontagePipelineEffects:
         if getattr(session, "_shared_floor_marker", None) == marker:
             return 0  # identical batch already in flight or admitted
         session._shared_floor_marker = marker
+        session._shared_floor_tiles = tuple(int(tile.montage_index) for tile in tiles)
         shader_display = bool(getattr(session, "shader_display", False))
 
         def evaluate(token=None, tiles=tiles, level=level):
@@ -425,6 +435,7 @@ class MontagePipelineEffects:
         def dropped():
             if getattr(session, "_shared_floor_marker", None) == marker:
                 session._shared_floor_marker = None
+                session._shared_floor_tiles = ()
 
         handle = renderer.win.kernel.submit(
             TaskSpec(

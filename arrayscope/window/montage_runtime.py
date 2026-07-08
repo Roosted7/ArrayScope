@@ -190,8 +190,8 @@ class MontageRuntimeMixin:
         render_lod.selected_lod_factor(session)
         intent = self._montage_render_intent(session)
         pipeline = self._montage_pipeline_for_session(session)
-        submitted = pipeline.retarget(intent, session.lod_policy_decision.demand)
-        submitted += pipeline.effects.submit_shared_transform_floor()
+        submitted = pipeline.effects.submit_shared_transform_floor()
+        submitted += pipeline.retarget(intent, session.lod_policy_decision.demand)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)
         if force_commit or session.flush_pending or session.final_commit_pending:

@@ -441,6 +441,7 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
             payload = None
         lod = None if payload is None else getattr(payload, "lod", None)
         presented_level = None if lod is None else int(getattr(lod, "level", 0) or 0)
+        presented_quality = "exact" if payload is None else str(getattr(payload, "quality", "exact") or "exact")
         ranked.append(
             (
                 _tile_priority_rank(tile, focus=focus, visible=tile_number in visible_numbers),
@@ -448,6 +449,7 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
                     tile_number=tile_number,
                     resident_levels=tuple(sorted(resident_levels)),
                     presented_level=presented_level,
+                    presented_quality=presented_quality,
                     floor_available=_floor_available(session, tile, demand, preview_cache=preview_cache),
                 ),
             )

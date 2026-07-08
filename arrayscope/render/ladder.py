@@ -66,6 +66,7 @@ class TileLodState:
     resident_levels: tuple[int, ...] = ()
     presented_level: int | None = None
     floor_available: bool = False
+    presented_quality: str = "exact"
     exact_requested: bool = False  # inspection or user demanded native
 
 
@@ -123,6 +124,7 @@ class LodLadder:
         steps: list[RungStep] = []
 
         presented = state.presented_level
+        presented_preview = str(getattr(state, "presented_quality", "exact") or "exact") == "preview"
         resident = frozenset(int(level) for level in state.resident_levels)
 
         def finest_available() -> float:
@@ -191,8 +193,10 @@ class LodLadder:
         # command to replace already-presented finer data. Demotion belongs to
         # memory/eviction policy; the ladder must keep camera-only zooms from
         # churning materialization and presentation.
-        desired_resident = desired in resident or presented == desired
-        if presented is not None and int(presented) <= desired:
+        desired_resident = (desired in resident and not presented_preview) or (
+            presented == desired and not presented_preview
+        )
+        if presented is not None and int(presented) <= desired and not presented_preview:
             desired_resident = True
         if not desired_resident and (desired > 0 or desired < finest_available()):
             steps.append(
