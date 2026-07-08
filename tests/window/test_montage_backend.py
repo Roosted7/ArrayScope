@@ -729,10 +729,12 @@ def test_vispy_persistent_feedback_passes_cost_class_signature():
         output_dtype=np.dtype("float32"),
         rgb=False,
         lifecycle=SimpleNamespace(presented_tiles=frozenset()),
+        rendered_tiles={},
     )
 
     montage_commit._persistent_tile_upsert_limits(window, session)
     session.output_dtype = np.dtype("complex64")
+    session.rendered_tiles = {0: SimpleNamespace(image=np.zeros((8, 8), dtype=np.complex64))}
     montage_commit._persistent_tile_upsert_limits(window, session)
 
     assert [channel for channel, _signature, _conservative in decisions] == [
@@ -752,6 +754,67 @@ def test_vispy_persistent_feedback_passes_cost_class_signature():
         False,
         True,
         True,
+    ]
+
+
+def test_vispy_persistent_feedback_does_not_cold_start_resident_remap():
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationState
+    from arrayscope.window import montage_commit
+
+    decisions = []
+
+    def decide(channel, **kwargs):
+        decisions.append((str(channel), kwargs.get("work_signature"), bool(kwargs.get("conservative_start"))))
+        return SimpleNamespace(batch_limit=1, byte_cap=1024, budget_ms=4.0)
+
+    payload = DisplayTilePayload(
+        tile_number=0,
+        source_index=0,
+        image=np.zeros((8, 8), dtype=np.complex64),
+        histogram_data=np.zeros((8, 8), dtype=np.float32),
+        source_id=("tile", 0, "complex"),
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="vispy",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            )
+        ),
+        _viewport_interaction_active=False,
+        _ui_work_decision=decide,
+    )
+    window.win = window
+    session = SimpleNamespace(
+        display_committed=True,
+        dirty_payloads={0: None},
+        pending_payload_upserts={0: None},
+        display_tile_payloads={0: payload},
+        tile_presentation_state=TilePresentationState({0: payload}),
+        acknowledged_source_ids={payload.source_id},
+        output_dtype=np.dtype("complex64"),
+        rgb=False,
+        lifecycle=SimpleNamespace(
+            presented_tiles=frozenset({0}),
+            backend_presented_identities={0: payload.source_id},
+        ),
+        rendered_tiles={0: SimpleNamespace(image=payload.image)},
+    )
+
+    montage_commit._persistent_tile_upsert_limits(window, session)
+
+    assert [channel for channel, _signature, _conservative in decisions] == [
+        "montage_present_total",
+        "montage_cold_commit",
+    ]
+    assert [signature.cost_class for _channel, signature, _conservative in decisions] == [
+        "rgb_or_complex",
+        "rgb_or_complex",
+    ]
+    assert [conservative for _channel, _signature, conservative in decisions] == [
+        False,
+        False,
     ]
 
 

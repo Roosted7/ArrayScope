@@ -1454,6 +1454,37 @@ class MontageRenderSession:
         stale_identity_removals: set[int] = set()
         backend_identities = dict(self.lifecycle.backend_presented_identities)
         if backend_identities:
+            # Backend truth can be ahead of the session's acknowledged
+            # TilePresentationState when a geometry/visibility commit reports
+            # already-current resident slots without committed upserts.  If we
+            # leave that split in place, the next VisPy commit receives an
+            # active tile with no active payload and clears a perfectly correct
+            # atlas mapping.  Rehydrate the acknowledged state from the one
+            # allowed source of truth: backend identity == current payload.
+            reconciled_payloads = None
+            confirmed_from_backend: list[int] = []
+            for tile_number in planned_numbers:
+                current = self.display_tile_payloads.get(int(tile_number))
+                if current is None:
+                    continue
+                if backend_identities.get(int(tile_number)) != current.source_id:
+                    continue
+                if previous_payloads.get(int(tile_number)) is current:
+                    continue
+                if reconciled_payloads is None:
+                    reconciled_payloads = dict(previous_payloads)
+                reconciled_payloads[int(tile_number)] = current
+                previous_payloads[int(tile_number)] = current
+                confirmed_from_backend.append(int(tile_number))
+            if reconciled_payloads is not None:
+                previous_state = TilePresentationState(
+                    reconciled_payloads,
+                    revision=int(getattr(previous_state, "revision", 0)),
+                )
+                self.tile_presentation_state = previous_state
+            if confirmed_from_backend:
+                self.lifecycle.presentation_confirmed(confirmed_from_backend)
+        if backend_identities:
             for tile_number, shown_identity in backend_identities.items():
                 current = self.display_tile_payloads.get(int(tile_number))
                 acknowledged = previous_payloads.get(int(tile_number))

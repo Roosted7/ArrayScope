@@ -1659,12 +1659,47 @@ def _tile_presentation_ui_work_decision(window, session, channel: str, *, intera
     )
 
     signature = tile_presentation_feedback_signature(session, backend=backend)
+    conservative_start = (
+        tile_presentation_feedback_conservative_start(signature)
+        and _tile_presentation_has_cold_payload_candidates(session)
+    )
     return getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
         channel,
         interactive=interactive,
         work_signature=signature,
-        conservative_start=tile_presentation_feedback_conservative_start(signature),
+        conservative_start=conservative_start,
     )
+
+
+def _tile_presentation_has_cold_payload_candidates(session) -> bool:
+    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    dirty = tuple(int(tile) for tile in getattr(session, "dirty_payloads", ()) or ())
+    pending = tuple(int(tile) for tile in getattr(session, "pending_payload_upserts", ()) or ())
+    candidates = tuple(dict.fromkeys((*dirty, *pending)))
+    if not candidates:
+        return False
+    acknowledged = set(getattr(session, "acknowledged_source_ids", set()) or set())
+    state_payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
+    backend_identities = dict(getattr(getattr(session, "lifecycle", None), "backend_presented_identities", {}) or {})
+    rendered_tiles = dict(getattr(session, "rendered_tiles", {}) or {})
+    for tile in candidates:
+        payload = payloads.get(int(tile))
+        if payload is None:
+            if int(tile) in rendered_tiles:
+                return True
+            continue
+        source_id = getattr(payload, "source_id", None)
+        previous = state_payloads.get(int(tile))
+        if previous is payload:
+            continue
+        if previous is not None and getattr(previous, "source_id", None) == source_id:
+            continue
+        if backend_identities.get(int(tile)) == source_id:
+            continue
+        if source_id in acknowledged:
+            continue
+        return True
+    return False
 
 
 def _reset_commit_timings(renderer) -> None:

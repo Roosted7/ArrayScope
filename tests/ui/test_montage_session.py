@@ -145,6 +145,28 @@ def test_unrendered_tile_without_payload_cannot_keep_pending_upsert_marker():
     assert 0 not in session.pending_payload_upserts
 
 
+def test_backend_confirmed_current_payload_rehydrates_active_state():
+    session = _session()
+    session.pending_tiles.clear()
+    tile = session.plan.tiles[0]
+    image = np.full((2, 2), 7.0, dtype=np.float32)
+    session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+    payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    session.tile_presentation_state = TilePresentationState()
+    session.lifecycle.backend_presented_snapshot({0: payload.source_id})
+    session.lifecycle.presentation_discarded(0)
+    assert 0 in session.loading_tiles
+
+    state, delta = session.build_tile_presentation({0: ("tile", 0)}, max_upserts=0)
+
+    assert delta.upserts == {}
+    assert state.active_payloads(delta)[0] is payload
+    assert session.tile_presentation_state.payloads[0] is payload
+    assert 0 in session.lifecycle.presented_tiles
+    assert 0 not in session.loading_tiles
+    assert 0 not in session.dirty_payloads
+
+
 def test_montage_render_session_keeps_skipped_separate_from_pending():
     session = _session()
     session.mark_skipped(session.plan.tiles[1])
